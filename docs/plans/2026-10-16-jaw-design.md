@@ -301,6 +301,7 @@ When many unread messages pile up, a catch-up feed says what's going on in each 
 
 ## Later
 
+- A spike on the message box: full width along the bottom of the screen, under the sidebar and chat list too, as Claude's is, since sending is the main job; tried against today's box in the conversation to see whether it confuses which chat it sends to.
 - Sending stickers; group admin; several numbers; video inside the terminal (mpv's kitty output); voice messages transcribed on the machine.
 - A desktop app on the same socket.
 - Encrypting `jaw.db` with SQLCipher.
