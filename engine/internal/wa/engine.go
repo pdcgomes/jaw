@@ -381,6 +381,9 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 	case *enginepb.Command_HistoryRequest:
 		return e.historyRequest(c.HistoryRequest)
 	}
+	if reply := e.sending(cmd); reply != nil {
+		return reply
+	}
 	return failure(fmt.Sprintf("the engine doesn't know %T", cmd.Kind), false)
 }
 

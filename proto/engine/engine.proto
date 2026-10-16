@@ -288,7 +288,53 @@ message Command {
     AppStateResync app_state_resync = 10;
     Avatar avatar = 11;
     HistoryRequest history_request = 12;
+    Send send = 13;
+    MarkRead mark_read = 14;
+    ChatPresence chat_presence = 15;
+    Presence presence = 16;
+    OnWhatsApp on_whatsapp = 17;
   }
+}
+
+// Sends a message with the ID jawd made for it, which WhatsApp then knows it by; answered with Sent
+// once the server has it. Sending the same ID again is the same message to WhatsApp.
+message Send {
+  string chat = 1;
+  string id = 2;
+  // WAWebProtobufsE2E.Message.
+  bytes raw = 3;
+}
+
+// Tells WhatsApp these messages from `sender` in `chat` are read; whatsmeow makes it read-self when
+// read receipts are off on the phone, so only your own devices hear. Done once it's sent.
+message MarkRead {
+  string chat = 1;
+  // Who sent them, in a group; empty in a one-to-one chat.
+  string sender = 2;
+  repeated string ids = 3;
+  int64 at_ms = 4;
+}
+
+// Typing, recording or stopped, in one chat. Done once it's sent.
+message ChatPresence {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    COMPOSING = 1;
+    RECORDING = 2;
+    PAUSED = 3;
+  }
+  string chat = 1;
+  State state = 2;
+}
+
+// Online or away for everyone. Done once it's sent.
+message Presence {
+  bool available = 1;
+}
+
+// Which of these phone numbers (digits only) are on WhatsApp; answered with OnWhatsAppList.
+message OnWhatsApp {
+  repeated string phones = 1;
 }
 
 // Every group the account is in, from WhatsApp; answered with GroupList.
@@ -366,7 +412,32 @@ message Reply {
     ContactList contact_list = 7;
     LidPairs lid_pairs = 8;
     AvatarFile avatar_file = 9;
+    Sent sent = 10;
+    OnWhatsAppList on_whatsapp_list = 11;
   }
+}
+
+// The server has a message Send sent.
+message Sent {
+  string id = 1;
+  // The server's time for it.
+  int64 at_ms = 2;
+  // The JID WhatsApp delivered it to, which for a phone number is often its LID.
+  string chat = 3;
+}
+
+message OnWhatsAppList {
+  repeated OnWhatsAppUser users = 1;
+}
+
+message OnWhatsAppUser {
+  // The number as it was asked about.
+  string query = 1;
+  bool is_in = 2;
+  // Their JID as WhatsApp gives it, often a LID, and their phone number's.
+  string jid = 3;
+  string phone = 4;
+  string verified_name = 5;
 }
 
 message GroupList {
