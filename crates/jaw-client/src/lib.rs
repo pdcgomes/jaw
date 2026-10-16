@@ -1,12 +1,13 @@
 //! The client side of jaw's protocol, for every Rust interface: connecting to jawd, saying hello,
 //! and asking it things. The connection's own threads and the window models come with M1.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use jaw_proto::{AccountState, ConnectionState, FromJawd, Hello, Outcome, PROTOCOL, Request, Status, Welcome};
+use jaw_proto::{AccountState, ConnectionState, FromJawd, Hello, Outcome, PROTOCOL, Push, Request, Status, Welcome};
 use serde_json::Value;
 
 /// A connection that asks and waits: for commands such as `jaw status`, not for drawing.
@@ -14,6 +15,8 @@ pub struct Connection {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     next: u64,
+    /// Pushes that arrived while a call waited for its reply.
+    pushes: VecDeque<Push>,
 }
 
 impl Connection {
@@ -25,36 +28,57 @@ impl Connection {
             }
             _ => anyhow!("can't reach jawd on {}: {e}", socket.display()),
         })?;
-        let mut connection = Connection { reader: BufReader::new(stream.try_clone()?), writer: stream, next: 1 };
+        let mut connection = Connection {
+            reader: BufReader::new(stream.try_clone()?),
+            writer: stream,
+            next: 1,
+            pushes: VecDeque::new(),
+        };
         let hello =
             Hello { protocol: PROTOCOL, client: client.into(), version: version.into(), focus: false, since: None };
         let welcome = connection.call("hello", serde_json::to_value(hello)?)?;
         Ok((connection, serde_json::from_value(welcome).context("jawd's answer to hello")?))
     }
 
-    /// Sends a request and waits for its reply. Pushes that arrive meanwhile are set aside.
+    /// Sends a request and waits for its reply. Pushes that arrive meanwhile are kept for `push`.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next;
         self.next += 1;
         let mut line = serde_json::to_vec(&Request { id, method: method.into(), params })?;
         line.push(b'\n');
         self.writer.write_all(&line)?;
-        let mut text = String::new();
         loop {
-            text.clear();
-            if self.reader.read_line(&mut text)? == 0 {
-                bail!("jawd closed the connection");
-            }
-            match serde_json::from_str::<FromJawd>(&text).context("a line from jawd that isn't jaw's protocol")? {
+            match self.line()? {
                 FromJawd::Reply(reply) if reply.id == id => {
                     return match reply.outcome {
                         Outcome::Result(result) => Ok(result),
                         Outcome::Error(error) => Err(anyhow!(error.message)),
                     };
                 }
-                _ => continue,
+                FromJawd::Push(push) => self.pushes.push_back(push),
+                FromJawd::Reply(_) => continue,
             }
         }
+    }
+
+    /// The next push from jawd, waiting for one if none has come.
+    pub fn push(&mut self) -> Result<Push> {
+        if let Some(push) = self.pushes.pop_front() {
+            return Ok(push);
+        }
+        loop {
+            if let FromJawd::Push(push) = self.line()? {
+                return Ok(push);
+            }
+        }
+    }
+
+    fn line(&mut self) -> Result<FromJawd> {
+        let mut text = String::new();
+        if self.reader.read_line(&mut text)? == 0 {
+            bail!("jawd closed the connection");
+        }
+        serde_json::from_str(&text).context("a line from jawd that isn't jaw's protocol")
     }
 }
 
@@ -104,6 +128,35 @@ pub fn describe(status: &Status) -> String {
         format!("whatsapp  {whatsapp}"),
         format!("engine    {engine}"),
     ];
+    if let Some(catch_up) = &status.catch_up {
+        let rate = |seconds: f64| catch_up.stored as f64 / seconds.max(1e-6);
+        lines.push(match catch_up.seconds {
+            Some(seconds) => format!(
+                "catch-up  {} messages in {seconds:.1} s, {:.0} a second ({} receipts and {} things in all)",
+                catch_up.stored,
+                rate(seconds),
+                catch_up.receipts,
+                catch_up.total
+            ),
+            None => format!("catch-up  {} of {} messages so far", catch_up.stored, catch_up.messages),
+        });
+    }
+    if let Some(history) = &status.history {
+        lines.push(format!(
+            "history   {} messages in {} chats from {} blobs ({:.1} MB), the phone says {}%; fetched in {:.1} s, stored in {:.1} s",
+            history.messages,
+            history.conversations,
+            history.blobs,
+            history.bytes as f64 / 1e6,
+            history.progress,
+            history.download_seconds,
+            history.store_seconds
+        ));
+    }
+    if let Some(stored) = status.stored {
+        lines
+            .push(format!("stored    {} kept as they arrived, {} messages from history", stored.inbox, stored.history));
+    }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));
     }

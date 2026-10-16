@@ -7,11 +7,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use jaw_proto::{Error, Hello, Outcome, PROTOCOL, Reply, Request, code};
+use jaw_proto::{Error, Hello, LinkStart, Outcome, PROTOCOL, Push, Reply, Request, code};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::broadcast;
 
+use crate::engine::{EngineError, pb};
 use crate::state::State;
 
 pub fn listen(path: &Path) -> Result<UnixListener> {
@@ -49,15 +51,42 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     let mut greeted = false;
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
+    // Pushes start once the connection has said hello.
+    let mut pushes: Option<broadcast::Receiver<Push>> = None;
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line? else { return Ok(()) };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let reply = answer(state, &line, &mut greeted).await;
+                send(&mut write, &reply).await?;
+                if greeted && pushes.is_none() {
+                    pushes = Some(state.pushes.subscribe());
+                }
+            }
+            push = next(&mut pushes) => match push {
+                Ok(push) => send(&mut write, &push).await?,
+                // A connection too slow for its pushes misses the oldest; the next says how things are.
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => pushes = None,
+            },
         }
-        let reply = answer(state, &line, &mut greeted).await;
-        let mut out = serde_json::to_vec(&reply)?;
-        out.push(b'\n');
-        write.write_all(&out).await?;
     }
+}
+
+async fn next(pushes: &mut Option<broadcast::Receiver<Push>>) -> Result<Push, broadcast::error::RecvError> {
+    match pushes {
+        Some(pushes) => pushes.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, line: &impl serde::Serialize) -> Result<()> {
+    let mut out = serde_json::to_vec(line)?;
+    out.push(b'\n');
+    write.write_all(&out).await?;
     Ok(())
 }
 
@@ -105,7 +134,32 @@ async fn answer(state: &State, line: &str, greeted: &mut bool) -> Reply {
             status.engine.answer_us = state.ping().await;
             succeeded(id, &status)
         }
+        "link.start" => {
+            let params = if request.params.is_null() { serde_json::json!({}) } else { request.params };
+            match serde_json::from_value::<LinkStart>(params) {
+                Ok(start) => {
+                    let phone = start.phone.unwrap_or_default();
+                    engine(state, id, pb::command::Kind::LinkStart(pb::LinkStart { phone })).await
+                }
+                Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("link.start's params: {e}"))),
+            }
+        }
+        "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
+        "link.logout" => engine(state, id, pb::command::Kind::Logout(pb::Logout {})).await,
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
+    }
+}
+
+/// Carries out a command on the engine, with an empty result once it's done.
+async fn engine(state: &State, id: u64, command: pb::command::Kind) -> Reply {
+    let engine = match state.engine() {
+        Ok(engine) => engine,
+        Err(why) => return failed(id, Error::new(code::ENGINE_UNAVAILABLE, why)),
+    };
+    match engine.call(command).await {
+        Ok(_) => succeeded(id, &serde_json::json!({})),
+        Err(EngineError::Failed { message, retry: false }) => failed(id, Error::new(code::NOT_ALLOWED, message)),
+        Err(e) => failed(id, Error::new(code::ENGINE_UNAVAILABLE, e.to_string())),
     }
 }
 
@@ -130,8 +184,17 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
         let listener = listen(&socket).unwrap();
-        let state =
-            Arc::new(State::new(home.path(), Err(("go", "no engine in this test".into())), Vec::new()).unwrap());
+        let state = Arc::new(
+            State::new(
+                home.path(),
+                Err(("go", "no engine in this test".into())),
+                Vec::new(),
+                Arc::default(),
+                None,
+                broadcast::channel(16).0,
+            )
+            .unwrap(),
+        );
         tokio::spawn(serve(state, listener));
         (home, socket)
     }

@@ -141,12 +141,70 @@ pub struct Connection {
     /// While banned: until when, in milliseconds since the epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<i64>,
+    /// Why, when WhatsApp said: a failed connection's cause, a logout's reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl Connection {
     pub fn new(state: ConnectionState) -> Self {
-        Connection { state, done: None, total: None, until: None }
+        Connection { state, done: None, total: None, until: None, reason: None }
     }
+}
+
+/// `link.start`'s params: by QR code, or by a code typed on the phone when `phone` is given.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LinkStart {
+    /// In international form, digits only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+}
+
+/// The `link` push, as linking goes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LinkStep {
+    /// A QR code to scan, until `expires` (milliseconds since the epoch); the next follows.
+    Qr {
+        code: String,
+        expires: i64,
+    },
+    /// The code to type on the phone.
+    Code {
+        code: String,
+    },
+    Done {
+        phone: String,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
+/// A catch-up after time offline: what WhatsApp said was waiting, what has been stored so far,
+/// and how long it took once it's done.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CatchUp {
+    pub total: u64,
+    pub messages: u64,
+    pub receipts: u64,
+    pub stored: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+}
+
+/// History downloaded from the phone since jawd started.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HistoryProgress {
+    pub blobs: u64,
+    pub conversations: u64,
+    pub messages: u64,
+    pub bytes: u64,
+    /// Time spent downloading and decoding, and storing, in seconds.
+    pub download_seconds: f64,
+    pub store_seconds: f64,
+    /// The phone's own measure of how far it has got, in percent.
+    pub progress: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +237,22 @@ pub struct Status {
     /// Each work pool: what it's running and holding, and how long its jobs wait and run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pools: Vec<Pool>,
+    /// The latest catch-up after time offline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up: Option<CatchUp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<HistoryProgress>,
+    /// What jaw.db holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored: Option<Stored>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stored {
+    /// Events kept as they arrived, messages among them.
+    pub inbox: u64,
+    /// Messages from history.
+    pub history: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

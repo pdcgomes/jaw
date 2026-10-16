@@ -14,4 +14,5 @@ anyhow.workspace = true
 clap.workspace = true
 jaw-client.workspace = true
 jaw-proto.workspace = true
+qrcode.workspace = true
 serde_json.workspace = true

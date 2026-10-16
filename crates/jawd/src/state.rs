@@ -6,10 +6,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use jaw_proto::{Account, AccountState, Connection, ConnectionState, Engine, Missing, PROTOCOL, Status, Welcome};
+use jaw_proto::{Account, Connection, Engine, Missing, PROTOCOL, Push, Status, Stored, Welcome};
+use tokio::sync::broadcast;
 
 use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
+use crate::store::Store;
+use crate::sync::Shared;
 use crate::work::Report;
 
 pub struct State {
@@ -19,18 +22,29 @@ pub struct State {
     engine: Result<Supervisor, (&'static str, String)>,
     missing: Vec<Missing>,
     pools: Vec<Arc<dyn Report>>,
+    live: Shared,
+    store: Option<Store>,
+    /// What every greeted connection is sent: linking, the connection's state.
+    pub pushes: broadcast::Sender<Push>,
 }
 
 impl State {
     /// `engine` is the supervisor of the engine jawd runs, or the engine's kind and why it can't run;
-    /// `pools` are the work pools `status` reports.
+    /// `pools` are the work pools `status` reports; `live` is what sync knows of the account.
     pub fn new(
         home: &Path,
         engine: Result<Supervisor, (&'static str, String)>,
         pools: Vec<Arc<dyn Report>>,
+        live: Shared,
+        store: Option<Store>,
+        pushes: broadcast::Sender<Push>,
     ) -> Result<State> {
         let owner = std::fs::metadata(home).with_context(|| format!("can't read {}", home.display()))?.uid();
-        Ok(State { home: home.to_path_buf(), owner, engine, missing: missing(), pools })
+        Ok(State { home: home.to_path_buf(), owner, engine, missing: missing(), pools, live, store, pushes })
+    }
+
+    pub fn engine(&self) -> Result<&Supervisor, &str> {
+        self.engine.as_ref().map_err(|(_, why)| why.as_str())
     }
 
     pub fn welcome(&self) -> Welcome {
@@ -66,21 +80,30 @@ impl State {
                 answer_us: None,
             },
         };
+        let (account, connection, catch_up, history) = {
+            let live = self.live.lock().expect("live state");
+            (live.account.clone(), live.connection.clone(), live.catch_up.clone(), live.history.clone())
+        };
         Status {
             jawd: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOL,
             root: self.home.display().to_string(),
-            account: self.account(),
-            connection: self.connection(),
+            account,
+            connection,
             engine,
             missing: self.missing.clone(),
             pools: self.pools.iter().map(|pool| pool.report()).collect(),
+            catch_up,
+            history,
+            stored: self.store.as_ref().and_then(|store| {
+                Some(Stored { inbox: store.count("inbox").ok()?, history: store.count("history_raw").ok()? })
+            }),
         }
     }
 
     /// How long the engine takes to answer a ping, in microseconds, if it answers within half a second.
     pub async fn ping(&self) -> Option<u64> {
-        let supervisor = self.engine.as_ref().ok()?;
+        let supervisor = self.engine().ok()?;
         let started = Instant::now();
         let ping = supervisor.call(pb::command::Kind::Ping(pb::Ping {}));
         match tokio::time::timeout(Duration::from_millis(500), ping).await {
@@ -90,11 +113,11 @@ impl State {
     }
 
     fn account(&self) -> Account {
-        Account { state: AccountState::Unlinked, me: None }
+        self.live.lock().expect("live state").account.clone()
     }
 
     fn connection(&self) -> Connection {
-        Connection::new(ConnectionState::Offline)
+        self.live.lock().expect("live state").connection.clone()
     }
 }
 

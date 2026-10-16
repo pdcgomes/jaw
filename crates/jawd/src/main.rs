@@ -4,6 +4,8 @@
 mod engine;
 mod sock;
 mod state;
+mod store;
+mod sync;
 mod work;
 
 use std::os::unix::fs::PermissionsExt;
@@ -59,6 +61,9 @@ enum Bench {
         /// Each message's size in bytes
         #[arg(long, default_value_t = 600)]
         size: u32,
+        /// Ack each message only once it's committed to a jaw.db's inbox, as a real one is
+        #[arg(long)]
+        commit: bool,
     },
     /// The work lanes: a backlog of background jobs, interactive ones arriving through it, and sends
     Lanes {
@@ -76,7 +81,7 @@ fn main() -> Result<()> {
     let home = jaw_proto::local::home();
     match cli.command {
         Some(Command::Status) => status(&home),
-        Some(Command::Bench(Bench::Link { count, size })) => bench_link(cli.engine, count, size),
+        Some(Command::Bench(Bench::Link { count, size, commit })) => bench_link(cli.engine, count, size, commit),
         Some(Command::Bench(Bench::Lanes { background, interactive })) => bench_lanes(background, interactive),
         None => run(&home, cli.engine),
     }
@@ -103,10 +108,16 @@ fn run(home: &Path, kind: EngineKind) -> Result<()> {
     runtime()?.block_on(async {
         let socket = jaw_proto::local::socket(home);
         let listener = sock::listen(&socket)?;
+        let store = store::Store::open(home)?;
+        let spool = home.join("spool");
+        std::fs::create_dir_all(&spool)?;
         let (events, incoming) = mpsc::channel(1024);
         let supervisor = engine(kind, home).map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
-        tokio::spawn(hold(incoming));
-        let state = Arc::new(state::State::new(home, supervisor, Vec::new())?);
+        let live: sync::Shared = Arc::default();
+        let (pushes, _) = tokio::sync::broadcast::channel(256);
+        let engine = supervisor.as_ref().ok().cloned();
+        tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, spool));
+        let state = Arc::new(state::State::new(home, supervisor, Vec::new(), live, Some(store), pushes)?);
         let outcome = tokio::select! {
             served = sock::serve(state, listener) => served,
             _ = shutdown() => Ok(()),
@@ -114,24 +125,6 @@ fn run(home: &Path, kind: EngineKind) -> Result<()> {
         let _ = std::fs::remove_file(&socket);
         outcome
     })
-}
-
-/// Until jawd has its store (M1), it keeps no messages. It acks only bench events, and leaves a
-/// real message unacked, so the engine waits and WhatsApp keeps it to send again.
-async fn hold(mut incoming: mpsc::Receiver<Incoming>) {
-    let mut held = false;
-    while let Some(Incoming { event, ack }) = incoming.recv().await {
-        match (event.kind, ack) {
-            (Some(pb::event::Kind::Bench(_)), Some(ack)) => ack.send(),
-            (Some(pb::event::Kind::Message(_)), Some(_)) if !held => {
-                held = true;
-                eprintln!(
-                    "jawd: a message arrived, but jawd can't store messages yet, so it's left for WhatsApp to send again"
-                );
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Waits for Ctrl-C or SIGTERM, which launchd and systemd send to stop jawd.
@@ -154,17 +147,23 @@ fn status(home: &Path) -> Result<()> {
 
 /// Runs an engine on a folder of its own, so a bench never touches the real session, and acks each
 /// made-up message as it arrives: the link alone, before any database.
-fn bench_link(kind: EngineKind, count: u32, size: u32) -> Result<()> {
+fn bench_link(kind: EngineKind, count: u32, size: u32, commit: bool) -> Result<()> {
     let scratch = std::env::temp_dir().join(format!("jaw-bench-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;
     let outcome = runtime()?.block_on(async {
         let engine = engine(kind, &scratch).map_err(|(_, why)| anyhow::anyhow!(why))?;
+        let store = if commit { Some(store::Store::open(&scratch)?) } else { None };
         let (events, mut incoming) = mpsc::channel(1024);
         let instance = engine.start(events).await?;
         tokio::spawn(async move {
-            while let Some(Incoming { ack, .. }) = incoming.recv().await {
-                if let Some(ack) = ack {
-                    ack.send();
+            while let Some(Incoming { event, ack }) = incoming.recv().await {
+                match (&store, event.kind) {
+                    (Some(store), Some(pb::event::Kind::Bench(bench))) => store.inbox("bench", 0, bench.payload, ack),
+                    _ => {
+                        if let Some(ack) = ack {
+                            ack.send();
+                        }
+                    }
                 }
             }
         });
@@ -172,13 +171,14 @@ fn bench_link(kind: EngineKind, count: u32, size: u32) -> Result<()> {
         let pb::reply::Kind::BenchResult(result) = reply else { anyhow::bail!("the engine answered the bench with {reply:?}") };
         let seconds = result.elapsed_us as f64 / 1e6;
         println!(
-            "{} round trips in {seconds:.2} s, {} a second: p50 {} µs, p99 {} µs, max {} µs ({} engine, {size}-byte messages, acked as they arrived)",
+            "{} round trips in {seconds:.2} s, {} a second: p50 {} µs, p99 {} µs, max {} µs ({} engine, {size}-byte messages, {})",
             result.count,
             (result.count as f64 / seconds.max(1e-9)).round(),
             result.p50_us,
             result.p99_us,
             result.max_us,
             engine.kind(),
+            if commit { "each committed to jaw.db's inbox before its ack" } else { "acked as they arrived" },
         );
         Ok(())
     });

@@ -12,14 +12,17 @@ repository = "https://github.com/pdcgomes/jaw"
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
 libc = "0.2"
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"
+qrcode = { version = "0.14", default-features = false }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 jaw-client = { path = "crates/jaw-client" }
 jaw-proto = { path = "crates/jaw-proto" }
