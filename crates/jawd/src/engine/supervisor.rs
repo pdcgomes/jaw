@@ -1,5 +1,6 @@
 //! Keeps an engine running: starts it, starts it again after a pause that doubles each time it
-//! stops (back to the first once it has run a minute), and says how it is for `status`.
+//! stops (back to the first once it has run a minute), and says how it is for `status`. Told to
+//! stop, it does at once, whatever it's waiting for, and starts the engine no more.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,6 +25,7 @@ pub enum State {
     Starting,
     Running,
     Restarting,
+    Stopped,
 }
 
 impl State {
@@ -32,6 +34,7 @@ impl State {
             State::Starting => "starting",
             State::Running => "running",
             State::Restarting => "restarting",
+            State::Stopped => "stopped",
         }
     }
 }
@@ -54,6 +57,7 @@ impl Default for Backoff {
 pub struct Supervisor {
     status: watch::Receiver<EngineStatus>,
     current: watch::Receiver<Option<Commands>>,
+    stop: Arc<watch::Sender<bool>>,
 }
 
 impl Supervisor {
@@ -63,8 +67,18 @@ impl Supervisor {
             EngineStatus { kind: engine.kind(), state: State::Starting, version: None, restarts: 0, last_exit: None };
         let (status_tx, status) = watch::channel(initial);
         let (current_tx, current) = watch::channel(None);
-        tokio::spawn(run(engine, events, backoff, status_tx, current_tx));
-        Supervisor { status, current }
+        let (stop, stopping) = watch::channel(false);
+        tokio::spawn(run(engine, events, backoff, status_tx, current_tx, stopping));
+        Supervisor { status, current, stop: Arc::new(stop) }
+    }
+
+    /// Ends the engine and starts it no more, and waits until it has: a start under way is given
+    /// up, a pause before the next is cut short, and an engine running is ended as jawd exiting
+    /// would end it.
+    pub async fn stop(&self) {
+        self.stop.send_replace(true);
+        let mut status = self.status.clone();
+        let _ = status.wait_for(|status| status.state == State::Stopped).await;
     }
 
     pub fn status(&self) -> EngineStatus {
@@ -92,12 +106,38 @@ async fn run(
     backoff: Backoff,
     status: watch::Sender<EngineStatus>,
     current: watch::Sender<Option<Commands>>,
+    mut stopping: watch::Receiver<bool>,
+) {
+    supervise(engine, events, backoff, &status, &current, &mut stopping).await;
+    current.send_replace(None);
+    status.send_modify(|s| s.state = State::Stopped);
+}
+
+/// Waits until the supervisor is told to stop; with no one left to tell it, that's never.
+async fn told(stopping: &mut watch::Receiver<bool>) {
+    if stopping.wait_for(|stop| *stop).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Runs the engine until jawd stops listening to `events` or says to stop.
+async fn supervise(
+    engine: Arc<dyn Engine>,
+    events: mpsc::Sender<Incoming>,
+    backoff: Backoff,
+    status: &watch::Sender<EngineStatus>,
+    current: &watch::Sender<Option<Commands>>,
+    stopping: &mut watch::Receiver<bool>,
 ) {
     let mut pause = backoff.first;
     loop {
         status.send_modify(|s| s.state = State::Starting);
         let started = Instant::now();
-        let why = match engine.start(events.clone()).await {
+        let instance = tokio::select! {
+            instance = engine.start(events.clone()) => instance,
+            _ = told(stopping) => return,
+        };
+        let why = match instance {
             Ok(instance) => {
                 let hello = &instance.hello;
                 let version = if hello.whatsmeow.is_empty() {
@@ -110,7 +150,10 @@ async fn run(
                     s.version = Some(version);
                 });
                 current.send_replace(Some(instance.commands));
-                let why = instance.exited.await;
+                let why = tokio::select! {
+                    why = instance.exited => why,
+                    _ = told(stopping) => return,
+                };
                 current.send_replace(None);
                 why
             }
@@ -128,7 +171,10 @@ async fn run(
             s.restarts += 1;
             s.last_exit = Some(why);
         });
-        tokio::time::sleep(pause).await;
+        tokio::select! {
+            _ = tokio::time::sleep(pause) => {}
+            _ = told(stopping) => return,
+        }
         pause = (pause * 2).min(backoff.most);
     }
 }
@@ -181,6 +227,62 @@ mod tests {
         assert_eq!(running.version.as_deref(), Some("jawd's demo engine"));
         let pong = supervisor.call(pb::command::Kind::Ping(pb::Ping {})).await.unwrap();
         assert!(matches!(pong, pb::reply::Kind::Pong(_)));
+    }
+
+    /// An engine whose start never finishes, as one that never says hello.
+    struct Silent;
+
+    impl Engine for Silent {
+        fn kind(&self) -> &'static str {
+            "silent"
+        }
+
+        fn start(&self, _events: mpsc::Sender<Incoming>) -> BoxFuture<'_, anyhow::Result<Instance>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Stops `supervisor`, which must take no longer than a moment.
+    async fn stopped(supervisor: &Supervisor) {
+        tokio::time::timeout(Duration::from_millis(200), supervisor.stop()).await.expect("it didn't stop at once");
+        assert_eq!(supervisor.status().state, State::Stopped);
+    }
+
+    #[tokio::test]
+    async fn told_to_stop_while_it_waits_to_start_an_engine_again_it_stops_at_once_and_starts_it_no_more() {
+        let engine =
+            Arc::new(Flaky { failures: u32::MAX, tries: AtomicU32::new(0), demo: DemoEngine::with(Vec::new()) });
+        let (tx, _rx) = mpsc::channel(8);
+        let pausing = Backoff { first: Duration::from_secs(30), ..quick() };
+        let supervisor = Supervisor::spawn(engine.clone(), tx, pausing);
+        let mut status = supervisor.status.clone();
+        status.wait_for(|s| s.state == State::Restarting).await.unwrap();
+        stopped(&supervisor).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(engine.tries.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn told_to_stop_while_a_start_waits_for_its_hello_it_gives_the_start_up() {
+        let (tx, _rx) = mpsc::channel(8);
+        let supervisor = Supervisor::spawn(Arc::new(Silent), tx, quick());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(supervisor.status().state, State::Starting);
+        stopped(&supervisor).await;
+    }
+
+    #[tokio::test]
+    async fn told_to_stop_while_its_engine_runs_it_ends_it_and_starts_it_no_more() {
+        let engine = Arc::new(Flaky { failures: 0, tries: AtomicU32::new(0), demo: DemoEngine::with(Vec::new()) });
+        let (tx, _rx) = mpsc::channel(8);
+        let supervisor = Supervisor::spawn(engine.clone(), tx, quick());
+        let mut status = supervisor.status.clone();
+        status.wait_for(|s| s.state == State::Running).await.unwrap();
+        stopped(&supervisor).await;
+        let refused = supervisor.call(pb::command::Kind::Ping(pb::Ping {})).await.unwrap_err();
+        assert!(matches!(refused, EngineError::Unavailable(_)), "{refused:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!((engine.tries.load(Ordering::Relaxed), supervisor.status().restarts), (1, 0));
     }
 
     #[tokio::test]

@@ -266,14 +266,17 @@ async fn start(home: &Path, kind: EngineKind, no_notify: bool) -> Result<Started
 }
 
 /// Stops jawd in the order that keeps its data whole: first it stops taking work, so no interface
-/// is answered for something that won't be done; the store closes last, once jawd's tasks are
-/// dropped. The engine goes with jawd, and anything it handed over that jawd hadn't acked comes
-/// again from WhatsApp.
+/// is answered for something that won't be done; then the engine is ended and started no more,
+/// whatever its supervisor was waiting for, and anything it handed over that jawd hadn't acked
+/// comes again from WhatsApp; the store closes last, once jawd's tasks are dropped.
 async fn stop(Started { state, notifications }: Started, socket: &Path) {
     state.stop();
     let _ = std::fs::remove_file(socket);
     if let Some(notifications) = notifications {
         notifications.abort();
+    }
+    if let Ok(engine) = state.engine() {
+        engine.stop().await;
     }
 }
 
