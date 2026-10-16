@@ -34,6 +34,7 @@ jaw isn't affiliated with WhatsApp or Meta, and WhatsApp's terms don't allow uno
 4. The daemon does everything an interface would otherwise repeat: names, formatting, quotes, reaction and receipt totals, poll tallies, display-sized previews, search, drafts, folders, presence, voice playback and recording, notifications.
 5. Memory is bounded everywhere: windows instead of histories, bounded queues, caches sized in bytes.
 6. The engine stays thin. It speaks WhatsApp and hands jawd WhatsApp's own protobufs; everything that understands them is in jawd, so engines can be swapped and compared.
+7. Nothing is ever lost, and the data is never inconsistent. Nothing is acknowledged, to WhatsApp, the phone or an interface, before it's durable. A change and its event commit together or not at all. Every migration is transactional and tested from every earlier version, and can't leave a database half changed. Anything that makes data access slow at times or opens an edge case (a setting, a missing index, a query plan, a lock) is a defect, not a trade-off.
 
 ## Budgets
 
