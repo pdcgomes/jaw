@@ -1,0 +1,262 @@
+# jaw: design
+
+16 October 2026. Settled with the owner over the day; nothing here is built yet. The plan this follows, with its build order, is the workstream's plan; this is the design it builds.
+
+## What it is
+
+jaw is a WhatsApp client for macOS and Linux that never makes you wait: your chats, photos, videos, voice messages and polls, from the keyboard, with the mouse too. It is three programs:
+
+- `jawd`, a Rust daemon that does all the work: it keeps every message, prepares everything an interface shows, and sends and receives.
+- `jaw-engine`, a small Go process that speaks WhatsApp for jawd through [whatsmeow](https://github.com/tulir/whatsmeow).
+- Interfaces that only draw, starting with `jaw`, a terminal interface in Rust on ratatui, in ooze's style and Tokyo Night. A desktop app can come later and get everything for free.
+
+Its creature is badcoffee.dev's Mimic, a treasure chest that's all jaw: to jaw is to chat, and a linked device mimics your phone.
+
+jaw isn't affiliated with WhatsApp or Meta, and WhatsApp's terms don't allow unofficial clients, so it's developed against a spare number.
+
+## Decisions
+
+- **Name and creature:** jaw and the Mimic. The name is free on crates.io, in Homebrew and on GitHub.
+- **The daemon keeps everything; interfaces are views.** jawd stays linked, keeps every chat and message in its own database, and serves interfaces over a Unix socket. Opening jaw never waits on WhatsApp, notifications arrive with no window open, and any later interface gets all of it.
+- **Rust everywhere but the engine.** whatsmeow is the proven engine, and it's Go, so Go is confined to `jaw-engine` behind an `Engine` trait in jawd. whatsapp-rust is wired in behind the same trait in M7 and compared before release picks the default.
+- **SQLite through rusqlite, with SQLite compiled in** (FTS5 on), so nothing needs installing. Unencrypted for now, in a folder only you can read; encryption later is rusqlite's `bundled-sqlcipher` feature and a key, in one module.
+- **First version:** all of messaging, link previews on what you send, communities gathered under their community, nested folders and an IM-style roster. Later: sending stickers, group admin, several numbers, video inside the terminal, transcription. Out: calls (shown as lines in the chat), status, channels, community admin, business tools and WhatsApp's settings.
+- **Modeless keys:** typing goes to the message box; single keys act on a selected message.
+- **One media pipeline** for every format, sending SD or HD as WhatsApp does, rather than cases per format.
+- **One tree of folders** holding chats and people, each able to sit in several; the roster shows the same folders with presence.
+
+## Principles
+
+1. No interface ever waits. It sends a request and keeps drawing; the answer arrives as data.
+2. jawd keeps realtime, interactive and background work apart, so history, media and maintenance can't delay a message by more than one short transaction.
+3. An interface receives only what it shows (its chat-list window and its open chat's window), coalesced to the newest state of each row.
+4. The daemon does everything an interface would otherwise repeat: names, formatting, quotes, reaction and receipt totals, poll tallies, display-sized previews, search, drafts, folders, presence, voice playback and recording, notifications.
+5. Memory is bounded everywhere: windows instead of histories, bounded queues, caches sized in bytes.
+6. The engine stays thin. It speaks WhatsApp and hands jawd WhatsApp's own protobufs; everything that understands them is in jawd, so engines can be swapped and compared.
+
+## Budgets
+
+| What | Budget |
+| --- | --- |
+| A keypress drawn | 16 ms (p99), while 2,000 messages a second arrive |
+| jaw's first frame | 50 ms after launch, with jawd running |
+| Opening a chat | 30 ms |
+| jaw's memory | under 40 MB with a screen of images |
+| An incoming message committed, acknowledged and on its way to interfaces | 5 ms (p99), at 5,000 messages a second or more |
+| The engine's commit-acked round trip | under 200 µs (p50) |
+| A 100-message page | 5 ms at any depth |
+| Search | 50 ms over a million messages |
+| jawd's memory | under 100 MB steady, 250 MB during a full history sync |
+| jaw-engine's memory | under 80 MB steady, 200 MB during a full history sync |
+| A 12-megapixel photo ready to upload | 300 ms |
+| Idle | no drawing, no wake-ups, no polling |
+
+The load harness measures them on an M-series Mac and a small Linux machine, and the README's "What it costs" reports them, as ooze's does.
+
+## The screen
+
+```text
+╭ jaw · online · catching up 1,204 of 5,000 ────────────────────────────────────────────────────────────── 14:02 ╮
+╭ folders ───────────────╮╭ chats · Family ────────────────╮╭ Ana Ribeiro · typing… ─────────────────────────────╮
+│ ▾ All               12 ││ ● Ana Ribeiro         14:01  2 ││                     Wednesday                      │
+│   Unread             5 ││   did you get the photos f…    ││ Ana  did you get the photos from Sunday?     13:58 │
+│ ▾ Family             3 ││   Mum                    13:40 ││      ┌────────────────────┐                        │
+│     Parents            ││   ✓✓ ok, call you later        ││      │      (photo)       │                        │
+│     Cousins            ││ ▸ Lisbon Climbing     12:15 14 ││      └────────────────────┘                        │
+│ ▸ Work               2 ││   Rui: Saturday at 9?          ││      ❤ 2                                           │
+│ ▸ Communities          ││   Pedro & Ana        yesterday ││                  yes, the one at the lake ✓✓ 13:59 │
+│                        ││   ▣ tickets.pdf                ││ Ana  ▶ ▁▂▅▇▆▃▂▁▂▃▅▆▅▃▂  0:14                 14:01 │
+│ roster                 ││                                ││                                                    │
+│ ● Ana Ribeiro   typing ││                                ││ ─ 2 new ────────────────────────────────────────── │
+│ ● Rui           online ││                                ││                                                    │
+│ ○ Mum        5 min ago ││                                ││ ╭────────────────────────────────────────────────╮ │
+│ ○ Sofia      yesterday ││                                ││ │ a message                                      │ │
+│                        ││                                ││ ╰────────────────────────────────────────────────╯ │
+│                        ││                                ││                                                    │
+╰────────────────────────╯╰────────────────────────────────╯╰────────────────────────────────────────────────────╯
+  ⏎ send  ↑ messages  ctrl-k find  alt-↑↓ chats  ctrl-b sidebar  ctrl-o attach  ctrl-r record  ? keys
+```
+
+- **The header:** connected or not, catching up and how far, the time.
+- **The sidebar:** the folder tree with unread counts, and the roster: online first, then by last seen. It folds away below 120 columns.
+- **The chat list:** the folder's chats, newest first, pinned at the top; a community is one row with its groups' unread total, opening to its groups. It folds away below 90 columns.
+- **The conversation:** messages anchored where you're reading, photos and stickers drawn with the terminal's graphics where it has them and half-blocks where it doesn't, voice messages with their waveform, and the message box, which always has the cursor.
+- **The Mimic** sits in an empty conversation and on the linking screen beside the QR code, chomps when a message arrives, and sleeps when jawd can't be reached.
+
+## How it fits together
+
+```text
+WhatsApp ⇄ jaw-engine (Go, whatsmeow, session.db)
+              ⇅ length-prefixed protobuf frames on the engine's stdin and stdout
+           jawd (Rust: lanes, jaw.db, media, voice, folders, presence, notifications)
+              ⇅ JSON lines on a Unix socket
+           jaw (Rust, ratatui) · a desktop app, later
+```
+
+All three keep their files in one folder, `~/Library/Application Support/jaw` on macOS or `$XDG_DATA_HOME/jaw` on Linux, mode 0700 and left out of Time Machine, since everything in it can come again from the phone: `session.db` (whatsmeow's keys), `jaw.db` (everything jaw shows), `spool/` (history on its way in), `media/` (downloaded files and display previews) and `jaw.sock`.
+
+## The engine
+
+- **The `Engine` trait** is a stream of events and a set of commands, both shaped like WhatsApp. An incoming message arrives as whatsmeow's `MessageInfo` and WhatsApp's own `Message` protobuf, and jawd parses it with prost types generated from the `.proto` files whatsmeow ships. `scripts/sync-protos` copies them into `proto/whatsapp/` at the whatsmeow commit the engine pins, and CI checks the two agree.
+- **Implementations:** `GoEngine`, which runs jaw-engine; `DemoEngine`, a made-up account for the demo, tests and the load harness; and, in M7, `RustEngine` on whatsapp-rust.
+- **The link** is `proto/engine.proto`: length-prefixed frames on the child's stdin and stdout, its logs on stderr into jawd's log. Code is generated for Go (protoc-gen-go, committed) and Rust (prost with protox, so no protoc is needed). The first frame carries a version, and jawd refuses an engine it doesn't match.
+- **Durability.** whatsmeow runs with `SynchronousAck` and `EnableDecryptedEventBuffer`. The engine's handler sends each message and waits for jawd's ack, which comes once the raw message is committed to `inbox`; only then does WhatsApp hear "received". A crash anywhere before that means WhatsApp sends it again, and whatsmeow's buffer means it isn't decrypted twice.
+- **That round trip caps a backlog.** whatsmeow handles incoming messages one at a time from a single queue, so a backlog drains at one round trip per message. The spike measures it; the target is under 200 µs.
+- **Big payloads travel as files.** History blobs are written to the spool and passed by path, one at a time, the next only once jawd has taken the last. Downloads go straight to the path jawd names (`DownloadToFile`), and uploads read from one (`UploadReader`). Frames stay small, so a 50 MB history chunk never queues ahead of a live message.
+- **Commands:** link by QR or code, log out, send (a raw message with jawd's ID), upload, download, media retry, mark read, presence, chat presence, subscribe to presence, app-state patches (pin, archive, mute, star, mark read, delete), history request, poll vote (it needs the poll's secret, which whatsmeow keeps), group info and subgroups, user info, profile pictures, `IsOnWhatsApp`, privacy settings.
+- **whatsmeow's settings:** `ManualHistorySyncDownload`, `EmitAppStateEventsOnFullSync`, `AutomaticMessageRerequestFromPhone`, `store.SetOSInfo` so the phone lists "jaw", `RequireFullSync`, and `SetProxyAddress` from `HTTPS_PROXY`.
+- **`session.db`** is whatsmeow's `sqlstore` on mattn's driver (WAL, `synchronous=NORMAL`), unless the spike shows a pure-Go driver keeps up with a backlog. jawd sets the engine's `GOMEMLIMIT` and `GOGC`.
+- **Supervision:** jawd starts the engine, restarts it with backoff and tells interfaces it's reconnecting meanwhile; the engine exits when its stdin closes.
+
+## jawd
+
+### Work lanes
+
+- **Realtime:** incoming messages, receipts, typing, sends, socket I/O. **Interactive:** what an interface shows or sends right now. **Background:** history, auto-downloads, avatars, off-screen previews, media retry, checkpoints, eviction, rebuilds.
+- tokio, with at most 4 worker threads, for I/O: the engine link, sockets, HTTP, timers and child processes. Dedicated threads for the database writer and readers, a rayon pool of half the cores for parsing, images and waveforms, and one thread for audio.
+- A pool per resource, each a priority queue with interactive ahead of background: downloads 6, uploads 3, video transcodes 1 to 2 (ffmpeg at a lower OS priority), image work half the cores, database readers one per core up to 4, sends one queue per chat with 16 chats at once.
+- Jobs with the same key share one run. A background job is promoted when a window shows its message. Bounded queues push back on background producers; realtime work never waits on them.
+- Each pool's depth, wait and run times (p50 and p99) show in `jawd status`, and anything over budget is logged with what it was.
+
+### Storage
+
+- `jaw.db`, in WAL mode, through rusqlite with SQLite bundled.
+- **Tables:** `inbox` (raw engine events waiting for conversion); `chats` (sort key, last message, unread and mention counts, draft, flags, community, frecency); `messages` (kind, sender, time, status, reply target, edit, delete and expiry, render-ready spans, and the compressed `raw` protobuf); `media` (one row per SD or HD copy); `reactions`; `receipts`; `poll_options`; `poll_votes`; `people` (one row per person, joining their LID and phone JIDs, with names, about text, avatar and last seen); `group_members`; `folders` and `folder_items`; `pending` (edits, reactions and votes for messages not seen yet); `outbox`; `events` (seq, type, key); and `messages_fts` (FTS5, `unicode61 remove_diacritics 2`, so "nao" finds "não").
+- **The raw protobufs are the source of truth.** A migration can rebuild the tables when jaw learns to read something new, without asking the phone again, and nothing WhatsApp sends is lost before jaw understands it.
+- **One writer thread** with prioritised queues: `inbox` commits first, since the engine waits on them; then live conversions and actions; then background batches capped at 1,000 rows or 10 ms per transaction. Queries go to a pool of read-only connections, so paging never waits behind a sync. Statements are prepared once.
+- **`synchronous=NORMAL`:** a crash of jawd or the engine loses nothing; a power cut can lose the last moments, which the phone still has. `wal_autocheckpoint=0` on the writer and PASSIVE checkpoints on a timer, so no commit pays for one.
+- **Keyset paging** on `(chat, time, rowid)`, never OFFSET, so the 50,000th page comes as quickly as the first; the chat list reads `chats` alone.
+- **The feed can't disagree with the tables:** each change writes its `events` row in the same transaction. The feed keeps 7 days.
+- **No polling:** a timer for the next disappearing message, and eviction when the cache passes its size.
+- **Migrations** are numbered SQL files built into jawd, run in one transaction at start against `PRAGMA user_version`, and tested from every earlier version's database.
+
+### Sync
+
+- **Linking** by QR or the phone-number code, through the engine; jawd asks for the full history.
+- **The converter** drains `inbox` as soon as rows land, in batches during a burst, into the tables and the feed.
+- **History** blobs from the spool are parsed in the background lane a conversation at a time and stored in batches. A chat's sort key is its newest message's time, so older history never moves a chat.
+- **Catching up after time offline:** `OfflineSyncPreview` says how many messages, receipts and changes are coming. Until `OfflineSyncCompleted`, rows update in place, the chat list reorders at most every 2 seconds, interfaces show progress, and notifications wait for one summary at the end.
+- **One converter per kind:** text, extended text, image, video, video note, audio, voice, document, sticker, location, live location, contact cards, polls (v1 to v6) and their votes, reactions, edits, deletes, ephemeral, view-once and device-sent wrappers, albums and HD children, events, pins, group invites, the call log. Their output is render-ready: names resolved, formatting parsed into spans, mentions and links marked, quotes summarised, reactions and receipts totalled, polls tallied. A kind jaw doesn't know keeps its protobuf and shows as "jaw can't show this yet".
+- **App state** (pin, archive, mute, read and unread, star, delete for me, clear and delete chat); contacts and push names joined into people by LID and phone number (`SenderAlt` and whatsmeow's LID map); group info and members; communities from `IsParent`, `LinkedParentJID`, `IsDefaultSubGroup` and `GetSubGroups`; avatars for visible chats in the background lane, resized once.
+- **Undecryptable messages** show as waiting until whatsmeow's retries resolve them. Scrolling past the oldest message asks the phone for 50 more.
+
+### Sending
+
+- jawd makes each message's ID up front, in whatsmeow's format, and the engine sends with it (`SendRequestExtra.ID`), so the row shown at once is the real message: pending, sent, delivered, read, played.
+- One queue per chat keeps order; chats send in parallel; failures retry with backoff, then stay marked for a manual retry.
+- Text, replies, mentions, edits, deletes for me or for everyone, reactions, forwards, polls and votes, read receipts (unless they're off on the phone), typing (throttled), drafts kept in jawd for every interface.
+- Online only while you're looking: jawd tells WhatsApp you're online while an interface has focus, which terminals report. Otherwise you're away, and your phone keeps its notifications.
+- A new poll carries a fresh secret, which whatsmeow keeps when it sends it; votes go through the engine, which has every poll's secret.
+- Link previews are fetched in the interactive lane within 3 seconds; the text goes without one if the page doesn't answer in time.
+
+### Media
+
+- **Incoming:** every message brings its thumbnail, so it shows at once. Photos, stickers, GIFs and voice download as they arrive, straight into the cache through the engine; videos and documents when you open them, or on arrival below a size you set. An HD copy attaches to its message instead of showing as a second one. Files gone from WhatsApp's servers, as history from before jaw was linked often is, are asked of the phone again (`SendMediaRetryReceipt`), which needs the phone online.
+- **For interfaces,** jawd writes display-ready previews at 256 and 768 pixels (the `image` crate and `fast_image_resize`; video posters and an animated sticker's first frame with ffmpeg), so no interface decodes full-size media to show a list.
+- **Outgoing:** ffprobe reads what a file is; then a plan per kind: JPEG; H.264 and AAC in MP4, through VideoToolbox on macOS or libx264 on Linux; GIFs as looping MP4; audio as AAC; documents as they are. A file that already fits passes untouched. Metadata is stripped and orientation kept. SD and HD sizes are measured from what the phone app sends before they're fixed, and HD goes as WhatsApp's dual upload: a standard copy, then the HD copy linked to it. Thumbnails, posters and waveforms are made alongside.
+- **Streaming** both ways through the engine, with progress events and cancel, so a 2 GB video never sits in memory.
+- **The cache** keeps files by content hash, 5 GB by default, dropping what was opened longest ago and never starred or unsent files.
+
+### Voice
+
+- In jawd, so every interface gets it by asking. Ogg Opus is decoded with the `ogg` and `opus` crates (libopus compiled in) and played through cpal; speed and seek re-decode from the position; the playhead is reported ten times a second.
+- Recording: cpal captures, jawd encodes mono Ogg Opus as you speak, reports levels, computes the 64-point waveform and sends a voice message. macOS asks once for jawd to use the microphone.
+
+### Folders and the roster
+
+- **One tree of nested folders.** An item is a chat or a person, and can sit in several folders. A person stands for their one-to-one chat in chat lists and for themselves in the roster.
+- **Smart folders** are saved filters jawd runs in SQL: unread, mentions me, groups, a community, muted, waiting on me (their message unanswered for a day), from favourites. Built in: All, Unread, Groups, Communities (each community with its groups, the announcement group first) and Archived.
+- A folder's unread count is its chats' unread total, each chat counted once. Any folder can be a window, as the chat list is.
+- **Favourites:** up to nine folders or chats on Alt-1 to Alt-9. The finder ranks by frecency: opens per chat, decaying over time.
+- **The roster:** people from the phone's contacts who are on WhatsApp, and anyone with a one-to-one chat, grouped by folder, online first, then by last seen, then by name, with offline people shown or hidden. It shows online, typing or recording, last seen, or nothing when someone hides it; their about text (`GetUserInfo`, 50 at a time, refreshed daily); and their avatar. Enter opens or starts the chat.
+- **Presence is bounded,** because subscribing to everyone is what presence trackers do, and WhatsApp polices it. jawd subscribes to the people in a roster window or an open chat, only while an interface has focus (which is also the only time WhatsApp sends presence), at most 20 new subscriptions a minute and 200 per connection, favourites first.
+- Folders, favourites and frecency are jaw's own, kept in `jaw.db` and shared by every interface; WhatsApp never sees them.
+
+### The socket and windows
+
+- One JSON object per line; requests and replies shaped like JSON-RPC 2.0; `hello` first, with the protocol version. [protocol/README.md](../../protocol/README.md) specifies it.
+- **Live windows instead of a firehose:** `chats.watch` (a folder and a range), `messages.watch` (a chat, an anchor, how many before and after) and `roster.watch` return rows, then push upserts and removals for that window. Rows carry a sort key and a version, so updates converge in any order, and there are no positions to get wrong.
+- **A fan-out task per client** reads the feed, keeps what its windows show and only the newest of each row, and flushes when the feed has been quiet for 5 ms, or every 50 ms during a burst. A slow client never holds jawd up: its pending updates are bounded by its windows, and one too far behind is told to watch again. On reconnect it watches again from its last seq and gets only what changed.
+- `jaw-proto` is the protocol's one definition, used by jawd and every Rust interface; `protocol/fixtures/` pins the wire format, and interfaces in other languages get a JSON Schema generated from it.
+
+### Lifecycle and notifications
+
+- `jaw agent install` starts jawd at login, as a LaunchAgent on macOS or a systemd user unit on Linux, from ooze's `agent.rs`; jawd starts the engine. Without it, jaw starts jawd itself and keeps drawing while it starts.
+- The listener follows haunt's: refuse if another jawd answers, clear a stale socket, mode 0600, and check that whoever connects is the same user. It listens before the engine connects, so interfaces get local data at once.
+- Notifications come from jawd, as ooze's do: Notification Center on macOS, `notify-send` on Linux, or the terminal's own. Muted chats and the chat you're reading stay quiet.
+
+## The terminal interface
+
+- **Threads:** the client's (from `jaw-client`), input (crossterm: keys, mouse, paste, focus), two image workers, and the main thread, which folds and draws. One channel into the main thread; input is handled first.
+- **The loop** sleeps until something arrives or the next deadline, applies what's waiting within 8 ms, and draws once if anything changed: at most 60 frames a second in a burst, animations at 10 a second and only while visible.
+- **Nothing jumps.** The chat list keeps the selected chat by ID and holds its order while you move through it. The conversation anchors on a message, so history arriving above doesn't move it; new messages below scroll only when you're at the bottom, and otherwise a "2 new" marker shows.
+- Wrapping is cached per message, version and width; only visible messages are laid out; long ones fold after 40 lines.
+- **Images** with ratatui-image: the protocol is detected once at start with a short timeout (kitty, iTerm2, sixel or half-blocks), images are encoded on the workers from jawd's previews, and kitty's are sent once and then drawn as Unicode placeholders, so scrolling is only text. The image cache is capped in bytes.
+- **Media:** photos and stickers inline; videos, GIFs and video notes as posters with their length (Enter opens a player); voice with its waveform and playhead; documents, locations, contact cards and link previews as cards; polls with bars and counts, number keys to vote.
+- **Keys:** Ctrl-K finds any chat, person or folder; Alt-Up and Alt-Down move between chats; Alt-1 to Alt-9 go to favourites; Ctrl-B shows the sidebar, and Tab moves between folders and roster. Up from an empty box steps into the messages, where r replies, e edits, d deletes, + reacts, f forwards, y copies, Enter opens or plays, s saves and i shows its info; m files the selected chat or person into folders; Esc goes back to typing. Enter sends; Alt-Enter, or Shift-Enter with the kitty keyboard protocol, adds a line. @ and : complete names and emoji. Ctrl-O attaches files, dropped paths and clipboard images; Ctrl-R records a voice message. Slash commands (/poll, /search) cover the rest, and ? shows the keys. The mouse clicks, scrolls and opens.
+- **States:** linking (the QR code in half-blocks beside the Mimic, or the phone code), starting jawd, catching up, phone offline, logged out, update needed.
+- `jaw demo` draws a made-up account, and `jaw snapshot --demo --width --height --keys` prints one frame as text after some keys, as ooze's do.
+
+## When something fails
+
+- **jawd isn't running:** jaw starts it and says so while it starts; if it can't, it says why.
+- **The engine crashes:** jawd restarts it with backoff; interfaces show "reconnecting" and keep everything they have.
+- **WhatsApp unreachable:** the header says so, everything local keeps working, sends wait in the outbox with their clocks, and the Mimic sleeps when jawd itself can't be reached.
+- **The phone is offline:** messages still arrive and send; media retry and older history wait, and say they're waiting for the phone.
+- **Logged out from the phone:** jawd deletes the session, keeps the messages until you choose, and jaw shows the linking screen.
+- **WhatsApp wants a newer version:** "update needed", until jaw is rebuilt on a newer whatsmeow.
+- **No ffmpeg:** text and receiving never need it; sending media other than photos says what's missing, and `jawd status` lists it.
+
+## Code
+
+```text
+engine/                 Go module github.com/pdcgomes/jaw/engine
+  cmd/jaw-engine/
+  internal/             link (framing, generated enginepb), wa (whatsmeow: settings, events, commands)
+crates/                 Cargo workspace
+  wa-proto/             prost types for WhatsApp's protobufs and the engine link
+  jaw-proto/            the interface protocol
+  jaw-client/           the client side, for every Rust interface
+  jawd/                 engine work store convert sync send media voice preview organise presence feed rpc notify agent demo
+  jaw/                  the terminal interface
+proto/                  engine.proto; whatsapp/, copied from whatsmeow by scripts/sync-protos
+protocol/               README.md, fixtures/
+docs/plans/             this design
+creatures/  scripts/
+Makefile                build, test, install, demo, perf, proto
+```
+
+## Testing
+
+- **The engine (Go):** framing; every whatsmeow event it forwards turned into the right frame; commands against a fake client; the ack wait and its timeout.
+- **jawd:** a converter test per message kind from hand-made protobufs, nothing from a real account; spans; paging at depth, accent-blind search, migrations from every version; writer priority under load; windows and coalescing checked against fresh queries (property tests); resume, resync and slow clients; the send state machine; small media fixtures (jpg, png, heic, webp, gif, mov, mp4, wav) through probe, plan and transcode; catch-up; a voice round trip; folders, smart folders and the presence limits.
+- **An engine contract suite** that every `Engine` runs: the demo engine in CI, the Go engine live on the spare number, whatsapp-rust in M7.
+- **Interfaces:** fixtures, window models against a reference, anchoring, frames as text at several sizes, keys, and a headless flood test that fails when a frame goes over budget.
+- **End to end:** `jawd demo` serving a made-up account through the real socket, driven by `jaw snapshot --keys`.
+- **Load:** `jawd demo --flood` and `--catch-up` against a million-message database, and the engine's round trip on its own; `make perf` before each milestone closes.
+- **CI:** Linux on every push; macOS on main and by hand, since macOS minutes count ten times on private repositories.
+
+## Milestones
+
+- **M0 Foundations:** this design and the protocol draft; scaffold and CI; the engine link and trait with the demo engine; the spike on a spare number; work lanes with metrics.
+- **M1 Text, fast:** store, history, catch-up, windows and fan-out, people, sending text with ticks, typing, presence, read receipts, drafts, search, notifications, the agent; the client crate and the terminal interface; budgets measured.
+- **M2 Everything in a message:** replies, mentions, reactions, edits, deletes, forwards, link previews both ways, polls, locations, contact cards, disappearing and view-once, system and call lines, group senders and members, communities, app state.
+- **M3 Media in** and **M4 Media out**, **M5 Voice**, **M6 Folders and the roster**.
+- **M7 A second engine:** whatsapp-rust wired in as `RustEngine`, run beside the Go engine on the spare number, and compared on the contract suite, the live checklist, the load harness, reconnects and logouts, and build size and time; the default is picked for M8.
+- **M8 Ready to live with:** full load runs, every failure state, a README with pictures, `make install` and a Homebrew tap; before going public, a look at WhatsApp's terms and Meta's rules on side projects.
+
+## Later
+
+- Sending stickers; group admin; several numbers; video inside the terminal (mpv's kitty output); voice messages transcribed on the machine.
+- A desktop app on the same socket.
+- Encrypting `jaw.db` with SQLCipher.
+- Clicking a notification to open its chat.
+
+## Risks
+
+- Unofficial clients can get numbers banned: a spare number for development, and nothing automated.
+- whatsmeow tracks WhatsApp's changes: pin it, update often, keep `proto/whatsapp/` at the same commit, and show "update needed" when WhatsApp says so.
+- The engine link is a hop on every message: measured in M0, and gone if whatsapp-rust wins in M7.
+- whatsapp-rust is at 0.7, with breaking changes landing often: pinned to a commit, and the default only if M7 says so.
+- Sixel and iTerm2 resend image data when an image moves: list images stay small there.
+- macOS ties microphone permission to jawd's binary: `make install` signs it with a stable identity, so it isn't asked again after each build.
