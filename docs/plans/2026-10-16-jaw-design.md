@@ -301,7 +301,11 @@ When many unread messages pile up, a catch-up feed says what's going on in each 
 
 ## Later
 
-- A spike on the message box: full width along the bottom of the screen, under the sidebar and chat list too, as Claude's is, since sending is the main job; tried against today's box in the conversation to see whether it confuses which chat it sends to.
+- A spike on the message box and a focused mode, tried against today's layout to see whether it confuses which chat you're sending to:
+  - **The box full width** along the bottom of the screen, under the sidebar and chat list too, as Claude's is, since sending is the main job.
+  - **A status line beside it**, as BitchX and the Claude command line keep one: the chat you're in, its state (typing, online, muted, catching up), and what needs you elsewhere (unread and mentions in other chats, named when they matter), always on screen.
+  - **A focused mode** for one chat, the chat list and sidebar folded away, with the status line as the only glimpse of the rest.
+  - **A quick look:** a palette action (and a key on the status line) that shows a short catch-up of what's going on in the chats that need you, without leaving the one you're in; a small version of the catch-up in "After the release".
 - Sending stickers; group admin; several numbers; video inside the terminal (mpv's kitty output); voice messages transcribed on the machine.
 - A desktop app on the same socket.
 - Encrypting `jaw.db` with SQLCipher.
