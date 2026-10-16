@@ -1276,3 +1276,82 @@ fn the_picker_finds_emoji_as_it_is_typed_and_the_quick_six_come_back_when_it_is_
     let screen = frame(&mut v);
     assert!(screen.contains("thumbs up") && screen.contains("folded hands"), "{screen}");
 }
+
+#[test]
+fn a_send_whose_answer_was_lost_waits_for_its_row_rather_than_saying_not_sent() {
+    let (mut v, _rx) = view(140, 40);
+    v.apply(Update::Unsure { chat: "ana".into(), text: "a caminho".into() });
+    assert!(!frame(&mut v).contains("not sent"));
+    let mut row = message("lost-1", 1, "9999999999990~000000001");
+    row.chat = "ana".into();
+    row.mine = true;
+    row.status = Some(crate::data::Tick::Pending);
+    row.spans = vec![Span { t: SpanKind::Text, s: "a caminho".into(), person: None, url: None }];
+    arrive(&mut v, "ana", vec![row]);
+    v.clock = Some(NOW + 60_000);
+    v.tick();
+    let screen = frame(&mut v);
+    assert!(!screen.contains("not sent") && v.composer.is_empty(), "its row came, so it went:\n{screen}");
+}
+
+#[test]
+fn a_lost_send_with_no_row_once_jawd_is_back_goes_back_to_the_box_as_not_sent() {
+    let (mut v, _rx) = view(140, 40);
+    v.apply(Update::Unreachable { why: "gone".into(), retry_in: 1_000 });
+    v.apply(Update::Unsure { chat: "ana".into(), text: "a caminho".into() });
+    v.clock = Some(NOW + 60_000);
+    v.tick();
+    assert!(v.composer.is_empty(), "while jawd is away, it waits");
+    v.apply(Update::Hello { root: String::new(), linked: true, me: vec![], connection: v.connection.clone() });
+    assert!(v.next_wake() <= NOW + 60_000 + 8_000);
+    v.clock = Some(NOW + 70_000);
+    v.tick();
+    let screen = frame(&mut v);
+    assert!(v.composer.text() == "a caminho" && screen.contains("didn't arrive"), "{screen}");
+}
+
+#[test]
+fn a_failed_message_says_enter_tries_again_and_enter_sends_it_again() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = view(width, 40);
+        let keys = if width < 90 {
+            "<down><down><down><down><down><down>\n"
+        } else {
+            "<a-down><a-down><a-down><a-down><a-down><a-down>"
+        };
+        press(&mut v, &rx, keys);
+        assert_eq!(v.open.as_deref(), Some("jantar"));
+        let failed = find_message(&v, "esqueci-me do pão");
+        let screen = frame(&mut v);
+        assert!(screen.contains("! not sent · ⏎ tries again"), "at {width}:\n{screen}");
+        v.focus = Focus::Message(failed.id.clone());
+        press(&mut v, &rx, "\n");
+        let again = find_message(&v, "esqueci-me do pão");
+        assert_eq!(again.status, Some(crate::data::Tick::Pending), "at {width}");
+        assert!(!frame(&mut v).contains("! not sent"));
+    }
+}
+
+#[test]
+fn the_palette_sends_a_failed_message_again() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<a-down><a-down><a-down><a-down><a-down><a-down>");
+    let failed = find_message(&v, "esqueci-me do pão");
+    v.focus = Focus::Message(failed.id.clone());
+    press(&mut v, &rx, "<c-k>send it");
+    assert!(frame(&mut v).contains("Send it again"));
+    press(&mut v, &rx, "\n");
+    assert_eq!(find_message(&v, "esqueci-me do pão").status, Some(crate::data::Tick::Pending));
+}
+
+#[test]
+fn a_number_typed_in_the_palette_starts_a_chat_with_it() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<c-k>+351 913 777 777");
+    let screen = frame(&mut v);
+    assert!(screen.contains("Start a chat with +351 913 777 777"), "{screen}");
+    press(&mut v, &rx, "\n");
+    assert_eq!(v.open.as_deref(), Some("351913777777@s.whatsapp.net"));
+    press(&mut v, &rx, "<c-k>12 34");
+    assert!(!frame(&mut v).contains("Start a chat with"), "too few digits to be a number");
+}

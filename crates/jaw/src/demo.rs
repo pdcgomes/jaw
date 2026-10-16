@@ -673,6 +673,50 @@ impl Account {
         self.send(Update::ChatStarted { chat });
     }
 
+    /// A chat by number: a contact's if it's theirs, the one jaw has if any, or a new one named
+    /// for the number; numbers too short to be one aren't on WhatsApp.
+    fn on_start_by_phone(&mut self, phone: &str) {
+        let digits: String = phone.chars().filter(char::is_ascii_digit).collect();
+        if digits.len() < 8 {
+            self.send(Update::Notice(format!("{phone} isn't on WhatsApp")));
+            return;
+        }
+        let same = |p: &Option<String>| {
+            p.as_deref().is_some_and(|p| p.chars().filter(char::is_ascii_digit).collect::<String>() == digits)
+        };
+        if let Some(person) = self.contacts.iter().find(|p| same(&p.phone)).map(|p| p.id.clone()) {
+            return self.on_start_chat(&person);
+        }
+        let id = format!("{digits}@s.whatsapp.net");
+        if let Some(&t) = self.index.get(&id) {
+            let chat = self.threads[t].chat.clone();
+            self.send(Update::ChatStarted { chat });
+            return;
+        }
+        let now = self.now();
+        let mut w = Writing::new(&id, &format!("+{digits}"), ChatKind::Direct, now);
+        w.thread.chat.sort = format!("0~{now:013}");
+        let thread = w.done(0, 0);
+        let chat = thread.chat.clone();
+        self.index.insert(chat.id.clone(), self.threads.len());
+        self.threads.push(thread);
+        let total = self.total();
+        self.send(Update::Chats(Window { upsert: vec![chat.clone()], total: Some(total), ..Window::default() }));
+        self.send(Update::ChatStarted { chat });
+    }
+
+    /// A failed message of yours, pending again, then on its way.
+    fn on_retry(&mut self, message: &str) {
+        let Some((t, i)) = self.locate(message) else { return };
+        if !self.threads[t].messages[i].mine || self.threads[t].messages[i].status != Some(Tick::Failed) {
+            return;
+        }
+        let chat = self.threads[t].chat.id.clone();
+        self.tick(&chat, message, Tick::Pending);
+        self.after(500, Later::Tick { chat: chat.clone(), id: message.to_string(), tick: Tick::Sent });
+        self.after(1_500, Later::Tick { chat, id: message.to_string(), tick: Tick::Delivered });
+    }
+
     fn on_link_start(&mut self, phone: Option<String>) {
         match phone {
             None => self.send_qr(),
@@ -788,6 +832,16 @@ impl Jawd for Demo {
 
     fn find(&mut self, id: u64, query: &str, kind: Option<FoundKind>, chat: Option<&str>, limit: usize) {
         self.ask(find::Ask { id, query: query.to_string(), kind, chat: chat.map(String::from), limit });
+    }
+
+    fn start_chat_by_phone(&mut self, phone: &str) {
+        let phone = phone.to_string();
+        self.defer(move |a| a.on_start_by_phone(&phone));
+    }
+
+    fn retry(&mut self, message: &str) {
+        let message = message.to_string();
+        self.defer(move |a| a.on_retry(&message));
     }
 
     fn start_chat(&mut self, person: &str) {

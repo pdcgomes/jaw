@@ -469,7 +469,11 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![lead(), Span::styled(said, Style::new().fg(t.comment))]));
     }
     if m.mine && m.status == Some(Tick::Failed) {
-        lines.push(Line::from(vec![lead(), Span::styled("not sent", Style::new().fg(t.warn))]));
+        lines.push(Line::from(vec![
+            lead(),
+            Span::styled("! not sent", Style::new().fg(t.warn)),
+            Span::styled(" · ⏎ tries again", Style::new().fg(t.comment)),
+        ]));
     }
     if !m.reactions.is_empty() && !m.deleted {
         let mut spans = vec![lead()];
@@ -576,7 +580,7 @@ mod tests {
         assert_eq!(lines, [format!("{}yes, the one at the lake       ✓✓  13:58", " ".repeat(20))]);
         m.status = Some(Tick::Failed);
         let lines = lay(&m, 60);
-        assert_eq!(lines[1].trim(), "not sent");
+        assert_eq!(lines[1].trim(), "! not sent · ⏎ tries again");
     }
 
     #[test]

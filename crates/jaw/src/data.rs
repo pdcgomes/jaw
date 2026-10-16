@@ -553,6 +553,12 @@ pub enum Update {
         chat: String,
         update: Window<Message>,
     },
+    /// A message whose `send.text` lost its answer to a dropped connection: jawd may have it,
+    /// which its row appearing will say.
+    Unsure {
+        chat: String,
+        text: String,
+    },
     /// A message jawd didn't take, given back to the box, and why.
     Unsent {
         chat: String,
@@ -692,6 +698,10 @@ pub trait Jawd {
     fn find(&mut self, id: u64, query: &str, kind: Option<FoundKind>, chat: Option<&str>, limit: usize);
     /// A chat with someone who has none yet; it comes back as `Update::ChatStarted`.
     fn start_chat(&mut self, person: &str);
+    /// A chat with a phone number, which jawd checks with WhatsApp first.
+    fn start_chat_by_phone(&mut self, phone: &str);
+    /// Sends a failed message of yours again.
+    fn retry(&mut self, message: &str);
     /// Mutes a chat until then, `i64::MAX` for ever, or unmutes it with `None`.
     fn mute(&mut self, chat: &str, until: Option<i64>);
     fn archive(&mut self, chat: &str, archived: bool);

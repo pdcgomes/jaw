@@ -167,6 +167,7 @@ impl Wire {
     /// What the interface hears of a request jawd didn't do.
     fn refused(&self, asked: Asked, failure: &Failure) -> Option<Update> {
         match asked {
+            Asked::Send { chat, text } if matches!(failure, Failure::Lost) => Some(Update::Unsure { chat, text }),
             Asked::Send { chat, text } => Some(Update::Unsent { chat, text, why: why_not(failure, "sending") }),
             Asked::Did(what) => Some(Update::Notice(why_not(failure, what))),
             Asked::StartChat => Some(Update::Notice(why_not(failure, "starting a chat"))),
@@ -393,6 +394,14 @@ impl Jawd for Wire {
 
     fn start_chat(&mut self, person: &str) {
         self.ask("chat.start", json!({ "person": person }), Asked::StartChat);
+    }
+
+    fn start_chat_by_phone(&mut self, phone: &str) {
+        self.ask("chat.start", json!({ "phone": phone }), Asked::StartChat);
+    }
+
+    fn retry(&mut self, message: &str) {
+        self.ask("send.retry", json!({ "message": message }), Asked::Did("sending again"));
     }
 
     fn mute(&mut self, chat: &str, until: Option<i64>) {

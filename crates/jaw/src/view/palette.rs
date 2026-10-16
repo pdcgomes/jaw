@@ -61,6 +61,8 @@ pub enum Does {
     Later(&'static str),
     /// How long to mute for, once Mute asks.
     MuteFor(String, i64, &'static str),
+    /// A chat with a number typed into the palette.
+    StartPhone(String),
     /// A key's action on the selected message, from the palette.
     OnMessage(String, char),
     React(String, String),
@@ -201,6 +203,14 @@ fn kind_name(k: FoundKind) -> &'static str {
         FoundKind::Media => "media",
         FoundKind::File => "files",
     }
+}
+
+/// What's typed, if it's a phone number: digits with a `+`, spaces, dashes and brackets, enough
+/// of them to be one.
+fn number(query: &str) -> Option<String> {
+    let q = query.trim();
+    let digits = q.chars().filter(char::is_ascii_digit).count();
+    (digits >= 7 && q.chars().all(|c| c.is_ascii_digit() || " +-()".contains(c))).then(|| q.to_string())
 }
 
 /// A count as the strip says it: 1,000 is at least that many.
@@ -377,6 +387,9 @@ impl View {
             let on = |name: &str, key: &'static str, c: char| {
                 Action::new(name, "the selected message", Does::OnMessage(id.clone(), c)).key(key)
             };
+            if m.mine && m.status == Some(crate::data::Tick::Failed) {
+                all.push(Action::new("Send it again", "it wasn't sent", Does::OnMessage(id.clone(), '\n')).key("⏎"));
+            }
             all.extend([on("Reply to this message", "r", 'r'), on("React to this message", "+", '+')]);
             if self.not_editable(m).is_none() {
                 all.push(on("Edit this message", "e", 'e'));
@@ -511,12 +524,28 @@ impl View {
                 return items;
             }
             Narrow::Kind(k) => {
+                if let Some(number) = number(query)
+                    .filter(|_| matches!(k, FoundKind::Person | FoundKind::Chat))
+                    .filter(|_| !matches!(p.mode, Mode::Forward { .. }))
+                {
+                    let start = Action::new(
+                        format!("Start a chat with {number}"),
+                        "if it's on WhatsApp",
+                        Does::StartPhone(number),
+                    );
+                    group(&mut items, "a number", vec![Item::Action(start)], 1, true);
+                }
                 let found: Vec<Item> = of(k).map(Item::Found).collect();
                 let total = p.counts.get(&k).copied().unwrap_or(found.len() as u32) as usize;
                 group(&mut items, kind_name(k), found, total, whole);
                 return items;
             }
             Narrow::All => {}
+        }
+        if let Some(number) = number(query) {
+            let start =
+                Action::new(format!("Start a chat with {number}"), "if it's on WhatsApp", Does::StartPhone(number));
+            group(&mut items, "a number", vec![Item::Action(start)], 1, true);
         }
         if query.trim().is_empty() {
             let recent: Vec<Item> = of(FoundKind::Chat).map(Item::Found).collect();
@@ -843,9 +872,16 @@ impl View {
             }
             Does::Quit => self.quit = true,
             Does::Later(said) => self.say(said),
+            Does::StartPhone(phone) => {
+                close(self);
+                self.starting = Some(phone.clone());
+                self.jawd.start_chat_by_phone(&phone);
+                self.say(format!("a chat with {phone} begins"));
+            }
             Does::OnMessage(id, c) => {
                 close(self);
-                let k = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+                let code = if c == '\n' { KeyCode::Enter } else { KeyCode::Char(c) };
+                let k = KeyEvent::new(code, KeyModifiers::NONE);
                 self.on_message_key(k, &id, false, false);
             }
             Does::React(id, emoji) => {

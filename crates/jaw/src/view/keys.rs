@@ -273,6 +273,10 @@ impl View {
                 }
             }
             KeyCode::End => self.step_into_messages(),
+            KeyCode::Enter if m.mine && m.status == Some(crate::data::Tick::Failed) => {
+                self.jawd.retry(&m.id);
+                self.say("sending it again");
+            }
             KeyCode::Enter => {
                 let folded = !self.unfolded.contains(&m.id)
                     && self.laid.get(&m.id).is_some_and(|l| l.lines.lines.len() > crate::layout::FOLD);
