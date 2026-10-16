@@ -1,0 +1,21 @@
+#!/bin/sh
+# Refuses a push to main whose data-layer commits don't name an approved audit
+# (.cursor/rules/data-integrity.mdc). Shared by every worktree of this repository.
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = "refs/heads/main" ] || continue
+  [ "$local_sha" = "$zero" ] && continue
+  base=$remote_sha
+  [ "$base" = "$zero" ] && base=$(git rev-parse origin/main)
+  script=$(mktemp)
+  if git show "$local_sha:scripts/check-data-audit.py" > "$script" 2>/dev/null; then
+    python3 "$script" "$base" "$local_sha" || status=1
+  fi
+  rm -f "$script"
+done
+if [ $status -ne 0 ]; then
+  echo
+  echo "Push to main refused: the database expert must audit these commits first."
+fi
+exit $status

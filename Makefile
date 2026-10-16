@@ -4,7 +4,7 @@ GO ?= go
 CARGO ?= cargo
 BUF := github.com/bufbuild/buf/cmd/buf@v1.74.0
 
-.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit clean
+.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit hooks clean
 
 build: engine rust
 
@@ -45,6 +45,10 @@ check-generated: proto
 # Every commit since origin/main that touches the data layer names an approved audit.
 check-audit:
 	python3 scripts/check-data-audit.py origin/main HEAD
+
+# The same check before every push to main, from every worktree.
+hooks:
+	install -m 755 scripts/pre-push "$$(git rev-parse --git-common-dir)/hooks/pre-push"
 
 clean:
 	$(CARGO) clean
