@@ -11,19 +11,24 @@ repository = "https://github.com/pdcgomes/jaw"
 
 [workspace.dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 libc = "0.2"
 nucleo-matcher = "0.3"
+png = "0.18"
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"
 qrcode = { version = "0.14", default-features = false }
+ratatui = "0.30"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+unicode-segmentation = "1"
+unicode-width = "0.2"
 zstd = { version = "0.14", default-features = false }
 
 jaw-client = { path = "crates/jaw-client" }
