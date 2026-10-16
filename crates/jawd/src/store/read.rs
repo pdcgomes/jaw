@@ -549,10 +549,13 @@ pub fn events(db: &Connection, since: i64, limit: usize) -> Result<Vec<Event>> {
     Ok(events)
 }
 
-/// The oldest seq the feed keeps and its last, or zeros before anything changed.
+/// The oldest seq the feed keeps and its last, or zeros before anything changed. Each is its own
+/// subquery, since SQLite reads one end of the key only when a query asks for one of them.
 pub fn feed_bounds(db: &Connection) -> Result<(i64, i64)> {
     Ok(db
-        .prepare_cached("SELECT coalesce(min(seq), 0), coalesce(max(seq), 0) FROM events")?
+        .prepare_cached(
+            "SELECT coalesce((SELECT min(seq) FROM events), 0), coalesce((SELECT max(seq) FROM events), 0)",
+        )?
         .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?)
 }
 

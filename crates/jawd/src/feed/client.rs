@@ -510,7 +510,7 @@ impl Client {
                 for window in self.windows.values_mut() {
                     window.dirty = true;
                 }
-                self.waiting();
+                self.waiting(Instant::now());
             }
             Ready::Changes(Err(RecvError::Closed)) => self.changes = None,
             Ready::Flush | Ready::Room => self.flush().await,
@@ -533,14 +533,14 @@ impl Client {
             }
         }
         if touched {
-            self.waiting();
+            self.waiting(changes.at);
         }
     }
 
-    fn waiting(&mut self) {
-        let now = Instant::now();
-        self.first.get_or_insert(now);
-        self.last = Some(now);
+    /// Notes a change waiting since `at`.
+    fn waiting(&mut self, at: Instant) {
+        self.first = Some(self.first.map_or(at, |first| first.min(at)));
+        self.last = Some(self.last.map_or(at, |last| last.max(at)));
     }
 
     fn flush_at(&self) -> Option<Instant> {

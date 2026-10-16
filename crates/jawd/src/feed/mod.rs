@@ -15,7 +15,7 @@ mod window;
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -24,10 +24,13 @@ use crate::store::{Store, read};
 use crate::work::Priority;
 
 /// Which rows the writer changed, from one read of the events.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Changes {
     /// The last seq they reach.
     pub seq: i64,
+    /// When the feed read them, just after they were committed: a client busy when they came
+    /// still counts their wait from then.
+    pub at: Instant,
     /// Chats changed or removed, by n.
     pub chats: HashSet<i64>,
     /// Chats with messages changed or removed, by n.
@@ -124,7 +127,13 @@ async fn follow(store: Store, mut committed: watch::Receiver<i64>, changes: broa
                 }
             };
             let Some(newest) = events.last() else { break };
-            let mut batch = Changes { seq: newest.seq, ..Changes::default() };
+            let mut batch = Changes {
+                seq: newest.seq,
+                at: Instant::now(),
+                chats: HashSet::new(),
+                messages: HashSet::new(),
+                people: HashSet::new(),
+            };
             for event in &events {
                 match (event.kind.as_str(), event.chat) {
                     ("chat", _) => {
