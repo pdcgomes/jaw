@@ -9,5 +9,11 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+crossbeam-channel.workspace = true
 jaw-proto.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+tempfile.workspace = true

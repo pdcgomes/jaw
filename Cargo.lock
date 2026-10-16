@@ -848,8 +848,12 @@ name = "jaw-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "jaw-proto",
+ "libc",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -1,5 +1,13 @@
-//! The client side of jaw's protocol, for every Rust interface: connecting to jawd, saying hello,
-//! and asking it things. The connection's own threads and the window models come with M1.
+//! The client side of jaw's protocol, for every Rust interface: `Client`, a connection with threads
+//! of its own that never makes its caller wait and reconnects by itself; the window models it
+//! feeds, `Chats` and `Messages`; and `Connection`, which asks and waits, for commands such as
+//! `jaw status`.
+
+mod client;
+mod window;
+
+pub use client::{Client, Config, Event, Failure, Frame, Stats, WindowId};
+pub use window::{Chats, Merged, Messages, Moved, Place, Row, Update};
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, ErrorKind, Write};

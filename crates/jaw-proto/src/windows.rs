@@ -93,21 +93,22 @@ pub struct Watch {
 }
 
 /// What `chats.watch` returns, and `watch.move` on a chat list: the rows the client doesn't
-/// hold as they are, and those it holds that have left the window.
+/// hold as they are, and those it holds that have left the window. The rows are jaw-proto's own
+/// unless an interface reads them into rows of its own.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ChatsWatched {
+pub struct ChatsWatched<R = ChatRow> {
     pub watch: String,
     /// The feed's seq the rows are as of.
     pub seq: u64,
     pub total: u64,
-    pub rows: Vec<ChatRow>,
+    pub rows: Vec<R>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove: Vec<String>,
 }
 
 /// What `messages.watch` returns, and `watch.move` on a chat's messages.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MessagesWatched {
+pub struct MessagesWatched<R = MessageRow> {
     pub watch: String,
     pub seq: u64,
     pub total: u64,
@@ -115,20 +116,20 @@ pub struct MessagesWatched {
     pub older: bool,
     /// How many messages come after the window's last row, counted up to 1,000.
     pub newer: u64,
-    pub rows: Vec<MessageRow>,
+    pub rows: Vec<R>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove: Vec<String>,
 }
 
 /// The `chats` push: what changed in a chat-list window. `total` comes when it changed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ChatsPush {
+pub struct ChatsPush<R = ChatRow> {
     pub watch: String,
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub upsert: Vec<ChatRow>,
+    #[serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")]
+    pub upsert: Vec<R>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove: Vec<String>,
 }
@@ -136,7 +137,7 @@ pub struct ChatsPush {
 /// The `messages` push: what changed in a messages window. `total`, `older` and `newer` come
 /// when they changed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MessagesPush {
+pub struct MessagesPush<R = MessageRow> {
     pub watch: String,
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,8 +146,8 @@ pub struct MessagesPush {
     pub older: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub newer: Option<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub upsert: Vec<MessageRow>,
+    #[serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")]
+    pub upsert: Vec<R>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove: Vec<String>,
 }
