@@ -17,7 +17,7 @@ The engine link, between jawd and jaw-engine, is a different protocol: `proto/en
 ```json
 {"id":7,"method":"send.text","params":{"chat":"351912345678@s.whatsapp.net","text":"on my way"}}
 {"id":7,"result":{"message":"3EB0C431F2A9B8E7D6"}}
-{"method":"messages","params":{"watch":"w2","seq":81233,"upsert":[{"id":"3EB0C431F2A9B8E7D6","v":1,"status":"pending"}]}}
+{"method":"messages","params":{"watch":"w2","seq":81233,"upsert":[{"id":"3EB0C431F2A9B8E7D6","v":81233,"…":"…","status":"pending"}]}}
 ```
 
 ### Errors
@@ -63,11 +63,12 @@ The first request on a connection. Anything else first gets error 6.
 
 An interface never asks for "all chats" or "all messages". It watches windows: a stretch of rows around an anchor, which jawd keeps current.
 
-- A window is a list of rows sorted by `sort`, a string that compares bytewise. A row's `v` (version) goes up each time it changes.
-- An update upserts rows by `id`, newest `v` wins, and removes rows by `id`. Applying the same update twice, or two in the wrong order, ends in the same state, so there are no positions to keep in step.
-- `before` and `after` say how many rows to keep on each side of the anchor. jawd keeps that many as rows move, removing those that fall out and upserting those that come in.
+- A window is a list of rows sorted by `sort`, a string that compares bytewise and that no two rows in a list share. A chat list reads from the largest `sort` down; a chat's messages from the smallest up. A row's `v` (version) is the feed's `seq` when it last changed.
+- An update upserts rows by `id` and removes rows by `id`. An upserted row replaces the one held when its `v` is at least as new: the same `v` can come again with a different `sort` while the chat list is held during a catch-up, or with a sender's new name, which changes what a row shows without changing the row. Upserts carry whole rows. Applying the same update twice ends in the same state, so there are no positions to keep in step.
+- `before` and `after` say how many rows to keep on each side of the anchor, at most 1,000 each. A window around a row holds `before` rows, the row, and `after` rows; `top` is the place above the chat list's first row, so it takes `after`, and `newest` the place below a chat's newest message, so it takes `before`. jawd keeps that many as rows move, removing those that fall out and upserting those that come in.
 - `total` is how many rows the whole list has, for a scroll bar.
-- `watch.move` re-anchors a window, for scrolling; `unwatch` ends it. A connection can have any number of windows.
+- Each result and push carries the `seq` it's as of; a client keeps the newest it has seen for reconnecting.
+- `watch.move` re-anchors a window, for scrolling; its result is like a push: the rows the client doesn't already hold as they are, and `remove` for those that left. `unwatch` ends a window. A connection can have any number of windows.
 
 ### chats.watch
 
@@ -75,12 +76,12 @@ An interface never asks for "all chats" or "all messages". It watches windows: a
 {"id":2,"method":"chats.watch","params":{"folder":"all","around":"top","before":0,"after":60}}
 ```
 
-- `folder`: `all`, `unread`, `groups`, `communities`, `archived`, or a folder's `id`.
-- `around`: `top`, or a chat's `id`, to keep the selected chat where it is.
-- Pinned chats sort first, then by their newest message's time. Older history arriving never changes a chat's sort; a new message does.
+- `folder`: `all`, `unread`, `groups`, `communities`, `archived`, or a folder's `id`. jawd serves `all` and `archived` so far, and answers -32602 for the others.
+- `around`: `top`, or a chat's `id`, to keep the selected chat where it is. The window follows the chat as it moves, and stays where the chat was if it leaves the list.
+- Pinned chats sort first, then by their newest message's time. Older history arriving never changes a chat's sort; a new message does, and deleting one doesn't.
 
 ```json
-{"id":2,"result":{"watch":"w1","total":312,"rows":[{"id":"351912345678@s.whatsapp.net","v":42,"sort":"1~1792145060000","kind":"direct","name":"Ana Ribeiro","avatar":"media/avatars/5f2c.jpg","last":{"from":"Ana","summary":"did you get the photos from Sunday?","kind":"text","status":null,"at":1792145060000},"unread":2,"mentions":0,"pinned":true,"muted_until":null,"archived":false,"draft":null,"typing":[],"community":null}]}}
+{"id":2,"result":{"watch":"w1","seq":81233,"total":312,"rows":[{"id":"351912345678@s.whatsapp.net","v":42,"sort":"1~1792145060000~000000000017","kind":"direct","name":"Ana Ribeiro","avatar":"media/avatars/5f2c.jpg","last":{"from":"Ana","mine":false,"summary":"did you get the photos from Sunday?","kind":"text","status":null,"at":1792145060000},"unread":2,"mentions":0,"pinned":true,"muted_until":null,"archived":false,"marked_unread":false,"draft":null,"typing":[],"community":null}]}}
 ```
 
 A chat row:
@@ -90,11 +91,11 @@ A chat row:
 | `id` | Its JID |
 | `kind` | `direct`, `group`, `community`, `announcement`, `broadcast` or `self` |
 | `name`, `avatar` | Its name as you know it, and its picture's path, once fetched |
-| `last` | Its newest message: who, a one-line `summary`, its `kind`, its `status` if it's yours, and when |
+| `last` | Its newest message: who (`from`, absent on yours, and `mine`), a one-line `summary`, its `kind`, its `status` if it's yours, and when |
 | `unread`, `mentions` | Unread messages, and how many mention you |
 | `pinned`, `muted_until`, `archived`, `marked_unread` | As on the phone |
 | `draft` | What's typed in its box, from any interface |
-| `typing` | Who's typing or recording now |
+| `typing` | Who's typing or recording now, by person `id` |
 | `community` | For a group in a community, the community's `id`; for a community, its groups' unread total in `children_unread` |
 
 ### messages.watch
@@ -103,12 +104,13 @@ A chat row:
 {"id":3,"method":"messages.watch","params":{"chat":"351912345678@s.whatsapp.net","around":"newest","before":80,"after":0}}
 ```
 
-- `around`: `newest` (the window follows new messages), `unread` (the first unread one), or a message's `id`.
-- While a window follows `newest`, new messages come into it and the oldest leave. Otherwise new messages past its end only raise `newer`, which an interface shows as "2 new".
-- `older` says whether there's more before the window; moving past the oldest message jaw has asks the phone for more (`history.more`), and they arrive as upserts.
+- `around`: `newest` (the window follows new messages), `unread` (the first unread one: counting back the chat's `unread` among messages others sent, found when the window is watched; `newest` when nothing's unread), or a message's `id`.
+- While a window follows `newest`, new messages come into it and the oldest leave. A window around a message keeps `after` rows after it: new messages fill that room, and past it only raise `newer`, which an interface shows as "2 new".
+- `older` says whether there's more before the window; moving past the oldest message jaw has asks the phone for more (`history.more`), and they arrive as upserts. `newer` is how many messages come after the window's last row: an interface that notes it when it moves the window shows the growth since as new.
+- A chat jaw has no messages for yet is an empty window, which fills when they come.
 
 ```json
-{"id":3,"result":{"watch":"w2","total":5120,"older":true,"newer":0,"rows":[{"id":"3EB0A1B2C3D4E5F6","v":3,"sort":"1792145060000~000123","chat":"351912345678@s.whatsapp.net","at":1792145060000,"from":{"id":"person:12","name":"Ana","colour":3},"mine":false,"kind":"text","spans":[{"t":"text","s":"did you get the "},{"t":"bold","s":"photos"},{"t":"text","s":" from Sunday?"}],"reply":null,"reactions":[{"emoji":"❤","n":2,"mine":true}],"status":null,"edited":false,"deleted":false,"expires_at":null}]}}
+{"id":3,"result":{"watch":"w2","seq":81233,"total":5120,"older":true,"newer":0,"rows":[{"id":"3EB0A1B2C3D4E5F6","v":81230,"sort":"1792145060000~000000000123","chat":"351912345678@s.whatsapp.net","at":1792145060000,"from":{"id":"person:12","name":"Ana","colour":4},"mine":false,"kind":"text","spans":[{"t":"text","s":"did you get the "},{"t":"bold","s":"photos"},{"t":"text","s":" from Sunday?"}],"reply":null,"forwarded":0,"reactions":[{"emoji":"❤","n":2,"mine":true}],"status":null,"edited":false,"deleted":false,"expires_at":null,"view_once":false,"starred":false}]}}
 ```
 
 A message row, render-ready:
@@ -118,10 +120,11 @@ A message row, render-ready:
 | `id`, `chat`, `at` | Its WhatsApp ID, its chat and when it was sent (milliseconds since the epoch) |
 | `from` | The sender's person `id`, the name to show, and a `colour` index for group senders; absent on your own |
 | `mine` | Whether you sent it |
-| `kind` | `text`, `image`, `video`, `gif`, `video_note`, `voice`, `audio`, `document`, `sticker`, `location`, `live_location`, `contact`, `poll`, `event`, `system`, `call` or `unknown` |
+| `sort` | Its time, then its place among messages, both zero-padded |
+| `kind` | `text`, `image`, `video`, `gif`, `video_note`, `voice`, `audio`, `document`, `sticker`, `location`, `live_location`, `contact`, `poll`, `event`, `system`, `call` or `unknown`; the fields below that its kind needs sit in the row beside the rest |
 | `spans` | The text and caption, parsed: `text`, `bold`, `italic`, `strike`, `mono`, `quote`, `list`, `link` (with `url`) and `mention` (with `person`) |
 | `reply` | The quoted message: its `id`, who wrote it, and a one-line `summary` |
-| `forwarded` | Whether, and how many times |
+| `forwarded` | How many times, 0 if it wasn't |
 | `reactions` | Each emoji, how many, and whether one is yours |
 | `status` | On yours: `pending`, `sent`, `delivered`, `read`, `played` or `failed`; in groups, the least far any recipient has got |
 | `edited`, `deleted`, `expires_at`, `view_once`, `starred` | As they are |
@@ -154,14 +157,14 @@ The whole tree; it's small. Each folder: `id`, `parent`, `name`, `position`, `sm
 ### Pushes for windows
 
 ```json
-{"method":"chats","params":{"watch":"w1","seq":81240,"total":313,"upsert":[{"id":"…","v":43,"sort":"1~1792145099000","unread":3,"last":{"…":"…"}}],"remove":[]}}
+{"method":"chats","params":{"watch":"w1","seq":81240,"total":313,"upsert":[{"id":"351912345678@s.whatsapp.net","v":81240,"sort":"1~1792145099000~000000000017","…":"…"}],"remove":["120363012345678901@g.us"]}}
 ```
 
-- `chats`, `messages`, `roster` and `folders`, each naming its `watch`. An upserted row that's already in the window may carry only its changed fields with its new `v`; a row new to the window carries all of them.
-- `messages` pushes also carry `older` and `newer` when they change.
-- **Coalescing:** jawd keeps, per watch, only the newest version of each row, and sends a batch when its feed has been quiet for 5 ms, or every 50 ms during a burst. A burst of 2,000 messages becomes at most 20 batches a second per window, each with only what the window shows.
-- **While catching up** after time offline, the chat list reorders at most every 2 seconds; rows update in place in between.
-- **A slow client** never holds jawd up. Its pending updates are bounded by its windows, since only the newest of each row is kept; one too far behind gets `resync` for its watches and watches again.
+- `chats`, `messages`, `roster` and `folders`, each naming its `watch`, with `upsert` and `remove` left out when empty.
+- `total` comes when it changed; `messages` pushes also carry `older` and `newer` when they change.
+- **Coalescing:** jawd keeps, per watch, only the newest version of each row, and sends a batch when its feed has been quiet for 5 ms, or every 50 ms during a burst, and never sooner than 50 ms after the connection's last batch. A burst of 2,000 messages becomes at most 20 batches a second per window, each with only what the window shows.
+- **While catching up** after time offline, the chat list reorders at most every 2 seconds; rows update in place in between, carrying the `sort` they had when the list last reordered, and at the next reorder the rows that moved come again with their new `sort` and the same `v`.
+- **A slow client** never holds jawd up. jawd keeps what each window's rows were when it last sent them, so a client's pending updates are bounded by its windows however far behind it is, and when it reads again it gets one batch with what changed. One that leaves its updates unread for 5 seconds gets `resync` for each watch once it reads again, and watches again; jawd has forgotten those windows meanwhile.
 
 ## Finding
 
@@ -185,7 +188,11 @@ The whole tree; it's small. Each folder: `id`, `parent`, `name`, `position`, `sm
 
 ## Reconnecting
 
-A client that loses its connection reconnects, sends `hello` with `since` (the last `seq` it saw), and watches its windows again. Rows that haven't changed since `since` are left out of the results, so a reconnect costs what changed, not the windows. If `since` is older than the feed keeps (7 days), the watches return everything, as a first watch does.
+A client that loses its connection reconnects, sends `hello` with `since` (the last `seq` it saw), and watches its windows again, each with `have`: the `id`s of the rows it holds for that window. Rows in `have` that haven't changed since `since` are left out of the results, and `remove` lists the ones in `have` that are no longer in the window, so a reconnect costs what changed, not the windows; rows that came into the window come whole, changed or not. A watch can give its own `since`, which wins over hello's; without `have`, a watch returns every row. If `since` is older than the feed keeps (7 days), or newer than its last `seq` (jaw.db was made again), the watches return everything, as a first watch does.
+
+```json
+{"id":3,"method":"messages.watch","params":{"chat":"351912345678@s.whatsapp.net","around":"newest","before":80,"after":0,"since":81200,"have":["3EB0A1B2C3D4E5F6","3EB0C431F2A9B8E7D6"]}}
+```
 
 ## Methods
 
@@ -196,8 +203,8 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `focus` | `focused` | |
 | `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes |
 | `link.cancel`, `link.logout` | | |
-| `chats.watch`, `messages.watch`, `roster.watch`, `folders.watch` | See Windows | `watch`, `total`, `rows` |
-| `watch.move` | `watch`, `around`, `before`, `after` | `total`, `rows` |
+| `chats.watch`, `messages.watch`, `roster.watch`, `folders.watch` | See Windows, and `since` and `have` when watching again | `watch`, `seq`, `total`, `rows`, `remove` (with `have`); `older` and `newer` for messages |
+| `watch.move` | `watch`, `around`, `before`, `after` | As its watch's, with only the rows the client lacks and `remove` |
 | `unwatch` | `watch` | |
 | `search` | `query`, `chat` (optional), `limit`, `cursor` | `hits` (message rows with the match marked) and the next `cursor` |
 | `contacts.find` | `query` | People and chats to start or open, best first; numbers are checked against WhatsApp |

@@ -7,6 +7,7 @@ use serde_json::Value;
 
 pub mod find;
 pub mod local;
+pub mod windows;
 
 /// The version this crate speaks. jawd serves one, and refuses a hello with another.
 pub const PROTOCOL: u32 = 1;

@@ -2,6 +2,7 @@
 //! repeat, and serves them on a Unix socket. docs/plans/2026-10-16-jaw-design.md is its design.
 
 mod engine;
+mod feed;
 mod find;
 mod sock;
 mod state;
@@ -97,6 +98,19 @@ enum Bench {
         #[arg(long, default_value_t = 50)]
         runs: u32,
     },
+    /// Windows: a client on the socket watching the chat list and a chat while messages are written
+    Feed {
+        /// Messages written a second
+        #[arg(long, default_value_t = 2_000)]
+        rate: u32,
+        #[arg(long, default_value_t = 5)]
+        seconds: u32,
+        /// The messages window's rows
+        #[arg(long, default_value_t = 100)]
+        window: u32,
+        #[arg(long, default_value_t = 300)]
+        chats: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -110,6 +124,7 @@ fn main() -> Result<()> {
         Some(Command::Bench(Bench::Find { messages, chats, people, runs })) => {
             bench_find(find::bench::Plan { messages, chats, people, runs })
         }
+        Some(Command::Bench(Bench::Feed { rate, seconds, window, chats })) => bench_feed(rate, seconds, window, chats),
         None => run(&home, cli.engine),
     }
 }
@@ -119,6 +134,15 @@ fn bench_find(plan: find::bench::Plan) -> Result<()> {
     let scratch = std::env::temp_dir().join(format!("jaw-bench-find-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;
     let outcome = runtime()?.block_on(find::bench::run(&scratch, plan));
+    let _ = std::fs::remove_dir_all(&scratch);
+    outcome
+}
+
+/// Serves a made-up jaw.db in a folder of its own, removed afterwards.
+fn bench_feed(rate: u32, seconds: u32, window: u32, chats: u32) -> Result<()> {
+    let scratch = std::env::temp_dir().join(format!("jaw-bench-feed-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let outcome = runtime()?.block_on(feed::bench::run(&scratch, feed::bench::Plan { rate, seconds, window, chats }));
     let _ = std::fs::remove_dir_all(&scratch);
     outcome
 }
@@ -164,7 +188,8 @@ fn run(home: &Path, kind: EngineKind) -> Result<()> {
         tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, spool));
         let pools: Vec<Arc<dyn work::Report>> = vec![Arc::new(store.reads().clone())];
         let finder = find::Finder::start(store.clone()).await?;
-        let state = Arc::new(state::State::new(home, supervisor, pools, live, Some(store), pushes)?);
+        let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
+        let state = Arc::new(state::State::new(home, supervisor, pools, live, Some(store), pushes)?.with_feed(feed));
         let _ = state.finder.set(finder);
         let outcome = tokio::select! {
             served = sock::serve(state, listener) => served,

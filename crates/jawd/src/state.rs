@@ -11,6 +11,7 @@ use tokio::sync::broadcast;
 
 use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
+use crate::feed::Feed;
 use crate::find::Finder;
 use crate::store::Store;
 use crate::sync::Shared;
@@ -29,6 +30,7 @@ pub struct State {
     pub pushes: broadcast::Sender<Push>,
     /// The palette's search, once its index has loaded.
     pub finder: OnceLock<Finder>,
+    feed: Option<Feed>,
 }
 
 impl State {
@@ -53,7 +55,18 @@ impl State {
             store,
             pushes,
             finder: OnceLock::new(),
+            feed: None,
         })
+    }
+
+    /// Serves windows from `feed`.
+    pub fn with_feed(mut self, feed: Feed) -> State {
+        self.feed = Some(feed);
+        self
+    }
+
+    pub fn feed(&self) -> Option<&Feed> {
+        self.feed.as_ref()
     }
 
     pub fn engine(&self) -> Result<&Supervisor, &str> {
@@ -65,7 +78,7 @@ impl State {
             protocol: PROTOCOL,
             jawd: env!("CARGO_PKG_VERSION").into(),
             root: self.home.display().to_string(),
-            seq: 0,
+            seq: self.feed.as_ref().map_or(0, Feed::seq),
             account: self.account(),
             connection: self.connection(),
         }

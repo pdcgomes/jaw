@@ -16,6 +16,13 @@ pub enum Change {
     Person(Person),
     Message(Message),
     Opened(Opened),
+    /// A message gone, by its chat's JID and its ID, as deleting it for me does; its event stays,
+    /// so the feed says it's gone. A chat whose newest it was shows the one before it, and keeps
+    /// its place.
+    DeleteMessage {
+        chat: String,
+        id: String,
+    },
 }
 
 /// You opened a chat yourself, so it ranks higher in the palette; a chat jaw hasn't seen is made.
@@ -205,6 +212,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         Change::Person(person) => upsert_person(db, stamps, person),
         Change::Message(message) => upsert_message(db, stamps, message),
         Change::Opened(opened) => open_chat(db, stamps, opened),
+        Change::DeleteMessage { chat, id } => delete_message(db, stamps, chat, id),
     }
 }
 
@@ -221,6 +229,31 @@ fn open_chat(db: &Connection, stamps: &mut Stamps, opened: &Opened) -> Result<bo
     db.prepare_cached("UPDATE chats SET frecency = ?2, opened_at = ?3, v = ?4 WHERE n = ?1")?
         .execute(params![n, now, latest, seq])?;
     stamps.record(db, CHAT, n, Some(n), seq)?;
+    Ok(true)
+}
+
+fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) -> Result<bool> {
+    let found: Option<(i64, i64)> = db
+        .prepare_cached(
+            "SELECT m.chat, m.n FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = ?1 AND m.id = ?2",
+        )?
+        .query_row(params![chat, id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((chat, n)) = found else { return Ok(false) };
+    db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([n])?;
+    let seq = stamps.seq(MESSAGE, Some(n));
+    stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+    let seq = stamps.seq(CHAT, Some(chat));
+    let shown = db
+        .prepare_cached(
+            "UPDATE chats SET v = ?3,
+                last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1)
+            WHERE n = ?1 AND last_message = ?2",
+        )?
+        .execute(params![chat, n, seq])?;
+    if shown > 0 {
+        stamps.record(db, CHAT, chat, Some(chat), seq)?;
+    }
     Ok(true)
 }
 

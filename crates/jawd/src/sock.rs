@@ -15,8 +15,19 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::engine::{EngineError, pb};
+use crate::feed;
 use crate::find::{Cancel, Cancelled};
 use crate::state::State;
+
+/// Lines waiting for an interface to read them. A reply waits for room; window updates wait in
+/// their windows instead, so a slow interface never holds anything else up.
+const WAITING_LINES: usize = 64;
+
+/// What a connection has said, and its windows.
+struct Session {
+    greeted: bool,
+    windows: Option<feed::Client>,
+}
 
 pub fn listen(path: &Path) -> Result<UnixListener> {
     if std::os::unix::net::UnixStream::connect(path).is_ok() {
@@ -50,9 +61,10 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
     if peer != state.owner {
         bail!("refused a connection from user {peer}, who doesn't own jaw's folder");
     }
-    let (read, mut write) = stream.into_split();
+    let (read, write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
-    let mut greeted = false;
+    let out = writer(write);
+    let mut session = Session { greeted: false, windows: state.feed().map(|feed| feed.client(out.clone())) };
     // Pushes start once the connection has said hello.
     let mut pushes: Option<broadcast::Receiver<Push>> = None;
     // Finds answer when they're done, so the next line, perhaps a newer find, is read meanwhile.
@@ -65,23 +77,31 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if greeted && let Ok(request) = serde_json::from_str::<Request>(&line) && request.method == "find" {
+                if session.greeted
+                    && let Ok(request) = serde_json::from_str::<Request>(&line)
+                    && request.method == "find"
+                {
                     finding.start(state, request, found.clone());
                     continue;
                 }
-                let reply = answer(state, &line, &mut greeted).await;
-                send(&mut write, &reply).await?;
-                if greeted && pushes.is_none() {
+                let reply = answer(state, &line, &mut session).await;
+                out.send(encode(&reply)).await.context("the interface stopped reading")?;
+                if session.greeted && pushes.is_none() {
                     pushes = Some(state.pushes.subscribe());
                 }
             }
-            Some(reply) = finished.recv() => send(&mut write, &reply).await?,
+            Some(reply) = finished.recv() => out.send(encode(&reply)).await.context("the interface stopped reading")?,
             push = next(&mut pushes) => match push {
-                Ok(push) => send(&mut write, &push).await?,
-                // A connection too slow for its pushes misses the oldest; the next says how things are.
+                // A connection too slow for its pushes misses them; the next says how things are.
+                Ok(push) => drop(out.try_send(encode(&push))),
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => pushes = None,
             },
+            ready = windows(&mut session.windows) => {
+                if let Some(windows) = session.windows.as_mut() {
+                    windows.handle(ready).await;
+                }
+            }
         }
     }
 }
@@ -137,15 +157,34 @@ async fn next(pushes: &mut Option<broadcast::Receiver<Push>>) -> Result<Push, br
     }
 }
 
-async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, line: &impl serde::Serialize) -> Result<()> {
-    let mut out = serde_json::to_vec(line)?;
+async fn windows(windows: &mut Option<feed::Client>) -> feed::Ready {
+    match windows {
+        Some(windows) => windows.ready().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Writes the lines sent to it to the interface, in order, until the connection ends.
+fn writer(mut write: tokio::net::unix::OwnedWriteHalf) -> mpsc::Sender<Vec<u8>> {
+    let (out, mut lines) = mpsc::channel::<Vec<u8>>(WAITING_LINES);
+    tokio::spawn(async move {
+        while let Some(line) = lines.recv().await {
+            if write.write_all(&line).await.is_err() {
+                return;
+            }
+        }
+    });
+    out
+}
+
+fn encode(line: &impl serde::Serialize) -> Vec<u8> {
+    let mut out = serde_json::to_vec(line).expect("jawd's own types serialize");
     out.push(b'\n');
-    write.write_all(&out).await?;
-    Ok(())
+    out
 }
 
 /// The reply to one line from an interface.
-async fn answer(state: &State, line: &str, greeted: &mut bool) -> Reply {
+async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(_) => return failed(0, Error::new(code::PARSE, "that line isn't JSON")),
@@ -160,13 +199,16 @@ async fn answer(state: &State, line: &str, greeted: &mut bool) -> Reply {
         }
     };
     let id = request.id;
-    if !*greeted && request.method != "hello" {
+    if !session.greeted && request.method != "hello" {
         return failed(id, Error::new(code::VERSION, "say hello first, with the protocol version you speak"));
     }
     match request.method.as_str() {
         "hello" => match serde_json::from_value::<Hello>(request.params) {
             Ok(hello) if hello.protocol == PROTOCOL => {
-                *greeted = true;
+                session.greeted = true;
+                if let Some(windows) = session.windows.as_mut() {
+                    windows.hello(hello.since);
+                }
                 succeeded(id, &state.welcome())
             }
             Ok(hello) => {
@@ -211,6 +253,13 @@ async fn answer(state: &State, line: &str, greeted: &mut bool) -> Reply {
         },
         "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
         "link.logout" => engine(state, id, pb::command::Kind::Logout(pb::Logout {})).await,
+        "chats.watch" | "messages.watch" | "watch.move" | "unwatch" => match session.windows.as_mut() {
+            Some(windows) => match windows.call(&request.method, request.params).await {
+                Ok(result) => succeeded(id, &result),
+                Err(error) => failed(id, error),
+            },
+            None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so there's nothing to watch")),
+        },
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
     }
 }

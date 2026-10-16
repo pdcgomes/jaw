@@ -5,6 +5,9 @@
 use std::path::{Path, PathBuf};
 
 use jaw_proto::find::{ChatOpened, Find, Found};
+use jaw_proto::windows::{
+    ChatsPush, ChatsWatch, ChatsWatched, MessagesPush, MessagesWatch, MessagesWatched, Watch, WatchMove,
+};
 use jaw_proto::{Connection, FromJawd, Hello, Outcome, Push, Reply, Request, Status, Welcome};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -61,6 +64,10 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "status" => assert!(request.params.is_null(), "{name} has params"),
                     "find" => params::<Find>(&name, &request.params),
                     "chat.opened" => params::<ChatOpened>(&name, &request.params),
+                    "chats.watch" => params::<ChatsWatch>(&name, &request.params),
+                    "messages.watch" => params::<MessagesWatch>(&name, &request.params),
+                    "watch.move" => params::<WatchMove>(&name, &request.params),
+                    "unwatch" => params::<Watch>(&name, &request.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -71,7 +78,10 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "hello" => params::<Welcome>(&name, result),
                     "status" => params::<Status>(&name, result),
                     "find" => params::<Found>(&name, result),
-                    "chat.opened" => assert_eq!(result, &serde_json::json!({}), "{name} has a result"),
+                    "chat.opened" | "unwatch" => assert_eq!(result, &serde_json::json!({}), "{name} has a result"),
+                    "chats.watch" => params::<ChatsWatched>(&name, result),
+                    // A move's result is its window's; this fixture moves a messages window.
+                    "messages.watch" | "watch.move" => params::<MessagesWatched>(&name, result),
                     _ => panic!("no type for {name}'s result"),
                 }
             }
@@ -80,6 +90,9 @@ fn every_fixture_reads_and_writes_back_the_same() {
                 assert_eq!(push.method, method, "{name} is for {}", push.method);
                 match method {
                     "connection" => params::<Connection>(&name, &push.params),
+                    "chats" => params::<ChatsPush>(&name, &push.params),
+                    "messages" => params::<MessagesPush>(&name, &push.params),
+                    "resync" => params::<Watch>(&name, &push.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }

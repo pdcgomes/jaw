@@ -837,6 +837,7 @@ dependencies = [
  "crossbeam-channel",
  "jaw-client",
  "jaw-proto",
+ "libc",
  "nucleo-matcher",
  "prost",
  "rusqlite",

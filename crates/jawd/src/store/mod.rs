@@ -726,4 +726,38 @@ mod tests {
         assert_eq!((plain.spans.get(), raw), (r#"[{"t":"text","s":"plain"}]"#, None));
         assert!(query(&store, move |db| read::message(db, chat, "nope")).await.is_none());
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deleted_message_leaves_its_event_and_its_chat_shows_the_one_before_in_its_place() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let chat = "351910000001@s.whatsapp.net";
+        let mut committed = store.committed();
+        let written = store
+            .apply(Lane::Live, messages([text(chat, "m1", 1_000, "first"), text(chat, "m2", 2_000, "second")]))
+            .await
+            .unwrap();
+        assert_eq!(*committed.borrow_and_update(), written.seq, "the feed hears of each commit");
+        let before = query(&store, |db| read::chats(db, false, None, 10)).await.remove(0);
+        let delete = |id: &str| Change::DeleteMessage { chat: chat.into(), id: id.into() };
+        let deleted = store.apply(Lane::Live, vec![delete("m2")]).await.unwrap();
+        assert_eq!(deleted.changed, 1);
+        assert_eq!(*committed.borrow_and_update(), deleted.seq);
+        let events = query(&store, move |db| read::events(db, written.seq, 10)).await;
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["message", "chat"], "the message gone, and its chat's newest");
+        let rows = query(&store, move |db| read::messages(db, chat, Around::Newest, 10)).await;
+        assert_eq!(rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["m1"]);
+        let after = query(&store, |db| read::chats(db, false, None, 10)).await.remove(0);
+        assert_eq!(after.last.as_ref().unwrap().summary, "first");
+        assert_eq!(after.sort, before.sort, "deleting doesn't move the chat");
+        assert!(after.v > before.v);
+        let again = store.apply(Lane::Live, vec![delete("m2")]).await.unwrap();
+        assert_eq!((again.changed, again.seq), (0, deleted.seq), "a message already gone changes nothing");
+        assert!(!committed.has_changed().unwrap(), "nor wakes the feed");
+        let quiet = store.count("events").unwrap();
+        store.apply(Lane::Live, vec![delete("m1")]).await.unwrap();
+        assert!(query(&store, |db| read::chats(db, false, None, 10)).await[0].last.is_none());
+        assert_eq!(store.count("events").unwrap(), quiet + 2);
+    }
 }

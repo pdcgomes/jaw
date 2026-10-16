@@ -548,3 +548,112 @@ pub fn events(db: &Connection, since: i64, limit: usize) -> Result<Vec<Event>> {
         .collect::<rusqlite::Result<_>>()?;
     Ok(events)
 }
+
+/// The oldest seq the feed keeps and its last, or zeros before anything changed.
+pub fn feed_bounds(db: &Connection) -> Result<(i64, i64)> {
+    Ok(db
+        .prepare_cached("SELECT coalesce(min(seq), 0), coalesce(max(seq), 0) FROM events")?
+        .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?)
+}
+
+/// A chat's n and its place in its list, archived or not, by its JID.
+pub fn chat_place(db: &Connection, id: &str) -> Result<Option<(i64, ChatCursor, bool)>> {
+    Ok(db
+        .prepare_cached("SELECT n, sort, archived FROM chats WHERE id = ?1")?
+        .query_row([id], |r| Ok((r.get(0)?, ChatCursor { sort: r.get(1)?, n: r.get(0)? }, r.get(2)?)))
+        .optional()?)
+}
+
+/// Up to `limit` chats just above `cursor` in the list, in the list's order, so the nearest is
+/// last.
+pub fn chats_above(db: &Connection, archived: bool, cursor: &ChatCursor, limit: usize) -> Result<Vec<ChatRow>> {
+    let sql =
+        format!("{CHAT_COLUMNS} WHERE c.archived = ?1 AND (c.sort, c.n) > (?2, ?3) ORDER BY c.sort, c.n LIMIT ?4");
+    let mut rows: Vec<ChatRow> = db
+        .prepare_cached(&sql)?
+        .query_map(params![archived, cursor.sort, cursor.n, limit as i64], chat_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// Up to `limit` chats from `cursor` down the list, the chat at it first if it's in this list.
+pub fn chats_from(db: &Connection, archived: bool, cursor: &ChatCursor, limit: usize) -> Result<Vec<ChatRow>> {
+    chats(db, archived, Some(&ChatCursor { sort: cursor.sort.clone(), n: cursor.n.saturating_add(1) }), limit)
+}
+
+/// The chats with these n that are still there, in no particular order.
+pub fn chats_by_n(db: &Connection, ns: &[i64]) -> Result<Vec<ChatRow>> {
+    let sql = format!("{CHAT_COLUMNS} WHERE c.n IN (SELECT value FROM json_each(?1))");
+    let ns = serde_json::to_string(ns)?;
+    let rows = db.prepare_cached(&sql)?.query_map([ns], chat_row)?.collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// How many chats the list has.
+pub fn chat_count(db: &Connection, archived: bool) -> Result<u64> {
+    let count: i64 =
+        db.prepare_cached("SELECT count(*) FROM chats WHERE archived = ?1")?.query_row([archived], |r| r.get(0))?;
+    Ok(count.max(0) as u64)
+}
+
+/// A chat's n by its JID.
+pub fn chat_n(db: &Connection, id: &str) -> Result<Option<i64>> {
+    Ok(db.prepare_cached("SELECT n FROM chats WHERE id = ?1")?.query_row([id], |r| r.get(0)).optional()?)
+}
+
+/// A message's place in its chat.
+pub fn message_place(db: &Connection, chat: &str, id: &str) -> Result<Option<MessageCursor>> {
+    Ok(db
+        .prepare_cached("SELECT at, n FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1) AND id = ?2")?
+        .query_row(params![chat, id], |r| Ok(MessageCursor { at: r.get(0)?, n: r.get(1)? }))
+        .optional()?)
+}
+
+/// The chat's first unread message, counted back from its newest among those others sent, with
+/// its ID; none when nothing's unread.
+pub fn first_unread(db: &Connection, chat: &str) -> Result<Option<(String, MessageCursor)>> {
+    let unread: Option<i64> =
+        db.prepare_cached("SELECT unread FROM chats WHERE id = ?1")?.query_row([chat], |r| r.get(0)).optional()?;
+    let Some(unread) = unread.filter(|&unread| unread > 0) else { return Ok(None) };
+    Ok(db
+        .prepare_cached(
+            "SELECT id, at, n FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1) AND mine = 0
+            ORDER BY at DESC, n DESC LIMIT 1 OFFSET ?2",
+        )?
+        .query_row(params![chat, unread - 1], |r| Ok((r.get(0)?, MessageCursor { at: r.get(1)?, n: r.get(2)? })))
+        .optional()?)
+}
+
+/// Up to `limit` messages in `chat` from `cursor` on, the one at it first if it's still there,
+/// oldest first.
+pub fn messages_from(db: &Connection, chat: &str, cursor: MessageCursor, limit: usize) -> Result<Vec<MessageRow>> {
+    messages(db, chat, Around::After(MessageCursor { at: cursor.at, n: cursor.n.saturating_sub(1) }), limit)
+}
+
+/// How many messages `chat` has.
+pub fn message_count(db: &Connection, chat: &str) -> Result<u64> {
+    let count: i64 = db
+        .prepare_cached("SELECT count(*) FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1)")?
+        .query_row([chat], |r| r.get(0))?;
+    Ok(count.max(0) as u64)
+}
+
+/// How many messages in `chat` come after `cursor`.
+pub fn messages_after(db: &Connection, chat: &str, cursor: MessageCursor) -> Result<u64> {
+    let count: i64 = db
+        .prepare_cached(
+            "SELECT count(*) FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1) AND (at, n) > (?2, ?3)",
+        )?
+        .query_row(params![chat, cursor.at, cursor.n], |r| r.get(0))?;
+    Ok(count.max(0) as u64)
+}
+
+/// Whether `chat` has a message before `cursor`.
+pub fn messages_before(db: &Connection, chat: &str, cursor: MessageCursor) -> Result<bool> {
+    Ok(db
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1) AND (at, n) < (?2, ?3))",
+        )?
+        .query_row(params![chat, cursor.at, cursor.n], |r| r.get(0))?)
+}
