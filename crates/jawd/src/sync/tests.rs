@@ -123,6 +123,13 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
     panic!("waited too long for {what}");
 }
 
+/// Waits for the converter to empty the inbox, once the inbox has what the test put in it: the
+/// writer takes the inbox's queue before the live one, so an empty live write commits after it.
+async fn drained(store: &Store) {
+    store.apply(Lane::Live, Vec::new()).await.unwrap();
+    until("the inbox to empty", || store.count("inbox").unwrap() == 0).await;
+}
+
 /// The converter running on `store` as jawd runs it.
 fn converting(store: &Store) -> tokio::task::JoinHandle<()> {
     let live: Shared = Arc::default();
@@ -181,7 +188,7 @@ async fn the_inbox_is_converted_once_even_when_jawd_stops_in_the_middle() {
     }
     let store = Store::open(home.path()).unwrap();
     let converter = converting(&store);
-    until("the inbox to empty", || store.count("inbox").unwrap() == 0).await;
+    drained(&store).await;
     converter.abort();
     assert_eq!(store.count("messages").unwrap(), 3, "each message once");
     assert_eq!(
@@ -289,7 +296,7 @@ async fn app_state_pins_archives_and_marks_chats_as_the_phone_has_them() {
     );
     store.inbox("app_state", 0, app_state(&["time_format"], |_| {}), None);
     let converter = converting(&store);
-    until("the inbox to empty", || store.count("inbox").unwrap() == 0).await;
+    drained(&store).await;
     converter.abort();
     let chats = query(&store, |db| read::chats(db, false, None, 10)).await;
     let ids: Vec<&str> = chats.iter().map(|c| c.id.as_str()).collect();
@@ -310,7 +317,7 @@ async fn a_senders_lid_joins_their_number_and_contacts_name_them() {
     from_lid.info.as_mut().unwrap().sender_alt = "351910000002:4@s.whatsapp.net".into();
     store.inbox("message", 0, from_lid.encode_to_vec(), None);
     let converter = converting(&store);
-    until("the inbox to empty", || store.count("inbox").unwrap() == 0).await;
+    drained(&store).await;
     converter.abort();
     let contacts = pb::ContactList {
         contacts: vec![pb::Contact { jid: ANA.into(), full_name: "Ana Ribeiro".into(), ..Default::default() }],
