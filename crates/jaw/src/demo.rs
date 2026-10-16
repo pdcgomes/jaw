@@ -7,6 +7,7 @@
 mod actions;
 mod find;
 mod folders;
+mod library;
 pub mod pictures;
 mod voice;
 
@@ -117,6 +118,8 @@ pub struct Account {
     player: Option<voice::Player>,
     recorder: Option<voice::Recorder>,
     folders: folders::Folders,
+    /// The library window watched, and its counts of each kind.
+    library: Option<(crate::data::LibraryAsk, std::collections::HashMap<crate::data::LibraryKind, u32>)>,
 }
 
 struct Shared {
@@ -178,6 +181,7 @@ impl Demo {
             player: None,
             recorder: None,
             folders: folders::Folders::made_up(now),
+            library: None,
         };
         let demo = Demo {
             shared: Arc::new(Shared {
@@ -539,6 +543,9 @@ impl Account {
         }
         thread.chat.v += 1;
         thread.messages.push(m.clone());
+        let name = thread.chat.name.clone();
+        self.library_arrived(&name, &m);
+        let thread = &mut self.threads[t];
         let len = thread.messages.len();
         let chat = thread.chat.id.clone();
         self.push_chat(t);
@@ -762,6 +769,15 @@ impl Jawd for Demo {
 
     fn watch_folders(&mut self) {
         self.defer(|a| a.on_watch_folders());
+    }
+
+    fn watch_library(&mut self, ask: &crate::data::LibraryAsk) {
+        let ask = ask.clone();
+        self.defer(move |a| a.on_watch_library(ask));
+    }
+
+    fn unwatch_library(&mut self) {
+        self.defer(|a| a.on_unwatch_library());
     }
 
     fn watch_roster(&mut self, folder: &str) {
@@ -1118,6 +1134,29 @@ impl Writing {
     }
 }
 
+/// What the climbing group says under its photos, the links it shares, and its files.
+const CAPTIONS: &[&str] = &[
+    "",
+    "Sintra, the slab",
+    "",
+    "na praia depois da escalada",
+    "Cascais at sunset",
+    "",
+    "a vista do topo",
+    "praia do Guincho",
+];
+const LINKS: &[(&str, &str)] = &[
+    ("o guia de Sintra", "https://thecrag.com/en/climbing/portugal/sintra"),
+    ("previsão para sábado", "https://www.ipma.pt/pt/otempo/prev.localidade.hora/"),
+    ("Peneda in May?", "https://8a.nu/crags/sportclimbing/portugal/peneda"),
+    ("comboio para Sintra", "https://www.cp.pt/passageiros/pt/consultar-horarios"),
+];
+const FILES: &[&str] = &[
+    "topo-sintra.pdf · 1.2 MB · 4 pages",
+    "rota-sintra-cascais.gpx · 88 KB",
+    "seguro-escalada-2026.pdf · 310 KB · 2 pages",
+];
+
 /// The photos the climbing group shares, and a flood brings into the open chat.
 const HISTORY_PHOTOS: [&str; 5] = ["city", "sunset", "lake", "bars", "beach"];
 
@@ -1268,10 +1307,18 @@ fn made_up(now: i64) -> Vec<Thread> {
         let words: Vec<&str> =
             (0..2 + (rng >> 40) as usize % 14).map(|k| WORDS[((rng >> (k % 24)) as usize) % WORDS.len()]).collect();
         let text = words.join(" ");
-        if i % 60 == 30 {
-            let p = HISTORY_PHOTOS[(i / 60) % HISTORY_PHOTOS.len()];
-            let m = w.other(ago, Some(&climbers[(rng >> 50) as usize % climbers.len()]), Kind::Image, "▣ photo", "");
+        let who = &climbers[(rng >> 50) as usize % climbers.len()];
+        if i % 20 == 10 {
+            let p = HISTORY_PHOTOS[(i / 20) % HISTORY_PHOTOS.len()];
+            let caption = CAPTIONS[(i / 20) % CAPTIONS.len()];
+            let m = w.other(ago, Some(who), Kind::Image, "▣ photo", caption);
             m.media = Some(Box::new(pictures::media(p)));
+        } else if i % 45 == 15 {
+            let (said, url) = LINKS[(i / 45) % LINKS.len()];
+            w.theirs(ago, who, &format!("{said} {url}"));
+        } else if i % 90 == 50 {
+            let file = FILES[(i / 90) % FILES.len()];
+            w.other(ago, Some(who), Kind::Document, &format!("▣ {file}"), "");
         } else if (rng >> 13).is_multiple_of(5) {
             w.mine(ago, &text);
         } else {

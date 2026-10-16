@@ -4,7 +4,7 @@
 //! user acted, quietly: a message that wasn't sent goes back to the box, an action says why in the
 //! footer, and what goes on in the background (drafts, receipts, typing) says nothing.
 
-use crate::data::{Chat, Counts, Found, FoundKind, Jawd, Message, MessageInfo, Place, Typing, Update};
+use crate::data::{Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, Place, Typing, Update};
 use crate::run::Event;
 use jaw_client::{Client, Config, Event as From, Failure, WindowId};
 use jaw_proto::find::{Find, Kind};
@@ -44,6 +44,8 @@ enum Asked {
     Roster(String),
     /// A folder being made.
     FolderMade,
+    /// The library's window, for the ask the interface numbered so.
+    Library(u64),
     /// Background work that says nothing either way.
     Quiet,
 }
@@ -65,6 +67,8 @@ pub struct Wire {
     folders: Option<Option<String>>,
     /// The roster's folder, and its watch's ID once jawd answers.
     roster: Option<(String, Option<String>)>,
+    /// What the library asked, and its watch's ID once jawd answers.
+    library: Option<(LibraryAsk, Option<String>)>,
     open: Option<(WindowId, String)>,
     asked: HashMap<u64, Asked>,
     /// The client's id for each `find`, to the interface's.
@@ -78,6 +82,20 @@ fn why_not(failure: &Failure, what: &str) -> String {
         Failure::Jawd(e) if e.code == code::UNKNOWN_METHOD => format!("{what} comes with the next step"),
         other => other.to_string(),
     }
+}
+
+/// A library window's answer or push, as the interface takes it.
+fn library(asked: u64, v: &Value, whole: bool) -> Update {
+    let rows = if whole { &v["rows"] } else { &v["upsert"] };
+    let window = crate::data::LibraryWindow {
+        upsert: serde_json::from_value(rows.clone()).unwrap_or_default(),
+        remove: serde_json::from_value(v["remove"].clone()).unwrap_or_default(),
+        whole,
+        total: v["total"].as_u64().map(|n| n as u32),
+        older: v["older"].as_bool(),
+        counts: serde_json::from_value(v["counts"].clone()).ok(),
+    };
+    Update::Library { asked, window }
 }
 
 /// Where jawd is: beside jaw, as `make install` and cargo put them, or on the PATH.
@@ -145,6 +163,7 @@ impl Wire {
             list_folder: "all".into(),
             folders: None,
             roster: None,
+            library: None,
             open: None,
             asked: HashMap::new(),
             finds: HashMap::new(),
@@ -199,6 +218,7 @@ impl Wire {
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
             Asked::Forward(_) => Some(Update::Notice(why_not(failure, "forwarding"))),
             Asked::Folders | Asked::Roster(_) => None,
+            Asked::Library(_) => Some(Update::LibraryRefused(why_not(failure, "the library"))),
             Asked::FolderMade => Some(Update::Notice(why_not(failure, "making folders"))),
             Asked::Quiet => None,
         }
@@ -233,6 +253,9 @@ impl Wire {
                 }
                 if let Some((folder, _)) = self.roster.take() {
                     self.watch_roster(&folder);
+                }
+                if let Some((ask, _)) = self.library.take() {
+                    self.watch_library(&ask);
                 }
                 let mut me = vec![];
                 if let Some(m) = w.account.me {
@@ -276,6 +299,12 @@ impl Wire {
                             self.roster = Some((folder.clone(), result["watch"].as_str().map(String::from)));
                             let upsert = serde_json::from_value(result["rows"].clone()).unwrap_or_default();
                             out.push(Update::Roster { folder, upsert, remove: vec![], whole: true });
+                        }
+                    }
+                    (Asked::Library(asked), Ok(result)) => {
+                        if let Some((_, watch)) = self.library.as_mut().filter(|(a, _)| a.id == asked) {
+                            *watch = result["watch"].as_str().map(String::from);
+                            out.push(library(asked, &result, true));
                         }
                     }
                     (Asked::FolderMade, Ok(result)) => {
@@ -322,6 +351,13 @@ impl Wire {
                     out.push(Update::Notice(text.to_string()));
                 }
             }
+            From::Push(push) if push.method == "library" => {
+                if let Some((ask, Some(w))) = &self.library
+                    && push.params["watch"].as_str() == Some(w.as_str())
+                {
+                    out.push(library(ask.id, &push.params, false));
+                }
+            }
             From::Push(push) if push.method == "folders" => {
                 let upsert = serde_json::from_value(push.params["upsert"].clone()).unwrap_or_default();
                 let remove = serde_json::from_value(push.params["remove"].clone()).unwrap_or_default();
@@ -366,6 +402,22 @@ impl Jawd for Wire {
                 self.list_folder = folder.to_string();
                 self.list = Some(self.client.watch_chats(folder, place));
             }
+        }
+    }
+
+    fn watch_library(&mut self, ask: &LibraryAsk) {
+        self.unwatch_library();
+        let mut params = serde_json::to_value(ask).unwrap_or(Value::Null);
+        if ask.kind.is_none() {
+            params["kind"] = json!("all");
+        }
+        self.library = Some((ask.clone(), None));
+        self.ask("library.watch", params, Asked::Library(ask.id));
+    }
+
+    fn unwatch_library(&mut self) {
+        if let Some((_, Some(w))) = self.library.take() {
+            self.ask("unwatch", json!({ "watch": w }), Asked::Quiet);
         }
     }
 

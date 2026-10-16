@@ -93,6 +93,9 @@ enum Command {
         /// Plays a voice message all along, its playhead moving ten times a second
         #[arg(long)]
         voice: bool,
+        /// Shows the library's grid of photos across all chats, the flood's photos coming into it
+        #[arg(long)]
+        library: bool,
     },
     /// Starts jawd at login, as a LaunchAgent on macOS or a systemd user unit on Linux
     #[command(subcommand)]
@@ -141,7 +144,7 @@ fn main() -> Result<()> {
             print!("{frame}");
             Ok(())
         }
-        Some(Command::Bench { rate, seconds, width, height, palette, jawd, graphics, voice }) => {
+        Some(Command::Bench { rate, seconds, width, height, palette, jawd, graphics, voice, library }) => {
             let flood = bench::Flood {
                 width,
                 height,
@@ -153,6 +156,7 @@ fn main() -> Result<()> {
                 jawd,
                 pictures: graphics,
                 voice,
+                library,
             };
             println!("{}", bench::flood(&flood)?.describe());
             Ok(())

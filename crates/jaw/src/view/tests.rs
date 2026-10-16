@@ -1519,3 +1519,193 @@ fn a_community_is_one_row_that_opens_to_its_groups_announcements_first() {
     assert!(screen.contains("▾ Bairro de Alvalade") && announce < festa, "{screen}");
     assert!(line_with(&screen, "Festa de Natal").contains("│     Festa"), "indented under it:\n{screen}");
 }
+
+fn library_rows(v: &View) -> Vec<crate::data::LibraryRow> {
+    v.library.as_ref().map(|l| l.rows.clone()).unwrap_or_default()
+}
+
+fn selected_item(v: &View) -> crate::data::LibraryRow {
+    let l = v.library.as_ref().unwrap();
+    l.rows.iter().find(|r| Some(&r.id) == l.at.as_ref()).cloned().unwrap()
+}
+
+#[test]
+fn ctrl_l_opens_the_open_chats_library_in_its_pane_then_all_chats_over_the_screen() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l>");
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ library · Ana Ribeiro") && screen.contains("╭ chats · All"), "{screen}");
+    assert!(screen.contains("esc back to the conversation"));
+    press(&mut v, &rx, "<c-l>");
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ library · all chats") && !screen.contains("╭ chats"), "the whole screen:\n{screen}");
+    assert!(
+        screen.contains("photos 79") && screen.contains("photos and videos · 80") && screen.contains("links · 26"),
+        "{screen}"
+    );
+    press(&mut v, &rx, "<esc>");
+    assert!(v.library.is_none() && frame(&mut v).contains("╭ Ana Ribeiro"));
+}
+
+#[test]
+fn across_all_chats_each_kind_shows_at_140_100_and_80_columns() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = view(width, 44);
+        press(&mut v, &rx, "<c-l><c-l>");
+        if width < 90 {
+            assert!(
+                v.library.as_ref().is_some_and(|l| l.chat.is_none()),
+                "no chat open at {width}, so all chats at once"
+            );
+        }
+        let per_row = ((width - 4 + 2) / 18) as usize;
+        let screen = frame(&mut v);
+        let captions = line_with(&screen, "Ana · ");
+        assert_eq!(captions.matches(" · ").count(), per_row, "{per_row} previews a row at {width}:\n{screen}");
+        press(&mut v, &rx, "<tab>");
+        assert!(frame(&mut v).contains("October 2026 ─"), "photos under their months at {width}");
+        press(&mut v, &rx, "<tab><tab>");
+        assert!(frame(&mut v).contains("0:14"), "voice at {width}");
+        press(&mut v, &rx, "<tab>");
+        let screen = frame(&mut v);
+        assert!(
+            screen.contains("▣ orcamento-obras-cozinha.pdf") && screen.contains("PDF · 2.4 MB · 3 pages"),
+            "files at {width}:\n{screen}"
+        );
+        press(&mut v, &rx, "<tab>");
+        let screen = frame(&mut v);
+        assert!(
+            screen.contains("↗ Climbing in Sintra: the complete guide") && screen.contains("thecrag.com"),
+            "links at {width}:\n{screen}"
+        );
+        assert!(
+            screen.contains("Every crag around Sintra"),
+            "the selected link opens out to its description at {width}"
+        );
+    }
+}
+
+#[test]
+fn arrows_move_across_the_grid_and_down_to_the_nearest_column() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l><tab>");
+    let first = selected_item(&v).id;
+    press(&mut v, &rx, "<right><right>");
+    let rows = library_rows(&v);
+    assert_eq!(selected_item(&v).id, rows[2].id);
+    press(&mut v, &rx, "<down>");
+    assert_eq!(selected_item(&v).id, rows[9].id, "seven a row: the one under it");
+    press(&mut v, &rx, "<up><left><left>");
+    assert_eq!(selected_item(&v).id, first);
+}
+
+#[test]
+fn filters_are_typed_with_completion_and_shown_as_chips_backspace_takes_away() {
+    let (mut v, rx) = view(100, 44);
+    press(&mut v, &rx, "<c-l><c-l>from:Le");
+    let screen = frame(&mut v);
+    assert!(screen.contains("┆ Leonor") && screen.contains("tab takes it"), "{screen}");
+    press(&mut v, &rx, "<tab>");
+    let screen = frame(&mut v);
+    assert!(
+        screen.contains(" from: Leonor ")
+            && library_rows(&v).iter().all(|r| r.from.as_ref().is_some_and(|f| f.name == "Leonor")),
+        "{screen}"
+    );
+    press(&mut v, &rx, "in:Lisb<tab>since:a mon<tab>");
+    let screen = frame(&mut v);
+    assert!(screen.contains(" in: Lisbon Climbing ") && screen.contains(" since: a month ago "), "{screen}");
+    let since = NOW - 31 * crate::fmt::DAY;
+    assert!(library_rows(&v).iter().all(|r| r.at >= since && r.chat == "climbing"));
+    press(&mut v, &rx, "<backspace>");
+    assert!(!frame(&mut v).contains("since:"), "Backspace on an empty search takes the last chip away");
+}
+
+#[test]
+fn words_search_captions_file_names_and_link_titles() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l>sintra");
+    let rows = library_rows(&v);
+    assert!(rows.iter().any(|r| r.kind == crate::data::LibraryKind::Photo));
+    assert!(rows.iter().any(|r| r.kind == crate::data::LibraryKind::File));
+    assert!(rows.iter().any(|r| r.kind == crate::data::LibraryKind::Link));
+    let photo = rows.iter().find(|r| r.kind == crate::data::LibraryKind::Photo).unwrap();
+    assert!(photo.caption.iter().any(|m| m.t == crate::data::MarkKind::Mark && m.s == "Sintra"), "{photo:?}");
+}
+
+#[test]
+fn enter_opens_a_link_in_the_browser_a_file_in_its_app_and_plays_a_voice_message() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l><tab><tab><tab><tab><tab>");
+    press(&mut v, &rx, "\n");
+    assert_eq!(v.take_effects(), [Effect::Open("https://thecrag.com/en/climbing/portugal/sintra".into())]);
+    press(&mut v, &rx, "<s-tab>\n");
+    let opened = v.take_effects();
+    assert!(matches!(&opened[..], [Effect::Open(p)] if p.ends_with(".pdf") || p.ends_with(".gpx")), "{opened:?}");
+    press(&mut v, &rx, "<s-tab>\n");
+    assert!(v.playing.is_some(), "a voice message plays in place");
+    assert!(frame(&mut v).contains("⏸ "));
+}
+
+#[test]
+fn enter_on_a_photo_shows_it_full_size_and_arrows_go_to_the_ones_beside_it() {
+    let (mut v, rx) = pictured(Protocol::Blocks, 140, 44);
+    press(&mut v, &rx, "<c-l><c-l><tab>\n");
+    let screen = frame(&mut v);
+    let first = selected_item(&v).id;
+    assert!(screen.contains("in Ana Ribeiro ·") && screen.matches('▀').count() > 1_000, "full size:\n{screen}");
+    press(&mut v, &rx, "<right>");
+    assert_ne!(selected_item(&v).id, first);
+    press(&mut v, &rx, "x");
+    assert!(!v.library.as_ref().unwrap().viewing, "any other key goes back to the grid");
+}
+
+#[test]
+fn ctrl_g_goes_to_the_items_message_in_its_chat() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l><tab><tab><tab><tab>");
+    let item = selected_item(&v);
+    press(&mut v, &rx, "<c-g>");
+    assert!(v.library.is_none());
+    assert_eq!(v.open.as_deref(), Some(item.chat.as_str()));
+    assert_eq!(v.focus, Focus::Message(item.message.clone()), "selected, there");
+}
+
+#[test]
+fn moving_near_the_end_of_a_kind_with_more_asks_for_the_next_page() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l><tab>");
+    let asked = v.library.as_ref().unwrap().asked;
+    let mut rows = library_rows(&v);
+    rows.truncate(14);
+    v.apply(Update::Library {
+        asked,
+        window: crate::data::LibraryWindow { upsert: rows, whole: true, older: Some(true), ..Default::default() },
+    });
+    press(&mut v, &rx, "<down>");
+    let l = v.library.as_ref().unwrap();
+    assert!(l.paging.is_none() || l.rows.len() > 14, "the next page was asked for and came: {} rows", l.rows.len());
+    assert!(l.rows.len() > 14);
+}
+
+#[test]
+fn what_arrives_while_the_library_is_open_comes_into_it() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l><tab>");
+    let before = library_rows(&v).len();
+    let asked = v.library.as_ref().unwrap().asked;
+    let mut new = library_rows(&v)[0].clone();
+    new.id = "new-photo".into();
+    new.sort = "9999999999999~new".into();
+    v.apply(Update::Library { asked, window: crate::data::LibraryWindow { upsert: vec![new], ..Default::default() } });
+    let rows = library_rows(&v);
+    assert_eq!((rows.len(), rows[0].id.as_str()), (before + 1, "new-photo"), "newest first");
+    drop(rx);
+}
+
+#[test]
+fn the_palette_opens_the_library() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-k>library\n");
+    assert!(v.library.as_ref().is_some_and(|l| l.chat.is_none()));
+}

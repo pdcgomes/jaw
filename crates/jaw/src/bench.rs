@@ -32,6 +32,9 @@ pub struct Flood {
     pub pictures: Protocol,
     /// Whether a voice message plays all along, its playhead pushed ten times a second.
     pub voice: bool,
+    /// Whether the library's grid of photos across all chats is open, the flood's photos
+    /// coming into it.
+    pub library: bool,
 }
 
 /// `jawd bench feed` writing its flood, for as long as the bench needs it.
@@ -186,6 +189,9 @@ pub fn flood(f: &Flood) -> Result<Report> {
     let start = Instant::now();
     view.images = Images::start(f.pictures, (8, 16), tx.clone());
     view.no_color = false;
+    if f.library {
+        view.open_library(None, Some(crate::data::LibraryKind::Photo), "");
+    }
     view.resize(f.width, f.height);
     let mut terminal = Terminal::new(TestBackend::new(f.width, f.height))?;
     let mut probe = Probe::default();
@@ -266,6 +272,7 @@ mod tests {
             jawd: false,
             pictures: Protocol::Blocks,
             voice: false,
+            library: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
@@ -288,6 +295,7 @@ mod tests {
             jawd: false,
             pictures: Protocol::Kitty,
             voice: false,
+            library: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
@@ -309,10 +317,33 @@ mod tests {
             jawd: false,
             pictures: Protocol::Blocks,
             voice: true,
+            library: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
         assert!(report.voice_at.is_some_and(|at| at >= 3.0), "it played all along: {}", report.describe());
+        assert!(report.keys.len() >= 200, "{}", report.describe());
+        assert!(report.at(0.99) <= Duration::from_millis(16), "{}", report.describe());
+    }
+
+    #[test]
+    fn with_the_librarys_photos_showing_a_keypress_is_drawn_within_16_ms_at_p99_while_2000_messages_a_second_arrive() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let report = flood(&Flood {
+            width: 140,
+            height: 40,
+            rate: 2_000,
+            seconds: 4.0,
+            every: Duration::from_millis(12),
+            warm: Duration::from_secs(1),
+            palette: false,
+            jawd: false,
+            pictures: Protocol::Blocks,
+            voice: false,
+            library: true,
+        })
+        .unwrap();
+        eprintln!("{}", report.describe());
         assert!(report.keys.len() >= 200, "{}", report.describe());
         assert!(report.at(0.99) <= Duration::from_millis(16), "{}", report.describe());
     }
@@ -331,6 +362,7 @@ mod tests {
             jawd: false,
             pictures: Protocol::Blocks,
             voice: false,
+            library: false,
         };
         let report = super::flood(&flood).unwrap();
         eprintln!("{}", report.describe());
@@ -352,6 +384,7 @@ mod tests {
             jawd: false,
             pictures: Protocol::Blocks,
             voice: false,
+            library: false,
         })
         .unwrap();
         assert!(report.keys.is_empty());

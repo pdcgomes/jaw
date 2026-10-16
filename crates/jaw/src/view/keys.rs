@@ -106,6 +106,14 @@ impl View {
             self.toggle_sidebar();
             return;
         }
+        if self.library.is_some() {
+            self.on_library_key(k);
+            return;
+        }
+        if ctrl && k.code == KeyCode::Char('l') {
+            self.library_key();
+            return;
+        }
         if alt && matches!(k.code, KeyCode::Up | KeyCode::Down) {
             self.step_chat(if k.code == KeyCode::Up { -1 } else { 1 });
             return;

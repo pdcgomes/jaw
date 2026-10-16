@@ -111,17 +111,21 @@ impl View {
 
     fn play(&mut self, m: &Message, at: Option<f64>) {
         let seconds = m.voice.as_ref().map_or(0.0, |v| v.seconds);
-        let resumed = self.playing.as_ref().filter(|p| p.message.as_deref() == Some(&m.id)).map(|p| p.at);
-        self.jawd.voice_play(Some(&m.id), at, self.speed);
+        self.play_id(&m.id, seconds, at);
+    }
+
+    fn play_id(&mut self, id: &str, seconds: f64, at: Option<f64>) {
+        let resumed = self.playing.as_ref().filter(|p| p.message.as_deref() == Some(id)).map(|p| p.at);
+        self.jawd.voice_play(Some(id), at, self.speed);
         self.playing = Some(Playback {
-            message: Some(m.id.clone()),
+            message: Some(id.to_string()),
             state: PlayState::Playing,
             at: at.or(resumed).unwrap_or(0.0),
             seconds,
             speed: self.speed,
             error: None,
         });
-        self.voice_asked = Some((Some(m.id.clone()), self.now()));
+        self.voice_asked = Some((Some(id.to_string()), self.now()));
     }
 
     /// The next voice message after `id` in the chat that you haven't heard, if one came.
@@ -139,15 +143,21 @@ impl View {
 
     /// Enter on a voice message: plays it, pauses it, or carries on where it paused.
     pub(super) fn toggle_voice(&mut self, m: &Message) {
-        match self.play_of(&m.id) {
+        let seconds = m.voice.as_ref().map_or(0.0, |v| v.seconds);
+        self.toggle_voice_id(&m.id, seconds);
+    }
+
+    /// The same, for a voice message known only by its ID and length, as the library knows it.
+    pub(super) fn toggle_voice_id(&mut self, id: &str, seconds: f64) {
+        match self.play_of(id) {
             Some(p) if !p.paused => {
                 self.jawd.voice_pause();
                 if let Some(p) = self.playing.as_mut() {
                     p.state = PlayState::Paused;
                 }
             }
-            Some(_) => self.play(m, None),
-            None => self.play(m, Some(0.0)),
+            Some(_) => self.play_id(id, seconds, None),
+            None => self.play_id(id, seconds, Some(0.0)),
         }
     }
 

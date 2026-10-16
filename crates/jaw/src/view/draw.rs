@@ -272,6 +272,9 @@ impl View {
                 ("esc", "closes", true),
             ];
         }
+        if self.library.is_some() {
+            return self.library_hints();
+        }
         if self.sidebar.keys.is_some() {
             return self.sidebar_hints();
         }
@@ -362,6 +365,9 @@ impl View {
     }
 
     fn draw_main(&mut self, f: &mut Frame, body: Rect) {
+        if self.library.as_ref().is_some_and(|l| l.chat.is_none()) {
+            return self.draw_library(f, body);
+        }
         let beside = body.width >= super::sidebar::SIDEBAR_FROM && !self.sidebar.folded;
         let over = self.sidebar.keys.is_some() && !beside;
         let mut rest = body;
@@ -525,6 +531,9 @@ impl View {
     }
 
     fn draw_conversation(&mut self, f: &mut Frame, area: Rect) {
+        if self.library.is_some() {
+            return self.draw_library(f, area);
+        }
         let t = self.theme;
         let selecting = matches!(self.focus, Focus::Message(_)) && self.overlay.is_none();
         let block = self

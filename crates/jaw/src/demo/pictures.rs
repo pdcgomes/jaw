@@ -38,9 +38,68 @@ pub fn folder() -> PathBuf {
             if !dir.join("ready").exists() {
                 let _ = paint_all(&dir);
             }
+            if !dir.join("files").join("ready").exists() {
+                let _ = write_files(&dir.join("files"));
+            }
             dir
         })
         .clone()
+}
+
+/// The files the made-up account's people share, small but real, so they open in their apps.
+const FILES: &[&str] = &[
+    "orcamento-obras-cozinha.pdf",
+    "bilhetes-comboio.pdf",
+    "topo-sintra.pdf",
+    "seguro-escalada-2026.pdf",
+    "rota-sintra-cascais.gpx",
+];
+
+/// A file's path in the folder, as a row's `path` gives it.
+pub fn file(name: &str) -> Option<String> {
+    FILES.contains(&name).then(|| format!("files/{name}"))
+}
+
+/// A one-page PDF saying `title`.
+fn pdf(title: &str) -> Vec<u8> {
+    let text = format!("BT /F1 24 Tf 72 720 Td ({title}) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{text}\nendstream", text.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![];
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for at in offsets {
+        out.extend(format!("{at:010} 00000 n \n").as_bytes());
+    }
+    out.extend(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes(),
+    );
+    out
+}
+
+fn write_files(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for name in FILES {
+        let bytes = if name.ends_with(".pdf") {
+            pdf(name.trim_end_matches(".pdf"))
+        } else {
+            b"<?xml version=\"1.0\"?>\n<gpx version=\"1.1\" creator=\"jaw\"><trk><name>Sintra to Cascais</name><trkseg><trkpt lat=\"38.80\" lon=\"-9.39\"/><trkpt lat=\"38.70\" lon=\"-9.42\"/></trkseg></trk></gpx>\n".to_vec()
+        };
+        let partial = dir.join(format!(".{name}.{}", std::process::id()));
+        std::fs::write(&partial, bytes)?;
+        std::fs::rename(partial, dir.join(name))?;
+    }
+    std::fs::write(dir.join("ready"), b"")
 }
 
 /// A painted picture's media, as jawd sends it: previews relative to the folder.

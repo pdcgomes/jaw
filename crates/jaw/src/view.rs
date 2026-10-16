@@ -5,6 +5,7 @@
 mod actions;
 mod draw;
 mod keys;
+mod library;
 mod palette;
 mod sidebar;
 mod voice;
@@ -193,6 +194,9 @@ pub struct View {
     pictureless: HashSet<String>,
     /// The size the last frame was drawn at, for drawing every picture again after a resize.
     drawn_size: (u16, u16),
+    /// The library, while it's open, and the width its items were last laid out at.
+    library: Option<library::Library>,
+    library_width: u16,
     /// The folder the chat list and roster show, the tree, the roster, and the sidebar's state.
     pub folder: String,
     folders: Vec<crate::data::FolderRow>,
@@ -297,6 +301,8 @@ impl View {
             images: Images::here(Protocol::None, (8, 16)),
             pictureless: HashSet::new(),
             drawn_size: (0, 0),
+            library: None,
+            library_width: 76,
             folder: "all".into(),
             folders: sidebar::built_in(),
             roster: vec![],
@@ -532,6 +538,8 @@ impl View {
             Update::Folders { upsert, remove, whole } => self.on_folders(upsert, remove, whole),
             Update::Roster { folder, upsert, remove, whole } => self.on_roster(folder, upsert, remove, whole),
             Update::FolderMade(row) => self.folder_made(*row),
+            Update::Library { asked, window } => self.on_library(asked, window),
+            Update::LibraryRefused(why) => self.library_refused(why),
             Update::FolderRefused { folder, why } => {
                 if self.folder == folder {
                     self.folder = "all".into();

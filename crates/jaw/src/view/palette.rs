@@ -84,6 +84,8 @@ pub enum Does {
     Unfile(String, String),
     /// Ctrl-B's sidebar.
     Sidebar,
+    /// Ctrl-L's library, across all chats.
+    Library,
 }
 
 /// What the palette is for: finding, or one of a message's actions that picks something.
@@ -593,9 +595,7 @@ impl View {
                 .key("ctrl-o")
                 .later("M4"),
             Action::new("Record a voice message", "in this chat", Does::Record).key("ctrl-r"),
-            Action::new("Library", "everything shared", Does::Later("the library comes with M3"))
-                .key("ctrl-l")
-                .later("M3"),
+            Action::new("Library", "everything shared, in every chat", Does::Library).key("ctrl-l"),
             Action::new("File this chat into folders", "", Does::File).key("m"),
             Action::new("The keys", "every key jaw has", Does::Keys).key("?"),
             Action::new("Quit", "", Does::Quit).key("ctrl-c"),
@@ -1015,7 +1015,15 @@ impl View {
                         self.palette = None;
                         self.pick_folder(&folder.id);
                     }
-                    Hit::Shared => self.say("links come with M2, and photos and files with M3"),
+                    Hit::Shared => {
+                        let words = self.palette.take().map(|p| p.query.text().to_string()).unwrap_or_default();
+                        let kind = match found.kind {
+                            FoundKind::Link => crate::data::LibraryKind::Link,
+                            FoundKind::File => crate::data::LibraryKind::File,
+                            _ => crate::data::LibraryKind::Photo,
+                        };
+                        self.open_library(None, Some(kind), words.trim());
+                    }
                 }
             }
             Item::Action(a) => self.act(a.does),
@@ -1147,6 +1155,10 @@ impl View {
                 close(self);
                 self.toggle_sidebar();
             }
+            Does::Library => {
+                close(self);
+                self.open_library(None, None, "");
+            }
             Does::OnMessage(id, c) => {
                 close(self);
                 let code = if c == '\n' { KeyCode::Enter } else { KeyCode::Char(c) };
@@ -1168,7 +1180,7 @@ impl View {
     }
 
     /// Opens a message's chat anchored on it, the message selected.
-    fn go_to_message(&mut self, chat: &str, id: &str) {
+    pub(super) fn go_to_message(&mut self, chat: &str, id: &str) {
         self.jump = Some(id.to_string());
         if self.open.as_deref() == Some(chat) {
             self.asked_place = None;
@@ -1230,7 +1242,9 @@ impl View {
                 main.extend(self.marks(&r.text, Style::new().fg(t.text)));
                 (Span::styled("┃", Style::new().fg(colour)), main, dim(fmt::when(m.at, self.now(), self.tz)))
             }
-            Hit::Shared => (Span::styled("↗", Style::new().fg(t.link)), self.marks(&r.text, name), dim("M2".into())),
+            Hit::Shared => {
+                (Span::styled("↗", Style::new().fg(t.link)), self.marks(&r.text, name), dim("in the library".into()))
+            }
         }
     }
 

@@ -8,6 +8,7 @@ pub use jaw_client::Place;
 use jaw_client::{Row, Update as Window};
 use jaw_proto::{Connection, LinkStep};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// A chat-list row: the protocol's chat row, as much of it as the interface draws.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -528,6 +529,124 @@ pub struct Person {
     pub phone: Option<String>,
 }
 
+/// What the library holds: each kind it has a strip entry for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryKind {
+    Photo,
+    Video,
+    Voice,
+    File,
+    Link,
+}
+
+impl LibraryKind {
+    pub const ALL: [LibraryKind; 5] =
+        [LibraryKind::Photo, LibraryKind::Video, LibraryKind::Voice, LibraryKind::File, LibraryKind::Link];
+
+    /// Its name on the kind strip.
+    pub fn plural(self) -> &'static str {
+        match self {
+            LibraryKind::Photo => "photos",
+            LibraryKind::Video => "videos",
+            LibraryKind::Voice => "voice",
+            LibraryKind::File => "files",
+            LibraryKind::Link => "links",
+        }
+    }
+}
+
+/// A file in the library: its name and what it is, as shown.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct FileInfo {
+    pub name: String,
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub pages: Option<u32>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// A link in the library: where it goes, and its preview's words.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct LinkInfo {
+    pub url: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// One thing shared: a message's photo, video, voice message or file, one of an album's
+/// photos, or one of a message's links.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct LibraryRow {
+    pub id: String,
+    #[serde(default)]
+    pub sort: String,
+    pub kind: LibraryKind,
+    pub message: String,
+    pub chat: String,
+    #[serde(default)]
+    pub chat_name: String,
+    #[serde(default)]
+    pub from: Option<Sender>,
+    #[serde(default)]
+    pub mine: bool,
+    #[serde(default)]
+    pub at: i64,
+    #[serde(default)]
+    pub media: Option<Box<Media>>,
+    #[serde(default)]
+    pub voice: Option<Voice>,
+    #[serde(default)]
+    pub file: Option<FileInfo>,
+    #[serde(default)]
+    pub link: Option<LinkInfo>,
+    #[serde(default)]
+    pub caption: Vec<Mark>,
+}
+
+/// A library window's answer or push: rows changed or gone, or with `whole` every row, and the
+/// counts that came with them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LibraryWindow {
+    pub upsert: Vec<LibraryRow>,
+    pub remove: Vec<String>,
+    pub whole: bool,
+    pub total: Option<u32>,
+    pub older: Option<bool>,
+    pub counts: Option<HashMap<LibraryKind, u32>>,
+}
+
+/// What the library asks jawd for: a kind or all of them, the filters, and where its window is.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub struct LibraryAsk {
+    /// The interface's number for the ask, so only the latest ask's answer is kept.
+    #[serde(skip)]
+    pub id: u64,
+    pub kind: Option<LibraryKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub person: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<i64>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// `top`, or an item's `id`.
+    pub around: String,
+    pub before: u32,
+    pub after: u32,
+}
+
 /// One of a chat's members, as `chat.info` gives them, for completing `@` names.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Member {
@@ -709,6 +828,14 @@ pub enum Update {
     },
     /// A folder just made, to fill or pick.
     FolderMade(Box<FolderRow>),
+    /// The library's window, for the ask numbered `asked`: rows changed or gone, or with `whole`
+    /// every row.
+    Library {
+        asked: u64,
+        window: LibraryWindow,
+    },
+    /// jawd can't serve the library yet, and why.
+    LibraryRefused(String),
     /// jawd can't show this folder's chats yet; the list is back on All.
     FolderRefused {
         folder: String,
@@ -788,6 +915,10 @@ pub trait Jawd {
     /// The chat list on All, or the same window moved.
     /// A folder's chat list, or the same window moved.
     fn watch_chats(&mut self, folder: &str, place: Place);
+    /// The library's window for what's asked, which replaces any earlier one; `Update::Library`
+    /// keeps it current.
+    fn watch_library(&mut self, ask: &LibraryAsk);
+    fn unwatch_library(&mut self);
     /// The folder tree, kept current with `Update::Folders`.
     fn watch_folders(&mut self);
     /// A folder's people, kept current with `Update::Roster`.
