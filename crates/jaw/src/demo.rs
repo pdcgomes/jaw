@@ -111,7 +111,11 @@ struct Shared {
     /// The thread `find` is answered on, once it has one, and the newest query it was asked.
     finder: Mutex<Option<Channel<find::Ask>>>,
     latest: AtomicU64,
+    /// What the interface asked while the account was busy, for whoever takes it next.
+    deferred: Mutex<Vec<Deferred>>,
 }
+
+type Deferred = Box<dyn FnOnce(&mut Account) + Send>;
 
 /// The made-up account as the interface's jawd.
 #[derive(Clone)]
@@ -161,6 +165,7 @@ impl Demo {
                 wake: Condvar::new(),
                 finder: Mutex::new(None),
                 latest: AtomicU64::new(0),
+                deferred: Mutex::new(Vec::new()),
             }),
         };
         {
@@ -191,20 +196,44 @@ impl Demo {
 
     /// Changes a chat's row as the phone would, and says so to the chat list: an archived chat
     /// leaves All, and comes back when it's unarchived.
-    fn change(&self, chat: &str, how: impl FnOnce(&mut Chat)) {
-        let mut a = self.lock();
-        let Some(&t) = a.index.get(chat) else { return };
-        let c = &mut a.threads[t].chat;
-        how(c);
-        c.v += 1;
-        let (row, archived) = (c.clone(), c.archived);
-        let total = a.total();
-        let (upsert, remove) = if archived { (vec![], vec![row.id]) } else { (vec![row], vec![]) };
-        a.send(Update::Chats(Window { upsert, remove, total: Some(total), ..Window::default() }));
+    fn change(&self, chat: &str, how: impl FnOnce(&mut Chat) + Send + 'static) {
+        let chat = chat.to_string();
+        self.defer(move |a| {
+            let Some(&t) = a.index.get(&chat) else { return };
+            let c = &mut a.threads[t].chat;
+            how(c);
+            c.v += 1;
+            let (row, archived) = (c.clone(), c.archived);
+            let total = a.total();
+            let (upsert, remove) = if archived { (vec![], vec![row.id]) } else { (vec![row], vec![]) };
+            a.send(Update::Chats(Window { upsert, remove, total: Some(total), ..Window::default() }));
+        });
+    }
+
+    /// Does `job` on the account now if it's free, or as soon as the thread that holds it next
+    /// takes it, waking the live thread for it, so the interface never waits on the account.
+    fn defer(&self, job: impl FnOnce(&mut Account) + Send + 'static) {
+        match self.shared.account.try_lock() {
+            Ok(mut a) => {
+                self.run_deferred(&mut a);
+                job(&mut a);
+            }
+            Err(_) => self.shared.deferred.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(job)),
+        }
+        self.wake();
+    }
+
+    fn run_deferred(&self, a: &mut Account) {
+        let jobs = std::mem::take(&mut *self.shared.deferred.lock().unwrap_or_else(|e| e.into_inner()));
+        for job in jobs {
+            job(a);
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Account> {
-        self.shared.account.lock().unwrap_or_else(|e| e.into_inner())
+        let mut a = self.shared.account.lock().unwrap_or_else(|e| e.into_inner());
+        self.run_deferred(&mut a);
+        a
     }
 
     fn wake(&self) {
@@ -533,22 +562,18 @@ impl Account {
     }
 }
 
-impl Jawd for Demo {
-    /// The made-up account's list fits one window, so it sends every chat wherever it's asked.
-    fn watch_chats(&mut self, place: Place) {
-        let mut a = self.lock();
-        let rows = a.threads.iter().map(|t| t.chat.clone()).filter(|c| !c.archived).collect();
-        let total = a.total();
+/// What the interface asks of the made-up account, done on it.
+impl Account {
+    fn on_watch_chats(&mut self, place: Place) {
+        let rows = self.threads.iter().map(|t| t.chat.clone()).filter(|c| !c.archived).collect();
+        let total = self.total();
         let moved = Some(Moved { place, newer: 0 });
-        a.send(Update::Chats(Window { upsert: rows, total: Some(total), moved, ..Window::default() }));
+        self.send(Update::Chats(Window { upsert: rows, total: Some(total), moved, ..Window::default() }));
     }
 
-    /// A chat's window, as jawd gives one: the rows around where it's asked to be, those of the
-    /// same chat's window before that have left it removed.
-    fn watch_messages(&mut self, chat: &str, place: Place) {
-        let mut a = self.lock();
-        let Some(&t) = a.index.get(chat) else { return };
-        let messages = &a.threads[t].messages;
+    fn on_watch_messages(&mut self, chat: &str, place: Place) {
+        let Some(&t) = self.index.get(chat) else { return };
+        let messages = &self.threads[t].messages;
         let len = messages.len();
         let (before, after) = (place.before as usize, place.after as usize);
         let newest = (len.saturating_sub(before), len, true);
@@ -559,13 +584,13 @@ impl Jawd for Demo {
             },
             _ => newest,
         };
-        let remove = match a.open.as_ref().filter(|o| o.chat == chat) {
+        let remove = match self.open.as_ref().filter(|o| o.chat == chat) {
             Some(o) => (o.lo..o.hi).filter(|i| !(lo..hi).contains(i)).map(|i| messages[i].id.clone()).collect(),
             None => vec![],
         };
         let rows = messages[lo..hi].to_vec();
         let newer = (len - hi) as u64;
-        a.open = Some(Open { chat: chat.into(), following, before, lo, hi });
+        self.open = Some(Open { chat: chat.into(), following, before, lo, hi });
         let update = Window {
             upsert: rows,
             remove,
@@ -575,50 +600,104 @@ impl Jawd for Demo {
             moved: Some(Moved { place, newer }),
             seq: 0,
         };
-        a.send(Update::Messages { chat: chat.into(), update });
+        self.send(Update::Messages { chat: chat.into(), update });
     }
 
-    fn send_text(&mut self, chat: &str, text: &str) {
-        let mut a = self.lock();
-        let Some(&t) = a.index.get(chat) else { return };
-        let at = a.now();
-        let m = a.message(at, None, markup(text), Some(Tick::Pending));
+    fn on_send_text(&mut self, chat: &str, text: &str) {
+        let Some(&t) = self.index.get(chat) else { return };
+        let at = self.now();
+        let m = self.message(at, None, markup(text), Some(Tick::Pending));
         let (chat, id) = (chat.to_string(), m.id.clone());
-        a.arrive(t, m);
-        if a.connection.state == ConnectionState::Offline {
-            a.send(Update::Notice("offline: it goes when WhatsApp is back".into()));
+        self.arrive(t, m);
+        if self.connection.state == ConnectionState::Offline {
+            self.send(Update::Notice("offline: it goes when WhatsApp is back".into()));
             return;
         }
-        a.after(400, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Sent });
-        a.after(1_200, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Delivered });
-        a.after(3_500, Later::Tick { chat, id, tick: Tick::Read });
-        drop(a);
-        self.wake();
+        self.after(400, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Sent });
+        self.after(1_200, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Delivered });
+        self.after(3_500, Later::Tick { chat, id, tick: Tick::Read });
     }
 
-    fn draft(&mut self, chat: &str, text: &str) {
-        let mut a = self.lock();
-        let Some(&t) = a.index.get(chat) else { return };
-        let c = &mut a.threads[t].chat;
+    fn on_draft(&mut self, chat: &str, text: &str) {
+        let Some(&t) = self.index.get(chat) else { return };
+        let c = &mut self.threads[t].chat;
         c.draft = (!text.is_empty()).then(|| text.to_string());
         c.v += 1;
-        a.push_chat(t);
+        self.push_chat(t);
     }
 
-    fn read(&mut self, chat: &str, _up_to: &str) {
-        let mut a = self.lock();
-        let Some(&t) = a.index.get(chat) else { return };
-        let c = &mut a.threads[t].chat;
+    fn on_read(&mut self, chat: &str, _up_to: &str) {
+        let Some(&t) = self.index.get(chat) else { return };
+        let c = &mut self.threads[t].chat;
         if c.unread > 0 || c.mentions > 0 {
             c.unread = 0;
             c.mentions = 0;
             c.v += 1;
-            a.push_chat(t);
+            self.push_chat(t);
         }
     }
 
+    fn on_opened(&mut self, chat: &str) {
+        *self.opens.entry(chat.to_string()).or_default() += 1;
+    }
+
+    fn on_start_chat(&mut self, person: &str) {
+        let Some(i) = self.contacts.iter().position(|p| p.id == person) else { return };
+        let p = self.contacts.remove(i);
+        let digits: String = p.phone.unwrap_or_default().chars().filter(char::is_ascii_digit).collect();
+        let now = self.now();
+        let mut w = Writing::new(&format!("{digits}@s.whatsapp.net"), &p.name, ChatKind::Direct, now);
+        w.thread.chat.sort = format!("0~{now:013}");
+        let thread = w.done(0, 0);
+        let chat = thread.chat.clone();
+        let at = self.threads.len();
+        self.index.insert(chat.id.clone(), at);
+        self.threads.push(thread);
+        let total = self.total();
+        self.send(Update::Chats(Window { upsert: vec![chat.clone()], total: Some(total), ..Window::default() }));
+        self.send(Update::ChatStarted { chat });
+    }
+
+    fn on_link_start(&mut self, phone: Option<String>) {
+        match phone {
+            None => self.send_qr(),
+            Some(_) => {
+                self.send(Update::Link(LinkStep::Code { code: "K4PM-7XQ2".into() }));
+                self.after(8_000, Later::Linked);
+            }
+        }
+    }
+}
+
+impl Jawd for Demo {
+    /// The made-up account's list fits one window, so it sends every chat wherever it's asked.
+    fn watch_chats(&mut self, place: Place) {
+        self.defer(move |a| a.on_watch_chats(place));
+    }
+
+    fn watch_messages(&mut self, chat: &str, place: Place) {
+        let chat = chat.to_string();
+        self.defer(move |a| a.on_watch_messages(&chat, place));
+    }
+
+    fn send_text(&mut self, chat: &str, text: &str) {
+        let (chat, text) = (chat.to_string(), text.to_string());
+        self.defer(move |a| a.on_send_text(&chat, &text));
+    }
+
+    fn draft(&mut self, chat: &str, text: &str) {
+        let (chat, text) = (chat.to_string(), text.to_string());
+        self.defer(move |a| a.on_draft(&chat, &text));
+    }
+
+    fn read(&mut self, chat: &str, up_to: &str) {
+        let (chat, up_to) = (chat.to_string(), up_to.to_string());
+        self.defer(move |a| a.on_read(&chat, &up_to));
+    }
+
     fn opened(&mut self, chat: &str) {
-        *self.lock().opens.entry(chat.to_string()).or_default() += 1;
+        let chat = chat.to_string();
+        self.defer(move |a| a.on_opened(&chat));
     }
 
     fn typing(&mut self, _chat: &str, _state: Typing) {}
@@ -630,33 +709,20 @@ impl Jawd for Demo {
     }
 
     fn start_chat(&mut self, person: &str) {
-        let mut a = self.lock();
-        let Some(i) = a.contacts.iter().position(|p| p.id == person) else { return };
-        let p = a.contacts.remove(i);
-        let digits: String = p.phone.unwrap_or_default().chars().filter(char::is_ascii_digit).collect();
-        let now = a.now();
-        let mut w = Writing::new(&format!("{digits}@s.whatsapp.net"), &p.name, ChatKind::Direct, now);
-        w.thread.chat.sort = format!("0~{now:013}");
-        let thread = w.done(0, 0);
-        let chat = thread.chat.clone();
-        let at = a.threads.len();
-        a.index.insert(chat.id.clone(), at);
-        a.threads.push(thread);
-        let total = a.total();
-        a.send(Update::Chats(Window { upsert: vec![chat.clone()], total: Some(total), ..Window::default() }));
-        a.send(Update::ChatStarted { chat });
+        let person = person.to_string();
+        self.defer(move |a| a.on_start_chat(&person));
     }
 
     fn mute(&mut self, chat: &str, until: Option<i64>) {
-        self.change(chat, |c| c.muted_until = until);
+        self.change(chat, move |c| c.muted_until = until);
     }
 
     fn archive(&mut self, chat: &str, archived: bool) {
-        self.change(chat, |c| c.archived = archived);
+        self.change(chat, move |c| c.archived = archived);
     }
 
     fn pin(&mut self, chat: &str, pinned: bool) {
-        self.change(chat, |c| {
+        self.change(chat, move |c| {
             c.pinned = pinned;
             let at = c.sort.split_once('~').map_or("0", |(_, at)| at).to_string();
             c.sort = format!("{}~{at}", u8::from(pinned));
@@ -664,20 +730,11 @@ impl Jawd for Demo {
     }
 
     fn mark_unread(&mut self, chat: &str, unread: bool) {
-        self.change(chat, |c| c.marked_unread = unread);
+        self.change(chat, move |c| c.marked_unread = unread);
     }
 
     fn link_start(&mut self, phone: Option<String>) {
-        let mut a = self.lock();
-        match phone {
-            None => a.send_qr(),
-            Some(_) => {
-                a.send(Update::Link(LinkStep::Code { code: "K4PM-7XQ2".into() }));
-                a.after(8_000, Later::Linked);
-            }
-        }
-        drop(a);
-        self.wake();
+        self.defer(move |a| a.on_link_start(phone));
     }
 }
 
