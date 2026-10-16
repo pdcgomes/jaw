@@ -66,6 +66,7 @@ fn message(id: &str, v: u64, sort: &str) -> Message {
         system: None,
         media: None,
         album: None,
+        voice: None,
     }
 }
 
@@ -149,8 +150,8 @@ fn single_keys_act_on_the_selected_message_and_others_type() {
     assert_eq!(v.take_effects(), [Effect::Copy("vens jantar sexta? a tua mãe pergunta".into())]);
     press(&mut v, &rx, "r");
     assert!(frame(&mut v).contains("replying comes with M2"), "a key for later says when it comes");
-    press(&mut v, &rx, "<up><up>\n");
-    assert!(frame(&mut v).contains("playing voice messages comes with M5"));
+    press(&mut v, &rx, "<up>\n");
+    assert!(frame(&mut v).contains("there's nothing to open in this one"));
     press(&mut v, &rx, "ok");
     assert_eq!((v.focus.clone(), v.composer.text()), (Focus::Typing, "ok"), "a key that acts on nothing types");
 }
@@ -742,7 +743,7 @@ fn without_colour_photos_are_their_summary_lines() {
     v.laid.clear();
     run::settle(&mut v, &rx);
     let screen = frame(&mut v);
-    assert!(screen.lines().all(|l| blocks_on(l).is_empty()), "{screen}");
+    assert!(!screen.contains('▀'), "{screen}");
     assert!(screen.contains("▣ photo · 4032 × 3024"));
 }
 
@@ -811,4 +812,191 @@ fn a_picture_that_has_stood_still_wakes_the_loop_to_be_drawn_with_its_escape() {
     assert!(v.dirty, "and once woken there's a frame to draw");
     frame(&mut v);
     assert!(String::from_utf8_lossy(&v.take_writes()).contains("\x1b]1337;File="));
+}
+
+/// The open chat's voice message lasting `seconds`.
+fn voice_message(v: &View, seconds: f64) -> Message {
+    let w = v.messages.as_ref().unwrap();
+    let mut at = w.oldest().cloned();
+    while let Some(m) = at {
+        if m.voice.as_ref().is_some_and(|x| x.seconds == seconds) {
+            return m;
+        }
+        at = w.after(&m.sort).cloned();
+    }
+    panic!("no voice message of {seconds} s")
+}
+
+fn playback(m: &Message, state: crate::data::PlayState, at: f64) -> Update {
+    Update::Playback(crate::data::Playback {
+        message: Some(m.id.clone()),
+        state,
+        at,
+        seconds: m.voice.as_ref().unwrap().seconds,
+        speed: 1.0,
+        error: None,
+    })
+}
+
+fn line_with<'a>(screen: &'a str, text: &str) -> &'a str {
+    screen.lines().find(|l| l.contains(text)).unwrap_or_else(|| panic!("{text} isn't on screen:\n{screen}"))
+}
+
+/// The waveform's cells on a line.
+fn bars(line: &str) -> usize {
+    line.chars().filter(|c| ('▁'..='█').contains(c)).count()
+}
+
+#[test]
+fn a_voice_message_is_its_waveform_and_length_with_a_dot_until_played_at_140_100_and_80_columns() {
+    for (width, keys) in [(140, ""), (100, ""), (80, "\n")] {
+        let (mut v, rx) = view(width, 40);
+        press(&mut v, &rx, keys);
+        let screen = frame(&mut v);
+        let line = line_with(&screen, "0:14");
+        assert!(line.contains("Ana   ▶ "), "at {width}:\n{screen}");
+        assert_eq!(bars(line), crate::layout::WAVE, "two of the 64 points to a cell at {width}:\n{screen}");
+        assert!(line.contains("0:14 ●"), "not played yet, at {width}:\n{screen}");
+    }
+}
+
+#[test]
+fn a_narrow_conversation_narrows_the_waveform_and_your_own_has_no_dot() {
+    let (mut v, rx) = view(52, 40);
+    press(&mut v, &rx, "\n");
+    let screen = frame(&mut v);
+    let line = line_with(&screen, "0:14");
+    assert!(bars(line) < crate::layout::WAVE && bars(line) >= 4, "{screen}");
+    assert!(line.ends_with('│') && line.contains("0:14 ●"), "it all fits on its line:\n{screen}");
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<a-down><a-down><a-down><a-down><a-down><a-down>");
+    assert_eq!(v.open.as_deref(), Some("jantar"));
+    let screen = frame(&mut v);
+    let mine = line_with(&screen, "0:06");
+    assert!(!mine.contains('●') && mine.contains("✓✓"), "{screen}");
+}
+
+#[test]
+fn enter_plays_a_voice_message_its_playhead_moves_with_jawds_pushes_and_enter_pauses_it() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up><up><up>");
+    let m = voice_message(&v, 14.0);
+    assert_eq!(v.focus, Focus::Message(m.id.clone()));
+    press(&mut v, &rx, "\n");
+    let screen = frame(&mut v);
+    let line = line_with(&screen, "0:14");
+    assert!(
+        line.contains("⏸ ") && line.contains("0:00 / 0:14") && !line.contains('●'),
+        "played, the dot goes:\n{screen}"
+    );
+    assert!(screen.contains("⏎ pause") && screen.contains("←→ seek"), "{screen}");
+    v.apply(playback(&m, crate::data::PlayState::Playing, 7.0));
+    let at = |v: &View| v.play_of(&m.id).map(|p| p.at);
+    assert_eq!(at(&v), Some(70));
+    assert!(frame(&mut v).contains("0:07 / 0:14"));
+    press(&mut v, &rx, "\n");
+    let screen = frame(&mut v);
+    assert!(line_with(&screen, "/ 0:14").contains("▶ "), "paused, it keeps its place:\n{screen}");
+    press(&mut v, &rx, "\n");
+    assert!(frame(&mut v).contains("⏸ "), "and carries on from there");
+}
+
+#[test]
+fn left_and_right_seek_the_one_playing_and_x_steps_through_the_speeds() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up><up><up>\n<right><right>");
+    assert!(frame(&mut v).contains("0:10 / 0:14"));
+    press(&mut v, &rx, "<left>");
+    assert!(frame(&mut v).contains("0:05 / 0:14"));
+    press(&mut v, &rx, "x");
+    assert!(frame(&mut v).contains("0:05 / 0:14 · 1.5×"));
+    press(&mut v, &rx, "x");
+    assert!(frame(&mut v).contains("0:05 / 0:14 · 2×"));
+    press(&mut v, &rx, "x");
+    let screen = frame(&mut v);
+    assert!(!line_with(&screen, "0:05 / 0:14").contains('×'), "back to 1×:\n{screen}");
+}
+
+#[test]
+fn x_on_a_voice_message_not_playing_says_the_speed_the_next_will_play_at() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up><up><up>x");
+    assert!(frame(&mut v).contains("voice messages play at 1.5×"));
+    press(&mut v, &rx, "\n");
+    assert!(frame(&mut v).contains("0:00 / 0:14 · 1.5×"));
+}
+
+#[test]
+fn when_one_ends_the_next_one_not_yet_played_plays_and_one_plays_at_a_time() {
+    let (mut v, rx) = view(140, 50);
+    press(&mut v, &rx, "<a-down><a-down><a-down>");
+    let (first, next) = (voice_message(&v, 31.0), voice_message(&v, 9.0));
+    v.toggle_voice(&first);
+    run::settle(&mut v, &rx);
+    v.apply(playback(&first, crate::data::PlayState::Ended, 31.0));
+    assert_eq!(v.playing.as_ref().and_then(|p| p.message.clone()), Some(next.id.clone()));
+    v.toggle_voice(&first);
+    v.apply(playback(&next, crate::data::PlayState::Playing, 2.0));
+    assert_eq!(
+        v.playing.as_ref().and_then(|p| p.message.clone()),
+        Some(first.id.clone()),
+        "a late push undoes nothing"
+    );
+    v.apply(playback(&next, crate::data::PlayState::Stopped, 2.0));
+    assert!(v.play_of(&first.id).is_some(), "the one stopped was the one before");
+}
+
+#[test]
+fn ctrl_r_records_with_its_levels_and_time_and_enter_sends_it() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<c-r>");
+    let screen = frame(&mut v);
+    assert!(screen.contains("● recording") && screen.contains("⏎ sends  ctrl-r stops to listen  esc throws it away"));
+    for (i, level) in [10u8, 60, 95, 40].iter().enumerate() {
+        let r = crate::data::Recorded {
+            state: crate::data::RecordState::Recording,
+            seconds: 3.0 + i as f64 * 0.1,
+            level: Some(*level),
+            waveform: vec![],
+            end: None,
+            reason: None,
+            error: None,
+        };
+        v.apply(Update::Recorded(r));
+    }
+    let screen = frame(&mut v);
+    assert!(line_with(&screen, "● recording").contains("0:03"), "{screen}");
+    assert!(screen.contains("▂▅█▄"), "the levels as they came:\n{screen}");
+    press(&mut v, &rx, "abc<a-down>");
+    assert_eq!((v.composer.text(), v.open.as_deref()), ("", Some("ana")), "keys wait while it records");
+    press(&mut v, &rx, "\n");
+    let screen = frame(&mut v);
+    assert!(!screen.contains("● recording") && screen.contains("⏎ send"), "{screen}");
+    let sent = v.messages.as_ref().unwrap().newest().unwrap().clone();
+    assert!(sent.mine && sent.kind == Kind::Voice && sent.voice.is_some(), "{sent:?}");
+}
+
+#[test]
+fn ctrl_r_again_stops_it_to_listen_and_esc_throws_it_away() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<c-r><c-r>");
+    let screen = frame(&mut v);
+    assert!(screen.contains("● recorded") && screen.contains("ctrl-r pauses"), "listening to it:\n{screen}");
+    assert!(v.listening().is_some());
+    press(&mut v, &rx, "<c-r>");
+    assert!(frame(&mut v).contains("ctrl-r listens"));
+    let before = v.messages.as_ref().unwrap().newest().unwrap().id.clone();
+    press(&mut v, &rx, "<esc>");
+    let screen = frame(&mut v);
+    assert!(!screen.contains("● record") && v.listening().is_none(), "{screen}");
+    assert_eq!(v.messages.as_ref().unwrap().newest().unwrap().id, before, "nothing was sent");
+}
+
+#[test]
+fn jawd_turning_voice_down_brings_the_box_back_and_says_why() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<c-r>");
+    v.apply(Update::VoiceRefused("voice comes with the next step".into()));
+    let screen = frame(&mut v);
+    assert!(!screen.contains("● recording") && screen.contains("voice comes with the next step"), "{screen}");
 }

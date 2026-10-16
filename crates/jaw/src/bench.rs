@@ -30,6 +30,8 @@ pub struct Flood {
     pub jawd: bool,
     /// What the terminal draws pictures with; the cells are 8 by 16 pixels.
     pub pictures: Protocol,
+    /// Whether a voice message plays all along, its playhead pushed ten times a second.
+    pub voice: bool,
 }
 
 /// `jawd bench feed` writing its flood, for as long as the bench needs it.
@@ -77,6 +79,8 @@ pub struct Report {
     pub peak_bytes: u64,
     /// What was written to the terminal beside the frames: pictures sent and drawn.
     pub written: u64,
+    /// Where the voice message playing had got by the end, as its pushes said.
+    pub voice_at: Option<f64>,
 }
 
 impl Report {
@@ -90,7 +94,7 @@ impl Report {
     pub fn describe(&self) -> String {
         let ms = |d: Duration| format!("{:.2} ms", d.as_secs_f64() * 1e3);
         format!(
-            "keys       {} drawn: p50 {}, p99 {}, slowest {}\nmessages   {} in {:.1} s, {:.0} a second\nframes     {}, {:.0} a second\nfirst      the first frame with a conversation in {}\nmemory     {:.1} MB at most\npictures   {:.1} MB written to the terminal",
+            "keys       {} drawn: p50 {}, p99 {}, slowest {}\nmessages   {} in {:.1} s, {:.0} a second\nframes     {}, {:.0} a second\nfirst      the first frame with a conversation in {}\nmemory     {:.1} MB at most\npictures   {:.1} MB written to the terminal{}",
             self.keys.len(),
             ms(self.at(0.5)),
             ms(self.at(0.99)),
@@ -103,6 +107,7 @@ impl Report {
             ms(self.first_frame),
             self.peak_bytes as f64 / 1e6,
             self.written as f64 / 1e6,
+            self.voice_at.map_or(String::new(), |at| format!("\nvoice      playing, at {}", crate::fmt::length(at))),
         )
     }
 }
@@ -171,6 +176,10 @@ pub fn flood(f: &Flood) -> Result<Report> {
     } else {
         let demo = Demo::start(tx.clone(), Clock::Wall, State::Online, false);
         demo.answer_on_a_thread();
+        if f.voice {
+            demo.keep_voice_time();
+            demo.play_newest_voice("ana");
+        }
         let flooding = demo.flood(f.rate, length);
         (View::new(Box::new(demo)), Some(flooding), None)
     };
@@ -229,6 +238,7 @@ pub fn flood(f: &Flood) -> Result<Report> {
         first_frame: probe.first.map_or(Duration::ZERO, |t| t - start),
         peak_bytes: peak_bytes(),
         written,
+        voice_at: view.playing.as_ref().map(|p| p.at),
     })
 }
 
@@ -255,6 +265,7 @@ mod tests {
             palette: false,
             jawd: false,
             pictures: Protocol::Blocks,
+            voice: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
@@ -276,10 +287,33 @@ mod tests {
             palette: false,
             jawd: false,
             pictures: Protocol::Kitty,
+            voice: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
         assert!(report.written > 0, "the pictures were sent: {}", report.describe());
+        assert!(report.at(0.99) <= Duration::from_millis(16), "{}", report.describe());
+    }
+
+    #[test]
+    fn with_a_voice_message_playing_a_keypress_is_drawn_within_16_ms_at_p99_while_2000_messages_a_second_arrive() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let report = flood(&Flood {
+            width: 140,
+            height: 40,
+            rate: 2_000,
+            seconds: 4.0,
+            every: Duration::from_millis(12),
+            warm: Duration::from_secs(1),
+            palette: false,
+            jawd: false,
+            pictures: Protocol::Blocks,
+            voice: true,
+        })
+        .unwrap();
+        eprintln!("{}", report.describe());
+        assert!(report.voice_at.is_some_and(|at| at >= 3.0), "it played all along: {}", report.describe());
+        assert!(report.keys.len() >= 200, "{}", report.describe());
         assert!(report.at(0.99) <= Duration::from_millis(16), "{}", report.describe());
     }
 
@@ -296,6 +330,7 @@ mod tests {
             palette: true,
             jawd: false,
             pictures: Protocol::Blocks,
+            voice: false,
         };
         let report = super::flood(&flood).unwrap();
         eprintln!("{}", report.describe());
@@ -316,6 +351,7 @@ mod tests {
             palette: false,
             jawd: false,
             pictures: Protocol::Blocks,
+            voice: false,
         })
         .unwrap();
         assert!(report.keys.is_empty());

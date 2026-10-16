@@ -87,6 +87,21 @@ pub fn num(n: u64) -> String {
     out
 }
 
+/// How long something lasts, as a player says it: 0:14, 12:03, 1:02:03.
+pub fn length(seconds: f64) -> String {
+    let s = seconds.max(0.0) as u64;
+    match s / 3600 {
+        0 => format!("{}:{:02}", s / 60, s % 60),
+        h => format!("{h}:{:02}:{:02}", s / 60 % 60, s % 60),
+    }
+}
+
+/// A playing speed as its button says it: 1, 1.5, 2.
+pub fn speed(speed: f64) -> String {
+    let tenths = (speed * 10.0).round() as u32;
+    if tenths.is_multiple_of(10) { (tenths / 10).to_string() } else { format!("{}.{}", tenths / 10, tenths % 10) }
+}
+
 pub fn width(s: &str) -> usize {
     s.width()
 }

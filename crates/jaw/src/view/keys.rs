@@ -18,7 +18,7 @@ fn opens(kind: Kind) -> &'static str {
         Kind::Image | Kind::Video | Kind::Gif | Kind::VideoNote | Kind::Document | Kind::Sticker => {
             "opening photos, videos and files comes with M3"
         }
-        Kind::Voice | Kind::Audio => "playing voice messages comes with M5",
+        Kind::Audio => "playing audio files comes later",
         Kind::Location | Kind::LiveLocation | Kind::Contact | Kind::Poll | Kind::Event => "opening these comes with M2",
         _ => "there's nothing to open in this one",
     }
@@ -83,6 +83,10 @@ impl View {
             self.on_palette_key(k);
             return;
         }
+        if self.recorder.is_some() && self.reach == super::Reach::Up {
+            self.on_recorder_key(k, ctrl);
+            return;
+        }
         if ctrl && k.code == KeyCode::Char('k') && self.reach == super::Reach::Up && !self.linking() {
             self.palette_open();
             return;
@@ -113,6 +117,10 @@ impl View {
     }
 
     fn on_typing_key(&mut self, k: KeyEvent, ctrl: bool, alt: bool) {
+        if ctrl && k.code == KeyCode::Char('r') {
+            self.record();
+            return;
+        }
         let before = self.composer.text().to_string();
         let c = &mut self.composer;
         match k.code {
@@ -217,7 +225,20 @@ impl View {
             }
             Some(at)
         };
+        if m.kind == Kind::Voice && !ctrl && !alt {
+            match k.code {
+                KeyCode::Enter => return self.toggle_voice(&m),
+                KeyCode::Left if self.seek_voice(&m, -1.0) => return,
+                KeyCode::Right if self.seek_voice(&m, 1.0) => return,
+                KeyCode::Char('x') => return self.next_speed(&m),
+                _ => {}
+            }
+        }
         match k.code {
+            KeyCode::Char('r') if ctrl => {
+                self.focus = Focus::Typing;
+                self.record();
+            }
             KeyCode::Esc => self.focus = Focus::Typing,
             KeyCode::Up | KeyCode::Char('k') if !ctrl && !alt => {
                 if let Some(prev) = step(self, -1) {

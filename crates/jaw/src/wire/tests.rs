@@ -139,7 +139,10 @@ fn jaw_draws_what_jawd_sends_through_the_client() {
     assert!(screen.contains("Ana Ribeiro") && screen.contains("Lisbon Climbing"), "{screen}");
     assert!(screen.contains("did you get the photos from Sunday?") && screen.contains("❤ 2"), "{screen}");
     assert!(screen.contains("┃ Ana did you get the photos from Sunday?"), "a reply's quote, from its row:\n{screen}");
-    assert!(screen.contains("▶ voice message"), "a kind with no summary from jawd yet has jaw's:\n{screen}");
+    assert!(
+        screen.contains("▶ ▁▁▁▁▂▂▂▂▄▄▄▄") && screen.contains("  0:14"),
+        "a voice message's waveform, from its row:\n{screen}"
+    );
 }
 
 #[test]
@@ -265,4 +268,14 @@ fn on_a_real_jawd_jaw_draws_at_140_100_and_80_columns_and_keeps_its_screen_throu
         before.lines().skip(1).collect::<Vec<_>>(),
         "back without a jump"
     );
+}
+
+#[test]
+fn recording_before_jawd_serves_voice_says_it_comes_with_the_next_step_and_the_box_comes_back() {
+    let jawd = scripted();
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<c-r>").unwrap();
+    let screen = until(&mut v, &rx, "voice comes with the next step");
+    assert!(!screen.contains("● recording"), "the box is a box again:\n{screen}");
+    assert!(jawd.refused.lock().unwrap().contains(&"voice.record".to_string()));
 }

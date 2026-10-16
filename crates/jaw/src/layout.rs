@@ -3,7 +3,7 @@
 //! changes. Laying one out is the costly part of a frame, so the view keeps what this returns per
 //! message, version and width, and lays out only what's on screen.
 
-use crate::data::{Kind, Message, SpanKind, Tick};
+use crate::data::{Kind, Message, SpanKind, Tick, Voice};
 use crate::fmt;
 use crate::theme::Theme;
 use chrono::FixedOffset;
@@ -32,6 +32,77 @@ pub struct Shape {
     pub unfolded: bool,
     /// Whether its pictures are drawn: not once none of their previews could be read.
     pub pictured: bool,
+    /// For the voice message playing or paused: where.
+    pub play: Option<Play>,
+}
+
+/// Where a voice message's playhead is, in steps its line can show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Play {
+    /// Tenths of a second in.
+    pub at: u32,
+    pub paused: bool,
+    /// Tenths: 10, 15 or 20.
+    pub speed: u8,
+}
+
+/// A waveform's heights, the lowest a bar of silence.
+const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// The most cells a voice message's waveform takes: two of its 64 points to a cell.
+pub const WAVE: usize = 32;
+
+/// One level, 0 to 100, as a bar.
+pub fn bar(level: u8) -> char {
+    BARS[(level.min(100) as usize * 7 + 50) / 100]
+}
+
+/// A waveform in `cells` cells, each the loudest of the points it covers.
+pub fn waveform(points: &[u8], cells: usize) -> String {
+    if points.is_empty() {
+        return BARS[0].to_string().repeat(cells);
+    }
+    let n = points.len();
+    (0..cells)
+        .map(|i| {
+            let from = (i * n / cells).min(n - 1);
+            let to = ((i + 1) * n / cells).clamp(from + 1, n);
+            bar(points[from..to].iter().copied().max().unwrap_or(0))
+        })
+        .collect()
+}
+
+/// A voice message's line: ▶ or ⏸, its waveform with the part played bright, its length and
+/// where it's got, the speed when it isn't 1×, and a dot until you've played it.
+fn voice(m: &Message, v: &Voice, play: Option<Play>, room: usize, ctx: &Ctx) -> Vec<(String, Style)> {
+    let t = ctx.theme;
+    let playing = play.is_some_and(|p| !p.paused);
+    let mut tail = match play {
+        Some(p) => format!("  {} / {}", fmt::length(p.at as f64 / 10.0), fmt::length(v.seconds)),
+        None => format!("  {}", fmt::length(v.seconds)),
+    };
+    if let Some(p) = play.filter(|p| p.speed != 10) {
+        tail.push_str(&format!(" · {}×", fmt::speed(p.speed as f64 / 10.0)));
+    }
+    let dot = !m.mine && !v.played;
+    let cells = room.saturating_sub(2 + tail.width() + if dot { 2 } else { 0 }).clamp(4, WAVE);
+    let bars = waveform(&v.waveform, cells);
+    let mut out = vec![(if playing { "⏸ " } else { "▶ " }.to_string(), Style::new().fg(t.focus))];
+    match play {
+        Some(p) => {
+            let done = p.at as f64 / 10.0 / v.seconds.max(0.1);
+            let played = ((done * cells as f64).round() as usize).min(cells);
+            let split = bars.char_indices().nth(played).map_or(bars.len(), |(i, _)| i);
+            out.push((bars[..split].to_string(), Style::new().fg(t.progress)));
+            out.push((bars[split..].to_string(), Style::new().fg(t.comment)));
+        }
+        None => out.push((bars, Style::new().fg(t.muted))),
+    }
+    out.push((tail, Style::new().fg(t.muted)));
+    if dot {
+        out.push((" ●".into(), Style::new().fg(t.unread)));
+    }
+    out.retain(|(s, _)| !s.is_empty());
+    out
 }
 
 pub struct Ctx<'a> {
@@ -239,8 +310,9 @@ pub fn ticks(tick: Tick, t: &Theme) -> Span<'static> {
     }
 }
 
-/// The text of a message as styled segments, from jawd's spans.
-fn body(m: &Message, ctx: &Ctx) -> Vec<(String, Style)> {
+/// The text of a message as styled segments, from jawd's spans; a voice message's line is drawn
+/// to fit `room`.
+fn body(m: &Message, play: Option<Play>, room: usize, ctx: &Ctx) -> Vec<(String, Style)> {
     let t = ctx.theme;
     let plain = Style::new().fg(t.fg);
     let dim = Style::new().fg(t.comment).add_modifier(Modifier::ITALIC);
@@ -249,7 +321,14 @@ fn body(m: &Message, ctx: &Ctx) -> Vec<(String, Style)> {
         return vec![(said.into(), dim)];
     }
     let mut out = vec![];
-    if m.kind != Kind::Text {
+    if m.kind == Kind::Voice
+        && let Some(v) = &m.voice
+    {
+        out.extend(voice(m, v, play, room, ctx));
+        if !m.spans.is_empty() {
+            out.push(("\n".into(), plain));
+        }
+    } else if m.kind != Kind::Text {
         let s = summary(m);
         let style = if m.kind == Kind::Unknown { dim } else { Style::new().fg(t.muted) };
         out.push((s, style));
@@ -326,7 +405,8 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
         segments.push((fmt::fit(&fmt::one_line(&q.summary), room), Style::new().fg(t.comment)));
         segments.push(("\n".into(), Style::new()));
     }
-    segments.extend(body(m, ctx));
+    let room = if m.reply.is_some() { text_w } else { first_w };
+    segments.extend(body(m, shape.play, room, ctx));
     if m.edited && !m.deleted {
         segments.push(("  edited".into(), Style::new().fg(t.comment)));
     }
@@ -437,6 +517,7 @@ mod tests {
             system: None,
             media: None,
             album: None,
+            voice: None,
         }
     }
 
@@ -451,7 +532,9 @@ mod tests {
         let theme = Theme::with(true);
         let me = ["person:0".to_string()];
         let ctx = Ctx { theme: &theme, tz: UTC, me: &me, pictures: false, cell: (8, 16), sharp: false };
-        shown(&laid(m, Shape { width, name: true, time: true, unfolded: false, pictured: true }, &ctx).lines)
+        shown(
+            &laid(m, Shape { width, name: true, time: true, unfolded: false, pictured: true, play: None }, &ctx).lines,
+        )
     }
 
     #[test]
@@ -525,5 +608,35 @@ mod tests {
         let lines = lay(&m, 50);
         assert_eq!(lines.len(), FOLD + 1);
         assert!(lines[FOLD].contains("21 more lines"), "{}", lines[FOLD]);
+    }
+
+    #[test]
+    fn a_waveform_takes_the_loudest_of_the_points_each_cell_covers() {
+        let points: Vec<u8> = (0..64).map(|i| if i % 2 == 0 { 0 } else { 100 }).collect();
+        assert_eq!(waveform(&points, 32), "█".repeat(32));
+        assert_eq!(waveform(&points[..2], 4), "▁▁██");
+        assert_eq!(waveform(&[], 3), "▁▁▁");
+        assert_eq!(waveform(&[0, 50, 100], 3), "▁▅█");
+    }
+
+    #[test]
+    fn a_voice_messages_played_part_is_bright_and_the_rest_quiet() {
+        let theme = Theme::with(true);
+        let me: Vec<String> = vec![];
+        let ctx = Ctx { theme: &theme, tz: UTC, me: &me, pictures: false, cell: (8, 16), sharp: false };
+        let mut m = theirs("");
+        m.spans = vec![];
+        m.kind = Kind::Voice;
+        m.voice = Some(Voice { seconds: 10.0, waveform: vec![50; 64], played: false });
+        let play = Some(Play { at: 50, paused: false, speed: 15 });
+        let segments = voice(&m, m.voice.as_ref().unwrap(), play, 60, &ctx);
+        let text: String = segments.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(text.starts_with("⏸ ") && text.ends_with("  0:05 / 0:10 · 1.5× ●"), "{text}");
+        let bars = |colour| -> usize {
+            let shown = segments.iter().filter(|(_, st)| st.fg == Some(colour));
+            shown.map(|(s, _)| s.chars().filter(|c| BARS.contains(c)).count()).sum()
+        };
+        let (progress, rest) = (bars(theme.progress), bars(theme.comment));
+        assert_eq!((progress, rest), (16, 16));
     }
 }

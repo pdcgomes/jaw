@@ -139,6 +139,87 @@ pub struct Message {
     /// For an album: its photos and videos.
     #[serde(default)]
     pub album: Option<Album>,
+    /// For a voice message: its length and waveform, and whether you've played it.
+    #[serde(default)]
+    pub voice: Option<Voice>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Voice {
+    #[serde(default)]
+    pub seconds: f64,
+    /// 64 values from 0 to 100, as WhatsApp sends them.
+    #[serde(default)]
+    pub waveform: Vec<u8>,
+    /// On someone else's: whether you've played it, which the played receipt said once.
+    #[serde(default)]
+    pub played: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayState {
+    Playing,
+    Paused,
+    /// It played to its end.
+    Ended,
+    /// Another message or a recording took over.
+    Stopped,
+    Failed,
+}
+
+/// jawd's `playback` push: what's playing or paused, and where its playhead is.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Playback {
+    /// The voice message, or none for the recording being listened to.
+    #[serde(default)]
+    pub message: Option<String>,
+    pub state: PlayState,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default)]
+    pub seconds: f64,
+    #[serde(default = "one")]
+    pub speed: f64,
+    /// Why it failed, in words to show.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordState {
+    Recording,
+    /// The microphone has given only silence for a second, as when jawd isn't allowed it.
+    Silent,
+    Stopped,
+    Cancelled,
+    Failed,
+}
+
+/// jawd's `recording` push.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Recorded {
+    pub state: RecordState,
+    #[serde(default)]
+    pub seconds: f64,
+    /// While recording: how loud, 0 to 100, ten times a second.
+    #[serde(default)]
+    pub level: Option<u8>,
+    /// Once stopped: its 64-point waveform.
+    #[serde(default)]
+    pub waveform: Vec<u8>,
+    /// Once stopped: `stopped`, `limit` or `interrupted`, with `reason` for the last.
+    #[serde(default)]
+    pub end: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// A message's file as an interface draws it: its size in pixels, how long it lasts, and the
@@ -459,6 +540,10 @@ pub enum Update {
         why: String,
         retry_in: i64,
     },
+    Playback(Playback),
+    Recorded(Recorded),
+    /// jawd turned down something asked of voice, and why.
+    VoiceRefused(String),
 }
 
 impl Update {
@@ -545,6 +630,19 @@ pub trait Jawd {
     fn archive(&mut self, chat: &str, archived: bool);
     fn pin(&mut self, chat: &str, pinned: bool);
     fn mark_unread(&mut self, chat: &str, unread: bool);
+    /// Plays a voice message, or with `None` the stopped recording, from `at` seconds or, without
+    /// it, where it paused; `playback` pushes say how it goes.
+    fn voice_play(&mut self, message: Option<&str>, at: Option<f64>, speed: f64);
+    fn voice_pause(&mut self);
+    fn voice_seek(&mut self, at: f64);
+    fn voice_speed(&mut self, speed: f64);
+    /// Records a voice message for `chat`; `recording` pushes say how it goes.
+    fn voice_record(&mut self, chat: &str);
+    /// Stops recording and keeps it, to listen to or send.
+    fn voice_stop(&mut self);
+    /// Sends the recording, stopping it first if it's still going.
+    fn voice_send(&mut self);
+    fn voice_cancel(&mut self);
     /// What came from jawd since the last frame, for a jawd that's woken the loop for it; the
     /// made-up account sends its updates on the channel itself.
     fn drain(&mut self) -> Vec<Update> {

@@ -5,7 +5,7 @@
 
 use super::{Focus, LIST, NARROW, Overlay, Placed, Reach, Scroll, View};
 use crate::art::{self, Look};
-use crate::data::{Chat, Message, Tick};
+use crate::data::{Chat, Kind, Message, Tick};
 use crate::fmt;
 use crate::layout;
 use jaw_client::Messages;
@@ -292,8 +292,14 @@ impl View {
                 ("ctrl-c", "quit", true),
             ];
         }
+        if self.recorder.is_some() {
+            return self.recorder_hints();
+        }
         match &self.focus {
-            Focus::Message(_) => {
+            Focus::Message(id) => {
+                if let Some(m) = self.messages.as_ref().and_then(|w| w.get(id)).filter(|m| m.kind == Kind::Voice) {
+                    return self.voice_hints(m);
+                }
                 vec![
                     ("r", "reply", false),
                     ("e", "edit", false),
@@ -497,14 +503,67 @@ impl View {
             f.render_widget(centred(lines, inner), inner);
             return;
         }
-        let box_h = (self.composer.height(inner.width.saturating_sub(4) as usize) + 2) as u16;
+        let box_h = if self.recorder.is_some() {
+            3
+        } else {
+            (self.composer.height(inner.width.saturating_sub(4) as usize) + 2) as u16
+        };
         let [messages, composer] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(box_h.min(inner.height))]).areas(inner);
         self.draw_messages(f, messages);
         self.draw_composer(f, composer);
     }
 
+    /// The box while recording: its levels as they come, or once stopped the recording's
+    /// waveform with how far listening has got.
+    fn draw_recorder(&mut self, f: &mut Frame, area: Rect) {
+        let t = self.theme;
+        let Some(rec) = self.recorder.as_ref() else { return };
+        let listening = self.listening().map(|p| p.at);
+        let (said, colour) = if rec.stopped { (" ● recorded ", t.muted) } else { (" ● recording ", t.warn) };
+        let time = match listening {
+            Some(at) if rec.stopped => format!(" {} / {} ", fmt::length(at), fmt::length(rec.seconds)),
+            _ => format!(" {} ", fmt::length(rec.seconds)),
+        };
+        let block = self
+            .panel(t.focus)
+            .padding(Padding::horizontal(1))
+            .title(Line::from(Span::styled(said, Style::new().fg(colour))))
+            .title(Line::from(Span::styled(time, Style::new().fg(t.muted))).right_aligned());
+        let inner = block.inner(area);
+        let w = inner.width as usize;
+        let line = if rec.stopped {
+            let cells = w.clamp(4, 64);
+            let bars = layout::waveform(&rec.waveform, cells);
+            match listening {
+                Some(at) => {
+                    let played = ((at / rec.seconds.max(0.1) * cells as f64).round() as usize).min(cells);
+                    let split = bars.char_indices().nth(played).map_or(bars.len(), |(i, _)| i);
+                    Line::from(vec![
+                        Span::styled(bars[..split].to_string(), Style::new().fg(t.progress)),
+                        Span::styled(bars[split..].to_string(), Style::new().fg(t.comment)),
+                    ])
+                }
+                None => Line::from(Span::styled(bars, Style::new().fg(t.muted))),
+            }
+        } else if rec.silent && rec.levels.iter().all(|l| *l == 0) {
+            let said = "nothing heard: the system may not let jawd use the microphone";
+            Line::from(Span::styled(fmt::fit(said, w), Style::new().fg(t.comment)))
+        } else {
+            let shown: String =
+                rec.levels.iter().skip(rec.levels.len().saturating_sub(w)).map(|l| layout::bar(*l)).collect();
+            Line::from(Span::styled(shown, Style::new().fg(t.muted)))
+        };
+        f.render_widget(block, area);
+        self.areas.composer = inner;
+        self.areas.composer_width = w;
+        f.render_widget(Paragraph::new(line), inner);
+    }
+
     fn draw_composer(&mut self, f: &mut Frame, area: Rect) {
+        if self.recorder.is_some() {
+            return self.draw_recorder(f, area);
+        }
         let t = self.theme;
         let typing = self.focus == Focus::Typing && self.overlay.is_none();
         let mut block = self.panel(if typing { t.focus } else { t.gutter }).padding(Padding::horizontal(1));
@@ -965,7 +1024,7 @@ impl View {
             pair(("⏎", "send", true), Some(("↑ ↓", "the one before, after", true))),
             pair(("alt-⏎", "a new line", true), Some(("home end", "the oldest, the newest", true))),
             pair(("↑", "into the messages", true), Some(("y", "copy its text", true))),
-            pair(("pgup pgdn", "scroll the messages", true), Some(("⏎", "open a folded one", true))),
+            pair(("pgup pgdn", "scroll the messages", true), Some(("⏎", "unfold, play, pause", true))),
             pair(("ctrl-a e", "start, end of the line", true), Some(("r", "reply · M2", false))),
             pair(("alt-b f", "back, on a word", true), Some(("e", "edit · M2", false))),
             pair(("ctrl-w u", "cut a word, the line", true), Some(("d", "delete · M2", false))),
@@ -973,7 +1032,8 @@ impl View {
             pair(("ctrl-y", "put back what was cut", true), Some(("f", "forward · M2", false))),
             pair(("@  :", "names and emoji · M2", false), Some(("i", "info · M2", false))),
             pair(("ctrl-o", "attach · M4", false), Some(("s", "save · M3", false))),
-            pair(("ctrl-r", "record · M5", false), Some(("esc", "back to typing", true))),
+            pair(("ctrl-r", "record a voice message", true), Some(("← →  x", "seek, speed of a voice one", true))),
+            pair(("", "", true), Some(("esc", "back to typing", true))),
             Line::default(),
             head("moving", "anywhere"),
             pair(("ctrl-k", "the palette: anything", true), Some(("?", "these keys", true))),

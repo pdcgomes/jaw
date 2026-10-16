@@ -30,6 +30,8 @@ enum Asked {
     /// Something the user did, named as the footer says it: "muting".
     Did(&'static str),
     StartChat,
+    /// Playing or recording a voice message, which the interface stops showing if it's refused.
+    Voice,
     /// Background work that says nothing either way.
     Quiet,
 }
@@ -162,6 +164,7 @@ impl Wire {
             Asked::Send { chat, text } => Some(Update::Unsent { chat, text, why: why_not(failure, "sending") }),
             Asked::Did(what) => Some(Update::Notice(why_not(failure, what))),
             Asked::StartChat => Some(Update::Notice(why_not(failure, "starting a chat"))),
+            Asked::Voice => Some(Update::VoiceRefused(why_not(failure, "voice"))),
             Asked::Quiet => None,
         }
     }
@@ -247,6 +250,12 @@ impl Wire {
                 if let Some(text) = push.params["text"].as_str() {
                     out.push(Update::Notice(text.to_string()));
                 }
+            }
+            From::Push(push) if push.method == "playback" => {
+                out.extend(serde_json::from_value(push.params).ok().map(Update::Playback));
+            }
+            From::Push(push) if push.method == "recording" => {
+                out.extend(serde_json::from_value(push.params).ok().map(Update::Recorded));
             }
             // A window that couldn't move stays where it was, which the screen already shows.
             From::Window { .. } | From::Push(_) => {}
@@ -347,6 +356,45 @@ impl Jawd for Wire {
     fn mark_unread(&mut self, chat: &str, unread: bool) {
         let what = if unread { "marking a chat unread" } else { "marking a chat read" };
         self.ask("chat.mark_unread", json!({ "chat": chat, "unread": unread }), Asked::Did(what));
+    }
+
+    fn voice_play(&mut self, message: Option<&str>, at: Option<f64>, speed: f64) {
+        let mut params = match message {
+            Some(m) => json!({ "message": m, "speed": speed }),
+            None => json!({ "recording": true, "speed": speed }),
+        };
+        if let Some(at) = at {
+            params["at"] = json!(at);
+        }
+        self.ask("voice.play", params, Asked::Voice);
+    }
+
+    fn voice_pause(&mut self) {
+        self.ask("voice.pause", json!({}), Asked::Voice);
+    }
+
+    fn voice_seek(&mut self, at: f64) {
+        self.ask("voice.seek", json!({ "at": at }), Asked::Voice);
+    }
+
+    fn voice_speed(&mut self, speed: f64) {
+        self.ask("voice.speed", json!({ "speed": speed }), Asked::Voice);
+    }
+
+    fn voice_record(&mut self, chat: &str) {
+        self.ask("voice.record", json!({ "chat": chat }), Asked::Voice);
+    }
+
+    fn voice_stop(&mut self) {
+        self.ask("voice.stop", json!({}), Asked::Voice);
+    }
+
+    fn voice_send(&mut self) {
+        self.ask("voice.send", json!({}), Asked::Voice);
+    }
+
+    fn voice_cancel(&mut self) {
+        self.ask("voice.cancel", json!({}), Asked::Quiet);
     }
 
     fn drain(&mut self) -> Vec<Update> {

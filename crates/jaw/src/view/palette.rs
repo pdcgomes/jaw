@@ -54,6 +54,7 @@ pub enum Does {
     Archive(String, bool),
     Pin(String, bool),
     MarkUnread(String, bool),
+    Record,
     Keys,
     Quit,
     /// Not yet: what it says when chosen.
@@ -284,9 +285,7 @@ impl View {
             Action::new("Attach files", "photos, videos, documents", Does::Later("attaching comes with M4"))
                 .key("ctrl-o")
                 .later("M4"),
-            Action::new("Record a voice message", "", Does::Later("voice messages come with M5"))
-                .key("ctrl-r")
-                .later("M5"),
+            Action::new("Record a voice message", "in this chat", Does::Record).key("ctrl-r"),
             Action::new("Library", "everything shared", Does::Later("the library comes with M3"))
                 .key("ctrl-l")
                 .later("M3"),
@@ -569,6 +568,14 @@ impl View {
                     p.query.take();
                 }
                 self.ask();
+            }
+            Does::Record => {
+                close(self);
+                self.focus = super::Focus::Typing;
+                match self.open.is_some() {
+                    true => self.record(),
+                    false => self.say("open a chat to record for it"),
+                }
             }
             Does::GoToUnread => {
                 close(self);

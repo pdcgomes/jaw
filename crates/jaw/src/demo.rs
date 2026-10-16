@@ -6,6 +6,7 @@
 
 mod find;
 pub mod pictures;
+mod voice;
 
 use crate::data::Place;
 use crate::data::{
@@ -18,7 +19,7 @@ use jaw_client::{Moved, Update as Window};
 use jaw_proto::windows::Around;
 use jaw_proto::{Connection, ConnectionState, LinkStep};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::mpsc::Sender as Channel;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
@@ -104,6 +105,9 @@ pub struct Account {
     contacts: Vec<Person>,
     /// How often each chat was opened by hand, which `find` ranks by.
     opens: HashMap<String, u32>,
+    /// What's playing or paused, and what's being recorded.
+    player: Option<voice::Player>,
+    recorder: Option<voice::Recorder>,
 }
 
 struct Shared {
@@ -114,6 +118,9 @@ struct Shared {
     latest: AtomicU64,
     /// What the interface asked while the account was busy, for whoever takes it next.
     deferred: Mutex<Vec<Deferred>>,
+    /// Whether voice keeps time, and whether its clock thread is running.
+    clocked: AtomicBool,
+    ticking: AtomicBool,
 }
 
 type Deferred = Box<dyn FnOnce(&mut Account) + Send>;
@@ -159,6 +166,8 @@ impl Demo {
             qr: 0,
             contacts: contacts(),
             opens: HashMap::new(),
+            player: None,
+            recorder: None,
         };
         let demo = Demo {
             shared: Arc::new(Shared {
@@ -167,6 +176,8 @@ impl Demo {
                 finder: Mutex::new(None),
                 latest: AtomicU64::new(0),
                 deferred: Mutex::new(Vec::new()),
+                clocked: AtomicBool::new(live),
+                ticking: AtomicBool::new(false),
             }),
         };
         {
@@ -461,6 +472,7 @@ impl Account {
             system: None,
             media: None,
             album: None,
+            voice: None,
         }
     }
 
@@ -482,7 +494,10 @@ impl Account {
         let mention = m.spans.iter().any(|s| s.t == SpanKind::Mention && s.person.as_deref() == Some(ME));
         thread.chat.last = Some(Last {
             from: m.from.as_ref().filter(|_| thread.chat.kind == ChatKind::Group).map(|f| f.name.clone()),
-            summary: crate::fmt::one_line(&m.spans.iter().map(|s| s.s.as_str()).collect::<String>()),
+            summary: match (&m.summary, m.kind) {
+                (Some(s), k) if k != Kind::Text => s.clone(),
+                _ => crate::fmt::one_line(&m.spans.iter().map(|s| s.s.as_str()).collect::<String>()),
+            },
             status: m.status,
             at: m.at,
         });
@@ -694,6 +709,42 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_send_text(&chat, &text));
     }
 
+    fn voice_play(&mut self, message: Option<&str>, at: Option<f64>, speed: f64) {
+        let message = message.map(String::from);
+        self.defer(move |a| a.on_voice_play(message, at, speed));
+        self.clock_voice();
+    }
+
+    fn voice_pause(&mut self) {
+        self.defer(|a| a.on_voice_pause());
+    }
+
+    fn voice_seek(&mut self, at: f64) {
+        self.defer(move |a| a.on_voice_seek(at));
+    }
+
+    fn voice_speed(&mut self, speed: f64) {
+        self.defer(move |a| a.on_voice_speed(speed));
+    }
+
+    fn voice_record(&mut self, chat: &str) {
+        let chat = chat.to_string();
+        self.defer(move |a| a.on_voice_record(&chat));
+        self.clock_voice();
+    }
+
+    fn voice_stop(&mut self) {
+        self.defer(|a| a.on_voice_stop());
+    }
+
+    fn voice_send(&mut self) {
+        self.defer(|a| a.on_voice_send());
+    }
+
+    fn voice_cancel(&mut self) {
+        self.defer(|a| a.on_voice_cancel());
+    }
+
     fn draft(&mut self, chat: &str, text: &str) {
         let (chat, text) = (chat.to_string(), text.to_string());
         self.defer(move |a| a.on_draft(&chat, &text));
@@ -873,6 +924,7 @@ impl Writing {
             system: None,
             media: None,
             album: None,
+            voice: None,
         });
         self.thread.messages.last_mut().expect("just added")
     }
@@ -944,7 +996,7 @@ fn made_up(now: i64) -> Vec<Thread> {
     photo.media = Some(Box::new(pictures::media("lake")));
     w.mine(3.0, "yes, the one at the lake");
     w.mine(2.9, "a Sofia tirou mais, vou pedir-lhe");
-    w.other(1.0, Some(&ana), Kind::Voice, "▶ voice message 0:14", "");
+    voice::voiced(w.other(1.0, Some(&ana), Kind::Voice, "▶ voice message 0:14", ""), 14.0, 1, false);
     w.mine(0.9, "haha, ela vai adorar");
     w.theirs(0.0, &ana, "vens jantar *sexta*? a tua mãe pergunta");
     threads.push(w.done(1, 0));
@@ -994,7 +1046,8 @@ fn made_up(now: i64) -> Vec<Thread> {
     let video =
         w.other(wed + 1.0 * h + 42.0, Some(&rui), Kind::Video, "▶ video 0:42 · 18.4 MB", "o Tomás a nadar sozinho!");
     video.media = Some(Box::new(Media { seconds: Some(42.0), bytes: Some(18_400_000), ..pictures::media("pool") }));
-    w.other(wed + 1.0 * h + 22.0, Some(&mae), Kind::Voice, "▶ voice message 0:31", "");
+    voice::voiced(w.other(wed + 1.0 * h + 22.0, Some(&mae), Kind::Voice, "▶ voice message 0:31", ""), 31.0, 2, true);
+    voice::voiced(w.other(wed + 1.0 * h + 21.0, Some(&mae), Kind::Voice, "▶ voice message 0:09", ""), 9.0, 5, false);
     w.other(wed + 57.0, Some(&rui), Kind::Document, "▣ orcamento-obras-cozinha.pdf · 2.4 MB · 3 pages", "");
     w.other(wed + 32.0, Some(&mae), Kind::Location, "⌖ Miradouro da Senhora do Monte · Lisbon", "");
     w.other(wed + 21.0, Some(&ines), Kind::Contact, "◉ Dr.ª Marta Lopes · +351 213 456 789", "");
@@ -1027,7 +1080,9 @@ fn made_up(now: i64) -> Vec<Thread> {
     w.mine(thu - 5.0 * h - 5.0, "a sair de casa").status = Some(Tick::Sent);
     w.mine(thu - 5.0 * h - 6.0, "estou no metro").status = Some(Tick::Delivered);
     w.mine(thu - 5.0 * h - 31.0, "cheguei!");
-    w.other(thu - 5.0 * h - 33.0, None, Kind::Voice, "▶ voice message 0:06", "").status = Some(Tick::Played);
+    let mine = w.other(thu - 5.0 * h - 33.0, None, Kind::Voice, "▶ voice message 0:06", "");
+    mine.status = Some(Tick::Played);
+    voice::voiced(mine, 6.0, 3, true);
     w.mine(thu - 5.0 * h - 34.0, "esqueci-me do pão").status = Some(Tick::Failed);
     w.theirs(thu - 5.0 * h - 40.0, &sofia, "afinal chego às 21h").edited = true;
     w.theirs(thu - 5.0 * h - 41.0, &sofia, "").deleted = true;
@@ -1041,7 +1096,7 @@ fn made_up(now: i64) -> Vec<Thread> {
     threads.push(w.done(0, 0));
 
     let mut w = Writing::new("sofia", "Sofia Martins", ChatKind::Direct, now);
-    w.other(4.0 * 24.0 * h, Some(&sofia), Kind::Voice, "▶ voice message 0:42", "");
+    voice::voiced(w.other(4.0 * 24.0 * h, Some(&sofia), Kind::Voice, "▶ voice message 0:42", ""), 42.0, 4, false);
     threads.push(w.done(0, 0));
 
     let mut w = Writing::new("avo", "Avó Lurdes", ChatKind::Direct, now);

@@ -5,6 +5,7 @@
 mod draw;
 mod keys;
 mod palette;
+mod voice;
 
 use crate::composer::Composer;
 use crate::data::{Chat, Jawd, Message, Place, Typing, Update};
@@ -183,6 +184,15 @@ pub struct View {
     pictureless: HashSet<String>,
     /// The size the last frame was drawn at, for drawing every picture again after a resize.
     drawn_size: (u16, u16),
+    /// The voice message playing or paused, or the recording being listened to, as jawd last
+    /// said or a key just asked.
+    pub playing: Option<crate::data::Playback>,
+    /// What a key last asked to play, and when, so pushes about the one before don't undo it.
+    voice_asked: Option<(Option<String>, i64)>,
+    /// The speed voice messages play at.
+    speed: f64,
+    /// The voice message being recorded in the box, or stopped to listen to.
+    recorder: Option<voice::Recorder>,
     /// Why the last message wasn't sent, said on the box it went back to until it's typed in.
     unsent: Option<String>,
     /// Ctrl-K's palette, while it's open.
@@ -256,6 +266,10 @@ impl View {
             images: Images::here(Protocol::None, (8, 16)),
             pictureless: HashSet::new(),
             drawn_size: (0, 0),
+            playing: None,
+            voice_asked: None,
+            speed: 1.0,
+            recorder: None,
             unsent: None,
             palette: None,
             asked: 0,
@@ -440,6 +454,9 @@ impl View {
                 self.unsent = Some(why);
             }
             Update::Notice(text) => self.say(text),
+            Update::Playback(p) => self.on_playback(p),
+            Update::Recorded(r) => self.on_recorded(r),
+            Update::VoiceRefused(why) => self.voice_refused(why),
             Update::Starting { failed } => self.reach = Reach::Starting { failed },
             Update::Unreachable { why, retry_in } => {
                 let retry_at = self.now() + retry_in;
@@ -764,6 +781,7 @@ impl View {
             time: changed || prev.is_some_and(|p| !fmt::same_minute(p.at, m.at, self.tz)),
             unfolded: self.unfolded.contains(&m.id),
             pictured: !self.pictureless.contains(&m.id),
+            play: self.play_of(&m.id),
         }
     }
 

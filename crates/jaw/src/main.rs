@@ -90,6 +90,9 @@ enum Command {
         /// What pictures are drawn with: kitty, iterm, sixel, blocks or none
         #[arg(long, default_value = "blocks", value_parser = graphics::Protocol::parse)]
         graphics: graphics::Protocol,
+        /// Plays a voice message all along, its playhead moving ten times a second
+        #[arg(long)]
+        voice: bool,
     },
     /// Starts jawd at login, as a LaunchAgent on macOS or a systemd user unit on Linux
     #[command(subcommand)]
@@ -138,7 +141,7 @@ fn main() -> Result<()> {
             print!("{frame}");
             Ok(())
         }
-        Some(Command::Bench { rate, seconds, width, height, palette, jawd, graphics }) => {
+        Some(Command::Bench { rate, seconds, width, height, palette, jawd, graphics, voice }) => {
             let flood = bench::Flood {
                 width,
                 height,
@@ -149,6 +152,7 @@ fn main() -> Result<()> {
                 palette,
                 jawd,
                 pictures: graphics,
+                voice,
             };
             println!("{}", bench::flood(&flood)?.describe());
             Ok(())
