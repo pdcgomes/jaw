@@ -258,6 +258,9 @@ pub struct Status {
     pub stored: Option<Stored>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interfaces: Option<Interfaces>,
+    /// jaw.db's WAL and commits, and why it can't be written if it can't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<Storage>,
 }
 
 /// The interfaces connected to jawd, and where its notifications go.
@@ -268,6 +271,25 @@ pub struct Interfaces {
     pub focused: bool,
     /// Where notifications go (`Notification Center`, `notify-send`), or why they don't.
     pub notifications: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Storage {
+    /// The WAL file's size.
+    pub wal_bytes: u64,
+    /// Frames in the WAL, and those of them not yet copied into jaw.db.
+    pub wal_frames: u64,
+    pub frames_waiting: u64,
+    /// The most frames the WAL has held since jawd started.
+    pub wal_peak_frames: u64,
+    /// Commits synced to the disk before an ack or an answer went.
+    pub synced_commits: u64,
+    /// How often background work waited for the checkpointer, and for how long in all.
+    pub background_waits: u64,
+    pub background_waited_ms: u64,
+    /// Why jaw.db can't be written, while it can't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trouble: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -189,6 +189,27 @@ pub fn describe(status: &Status) -> String {
         };
         lines.push(format!("open      {connected}{front}; notifications {}", interfaces.notifications));
     }
+    if let Some(storage) = &status.storage {
+        if let Some(trouble) = &storage.trouble {
+            lines.push(format!("trouble   {trouble}"));
+        }
+        let mut wal = format!(
+            "wal       {:.1} MB, {} frames, {} not yet in jaw.db, at most {} frames; {} synced commits",
+            storage.wal_bytes as f64 / 1e6,
+            storage.wal_frames,
+            storage.frames_waiting,
+            storage.wal_peak_frames,
+            storage.synced_commits
+        );
+        if storage.background_waits > 0 {
+            wal.push_str(&format!(
+                "; background waited for it {} times, {:.1} s in all",
+                storage.background_waits,
+                storage.background_waited_ms as f64 / 1e3
+            ));
+        }
+        lines.push(wal);
+    }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));
     }

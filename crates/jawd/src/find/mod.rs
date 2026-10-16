@@ -18,7 +18,7 @@ use rusqlite::Connection;
 use tokio::sync::watch;
 
 use self::index::{Index, NameHit, Query};
-use crate::store::{Change, Lane, Opened, Store, read};
+use crate::store::{Change, Opened, Store, read};
 use crate::work::Priority;
 
 /// Results of each kind when a find doesn't say.
@@ -134,7 +134,7 @@ impl Finder {
 
     /// Counts an open of `chat` in its frecency, once the index has it too.
     pub async fn opened(&self, chat: String) -> Result<()> {
-        let applied = self.inner.store.apply(Lane::Live, vec![Change::Opened(Opened { chat, at: now_ms() })]).await?;
+        let applied = self.inner.store.apply_durable(vec![Change::Opened(Opened { chat, at: now_ms() })]).await?;
         let _ = tokio::time::timeout(OPENED_WAIT, self.caught_up(applied.seq)).await;
         Ok(())
     }
@@ -386,7 +386,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::store::{Chat, Message, Person};
+    use crate::store::{Chat, Lane, Message, Person};
 
     async fn finder() -> (tempfile::TempDir, Store, Finder) {
         let home = tempfile::tempdir().unwrap();

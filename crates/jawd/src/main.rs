@@ -237,6 +237,7 @@ async fn start(home: &Path, kind: EngineKind, no_notify: bool) -> Result<Started
     let supervisor = engine(kind, home).map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
     let live: sync::Shared = Arc::default();
     let (pushes, _) = tokio::sync::broadcast::channel(256);
+    tokio::spawn(trouble(store.trouble(), pushes.clone()));
     let engine = supervisor.as_ref().ok().cloned();
     tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, home.to_path_buf()));
     let pools: Vec<Arc<dyn work::Report>> = vec![Arc::new(store.clone()), Arc::new(store.reads().clone())];
@@ -281,6 +282,32 @@ async fn stop(Started { state, notifications }: Started, socket: &Path) {
     }
     if let Ok(engine) = state.engine() {
         engine.stop().await;
+    }
+    if let Some(store) = state.store() {
+        match tokio::time::timeout(EMPTYING, store.truncate()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("jawd: can't empty the WAL at the stop: {e:#}"),
+            Err(_) => eprintln!("jawd: the WAL wasn't emptied in time at the stop"),
+        }
+    }
+}
+
+/// How long a clean stop waits for the WAL to be copied into jaw.db and emptied, within STOPPING.
+const EMPTYING: Duration = Duration::from_secs(2);
+
+/// Tells interfaces when jaw.db can't be written, and when it can again.
+async fn trouble(
+    mut trouble: tokio::sync::watch::Receiver<Option<String>>,
+    pushes: tokio::sync::broadcast::Sender<jaw_proto::Push>,
+) {
+    use jaw_proto::sync::{Notice, Tone};
+    while trouble.changed().await.is_ok() {
+        let notice = match trouble.borrow_and_update().clone() {
+            Some(why) => Notice { text: why, tone: Tone::Error },
+            None => Notice { text: "jaw.db can be written again".into(), tone: Tone::Info },
+        };
+        let params = serde_json::to_value(notice).expect("a notice serializes");
+        let _ = pushes.send(jaw_proto::Push { method: "notice".into(), params });
     }
 }
 

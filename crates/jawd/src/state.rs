@@ -176,6 +176,7 @@ impl State {
                 focused: self.focused(),
                 notifications: self.notifications.clone(),
             }),
+            storage: self.store.as_ref().map(Store::storage),
         }
     }
 

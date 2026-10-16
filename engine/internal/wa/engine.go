@@ -5,17 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -77,12 +74,7 @@ func (e *Engine) open(home string) error {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return err
 	}
-	dsn := (&url.URL{
-		Scheme:   "file",
-		Path:     filepath.Join(home, "session.db"),
-		RawQuery: "_foreign_keys=on&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000",
-	}).String()
-	container, err := sqlstore.New(e.ctx, "sqlite3", dsn, e.log.Sub("db"))
+	container, err := openSession(e.ctx, home, e.log.Sub("db"))
 	if err != nil {
 		return fmt.Errorf("can't open whatsmeow's session: %w", err)
 	}
@@ -99,6 +91,8 @@ func (e *Engine) open(home string) error {
 	client.ManualHistorySyncDownload = true
 	client.EmitAppStateEventsOnFullSync = true
 	client.AutomaticMessageRerequestFromPhone = true
+	// A recipient's retry receipt for a message sent before a restart can still be answered.
+	client.UseRetryMessageStore = true
 	if proxy := os.Getenv("HTTPS_PROXY"); proxy != "" {
 		if err := client.SetProxyAddress(proxy); err != nil {
 			return fmt.Errorf("can't use the proxy in HTTPS_PROXY: %w", err)

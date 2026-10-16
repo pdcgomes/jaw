@@ -1,11 +1,17 @@
 //! jaw.db, through rusqlite with SQLite compiled in. One writer thread owns the write connection
-//! and takes the inbox first: a message is committed, then acked, before WhatsApp hears it
-//! arrived. Live changes (conversions as messages arrive, and actions) come next, each in a
-//! transaction of its own. Background changes and history go in transactions of at most 1,000
-//! rows or 3 ms with their commit, ending early as soon as an inbox or live write is waiting, which
-//! is taken before the next. Text written in the background is indexed for search afterwards, in
-//! steps as short, while nothing else is waiting. Queries go to the read pool, so a page never waits
-//! behind a sync.
+//! and takes the inbox first: what the engine hands over is committed and synced to the disk, and
+//! only then acked, before WhatsApp hears it arrived. Live changes (conversions as messages arrive,
+//! and actions) come next, each in a transaction of its own. Background changes and history go in
+//! transactions of at most 1,000 rows or 3 ms with their commit, ending early as soon as an inbox or
+//! live write is waiting, which is taken before the next. Text written in the background is indexed
+//! for search afterwards, in steps as short, while nothing else is waiting. Queries go to the read
+//! pool, so a page never waits behind a sync.
+//!
+//! Every write transaction begins IMMEDIATE. One that fails for a reason that passes (a full disk,
+//! an I/O error, a lock) is tried again with back-off, never dropped, and while the inbox can't
+//! commit its rows are kept and nothing else is written. The checkpointer copies the WAL into the
+//! database while frames wait, and background work waits for it once the WAL passes WAL_SOFT, so
+//! the WAL stays under 64 MiB however fast history comes.
 
 pub mod bench;
 #[cfg(test)]
@@ -16,15 +22,20 @@ mod rules;
 mod schema;
 mod write;
 
+use std::cell::Cell;
+use std::ffi::c_int;
+use std::fmt::Display;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use crossbeam_channel::{Receiver, Sender, bounded, select_biased, unbounded};
-use rusqlite::{Connection, OptionalExtension, params};
+use anyhow::{Context, Result, bail};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, select_biased, unbounded};
+use rusqlite::hooks::Wal as WalFile;
+use rusqlite::types::Value;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use tokio::sync::{Notify, oneshot, watch};
 
 pub use self::read::Reads;
@@ -60,19 +71,27 @@ pub enum Lane {
     Background,
 }
 
-enum Realtime {
-    /// An engine event to keep; `ack` goes once it's committed.
-    Inbox { kind: &'static str, at_ms: i64, payload: Vec<u8>, ack: Option<Ack>, queued: Instant },
+/// An engine event to keep; `ack` goes once it's committed and synced.
+struct Inbox {
+    kind: &'static str,
+    at_ms: i64,
+    payload: Vec<u8>,
+    ack: Option<Ack>,
+    queued: Instant,
 }
 
 type Done = oneshot::Sender<Result<Applied, String>>;
 
-struct Live {
-    changes: Vec<Change>,
-    done: Done,
-    queued: Instant,
-    /// Whether its commit must reach the disk before it's said to be done.
-    durable: bool,
+enum Live {
+    Changes {
+        changes: Vec<Change>,
+        done: Done,
+        queued: Instant,
+        /// Whether its commit must reach the disk before it's said to be done.
+        durable: bool,
+    },
+    /// Copies the whole WAL into the database and empties it, as at a clean stop.
+    Truncate { done: oneshot::Sender<Result<(), String>> },
 }
 
 /// What one transaction made of its changes.
@@ -87,10 +106,67 @@ struct Made {
 #[derive(Default)]
 struct Stats {
     transactions: u64,
+    /// Commits synced to the disk, each before the acks or answers that waited on it.
+    synced: u64,
     /// How long inbox and live writes waited for the writer.
     waits: Samples,
     /// How long each transaction took, commit included.
     runs: Samples,
+    /// How long background work waited for the checkpointer, each time it did, and in all.
+    held: Samples,
+    held_times: u64,
+    held_for: Duration,
+}
+
+/// The WAL as the writer and the checkpointer last saw it, for each other and for `status`.
+struct Wal {
+    /// Its size in frames past which background transactions wait for the checkpointer, and past
+    /// which they wait until it has started again from its beginning.
+    soft: u64,
+    hard: u64,
+    /// Frames in the WAL after the writer's last commit.
+    frames: AtomicU64,
+    /// The checkpointer's latest pass: the frames in the WAL then, and how many were in jaw.db.
+    log: AtomicU64,
+    copied: AtomicU64,
+    /// The most frames the WAL has held since jawd started.
+    peak: AtomicU64,
+    /// Whether background work is waiting for the WAL to start again, so the checkpointer copies
+    /// however few frames wait.
+    held: AtomicBool,
+    /// Whether the writer copies the last few frames itself, so the checkpointer leaves them.
+    finishing: AtomicBool,
+}
+
+impl Wal {
+    fn new(soft: u64, hard: u64) -> Wal {
+        Wal {
+            soft,
+            hard,
+            frames: AtomicU64::new(0),
+            log: AtomicU64::new(0),
+            copied: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
+            held: AtomicBool::new(false),
+            finishing: AtomicBool::new(false),
+        }
+    }
+
+    /// Frames committed and not yet copied into jaw.db, as far as is known.
+    fn waiting(&self) -> u64 {
+        let (frames, log, copied) = (
+            self.frames.load(Ordering::Relaxed),
+            self.log.load(Ordering::Relaxed),
+            self.copied.load(Ordering::Relaxed),
+        );
+        // A pass from before the WAL started again knows nothing of the frames since.
+        if log > frames { frames } else { frames - copied.min(frames) }
+    }
+
+    fn passed(&self, (log, copied): (u64, u64)) {
+        self.log.store(log, Ordering::Relaxed);
+        self.copied.store(copied, Ordering::Relaxed);
+    }
 }
 
 enum Background {
@@ -107,13 +183,15 @@ enum Background {
 #[derive(Clone)]
 pub struct Store {
     path: PathBuf,
-    realtime: Sender<Realtime>,
+    realtime: Sender<Inbox>,
     live: Sender<Live>,
     background: Sender<Background>,
     reads: Reads,
     committed: watch::Receiver<i64>,
     stats: Arc<Mutex<Stats>>,
     inboxed: Arc<Notify>,
+    wal: Arc<Wal>,
+    trouble: watch::Receiver<Option<String>>,
 }
 
 const BATCH_ROWS: usize = 1_000;
@@ -125,33 +203,148 @@ const INDEX_PAUSE: Duration = Duration::from_millis(1);
 /// The pages of FTS5 merging a step does, about a millisecond's worth.
 const MERGE_PAGES: i64 = 64;
 const WRITER_CACHE_KIB: i64 = 32 * 1024;
+/// How long any connection waits for a lock before it fails, which the writer then tries again.
+const BUSY_MS: i64 = 5_000;
+/// The most inbox rows one synced commit takes.
+const INBOX_GROUP: usize = 256;
+/// How long the writer waits before trying a commit that failed again, doubling each time.
+const RETRY_FIRST: Duration = Duration::from_millis(10);
+const RETRY_MOST: Duration = Duration::from_secs(1);
+/// How long indexing for search waits, at most, before trying a step that failed again.
+const INDEX_RETRY_MOST: Duration = Duration::from_secs(60);
+
+/// The WAL's size in frames, of a 4 KiB page each, past which background transactions wait for
+/// the checkpointer; past WAL_HARD they wait until the WAL has started again from its beginning.
+/// Each start costs live writes a pause of two flushes of the drive, so the WAL starts again as
+/// seldom as WAL_LIMIT allows, and the file stays under it.
+const WAL_SOFT: u64 = 12_288;
+const WAL_HARD: u64 = 15_360;
+/// Frames few enough for the writer to copy itself between two transactions.
+const WAL_NEAR: u64 = 64;
+/// How long the checkpointer has to copy the last frames by itself, which it can between two live
+/// writes, before the writer copies them, flushing the drive twice while live writes wait.
+const FINISH_AFTER: Duration = Duration::from_millis(50);
+/// How often, 10 ms apart, the writer tries to empty the WAL while another checkpoint runs.
+const TRUNCATE_TRIES: u32 = 500;
+/// What the WAL file is cut back to each time it starts again.
+const WAL_LIMIT: i64 = 64 * 1024 * 1024;
+/// Fewer frames than this wait for more before the checkpointer copies them, unless background
+/// work is waiting: each pass flushes the drive twice whatever it copies, and every flush an inbox
+/// commit shares the drive with makes its ack later.
+const WAL_EASY: u64 = 1_024;
+/// How long jaw.db goes without a commit before the checkpointer empties the WAL.
+const IDLE: Duration = Duration::from_secs(10);
+/// While background work waits for the checkpointer, how often the writer looks again.
+const HOLD_POLL: Duration = Duration::from_millis(1);
+
+/// What a connection to jaw.db is for, which decides how it's set up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Writer,
+    Reader,
+    Checkpointer,
+}
+
+/// Opens jaw.db at `path` for `role`. Every setting is read back, since SQLite ignores a PRAGMA it
+/// doesn't know or a value it can't take, and a connection that isn't as asked isn't used.
+fn connect(path: &Path, role: Role) -> Result<Connection> {
+    let flags = match role {
+        Role::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+        Role::Writer | Role::Checkpointer => OpenFlags::default(),
+    };
+    let db = Connection::open_with_flags(path, flags).with_context(|| format!("can't open {}", path.display()))?;
+    pragma(&db, "busy_timeout", BUSY_MS)?;
+    // Whichever connection closes last checkpoints, and on macOS a checkpoint whose syncs stop at
+    // the drive's cache can leave jaw.db malformed after a power cut.
+    pragma(&db, "checkpoint_fullfsync", 1)?;
+    pragma(&db, "temp_store", 2)?;
+    db.set_prepared_statement_cache_capacity(64);
+    match role {
+        Role::Reader => check(&db, "journal_mode", "wal")?,
+        Role::Writer => {
+            pragma(&db, "journal_mode", "wal")?;
+            pragma(&db, "journal_size_limit", WAL_LIMIT)?;
+            pragma(&db, "synchronous", 1)?;
+            pragma(&db, "fullfsync", 0)?;
+            pragma(&db, "foreign_keys", 1)?;
+            // No commit pays for a checkpoint; the checkpointer does them on a connection of its own.
+            pragma(&db, "wal_autocheckpoint", 0)?;
+            // History lands all over the indexes, so the writer keeps more of them than SQLite's 2 MB.
+            pragma(&db, "cache_size", -WRITER_CACHE_KIB)?;
+        }
+        Role::Checkpointer => {
+            check(&db, "journal_mode", "wal")?;
+            pragma(&db, "journal_size_limit", WAL_LIMIT)?;
+            pragma(&db, "synchronous", 2)?;
+        }
+    }
+    Ok(db)
+}
+
+/// Sets a PRAGMA and reads it back.
+fn pragma(db: &Connection, name: &str, value: impl Display) -> Result<()> {
+    let value = value.to_string();
+    db.execute_batch(&format!("PRAGMA {name} = {value}")).with_context(|| format!("can't set {name}"))?;
+    check(db, name, &value)
+}
+
+/// Fails unless a PRAGMA reads as `expected`.
+fn check(db: &Connection, name: &str, expected: &str) -> Result<()> {
+    let read = db
+        .query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, Value>(0))
+        .optional()
+        .with_context(|| format!("can't read {name}"))?;
+    let read = match read {
+        Some(Value::Integer(n)) => n.to_string(),
+        Some(Value::Text(text)) => text,
+        other => format!("{other:?}"),
+    };
+    if !read.eq_ignore_ascii_case(expected) {
+        bail!("jaw.db's {name} is {read} after setting it to {expected}");
+    }
+    Ok(())
+}
+
+thread_local! {
+    /// The frames in the WAL after the last commit on this thread's connection, as SQLite says.
+    static FRAMES: Cell<u64> = const { Cell::new(0) };
+}
+
+fn note_frames(_: &WalFile, frames: c_int) -> rusqlite::Result<()> {
+    FRAMES.with(|f| f.set(frames.max(0) as u64));
+    Ok(())
+}
+
+/// Runs a checkpoint, saying (busy, frames in the WAL, frames in jaw.db).
+fn wal_checkpoint(db: &Connection, mode: &str) -> Result<(bool, u64, u64)> {
+    Ok(db.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| {
+        Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)?.max(0) as u64, r.get::<_, i64>(2)?.max(0) as u64))
+    })?)
+}
 
 impl Store {
     /// Opens jaw.db in `home`, bringing its schema up to date, and starts the writer and readers.
     pub fn open(home: &Path) -> Result<Store> {
+        Store::open_with(home, WAL_SOFT, WAL_HARD)
+    }
+
+    fn open_with(home: &Path, soft: u64, hard: u64) -> Result<Store> {
         let path = home.join("jaw.db");
-        let mut db = Connection::open(&path).with_context(|| format!("can't open {}", path.display()))?;
-        db.pragma_update(None, "journal_mode", "WAL")?;
-        db.pragma_update(None, "synchronous", "NORMAL")?;
-        db.pragma_update(None, "foreign_keys", "ON")?;
-        db.pragma_update(None, "temp_store", "MEMORY")?;
-        db.busy_timeout(Duration::from_secs(5))?;
-        db.set_prepared_statement_cache_capacity(64);
-        // History lands all over the indexes, so the writer keeps more of them than SQLite's 2 MB.
-        db.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)?;
+        let mut db = connect(&path, Role::Writer)?;
         schema::migrate(&mut db)?;
         let stamps = Stamps::load(&db)?;
         let reads = Reads::open(&path)?;
-        let checkpointer = Connection::open(&path)?;
-        checkpointer.busy_timeout(Duration::from_secs(5))?;
+        let checkpointer = connect(&path, Role::Checkpointer)?;
         let (realtime, realtime_rx) = unbounded();
         let (live, live_rx) = unbounded();
         let (background, background_rx) = bounded(16);
-        let commits = Arc::new(AtomicU64::new(0));
+        let (kick, kicks) = bounded(1);
         let (seq, committed) = watch::channel(stamps.last());
+        let (trouble, troubled) = watch::channel(None);
         let backlog = db.query_row("SELECT EXISTS (SELECT 1 FROM fts_backlog)", [], |r| r.get(0))?;
         let stats = Arc::new(Mutex::new(Stats::default()));
         let inboxed = Arc::new(Notify::new());
+        let wal = Arc::new(Wal::new(soft, hard));
         let writer = Writer {
             stats: stats.clone(),
             inboxed: inboxed.clone(),
@@ -159,7 +352,11 @@ impl Store {
             stamps,
             realtime: realtime_rx,
             live: live_rx,
-            commits: commits.clone(),
+            inbox: Vec::new(),
+            synced: Some(false),
+            wal: wal.clone(),
+            kick,
+            trouble,
             seq,
             pruned: Instant::now(),
             changes_pace: Pace::default(),
@@ -167,10 +364,16 @@ impl Store {
             backlog,
             unmerged: true,
             indexed: Vec::new(),
+            index_after: None,
+            index_retry: RETRY_FIRST,
+            near: None,
         };
         std::thread::Builder::new().name("jawd-writer".into()).spawn(move || writer.run(background_rx))?;
-        std::thread::Builder::new().name("jawd-checkpoint".into()).spawn(move || checkpoint(checkpointer, commits))?;
-        Ok(Store { path, realtime, live, background, reads, committed, stats, inboxed })
+        let checkpointing = wal.clone();
+        std::thread::Builder::new()
+            .name("jawd-checkpoint".into())
+            .spawn(move || checkpoint(checkpointer, checkpointing, kicks))?;
+        Ok(Store { path, realtime, live, background, reads, committed, stats, inboxed, wal, trouble: troubled })
     }
 
     /// The feed's last committed seq, which changes as each transaction with events commits.
@@ -183,9 +386,15 @@ impl Store {
         self.inboxed.clone()
     }
 
-    /// Keeps an engine event, then sends its ack. It never waits: realtime writes aren't bounded.
+    /// Why jaw.db can't be written, while it can't: what arrives then waits on the phone.
+    pub fn trouble(&self) -> watch::Receiver<Option<String>> {
+        self.trouble.clone()
+    }
+
+    /// Keeps an engine event, then sends its ack once its commit has reached the disk. It never
+    /// waits: realtime writes aren't bounded.
     pub fn inbox(&self, kind: &'static str, at_ms: i64, payload: Vec<u8>, ack: Option<Ack>) {
-        let _ = self.realtime.send(Realtime::Inbox { kind, at_ms, payload, ack, queued: Instant::now() });
+        let _ = self.realtime.send(Inbox { kind, at_ms, payload, ack, queued: Instant::now() });
     }
 
     /// Makes `changes` in `lane`, each with its event, and says how it went once they're committed.
@@ -196,7 +405,7 @@ impl Store {
         match lane {
             Lane::Live => self
                 .live
-                .send(Live { changes, done, queued: Instant::now(), durable: false })
+                .send(Live::Changes { changes, done, queued: Instant::now(), durable: false })
                 .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?,
             Lane::Background => self.queue_background(Background::Changes { changes, done }).await?,
         }
@@ -204,14 +413,21 @@ impl Store {
     }
 
     /// Makes `changes` in the live lane in one transaction that reaches the disk before it's said
-    /// to be done, for what must survive a power cut, such as the commit after which a spool file
-    /// can go.
+    /// to be done, for what must survive a power cut: an action an interface is told is done, or
+    /// the commit after which a spool file can go.
     pub async fn apply_durable(&self, changes: Vec<Change>) -> Result<Applied> {
         let (done, applied) = oneshot::channel();
         self.live
-            .send(Live { changes, done, queued: Instant::now(), durable: true })
+            .send(Live::Changes { changes, done, queued: Instant::now(), durable: true })
             .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?;
         applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Copies the whole WAL into jaw.db and empties it, as at a clean stop.
+    pub async fn truncate(&self) -> Result<()> {
+        let (done, truncated) = oneshot::channel();
+        self.live.send(Live::Truncate { done }).map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?;
+        truncated.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
     }
 
     async fn queue_background(&self, work: Background) -> Result<()> {
@@ -235,15 +451,31 @@ impl Store {
 
     /// What sync remembered under `key`, read on a connection of its own.
     pub fn remembered(&self, key: &str) -> Result<Option<String>> {
-        let db = Connection::open(&self.path)?;
+        let db = connect(&self.path, Role::Reader)?;
         Ok(db.query_row("SELECT value FROM sync_state WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }
 
     /// How many rows `table` holds, read on a connection of its own so the writer doesn't wait.
     pub fn count(&self, table: &str) -> Result<u64> {
-        let db = Connection::open(&self.path)?;
+        let db = connect(&self.path, Role::Reader)?;
         let count: i64 = db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))?;
         Ok(count.max(0) as u64)
+    }
+
+    /// The WAL, the commits synced and whether jaw.db can be written, for `status`.
+    pub fn storage(&self) -> jaw_proto::Storage {
+        let stats = self.stats.lock().expect("the writer's stats");
+        let wal_bytes = std::fs::metadata(self.path.with_extension("db-wal")).map_or(0, |m| m.len());
+        jaw_proto::Storage {
+            wal_bytes,
+            wal_frames: self.wal.frames.load(Ordering::Relaxed),
+            frames_waiting: self.wal.waiting(),
+            wal_peak_frames: self.wal.peak.load(Ordering::Relaxed),
+            synced_commits: stats.synced,
+            background_waits: stats.held_times,
+            background_waited_ms: stats.held_for.as_millis() as u64,
+            trouble: self.trouble.borrow().clone(),
+        }
     }
 }
 
@@ -258,14 +490,11 @@ impl Report for Store {
             queued_background: self.background.len() as u32,
             done: stats.transactions,
             wait_interactive: stats.waits.percentiles(),
-            wait_background: None,
+            wait_background: stats.held.percentiles(),
             run: stats.runs.percentiles(),
         }
     }
 }
-
-/// How often the checkpointer copies the WAL into the database, when anything was committed.
-const CHECKPOINT_EVERY: Duration = Duration::from_secs(1);
 
 /// How often the writer removes events older than the feed keeps, when it has background work.
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
@@ -275,9 +504,16 @@ struct Writer {
     inboxed: Arc<Notify>,
     db: Connection,
     stamps: Stamps,
-    realtime: Receiver<Realtime>,
+    realtime: Receiver<Inbox>,
     live: Receiver<Live>,
-    commits: Arc<AtomicU64>,
+    /// Inbox rows taken from the queue and not committed yet. They stay until they are.
+    inbox: Vec<Inbox>,
+    /// Whether commits reach the disk before they return, as they are now; None while unsure.
+    synced: Option<bool>,
+    wal: Arc<Wal>,
+    /// Woken after each commit, so the checkpointer copies what it added.
+    kick: Sender<()>,
+    trouble: watch::Sender<Option<String>>,
     /// The feed's last committed seq, for whoever follows the feed.
     seq: watch::Sender<i64>,
     pruned: Instant,
@@ -289,6 +525,12 @@ struct Writer {
     unmerged: bool,
     /// Who waits for everything written to be indexed.
     indexed: Vec<oneshot::Sender<Result<(), String>>>,
+    /// When indexing, after a step failed, is tried again, and how long the next failure waits.
+    index_after: Option<Instant>,
+    index_retry: Duration,
+    /// Since when the checkpointer has had only a few frames left to copy, while background work
+    /// waits for the WAL to start again.
+    near: Option<Instant>,
 }
 
 /// What a kind of background transaction's commit has lately cost for each row it took. SQLite
@@ -323,20 +565,16 @@ impl Pace {
 }
 
 impl Writer {
-    /// Inbox first, then live changes, then background work in short transactions. SQLite's own
-    /// checkpoints are off, so no commit pays for one; the checkpointer does them on a connection
-    /// of its own.
+    /// Inbox first, then live changes, then background work in short transactions.
     fn run(mut self, background: Receiver<Background>) {
-        if let Err(e) = self.db.pragma_update(None, "wal_autocheckpoint", 0) {
-            eprintln!("jawd: can't turn SQLite's own checkpoints off: {e}");
-        }
+        self.db.wal_hook(Some(note_frames));
         self.prune();
         let (realtime, live) = (self.realtime.clone(), self.live.clone());
         loop {
-            let idle = if self.backlog || self.unmerged { INDEX_PAUSE } else { Duration::from_secs(3600) };
+            let idle = self.idle_for();
             select_biased! {
-                recv(realtime) -> write => match write {
-                    Ok(write) => self.realtime_write(write),
+                recv(realtime) -> row => match row {
+                    Ok(row) => self.take_inbox(row),
                     Err(_) => return,
                 },
                 recv(live) -> write => match write {
@@ -360,32 +598,52 @@ impl Writer {
                     }
                     Err(_) => return,
                 },
-                // Merging first keeps FTS5's levels short of a merge it would do all at once.
-                default(idle) => {
-                    let step = if self.unmerged { self.merge() } else if self.backlog { self.index() } else { Ok(()) };
-                    if let Err(e) = &step {
-                        eprintln!("jawd: can't index messages for search: {e:#}");
-                        (self.backlog, self.unmerged) = (false, false);
-                    }
-                    if !self.backlog && !self.unmerged {
-                        for done in self.indexed.drain(..) {
-                            let _ = done.send(step.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
-                        }
-                    }
-                }
+                default(idle) => self.index_step(),
             }
         }
     }
 
-    fn realtime_write(&mut self, write: Realtime) {
-        let Realtime::Inbox { queued, .. } = &write;
-        let began = Instant::now();
-        let waited = began - *queued;
-        if realtime_write(&mut self.db, write) {
-            self.inboxed.notify_one();
+    /// How long the writer may wait for work before an indexing step is due.
+    fn idle_for(&self) -> Duration {
+        if !self.backlog && !self.unmerged {
+            return Duration::from_secs(3600);
         }
-        self.commits.fetch_add(1, Ordering::Relaxed);
-        self.count(Some(waited), began.elapsed());
+        match self.index_after {
+            Some(at) => at.saturating_duration_since(Instant::now()).max(INDEX_PAUSE),
+            None => INDEX_PAUSE,
+        }
+    }
+
+    /// Merges FTS5's segments or indexes some of fts_backlog, if the WAL has room. A step that
+    /// fails is tried again later, waiting longer each time.
+    fn index_step(&mut self) {
+        if self.index_after.is_some_and(|at| Instant::now() < at) || !self.room() {
+            return;
+        }
+        // Merging first keeps FTS5's levels short of a merge it would do all at once.
+        let step = if self.unmerged {
+            self.merge()
+        } else if self.backlog {
+            self.index()
+        } else {
+            Ok(())
+        };
+        match &step {
+            Ok(()) => (self.index_after, self.index_retry) = (None, RETRY_FIRST),
+            Err(e) => {
+                eprintln!(
+                    "jawd: can't index messages for search, so it's tried again in {} ms: {e:#}",
+                    self.index_retry.as_millis()
+                );
+                self.index_after = Some(Instant::now() + self.index_retry);
+                self.index_retry = (self.index_retry * 2).min(INDEX_RETRY_MOST);
+            }
+        }
+        if step.is_err() || (!self.backlog && !self.unmerged) {
+            for done in self.indexed.drain(..) {
+                let _ = done.send(step.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
+            }
+        }
     }
 
     fn count(&self, waited: Option<Duration>, ran: Duration) {
@@ -397,13 +655,223 @@ impl Writer {
         stats.runs.add(ran);
     }
 
+    /// After a commit: what it left in the WAL, and the checkpointer woken to copy it.
+    fn committed(&mut self) {
+        let frames = FRAMES.with(Cell::get);
+        self.wal.frames.store(frames, Ordering::Relaxed);
+        self.wal.peak.fetch_max(frames, Ordering::Relaxed);
+        let _ = self.kick.try_send(());
+    }
+
+    /// Makes the writer's commits reach the disk before they return, or go back to letting a later
+    /// synced commit or the checkpointer's syncs do it. On macOS only F_FULLFSYNC gets past the
+    /// drive's cache. Both are read back, so a commit is never said to be synced when it isn't.
+    fn synced(&mut self, synced: bool) -> Result<()> {
+        if self.synced != Some(synced) {
+            self.synced = None;
+            pragma(&self.db, "synchronous", if synced { 2 } else { 1 })?;
+            pragma(&self.db, "fullfsync", i32::from(synced))?;
+            self.synced = Some(synced);
+        }
+        Ok(())
+    }
+
+    /// Says why jaw.db can't be written, once each time it starts failing.
+    fn failing(&self, e: &anyhow::Error) {
+        let full = e.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<rusqlite::Error>(),
+                Some(rusqlite::Error::SqliteFailure(f, _)) if f.code == rusqlite::ErrorCode::DiskFull
+            )
+        });
+        let why = if full {
+            "jaw's disk is full, so what arrives waits on the phone until there's room".to_string()
+        } else {
+            format!("jaw can't write to jaw.db ({e:#}), so what arrives waits on the phone until it can")
+        };
+        self.trouble.send_if_modified(|trouble| {
+            if trouble.is_none() {
+                eprintln!("jawd: {why}");
+            }
+            let changed = trouble.as_deref() != Some(&why);
+            *trouble = Some(why);
+            changed
+        });
+    }
+
+    fn recovered(&self) {
+        self.trouble.send_if_modified(|trouble| {
+            if trouble.take().is_some() {
+                eprintln!("jawd: jaw.db can be written again");
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    /// Runs `attempt` until it succeeds or fails for a reason that won't pass, waiting from 10 ms
+    /// doubling to 1 s between tries. The inbox goes first even then, and nothing else meanwhile.
+    fn retrying<T>(&mut self, mut attempt: impl FnMut(&mut Writer) -> Result<T>) -> Result<T> {
+        let mut pause = RETRY_FIRST;
+        loop {
+            match attempt(self) {
+                Ok(made) => {
+                    self.recovered();
+                    return Ok(made);
+                }
+                Err(e) if write::transient(&e) => {
+                    self.failing(&e);
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(RETRY_MOST);
+                    self.commit_inbox();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn take_inbox(&mut self, row: Inbox) {
+        self.inbox.push(row);
+        self.commit_inbox();
+    }
+
+    /// Commits the inbox rows waiting, in one synced transaction, then sends their acks. A commit
+    /// that fails, for whatever reason, keeps the rows and is tried again from 10 ms doubling to
+    /// 1 s until it succeeds, and nothing else is written meanwhile: without its ack the engine
+    /// waits, and WhatsApp keeps the message.
+    fn commit_inbox(&mut self) {
+        let mut pause = RETRY_FIRST;
+        loop {
+            while self.inbox.len() < INBOX_GROUP {
+                match self.realtime.try_recv() {
+                    Ok(row) => self.inbox.push(row),
+                    Err(_) => break,
+                }
+            }
+            if self.inbox.is_empty() {
+                return;
+            }
+            let began = Instant::now();
+            match self.store_inbox() {
+                Ok(()) => {
+                    self.recovered();
+                    self.committed();
+                    let ran = began.elapsed();
+                    let mut stats = self.stats.lock().expect("the writer's stats");
+                    stats.transactions += 1;
+                    stats.synced += 1;
+                    stats.runs.add(ran);
+                    for row in self.inbox.drain(..) {
+                        stats.waits.add(began.saturating_duration_since(row.queued));
+                        if let Some(ack) = row.ack {
+                            ack.send();
+                        }
+                    }
+                    drop(stats);
+                    self.inboxed.notify_one();
+                    pause = RETRY_FIRST;
+                }
+                Err(e) => {
+                    self.failing(&e);
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(RETRY_MOST);
+                }
+            }
+        }
+    }
+
+    fn store_inbox(&mut self) -> Result<()> {
+        self.synced(true)?;
+        let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut insert = tx.prepare_cached("INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)")?;
+            for row in &self.inbox {
+                insert.execute(params![row.kind, row.at_ms, row.payload])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether a background transaction may begin, as the WAL stands. Past the soft limit it waits
+    /// for the checkpointer to copy every frame, after which the next transaction starts the WAL
+    /// again from its beginning. Live writes landing during the checkpointer's passes can keep it
+    /// from ever getting there, so after FINISH_AFTER with only a few frames left the writer copies
+    /// those itself, where no commit can land meanwhile. Past the hard limit it waits for that
+    /// whatever holds the frames.
+    fn room(&mut self) -> bool {
+        let frames = self.wal.frames.load(Ordering::Relaxed);
+        let waiting = self.wal.waiting();
+        if frames < self.wal.soft || waiting == 0 {
+            self.near = None;
+            self.wal.finishing.store(false, Ordering::Relaxed);
+            return true;
+        }
+        if waiting > WAL_NEAR {
+            return false;
+        }
+        let near = *self.near.get_or_insert_with(Instant::now);
+        if near.elapsed() < FINISH_AFTER {
+            return false;
+        }
+        self.wal.finishing.store(true, Ordering::Relaxed);
+        match wal_checkpoint(&self.db, "PASSIVE") {
+            // The checkpointer is in the middle of a pass, and leaves the rest once it's done.
+            Ok((true, _, _)) => false,
+            Ok((false, log, copied)) => {
+                self.wal.passed((log, copied));
+                // Otherwise a reader holds the frames left.
+                copied >= log || frames < self.wal.hard
+            }
+            Err(e) => {
+                eprintln!("jawd: the writer's checkpoint failed: {e:#}");
+                frames < self.wal.hard
+            }
+        }
+    }
+
+    /// Waits until the WAL has room for a background transaction, taking inbox and live writes
+    /// meanwhile.
+    fn wait_for_room(&mut self) {
+        if self.room() {
+            return;
+        }
+        let began = Instant::now();
+        self.wal.held.store(true, Ordering::Relaxed);
+        let (realtime, live) = (self.realtime.clone(), self.live.clone());
+        while !self.room() {
+            select_biased! {
+                recv(realtime) -> row => match row {
+                    Ok(row) => self.take_inbox(row),
+                    Err(_) => break,
+                },
+                recv(live) -> write => match write {
+                    Ok(write) => self.live_write(write),
+                    Err(_) => break,
+                },
+                default(HOLD_POLL) => {}
+            }
+        }
+        self.wal.held.store(false, Ordering::Relaxed);
+        let held = began.elapsed();
+        let mut stats = self.stats.lock().expect("the writer's stats");
+        stats.held.add(held);
+        stats.held_times += 1;
+        stats.held_for += held;
+    }
+
     /// Merges MERGE_PAGES of FTS5's segments, if any level has enough to merge.
     fn merge(&mut self) -> Result<()> {
         let began = Instant::now();
-        let before = self.db.total_changes();
-        self.db.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)", [MERGE_PAGES])?;
-        self.unmerged = self.db.total_changes() > before + 1;
-        self.commits.fetch_add(1, Ordering::Relaxed);
+        self.synced(false)?;
+        let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = tx.total_changes();
+        tx.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)", [MERGE_PAGES])?;
+        let merged = tx.total_changes() > before + 1;
+        tx.commit()?;
+        self.unmerged = merged;
+        self.committed();
         self.count(None, began.elapsed());
         Ok(())
     }
@@ -411,7 +879,8 @@ impl Writer {
     /// Indexes a short transaction's worth of fts_backlog for search.
     fn index(&mut self) -> Result<()> {
         let began = Instant::now();
-        let tx = self.db.transaction()?;
+        self.synced(false)?;
+        let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (realtime, live, pace) = (&self.realtime, &self.live, self.index_pace);
         let (taken, more) = write::index(&tx, pace.rows(), |taken| {
             !realtime.is_empty() || !live.is_empty() || pace.enough(began.elapsed(), taken)
@@ -420,45 +889,57 @@ impl Writer {
         tx.commit()?;
         self.index_pace.learn(body, began.elapsed() - body, taken);
         self.unmerged = true;
+        self.committed();
         self.count(None, began.elapsed());
-        self.commits.fetch_add(1, Ordering::Relaxed);
         self.backlog = more;
         Ok(())
     }
 
-    /// Makes the writer's commits reach the disk before they return, or go back to letting the
-    /// checkpointer's syncs do it. On macOS only F_FULLFSYNC gets past the drive's cache.
-    fn durable(&mut self, durable: bool) {
-        let (synchronous, fullfsync) = if durable { ("FULL", "ON") } else { ("NORMAL", "OFF") };
-        if let Err(e) = self
-            .db
-            .pragma_update(None, "synchronous", synchronous)
-            .and_then(|_| self.db.pragma_update(None, "fullfsync", fullfsync))
-        {
-            eprintln!("jawd: can't set synchronous={synchronous}: {e}");
-        }
-    }
-
-    fn live_write(&mut self, Live { changes, done, queued, durable }: Live) {
+    fn live_write(&mut self, write: Live) {
+        let (changes, done, queued, durable) = match write {
+            Live::Changes { changes, done, queued, durable } => (changes, done, queued, durable),
+            Live::Truncate { done } => {
+                let truncated = self.retrying(Writer::truncate);
+                let _ = done.send(truncated.map_err(|e| format!("{e:#}")));
+                return;
+            }
+        };
         let started = Instant::now();
         self.unmerged = true;
         let waited = started - queued;
         let groups = write::groups(&changes);
-        if durable {
-            self.durable(true);
-        }
-        let applied = self.transaction(&changes, &groups, false).map(|made| Applied {
-            changed: made.changed,
-            quarantined: made.quarantined,
-            transactions: 1,
-            took: started.elapsed(),
-            seq: self.stamps.last(),
-        });
-        if durable {
-            self.durable(false);
+        let applied = self
+            .retrying(|w| {
+                w.synced(durable)?;
+                w.transaction(&changes, &groups, false)
+            })
+            .map(|made| Applied {
+                changed: made.changed,
+                quarantined: made.quarantined,
+                transactions: 1,
+                took: started.elapsed(),
+                seq: self.stamps.last(),
+            });
+        if durable && applied.is_ok() {
+            self.stats.lock().expect("the writer's stats").synced += 1;
         }
         self.count(Some(waited), started.elapsed());
         let _ = done.send(applied.map_err(|e| format!("{e:#}")));
+    }
+
+    /// Copies the whole WAL into jaw.db and empties it. SQLite doesn't wait for another
+    /// checkpoint to finish, so it tries again while the checkpointer's pass runs.
+    fn truncate(&mut self) -> Result<()> {
+        for _ in 0..TRUNCATE_TRIES {
+            if !wal_checkpoint(&self.db, "TRUNCATE")?.0 {
+                FRAMES.with(|f| f.set(0));
+                self.wal.frames.store(0, Ordering::Relaxed);
+                self.wal.passed((0, 0));
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        bail!("a reader or another checkpoint kept the WAL from being emptied")
     }
 
     /// Makes the groups of `changes` in one transaction, all of them for a live one; a background
@@ -470,7 +951,7 @@ impl Writer {
         self.stamps.begin();
         let start = groups.first().map_or(0, |g| g.start);
         let made = (|| {
-            let mut tx = self.db.transaction()?;
+            let mut tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let mut made = Made::default();
             for group in groups {
                 let mark = self.stamps.mark();
@@ -521,7 +1002,7 @@ impl Writer {
         })();
         match &made {
             Ok(_) => {
-                self.commits.fetch_add(1, Ordering::Relaxed);
+                self.committed();
                 let last = self.stamps.last();
                 self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
                 self.backlog |= background;
@@ -534,8 +1015,8 @@ impl Writer {
     /// Takes the inbox and live writes waiting, between two background transactions.
     fn between(&mut self) {
         loop {
-            if let Ok(write) = self.realtime.try_recv() {
-                self.realtime_write(write);
+            if let Ok(row) = self.realtime.try_recv() {
+                self.take_inbox(row);
             } else if let Ok(write) = self.live.try_recv() {
                 self.live_write(write);
             } else {
@@ -550,7 +1031,11 @@ impl Writer {
         let groups = write::groups(changes);
         let mut rest = groups.as_slice();
         while !rest.is_empty() {
-            let made = self.transaction(changes, rest, true)?;
+            self.wait_for_room();
+            let made = self.retrying(|w| {
+                w.synced(false)?;
+                w.transaction(changes, rest, true)
+            })?;
             applied.changed += made.changed;
             applied.quarantined += made.quarantined;
             applied.transactions += 1;
@@ -567,12 +1052,15 @@ impl Writer {
     fn prune(&mut self) {
         self.pruned = Instant::now();
         loop {
-            let pruned = (|| {
-                let tx = self.db.transaction()?;
+            self.wait_for_room();
+            let pruned = self.retrying(|w| {
+                w.synced(false)?;
+                let tx = w.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let pruned = write::prune(&tx, BATCH_ROWS)?;
                 tx.commit()?;
+                w.committed();
                 anyhow::Ok(pruned)
-            })();
+            });
             match pruned {
                 Ok(n) if n == BATCH_ROWS => self.between(),
                 Ok(_) => return,
@@ -585,42 +1073,57 @@ impl Writer {
     }
 }
 
-/// Copies the WAL into the database once a second, if anything was committed, without waiting for
-/// readers or holding up the writer, which keeps appending meanwhile. It ends when the writer has.
-fn checkpoint(db: Connection, commits: Arc<AtomicU64>) {
-    let mut seen = 0;
-    while Arc::strong_count(&commits) > 1 {
-        std::thread::sleep(CHECKPOINT_EVERY);
-        let now = commits.load(Ordering::Relaxed);
-        if now == seen {
+/// Copies the WAL into jaw.db once WAL_EASY frames wait, or any while background work waits for
+/// the WAL to start again, and until none do, without waiting for readers or holding up the
+/// writer, which keeps appending meanwhile; and says how far it has got. Once the writer copies
+/// the last few frames itself, it leaves them. Once jaw.db has gone IDLE without a commit, it
+/// empties the WAL. It ends when the writer has.
+fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>) {
+    let mut emptied = false;
+    loop {
+        match kicks.recv_timeout(IDLE) {
+            Ok(()) => emptied = false,
+            Err(RecvTimeoutError::Timeout) => {
+                if !emptied {
+                    match wal_checkpoint(&db, "TRUNCATE") {
+                        Ok((false, _, _)) => {
+                            wal.frames.store(0, Ordering::Relaxed);
+                            wal.passed((0, 0));
+                            emptied = true;
+                        }
+                        Ok((true, _, _)) => {}
+                        Err(e) => eprintln!("jawd: can't empty the WAL: {e:#}"),
+                    }
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        if !wal.held.load(Ordering::Relaxed) && wal.waiting() < WAL_EASY {
             continue;
         }
-        seen = now;
-        if let Err(e) = db.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())) {
-            eprintln!("jawd: a checkpoint failed: {e}");
-        }
-    }
-}
-
-/// Makes a realtime write, saying whether it was committed.
-fn realtime_write(db: &mut Connection, write: Realtime) -> bool {
-    match write {
-        Realtime::Inbox { kind, at_ms, payload, ack, .. } => {
-            let stored =
-                db.execute("INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)", params![kind, at_ms, payload]);
-            match stored {
-                Ok(_) => {
-                    if let Some(ack) = ack {
-                        ack.send();
-                    }
-                    true
-                }
-                // Without its ack, the engine keeps waiting and WhatsApp keeps the message.
-                Err(e) => {
-                    eprintln!("jawd: can't keep a {kind} in the inbox, so it isn't acked: {e}");
-                    false
-                }
+        let mut last = None;
+        loop {
+            if wal.finishing.load(Ordering::Relaxed) && wal.waiting() <= WAL_NEAR {
+                break;
             }
+            let _ = kicks.try_recv();
+            let passed = match wal_checkpoint(&db, "PASSIVE") {
+                Ok((_, log, copied)) => (log, copied),
+                Err(e) => {
+                    eprintln!("jawd: a checkpoint failed: {e:#}");
+                    break;
+                }
+            };
+            wal.passed(passed);
+            if passed.1 >= passed.0 {
+                break;
+            }
+            // A reader still needs the frames left, so give it a moment.
+            if last == Some(passed) {
+                std::thread::sleep(HOLD_POLL);
+            }
+            last = Some(passed);
         }
     }
 }
@@ -1126,5 +1629,124 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(query(&store, move |db| read::message_count(db, chat)).await, 1, "neither comes back");
+    }
+
+    #[test]
+    fn a_pragma_sqlite_ignores_or_doesnt_know_is_refused() {
+        let db = Connection::open_in_memory().unwrap();
+        assert!(pragma(&db, "synchronous", "'FULL ff'").is_err(), "SQLite takes it and sets NORMAL");
+        assert!(pragma(&db, "synchronus", 2).is_err(), "a misspelled PRAGMA does nothing");
+        pragma(&db, "synchronous", 2).unwrap();
+    }
+
+    #[test]
+    fn every_connection_to_jaw_db_is_as_asked_and_its_checkpoints_reach_the_disk() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("jaw.db");
+        let writer = connect(&path, Role::Writer).unwrap();
+        let (reader, checkpointer) =
+            (connect(&path, Role::Reader).unwrap(), connect(&path, Role::Checkpointer).unwrap());
+        for db in [&writer, &reader, &checkpointer] {
+            check(db, "checkpoint_fullfsync", "1").unwrap();
+            check(db, "busy_timeout", "5000").unwrap();
+            check(db, "journal_mode", "wal").unwrap();
+        }
+        for (name, value) in [("synchronous", "1"), ("wal_autocheckpoint", "0"), ("journal_size_limit", "67108864")] {
+            check(&writer, name, value).unwrap();
+        }
+        check(&checkpointer, "synchronous", "2").unwrap();
+        assert!(reader.execute_batch("CREATE TABLE nope (x)").is_err(), "readers can't write");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inbox_rows_and_durable_changes_are_synced_before_they_are_answered_and_live_ones_are_not() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let inboxed = store.inboxed();
+        let notified = inboxed.notified();
+        store.inbox("message", 0, vec![1], None);
+        notified.await;
+        assert_eq!(store.storage().synced_commits, 1);
+        let chat = "351910000001@s.whatsapp.net";
+        store.apply(Lane::Live, messages([text(chat, "m1", 1_000, "converted")])).await.unwrap();
+        assert_eq!(store.storage().synced_commits, 1, "a conversion commits at NORMAL");
+        store.apply_durable(messages([text(chat, "m2", 2_000, "done")])).await.unwrap();
+        assert_eq!(store.storage().synced_commits, 2);
+        let notified = inboxed.notified();
+        store.inbox("message", 0, vec![2], None);
+        notified.await;
+        assert_eq!(store.storage().synced_commits, 3, "after a NORMAL commit, the next inbox row is synced again");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_inbox_commit_that_fails_keeps_its_row_and_holds_everything_else_back_until_it_goes_in() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let outside = Connection::open(home.path().join("jaw.db")).unwrap();
+        outside.busy_timeout(Duration::from_secs(5)).unwrap();
+        outside
+            .execute_batch(
+                "CREATE TRIGGER inbox_fails BEFORE INSERT ON inbox BEGIN SELECT RAISE(FAIL, 'the disk is full'); END",
+            )
+            .unwrap();
+        let mut trouble = store.trouble();
+        store.inbox("message", 7, b"kept".to_vec(), None);
+        tokio::time::timeout(Duration::from_secs(10), trouble.wait_for(Option::is_some)).await.unwrap().unwrap();
+        assert!(trouble.borrow().as_deref().unwrap().contains("the disk is full"));
+        assert!(store.storage().trouble.is_some(), "status says so too");
+        let chat = "351910000001@s.whatsapp.net";
+        let background = {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply(Lane::Background, messages([text(chat, "b", 1_000, "b")])).await })
+        };
+        let live = {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply(Lane::Live, messages([text(chat, "l", 2_000, "l")])).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!background.is_finished() && !live.is_finished(), "nothing is written while the inbox can't be");
+        assert_eq!(store.count("inbox").unwrap(), 0);
+        outside.execute_batch("DROP TRIGGER inbox_fails").unwrap();
+        background.await.unwrap().unwrap();
+        live.await.unwrap().unwrap();
+        let kept: (String, i64, Vec<u8>) = query(&store, |db| {
+            Ok(db.query_row("SELECT kind, at, payload FROM inbox", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+        })
+        .await;
+        assert_eq!(kept, ("message".to_string(), 7, b"kept".to_vec()));
+        tokio::time::timeout(Duration::from_secs(5), trouble.wait_for(Option::is_none)).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_wal_stays_bounded_while_history_pours_in_and_live_writes_never_wait_for_it() {
+        let home = tempfile::tempdir().unwrap();
+        let (soft, hard) = (256, 512);
+        let store = Store::open_with(home.path(), soft, hard).unwrap();
+        let history: Vec<Message> =
+            (0..20_000).map(|n| text("351910000001@s.whatsapp.net", &format!("h{n}"), n, "history")).collect();
+        let batch = {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply(Lane::Background, messages(history)).await.unwrap() })
+        };
+        let mut live = 0;
+        while !batch.is_finished() {
+            let started = Instant::now();
+            store
+                .apply(Lane::Live, messages([text("351910000002@s.whatsapp.net", &format!("l{live}"), live, "live")]))
+                .await
+                .unwrap();
+            assert!(started.elapsed() < Duration::from_secs(1), "a live write waited {:?}", started.elapsed());
+            live += 1;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(batch.await.unwrap().changed, 20_000);
+        let storage = store.storage();
+        assert!(storage.background_waits > 0, "background work never waited for the checkpointer");
+        // One background transaction can begin just under the hard limit.
+        assert!(storage.wal_peak_frames < hard + 400, "the WAL held {} frames", storage.wal_peak_frames);
+        assert!(storage.wal_bytes < (hard + 400) * 4_120, "the WAL file is {} bytes", storage.wal_bytes);
+        store.truncate().await.unwrap();
+        assert_eq!(std::fs::metadata(home.path().join("jaw.db-wal")).unwrap().len(), 0);
+        assert_eq!(store.count("messages").unwrap(), 20_000 + live as u64);
     }
 }

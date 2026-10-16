@@ -343,8 +343,8 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         (0..1_000).map(|n| Change::Person(Person { jids: vec![lid(n), phone(n)], ..Person::default() })).collect();
     let joined = store.apply(Lane::Background, joins).await?;
 
-    let checkpoint = rusqlite::Connection::open(home.join("jaw.db"))?;
-    checkpoint.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    let storage = store.storage();
+    store.truncate().await?;
     let bytes = std::fs::metadata(home.join("jaw.db"))?.len();
     println!(
         "Built {total} messages in {chats} chats ({} in each of the biggest {BIG_CHATS}, {} in the next, {} in the median one) through the writer's background lane in {:.1} s: {:.0} messages a second in {transactions} transactions. jaw.db is {:.0} MB, {:.0} bytes a message.",
@@ -361,6 +361,13 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         "{}, while it was indexed for search in {:.1} s",
         live_indexing.line(&format!("a live message, {} of them", live_indexing.0.len())),
         indexed.as_secs_f64()
+    );
+    println!(
+        "  The WAL held {} frames at most, and its file was {:.1} MB before the last checkpoint; background work waited for the checkpointer {} times, {:.1} s in all.\n",
+        storage.wal_peak_frames,
+        storage.wal_bytes as f64 / 1e6,
+        storage.background_waits,
+        storage.background_waited_ms as f64 / 1e3,
     );
     println!("{}\n", jaw_client::pools(&[writer]));
     println!(

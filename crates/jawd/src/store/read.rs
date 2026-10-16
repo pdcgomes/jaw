@@ -5,11 +5,11 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, select_biased, unbounded};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use tokio::sync::oneshot;
@@ -51,13 +51,8 @@ impl Reads {
         let (background, background_rx) = unbounded();
         let stats = Arc::new(Mutex::new(Stats::default()));
         for n in 0..workers {
-            let db = Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
-            )
-            .with_context(|| format!("can't open {} to read", path.display()))?;
-            db.busy_timeout(Duration::from_secs(5))?;
-            db.set_prepared_statement_cache_capacity(64);
+            let db = super::connect(path, super::Role::Reader)
+                .with_context(|| format!("can't open {} to read", path.display()))?;
             let (interactive, background, stats) = (interactive_rx.clone(), background_rx.clone(), stats.clone());
             std::thread::Builder::new()
                 .name(format!("jawd-reader-{n}"))

@@ -1,0 +1,9 @@
+# Every migration in schema.rs: its number, its kind (schema: costs the same however big the
+# database is; data: costs time in proportion to the rows) and the SHA-256 of its text.
+# A merged migration's line never changes. A branch adds a line for each migration it adds and
+# takes the next free number when it merges; two lines with one number fail the tests.
+1 schema 978e6a347dacb67186d4c3fb71ee3ea5dc4c0a3f45db1ae2b8534c9bcb13431c
+2 schema 82eb4aa6bfc1380e483a9e368a9778a1eeb57d6e97e49164e6d39e48ada7e87b
+3 data 57b37b042be8767a31add6a79d630087e7ce5c90dc78e4989ee8001a80c065b9
+4 schema aa124fd5ab07fe7c1365374c9ac8fc5d8cba94c30c4a93d6d9f895c91b65dfb3
+5 schema a5272c20b16e316904375678b56161e0a7b0a6818efa92c165cbd7523d8389a5

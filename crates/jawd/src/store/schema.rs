@@ -1,8 +1,14 @@
-//! jaw.db's schema, as numbered migrations run in order in one transaction at start; `PRAGMA
-//! user_version` says how many have run.
+//! jaw.db's schema, as numbered migrations run in order at start; `PRAGMA user_version` says how
+//! many have run. A merged migration is frozen: `migrations.lock` has a line for each, its number,
+//! its kind and the SHA-256 of its text, which a test checks. Consecutive schema steps run in one
+//! IMMEDIATE transaction, and a data step, whose cost grows with the rows, in one of its own. The
+//! schema must be the one the migrations make, before and after, or jawd refuses to write.
+
+use std::ops::Range;
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, TransactionBehavior};
+use sha2::{Digest, Sha256};
 
 pub(super) const MIGRATIONS: &[&str] = &[
     // 1: what the engine sends, kept before WhatsApp hears it arrived, and history as it came.
@@ -487,34 +493,163 @@ pub(super) const MIGRATIONS: &[&str] = &[
     ",
 ];
 
+/// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.
+pub(super) const APPLICATION_ID: i64 = 0x6A61_7701;
+
+/// Each migration's number, kind and SHA-256, a line each.
+const LOCK: &str = include_str!("migrations.lock");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// Costs the same however big the database is.
+    Schema,
+    /// Costs time in proportion to the rows.
+    Data,
+}
+
+struct Locked {
+    kind: Kind,
+    sha256: String,
+}
+
+/// The lock's lines in order of number. Every number from 1 has exactly one line, so two branches
+/// that each took the next number fail here once both are merged.
+fn locked(lock: &str) -> Result<Vec<Locked>> {
+    let mut lines: Vec<(usize, Locked)> = Vec::new();
+    for line in lock.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [number, kind, sha256] = fields[..] else {
+            bail!("migrations.lock's line {line:?} isn't a number, a kind and a SHA-256")
+        };
+        let number: usize = number.parse().with_context(|| format!("migrations.lock's line {line:?}"))?;
+        let kind = match kind {
+            "schema" => Kind::Schema,
+            "data" => Kind::Data,
+            other => bail!("migration {number}'s kind is {other:?}, not schema or data"),
+        };
+        if lines.iter().any(|(n, _)| *n == number) {
+            bail!("two migrations have the number {number}: renumber the newer one as the next free number");
+        }
+        lines.push((number, Locked { kind, sha256: sha256.to_ascii_lowercase() }));
+    }
+    lines.sort_by_key(|(n, _)| *n);
+    for (at, (number, _)) in lines.iter().enumerate() {
+        if *number != at + 1 {
+            bail!("migrations.lock has no migration {}", at + 1);
+        }
+    }
+    Ok(lines.into_iter().map(|(_, locked)| locked).collect())
+}
+
+fn sha256(text: &str) -> String {
+    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// SHA-256 of the schema's text, whitespace aside, so a schema changed by hand, by an edited
+/// migration or by another branch's migration of the same number is told apart.
+fn fingerprint(db: &Connection) -> Result<String> {
+    let mut rows = db.prepare(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+    )?;
+    let mut hash = Sha256::new();
+    let mut rows = rows.query([])?;
+    while let Some(row) = rows.next()? {
+        let sql: Option<String> = row.get(3)?;
+        let sql = sql.map(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        for field in [row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, sql] {
+            hash.update(field.as_bytes());
+            hash.update([0]);
+        }
+    }
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The fingerprint of the schema the first `version` migrations make.
+fn expected(version: usize) -> Result<String> {
+    let db = Connection::open_in_memory()?;
+    for migration in &MIGRATIONS[..version] {
+        db.execute_batch(migration)?;
+    }
+    fingerprint(&db)
+}
+
+/// Refuses a file that isn't jaw's: one with another application's ID, or one with tables and no
+/// schema version. A jaw.db from before the ID has none and is given it.
+fn mine(db: &Connection, version: usize) -> Result<()> {
+    let id: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    if id == APPLICATION_ID {
+        return Ok(());
+    }
+    if id != 0 {
+        bail!("jaw.db isn't jaw's database: its application_id is {id:#x}");
+    }
+    if version == 0 {
+        let tables: i64 = db.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0))?;
+        if tables > 0 {
+            bail!("jaw.db isn't jaw's database: it has {tables} tables and no schema version");
+        }
+    }
+    Ok(())
+}
+
+/// The transactions the migrations after `from` run in: each run of schema steps together, and
+/// each data step alone.
+fn steps(kinds: &[Kind], from: usize) -> Vec<Range<usize>> {
+    let mut steps = Vec::new();
+    let mut at = from;
+    while at < kinds.len() {
+        let end = match kinds[at] {
+            Kind::Data => at + 1,
+            Kind::Schema => (at..kinds.len()).find(|&n| kinds[n] == Kind::Data).unwrap_or(kinds.len()),
+        };
+        steps.push(at..end);
+        at = end;
+    }
+    steps
+}
+
 pub fn migrate(db: &mut Connection) -> Result<()> {
+    let locked = locked(LOCK)?;
+    if locked.len() != MIGRATIONS.len() {
+        bail!("migrations.lock has {} migrations and schema.rs {}", locked.len(), MIGRATIONS.len());
+    }
+    if let Some(n) = MIGRATIONS.iter().zip(&locked).position(|(migration, locked)| sha256(migration) != locked.sha256) {
+        bail!("jaw.db's migration {} isn't the text it was merged with, so this jawd won't run it", n + 1);
+    }
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let version = usize::try_from(version).unwrap_or(usize::MAX);
     if version > MIGRATIONS.len() {
         bail!("jaw.db is from a newer jawd (schema {version}, this jawd knows {})", MIGRATIONS.len());
     }
-    if version == MIGRATIONS.len() {
-        return Ok(());
+    mine(db, version)?;
+    if version > 0 && fingerprint(db)? != expected(version)? {
+        bail!(
+            "jaw.db's schema isn't the one jaw's migrations make at version {version}, so jawd won't write to it: \
+             it was changed by hand, by a migration edited since, or by another build's migration {version}"
+        );
     }
-    // A table rebuilt drops the old one, which with foreign keys on would delete every row that
-    // refers to it, so they're off for the transaction and checked before it commits.
-    db.pragma_update(None, "foreign_keys", "OFF")?;
-    let migrated = (|| {
-        let tx = db.transaction()?;
-        for (n, migration) in MIGRATIONS.iter().enumerate().skip(version) {
+    let kinds: Vec<Kind> = locked.iter().map(|l| l.kind).collect();
+    for Range { start: at, end } in steps(&kinds, version) {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (n, migration) in MIGRATIONS.iter().enumerate().take(end).skip(at) {
             tx.execute_batch(migration).with_context(|| format!("jaw.db's migration {}", n + 1))?;
         }
-        if let Some(table) =
-            tx.prepare("PRAGMA foreign_key_check")?.query_row([], |r| r.get::<_, String>(0)).optional()?
-        {
-            bail!("jaw.db's migrations left a row in {table} that refers to nothing, so they were undone");
+        tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+        tx.pragma_update(None, "user_version", end as i64)?;
+        if fingerprint(&tx)? != expected(end)? {
+            bail!("jaw.db's migrations to version {end} didn't make the schema they make on an empty database");
         }
-        tx.pragma_update(None, "user_version", MIGRATIONS.len() as i64)?;
         tx.commit()?;
-        Ok(())
-    })();
-    db.pragma_update(None, "foreign_keys", "ON")?;
-    migrated
+    }
+    let id: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    if id != APPLICATION_ID {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+        tx.commit()?;
+    }
+    super::check(db, "application_id", &APPLICATION_ID.to_string())?;
+    super::check(db, "user_version", &MIGRATIONS.len().to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -598,6 +733,81 @@ mod tests {
             assert_eq!(kept, (1, 1), "from version {from}");
             let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
             assert_eq!(version, MIGRATIONS.len() as i64);
+            assert_eq!(fingerprint(&db).unwrap(), expected(MIGRATIONS.len()).unwrap(), "from version {from}");
         }
+    }
+
+    #[test]
+    fn each_merged_migration_is_still_the_text_it_was_merged_with() {
+        let locked = locked(LOCK).unwrap();
+        assert_eq!(locked.len(), MIGRATIONS.len(), "each migration has its line in migrations.lock");
+        for (n, (migration, locked)) in MIGRATIONS.iter().zip(&locked).enumerate() {
+            assert_eq!(
+                sha256(migration),
+                locked.sha256,
+                "migration {} isn't the text it was merged with; a merged migration is never edited, so add a new one",
+                n + 1
+            );
+        }
+    }
+
+    #[test]
+    fn two_migrations_with_one_number_or_a_gap_are_refused() {
+        let line = |n: usize| format!("{n} schema {}\n", "0".repeat(64));
+        let twice = [line(1), line(2), line(2)].concat();
+        assert!(locked(&twice).err().unwrap().to_string().contains("two migrations have the number 2"));
+        let gap = [line(1), line(3)].concat();
+        assert!(locked(&gap).err().unwrap().to_string().contains("no migration 2"));
+        assert!(locked(&format!("1 later {}", "0".repeat(64))).is_err(), "a kind that isn't schema or data");
+        assert_eq!(locked(&[line(2), line(1)].concat()).unwrap().len(), 2, "in any order");
+    }
+
+    #[test]
+    fn a_data_step_runs_in_a_transaction_of_its_own_between_runs_of_schema_steps() {
+        use Kind::{Data, Schema};
+        assert_eq!(locked(LOCK).unwrap()[2].kind, Data, "migration 3 counts every chat's messages");
+        let kinds = [Schema, Schema, Data, Schema, Schema, Data, Data];
+        assert_eq!(steps(&kinds, 0), [0..2, 2..3, 3..5, 5..6, 6..7]);
+        assert_eq!(steps(&kinds, 2), [2..3, 3..5, 5..6, 6..7]);
+        assert_eq!(steps(&kinds, 4), [4..5, 5..6, 6..7]);
+        assert!(steps(&kinds, 7).is_empty());
+    }
+
+    #[test]
+    fn a_new_database_is_jaws_and_another_file_is_refused() {
+        let mut db = Connection::open_in_memory().unwrap();
+        migrate(&mut db).unwrap();
+        let id: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0)).unwrap();
+        assert_eq!(id, APPLICATION_ID);
+
+        let mut other = Connection::open_in_memory().unwrap();
+        other.pragma_update(None, "application_id", 0x1234).unwrap();
+        assert!(migrate(&mut other).unwrap_err().to_string().contains("isn't jaw's"));
+        let mut unversioned = Connection::open_in_memory().unwrap();
+        unversioned.execute_batch("CREATE TABLE notes (text TEXT)").unwrap();
+        assert!(migrate(&mut unversioned).unwrap_err().to_string().contains("isn't jaw's"));
+    }
+
+    #[test]
+    fn a_jaw_db_from_before_the_application_id_is_given_it() {
+        let mut db = Connection::open_in_memory().unwrap();
+        for migration in MIGRATIONS {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", MIGRATIONS.len() as i64).unwrap();
+        migrate(&mut db).unwrap();
+        let id: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0)).unwrap();
+        assert_eq!(id, APPLICATION_ID);
+    }
+
+    #[test]
+    fn a_schema_changed_by_hand_is_refused() {
+        let mut db = Connection::open_in_memory().unwrap();
+        migrate(&mut db).unwrap();
+        db.execute_batch("CREATE INDEX messages_by_kind ON messages (kind)").unwrap();
+        let refused = migrate(&mut db).unwrap_err().to_string();
+        assert!(refused.contains("isn't the one jaw's migrations make at version"), "{refused}");
+        db.execute_batch("DROP INDEX messages_by_kind").unwrap();
+        migrate(&mut db).unwrap();
     }
 }
