@@ -29,7 +29,7 @@ Read "jawd › Storage › Data integrity" and "Migrations" in `docs/plans/2026-
 
 ## The audit, before landing
 
-1. When the gate passes, and before pushing, have the database expert audit the branch: launch the `database-expert` subagent (`.cursor/agents/database-expert.md`; if that type isn't offered, launch a general-purpose subagent with that file as its brief) with the worktree path and `origin/main..HEAD`.
+1. When the gate passes, and before pushing, have the database expert audit the branch: launch the `database-expert` subagent (`.cursor/agents/database-expert.md`; if that type isn't offered, launch a general-purpose subagent with that file as its brief) with the worktree path and `origin/main..HEAD`. If you can't launch subagents, don't push: report back to whoever started you and ask for the audit.
 2. Fix everything it marks as data loss or inconsistency, then have it audit again. It writes `docs/audits/YYYY-MM-DD-<topic>.md` ending in `Verdict: approved`.
 3. Commit the note in the branch, and give every commit that touches the data layer the trailer `Data-Audit: docs/audits/<file>.md`, for example `git rebase origin/main -x 'git commit --amend --no-edit --trailer "Data-Audit: docs/audits/2026-10-17-sync.md"'`.
 4. `make check-audit` must pass locally; CI runs the same check and fails a push without it.
