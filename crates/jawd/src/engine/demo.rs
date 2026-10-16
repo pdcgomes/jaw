@@ -163,6 +163,8 @@ impl Sender {
         match kind {
             pb::command::Kind::Ping(_) => Ok(pb::reply::Kind::Pong(pb::Pong { at_ms: now_ms() })),
             pb::command::Kind::BenchRun(run) => self.bench(run).await,
+            // The made-up account has no connection to end.
+            pb::command::Kind::LinkCancel(_) => Ok(pb::reply::Kind::Done(pb::Done {})),
             _ => Err(EngineError::Failed { message: "the demo engine doesn't do that".into(), retry: false }),
         }
     }

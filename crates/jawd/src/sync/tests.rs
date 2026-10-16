@@ -677,10 +677,132 @@ async fn a_clean_stop_is_noted_and_the_next_start_notes_it_is_running_before_it_
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
     assert_eq!(store.remembered(CLEAN).unwrap(), None, "a database jawd never stopped cleanly");
-    stopped(&store, None).await;
+    stop(&store, None).await;
     assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("1"));
     running(&store).await.unwrap();
     assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("0"), "noted before the engine can start");
+}
+
+/// An engine for the stop: it says hello once `gate` lets it (at once without one), answers the
+/// disconnect unless `deaf`, and notes what jaw.db's clean marker says at the moment it's ended.
+#[derive(Clone)]
+struct Ending {
+    store: Store,
+    gate: Option<Arc<tokio::sync::Notify>>,
+    deaf: bool,
+    marker_when_ended: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+impl Ending {
+    fn new(store: &Store) -> Ending {
+        Ending { store: store.clone(), gate: None, deaf: false, marker_when_ended: Arc::default() }
+    }
+
+    fn ended(&self) -> Vec<Option<String>> {
+        self.marker_when_ended.lock().unwrap().clone()
+    }
+}
+
+/// Notes the clean marker when the engine holding it is ended.
+struct Ended(Ending);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        let marker = self.0.store.remembered(CLEAN).unwrap();
+        self.0.marker_when_ended.lock().unwrap().push(marker);
+    }
+}
+
+impl crate::engine::Engine for Ending {
+    fn kind(&self) -> &'static str {
+        "ending"
+    }
+
+    fn start(
+        &self,
+        _events: mpsc::Sender<crate::engine::Incoming>,
+    ) -> crate::engine::BoxFuture<'_, anyhow::Result<crate::engine::Instance>> {
+        let engine = self.clone();
+        Box::pin(async move {
+            if let Some(gate) = &engine.gate {
+                gate.notified().await;
+            }
+            let (commands, mut outgoing) = crate::engine::Commands::for_tests();
+            let deaf = engine.deaf;
+            tokio::spawn(async move {
+                let mut unanswered = Vec::new();
+                while let Some(out) = outgoing.recv().await {
+                    if let crate::engine::Outgoing::Command { reply, .. } = out {
+                        if deaf {
+                            unanswered.push(reply);
+                        } else {
+                            let _ = reply.send(Ok(pb::reply::Kind::Done(pb::Done {})));
+                        }
+                    }
+                }
+            });
+            let ended = Ended(engine);
+            let exited: crate::engine::BoxFuture<'static, String> = Box::pin(async move {
+                let _ended = ended;
+                std::future::pending().await
+            });
+            let hello =
+                pb::Hello { protocol: crate::engine::PROTOCOL, program: "ending".into(), whatsmeow: String::new() };
+            Ok(crate::engine::Instance { hello, commands, exited })
+        })
+    }
+}
+
+fn supervising(engine: &Ending) -> (Supervisor, mpsc::Receiver<crate::engine::Incoming>) {
+    let (events, incoming) = mpsc::channel(64);
+    let backoff = crate::engine::supervisor::Backoff::default();
+    (Supervisor::spawn(Arc::new(engine.clone()), events, backoff), incoming)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_clean_stop_is_noted_only_once_the_engine_that_disconnected_has_been_ended() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    running(&store).await.unwrap();
+    let engine = Ending::new(&store);
+    let (supervisor, _incoming) = supervising(&engine);
+    until("the engine to run", || supervisor.status().runs == 1).await;
+    stop(&store, Some(&supervisor)).await;
+    assert_eq!(engine.ended(), [Some("0".to_string())], "the marker said running while the engine ran");
+    assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("1"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_that_says_hello_after_the_disconnect_found_none_leaves_the_stop_unclean() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    running(&store).await.unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let engine = Ending { gate: Some(gate.clone()), ..Ending::new(&store) };
+    let (supervisor, _incoming) = supervising(&engine);
+    let disconnected = disconnect(&supervisor).await;
+    assert_eq!(disconnected, Some(0), "no engine was running to disconnect");
+    gate.notify_one();
+    until("the engine to say hello", || supervisor.status().runs == 1).await;
+    supervisor.stop().await;
+    noted_clean(&store, Some(&supervisor), disconnected).await;
+    assert_eq!(engine.ended(), [Some("0".to_string())]);
+    assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("0"), "an engine ran that never disconnected");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_that_doesnt_disconnect_in_time_is_ended_and_the_stop_stays_unclean() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    running(&store).await.unwrap();
+    let engine = Ending { deaf: true, ..Ending::new(&store) };
+    let (supervisor, _incoming) = supervising(&engine);
+    until("the engine to run", || supervisor.status().runs == 1).await;
+    let began = std::time::Instant::now();
+    stop(&store, Some(&supervisor)).await;
+    assert!(began.elapsed() < DISCONNECTING + Duration::from_millis(500), "within jawd's bound to stop");
+    assert_eq!(engine.ended().len(), 1, "the engine was ended");
+    assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("0"));
 }
 
 #[test]
@@ -712,6 +834,8 @@ enum Blob {
     NotYet,
     /// WhatsApp no longer has it.
     Gone,
+    /// The engine couldn't ask: it went, or none was running, as while jawd stops.
+    NoEngine(EngineError),
 }
 
 /// An engine for tests: each instance says it's connected once it's running, answers what sync
@@ -765,6 +889,7 @@ impl Scripted {
                         Ok(pb::reply::Kind::HistoryFile(pb::HistoryFile { path: download.path, ..Default::default() }))
                     }
                     Some(Blob::NotYet) => Err(EngineError::Failed { message: "no answer".into(), retry: true }),
+                    Some(Blob::NoEngine(e)) => Err(e),
                     Some(Blob::Gone) | None => Err(EngineError::Failed { message: "404".into(), retry: false }),
                 };
                 ("history", answer)
@@ -939,6 +1064,38 @@ async fn a_history_blob_that_cant_be_had_yet_waits_behind_the_ones_after_it_and_
         kept.global_settings.is_some() && kept.conversations[0].messages.is_empty(),
         "settings kept, rows' messages taken out"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_history_blob_the_engine_couldnt_ask_for_is_never_quarantined() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    notifications(&store, 3).await;
+    let engine = Scripted::default();
+    engine.blobs.lock().unwrap().extend([
+        ("went".to_string(), Blob::NoEngine(EngineError::Gone)),
+        ("stopped".to_string(), Blob::NoEngine(EngineError::Unavailable("it's stopped".into()))),
+        ("here".to_string(), Blob::Here(blob("h1"))),
+    ]);
+    let (supervisor, _incoming) = supervised(&engine);
+    until("the engine to run", || supervisor.status().state.name() == "running").await;
+    let (offered, offers) = mpsc::unbounded_channel();
+    let fetching = tokio::spawn(fetch::run(
+        offers,
+        store.clone(),
+        supervisor,
+        Arc::default(),
+        home.path().join("spool"),
+        Merges::default(),
+    ));
+    for work in [offer(1, "went"), offer(2, "stopped"), offer(3, "here")] {
+        offered.send(work).unwrap();
+    }
+    until("the blob after them", || store.count("messages").unwrap() == 1).await;
+    until("each asked for", || engine.asked("history") >= 3).await;
+    fetching.abort();
+    assert_eq!(store.count("quarantine").unwrap(), 0, "neither is a failure for good");
+    assert_eq!(store.count("inbox").unwrap(), 2, "both wait to be asked for again");
 }
 
 #[tokio::test(flavor = "multi_thread")]

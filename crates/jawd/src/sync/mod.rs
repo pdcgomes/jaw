@@ -225,13 +225,46 @@ pub async fn run(
     }
 }
 
-/// Ends jawd's run cleanly: the engine stops taking events from WhatsApp, and then jaw.db says the
-/// stop was clean.
-pub async fn stopped(store: &Store, engine: Option<&Supervisor>) {
+/// Ends the engine in the order that leaves nothing of it after jaw.db says the stop was clean:
+/// whatsmeow disconnects, the supervisor ends the engine and starts it no more, and only then is
+/// "1" noted, if the disconnect went through or no engine was running and none said hello since.
+pub async fn stop(store: &Store, engine: Option<&Supervisor>) {
+    let disconnected = match engine {
+        Some(engine) => disconnect(engine).await,
+        None => Some(0),
+    };
     if let Some(engine) = engine {
-        let stop = engine.call(pb::command::Kind::LinkCancel(pb::LinkCancel {}));
-        if tokio::time::timeout(STOPPING, stop).await.is_err() {
-            eprintln!("jawd: the engine didn't stop in time");
+        engine.stop().await;
+    }
+    noted_clean(store, engine, disconnected).await;
+}
+
+/// Asks the engine running now to disconnect. Some(runs) when it did, or when none was running,
+/// with the supervisor's runs from before asking; None when it couldn't or didn't in time.
+async fn disconnect(engine: &Supervisor) -> Option<u32> {
+    let runs = engine.status().runs;
+    let asked = engine.call(pb::command::Kind::LinkCancel(pb::LinkCancel {}));
+    match tokio::time::timeout(DISCONNECTING, asked).await {
+        Ok(Ok(_) | Err(EngineError::Unavailable(_))) => Some(runs),
+        Ok(Err(e)) => {
+            eprintln!("jawd: the engine couldn't disconnect: {e}");
+            None
+        }
+        Err(_) => {
+            eprintln!("jawd: the engine didn't disconnect in time");
+            None
+        }
+    }
+}
+
+/// Notes the stop was clean once the engine has been ended, unless it didn't disconnect or another
+/// engine said hello after it was asked to.
+async fn noted_clean(store: &Store, engine: Option<&Supervisor>, disconnected: Option<u32>) {
+    let Some(runs) = disconnected else { return };
+    if let Some(engine) = engine {
+        let status = engine.status();
+        if status.state != crate::engine::supervisor::State::Stopped || status.runs != runs {
+            eprintln!("jawd: an engine ran after it was asked to disconnect, so the stop isn't noted clean");
             return;
         }
     }
@@ -240,8 +273,9 @@ pub async fn stopped(store: &Store, engine: Option<&Supervisor>) {
     }
 }
 
-/// How long the engine has to disconnect at a clean stop.
-const STOPPING: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long the engine has to disconnect at a clean stop, inside jawd's 3 s to stop; if that runs
+/// out first, the marker stays "0", and the next start says the last didn't stop cleanly.
+const DISCONNECTING: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Counts a message that arrived while catching up, and says how far it has got now and then.
 fn caught(live: &Shared, pushes: &broadcast::Sender<Push>, chat: &str) {

@@ -268,20 +268,20 @@ async fn start(home: &Path, kind: EngineKind, no_notify: bool) -> Result<Started
 }
 
 /// Stops jawd in the order that keeps its data whole: first it stops taking work, so no interface
-/// is answered for something that won't be done; then the engine is ended and started no more,
-/// whatever its supervisor was waiting for, and anything it handed over that jawd hadn't acked
-/// comes again from WhatsApp; the store closes last, once jawd's tasks are dropped.
+/// is answered for something that won't be done; then whatsmeow disconnects, the engine is ended
+/// and started no more, whatever its supervisor was waiting for, and anything it handed over that
+/// jawd hadn't acked comes again from WhatsApp; only then does jaw.db note a clean stop, and the
+/// store closes last, once jawd's tasks are dropped.
 async fn stop(Started { state, notifications }: Started, socket: &Path) {
     state.stop();
     let _ = std::fs::remove_file(socket);
     if let Some(notifications) = notifications {
         notifications.abort();
     }
-    if let Some(store) = state.store() {
-        sync::stopped(store, state.engine().ok()).await;
-    }
-    if let Ok(engine) = state.engine() {
-        engine.stop().await;
+    match (state.store(), state.engine()) {
+        (Some(store), engine) => sync::stop(store, engine.ok()).await,
+        (None, Ok(engine)) => engine.stop().await,
+        (None, Err(_)) => {}
     }
     if let Some(store) = state.store() {
         match tokio::time::timeout(EMPTYING, store.truncate()).await {

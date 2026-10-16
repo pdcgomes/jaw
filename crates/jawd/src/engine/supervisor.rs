@@ -16,6 +16,8 @@ pub struct EngineStatus {
     /// What the engine said it is in its hello.
     pub version: Option<String>,
     pub restarts: u32,
+    /// How many engines have said hello, so one that ran in between two looks is seen.
+    pub runs: u32,
     /// Why it last stopped.
     pub last_exit: Option<String>,
 }
@@ -63,8 +65,14 @@ pub struct Supervisor {
 impl Supervisor {
     /// Runs `engine` until jawd stops listening to `events`.
     pub fn spawn(engine: Arc<dyn Engine>, events: mpsc::Sender<Incoming>, backoff: Backoff) -> Supervisor {
-        let initial =
-            EngineStatus { kind: engine.kind(), state: State::Starting, version: None, restarts: 0, last_exit: None };
+        let initial = EngineStatus {
+            kind: engine.kind(),
+            state: State::Starting,
+            version: None,
+            restarts: 0,
+            runs: 0,
+            last_exit: None,
+        };
         let (status_tx, status) = watch::channel(initial);
         let (current_tx, current) = watch::channel(None);
         let (stop, stopping) = watch::channel(false);
@@ -145,11 +153,14 @@ async fn supervise(
                 } else {
                     format!("{} (whatsmeow {})", hello.program, hello.whatsmeow)
                 };
+                // Commands are taken before the run is counted, so a caller that found none and
+                // then the same count knows no engine said hello in between.
+                current.send_replace(Some(instance.commands));
                 status.send_modify(|s| {
                     s.state = State::Running;
                     s.version = Some(version);
+                    s.runs += 1;
                 });
-                current.send_replace(Some(instance.commands));
                 let why = tokio::select! {
                     why = instance.exited => why,
                     _ = told(stopping) => return,
