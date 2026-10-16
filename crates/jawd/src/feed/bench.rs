@@ -1,9 +1,11 @@
 //! `jawd bench feed`: an interface on the real socket watching the chat list and a chat's newest
 //! messages while made-up messages are written at a steady rate, as the converter would write
-//! them, with a few deleted for me, then messages one at a time after quiet spells. It reports
-//! the batches a second each window got during the burst, how long each message took from its
-//! commit to the interface reading its push, in the burst and alone, and the CPU jawd spent, with
-//! the writes alone first so the windows' share shows.
+//! them, with a few deleted for me; then messages one at a time after quiet spells, and again
+//! while the unread counts and names of chats no window shows keep changing. It reports the
+//! batches a second each window got during the burst, how long each message took from its commit
+//! to the first interface reading its push, in the burst and alone, how often windows were read,
+//! and the CPU jawd spent, with the writes alone first so the windows' share shows. Several
+//! interfaces can watch at once.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
@@ -21,19 +23,31 @@ use tokio::sync::broadcast;
 
 use super::{Feed, Timing};
 use crate::state::State;
-use crate::store::{Change, Lane, Message, Store};
+use crate::store::{Change, Lane, Message, Person, Read, Store};
 
 pub struct Plan {
     pub rate: u32,
     pub seconds: u32,
     pub window: u32,
     pub chats: u32,
-    /// Messages written one at a time after the burst, each after a quiet spell.
+    /// Messages written one at a time after the burst, each after a quiet spell, and as many again
+    /// while other chats change.
     pub lone: u32,
+    /// Interfaces watching the same windows; the first is the one timed.
+    pub interfaces: u32,
+    /// Chats that never reach the top of the list, whose unread counts and names keep changing
+    /// while lone messages are timed a second time; none leaves that out.
+    pub far: u32,
 }
 
 /// How long the feed is quiet before each lone message.
 const LONE_EVERY: Duration = Duration::from_millis(200);
+/// Changes a second to the far chats.
+const FAR_RATE: u64 = 2_000;
+
+fn far(n: usize) -> String {
+    format!("35195{n:07}@s.whatsapp.net")
+}
 
 /// The chat the interface has open, and how many messages it has before the bench writes.
 const OPEN: &str = "351900000000@s.whatsapp.net";
@@ -93,6 +107,9 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
             history.push(message(chat(c), format!("h{c}-{n}"), start + (n as i64 * 97 + c as i64) * 1000));
         }
     }
+    for n in 0..plan.far as usize {
+        history.push(message(far(n), format!("far{n}"), start - 1_000_000_000 + n as i64));
+    }
     let seeded = history.len();
     store.apply(Lane::Background, history).await?;
 
@@ -107,7 +124,7 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         Some(store.clone()),
         broadcast::channel(16).0,
     )?
-    .with_feed(feed);
+    .with_feed(feed.clone());
     tokio::spawn(crate::sock::serve(Arc::new(state), listener));
 
     let seconds = Duration::from_secs(u64::from(plan.seconds));
@@ -115,26 +132,38 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
     let alone = write(&store, &plan, seconds, "a", commits.clone()).await?;
 
     let stop = Arc::new(AtomicBool::new(false));
-    let (watching, watched) = std::sync::mpsc::channel();
-    let client = {
-        let (stop, window) = (stop.clone(), plan.window);
-        std::thread::spawn(move || watch(socket, window, watching, stop))
-    };
-    watched.recv().context("the bench's interface couldn't watch")??;
+    let mut clients = Vec::new();
+    for _ in 0..plan.interfaces.max(1) {
+        let (watching, watched) = std::sync::mpsc::channel();
+        let (stop, window, socket) = (stop.clone(), plan.window, socket.clone());
+        clients.push(std::thread::spawn(move || watch(socket, window, watching, stop)));
+        watched.recv().context("the bench's interface couldn't watch")??;
+    }
+    let reads = feed.reads();
     let started = Instant::now();
     let together = write(&store, &plan, seconds, "b", commits.clone()).await?;
     let wrote = started.elapsed();
+    let burst_reads = feed.reads() - reads;
     let burst_ended = Instant::now() + Duration::from_millis(200);
-    for n in 0..plan.lone {
-        tokio::time::sleep(LONE_EVERY).await;
-        let id = format!("l{n}");
-        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
-        store.apply(Lane::Live, vec![message(OPEN.into(), id.clone(), at)]).await?;
-        commits.lock().expect("commit times").insert(id, Instant::now());
-    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let quiet = lone(&store, &feed, plan.lone, "l", &commits).await?;
+    let busy = if plan.far > 0 {
+        let writing = Arc::new(AtomicBool::new(true));
+        let changing = tokio::spawn(far_changes(store.clone(), plan.far as usize, writing.clone()));
+        let busy = lone(&store, &feed, plan.lone, "m", &commits).await?;
+        writing.store(false, Ordering::Relaxed);
+        Some((busy, changing.await??))
+    } else {
+        None
+    };
     tokio::time::sleep(Duration::from_millis(200)).await;
     stop.store(true, Ordering::Relaxed);
-    let mut seen = client.join().map_err(|_| anyhow::anyhow!("the bench's interface panicked"))??;
+    let mut seens = Vec::new();
+    for client in clients {
+        seens.push(client.join().map_err(|_| anyhow::anyhow!("the bench's interface panicked"))??);
+    }
+    let watching_cpu: Duration = seens.iter().map(|seen| seen.cpu).sum();
+    let mut seen = seens.swap_remove(0);
     seen.chats.retain(|&at| at < burst_ended);
     seen.messages.retain(|&at| at < burst_ended);
 
@@ -149,7 +178,7 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         delays.sort();
         delays
     };
-    let (delays, lone) = (delays_of("b"), delays_of("l"));
+    let (delays, alone_delays, busy_delays) = (delays_of("b"), delays_of("l"), delays_of("m"));
     let percentile = |delays: &[Duration], p: f64| {
         let at = delays.get(((delays.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or_default();
         at.as_secs_f64() * 1e3
@@ -163,15 +192,23 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         most
     };
     let share = |cpu: Duration, over: Duration| cpu.as_secs_f64() / over.as_secs_f64() * 100.0;
+    let interfaces = match plan.interfaces.max(1) {
+        1 => "an interface".to_string(),
+        n => format!("{n} interfaces, each"),
+    };
     println!(
-        "{seeded} messages in {} chats first, the open chat with {OPEN_HISTORY}; then {} messages a second for {} s, one in {OPEN_SHARE} to the open chat, with an interface watching the top {CHAT_ROWS} chats and the open chat's newest {}:\n",
-        plan.chats, plan.rate, plan.seconds, plan.window
+        "{seeded} messages in {} chats first, the open chat with {OPEN_HISTORY}; then {} messages a second for {} s, one in {OPEN_SHARE} to the open chat, with {interfaces} watching the top {CHAT_ROWS} chats and the open chat's newest {}:\n",
+        plan.chats + plan.far,
+        plan.rate,
+        plan.seconds,
+        plan.window
     );
     println!(
-        "chat list        {} batches, {:.1} a second, at most {} in any second",
+        "chat list        {} batches, {:.1} a second, at most {} in any second; {:.0} window reads a second in all",
         seen.chats.len(),
         per_second(seen.chats.len()),
-        busiest(&seen.chats)
+        busiest(&seen.chats),
+        burst_reads as f64 / wrote.as_secs_f64()
     );
     println!(
         "messages window  {} batches, {:.1} a second, at most {} in any second; {} new messages in them",
@@ -187,18 +224,31 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         percentile(&delays, 1.0)
     );
     println!(
-        "a lone message   p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms from commit to push, for {} messages {} ms apart after the burst",
-        percentile(&lone, 0.5),
-        percentile(&lone, 0.99),
-        percentile(&lone, 1.0),
-        lone.len(),
-        LONE_EVERY.as_millis()
+        "a lone message   p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms from commit to push, for {} messages {} ms apart after the burst; {:.0} window reads a second",
+        percentile(&alone_delays, 0.5),
+        percentile(&alone_delays, 0.99),
+        percentile(&alone_delays, 1.0),
+        alone_delays.len(),
+        LONE_EVERY.as_millis(),
+        quiet.reads_per_second
     );
+    if let Some((busy, far_changed)) = busy {
+        println!(
+            "  while busy     p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms, for {} more while {far_changed} unread counts and names changed in {} chats no window shows, {FAR_RATE} a second; {:.0} window reads a second",
+            percentile(&busy_delays, 0.5),
+            percentile(&busy_delays, 0.99),
+            percentile(&busy_delays, 1.0),
+            busy_delays.len(),
+            plan.far,
+            busy.reads_per_second
+        );
+    }
     println!(
-        "jawd's CPU       {:.1}% of a core writing alone, {:.1}% with the interface watching (its own parsing left out, {:.1}%)",
+        "jawd's CPU       {:.1}% of a core writing alone, {:.1}% with {} watching (their own parsing left out, {:.1}%)",
         share(alone.cpu, alone.took),
-        share(together.cpu.saturating_sub(seen.cpu), together.took),
-        share(seen.cpu, together.took)
+        share(together.cpu.saturating_sub(watching_cpu), together.took),
+        if plan.interfaces > 1 { "the interfaces" } else { "the interface" },
+        share(watching_cpu, together.took)
     );
     if alone.behind > Duration::from_millis(100) || together.behind > Duration::from_millis(100) {
         println!(
@@ -208,6 +258,51 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         );
     }
     Ok(())
+}
+
+struct Lone {
+    reads_per_second: f64,
+}
+
+/// Writes `count` messages to the open chat one at a time, `LONE_EVERY` apart, noting when each
+/// was committed, and says how often windows were read meanwhile.
+async fn lone(
+    store: &Store,
+    feed: &Feed,
+    count: u32,
+    run: &str,
+    commits: &Mutex<HashMap<String, Instant>>,
+) -> Result<Lone> {
+    let (reads, started) = (feed.reads(), Instant::now());
+    for n in 0..count {
+        tokio::time::sleep(LONE_EVERY).await;
+        let id = format!("{run}{n}");
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+        store.apply(Lane::Live, vec![message(OPEN.into(), id.clone(), at)]).await?;
+        commits.lock().expect("commit times").insert(id, Instant::now());
+    }
+    Ok(Lone { reads_per_second: (feed.reads() - reads) as f64 / started.elapsed().as_secs_f64() })
+}
+
+/// Changes the unread counts and names of chats far down the list, `FAR_RATE` a second, each in
+/// a transaction of its own, until told to stop; each touches every chat list without changing
+/// what it shows. Says how many it made.
+async fn far_changes(store: Store, chats: usize, writing: Arc<AtomicBool>) -> Result<u64> {
+    let started = Instant::now();
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let mut n = 0u64;
+    while writing.load(Ordering::Relaxed) {
+        let to = far(n as usize % chats);
+        let change = if n.is_multiple_of(2) {
+            Change::Read(Read { chat: to, at, ids: Vec::new(), phone: Some(((n % 7) as u32, 0)) })
+        } else {
+            Change::Person(Person { jids: vec![to], name: Some(format!("Someone {n}")), ..Person::default() })
+        };
+        store.apply(Lane::Live, vec![change]).await?;
+        n += 1;
+        tokio::time::sleep_until((started + Duration::from_micros(n * 1_000_000 / FAR_RATE)).into()).await;
+    }
+    Ok(n)
 }
 
 struct Wrote {

@@ -118,9 +118,16 @@ enum Bench {
         window: u32,
         #[arg(long, default_value_t = 300)]
         chats: u32,
-        /// Messages written one at a time after the burst, 200 ms apart
+        /// Messages written one at a time after the burst, 200 ms apart, and as many again while
+        /// far chats change
         #[arg(long, default_value_t = 50)]
         lone: u32,
+        /// Interfaces watching the same windows
+        #[arg(long, default_value_t = 1)]
+        interfaces: u32,
+        /// Chats far down the list whose counts and names change while lone messages are timed again
+        #[arg(long, default_value_t = 0)]
+        far: u32,
     },
 }
 
@@ -135,8 +142,8 @@ fn main() -> Result<()> {
         Some(Command::Bench(Bench::Find { messages, chats, people, runs })) => {
             bench_find(find::bench::Plan { messages, chats, people, runs })
         }
-        Some(Command::Bench(Bench::Feed { rate, seconds, window, chats, lone })) => {
-            bench_feed(feed::bench::Plan { rate, seconds, window, chats, lone })
+        Some(Command::Bench(Bench::Feed { rate, seconds, window, chats, lone, interfaces, far })) => {
+            bench_feed(feed::bench::Plan { rate, seconds, window, chats, lone, interfaces, far })
         }
         None => run(&home, cli.engine, cli.no_notify),
     }
