@@ -61,8 +61,10 @@ func TestASendThatMightWorkLaterIsTriedAgainAndOneThatCantIsNot(t *testing.T) {
 	for _, err := range []error{
 		whatsmeow.ErrNotConnected,
 		fmt.Errorf("%w 500", whatsmeow.ErrServerReturnedError),
+		fmt.Errorf("%w 429", whatsmeow.ErrServerReturnedError),
 		whatsmeow.ErrMessageTimedOut,
 		fmt.Errorf("failed to get devices: %w", netErr),
+		fmt.Errorf("failed to get devices: %w", &whatsmeow.IQError{Code: 503}),
 		context.DeadlineExceeded,
 		errors.New("failed to get user info for 351910000002@s.whatsapp.net to fill LID cache"),
 	} {
@@ -74,6 +76,11 @@ func TestASendThatMightWorkLaterIsTriedAgainAndOneThatCantIsNot(t *testing.T) {
 		whatsmeow.ErrRecipientADJID,
 		fmt.Errorf("%w x.example", whatsmeow.ErrUnknownServer),
 		whatsmeow.ErrNoPermissionInGroup,
+		fmt.Errorf("failed to get group members: %w", whatsmeow.ErrNotInGroup),
+		fmt.Errorf("%w 403", whatsmeow.ErrServerReturnedError),
+		fmt.Errorf("%w 413", whatsmeow.ErrServerReturnedError),
+		fmt.Errorf("failed to get devices: %w", &whatsmeow.IQError{Code: 404}),
+		errors.New("no LID found for 351910000002@s.whatsapp.net from server"),
 		errors.New("failed to marshal message: proto: invalid"),
 	} {
 		if retryable(err) {

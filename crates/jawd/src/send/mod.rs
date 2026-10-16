@@ -1,11 +1,12 @@
 //! Sending: what you write, read and type, on its way to WhatsApp. `send.text` makes the message's
 //! ID up front, as whatsmeow does, and writes the message (pending) and its outbox row in one
 //! synced commit before it answers, so the row every window shows is the real message and nothing
-//! sent is lost; each chat's sends then go one after another through the engine with that ID
-//! (`outbox`). Reading moves the chat's read position and owes WhatsApp read receipts, sent at most
-//! every so often per chat (`reads`); typing is said at most every so often and stopped after a
-//! quiet spell (`typing`); you're online only while an interface has focus (`presence`); and
-//! `chat.start` finds or makes a chat by number or person (`start`).
+//! sent is lost; each chat's sends then go one after another through the engine with that ID,
+//! waiting while WhatsApp can't be reached and failing only when it refuses one (`outbox`).
+//! Reading moves the chat's read position and owes WhatsApp read receipts, sent at most every so
+//! often per chat (`reads`); typing is said at most every so often and stopped after a quiet spell
+//! (`typing`); you're online only while an interface has focus (`presence`); and `chat.start`
+//! finds or makes a chat by number or person (`start`).
 
 pub mod bench;
 mod outbox;
@@ -26,7 +27,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, broadcast};
+use tokio::sync::{Mutex, Notify, broadcast, watch};
 
 pub use self::presence::Viewer;
 use crate::engine::supervisor::Supervisor;
@@ -38,11 +39,9 @@ use crate::work::{Priority, Report, Serial};
 /// How long sending waits for things, which tests shorten.
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
-    /// The pause after a send fails, at first and at most; it doubles each time.
+    /// The pause after a send fails on the way, at first and at most; it doubles each time.
     pub retry_first: Duration,
     pub retry_most: Duration,
-    /// How long a message is tried, from its first attempt since jawd started, before it's failed.
-    pub give_up: Duration,
     /// The shortest time between two of a chat's read receipts.
     pub read_every: Duration,
     /// How often typing is said again while it goes on, and how long after the interface last
@@ -59,7 +58,6 @@ impl Default for Timing {
         Timing {
             retry_first: Duration::from_secs(1),
             retry_most: Duration::from_secs(60),
-            give_up: Duration::from_secs(600),
             read_every: Duration::from_secs(2),
             typing_again: Duration::from_secs(10),
             typing_quiet: Duration::from_secs(10),
@@ -86,6 +84,8 @@ struct Inner {
     enqueue: Mutex<()>,
     /// Woken each time the connection to WhatsApp comes back, for whatever waits to try again.
     online: Notify,
+    /// Whether WhatsApp can be reached now; sends wait for it.
+    connected: watch::Sender<bool>,
     reads: reads::Reads,
     typing: typing::Typists,
     presence: presence::Presence,
@@ -103,6 +103,8 @@ impl Sending {
         timing: Timing,
     ) -> anyhow::Result<Sending> {
         let (presence, focused) = presence::Presence::new();
+        let pushes = pushes.subscribe();
+        let online = presence::connected(&live.lock().expect("live state").connection);
         let inner = Arc::new(Inner {
             store,
             engine,
@@ -110,13 +112,12 @@ impl Sending {
             timing,
             enqueue: Mutex::new(()),
             online: Notify::new(),
+            connected: watch::channel(online).0,
             reads: reads::Reads::default(),
             typing: typing::Typists::new(),
             presence,
         });
         typing::start(&inner);
-        let pushes = pushes.subscribe();
-        let online = presence::connected(&live.lock().expect("live state").connection);
         tokio::spawn(presence::follow(inner.clone(), pushes, focused, online));
         outbox::resume(&inner).await?;
         reads::resume(&inner).await?;

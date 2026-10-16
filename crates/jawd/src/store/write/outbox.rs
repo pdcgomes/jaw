@@ -68,7 +68,7 @@ const TOLD: &str = "UPDATE reads SET told_at = ?2, told_n = ?3
     WHERE chat = ?1 AND (?2, ?3) > (told_at, told_n) AND (?2, ?3) <= (at, n)";
 const QUEUED: &str = "SELECT o.n, c.id FROM outbox o JOIN messages m ON m.n = o.message JOIN chats c ON c.n = m.chat
     WHERE o.state = 'queued' ORDER BY o.n";
-const WAITING: &str = "SELECT count(*) FROM outbox WHERE state = 'queued'";
+const WAITING: &str = "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox";
 const OUTBOXED: &str = "SELECT o.n, c.id, m.id, o.raw, o.state = 'queued', m.status
     FROM outbox o CROSS JOIN messages m ON m.n = o.message JOIN chats c ON c.n = m.chat";
 const OWING: &str = "SELECT chat FROM reads WHERE (told_at, told_n) < (at, n)";
@@ -77,6 +77,68 @@ const OWED_CHAT: &str = "SELECT c.id, c.kind, r.at, r.n, r.told_at, r.told_n FRO
 const OWED_MESSAGES: &str = "SELECT m.id, j.jid FROM messages m LEFT JOIN person_jids j ON j.n = m.sender
     WHERE m.chat = ?1 AND m.mine = 0 AND (m.at, m.n) > (?2, ?3) AND (m.at, m.n) <= (?4, ?5)
     ORDER BY m.at DESC, m.n DESC LIMIT ?6";
+
+const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
+const RECIPIENTS: &str = "INSERT OR IGNORE INTO recipients (message, member)
+    SELECT ?1, g.member FROM group_members g JOIN person_jids j ON j.n = g.member
+    WHERE g.chat = ?2 AND j.person NOT IN (SELECT p.person FROM json_each(?3) e JOIN person_jids p ON p.jid = e.value)";
+/// A message's recipients: those it was sent to who are still members of group ?2, you apart, in
+/// case it was sent before jaw knew your JIDs, ?3.
+macro_rules! sent_to {
+    () => {
+        "FROM recipients s JOIN group_members g ON g.chat = ?2 AND g.member = s.member
+        JOIN person_jids mj ON mj.n = s.member WHERE s.message = ?1
+        AND mj.person NOT IN (SELECT p.person FROM json_each(?3) e JOIN person_jids p ON p.jid = e.value)"
+    };
+}
+/// Everyone in group ?2 now but you, whose JIDs are ?3, for a message jaw didn't send.
+macro_rules! members_now {
+    () => {
+        "FROM group_members g JOIN person_jids mj ON mj.n = g.member
+        WHERE g.chat = ?2 AND mj.person NOT IN (SELECT p.person FROM json_each(?3) e JOIN person_jids p ON p.jid = e.value)"
+    };
+}
+/// Whether any of the recipients `$from` names hasn't got as far as `$reached` with message ?1,
+/// under any of their JIDs, so a receipt from someone's LID counts for their number.
+macro_rules! laggard {
+    ($from:expr, $reached:literal) => {
+        concat!(
+            "SELECT EXISTS (SELECT 1 ",
+            $from,
+            " AND NOT EXISTS (SELECT 1 FROM person_jids xj CROSS JOIN receipts x ON x.message = ?1 AND x.recipient = xj.n
+                WHERE xj.person = mj.person AND ",
+            $reached,
+            "))"
+        )
+    };
+}
+const ANY_SENT_TO: &str = concat!("SELECT EXISTS (SELECT 1 ", sent_to!(), ")");
+const ANY_MEMBER: &str = concat!("SELECT EXISTS (SELECT 1 ", members_now!(), ")");
+/// The statements that find someone not yet as far as each status, for those a message was sent to
+/// and for everyone in the group now.
+const LAGGARDS: [(&str, [&str; 2]); 3] = [
+    ("played", [laggard!(sent_to!(), "x.played_at IS NOT NULL"), laggard!(members_now!(), "x.played_at IS NOT NULL")]),
+    (
+        "read",
+        [
+            laggard!(sent_to!(), "coalesce(x.read_at, x.played_at) IS NOT NULL"),
+            laggard!(members_now!(), "coalesce(x.read_at, x.played_at) IS NOT NULL"),
+        ],
+    ),
+    (
+        "delivered",
+        [
+            laggard!(sent_to!(), "coalesce(x.delivered_at, x.read_at, x.played_at) IS NOT NULL"),
+            laggard!(members_now!(), "coalesce(x.delivered_at, x.read_at, x.played_at) IS NOT NULL"),
+        ],
+    ),
+];
+const SENT_TO_MEMBER: &str = "SELECT message FROM recipients WHERE member = ?1 ORDER BY message DESC LIMIT ?2";
+const MINE_IN: &str = "SELECT status FROM messages WHERE n = ?1 AND chat = ?2 AND mine";
+const REGROUPED: &str = "UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1";
+
+/// How many of a member's latest messages from you are looked at again when they leave a group.
+const LEFT_LOOKED_AT: i64 = 100;
 
 /// Where a step that failed came from, for the quarantine.
 pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
@@ -120,6 +182,7 @@ fn enqueue(db: &Connection, stamps: &mut Stamps, message: &Message, kind: &str, 
         .prepare_cached(MESSAGE_BY_ID)?
         .query_row(params![message.chat, message.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
     db.prepare_cached(ENQUEUE)?.execute(params![n, kind, raw, now_ms()])?;
+    db.prepare_cached(RECIPIENTS)?.execute(params![n, chat, me(db)?])?;
     let seq = stamps.seq(CHAT, Some(chat));
     if db.prepare_cached(CLEAR_DRAFT)?.execute([chat, seq])? > 0 {
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
@@ -232,6 +295,68 @@ fn told_before(db: &Connection, chat: i64, upto: (i64, i64), unread: i64) -> Res
     Ok(walked.get(unread as usize).copied().unwrap_or((i64::MIN, 0)))
 }
 
+/// The account's own JIDs as sync keeps them, as a JSON array.
+fn me(db: &Connection) -> Result<String> {
+    let me: Option<String> = db.prepare_cached(ME)?.query_row([], |r| r.get(0)).optional()?;
+    Ok(serde_json::to_string(&me.as_deref().unwrap_or_default().split_whitespace().collect::<Vec<_>>())?)
+}
+
+/// How far message `n` of yours in group `chat`, at `kept` now, has got with all its recipients:
+/// those it was sent to who are still members, or, for a message jaw didn't send, everyone in the
+/// group now but you. `None` when jaw doesn't know who they are, and then a receipt from anyone
+/// stands for all. Each status is looked for only if it's further than `kept`, and the look stops at
+/// the first recipient not that far, so a receipt in a big group costs little until it's the last.
+pub(super) fn group_reached(
+    db: &Connection,
+    n: i64,
+    chat: i64,
+    kept: Option<&str>,
+) -> Result<Option<Option<&'static str>>> {
+    let me = me(db)?;
+    let exists =
+        |sql: &str| -> Result<bool> { Ok(db.prepare_cached(sql)?.query_row(params![n, chat, me], |r| r.get(0))?) };
+    let source = if exists(ANY_SENT_TO)? {
+        0
+    } else if exists(ANY_MEMBER)? {
+        1
+    } else {
+        return Ok(None);
+    };
+    for (status, laggards) in LAGGARDS {
+        if advanced(kept, Some(status)) == kept {
+            break;
+        }
+        if !exists(laggards[source])? {
+            return Ok(Some(Some(status)));
+        }
+    }
+    Ok(Some(None))
+}
+
+/// Members who left group `chat` no longer hold up your latest messages they were sent.
+pub(super) fn members_left(db: &Connection, stamps: &mut Stamps, chat: i64, members: &[i64]) -> Result<()> {
+    for &member in members {
+        let messages: Vec<i64> = db
+            .prepare_cached(SENT_TO_MEMBER)?
+            .query_map(params![member, LEFT_LOOKED_AT], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for n in messages {
+            let Some(kept) =
+                db.prepare_cached(MINE_IN)?.query_row([n, chat], |r| r.get::<_, Option<String>>(0)).optional()?
+            else {
+                continue;
+            };
+            let Some(Some(reached)) = group_reached(db, n, chat, kept.as_deref())? else { continue };
+            if advanced(kept.as_deref(), Some(reached)) != kept.as_deref() {
+                let seq = stamps.seq(MESSAGE, Some(n));
+                db.prepare_cached(REGROUPED)?.execute(params![n, reached, seq])?;
+                touched(db, stamps, chat, n, seq)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An outbox row as the sender takes it.
 #[derive(Clone, Debug)]
 pub struct Outboxed {
@@ -248,10 +373,10 @@ pub fn queued(db: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(db.prepare_cached(QUEUED)?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
 }
 
-/// How many messages wait to be sent, failed ones apart.
-pub fn waiting(db: &Connection) -> Result<u64> {
-    let n: i64 = db.prepare_cached(WAITING)?.query_row([], |r| r.get(0))?;
-    Ok(n.max(0) as u64)
+/// How many messages the outbox holds, and how many of them failed and wait for `send.retry`.
+pub fn waiting(db: &Connection) -> Result<(u64, u64)> {
+    let (all, failed): (i64, i64) = db.prepare_cached(WAITING)?.query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok((all.max(0) as u64, failed.max(0) as u64))
 }
 
 fn outboxed_row(r: &rusqlite::Row) -> rusqlite::Result<Outboxed> {
@@ -389,6 +514,49 @@ mod tests {
                 OWED_MESSAGES,
                 "SEARCH m USING INDEX messages_by_time (chat=? AND at>? AND at<?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
             ),
+            ("me", ME, "SEARCH sync_state USING PRIMARY KEY (key=?)"),
+            (
+                "recipients",
+                RECIPIENTS,
+                "SEARCH g USING PRIMARY KEY (chat=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN e VIRTUAL TABLE INDEX 1:\nSEARCH p USING INDEX sqlite_autoindex_person_jids_1 (jid=?)\nCREATE BLOOM FILTER",
+            ),
+            (
+                "any sent to",
+                ANY_SENT_TO,
+                "SCAN CONSTANT ROW\nSCALAR SUBQUERY 2\nSEARCH s USING PRIMARY KEY (message=?)\nSEARCH mj USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN e VIRTUAL TABLE INDEX 1:\nSEARCH p USING INDEX sqlite_autoindex_person_jids_1 (jid=?)\nCREATE BLOOM FILTER\nSEARCH g USING COVERING INDEX group_members_by_member (member=? AND chat=?)",
+            ),
+            (
+                "any member",
+                ANY_MEMBER,
+                "SCAN CONSTANT ROW\nSCALAR SUBQUERY 2\nSEARCH g USING PRIMARY KEY (chat=?)\nSEARCH mj USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN e VIRTUAL TABLE INDEX 1:\nSEARCH p USING INDEX sqlite_autoindex_person_jids_1 (jid=?)\nCREATE BLOOM FILTER",
+            ),
+            (
+                "not delivered to one sent to",
+                LAGGARDS[2].1[0],
+                "SCAN CONSTANT ROW\nSCALAR SUBQUERY 3\nSEARCH s USING PRIMARY KEY (message=?)\nSEARCH mj USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN e VIRTUAL TABLE INDEX 1:\nSEARCH p USING INDEX sqlite_autoindex_person_jids_1 (jid=?)\nCREATE BLOOM FILTER\nCORRELATED SCALAR SUBQUERY 2\nSEARCH xj USING COVERING INDEX person_jids_by_person (person=?)\nSEARCH x USING PRIMARY KEY (message=? AND recipient=?)\nSEARCH g USING COVERING INDEX group_members_by_member (member=? AND chat=?)",
+            ),
+            (
+                "not delivered to a member",
+                LAGGARDS[2].1[1],
+                "SCAN CONSTANT ROW\nSCALAR SUBQUERY 3\nSEARCH g USING PRIMARY KEY (chat=?)\nSEARCH mj USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN e VIRTUAL TABLE INDEX 1:\nSEARCH p USING INDEX sqlite_autoindex_person_jids_1 (jid=?)\nCREATE BLOOM FILTER\nCORRELATED SCALAR SUBQUERY 2\nSEARCH xj USING COVERING INDEX person_jids_by_person (person=?)\nSEARCH x USING PRIMARY KEY (message=? AND recipient=?)",
+            ),
+            (
+                "not read by one sent to",
+                LAGGARDS[1].1[0],
+                "SCAN CONSTANT ROW\nSCALAR SUBQUERY 3\nSEARCH s USING PRIMARY KEY (message=?)\nSEARCH mj USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN e VIRTUAL TABLE INDEX 1:\nSEARCH p USING INDEX sqlite_autoindex_person_jids_1 (jid=?)\nCREATE BLOOM FILTER\nCORRELATED SCALAR SUBQUERY 2\nSEARCH xj USING COVERING INDEX person_jids_by_person (person=?)\nSEARCH x USING PRIMARY KEY (message=? AND recipient=?)\nSEARCH g USING COVERING INDEX group_members_by_member (member=? AND chat=?)",
+            ),
+            (
+                "not played by a member",
+                LAGGARDS[0].1[1],
+                "SCAN CONSTANT ROW\nSCALAR SUBQUERY 3\nSEARCH g USING PRIMARY KEY (chat=?)\nSEARCH mj USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN e VIRTUAL TABLE INDEX 1:\nSEARCH p USING INDEX sqlite_autoindex_person_jids_1 (jid=?)\nCREATE BLOOM FILTER\nCORRELATED SCALAR SUBQUERY 2\nSEARCH xj USING COVERING INDEX person_jids_by_person (person=?)\nSEARCH x USING PRIMARY KEY (message=? AND recipient=?)",
+            ),
+            (
+                "sent to a member",
+                SENT_TO_MEMBER,
+                "SEARCH recipients USING COVERING INDEX recipients_by_member (member=?)",
+            ),
+            ("mine in a chat", MINE_IN, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("regrouped", REGROUPED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
         ];
         let mut wrong = Vec::new();
         for (what, sql, expected) in statements {

@@ -2,7 +2,7 @@
 //! its notifications while you're not looking. Focus has to hold for `Timing::online_after` before
 //! WhatsApp hears you're online, and be gone for `Timing::away_after` before it hears you're away,
 //! so switching windows doesn't flicker. Each time the connection comes back, WhatsApp is told
-//! again, since it forgets.
+//! again, since it forgets; and whatever waits to send hears whether WhatsApp can be reached.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -102,6 +102,7 @@ pub(super) async fn follow(
             push = pushes.recv() => match push {
                 Ok(push) if push.method == "connection" => {
                     let now = serde_json::from_value::<Connection>(push.params).is_ok_and(|c| connected(&c));
+                    inner.connected.send_if_modified(|was| std::mem::replace(was, now) != now);
                     if now && !online {
                         told = None;
                         inner.online.notify_waiters();

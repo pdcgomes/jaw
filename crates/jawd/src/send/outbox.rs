@@ -1,12 +1,13 @@
 //! The outbox's lane. A message is committed, synced, with its outbox row before `send.text`
 //! answers; then it joins its chat's queue, which sends one message at a time with the ID jawd made,
 //! so a message is sent once however often it's tried: WhatsApp knows a message by its ID, and one
-//! sent again with the same ID is the same message to its recipients. A send that fails is tried
-//! again after a pause that doubles, for as long as `Timing::give_up` allows, then it's failed until
-//! `send.retry`; a restart queues what's left again, in order.
+//! sent again with the same ID is the same message to its recipients. As on the phone, a message
+//! waits, pending, for as long as WhatsApp can't be reached; while it can, a send that fails on the
+//! way (the network, the server busy) is tried again after a pause that doubles, and only one that's
+//! refused (a number not on WhatsApp, a group you've left, a message the server won't take) is
+//! failed, until `send.retry`. A restart queues what's left again, in order.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use jaw_proto::send::{SendRetry, SendText, Sent};
 use jaw_proto::{Error, code};
@@ -26,7 +27,8 @@ use crate::store::{Change, Lane, Person, read};
 
 pub(super) const CHAT_EPHEMERAL: &str = "SELECT ephemeral FROM chats WHERE id = ?1";
 
-/// The most messages waiting to send at once; more is refused until some have gone.
+/// The most messages the outbox holds, waiting or failed; past it `send.text` is refused, and none
+/// already in it is ever dropped.
 pub(super) const WAITING_MOST: u64 = 1_000;
 
 /// A new message ID in whatsmeow's format for messages from this kind of device: `3EB0` and 18
@@ -78,11 +80,16 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
     .await?;
     let ephemeral = match found {
         (None, _) => return Err(no_chat(&send.chat)),
-        (Some(_), waiting) if waiting >= WAITING_MOST => {
-            return Err(Error::new(
+        (Some(_), (waiting, failed)) if waiting >= WAITING_MOST => {
+            let mut error = Error::new(
                 code::LIMIT,
-                format!("{waiting} messages are waiting to send; try again once they've gone"),
-            ));
+                format!(
+                    "{waiting} messages of yours are waiting to send, {failed} of them failed; \
+                    jawd takes more once some have gone or been retried"
+                ),
+            );
+            error.data = Some(serde_json::json!({ "limit": "outbox", "waiting": waiting, "failed": failed }));
+            return Err(error);
         }
         (Some(ephemeral), _) => ephemeral,
     };
@@ -141,12 +148,19 @@ fn reached_server(status: Option<&str>) -> bool {
     matches!(status, Some("sent" | "delivered" | "read" | "played"))
 }
 
-/// Sends outbox row `outbox` until the server has it, or it's failed. Each attempt reads the row
-/// again, so a message sent, failed or deleted meanwhile isn't sent.
+/// Sends outbox row `outbox` until the server has it, or refuses it. Each attempt reads the row
+/// again, so a message sent, failed or deleted meanwhile isn't sent; none is made while WhatsApp
+/// can't be reached.
 async fn deliver(inner: Arc<Inner>, outbox: i64) {
-    let began = Instant::now();
     let mut pause = inner.timing.retry_first;
+    let mut connected = inner.connected.subscribe();
     loop {
+        if !*connected.borrow_and_update() {
+            pause = inner.timing.retry_first;
+            if connected.wait_for(|connected| *connected).await.is_err() {
+                return;
+            }
+        }
         let row = match inner
             .store
             .reads()
@@ -180,19 +194,19 @@ async fn deliver(inner: Arc<Inner>, outbox: i64) {
             }
             Err(e) => e,
         };
-        let again = retryable(&failure) && began.elapsed() + pause <= inner.timing.give_up;
+        let again = retryable(&failure);
         let next_at = again.then(|| now_ms() + pause.as_millis() as i64);
         let failed = Step::Failed { outbox, error: failure.to_string(), next_at };
         if let Err(e) = inner.store.apply(Lane::Live, vec![Change::Outbox(failed)]).await {
             eprintln!("jawd: can't note that {} didn't send: {e:#}", row.id);
         }
         if !again {
-            eprintln!("jawd: {} in {} didn't send, and waits for a retry: {failure}", row.id, row.chat);
+            eprintln!("jawd: WhatsApp refused {} in {}, which waits for a retry: {failure}", row.id, row.chat);
             return;
         }
         tokio::select! {
             _ = tokio::time::sleep(pause) => {}
-            _ = inner.online.notified() => {}
+            _ = connected.changed() => {}
         }
         pause = (pause * 2).min(inner.timing.retry_most);
     }

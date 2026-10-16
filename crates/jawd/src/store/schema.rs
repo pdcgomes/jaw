@@ -596,6 +596,19 @@ pub(super) const MIGRATIONS: &[&str] = &[
         CHECK ((told_at, told_n) <= (at, n))
     ) STRICT;
     ",
+    // 8: who a message of yours in a group went to, a schema step. jaw's own: the group's members
+    // as they were when you sent it can't be had again.
+    "
+    -- The group's members when you sent the message, you apart. It's delivered once every one of
+    -- them who's still a member has it, and read once every one has read it; members who joined
+    -- after don't count, and those who left don't hold it up.
+    CREATE TABLE recipients (
+        message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
+        member INTEGER NOT NULL REFERENCES person_jids (n),
+        PRIMARY KEY (message, member)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX recipients_by_member ON recipients (member, message);
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.

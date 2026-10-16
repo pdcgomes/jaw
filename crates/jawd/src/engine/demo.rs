@@ -52,6 +52,8 @@ pub struct World {
     given: Mutex<HashSet<String>>,
     /// How many sends to fail next, as a connection that's down does.
     failing: Mutex<u32>,
+    /// How many sends to refuse next, as WhatsApp refuses one to a number that isn't on it.
+    refusing: Mutex<u32>,
     /// Whether the server takes sends without answering, as a connection that drops does.
     holding: AtomicBool,
     /// How many sends the server has had at once, at most.
@@ -72,6 +74,12 @@ impl World {
     #[cfg(test)]
     pub fn fail_next(&self, n: u32) {
         *self.failing.lock().expect("the demo world") = n;
+    }
+
+    /// Refuses the next `n` sends for good.
+    #[cfg(test)]
+    pub fn refuse_next(&self, n: u32) {
+        *self.refusing.lock().expect("the demo world") = n;
     }
 
     /// Takes sends without answering them, until it's told otherwise.
@@ -122,12 +130,17 @@ impl World {
     /// Waits until `enough` holds of what the engine was asked.
     #[cfg(test)]
     pub async fn until(&self, enough: impl Fn(&[pb::command::Kind]) -> bool) {
-        loop {
-            let notified = self.asked_now.notified();
-            if enough(&self.asked.lock().expect("the demo world")) {
-                return;
+        let waited = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let notified = self.asked_now.notified();
+                if enough(&self.asked.lock().expect("the demo world")) {
+                    return;
+                }
+                notified.await;
             }
-            notified.await;
+        });
+        if waited.await.is_err() {
+            panic!("the demo engine wasn't asked what was waited for; it was asked {:?}", self.asked());
         }
     }
 
@@ -362,13 +375,19 @@ impl Sender {
     /// it and, later, that they've read it.
     async fn sent(&self, send: pb::Send) -> Result<pb::reply::Kind, EngineError> {
         let world = &self.world;
-        let failing = {
-            let mut failing = world.failing.lock().expect("the demo world");
-            let fails = *failing > 0;
-            *failing = failing.saturating_sub(1);
-            fails
+        let next = |counter: &Mutex<u32>| {
+            let mut left = counter.lock().expect("the demo world");
+            let now = *left > 0;
+            *left = left.saturating_sub(1);
+            now
         };
-        if failing {
+        if next(&world.refusing) {
+            return Err(EngineError::Failed {
+                message: format!("no LID found for {} from server", send.chat),
+                retry: false,
+            });
+        }
+        if next(&world.failing) {
             return Err(EngineError::Failed { message: "websocket not connected".into(), retry: true });
         }
         let at = *world.has.lock().expect("the demo world").entry(send.id.clone()).or_insert_with(now_ms);
@@ -397,8 +416,12 @@ impl Sender {
                         return;
                     }
                 }
-                tokio::time::sleep(replies.read).await;
-                sender.send(receipt(&send, recipients[0], "read")).await;
+                for recipient in &recipients {
+                    tokio::time::sleep(replies.read).await;
+                    if !sender.send(receipt(&send, recipient, "read")).await {
+                        return;
+                    }
+                }
             });
         }
         Ok(pb::reply::Kind::Sent(pb::Sent { id: send.id, at_ms: at, chat: send.chat }))

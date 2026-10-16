@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,30 +74,60 @@ func (e *Engine) sendMessage(c *enginepb.Send) *enginepb.Reply {
 }
 
 // retryable says whether a send that failed with err might work later: a connection that's down
-// or slow, or WhatsApp having a moment. A chat that can't be sent to, a message that can't be
-// encoded or a group you can't write in won't.
+// or slow, or WhatsApp having a moment. A refusal won't: a number that isn't on WhatsApp, a group
+// you're not in or can't write in, a chat that can't be sent to, a message the server won't take
+// (too large, blocked and the like, which it answers with a 4xx code), or one that can't be encoded.
 func retryable(err error) bool {
 	switch {
 	case errors.Is(err, whatsmeow.ErrRecipientADJID),
 		errors.Is(err, whatsmeow.ErrUnknownServer),
 		errors.Is(err, whatsmeow.ErrNoPermissionInGroup),
-		errors.Is(err, whatsmeow.ErrInvalidInlineBotID):
+		errors.Is(err, whatsmeow.ErrInvalidInlineBotID),
+		errors.Is(err, whatsmeow.ErrGroupNotFound),
+		errors.Is(err, whatsmeow.ErrNotInGroup),
+		errors.Is(err, whatsmeow.ErrBroadcastListUnsupported):
 		return false
 	case errors.Is(err, whatsmeow.ErrNotConnected),
 		errors.Is(err, whatsmeow.ErrNotLoggedIn),
 		errors.Is(err, whatsmeow.ErrMessageTimedOut),
 		errors.Is(err, whatsmeow.ErrIQTimedOut),
-		errors.Is(err, whatsmeow.ErrServerReturnedError),
 		errors.Is(err, context.DeadlineExceeded):
 		return true
+	}
+	var iq *whatsmeow.IQError
+	if errors.As(err, &iq) {
+		return transient(iq.Code)
+	}
+	if errors.Is(err, whatsmeow.ErrServerReturnedError) {
+		return transient(serverCode(err))
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		return true
 	}
-	// whatsmeow wraps most of what goes wrong on the way (devices, sessions, LIDs) without a type of
-	// its own; they're mostly the network or the server, so they're tried again until jawd gives up.
-	return !strings.Contains(err.Error(), "failed to marshal")
+	// whatsmeow says a number has no account only in words.
+	if strings.Contains(err.Error(), "no LID found") || strings.Contains(err.Error(), "failed to marshal") {
+		return false
+	}
+	// The rest it wraps without a type of its own (devices, sessions, keys) are mostly the network
+	// or the server, so they're tried again while the connection lasts.
+	return true
+}
+
+// transient says whether a server's error code is worth trying again after: none, a timeout,
+// too many requests, or the server's own trouble.
+func transient(code int) bool {
+	return code == 0 || code == 408 || code == 429 || code >= 500
+}
+
+// serverCode is the code in whatsmeow's "server returned error N", or 0.
+func serverCode(err error) int {
+	fields := strings.Fields(err.Error())
+	if len(fields) == 0 {
+		return 0
+	}
+	code, _ := strconv.Atoi(fields[len(fields)-1])
+	return code
 }
 
 func (e *Engine) markRead(c *enginepb.MarkRead) *enginepb.Reply {

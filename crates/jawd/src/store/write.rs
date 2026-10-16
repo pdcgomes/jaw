@@ -1629,19 +1629,24 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
                 ON CONFLICT (message, recipient) DO UPDATE SET {column} = coalesce({column}, excluded.{column})"
             ))?
             .execute(params![n, recipient, at])?;
-            // In a group, as on the phone, a message is delivered once anyone has it and read once
-            // anyone has read it; each recipient's own times stay in receipts.
-            let kept: Option<Option<String>> = db
-                .prepare_cached("SELECT status FROM messages WHERE n = ?1 AND mine")?
-                .query_row([n], |r| r.get(0))
+            // In a group, as on the phone, a message is delivered once every recipient has it and
+            // read once every one has read it; each recipient's own times stay in receipts.
+            let kept: Option<(Option<String>, bool)> = db
+                .prepare_cached("SELECT m.status, c.kind = 'direct' FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1 AND m.mine")?
+                .query_row([n], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?;
-            if let Some(kept) = kept
-                && advanced(kept.as_deref(), Some(status)) != kept.as_deref()
-            {
-                db.prepare_cached("UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1")?
-                    .execute(params![n, status, seq])?
-            } else {
-                0
+            let reached = match &kept {
+                Some((_, true)) => Some(status.as_str()),
+                Some((kept, false)) => {
+                    outbox::group_reached(db, n, chat, kept.as_deref())?.unwrap_or(Some(status.as_str()))
+                }
+                None => None,
+            };
+            match (kept, reached) {
+                (Some((kept, _)), Some(reached)) if advanced(kept.as_deref(), Some(reached)) != kept.as_deref() => db
+                    .prepare_cached("UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1")?
+                    .execute(params![n, reached, seq])?,
+                _ => 0,
             }
         }
         Amendment::DeleteForMe | Amendment::Keep { .. } => 0,
@@ -1683,11 +1688,15 @@ fn set_members(db: &Connection, stamps: &mut Stamps, members: &Members) -> Resul
             .optional()?;
         gone.extend(found.filter(|member| !kept.contains(member)));
     }
+    let mut left = Vec::new();
     for member in gone {
-        changed |=
-            db.prepare_cached("DELETE FROM group_members WHERE chat = ?1 AND member = ?2")?.execute([chat, member])?
-                > 0;
+        if db.prepare_cached("DELETE FROM group_members WHERE chat = ?1 AND member = ?2")?.execute([chat, member])? > 0
+        {
+            left.push(member);
+        }
     }
+    changed |= !left.is_empty();
+    outbox::members_left(db, stamps, chat, &left)?;
     if changed {
         let seq = stamps.seq(CHAT, Some(chat));
         db.prepare_cached("UPDATE chats SET v = ?2 WHERE n = ?1")?.execute([chat, seq])?;
