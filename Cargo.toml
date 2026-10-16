@@ -35,6 +35,11 @@ jaw-client = { path = "crates/jaw-client" }
 jaw-proto = { path = "crates/jaw-proto" }
 wa-proto = { path = "crates/wa-proto" }
 
+# Dependencies optimised in debug builds too, so the timing tests the gate runs in debug measure
+# jaw's code rather than unoptimised SQLite, zstd and ratatui.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
