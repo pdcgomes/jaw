@@ -107,5 +107,58 @@ pub fn describe(status: &Status) -> String {
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));
     }
+    if !status.pools.is_empty() {
+        lines.push(String::new());
+        lines.push(pools(&status.pools));
+    }
     lines.join("\n")
+}
+
+/// The work pools as a table: what each is running and holding, and its waits and runs.
+pub fn pools(pools: &[jaw_proto::Pool]) -> String {
+    let times = |p: Option<jaw_proto::Percentiles>| match p {
+        Some(p) => format!("{} / {}", duration(p.p50_us), duration(p.p99_us)),
+        None => "–".to_string(),
+    };
+    let mut rows = vec![[
+        "pool".to_string(),
+        "running".to_string(),
+        "queued".to_string(),
+        "done".to_string(),
+        "waits, interactive p50 / p99".to_string(),
+        "waits, background".to_string(),
+        "runs".to_string(),
+    ]];
+    for pool in pools {
+        rows.push([
+            pool.name.clone(),
+            format!("{} of {}", pool.running, pool.workers),
+            format!("{} + {}", pool.queued_interactive, pool.queued_background),
+            pool.done.to_string(),
+            times(pool.wait_interactive),
+            times(pool.wait_background),
+            times(pool.run),
+        ]);
+    }
+    let widths: Vec<usize> = (0..7).map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0)).collect();
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .zip(&widths)
+                .map(|(cell, width)| format!("{cell:<width$}"))
+                .collect::<Vec<_>>()
+                .join("  ")
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn duration(us: u64) -> String {
+    match us {
+        0..1_000 => format!("{us} µs"),
+        1_000..1_000_000 => format!("{:.1} ms", us as f64 / 1e3),
+        _ => format!("{:.1} s", us as f64 / 1e6),
+    }
 }

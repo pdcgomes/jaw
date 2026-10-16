@@ -130,7 +130,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
         let listener = listen(&socket).unwrap();
-        let state = Arc::new(State::new(home.path(), Err(("go", "no engine in this test".into()))).unwrap());
+        let state =
+            Arc::new(State::new(home.path(), Err(("go", "no engine in this test".into())), Vec::new()).unwrap());
         tokio::spawn(serve(state, listener));
         (home, socket)
     }

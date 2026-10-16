@@ -176,6 +176,33 @@ pub struct Status {
     /// What jawd looked for and didn't find, with what it's for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<Missing>,
+    /// Each work pool: what it's running and holding, and how long its jobs wait and run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pools: Vec<Pool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pool {
+    pub name: String,
+    pub workers: u32,
+    pub running: u32,
+    pub queued_interactive: u32,
+    pub queued_background: u32,
+    /// Jobs finished since jawd started.
+    pub done: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_interactive: Option<Percentiles>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_background: Option<Percentiles>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Percentiles>,
+}
+
+/// Of the latest thousand or so, in microseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Percentiles {
+    pub p50_us: u64,
+    pub p99_us: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

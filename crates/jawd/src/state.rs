@@ -2,6 +2,7 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -9,6 +10,7 @@ use jaw_proto::{Account, AccountState, Connection, ConnectionState, Engine, Miss
 
 use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
+use crate::work::Report;
 
 pub struct State {
     pub home: PathBuf,
@@ -16,13 +18,19 @@ pub struct State {
     pub owner: u32,
     engine: Result<Supervisor, (&'static str, String)>,
     missing: Vec<Missing>,
+    pools: Vec<Arc<dyn Report>>,
 }
 
 impl State {
-    /// `engine` is the supervisor of the engine jawd runs, or the engine's kind and why it can't run.
-    pub fn new(home: &Path, engine: Result<Supervisor, (&'static str, String)>) -> Result<State> {
+    /// `engine` is the supervisor of the engine jawd runs, or the engine's kind and why it can't run;
+    /// `pools` are the work pools `status` reports.
+    pub fn new(
+        home: &Path,
+        engine: Result<Supervisor, (&'static str, String)>,
+        pools: Vec<Arc<dyn Report>>,
+    ) -> Result<State> {
         let owner = std::fs::metadata(home).with_context(|| format!("can't read {}", home.display()))?.uid();
-        Ok(State { home: home.to_path_buf(), owner, engine, missing: missing() })
+        Ok(State { home: home.to_path_buf(), owner, engine, missing: missing(), pools })
     }
 
     pub fn welcome(&self) -> Welcome {
@@ -66,6 +74,7 @@ impl State {
             connection: self.connection(),
             engine,
             missing: self.missing.clone(),
+            pools: self.pools.iter().map(|pool| pool.report()).collect(),
         }
     }
 
