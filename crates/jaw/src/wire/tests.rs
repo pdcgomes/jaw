@@ -279,3 +279,16 @@ fn recording_before_jawd_serves_voice_says_it_comes_with_the_next_step_and_the_b
     assert!(!screen.contains("● recording"), "the box is a box again:\n{screen}");
     assert!(jawd.refused.lock().unwrap().contains(&"voice.record".to_string()));
 }
+
+#[test]
+fn message_actions_before_jawd_serves_them_say_they_come_with_the_next_step() {
+    let jawd = scripted();
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<up>2").unwrap();
+    until(&mut v, &rx, "reacting comes with the next step");
+    run::press_live(&mut v, &rx, "i").unwrap();
+    let screen = until(&mut v, &rx, "a message's info comes with the next step");
+    assert!(screen.contains("╭ info "), "on the sheet that asked:\n{screen}");
+    let refused = jawd.refused.lock().unwrap().clone();
+    assert!(refused.contains(&"react".to_string()) && refused.contains(&"message.info".to_string()), "{refused:?}");
+}

@@ -2,6 +2,7 @@
 //! is anchored, the message box, and what's selected. Updates apply here, keys drive it
 //! (`keys`), and it draws itself (`draw`).
 
+mod actions;
 mod draw;
 mod keys;
 mod palette;
@@ -78,6 +79,8 @@ pub enum Scroll {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
     Keys,
+    /// The selected message's info: when it was sent, and each recipient's receipts.
+    Info,
 }
 
 /// What the loop does for the view outside the terminal's frame.
@@ -85,6 +88,8 @@ pub enum Overlay {
 pub enum Effect {
     /// Puts text on the clipboard, through the terminal.
     Copy(String),
+    /// Opens a link in the browser, or a file in the app the system has for it.
+    Open(String),
     /// Bytes for the terminal beside the frame: pictures sent, deleted and drawn.
     Write(Vec<u8>),
 }
@@ -184,6 +189,18 @@ pub struct View {
     pictureless: HashSet<String>,
     /// The size the last frame was drawn at, for drawing every picture again after a resize.
     drawn_size: (u16, u16),
+    /// What the box replies to or edits, and the names taken into it from the completion.
+    replying: Option<actions::Replying>,
+    editing: Option<actions::Editing>,
+    taken: Vec<actions::Taken>,
+    /// An `@` whose names Esc put away, and which of the names offered is selected.
+    dismissed: Option<usize>,
+    naming_selected: usize,
+    /// Each chat's members as jawd said them, and the chats they've been asked for.
+    members: HashMap<String, Vec<crate::data::Member>>,
+    members_asked: HashSet<String>,
+    /// The message whose info the sheet shows, and jawd's answer once it comes.
+    info: Option<(String, Option<Result<crate::data::MessageInfo, String>>)>,
     /// The voice message playing or paused, or the recording being listened to, as jawd last
     /// said or a key just asked.
     pub playing: Option<crate::data::Playback>,
@@ -266,6 +283,14 @@ impl View {
             images: Images::here(Protocol::None, (8, 16)),
             pictureless: HashSet::new(),
             drawn_size: (0, 0),
+            replying: None,
+            editing: None,
+            taken: vec![],
+            dismissed: None,
+            naming_selected: 0,
+            members: HashMap::new(),
+            members_asked: HashSet::new(),
+            info: None,
             playing: None,
             voice_asked: None,
             speed: 1.0,
@@ -457,6 +482,8 @@ impl View {
             Update::Playback(p) => self.on_playback(p),
             Update::Recorded(r) => self.on_recorded(r),
             Update::VoiceRefused(why) => self.voice_refused(why),
+            Update::Members { chat, members } => self.on_members(chat, members),
+            Update::Info { message, info } => self.on_info(message, info),
             Update::Starting { failed } => self.reach = Reach::Starting { failed },
             Update::Unreachable { why, retry_in } => {
                 let retry_at = self.now() + retry_in;
@@ -550,6 +577,7 @@ impl View {
     /// The open chat's draft and typing, settled before another opens.
     fn leave_chat(&mut self) {
         let Some(chat) = self.open.clone() else { return };
+        self.drop_actions();
         self.save_draft(&chat);
         if self.typing_at > 0 {
             self.jawd.typing(&chat, Typing::Paused);
@@ -629,7 +657,9 @@ impl View {
             self.jawd.typing(&chat, Typing::Composing);
             self.typing_at = now;
         }
-        self.draft_due = Some(now + DRAFT);
+        if self.editing.is_none() {
+            self.draft_due = Some(now + DRAFT);
+        }
         self.unsent = None;
     }
 
@@ -650,7 +680,16 @@ impl View {
             return;
         }
         self.composer.take();
-        self.jawd.send_text(&chat, &text);
+        if let Some(e) = self.editing.take() {
+            self.jawd.edit(&e.id, &text);
+            self.composer.set(&e.draft);
+            return;
+        }
+        let reply = self.replying.take().map(|r| r.id);
+        let mentions = self.mentions_in(&text);
+        self.taken.clear();
+        self.dismissed = None;
+        self.jawd.send_text(&chat, &text, reply.as_deref(), &mentions);
         self.typing_at = 0;
         self.draft_sent.clear();
         self.draft_due = None;

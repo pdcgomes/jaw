@@ -58,6 +58,7 @@ fn message(id: &str, v: u64, sort: &str) -> Message {
         kind: Kind::Text,
         spans: vec![],
         reply: None,
+        forwarded: 0,
         reactions: vec![],
         status: None,
         edited: false,
@@ -74,7 +75,7 @@ fn theirs(id: &str, sort: &str, at: i64, text: &str) -> Message {
     let mut m = message(id, 1, sort);
     m.at = at;
     m.from = Some(Sender { id: "person:20".into(), name: "Marta".into(), colour: 0 });
-    m.spans = vec![Span { t: SpanKind::Text, s: text.into(), person: None }];
+    m.spans = vec![Span { t: SpanKind::Text, s: text.into(), person: None, url: None }];
     m
 }
 
@@ -148,8 +149,8 @@ fn single_keys_act_on_the_selected_message_and_others_type() {
     let (mut v, rx) = view(100, 30);
     press(&mut v, &rx, "<up>y");
     assert_eq!(v.take_effects(), [Effect::Copy("vens jantar sexta? a tua mãe pergunta".into())]);
-    press(&mut v, &rx, "r");
-    assert!(frame(&mut v).contains("replying comes with M2"), "a key for later says when it comes");
+    press(&mut v, &rx, "s");
+    assert!(frame(&mut v).contains("saving files comes with M3"), "a key for later says when it comes");
     press(&mut v, &rx, "<up>\n");
     assert!(frame(&mut v).contains("there's nothing to open in this one"));
     press(&mut v, &rx, "ok");
@@ -192,7 +193,7 @@ fn the_keys_show_on_question_mark_and_any_key_closes_them() {
     press(&mut v, &rx, "?");
     let screen = frame(&mut v);
     assert!(
-        screen.contains("╭ keys ─") && screen.contains("reply · M2") && screen.contains("any key closes"),
+        screen.contains("╭ keys ─") && screen.contains("save · M3") && screen.contains("any key closes"),
         "{screen}"
     );
     press(&mut v, &rx, "?");
@@ -999,4 +1000,279 @@ fn jawd_turning_voice_down_brings_the_box_back_and_says_why() {
     v.apply(Update::VoiceRefused("voice comes with the next step".into()));
     let screen = frame(&mut v);
     assert!(!screen.contains("● recording") && screen.contains("voice comes with the next step"), "{screen}");
+}
+
+fn newest(v: &View) -> Message {
+    v.messages.as_ref().unwrap().newest().unwrap().clone()
+}
+
+fn find_message(v: &View, text: &str) -> Message {
+    let w = v.messages.as_ref().unwrap();
+    let mut at = w.oldest().cloned();
+    while let Some(m) = at {
+        if m.spans.iter().map(|s| s.s.as_str()).collect::<String>().contains(text) {
+            return m;
+        }
+        at = w.after(&m.sort).cloned();
+    }
+    panic!("no message saying {text}")
+}
+
+/// Ana's chat at each width, open: at 80 the list has the screen until Enter.
+fn anas(width: u16) -> (View, Receiver<Event>) {
+    let (mut v, rx) = view(width, 40);
+    if width < 90 {
+        press(&mut v, &rx, "\n");
+    }
+    (v, rx)
+}
+
+#[test]
+fn r_replies_with_the_message_in_the_boxs_border_and_the_row_jawd_sends_quotes_it() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = anas(width);
+        let asked = newest(&v);
+        press(&mut v, &rx, "<up>rsim, levo");
+        let screen = frame(&mut v);
+        assert!(screen.contains("↩ Ana vens jantar sexta?") && screen.contains("esc drops the reply"), "{screen}");
+        assert_eq!(v.focus, Focus::Typing);
+        press(&mut v, &rx, "\n");
+        let sent = newest(&v);
+        let quote = sent.reply.as_ref().expect("it quotes what it answers");
+        assert_eq!((quote.id.as_deref(), quote.who().as_str()), (Some(asked.id.as_str()), "Ana"));
+        let screen = frame(&mut v);
+        assert!(screen.contains("┃ Ana vens jantar sexta?") && !screen.contains("↩ Ana"), "at {width}:\n{screen}");
+    }
+}
+
+#[test]
+fn esc_drops_the_reply_and_keeps_what_was_typed() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up>rsim<esc>");
+    assert_eq!((v.composer.text(), v.replying.is_none()), ("sim", true));
+}
+
+#[test]
+fn e_edits_your_own_message_in_the_box_and_jawds_row_says_edited() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = anas(width);
+        press(&mut v, &rx, "um rascunho<up>");
+        assert!(v.focus == Focus::Typing, "Up with text in the box moves in the box");
+        press(&mut v, &rx, "<c-u><up><up>e");
+        let screen = frame(&mut v);
+        assert!(screen.contains("✎ editing") && v.composer.text() == "haha, ela vai adorar", "{screen}");
+        press(&mut v, &rx, "!!\n");
+        let edited = find_message(&v, "haha, ela vai adorar!!");
+        assert!(edited.edited);
+        let screen = frame(&mut v);
+        assert!(line_with(&screen, "adorar!!").contains("edited"), "at {width}:\n{screen}");
+    }
+}
+
+#[test]
+fn editing_gives_the_draft_back_after_and_isnt_saved_as_one() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "olá<up>");
+    press(&mut v, &rx, "<esc>");
+    let haha = find_message(&v, "haha, ela vai adorar");
+    v.edit(&haha);
+    assert_eq!(v.composer.text(), "haha, ela vai adorar");
+    press(&mut v, &rx, "<esc>");
+    assert_eq!(v.composer.text(), "olá", "Esc stops editing");
+    v.edit(&haha);
+    press(&mut v, &rx, " :)\n");
+    assert_eq!(v.composer.text(), "olá", "saved, the draft is back");
+}
+
+#[test]
+fn someone_elses_message_and_one_too_old_cant_be_edited_and_say_why() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up>e");
+    assert!(frame(&mut v).contains("only your own messages can be edited"));
+    let old = find_message(&v, "cheguei, boa noite");
+    v.edit(&old);
+    assert!(frame(&mut v).contains("15 minutes"));
+    assert!(v.editing.is_none());
+}
+
+#[test]
+fn d_deletes_for_everyone_leaving_a_line_or_for_you_taking_it_away() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = anas(width);
+        press(&mut v, &rx, "<up><up>d");
+        let screen = frame(&mut v);
+        assert!(
+            screen.contains("For me") && screen.contains("For everyone") && !screen.contains("finding"),
+            "{screen}"
+        );
+        press(&mut v, &rx, "<down>\n");
+        let screen = frame(&mut v);
+        assert!(screen.contains("⊘ You deleted this message") && !screen.contains("ela vai adorar"), "{screen}");
+        let gone = find_message(&v, "a Sofia tirou mais");
+        v.focus = Focus::Message(gone.id.clone());
+        press(&mut v, &rx, "d\n");
+        assert!(!frame(&mut v).contains("a Sofia tirou mais"), "for you, it goes, at {width}");
+    }
+}
+
+#[test]
+fn someone_elses_message_is_deleted_only_for_you() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up>d<down>\n");
+    let screen = frame(&mut v);
+    assert!(screen.contains("only your own") && screen.contains("vens jantar sexta?"), "{screen}");
+}
+
+#[test]
+fn one_to_six_react_at_once_again_takes_it_away_and_another_replaces_it() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up>2");
+    let mine = |v: &View| newest(v).reactions.iter().filter(|r| r.mine).map(|r| r.emoji.clone()).collect::<Vec<_>>();
+    assert_eq!(mine(&v), ["❤️"]);
+    assert!(line_with(&frame(&mut v), "❤️").contains("1"));
+    press(&mut v, &rx, "1");
+    assert_eq!(mine(&v), ["👍"], "one reaction of yours a message");
+    press(&mut v, &rx, "1");
+    assert!(mine(&v).is_empty() && newest(&v).reactions.is_empty());
+}
+
+#[test]
+fn plus_opens_the_picker_with_the_quick_six_and_any_emoji_by_name() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = anas(width);
+        press(&mut v, &rx, "<up>+");
+        let screen = frame(&mut v);
+        assert!(
+            screen.contains(" react ") && screen.contains("thumbs up") && screen.contains("folded hands"),
+            "{screen}"
+        );
+        press(&mut v, &rx, "party");
+        let screen = frame(&mut v);
+        assert!(screen.contains("partying face") && !screen.contains("thumbs up"), "{screen}");
+        press(&mut v, &rx, "\n");
+        assert_eq!(newest(&v).reactions.iter().find(|r| r.mine).map(|r| r.emoji.as_str()), Some("🥳"));
+    }
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up>+3");
+    assert_eq!(newest(&v).reactions.iter().find(|r| r.mine).map(|r| r.emoji.as_str()), Some("😂"));
+}
+
+#[test]
+fn f_forwards_to_the_chats_picked_with_tab() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = anas(width);
+        let asked = newest(&v);
+        press(&mut v, &rx, "<up>f");
+        let screen = frame(&mut v);
+        assert!(screen.contains(" forward ") && screen.contains("tab picks a chat"), "{screen}");
+        press(&mut v, &rx, "<down><tab><down><tab>");
+        let screen = frame(&mut v);
+        assert!(screen.contains("✓ Mãe") && screen.contains("✓ Escola do Bairro"), "{screen}");
+        press(&mut v, &rx, "\n");
+        assert!(frame(&mut v).contains("forwarded to 2 chats"));
+        press(&mut v, &rx, "<esc>");
+        v.open_chat("mae");
+        run::settle(&mut v, &rx);
+        let sent = newest(&v);
+        assert!(sent.mine && sent.forwarded == 1 && sent.spans == asked.spans, "{sent:?}");
+        assert!(frame(&mut v).contains("↪ forwarded"), "at {width}");
+    }
+}
+
+#[test]
+fn enter_while_forwarding_with_none_picked_forwards_to_the_selected_chat() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up>f<down>\n");
+    assert!(frame(&mut v).contains("forwarded"));
+    v.open_chat("mae");
+    run::settle(&mut v, &rx);
+    assert_eq!(newest(&v).forwarded, 1);
+}
+
+#[test]
+fn i_shows_who_has_it_and_who_has_read_it_and_any_key_closes_it() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = anas(width);
+        press(&mut v, &rx, "<up><up>i");
+        let screen = frame(&mut v);
+        assert!(screen.contains("╭ info ") && screen.contains("delivered") && screen.contains("read"), "{screen}");
+        assert!(line_with(&screen, "│ Ana ").contains(':'), "Ana's times:\n{screen}");
+        press(&mut v, &rx, "x");
+        assert!(!frame(&mut v).contains("╭ info "));
+    }
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up>i");
+    assert!(frame(&mut v).contains("Receipts are only for your own messages."));
+}
+
+#[test]
+fn at_in_a_group_completes_its_members_and_the_message_carries_a_real_mention() {
+    for width in [140, 100, 80] {
+        let (mut v, rx) = view(width, 40);
+        let keys = if width < 90 { "<down><down><down>\n" } else { "<a-down><a-down><a-down>" };
+        press(&mut v, &rx, keys);
+        assert_eq!(v.open.as_deref(), Some("familia"));
+        press(&mut v, &rx, "@In");
+        let screen = frame(&mut v);
+        assert!(screen.contains(" members ") && screen.contains("Inês Duarte") && screen.contains("··· "), "{screen}");
+        press(&mut v, &rx, "<down><tab>vens?\n");
+        let sent = newest(&v);
+        let mention = sent.spans.iter().find(|s| s.t == SpanKind::Mention).expect("a mention");
+        assert_eq!((mention.s.as_str(), mention.person.as_deref()), ("@Inês Duarte", Some("person:8")), "at {width}");
+    }
+}
+
+#[test]
+fn esc_puts_the_names_away_and_a_direct_chat_offers_none() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<a-down><a-down><a-down>@In<esc>");
+    assert!(!frame(&mut v).contains(" members ") && v.composer.text() == "@In");
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "@An");
+    assert!(!frame(&mut v).contains(" members "));
+}
+
+#[test]
+fn enter_on_a_message_with_a_link_opens_it() {
+    let (mut v, rx) = view(140, 50);
+    press(&mut v, &rx, "<a-down><a-down><a-down>");
+    let link = find_message(&v, "casadapraia");
+    v.focus = Focus::Message(link.id.clone());
+    press(&mut v, &rx, "\n");
+    assert_eq!(v.take_effects(), [Effect::Open("https://casadapraia.pt/ericeira".into())]);
+}
+
+#[test]
+fn the_palette_has_the_selected_messages_actions() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up><up><c-k>edit");
+    assert!(frame(&mut v).contains("Edit this message"));
+    press(&mut v, &rx, "\n");
+    assert!(v.editing.is_some());
+    press(&mut v, &rx, "<esc><up><c-k>reply\n");
+    assert!(v.replying.is_some(), "Up selects the newest, whose actions the palette offers");
+}
+
+#[test]
+fn the_messages_keys_are_lit_and_edit_only_where_it_can_be() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up>");
+    let hints = v.hints();
+    assert!(hints.contains(&("r", "reply", true)) && hints.contains(&("e", "edit", false)));
+    press(&mut v, &rx, "<up>");
+    assert!(v.hints().contains(&("e", "edit", true)));
+}
+
+#[test]
+fn the_picker_finds_emoji_as_it_is_typed_and_the_quick_six_come_back_when_it_is_cleared() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<up>+heart");
+    let screen = frame(&mut v);
+    assert!(
+        screen.contains("red heart") && screen.contains("broken heart") && !screen.contains("thumbs up"),
+        "{screen}"
+    );
+    press(&mut v, &rx, "<c-u>");
+    let screen = frame(&mut v);
+    assert!(screen.contains("thumbs up") && screen.contains("folded hands"), "{screen}");
 }

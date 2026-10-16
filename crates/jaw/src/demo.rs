@@ -4,6 +4,7 @@
 //! window does. Live, a thread of its own has people type and write; a flood sends messages as
 //! fast as asked.
 
+mod actions;
 mod find;
 pub mod pictures;
 mod voice;
@@ -464,6 +465,7 @@ impl Account {
             kind: Kind::Text,
             spans,
             reply: None,
+            forwarded: 0,
             reactions: vec![],
             status,
             edited: false,
@@ -568,8 +570,12 @@ impl Account {
         let words: Vec<&str> =
             (0..3 + (*rng >> 40) as usize % 12).map(|k| WORDS[(*rng as usize >> (k % 16)) % WORDS.len()]).collect();
         let at = self.now();
-        let mut m =
-            self.message(at, Some(sender), vec![Span { t: SpanKind::Text, s: words.join(" "), person: None }], None);
+        let mut m = self.message(
+            at,
+            Some(sender),
+            vec![Span { t: SpanKind::Text, s: words.join(" "), person: None, url: None }],
+            None,
+        );
         if Some(t) == open && n.is_multiple_of(8) {
             m.kind = Kind::Image;
             m.summary = Some("▣ photo".into());
@@ -625,21 +631,6 @@ impl Account {
             seq: 0,
         };
         self.send(Update::Messages { chat: chat.into(), update });
-    }
-
-    fn on_send_text(&mut self, chat: &str, text: &str) {
-        let Some(&t) = self.index.get(chat) else { return };
-        let at = self.now();
-        let m = self.message(at, None, markup(text), Some(Tick::Pending));
-        let (chat, id) = (chat.to_string(), m.id.clone());
-        self.arrive(t, m);
-        if self.connection.state == ConnectionState::Offline {
-            self.send(Update::Notice("offline: it goes when WhatsApp is back".into()));
-            return;
-        }
-        self.after(400, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Sent });
-        self.after(1_200, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Delivered });
-        self.after(3_500, Later::Tick { chat, id, tick: Tick::Read });
     }
 
     fn on_draft(&mut self, chat: &str, text: &str) {
@@ -704,9 +695,40 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_watch_messages(&chat, place));
     }
 
-    fn send_text(&mut self, chat: &str, text: &str) {
-        let (chat, text) = (chat.to_string(), text.to_string());
-        self.defer(move |a| a.on_send_text(&chat, &text));
+    fn send_text(&mut self, chat: &str, text: &str, reply: Option<&str>, mentions: &[String]) {
+        let (chat, text, reply, mentions) =
+            (chat.to_string(), text.to_string(), reply.map(String::from), mentions.to_vec());
+        self.defer(move |a| a.on_send_text(&chat, &text, reply.as_deref(), &mentions));
+    }
+
+    fn react(&mut self, message: &str, emoji: &str) {
+        let (message, emoji) = (message.to_string(), emoji.to_string());
+        self.defer(move |a| a.on_react(&message, &emoji));
+    }
+
+    fn edit(&mut self, message: &str, text: &str) {
+        let (message, text) = (message.to_string(), text.to_string());
+        self.defer(move |a| a.on_edit(&message, &text));
+    }
+
+    fn delete(&mut self, message: &str, everyone: bool) {
+        let message = message.to_string();
+        self.defer(move |a| a.on_delete(&message, everyone));
+    }
+
+    fn forward(&mut self, messages: &[String], to: &[String]) {
+        let (messages, to) = (messages.to_vec(), to.to_vec());
+        self.defer(move |a| a.on_forward(&messages, &to));
+    }
+
+    fn message_info(&mut self, message: &str) {
+        let message = message.to_string();
+        self.defer(move |a| a.on_message_info(&message));
+    }
+
+    fn chat_info(&mut self, chat: &str) {
+        let chat = chat.to_string();
+        self.defer(move |a| a.on_chat_info(&chat));
     }
 
     fn voice_play(&mut self, message: Option<&str>, at: Option<f64>, speed: f64) {
@@ -808,7 +830,12 @@ pub fn markup(text: &str) -> Vec<Span> {
         }
         match out.last_mut() {
             Some(last) if last.t == t && t == SpanKind::Text => last.s.push_str(s),
-            _ => out.push(Span { t, s: s.into(), person: person.map(String::from) }),
+            _ => out.push(Span {
+                t,
+                s: s.into(),
+                person: person.map(String::from),
+                url: (t == SpanKind::Link).then(|| s.into()),
+            }),
         }
     };
     let mut rest = text;
@@ -916,6 +943,7 @@ impl Writing {
             kind,
             spans: markup(text),
             reply: None,
+            forwarded: 0,
             reactions: vec![],
             status: from.is_none().then_some(Tick::Read),
             edited: false,
@@ -1031,6 +1059,7 @@ fn made_up(now: i64) -> Vec<Thread> {
     w.theirs(wed + 5.0 * h - 1.0, &mae, "@Pedro trazes o _vinho_? e ~não te esqueças~ do pão");
     w.theirs(wed + 5.0 * h - 1.0, &mae, "a lista: `pão, vinho, queijo da serra`");
     w.theirs(wed + 5.0 * h - 8.0, &rui, "eu levo o vinho, o Pedro leva o pão").reply = Some(Quote {
+        id: None,
         from: Some("Mãe".into()),
         colour: 0,
         summary: "@Pedro trazes o vinho? e não te esqueças do pão".into(),

@@ -61,6 +61,33 @@ pub enum Does {
     Later(&'static str),
     /// How long to mute for, once Mute asks.
     MuteFor(String, i64, &'static str),
+    /// A key's action on the selected message, from the palette.
+    OnMessage(String, char),
+    React(String, String),
+    /// Deletes a message for you, or for everyone.
+    DeleteFor(String, bool),
+}
+
+/// What the palette is for: finding, or one of a message's actions that picks something.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mode {
+    Find,
+    /// A reaction for the message: the six quick ones, or any emoji by name.
+    React {
+        message: String,
+        summary: String,
+    },
+    /// For you or for everyone; `everyone` says why not when it can't be.
+    Delete {
+        message: String,
+        summary: String,
+        everyone: Option<&'static str>,
+    },
+    /// The chats to forward the messages to, picked with Tab.
+    Forward {
+        messages: Vec<String>,
+        picked: Vec<(String, String)>,
+    },
 }
 
 /// One of the interface's own actions, matched against what's typed.
@@ -70,6 +97,8 @@ pub struct Action {
     detail: String,
     /// Its key, so the palette teaches them.
     key: Option<&'static str>,
+    /// What it shows before its name, where not ▸: an emoji, for a reaction.
+    lead: Option<String>,
     /// The milestone it comes with, while it's not here yet.
     later: Option<&'static str>,
     pub does: Does,
@@ -79,7 +108,16 @@ pub struct Action {
 
 impl Action {
     fn new(name: impl Into<String>, detail: impl Into<String>, does: Does) -> Action {
-        Action { name: name.into(), detail: detail.into(), key: None, later: None, does, marks: vec![], score: 0 }
+        Action {
+            name: name.into(),
+            detail: detail.into(),
+            key: None,
+            lead: None,
+            later: None,
+            does,
+            marks: vec![],
+            score: 0,
+        }
     }
 
     fn key(mut self, key: &'static str) -> Action {
@@ -115,6 +153,9 @@ pub struct Palette {
     pub scope: Option<(String, String)>,
     /// Mute asks how long: the chat and its name.
     pub muting: Option<(String, String)>,
+    pub mode: Mode,
+    /// The emoji found for what's typed while reacting, found once each time it changes.
+    reactions: Vec<Action>,
     /// The newest `find` asked, the only one whose answer is kept.
     pub asked: u64,
     pub answered: bool,
@@ -136,6 +177,8 @@ impl Palette {
             narrow: Narrow::All,
             scope: None,
             muting: None,
+            mode: Mode::Find,
+            reactions: vec![],
             asked: 0,
             answered: false,
             results: vec![],
@@ -201,6 +244,77 @@ impl View {
         self.ask();
     }
 
+    /// The palette picking a reaction for `m`.
+    pub fn palette_react(&mut self, m: &crate::data::Message) {
+        let mut p = Palette::new();
+        p.narrow = Narrow::Actions;
+        p.mode = Mode::React { message: m.id.clone(), summary: super::actions::one_line(m) };
+        p.answered = true;
+        self.palette = Some(p);
+    }
+
+    /// The palette asking whom to delete `m` for.
+    pub fn palette_delete(&mut self, m: &crate::data::Message) {
+        let mut p = Palette::new();
+        p.narrow = Narrow::Actions;
+        let everyone = self.not_for_everyone(m);
+        p.mode = Mode::Delete { message: m.id.clone(), summary: super::actions::one_line(m), everyone };
+        p.answered = true;
+        self.palette = Some(p);
+    }
+
+    /// The palette's chats, to pick where to forward `m`.
+    pub fn palette_forward(&mut self, m: &crate::data::Message) {
+        if m.deleted {
+            self.say("a deleted message can't be forwarded");
+            return;
+        }
+        let mut p = Palette::new();
+        p.narrow = Narrow::Kind(FoundKind::Chat);
+        p.mode = Mode::Forward { messages: vec![m.id.clone()], picked: vec![] };
+        self.palette = Some(p);
+        self.ask();
+    }
+
+    /// Reactions for what's typed: before anything, the six quick ones on their numbers.
+    fn react_items(&self, message: &str, summary: &str, query: &str) -> Vec<Item> {
+        let mut items = vec![Item::Heading("react", fmt::fit(summary, 48))];
+        let name = |e: &str| emojis::get(e).map_or_else(|| e.to_string(), |x| x.name().to_string());
+        if query.trim().is_empty() {
+            const KEYS: [&str; 6] = ["1", "2", "3", "4", "5", "6"];
+            for (i, e) in super::actions::QUICK.iter().enumerate() {
+                let mut a = Action::new(name(e), "", Does::React(message.to_string(), e.to_string())).key(KEYS[i]);
+                a.lead = Some(e.to_string());
+                items.push(Item::Action(a));
+            }
+            return items;
+        }
+        if let Some(p) = &self.palette {
+            items.extend(p.reactions.iter().cloned().map(Item::Action));
+        }
+        items
+    }
+
+    /// The emoji whose names match what's typed while reacting, best first.
+    fn search_emoji(&mut self) {
+        let Some(p) = self.palette.as_mut() else { return };
+        let Mode::React { message, .. } = &p.mode else { return };
+        let query = p.query.text().to_string();
+        let mut found: Vec<Action> = emojis::iter()
+            .filter_map(|e| {
+                let (score, marks) = find::name(&query, e.name())?;
+                let mut a = Action::new(e.name(), "", Does::React(message.clone(), e.as_str().to_string()));
+                a.lead = Some(e.as_str().to_string());
+                a.score = score;
+                a.marks = marks;
+                Some(a)
+            })
+            .collect();
+        found.sort_by_key(|a| std::cmp::Reverse(a.score));
+        found.truncate(NARROWED_LIMIT);
+        p.reactions = found;
+    }
+
     /// Asks `find` for what's typed, numbered so only its answer is kept.
     fn ask(&mut self) {
         let Some(p) = self.palette.as_mut() else { return };
@@ -257,6 +371,23 @@ impl View {
             Action::new("Go to unread", self.unread_chats(), Does::GoToUnread),
             Action::new("Search messages", "everywhere", Does::SearchMessages).key("/search"),
         ];
+        if let super::Focus::Message(id) = &self.focus
+            && let Some(m) = self.messages.as_ref().and_then(|w| w.get(id))
+        {
+            let on = |name: &str, key: &'static str, c: char| {
+                Action::new(name, "the selected message", Does::OnMessage(id.clone(), c)).key(key)
+            };
+            all.extend([on("Reply to this message", "r", 'r'), on("React to this message", "+", '+')]);
+            if self.not_editable(m).is_none() {
+                all.push(on("Edit this message", "e", 'e'));
+            }
+            all.extend([
+                on("Delete this message", "d", 'd'),
+                on("Forward this message", "f", 'f'),
+                on("This message's info", "i", 'i'),
+                on("Copy this message", "y", 'y'),
+            ]);
+        }
         // "This chat" is the one open, or the one selected while the list has the screen.
         let this = if self.narrow() && self.picking { self.selected.as_deref() } else { self.open.as_deref() };
         if let Some(c) = this.and_then(|id| self.chat_known(id)) {
@@ -329,6 +460,22 @@ impl View {
     /// The palette's rows: headings and what's under them, in the order they show.
     pub fn palette_items(&self) -> Vec<Item> {
         let Some(p) = &self.palette else { return vec![] };
+        match &p.mode {
+            Mode::React { message, summary } => return self.react_items(message, summary, p.query.text()),
+            Mode::Delete { message, summary, everyone } => {
+                let mut items = vec![Item::Heading("delete", fmt::fit(summary, 48))];
+                let me =
+                    Action::new("For me", "from jaw and your other devices", Does::DeleteFor(message.clone(), false));
+                items.push(Item::Action(me));
+                let all = match everyone {
+                    None => Action::new("For everyone", "", Does::DeleteFor(message.clone(), true)),
+                    Some(why) => Action::new("For everyone", "", Does::Later(why)).later(why),
+                };
+                items.push(Item::Action(all));
+                return items;
+            }
+            Mode::Forward { .. } | Mode::Find => {}
+        }
         if let Some((id, name)) = &p.muting {
             let now = self.now();
             let mut items = vec![Item::Heading("mute", name.clone())];
@@ -434,6 +581,27 @@ impl View {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let Some(p) = self.palette.as_mut() else { return };
         let before = p.query.text().to_string();
+        match (&mut p.mode, k.code) {
+            (Mode::React { message, .. }, KeyCode::Char(c @ '1'..='6')) if p.query.is_empty() && !ctrl && !alt => {
+                let (message, i) = (message.clone(), c as usize - '1' as usize);
+                self.palette = None;
+                if let Some(m) = self.messages.as_ref().and_then(|w| w.get(&message)).cloned() {
+                    self.react_quick(&m, i);
+                }
+                return;
+            }
+            (Mode::React { .. } | Mode::Delete { .. }, KeyCode::Tab | KeyCode::BackTab) => return,
+            (Mode::Forward { .. }, KeyCode::Tab) => {
+                self.forward_pick();
+                return;
+            }
+            (Mode::Forward { picked, .. }, KeyCode::Backspace) if p.query.is_empty() => {
+                picked.pop();
+                return;
+            }
+            _ => {}
+        }
+        let Some(p) = self.palette.as_mut() else { return };
         let q = &mut p.query;
         match k.code {
             KeyCode::Esc if p.muting.is_some() => p.muting = None,
@@ -495,6 +663,7 @@ impl View {
             if let Narrow::Kind(k) = p.narrow {
                 p.strip.retain(|kind, _| *kind == k);
             }
+            self.search_emoji();
             self.ask();
         }
     }
@@ -524,8 +693,49 @@ impl View {
         self.palette_items().into_iter().filter(Item::selectable).nth(selected)
     }
 
+    /// Tab while forwarding: the selected chat picked, or unpicked.
+    fn forward_pick(&mut self) {
+        let Some(Item::Found(i)) = self.palette_selected() else { return };
+        let Some(Hit::Chat(c)) = self.palette_result(i).map(|f| f.hit.clone()) else { return };
+        if let Some(Palette { mode: Mode::Forward { picked, .. }, .. }) = self.palette.as_mut() {
+            match picked.iter().position(|(id, _)| *id == c.id) {
+                Some(at) => {
+                    picked.remove(at);
+                }
+                None if picked.len() >= 5 => self.say("five chats at most, as the phones allow"),
+                None => picked.push((c.id.clone(), c.name.clone())),
+            }
+        }
+    }
+
+    /// Enter while forwarding: to the chats picked, or to the one selected if none are.
+    fn forward_go(&mut self) {
+        let selected = match self.palette_selected() {
+            Some(Item::Found(i)) => match self.palette_result(i).map(|f| f.hit.clone()) {
+                Some(Hit::Chat(c)) => Some((c.id, c.name)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(Palette { mode: Mode::Forward { messages, picked }, .. }) = self.palette.take() else { return };
+        let to: Vec<(String, String)> = if picked.is_empty() { selected.into_iter().collect() } else { picked };
+        if to.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = to.iter().map(|(id, _)| id.clone()).collect();
+        self.jawd.forward(&messages, &ids);
+        let said = match to.as_slice() {
+            [(_, name)] => format!("forwarding to {name}"),
+            more => format!("forwarding to {} chats", more.len()),
+        };
+        self.say(said);
+    }
+
     /// Enter: opens a chat, goes to a message, starts a chat with someone, or does an action.
     pub fn palette_act(&mut self) {
+        if self.palette.as_ref().is_some_and(|p| matches!(p.mode, Mode::Forward { .. })) {
+            return self.forward_go();
+        }
         let Some(item) = self.palette_selected() else { return };
         match item {
             Item::Heading(..) => {}
@@ -633,6 +843,22 @@ impl View {
             }
             Does::Quit => self.quit = true,
             Does::Later(said) => self.say(said),
+            Does::OnMessage(id, c) => {
+                close(self);
+                let k = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+                self.on_message_key(k, &id, false, false);
+            }
+            Does::React(id, emoji) => {
+                close(self);
+                if let Some(m) = self.messages.as_ref().and_then(|w| w.get(&id)).cloned() {
+                    self.react(&m, &emoji);
+                }
+            }
+            Does::DeleteFor(id, everyone) => {
+                close(self);
+                self.jawd.delete(&id, everyone);
+                self.focus = super::Focus::Typing;
+            }
         }
     }
 
@@ -723,7 +949,11 @@ impl View {
         if let Some(when) = a.later {
             detail.push(Span::styled(format!(" · {when}"), Style::new().fg(t.gutter)));
         }
-        (Span::styled("▸", Style::new().fg(t.comment)), self.marks(&text, name), detail)
+        let lead = match &a.lead {
+            Some(l) => Span::raw(l.clone()),
+            None => Span::styled("▸", Style::new().fg(t.comment)),
+        };
+        (lead, self.marks(&text, name), detail)
     }
 
     pub fn draw_palette(&mut self, f: &mut Frame) {
@@ -746,15 +976,19 @@ impl View {
             }
         }
         f.render_widget(Clear, area);
-        let foot = Line::from(Span::styled(
-            " ↑↓ moves · tab narrows · ⏎ does it · ctrl-g its message · esc closes ",
-            Style::new().fg(t.muted),
-        ));
+        let mode = self.palette.as_ref().map_or(Mode::Find, |p| p.mode.clone());
+        let (title, foot) = match &mode {
+            Mode::Find => (" palette ", " ↑↓ moves · tab narrows · ⏎ does it · ctrl-g its message · esc closes "),
+            Mode::React { .. } => (" react ", " 1-6 the quick ones · type for any other · ⏎ reacts · esc closes "),
+            Mode::Delete { .. } => (" delete ", " ↑↓ moves · ⏎ deletes · esc closes "),
+            Mode::Forward { .. } => (" forward ", " tab picks a chat · ⏎ forwards · esc closes "),
+        };
+        let foot = Line::from(Span::styled(foot, Style::new().fg(t.muted)));
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(t.focus))
             .style(Style::new().bg(t.surface).fg(t.fg))
-            .title(Span::styled(" palette ", Style::new().fg(t.text)))
+            .title(Span::styled(title, Style::new().fg(t.text)))
             .title_bottom(foot)
             .padding(Padding::horizontal(1));
         let inner = block.inner(area);
@@ -783,6 +1017,12 @@ impl View {
         if text.is_empty() {
             let hint = if p.muting.is_some() {
                 "for how long?"
+            } else if let Mode::React { .. } = p.mode {
+                "an emoji's name, or 1 to 6"
+            } else if let Mode::Delete { .. } = p.mode {
+                "for whom?"
+            } else if let Mode::Forward { .. } = p.mode {
+                "a chat to forward to"
             } else if p.scope.is_some() {
                 "words said in this chat"
             } else {
@@ -807,7 +1047,19 @@ impl View {
         line.push(Span::styled(right, Style::new().fg(t.comment)));
         let buf = f.buffer_mut();
         buf.set_line(inner.x, inner.y, &Line::from(line), inner.width);
-        if p.muting.is_none() {
+        if let Mode::Forward { picked, .. } = &p.mode {
+            let mut spans = vec![Span::styled("to ", Style::new().fg(t.comment))];
+            if picked.is_empty() {
+                spans.push(Span::styled("the chat you pick, or several with tab", Style::new().fg(t.gutter)));
+            }
+            for (i, (_, name)) in picked.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(format!(" {name} "), Style::new().fg(t.fg).bg(t.selection)));
+            }
+            buf.set_line(inner.x, inner.y + 1, &Line::from(fit_spans(spans, iw)), inner.width);
+        } else if p.muting.is_none() && p.mode == Mode::Find {
             let mut spans = vec![];
             for (i, (n, label)) in strip.iter().enumerate() {
                 if i > 0 {
@@ -867,7 +1119,12 @@ impl View {
                 }
                 Item::Found(i) => {
                     let Some(r) = self.palette.as_ref().and_then(|p| p.results.get(*i)) else { continue };
-                    let (lead, main, detail) = self.found_row(r);
+                    let (mut lead, main, detail) = self.found_row(r);
+                    if let (Mode::Forward { picked, .. }, Hit::Chat(c)) = (&mode, &r.hit)
+                        && picked.iter().any(|(id, _)| *id == c.id)
+                    {
+                        lead = Span::styled("✓", Style::new().fg(t.progress).add_modifier(Modifier::BOLD));
+                    }
                     self.hit_line(lead, main, detail, iw)
                 }
                 Item::Action(a) => {

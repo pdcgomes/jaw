@@ -121,6 +121,9 @@ impl View {
             self.record();
             return;
         }
+        if !ctrl && !alt && self.on_naming_key(k) {
+            return;
+        }
         let before = self.composer.text().to_string();
         let c = &mut self.composer;
         match k.code {
@@ -165,6 +168,8 @@ impl View {
             }
             KeyCode::PageUp => self.scroll_rows(self.page()),
             KeyCode::PageDown => self.scroll_rows(-self.page()),
+            KeyCode::Esc if self.editing.is_some() => self.editing_stop(),
+            KeyCode::Esc if self.replying.is_some() => self.replying = None,
             KeyCode::Esc if self.narrow() => {
                 self.picking = true;
                 self.selected = self.open.clone();
@@ -208,7 +213,7 @@ impl View {
         }
     }
 
-    fn on_message_key(&mut self, k: KeyEvent, id: &str, ctrl: bool, alt: bool) {
+    pub(super) fn on_message_key(&mut self, k: KeyEvent, id: &str, ctrl: bool, alt: bool) {
         let Some(m) = self.messages.as_ref().and_then(|w| w.get(id)).cloned() else {
             self.focus = Focus::Typing;
             return;
@@ -273,7 +278,7 @@ impl View {
                     && self.laid.get(&m.id).is_some_and(|l| l.lines.lines.len() > crate::layout::FOLD);
                 if folded {
                     self.unfolded.insert(m.id.clone());
-                } else {
+                } else if !self.open_in(&m) {
                     self.say(opens(m.kind));
                 }
             }
@@ -281,12 +286,13 @@ impl View {
                 self.effects.push(Effect::Copy(plain(&m)));
                 self.say("copied");
             }
-            KeyCode::Char('r') => self.say("replying comes with M2"),
-            KeyCode::Char('e') => self.say("editing comes with M2"),
-            KeyCode::Char('d') => self.say("deleting comes with M2"),
-            KeyCode::Char('+' | '1'..='6') => self.say("reactions come with M2"),
-            KeyCode::Char('f') => self.say("forwarding comes with M2"),
-            KeyCode::Char('i') => self.say("a message's info comes with M2"),
+            KeyCode::Char('r') => self.reply_to(&m),
+            KeyCode::Char('e') => self.edit(&m),
+            KeyCode::Char('d') => self.palette_delete(&m),
+            KeyCode::Char('+') => self.palette_react(&m),
+            KeyCode::Char(c @ '1'..='6') => self.react_quick(&m, c as usize - '1' as usize),
+            KeyCode::Char('f') => self.palette_forward(&m),
+            KeyCode::Char('i') => self.info(&m),
             KeyCode::Char('s') => self.say("saving files comes with M3"),
             KeyCode::Char('m') => self.say("folders come with M6"),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Keys),

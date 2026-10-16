@@ -34,6 +34,19 @@ impl Composer {
         &self.text
     }
 
+    /// Where the cursor is, as a byte offset into the text.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Puts `with` in place of the text from `start` to the cursor, the cursor after it.
+    pub fn replace_back_to(&mut self, start: usize, with: &str) {
+        let start = start.min(self.cursor);
+        self.text.replace_range(start..self.cursor, with);
+        self.cursor = start + with.len();
+        self.goal = None;
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }

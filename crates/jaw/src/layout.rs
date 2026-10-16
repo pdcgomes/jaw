@@ -396,6 +396,11 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
     let first_w = if name_w > NAME { text_w.saturating_sub(name_w - NAME) } else { text_w };
 
     let mut segments = vec![];
+    if m.forwarded > 0 && !m.deleted {
+        let said = if m.forwarded >= 5 { "↪ forwarded many times" } else { "↪ forwarded" };
+        segments.push((said.to_string(), Style::new().fg(t.comment).add_modifier(Modifier::ITALIC)));
+        segments.push(("\n".into(), Style::new()));
+    }
     if let Some(q) = &m.reply {
         let bar = Style::new().fg(t.sender(q.colour));
         segments.push(("┃ ".to_string(), bar));
@@ -494,7 +499,7 @@ mod tests {
     const NOW: i64 = 1_792_159_320_000;
 
     fn text(s: &str) -> Vec<Run> {
-        vec![Run { t: SpanKind::Text, s: s.into(), person: None }]
+        vec![Run { t: SpanKind::Text, s: s.into(), person: None, url: None }]
     }
 
     fn theirs(s: &str) -> Message {
@@ -509,6 +514,7 @@ mod tests {
             kind: Kind::Text,
             spans: text(s),
             reply: None,
+            forwarded: 0,
             reactions: vec![],
             status: None,
             edited: false,
@@ -576,7 +582,7 @@ mod tests {
     #[test]
     fn a_reply_quotes_its_message_on_a_line_and_reactions_follow() {
         let mut m = theirs("eu levo o vinho");
-        m.reply = Some(Quote { from: Some("Mãe".into()), colour: 0, summary: "trazes o vinho?".into() });
+        m.reply = Some(Quote { id: None, from: Some("Mãe".into()), colour: 0, summary: "trazes o vinho?".into() });
         m.reactions = vec![Reaction { emoji: "❤".into(), n: 2, mine: true }];
         m.edited = true;
         let lines = lay(&m, 60);

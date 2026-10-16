@@ -4,7 +4,7 @@
 //! user acted, quietly: a message that wasn't sent goes back to the box, an action says why in the
 //! footer, and what goes on in the background (drafts, receipts, typing) says nothing.
 
-use crate::data::{Chat, Counts, Found, FoundKind, Jawd, Message, Place, Typing, Update};
+use crate::data::{Chat, Counts, Found, FoundKind, Jawd, Message, MessageInfo, Place, Typing, Update};
 use crate::run::Event;
 use jaw_client::{Client, Config, Event as From, Failure, WindowId};
 use jaw_proto::find::{Find, Kind};
@@ -32,6 +32,12 @@ enum Asked {
     StartChat,
     /// Playing or recording a voice message, which the interface stops showing if it's refused.
     Voice,
+    /// A message's receipts, for the sheet waiting for them.
+    Info(String),
+    /// A chat's members, for completing `@` names; refused, the interface uses who it's seen.
+    Members(String),
+    /// Forwarding to this many chats.
+    Forward(usize),
     /// Background work that says nothing either way.
     Quiet,
 }
@@ -165,6 +171,9 @@ impl Wire {
             Asked::Did(what) => Some(Update::Notice(why_not(failure, what))),
             Asked::StartChat => Some(Update::Notice(why_not(failure, "starting a chat"))),
             Asked::Voice => Some(Update::VoiceRefused(why_not(failure, "voice"))),
+            Asked::Info(message) => Some(Update::Info { message, info: Err(why_not(failure, "a message's info")) }),
+            Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
+            Asked::Forward(_) => Some(Update::Notice(why_not(failure, "forwarding"))),
             Asked::Quiet => None,
         }
     }
@@ -217,6 +226,19 @@ impl Wire {
                             out.push(Update::ChatStarted { chat });
                         }
                     }
+                    (Asked::Info(message), Ok(result)) => {
+                        let info = serde_json::from_value::<MessageInfo>(result).map_err(|e| e.to_string());
+                        out.push(Update::Info { message, info });
+                    }
+                    (Asked::Members(chat), Ok(result)) => {
+                        let members = serde_json::from_value(result["members"].clone()).unwrap_or_default();
+                        out.push(Update::Members { chat, members });
+                    }
+                    (Asked::Forward(n), Ok(_)) => out.push(Update::Notice(if n == 1 {
+                        "forwarded".into()
+                    } else {
+                        format!("forwarded to {n} chats")
+                    })),
                     (asked, Err(failure)) => out.extend(self.refused(asked, &failure)),
                     _ => {}
                 }
@@ -290,9 +312,41 @@ impl Jawd for Wire {
         self.ask("chat.opened", json!({ "chat": chat }), Asked::Quiet);
     }
 
-    fn send_text(&mut self, chat: &str, text: &str) {
+    fn send_text(&mut self, chat: &str, text: &str, reply: Option<&str>, mentions: &[String]) {
         let asked = Asked::Send { chat: chat.to_string(), text: text.to_string() };
-        self.ask("send.text", json!({ "chat": chat, "text": text }), asked);
+        let mut params = json!({ "chat": chat, "text": text });
+        if let Some(reply) = reply {
+            params["reply"] = json!(reply);
+        }
+        if !mentions.is_empty() {
+            params["mentions"] = json!(mentions);
+        }
+        self.ask("send.text", params, asked);
+    }
+
+    fn react(&mut self, message: &str, emoji: &str) {
+        self.ask("react", json!({ "message": message, "emoji": emoji }), Asked::Did("reacting"));
+    }
+
+    fn edit(&mut self, message: &str, text: &str) {
+        self.ask("edit", json!({ "message": message, "text": text }), Asked::Did("editing"));
+    }
+
+    fn delete(&mut self, message: &str, everyone: bool) {
+        let to = if everyone { "everyone" } else { "me" };
+        self.ask("delete", json!({ "message": message, "for": to }), Asked::Did("deleting"));
+    }
+
+    fn forward(&mut self, messages: &[String], to: &[String]) {
+        self.ask("forward", json!({ "messages": messages, "to": to }), Asked::Forward(to.len()));
+    }
+
+    fn message_info(&mut self, message: &str) {
+        self.ask("message.info", json!({ "message": message }), Asked::Info(message.to_string()));
+    }
+
+    fn chat_info(&mut self, chat: &str) {
+        self.ask("chat.info", json!({ "chat": chat }), Asked::Members(chat.to_string()));
     }
 
     fn draft(&mut self, chat: &str, text: &str) {

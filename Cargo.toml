@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 cpal = "0.18"
 crossbeam-channel = "0.5"
 fast_image_resize = "6"
+emojis = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 jpeg-encoder = "0.7"
 libc = "0.2"

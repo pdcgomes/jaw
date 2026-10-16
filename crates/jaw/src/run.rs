@@ -192,6 +192,17 @@ fn copy(text: &str) {
     let _ = out.flush();
 }
 
+/// Opens a link or a file as the system would on a click, without waiting for it.
+fn open(target: &str) {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let _ = std::process::Command::new(opener)
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 pub fn base64(bytes: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -227,6 +238,7 @@ pub fn run(start: impl FnOnce(Sender<Event>) -> View) -> Result<()> {
     spawn_input(tx);
     let result = drive(&mut view, &rx, &mut terminal, &mut Probe::default(), &mut |e| match e {
         Effect::Copy(text) => copy(&text),
+        Effect::Open(target) => open(&target),
         Effect::Write(bytes) => {
             let mut out = std::io::stdout();
             let _ = out.write_all(&bytes);

@@ -13,6 +13,7 @@ publish = false
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+emojis.workspace = true
 fast_image_resize.workspace = true
 image.workspace = true
 jaw-client.workspace = true

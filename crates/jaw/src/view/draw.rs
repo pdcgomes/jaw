@@ -145,8 +145,10 @@ impl View {
         if self.palette.is_some() {
             self.draw_palette(f);
         }
-        if self.overlay == Some(Overlay::Keys) {
-            self.draw_keys(f);
+        match self.overlay {
+            Some(Overlay::Keys) => self.draw_keys(f),
+            Some(Overlay::Info) => self.draw_info(f),
+            None => {}
         }
         self.images.end();
         if self.no_color {
@@ -257,7 +259,7 @@ impl View {
         buf.set_line(area.x, area.y, &Line::from(spans), area.width);
     }
 
-    fn hints(&self) -> Vec<(&'static str, &'static str, bool)> {
+    pub(super) fn hints(&self) -> Vec<(&'static str, &'static str, bool)> {
         if self.overlay.is_some() {
             return vec![("any key", "closes", true)];
         }
@@ -300,17 +302,23 @@ impl View {
                 if let Some(m) = self.messages.as_ref().and_then(|w| w.get(id)).filter(|m| m.kind == Kind::Voice) {
                     return self.voice_hints(m);
                 }
+                let editable =
+                    self.messages.as_ref().and_then(|w| w.get(id)).is_some_and(|m| self.not_editable(m).is_none());
                 vec![
-                    ("r", "reply", false),
-                    ("e", "edit", false),
-                    ("d", "delete", false),
-                    ("+", "react", false),
-                    ("f", "forward", false),
+                    ("r", "reply", true),
+                    ("e", "edit", editable),
+                    ("d", "delete", true),
+                    ("+", "react", true),
+                    ("f", "forward", true),
                     ("y", "copy", true),
                     ("⏎", "open", true),
-                    ("i", "info", false),
+                    ("i", "info", true),
                     ("esc", "back to typing", true),
                 ]
+            }
+            Focus::Typing if self.editing.is_some() => vec![("⏎", "saves", true), ("esc", "stops editing", true)],
+            Focus::Typing if self.naming().is_some() => {
+                vec![("tab", "takes the name", true), ("↑↓", "moves", true), ("esc", "puts them away", true)]
             }
             Focus::Typing => {
                 let mut keys = vec![
@@ -512,6 +520,7 @@ impl View {
             Layout::vertical([Constraint::Min(1), Constraint::Length(box_h.min(inner.height))]).areas(inner);
         self.draw_messages(f, messages);
         self.draw_composer(f, composer);
+        self.draw_naming(f, composer);
     }
 
     /// The box while recording: its levels as they come, or once stopped the recording's
@@ -567,6 +576,22 @@ impl View {
         let t = self.theme;
         let typing = self.focus == Focus::Typing && self.overlay.is_none();
         let mut block = self.panel(if typing { t.focus } else { t.gutter }).padding(Padding::horizontal(1));
+        if let Some(r) = &self.replying {
+            let room = (area.width as usize).saturating_sub(fmt::width(&r.from) + 9);
+            block = block.title(Line::from(vec![
+                Span::styled(" ↩ ", Style::new().fg(t.comment)),
+                Span::styled(r.from.clone(), Style::new().fg(t.sender(r.colour)).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {} ", fmt::fit(&r.summary, room)), Style::new().fg(t.muted)),
+            ]));
+            block = block.title_bottom(Line::from(Span::styled(
+                " alt-⏎ new line · esc drops the reply ",
+                Style::new().fg(t.comment),
+            )));
+        } else if self.editing.is_some() {
+            block = block.title(Line::from(Span::styled(" ✎ editing ", Style::new().fg(t.text))));
+            block = block
+                .title_bottom(Line::from(Span::styled(" ⏎ saves · esc stops editing ", Style::new().fg(t.comment))));
+        }
         if let Some(why) = &self.unsent {
             block =
                 block.title_bottom(Line::from(Span::styled(format!(" not sent: {why} "), Style::new().fg(t.comment))));
@@ -1024,13 +1049,13 @@ impl View {
             pair(("⏎", "send", true), Some(("↑ ↓", "the one before, after", true))),
             pair(("alt-⏎", "a new line", true), Some(("home end", "the oldest, the newest", true))),
             pair(("↑", "into the messages", true), Some(("y", "copy its text", true))),
-            pair(("pgup pgdn", "scroll the messages", true), Some(("⏎", "unfold, play, pause", true))),
-            pair(("ctrl-a e", "start, end of the line", true), Some(("r", "reply · M2", false))),
-            pair(("alt-b f", "back, on a word", true), Some(("e", "edit · M2", false))),
-            pair(("ctrl-w u", "cut a word, the line", true), Some(("d", "delete · M2", false))),
-            pair(("alt-d", "cut the next word", true), Some(("+  1-6", "react · M2", false))),
-            pair(("ctrl-y", "put back what was cut", true), Some(("f", "forward · M2", false))),
-            pair(("@  :", "names and emoji · M2", false), Some(("i", "info · M2", false))),
+            pair(("pgup pgdn", "scroll the messages", true), Some(("⏎", "open, play, unfold", true))),
+            pair(("ctrl-a e", "start, end of the line", true), Some(("r", "reply", true))),
+            pair(("alt-b f", "back, on a word", true), Some(("e", "edit your own", true))),
+            pair(("ctrl-w u", "cut a word, the line", true), Some(("d", "delete", true))),
+            pair(("alt-d", "cut the next word", true), Some(("+  1-6", "react", true))),
+            pair(("ctrl-y", "put back what was cut", true), Some(("f", "forward", true))),
+            pair(("@", "a name, in a group", true), Some(("i", "info", true))),
             pair(("ctrl-o", "attach · M4", false), Some(("s", "save · M3", false))),
             pair(("ctrl-r", "record a voice message", true), Some(("← →  x", "seek, speed of a voice one", true))),
             pair(("", "", true), Some(("esc", "back to typing", true))),

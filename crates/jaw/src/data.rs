@@ -119,6 +119,9 @@ pub struct Message {
     pub spans: Vec<Span>,
     #[serde(default)]
     pub reply: Option<Quote>,
+    /// How many times it had been forwarded before it came, 0 if it wasn't.
+    #[serde(default)]
+    pub forwarded: u32,
     #[serde(default)]
     pub reactions: Vec<Reaction>,
     #[serde(default, deserialize_with = "tick")]
@@ -226,6 +229,9 @@ pub struct Recorded {
 /// previews jawd has written of it, as paths under jawd's folder.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct Media {
+    /// The file, once downloaded.
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default)]
     pub w: u32,
     #[serde(default)]
@@ -331,6 +337,9 @@ pub struct Span {
     /// For a mention: the person mentioned.
     #[serde(default, deserialize_with = "some_id")]
     pub person: Option<String>,
+    /// For a link: where it goes, which can differ from the text shown.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -352,6 +361,9 @@ pub enum SpanKind {
 /// The message a reply quotes, as one line.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Quote {
+    /// The message quoted.
+    #[serde(default)]
+    pub id: Option<String>,
     /// Who wrote it: a name, or jawd's JID for them until it names them.
     #[serde(default, deserialize_with = "some_id")]
     pub from: Option<String>,
@@ -416,6 +428,40 @@ pub struct Person {
     pub name: String,
     #[serde(default)]
     pub phone: Option<String>,
+}
+
+/// One of a chat's members, as `chat.info` gives them, for completing `@` names.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Member {
+    #[serde(rename = "person")]
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub admin: bool,
+}
+
+/// `message.info`'s answer: when it was sent, and how far it has got with each recipient.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct MessageInfo {
+    pub message: String,
+    #[serde(default)]
+    pub sent: Option<i64>,
+    #[serde(default)]
+    pub recipients: Vec<Recipient>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Recipient {
+    pub person: String,
+    pub name: String,
+    #[serde(default)]
+    pub delivered: Option<i64>,
+    #[serde(default)]
+    pub read: Option<i64>,
+    #[serde(default)]
+    pub played: Option<i64>,
 }
 
 /// A folder, as `find` returns it; built-in folders have their fixed IDs.
@@ -544,6 +590,16 @@ pub enum Update {
     Recorded(Recorded),
     /// jawd turned down something asked of voice, and why.
     VoiceRefused(String),
+    /// A chat's members, for completing `@` names.
+    Members {
+        chat: String,
+        members: Vec<Member>,
+    },
+    /// `message.info`'s answer for the sheet, or why there's none.
+    Info {
+        message: String,
+        info: Result<MessageInfo, String>,
+    },
 }
 
 impl Update {
@@ -611,7 +667,18 @@ pub trait Jawd {
     fn watch_messages(&mut self, chat: &str, place: Place);
     /// You opened a chat yourself, which the palette ranks by; passing through it doesn't count.
     fn opened(&mut self, chat: &str);
-    fn send_text(&mut self, chat: &str, text: &str);
+    /// Sends text to a chat, as a reply to `reply` and mentioning the people in `mentions`.
+    fn send_text(&mut self, chat: &str, text: &str, reply: Option<&str>, mentions: &[String]);
+    /// Reacts to a message with `emoji`, or takes yours away with an empty one.
+    fn react(&mut self, message: &str, emoji: &str);
+    fn edit(&mut self, message: &str, text: &str);
+    /// Deletes a message for you, or for everyone.
+    fn delete(&mut self, message: &str, everyone: bool);
+    fn forward(&mut self, messages: &[String], to: &[String]);
+    /// Asks for a message's receipts; they come as `Update::Info`.
+    fn message_info(&mut self, message: &str);
+    /// Asks for a chat's members; they come as `Update::Members`.
+    fn chat_info(&mut self, chat: &str);
     fn draft(&mut self, chat: &str, text: &str);
     /// Everything in the chat up to and including `up_to` has been seen.
     fn read(&mut self, chat: &str, up_to: &str);
@@ -685,7 +752,7 @@ mod tests {
 
         let message: Message = serde_json::from_str(r#"{"id":"3EB0A1B2C3D4E5F6","v":3,"sort":"1792145060000~000123","chat":"351912345678@s.whatsapp.net","at":1792145060000,"from":{"id":"person:12","name":"Ana","colour":3},"mine":false,"kind":"text","spans":[{"t":"text","s":"did you get the "},{"t":"bold","s":"photos"},{"t":"text","s":" from Sunday?"}],"reply":null,"reactions":[{"emoji":"❤","n":2,"mine":true}],"status":null,"edited":false,"deleted":false,"expires_at":null}"#).unwrap();
         assert_eq!(message.from.as_ref().map(|f| f.colour), Some(3));
-        assert_eq!(message.spans[1], Span { t: SpanKind::Bold, s: "photos".into(), person: None });
+        assert_eq!(message.spans[1], Span { t: SpanKind::Bold, s: "photos".into(), person: None, url: None });
         assert_eq!(message.reactions[0], Reaction { emoji: "❤".into(), n: 2, mine: true });
 
         let window = |upsert: Vec<Message>, remove: Vec<String>, older: Option<bool>| Update::Messages {
