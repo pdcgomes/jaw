@@ -130,7 +130,7 @@ A message row, render-ready:
 | `edited`, `deleted`, `expires_at`, `view_once`, `starred` | As they are |
 | `media` | For media kinds: `w`, `h` (the original's size in pixels, which the interface keeps the shape of), `seconds`, `bytes`, `name`, `mime`, `hd` (an HD copy exists), `previews` (`{"256": path, "768": path}`, each JPEG, or PNG for a sticker with its transparency, at most that many pixels on its long side, either absent until it's made), `thumbnail` (the tiny copy that came in the message, as a file, for drawing before a preview is made), `path` (the file, once downloaded), `state` (`remote`, `downloading` with `progress`, `local`, `expired`, `waiting_for_phone` or `gone`). Paths are relative to `hello`'s `root` |
 | `album` | For `album`: `items`, each an `id`, a `kind` (`image` or `video`) and its `media` as above, in the order sent; the row's own `spans` are the album's caption |
-| `voice` | `seconds` and `waveform`, 64 values from 0 to 100 |
+| `voice` | `seconds` and `waveform`, 64 values from 0 to 100, and `played`: on someone else's, whether you've played it, as the played receipt jawd sent says (the interface shows a dot until then, and plays the next one not yet played when one ends) |
 | `link` | A link preview: `url`, `title`, `description`, `preview` |
 | `poll` | `question`, `options` (each with `name`, `votes` and `mine`), `max` (how many choices), `voters` |
 | `location`, `contact`, `event` | Their fields, ready to show |
