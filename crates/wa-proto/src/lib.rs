@@ -10,3 +10,10 @@ mod generated {
 }
 
 pub use generated::*;
+
+const VERSION: &str = include_str!("../../../proto/whatsapp/VERSION");
+
+/// The whatsmeow version proto/whatsapp/ was copied from, which jaw-engine must be built with.
+pub fn whatsmeow() -> &'static str {
+    VERSION.trim().rsplit(' ').next().unwrap_or_default()
+}

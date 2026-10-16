@@ -182,10 +182,23 @@ pub struct Status {
 pub struct Engine {
     /// `go`, `rust` or `demo`.
     pub kind: String,
-    /// `starting`, `running`, `restarting` or `stopped`.
+    /// `starting`, `running`, `restarting` or `missing`.
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// How many times it has been started again since jawd started.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub restarts: u32,
+    /// Why it last stopped, or why it can't run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit: Option<String>,
+    /// How long it took to answer a ping just now, in microseconds; absent if it didn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_us: Option<u64>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

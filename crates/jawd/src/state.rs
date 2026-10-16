@@ -2,21 +2,27 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use jaw_proto::{Account, AccountState, Connection, ConnectionState, Engine, Missing, PROTOCOL, Status, Welcome};
+
+use crate::engine::pb;
+use crate::engine::supervisor::Supervisor;
 
 pub struct State {
     pub home: PathBuf,
     /// The user who owns jaw's folder, the only one jawd talks to.
     pub owner: u32,
+    engine: Result<Supervisor, (&'static str, String)>,
     missing: Vec<Missing>,
 }
 
 impl State {
-    pub fn new(home: &Path) -> Result<State> {
+    /// `engine` is the supervisor of the engine jawd runs, or the engine's kind and why it can't run.
+    pub fn new(home: &Path, engine: Result<Supervisor, (&'static str, String)>) -> Result<State> {
         let owner = std::fs::metadata(home).with_context(|| format!("can't read {}", home.display()))?.uid();
-        Ok(State { home: home.to_path_buf(), owner, missing: missing() })
+        Ok(State { home: home.to_path_buf(), owner, engine, missing: missing() })
     }
 
     pub fn welcome(&self) -> Welcome {
@@ -31,14 +37,46 @@ impl State {
     }
 
     pub fn status(&self) -> Status {
+        let engine = match &self.engine {
+            Ok(supervisor) => {
+                let status = supervisor.status();
+                Engine {
+                    kind: status.kind.into(),
+                    state: status.state.name().into(),
+                    version: status.version,
+                    restarts: status.restarts,
+                    last_exit: status.last_exit,
+                    answer_us: None,
+                }
+            }
+            Err((kind, why)) => Engine {
+                kind: (*kind).into(),
+                state: "missing".into(),
+                version: None,
+                restarts: 0,
+                last_exit: Some(why.clone()),
+                answer_us: None,
+            },
+        };
         Status {
             jawd: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOL,
             root: self.home.display().to_string(),
             account: self.account(),
             connection: self.connection(),
-            engine: Engine { kind: "go".into(), state: "stopped".into(), version: None },
+            engine,
             missing: self.missing.clone(),
+        }
+    }
+
+    /// How long the engine takes to answer a ping, in microseconds, if it answers within half a second.
+    pub async fn ping(&self) -> Option<u64> {
+        let supervisor = self.engine.as_ref().ok()?;
+        let started = Instant::now();
+        let ping = supervisor.call(pb::command::Kind::Ping(pb::Ping {}));
+        match tokio::time::timeout(Duration::from_millis(500), ping).await {
+            Ok(Ok(pb::reply::Kind::Pong(_))) => Some(started.elapsed().as_micros() as u64),
+            _ => None,
         }
     }
 

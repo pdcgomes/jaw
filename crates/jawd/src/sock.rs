@@ -53,7 +53,7 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let reply = answer(state, &line, &mut greeted);
+        let reply = answer(state, &line, &mut greeted).await;
         let mut out = serde_json::to_vec(&reply)?;
         out.push(b'\n');
         write.write_all(&out).await?;
@@ -62,7 +62,7 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
 }
 
 /// The reply to one line from an interface.
-fn answer(state: &State, line: &str, greeted: &mut bool) -> Reply {
+async fn answer(state: &State, line: &str, greeted: &mut bool) -> Reply {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(_) => return failed(0, Error::new(code::PARSE, "that line isn't JSON")),
@@ -100,7 +100,11 @@ fn answer(state: &State, line: &str, greeted: &mut bool) -> Reply {
             }
             Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("hello's params: {e}"))),
         },
-        "status" => succeeded(id, &state.status()),
+        "status" => {
+            let mut status = state.status();
+            status.engine.answer_us = state.ping().await;
+            succeeded(id, &status)
+        }
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
     }
 }
@@ -126,7 +130,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
         let listener = listen(&socket).unwrap();
-        let state = Arc::new(State::new(home.path()).unwrap());
+        let state = Arc::new(State::new(home.path(), Err(("go", "no engine in this test".into()))).unwrap());
         tokio::spawn(serve(state, listener));
         (home, socket)
     }

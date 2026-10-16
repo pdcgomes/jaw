@@ -82,10 +82,21 @@ pub fn describe(status: &Status) -> String {
         ConnectionState::Banned => "temporarily banned".to_string(),
         ConnectionState::EngineRestarting => "reconnecting while the engine restarts".to_string(),
     };
-    let engine = match &status.engine.version {
-        Some(version) => format!("{}, {} ({version})", status.engine.kind, status.engine.state),
+    let mut engine = match &status.engine.version {
+        Some(version) => format!("{}, {}: {version}", status.engine.kind, status.engine.state),
         None => format!("{}, {}", status.engine.kind, status.engine.state),
     };
+    match status.engine.answer_us {
+        Some(us) if us >= 1_000 => engine.push_str(&format!(", answering in {:.1} ms", us as f64 / 1_000.0)),
+        Some(us) => engine.push_str(&format!(", answering in {us} µs")),
+        None => {}
+    }
+    if status.engine.restarts > 0 {
+        engine.push_str(&format!(", started again {} times", status.engine.restarts));
+    }
+    if let Some(why) = &status.engine.last_exit {
+        engine.push_str(&format!("; last stopped: {why}"));
+    }
     let mut lines = vec![
         format!("jawd      {} (protocol {})", status.jawd, status.protocol),
         format!("folder    {}", status.root),

@@ -276,10 +276,12 @@ dependencies = [
  "clap",
  "jaw-client",
  "jaw-proto",
+ "prost",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "wa-proto",
 ]
 
 [[package]]

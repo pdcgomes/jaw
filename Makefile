@@ -14,7 +14,7 @@ engine:
 rust:
 	$(CARGO) build --workspace
 
-test:
+test: engine
 	cd engine && $(GO) test -race ./...
 	$(CARGO) test --workspace
 
