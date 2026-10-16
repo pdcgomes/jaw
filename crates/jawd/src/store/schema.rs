@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::fallible_iterator::FallibleIterator;
-use rusqlite::{Batch, Connection, TransactionBehavior};
+use rusqlite::{Batch, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 pub(super) const MIGRATIONS: &[&str] = &[
@@ -666,10 +666,21 @@ impl Runner {
         {
             back_up(db, &path, version, self.free)?;
         }
-        for Range { start: at, end } in steps {
+        // A table rebuilt drops the old one, which with foreign keys on would delete every row that
+        // refers to it, so they're off while the migrations run, and a data step checks them before
+        // it commits.
+        let keys: bool = db.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+        db.pragma_update(None, "foreign_keys", false)?;
+        let ran = steps.into_iter().try_for_each(|Range { start: at, end }| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             for (n, migration) in MIGRATIONS.iter().enumerate().take(end).skip(at) {
                 self.execute(&tx, migration).with_context(|| format!("jaw.db's migration {}", n + 1))?;
+            }
+            if kinds[at] == Kind::Data
+                && let Some(table) =
+                    tx.prepare("PRAGMA foreign_key_check")?.query_row([], |r| r.get::<_, String>(0)).optional()?
+            {
+                bail!("jaw.db's migration {end} left a row in {table} that refers to nothing, so it was undone");
             }
             tx.pragma_update(None, "application_id", APPLICATION_ID)?;
             tx.pragma_update(None, "user_version", end as i64)?;
@@ -677,7 +688,10 @@ impl Runner {
                 bail!("jaw.db's migrations to version {end} didn't make the schema they make on an empty database");
             }
             tx.commit()?;
-        }
+            anyhow::Ok(())
+        });
+        db.pragma_update(None, "foreign_keys", keys)?;
+        ran?;
         let id: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0))?;
         if id != APPLICATION_ID {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -947,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn a_data_step_waits_for_a_whole_synced_backup_at_the_old_version_and_a_schema_step_needs_none() {
+    fn a_data_step_waits_for_a_whole_synced_backup_at_the_old_version_and_a_database_up_to_date_needs_none() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("jaw.db");
         let mut db = at(Some(&path), 2);
@@ -965,7 +979,7 @@ mod tests {
         assert!(!home.path().join("jaw.db.before-v2.part").exists());
 
         let other = tempfile::tempdir().unwrap();
-        let mut db = at(Some(&other.path().join("jaw.db")), 3);
+        let mut db = at(Some(&other.path().join("jaw.db")), MIGRATIONS.len());
         migrate(&mut db).unwrap();
         assert_eq!(std::fs::read_dir(other.path()).unwrap().count(), 1, "only jaw.db");
     }

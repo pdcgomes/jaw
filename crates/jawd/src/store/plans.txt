@@ -61,10 +61,10 @@ SELECT count(*) FROM inbox
     SCAN inbox
 
 -- src/store/mod.rs
-INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)
+INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)
 
 -- src/store/mod.rs
-INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)
+INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)
 
 -- src/store/read.rs
 SELECT raw FROM messages WHERE n = ?1
@@ -144,6 +144,15 @@ SELECT EXISTS (SELECT 1 FROM messages WHERE chat = (SELECT n FROM chats WHERE id
       SEARCH messages USING COVERING INDEX messages_by_time (chat=? AND at<?)
       SCALAR SUBQUERY 1
         SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+
+-- src/store/schema.rs
+SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name
+    SCAN sqlite_schema
+    USE TEMP B-TREE FOR ORDER BY
+
+-- src/store/schema.rs
+SELECT count(*) FROM sqlite_schema
+    SCAN sqlite_master
 
 -- src/store/write.rs
 SELECT coalesce(max(seq), 0) FROM events

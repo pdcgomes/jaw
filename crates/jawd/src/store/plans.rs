@@ -42,6 +42,7 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     ("SELECT folder, chat, person FROM folder_items", "the palette's folders, read once at start"),
     ("SELECT n, parent, name FROM folders", "the palette's folders, read once at start"),
+    ("FROM sqlite_schema", "the schema's fingerprint, read at start and after each migration step"),
 ];
 
 /// Names in format strings that aren't constants, and what to plan them with.

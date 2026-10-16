@@ -502,7 +502,7 @@ mod tests {
                                 kind: "text",
                                 text: Some(text.clone()),
                                 summary: text,
-                                counts: true,
+                                live: true,
                                 ..Message::default()
                             })
                         })

@@ -5,7 +5,7 @@ use jaw_proto::{Connection, ConnectionState};
 use tokio::sync::mpsc;
 
 use super::*;
-use crate::store::{Change, Chat, Lane, Message};
+use crate::store::{Change, Chat, Lane, Message, Read};
 
 const ANA: &str = "351912345678@s.whatsapp.net";
 const RUI: &str = "351913333333@s.whatsapp.net";
@@ -70,7 +70,7 @@ impl Running {
 
     /// A message arriving live from `sender` in `chat`, sent just now.
     async fn arrives(&self, chat: &str, sender: &str, id: &str, text: &str) {
-        self.write(Message { sender: Some(sender.into()), counts: true, ..message(chat, id, text, 0) }).await;
+        self.write(Message { sender: Some(sender.into()), live: true, ..message(chat, id, text, 0) }).await;
     }
 
     async fn write(&self, message: Message) {
@@ -148,7 +148,7 @@ async fn a_burst_in_a_chat_is_one_notification_with_its_newest_message() {
 async fn a_group_names_who_wrote_and_media_says_its_kind() {
     let mut running = Running::new().await;
     let photo = Message { kind: "image", text: None, summary: String::new(), ..message(CLIMBING, "p1", "", 0) };
-    running.write(Message { sender: Some(RUI.into()), counts: true, ..photo }).await;
+    running.write(Message { sender: Some(RUI.into()), live: true, ..photo }).await;
     assert_eq!(running.expect(1).await, vec![notice("Lisbon Climbing", None, "+351913333333: Photo")]);
 }
 
@@ -161,9 +161,9 @@ async fn muted_archived_yours_older_and_history_stay_quiet() {
     running.chat(Chat { id: archived.into(), archived: Some(true), ..Chat::default() }).await;
     running.arrives(muted, muted, "m1", "muted").await;
     running.arrives(archived, archived, "a1", "archived").await;
-    running.write(Message { mine: true, counts: true, ..message(ANA, "y1", "mine", 0) }).await;
+    running.write(Message { mine: true, live: true, ..message(ANA, "y1", "mine", 0) }).await;
     let older = message(RUI, "o1", "sent before jawd started, arriving now", 60_000);
-    running.write(Message { sender: Some(RUI.into()), counts: true, ..older }).await;
+    running.write(Message { sender: Some(RUI.into()), live: true, ..older }).await;
     let history = message(CLIMBING, "h1", "history, which isn't unread", 0);
     running.write(Message { sender: Some(RUI.into()), ..history }).await;
     assert_eq!(running.sent().await, Vec::new());
@@ -229,7 +229,7 @@ async fn what_came_while_jawd_was_off_is_one_summary_once_its_first_catch_up_end
     running.catch_up();
     let away = |chat: &str, sender: &str, id: &str, ago: i64| Message {
         sender: Some(sender.into()),
-        counts: true,
+        live: true,
         ..message(chat, id, &format!("sent {ago} ms ago"), ago)
     };
     running.write(away(ANA, ANA, "m1", 3_000_000)).await;
@@ -238,7 +238,8 @@ async fn what_came_while_jawd_was_off_is_one_summary_once_its_first_catch_up_end
     running.write(away(archived, archived, "a1", 2_700_000)).await;
     running.write(Message { sender: None, mine: true, ..away(mum, mum, "y1", 2_600_000) }).await;
     // App state for a chat with old unread messages touches it without bringing any.
-    running.chat(Chat { id: "351917777777@s.whatsapp.net".into(), unread: Some(4), ..Chat::default() }).await;
+    let read = Read { chat: "351917777777@s.whatsapp.net".into(), at: 0, ids: Vec::new(), phone: Some((4, 0)) };
+    running.store.apply(Lane::Live, vec![Change::Read(read)]).await.unwrap();
     assert_eq!(running.sent().await, Vec::new(), "nothing goes while catching up");
     running.caught_up();
     // WhatsApp says it's done before the last of it is converted.
@@ -254,7 +255,7 @@ async fn a_catch_up_that_brought_one_chat_ends_in_that_chats_own_notification() 
     let mut running = Running::new().await;
     running.catch_up();
     let away = message(ANA, "m1", "while you were away", 600_000);
-    running.write(Message { sender: Some(ANA.into()), counts: true, ..away }).await;
+    running.write(Message { sender: Some(ANA.into()), live: true, ..away }).await;
     running.caught_up();
     assert_eq!(running.expect(1).await, vec![notice("Ana Ribeiro", None, "while you were away")]);
 }
