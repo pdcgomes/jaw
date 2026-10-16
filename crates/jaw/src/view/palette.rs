@@ -298,7 +298,7 @@ impl View {
     }
 
     fn unread_chats(&self) -> String {
-        let n = self.chats.order().iter().filter_map(|id| self.chats.get(id)).filter(|c| c.unread > 0).count();
+        let n = self.chats.rows().filter(|c| c.unread > 0).count();
         match n {
             0 => "nothing unread".into(),
             1 => "1 chat".into(),
@@ -572,7 +572,7 @@ impl View {
             }
             Does::GoToUnread => {
                 close(self);
-                let order: Vec<String> = self.chats.order().iter().map(|s| s.to_string()).collect();
+                let order: Vec<String> = self.chats.rows().map(|c| c.id.clone()).collect();
                 let at = self.open.as_ref().and_then(|o| order.iter().position(|id| id == o)).map_or(0, |i| i + 1);
                 let next = (0..order.len()).map(|k| &order[(at + k) % order.len()]).find(|id| {
                     self.chats
@@ -633,7 +633,8 @@ impl View {
     fn go_to_message(&mut self, chat: &str, id: &str) {
         self.jump = Some(id.to_string());
         if self.open.as_deref() == Some(chat) {
-            self.watch(chat, crate::data::Around::Message(id.to_string()));
+            self.asked_place = None;
+            self.watch(chat, View::around(id));
         } else {
             self.open_chat_at(chat, Some(id.to_string()));
             self.jawd.opened(chat);

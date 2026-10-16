@@ -1,6 +1,6 @@
-//! jaw: WhatsApp in a terminal. It draws what jawd, the daemon, prepares. `jaw demo` shows the
-//! terminal interface on a made-up account; until it talks to jawd, `jaw status` asks jawd how it
-//! is, and `jaw link` links an account.
+//! jaw: WhatsApp in a terminal. It draws what jawd, the daemon, prepares: `jaw` on its own runs
+//! the interface on jawd, starting jawd first if it isn't running, `jaw demo` runs it on a
+//! made-up account, `jaw status` asks jawd how it is, and `jaw link` links an account.
 
 mod art;
 mod bench;
@@ -13,7 +13,7 @@ mod layout;
 mod run;
 mod theme;
 mod view;
-mod window;
+mod wire;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -56,7 +56,7 @@ enum Command {
         width: u16,
         #[arg(long, default_value_t = 40)]
         height: u16,
-        /// The made-up account; the only one until jaw talks to jawd
+        /// The made-up account, rather than the jawd on jaw's folder
         #[arg(long)]
         demo: bool,
         #[arg(long, value_enum, default_value_t = demo::State::Online)]
@@ -82,13 +82,17 @@ enum Command {
         /// Presses the keys in the palette, which searches at each one
         #[arg(long)]
         palette: bool,
+        /// Floods a real jawd, `jawd bench feed`'s made-up account on a folder of its own
+        #[arg(long)]
+        jawd: bool,
     },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Status) | None => status(),
+        None => run::run(|tx| view::View::new(Box::new(wire::Wire::start(&jaw_proto::local::home(), tx)))),
+        Some(Command::Status) => status(),
         Some(Command::Link { phone }) => link(phone),
         Some(Command::Demo { state, flood }) => run::run(|tx| {
             let demo = demo::Demo::start(tx, demo::Clock::Wall, state, true);
@@ -99,17 +103,24 @@ fn main() -> Result<()> {
             view::View::new(Box::new(demo))
         }),
         Some(Command::Snapshot { width, height, demo, state, keys, ansi }) => {
-            if !demo {
-                bail!("jaw snapshot draws the made-up account with --demo; jawd's comes when jaw talks to it");
-            }
             let (tx, rx) = std::sync::mpsc::channel();
             let now = chrono::Utc::now().timestamp_millis();
-            let account = demo::Demo::start(tx, demo::Clock::Fixed(now), state, false);
-            let mut view = view::View::new(Box::new(account));
+            let mut view = if demo {
+                let account = demo::Demo::start(tx, demo::Clock::Fixed(now), state, false);
+                view::View::new(Box::new(account))
+            } else {
+                let socket = jaw_proto::local::socket(&jaw_proto::local::home());
+                view::View::new(Box::new(wire::Wire::connect(socket, tx)))
+            };
             view.clock = Some(now);
             view.resize(width, height);
-            run::settle(&mut view, &rx);
-            run::press(&mut view, &rx, &keys)?;
+            if demo {
+                run::settle(&mut view, &rx);
+                run::press(&mut view, &rx, &keys)?;
+            } else {
+                run::settle_live(&mut view, &rx, Duration::from_secs(5));
+                run::press_live(&mut view, &rx, &keys)?;
+            }
             let frame = if ansi {
                 run::snapshot_ansi(&mut view, width, height)
             } else {
@@ -118,7 +129,7 @@ fn main() -> Result<()> {
             print!("{frame}");
             Ok(())
         }
-        Some(Command::Bench { rate, seconds, width, height, palette }) => {
+        Some(Command::Bench { rate, seconds, width, height, palette, jawd }) => {
             let flood = bench::Flood {
                 width,
                 height,
@@ -127,6 +138,7 @@ fn main() -> Result<()> {
                 every: Duration::from_millis(12),
                 warm: Duration::from_secs(1),
                 palette,
+                jawd,
             };
             println!("{}", bench::flood(&flood)?.describe());
             Ok(())

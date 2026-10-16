@@ -7,12 +7,12 @@ mod keys;
 mod palette;
 
 use crate::composer::Composer;
-use crate::data::{Around, Jawd, Message, Typing, Update};
+use crate::data::{Chat, Jawd, Message, Place, Typing, Update};
 use crate::fmt::{self, MINUTE};
 use crate::layout::{self, Shape};
 use crate::theme::Theme;
-use crate::window::{Chats, Messages};
 use chrono::FixedOffset;
+use jaw_client::{Chats, Messages};
 use jaw_proto::{Connection, ConnectionState, LinkStep};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -35,6 +35,8 @@ const TYPING: i64 = 5_000;
 const READ: i64 = 1_000;
 /// The Mimic chomps for this long when an empty chat's first message comes.
 const CHOMP: i64 = 1_200;
+/// Chats the list's window keeps.
+const LIST_ROWS: u32 = 100;
 /// Messages kept each side of the anchor in the open chat's window.
 pub const WINDOW: usize = 100;
 /// Ask for the window to move once the screen is this close to its edge.
@@ -128,15 +130,15 @@ pub struct View {
 
     reach: Reach,
     linked: Option<bool>,
-    me: Option<String>,
+    me: Vec<String>,
     connection: Connection,
     link: Option<LinkStep>,
     link_asked: bool,
     /// The number being typed for a phone code.
     phone: Option<String>,
 
-    chats: Chats,
-    messages: Option<Messages>,
+    chats: Chats<Chat>,
+    messages: Option<Messages<Message>>,
     /// The open chat, kept by ID however the list moves.
     open: Option<String>,
     /// The chat the list has selected, which is the open one except while picking on a narrow
@@ -158,7 +160,10 @@ pub struct View {
     /// Each chat's rows in the list, kept per version, whether it's open, width and minute.
     rows_laid: HashMap<String, ChatRows>,
     unfolded: HashSet<String>,
-    asked_around: Option<String>,
+    /// Where the open chat's window was last asked to be, so it isn't asked again each frame.
+    asked_place: Option<Place>,
+    /// Whether the windows have been watched, which a connection's later hellos don't do again.
+    watching: bool,
 
     composer: Composer,
     draft_sent: String,
@@ -169,6 +174,8 @@ pub struct View {
     read_due: Option<i64>,
 
     overlay: Option<Overlay>,
+    /// Why the last message wasn't sent, said on the box it went back to until it's typed in.
+    unsent: Option<String>,
     /// Ctrl-K's palette, while it's open.
     palette: Option<palette::Palette>,
     /// The newest request number the interface has given a `find`.
@@ -207,12 +214,12 @@ impl View {
             jawd,
             reach: Reach::Waiting,
             linked: None,
-            me: None,
+            me: vec![],
             connection: Connection::new(ConnectionState::Connecting),
             link: None,
             link_asked: false,
             phone: None,
-            chats: Chats::default(),
+            chats: Chats::new("all", Place::top(LIST_ROWS)),
             messages: None,
             open: None,
             selected: None,
@@ -227,7 +234,8 @@ impl View {
             laid: HashMap::new(),
             rows_laid: HashMap::new(),
             unfolded: HashSet::new(),
-            asked_around: None,
+            asked_place: None,
+            watching: false,
             composer: Composer::default(),
             draft_sent: String::new(),
             draft_due: None,
@@ -236,6 +244,7 @@ impl View {
             read_at: 0,
             read_due: None,
             overlay: None,
+            unsent: None,
             palette: None,
             asked: 0,
             outside: None,
@@ -264,6 +273,11 @@ impl View {
         self.dirty = true;
     }
 
+    /// What jawd sent since the last frame.
+    pub fn drain_jawd(&mut self) -> Vec<Update> {
+        self.jawd.drain()
+    }
+
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }
@@ -274,6 +288,13 @@ impl View {
 
     pub fn size(&self) -> Option<(u16, u16)> {
         self.size
+    }
+
+    /// Whether jawd has said how things stand, or that it can't be reached, so a frame of it
+    /// says something.
+    pub fn answered(&self) -> bool {
+        !matches!(self.reach, Reach::Waiting | Reach::Starting { failed: None })
+            && (self.reach != Reach::Up || self.linked == Some(false) || self.chats.loaded)
     }
 
     /// Whether the open chat's messages are on screen, which is when the first frame is done.
@@ -299,12 +320,12 @@ impl View {
                 self.linked = Some(linked);
                 self.me = me;
                 self.connection = connection;
-                if linked {
-                    self.jawd.watch_chats(self.selected.as_deref(), 20, 100);
-                    if let Some(chat) = self.open.clone() {
-                        self.watch(&chat, Around::Newest);
-                    }
-                } else {
+                // Connecting again, jawd's client watches every window again itself, where it was,
+                // so nothing moves.
+                if linked && !self.watching {
+                    self.watching = true;
+                    self.jawd.watch_chats(Place::top(LIST_ROWS));
+                } else if !linked {
                     self.start_linking();
                 }
             }
@@ -320,36 +341,44 @@ impl View {
                     self.say(format!("Linked {phone}. jawd is fetching your history."));
                     self.linked = Some(true);
                     self.connection = Connection::new(ConnectionState::CatchingUp);
-                    self.jawd.watch_chats(None, 20, 100);
+                    if !self.watching {
+                        self.watching = true;
+                        self.jawd.watch_chats(Place::top(LIST_ROWS));
+                    }
                 }
                 self.link = Some(step);
             }
-            Update::Chats { reset, upsert, remove, total } => {
-                let left = reset || !remove.is_empty();
-                if let Some(open) = self.open.as_ref().filter(|o| remove.contains(o)) {
+            Update::Chats(update) => {
+                let left = !update.remove.is_empty();
+                if let Some(open) = self.open.as_ref().filter(|o| update.remove.contains(o)) {
                     self.outside = self.chats.get(open).cloned().or(self.outside.take());
                 }
-                if let Some(back) = upsert.iter().find(|c| self.outside.as_ref().is_some_and(|o| o.id == c.id)) {
+                if let Some(back) = update.upsert.iter().find(|c| self.outside.as_ref().is_some_and(|o| o.id == c.id)) {
                     self.outside = (back.archived).then(|| back.clone());
                 }
-                self.keep_selected_row(|v| v.chats.apply(reset, upsert, &remove, total));
+                self.keep_selected_row(|v| {
+                    v.chats.apply(update);
+                });
                 if left {
                     let chats = &self.chats;
                     self.rows_laid.retain(|id, _| chats.get(id).is_some());
                 }
                 if self.open.is_none() {
-                    let first = self.chats.order().first().map(|s| s.to_string());
+                    let first = self.chats.rows().next().map(|c| c.id.clone());
                     if let Some(first) = first {
                         self.open_chat(&first);
                         self.picking = true;
                     }
                 }
             }
-            Update::Messages { chat, reset, upsert, remove, older, newer } => {
+            Update::Messages { chat, update } => {
                 let Some(window) = self.messages.as_mut().filter(|w| w.chat == chat) else { return };
-                let first = !window.loaded && reset;
+                let first = !window.loaded;
                 let was_empty = window.loaded && window.is_empty();
-                let gone = window.apply(reset, upsert, &remove, older, newer);
+                if update.moved.is_some() {
+                    self.asked_place = None;
+                }
+                let gone = window.apply(update);
                 let now_empty = window.is_empty();
                 for id in gone {
                     self.laid.remove(&id);
@@ -380,9 +409,16 @@ impl View {
                     self.jawd.opened(&id);
                 }
             }
+            Update::Unsent { chat, text, why } => {
+                if self.open.as_deref() == Some(chat.as_str()) && self.composer.is_empty() {
+                    self.composer.set(&text);
+                }
+                self.unsent = Some(why);
+            }
             Update::Notice(text) => self.say(text),
             Update::Starting { failed } => self.reach = Reach::Starting { failed },
-            Update::Unreachable { why, retry_at } => {
+            Update::Unreachable { why, retry_in } => {
+                let retry_at = self.now() + retry_in;
                 let since = match &self.reach {
                     Reach::Unreachable { since, .. } => *since,
                     _ => self.now(),
@@ -451,7 +487,7 @@ impl View {
         self.draft_sent = draft;
         self.open = Some(id.to_string());
         self.selected = Some(id.to_string());
-        self.messages = Some(Messages::new(id));
+        self.messages = Some(Messages::new(id, Place::newest(WINDOW as u32)));
         self.focus = Focus::Typing;
         self.scroll = Scroll::Bottom;
         self.seen = None;
@@ -464,7 +500,8 @@ impl View {
         if self.outside.as_ref().is_some_and(|o| o.id != id) {
             self.outside = None;
         }
-        self.watch(id, at.map_or(Around::Newest, Around::Message));
+        self.asked_place = None;
+        self.watch(id, at.map_or_else(View::newest, |m| View::around(&m)));
         self.reveal_selected_chat();
         self.dirty = true;
     }
@@ -492,19 +529,22 @@ impl View {
         }
     }
 
-    fn watch(&mut self, chat: &str, around: Around) {
-        let (before, after) = match around {
-            Around::Newest => (WINDOW, 0),
-            Around::Message(_) => (WINDOW, WINDOW),
-        };
-        if let Some(w) = self.messages.as_mut() {
-            w.following = around == Around::Newest;
+    /// Asks for the open chat's window somewhere, unless that's where it was last asked for.
+    fn watch(&mut self, chat: &str, place: Place) {
+        if self.asked_place.as_ref() == Some(&place) {
+            return;
         }
-        self.asked_around = match &around {
-            Around::Message(id) => Some(id.clone()),
-            Around::Newest => None,
-        };
-        self.jawd.watch_messages(chat, around, before, after);
+        self.asked_place = Some(place.clone());
+        self.jawd.watch_messages(chat, place);
+    }
+
+    /// The open chat's window around a message.
+    fn around(id: &str) -> Place {
+        Place::around(id, WINDOW as u32, WINDOW as u32)
+    }
+
+    fn newest() -> Place {
+        Place::newest(WINDOW as u32)
     }
 
     /// The message a jump is for, once it's in the window: anchored a third of the way down,
@@ -529,7 +569,7 @@ impl View {
         if n == 0 {
             return;
         }
-        if let Some(first) = w.nth_newest_theirs(n) {
+        if let Some(first) = w.rows().rev().filter(|m| !m.mine).nth(n - 1) {
             self.seen = w.before(&first.sort).map(|m| m.sort.clone());
             self.scroll = Scroll::Anchor { id: first.id.clone(), sort: first.sort.clone(), top: 1 };
         }
@@ -549,6 +589,7 @@ impl View {
             self.typing_at = now;
         }
         self.draft_due = Some(now + DRAFT);
+        self.unsent = None;
     }
 
     fn send(&mut self) {
@@ -572,8 +613,8 @@ impl View {
         self.typing_at = 0;
         self.draft_sent.clear();
         self.draft_due = None;
-        if !self.messages.as_ref().is_some_and(|w| w.following) {
-            self.watch(&chat, Around::Newest);
+        if !self.messages.as_ref().is_some_and(|w| w.following()) {
+            self.watch(&chat, View::newest());
         }
         self.scroll = Scroll::Bottom;
     }
@@ -659,6 +700,26 @@ impl View {
         self.reach == Reach::Up && (self.linked == Some(false) || self.connection.state == ConnectionState::LoggedOut)
     }
 
+    /// Who's typing in a chat, as its row and title say it: in a group, their names where jaw
+    /// knows them; jawd says who by person ID, which jaw names from the open chat's senders.
+    fn who_types(&self, chat: &Chat) -> String {
+        if !chat.group() {
+            return "typing…".into();
+        }
+        let named: Vec<String> = chat
+            .typing
+            .iter()
+            .filter_map(|who| {
+                if !who.starts_with("person:") {
+                    return Some(who.clone());
+                }
+                let window = self.messages.as_ref().filter(|w| w.chat == chat.id)?;
+                window.rows().rev().find_map(|m| m.from.as_ref().filter(|f| f.id == *who).map(|f| f.name.clone()))
+            })
+            .collect();
+        if named.is_empty() { "typing…".into() } else { format!("{} typing…", named.join(", ")) }
+    }
+
     /// What a message's lines depend on, from the one before it.
     fn shape(&self, m: &Message, prev: Option<&Message>, width: usize) -> Shape {
         fn who(m: &Message) -> Option<&str> {
@@ -694,7 +755,7 @@ impl View {
         {
             return l.lines.clone();
         }
-        let ctx = layout::Ctx { theme: &self.theme, tz: self.tz, me: self.me.as_deref() };
+        let ctx = layout::Ctx { theme: &self.theme, tz: self.tz, me: &self.me };
         let lines = Rc::new(layout::message(m, shape, &ctx));
         self.laid.insert(m.id.clone(), Laid { v: m.v, shape, lines: lines.clone() });
         lines

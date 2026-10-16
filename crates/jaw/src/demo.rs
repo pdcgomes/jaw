@@ -6,12 +6,15 @@
 
 mod find;
 
+use crate::data::Place;
 use crate::data::{
-    Around, Chat, ChatKind, FoundKind, Jawd, Kind, Last, Message, Person, Quote, Reaction, Sender, Span, SpanKind,
-    Tick, Typing, Update,
+    Chat, ChatKind, FoundKind, Jawd, Kind, Last, Message, Person, Quote, Reaction, Sender, Span, SpanKind, Tick,
+    Typing, Update,
 };
 use crate::fmt::{DAY, MINUTE};
 use crate::run::Event;
+use jaw_client::{Moved, Update as Window};
+use jaw_proto::windows::Around;
 use jaw_proto::{Connection, ConnectionState, LinkStep};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -71,7 +74,6 @@ struct Open {
     /// The first message in the window, and one past the last.
     lo: usize,
     hi: usize,
-    newer: u32,
 }
 
 enum Later {
@@ -198,7 +200,7 @@ impl Demo {
         let (row, archived) = (c.clone(), c.archived);
         let total = a.total();
         let (upsert, remove) = if archived { (vec![], vec![row.id]) } else { (vec![row], vec![]) };
-        a.send(Update::Chats { reset: false, upsert, remove, total });
+        a.send(Update::Chats(Window { upsert, remove, total: Some(total), ..Window::default() }));
     }
 
     fn lock(&self) -> MutexGuard<'_, Account> {
@@ -339,13 +341,12 @@ impl Account {
 
     fn hello(&mut self) {
         let linked = self.state != State::Linking;
-        self.send(Update::Hello { linked, me: Some(ME.into()), connection: self.connection.clone() });
+        self.send(Update::Hello { linked, me: vec![ME.into()], connection: self.connection.clone() });
     }
 
     fn unreachable(&mut self) {
         let why = "jawd isn't running: nothing answers on jaw.sock".to_string();
-        let retry_at = self.now() + 4_000;
-        self.send(Update::Unreachable { why, retry_at });
+        self.send(Update::Unreachable { why, retry_in: 4_000 });
         self.after(4_000, Later::Retry);
     }
 
@@ -430,14 +431,14 @@ impl Account {
         }
     }
 
-    fn total(&self) -> usize {
-        self.threads.len()
+    fn total(&self) -> u64 {
+        self.threads.iter().filter(|t| !t.chat.archived).count() as u64
     }
 
     fn push_chat(&mut self, t: usize) {
         let row = self.threads[t].chat.clone();
         let total = self.total();
-        self.send(Update::Chats { reset: false, upsert: vec![row], remove: vec![], total });
+        self.send(Update::Chats(Window { upsert: vec![row], total: Some(total), ..Window::default() }));
     }
 
     /// A message comes into chat `t`: its row moves up, and the open window takes it if it
@@ -474,26 +475,11 @@ impl Account {
                 remove.push(self.threads[t].messages[open.lo].id.clone());
                 open.lo += 1;
             }
-            let older = open.lo > 0;
-            self.send(Update::Messages {
-                chat,
-                reset: false,
-                upsert: vec![m],
-                remove,
-                older: Some(older),
-                newer: None,
-            });
+            let update = Window { upsert: vec![m], remove, older: Some(open.lo > 0), ..Window::default() };
+            self.send(Update::Messages { chat, update });
         } else {
-            open.newer += 1;
-            let newer = open.newer;
-            self.send(Update::Messages {
-                chat,
-                reset: false,
-                upsert: vec![],
-                remove: vec![],
-                older: None,
-                newer: Some(newer),
-            });
+            let newer = (len - open.hi) as u64;
+            self.send(Update::Messages { chat, update: Window { newer: Some(newer), ..Window::default() } });
         }
     }
 
@@ -514,14 +500,7 @@ impl Account {
         }
         if let Some(open) = self.open.as_ref().filter(|o| o.chat == chat && (o.lo..o.hi).contains(&i)) {
             let chat = open.chat.clone();
-            self.send(Update::Messages {
-                chat,
-                reset: false,
-                upsert: vec![m],
-                remove: vec![],
-                older: None,
-                newer: None,
-            });
+            self.send(Update::Messages { chat, update: Window { upsert: vec![m], ..Window::default() } });
         }
     }
 
@@ -555,35 +534,48 @@ impl Account {
 }
 
 impl Jawd for Demo {
-    fn watch_chats(&mut self, _around: Option<&str>, _before: usize, _after: usize) {
+    /// The made-up account's list fits one window, so it sends every chat wherever it's asked.
+    fn watch_chats(&mut self, place: Place) {
         let mut a = self.lock();
         let rows = a.threads.iter().map(|t| t.chat.clone()).filter(|c| !c.archived).collect();
         let total = a.total();
-        a.send(Update::Chats { reset: true, upsert: rows, remove: vec![], total });
+        let moved = Some(Moved { place, newer: 0 });
+        a.send(Update::Chats(Window { upsert: rows, total: Some(total), moved, ..Window::default() }));
     }
 
-    fn watch_messages(&mut self, chat: &str, around: Around, before: usize, after: usize) {
+    /// A chat's window, as jawd gives one: the rows around where it's asked to be, those of the
+    /// same chat's window before that have left it removed.
+    fn watch_messages(&mut self, chat: &str, place: Place) {
         let mut a = self.lock();
         let Some(&t) = a.index.get(chat) else { return };
         let messages = &a.threads[t].messages;
         let len = messages.len();
-        let (lo, hi, following) = match &around {
-            Around::Newest => (len.saturating_sub(before), len, true),
-            Around::Message(id) => match messages.iter().position(|m| &m.id == id) {
+        let (before, after) = (place.before as usize, place.after as usize);
+        let newest = (len.saturating_sub(before), len, true);
+        let (lo, hi, following) = match &place.around {
+            Around::Row(id) => match messages.iter().position(|m| &m.id == id) {
                 Some(i) => (i.saturating_sub(before), (i + after + 1).min(len), false),
-                None => (len.saturating_sub(before), len, true),
+                None => newest,
             },
+            _ => newest,
+        };
+        let remove = match a.open.as_ref().filter(|o| o.chat == chat) {
+            Some(o) => (o.lo..o.hi).filter(|i| !(lo..hi).contains(i)).map(|i| messages[i].id.clone()).collect(),
+            None => vec![],
         };
         let rows = messages[lo..hi].to_vec();
-        a.open = Some(Open { chat: chat.into(), following, before, lo, hi, newer: 0 });
-        a.send(Update::Messages {
-            chat: chat.into(),
-            reset: true,
+        let newer = (len - hi) as u64;
+        a.open = Some(Open { chat: chat.into(), following, before, lo, hi });
+        let update = Window {
             upsert: rows,
-            remove: vec![],
+            remove,
+            total: Some(len as u64),
             older: Some(lo > 0),
-            newer: Some(0),
-        });
+            newer: Some(newer),
+            moved: Some(Moved { place, newer }),
+            seq: 0,
+        };
+        a.send(Update::Messages { chat: chat.into(), update });
     }
 
     fn send_text(&mut self, chat: &str, text: &str) {
@@ -651,7 +643,7 @@ impl Jawd for Demo {
         a.index.insert(chat.id.clone(), at);
         a.threads.push(thread);
         let total = a.total();
-        a.send(Update::Chats { reset: false, upsert: vec![chat.clone()], remove: vec![], total });
+        a.send(Update::Chats(Window { upsert: vec![chat.clone()], total: Some(total), ..Window::default() }));
         a.send(Update::ChatStarted { chat });
     }
 
@@ -915,7 +907,7 @@ fn made_up(now: i64) -> Vec<Thread> {
     w.theirs(wed + 5.0 * h - 1.0, &mae, "@Pedro trazes o _vinho_? e ~não te esqueças~ do pão");
     w.theirs(wed + 5.0 * h - 1.0, &mae, "a lista: `pão, vinho, queijo da serra`");
     w.theirs(wed + 5.0 * h - 8.0, &rui, "eu levo o vinho, o Pedro leva o pão").reply = Some(Quote {
-        from: "Mãe".into(),
+        from: Some("Mãe".into()),
         colour: 0,
         summary: "@Pedro trazes o vinho? e não te esqueças do pão".into(),
     });

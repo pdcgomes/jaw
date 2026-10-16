@@ -27,6 +27,8 @@ pub enum Event {
     /// From the terminal, and when it came.
     Input(Input, Instant),
     Update(Update),
+    /// jawd has sent something, which the view drains.
+    Jawd,
     /// A signal to stop, as q would.
     Stop,
 }
@@ -85,6 +87,7 @@ where
                 }
             }
             Event::Update(u) => waiting.push_back(u),
+            Event::Jawd => waiting.extend(view.drain_jawd()),
             Event::Stop => view.quit = true,
         };
         if let Some(e) = first {
@@ -225,12 +228,54 @@ pub fn run(start: impl FnOnce(Sender<Event>) -> View) -> Result<()> {
 pub fn settle(view: &mut View, rx: &Receiver<Event>) {
     for _ in 0..4 {
         while let Ok(e) = rx.try_recv() {
-            if let Event::Update(u) = e {
-                view.apply(u);
+            match e {
+                Event::Update(u) => view.apply(u),
+                Event::Jawd => {
+                    for u in view.drain_jawd() {
+                        view.apply(u);
+                    }
+                }
+                _ => {}
             }
         }
         frame(view, 140, 40);
     }
+}
+
+/// Applies what a jawd sends until it has been quiet a moment with something on screen, or for at
+/// most `most`, drawing between so the windows the screen needs are asked for.
+pub fn settle_live(view: &mut View, rx: &Receiver<Event>, most: Duration) {
+    let end = Instant::now() + most;
+    let quiet = Duration::from_millis(200);
+    loop {
+        let now = Instant::now();
+        if now >= end {
+            break;
+        }
+        match rx.recv_timeout(quiet.min(end - now)) {
+            Ok(Event::Update(u)) => view.apply(u),
+            Ok(Event::Jawd) => {
+                for u in view.drain_jawd() {
+                    view.apply(u);
+                }
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) if view.showing_messages() || view.answered() => break,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        frame(view, 140, 40);
+    }
+    frame(view, 140, 40);
+}
+
+/// Presses keys against a jawd, waiting for what each brings.
+pub fn press_live(view: &mut View, rx: &Receiver<Event>, spec: &str) -> Result<()> {
+    for k in keys(spec)? {
+        view.on_input(Input::Key(k));
+        settle_live(view, rx, Duration::from_secs(2));
+    }
+    Ok(())
 }
 
 fn frame(view: &mut View, width: u16, height: u16) -> Buffer {

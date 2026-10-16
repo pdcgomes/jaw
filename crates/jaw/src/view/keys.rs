@@ -298,7 +298,7 @@ impl View {
     }
 
     fn move_selection(&mut self, by: isize) {
-        let order: Vec<String> = self.chats.order().iter().map(|s| s.to_string()).collect();
+        let order: Vec<String> = self.chats.rows().map(|c| c.id.clone()).collect();
         if order.is_empty() {
             return;
         }

@@ -4,6 +4,8 @@
 //! never waits, since answers arrive as updates on the main thread's channel. `crate::demo` is a
 //! made-up account behind both.
 
+pub use jaw_client::Place;
+use jaw_client::{Row, Update as Window};
 use jaw_proto::{Connection, LinkStep};
 use serde::Deserialize;
 
@@ -52,6 +54,22 @@ pub enum ChatKind {
     Broadcast,
     #[serde(rename = "self")]
     Myself,
+    #[serde(other)]
+    Other,
+}
+
+impl Quote {
+    /// Who the quote is from, as the screen names them: a JID as its number until jawd names it.
+    pub fn who(&self) -> String {
+        match self.from.as_deref() {
+            Some(jid) if jid.contains('@') => match jid.split_once('@') {
+                Some((user, "s.whatsapp.net")) => format!("+{user}"),
+                _ => "someone".into(),
+            },
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => "someone".into(),
+        }
+    }
 }
 
 impl Chat {
@@ -73,6 +91,7 @@ pub struct Last {
     pub summary: String,
     /// Its ticks, if it's yours.
     #[serde(default)]
+    #[serde(deserialize_with = "tick")]
     pub status: Option<Tick>,
     pub at: i64,
 }
@@ -102,7 +121,7 @@ pub struct Message {
     pub reply: Option<Quote>,
     #[serde(default)]
     pub reactions: Vec<Reaction>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "tick")]
     pub status: Option<Tick>,
     #[serde(default)]
     pub edited: bool,
@@ -123,6 +142,21 @@ pub struct Sender {
     pub name: String,
     #[serde(default)]
     pub colour: u8,
+}
+
+/// A status jawd may have more of than jaw knows: those it doesn't are no ticks, rather than a
+/// row it can't read.
+fn tick<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Tick>, D::Error> {
+    Ok(Option::<serde_json::Value>::deserialize(d)?.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// An optional ID that's a string, or a number.
+fn some_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match Option::<serde_json::Value>::deserialize(d)? {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(other) => Some(other.to_string()),
+    })
 }
 
 /// An ID that's a string, or a number where a fixture writes one.
@@ -163,7 +197,7 @@ pub struct Span {
     pub t: SpanKind,
     pub s: String,
     /// For a mention: the person mentioned.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "some_id")]
     pub person: Option<String>,
 }
 
@@ -186,8 +220,9 @@ pub enum SpanKind {
 /// The message a reply quotes, as one line.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Quote {
-    /// The name of who wrote it.
-    pub from: String,
+    /// Who wrote it: a name, or jawd's JID for them until it names them.
+    #[serde(default, deserialize_with = "some_id")]
+    pub from: Option<String>,
     #[serde(default)]
     pub colour: u8,
     pub summary: String,
@@ -323,28 +358,26 @@ pub enum Update {
     /// jawd answered hello: whether the account is linked, and the connection.
     Hello {
         linked: bool,
-        me: Option<String>,
+        /// Every identity of yours: your person ID, and the JID your number makes.
+        me: Vec<String>,
         connection: Connection,
     },
     Connection(Connection),
     Link(LinkStep),
-    /// The chat list's window. `reset` replaces what it held, as a watch's first rows do.
-    Chats {
-        reset: bool,
-        upsert: Vec<Chat>,
-        remove: Vec<String>,
-        total: usize,
-    },
+    /// The chat list's window: a watch's or a move's rows, or a push, as jaw-client's models take
+    /// them.
+    Chats(Window<Chat>),
     /// The open chat's window, for `chat`; updates for any other chat are from a window since
-    /// closed. `older` and `newer` come when they change: whether there's more before the window,
-    /// and how many have arrived past its end while it doesn't follow the newest.
+    /// closed.
     Messages {
         chat: String,
-        reset: bool,
-        upsert: Vec<Message>,
-        remove: Vec<String>,
-        older: Option<bool>,
-        newer: Option<u32>,
+        update: Window<Message>,
+    },
+    /// A message jawd didn't take, given back to the box, and why.
+    Unsent {
+        chat: String,
+        text: String,
+        why: String,
     },
     /// The answer to the `find` the interface numbered `id`.
     Found {
@@ -368,49 +401,62 @@ pub enum Update {
     Starting {
         failed: Option<String>,
     },
-    /// jawd doesn't answer; jaw tries again at `retry_at`.
+    /// jawd doesn't answer; jaw tries again in `retry_in` milliseconds.
     Unreachable {
         why: String,
-        retry_at: i64,
+        retry_in: i64,
     },
 }
 
 impl Update {
     /// Takes `next` into this update when the two apply as one, as a burst of upserts to the same
-    /// window does; gives it back when they don't.
+    /// window does; gives it back when they don't. jaw-client merges a frame's updates itself; this
+    /// does the same for the made-up account, which sends each as it happens.
     pub fn absorb(&mut self, next: Update) -> Option<Update> {
-        let clash = |upsert: &[String], remove: &[String]| remove.iter().any(|id| upsert.contains(id));
-        match (self, next) {
-            (
-                Update::Chats { upsert, remove, total, .. },
-                Update::Chats { reset: false, upsert: more, remove: gone, total: now },
-            ) if !clash(&upsert.iter().map(|c| c.id.clone()).collect::<Vec<_>>(), &gone) => {
-                upsert.extend(more);
-                remove.extend(gone);
-                *total = now;
-                None
+        fn merge<R: Row>(into: &mut Window<R>, next: Window<R>) -> Option<Window<R>> {
+            if next.moved.is_some() || next.remove.iter().any(|id| into.upsert.iter().any(|r| r.id() == id)) {
+                return Some(next);
             }
-            (
-                Update::Messages { chat, upsert, remove, older, newer, .. },
-                Update::Messages { chat: other, reset: false, upsert: more, remove: gone, older: o, newer: n },
-            ) if *chat == other && !clash(&upsert.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), &gone) => {
-                upsert.extend(more);
-                remove.extend(gone);
-                *older = o.or(*older);
-                *newer = n.or(*newer);
-                None
+            into.seq = into.seq.max(next.seq);
+            into.remove.extend(next.remove);
+            into.upsert.extend(next.upsert);
+            into.total = next.total.or(into.total);
+            into.older = next.older.or(into.older);
+            into.newer = next.newer.or(into.newer);
+            None
+        }
+        match (self, next) {
+            (Update::Chats(into), Update::Chats(next)) => merge(into, next).map(Update::Chats),
+            (Update::Messages { chat, update }, Update::Messages { chat: other, update: next }) if *chat == other => {
+                merge(update, next).map(|update| Update::Messages { chat: other, update })
             }
             (_, next) => Some(next),
         }
     }
 }
 
-/// Where a messages window is anchored.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Around {
-    /// The newest, which the window then follows.
-    Newest,
-    Message(String),
+impl Row for Chat {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn v(&self) -> u64 {
+        self.v
+    }
+    fn sort(&self) -> &str {
+        &self.sort
+    }
+}
+
+impl Row for Message {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn v(&self) -> u64 {
+        self.v
+    }
+    fn sort(&self) -> &str {
+        &self.sort
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,10 +467,10 @@ pub enum Typing {
 
 /// What the interface asks of jawd. Nothing here waits: what comes of it arrives as `Update`s.
 pub trait Jawd {
-    /// The chat list on All, `before` and `after` rows around a chat or from the top.
-    fn watch_chats(&mut self, around: Option<&str>, before: usize, after: usize);
+    /// The chat list on All, or the same window moved.
+    fn watch_chats(&mut self, place: Place);
     /// The open chat's messages: a new window, or the same one moved.
-    fn watch_messages(&mut self, chat: &str, around: Around, before: usize, after: usize);
+    fn watch_messages(&mut self, chat: &str, place: Place);
     /// You opened a chat yourself, which the palette ranks by; passing through it doesn't count.
     fn opened(&mut self, chat: &str);
     fn send_text(&mut self, chat: &str, text: &str);
@@ -446,6 +492,11 @@ pub trait Jawd {
     fn archive(&mut self, chat: &str, archived: bool);
     fn pin(&mut self, chat: &str, pinned: bool);
     fn mark_unread(&mut self, chat: &str, unread: bool);
+    /// What came from jawd since the last frame, for a jawd that's woken the loop for it; the
+    /// made-up account sends its updates on the channel itself.
+    fn drain(&mut self) -> Vec<Update> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -486,35 +537,22 @@ mod tests {
         assert_eq!(message.spans[1], Span { t: SpanKind::Bold, s: "photos".into(), person: None });
         assert_eq!(message.reactions[0], Reaction { emoji: "❤".into(), n: 2, mine: true });
 
-        let mut burst = Update::Messages {
+        let window = |upsert: Vec<Message>, remove: Vec<String>, older: Option<bool>| Update::Messages {
             chat: "ana".into(),
-            reset: false,
-            upsert: vec![message.clone()],
-            remove: vec![],
-            older: None,
-            newer: None,
+            update: Window { upsert, remove, older, ..Window::default() },
         };
-        let more = Update::Messages {
-            chat: "ana".into(),
-            reset: false,
-            upsert: vec![],
-            remove: vec!["old".into()],
-            older: Some(true),
-            newer: None,
-        };
-        assert_eq!(burst.absorb(more), None, "a burst to one window applies as one");
-        assert!(matches!(&burst, Update::Messages { remove, older: Some(true), .. } if remove == &["old"]));
-        let undo = Update::Messages {
-            chat: "ana".into(),
-            reset: false,
-            upsert: vec![],
-            remove: vec![message.id.clone()],
-            older: None,
-            newer: None,
-        };
+        let mut burst = window(vec![message.clone()], vec![], None);
+        assert_eq!(
+            burst.absorb(window(vec![], vec!["old".into()], Some(true))),
+            None,
+            "a burst to one window applies as one"
+        );
+        assert!(
+            matches!(&burst, Update::Messages { update, .. } if update.remove == ["old"] && update.older == Some(true))
+        );
+        let undo = window(vec![], vec![message.id.clone()], None);
         assert!(burst.absorb(undo).is_some(), "removing what the burst brought keeps them apart");
-        let other = Update::Chats { reset: false, upsert: vec![], remove: vec![], total: 1 };
-        assert!(burst.absorb(other).is_some(), "and so do two windows");
+        assert!(burst.absorb(Update::Chats(Window::default())).is_some(), "and so do two windows");
 
         let poll: Message =
             serde_json::from_str(r#"{"id":"P","v":1,"sort":"1~1","at":1,"kind":"a_kind_from_later","spans":[]}"#)

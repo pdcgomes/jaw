@@ -24,6 +24,42 @@ pub struct Flood {
     pub warm: Duration,
     /// Whether the keys are pressed in the palette, which searches at each one.
     pub palette: bool,
+    /// Whether the flood comes from a real jawd, `jawd bench feed`'s made-up account on a folder
+    /// of its own, rather than from jaw's.
+    pub jawd: bool,
+}
+
+/// `jawd bench feed` writing its flood, for as long as the bench needs it.
+struct Feeding {
+    child: std::process::Child,
+}
+
+impl Feeding {
+    /// Starts it and waits for its socket, which comes once its made-up history is written.
+    fn start(rate: u32, seconds: f64) -> Result<(Feeding, std::path::PathBuf)> {
+        let child = std::process::Command::new(crate::wire::jawd_binary())
+            .args(["bench", "feed", "--rate", &rate.to_string(), "--seconds", &(seconds.ceil() as u32 + 2).to_string()])
+            .args(["--chats", "40"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("can't start jawd bench feed: {e}; cargo build -p jawd builds it"))?;
+        let socket = std::env::temp_dir().join(format!("jaw-bench-feed-{}", child.id())).join("jaw.sock");
+        let feeding = Feeding { child };
+        let end = Instant::now() + Duration::from_secs(120);
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            anyhow::ensure!(Instant::now() < end, "jawd bench feed didn't open {}", socket.display());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok((feeding, socket))
+    }
+}
+
+impl Drop for Feeding {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 pub struct Report {
@@ -121,15 +157,21 @@ pub fn peak_bytes() -> u64 {
 }
 
 pub fn flood(f: &Flood) -> Result<Report> {
-    let start = Instant::now();
     let (tx, rx) = std::sync::mpsc::channel();
-    let demo = Demo::start(tx.clone(), Clock::Wall, State::Online, false);
-    demo.answer_on_a_thread();
-    let mut view = View::new(Box::new(demo.clone()));
+    let length = f.warm.as_secs_f64() + f.seconds;
+    let (mut view, flooding, feeding) = if f.jawd {
+        let (feeding, socket) = Feeding::start(f.rate, length)?;
+        (View::new(Box::new(crate::wire::Wire::connect(socket, tx.clone()))), None, Some(feeding))
+    } else {
+        let demo = Demo::start(tx.clone(), Clock::Wall, State::Online, false);
+        demo.answer_on_a_thread();
+        let flooding = demo.flood(f.rate, length);
+        (View::new(Box::new(demo)), Some(flooding), None)
+    };
+    let start = Instant::now();
     view.resize(f.width, f.height);
     let mut terminal = Terminal::new(TestBackend::new(f.width, f.height))?;
     let mut probe = Probe::default();
-    let flooding = demo.flood(f.rate, f.warm.as_secs_f64() + f.seconds);
     let (every, seconds, warm, palette) = (f.every, f.seconds, f.warm, f.palette);
     let presser = std::thread::spawn(move || {
         let keys = if palette { palette_script() } else { script() };
@@ -158,7 +200,11 @@ pub fn flood(f: &Flood) -> Result<Report> {
         let _ = tx.send(Event::Stop);
     });
     run::drive(&mut view, &rx, &mut terminal, &mut probe, &mut |_| {})?;
-    let messages = flooding.join().unwrap_or(0);
+    let messages = match flooding {
+        Some(flooding) => flooding.join().unwrap_or(0),
+        None => (f.rate as f64 * length) as u64,
+    };
+    drop(feeding);
     let _ = presser.join();
     let mut keys = probe.keys;
     keys.sort();
@@ -193,6 +239,7 @@ mod tests {
             every: Duration::from_millis(12),
             warm: Duration::from_secs(1),
             palette: false,
+            jawd: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
@@ -212,6 +259,7 @@ mod tests {
             every: Duration::from_millis(12),
             warm: Duration::from_secs(1),
             palette: true,
+            jawd: false,
         };
         let report = super::flood(&flood).unwrap();
         eprintln!("{}", report.describe());
@@ -230,6 +278,7 @@ mod tests {
             every: Duration::from_secs(60),
             warm: Duration::ZERO,
             palette: false,
+            jawd: false,
         })
         .unwrap();
         assert!(report.keys.is_empty());

@@ -36,7 +36,7 @@ pub struct Ctx<'a> {
     pub theme: &'a Theme,
     pub tz: FixedOffset,
     /// The account's own person, so a mention of you stands out.
-    pub me: Option<&'a str>,
+    pub me: &'a [String],
 }
 
 /// Where your own messages start: a third of the way across.
@@ -181,7 +181,7 @@ fn body(m: &Message, ctx: &Ctx) -> Vec<(String, Style)> {
             SpanKind::Mono => Style::new().fg(t.text).bg(t.surface),
             SpanKind::Quote => Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
             SpanKind::Link => Style::new().fg(t.link).add_modifier(Modifier::UNDERLINED),
-            SpanKind::Mention if span.person.is_some() && span.person.as_deref() == ctx.me => {
+            SpanKind::Mention if span.person.as_ref().is_some_and(|p| ctx.me.contains(p)) => {
                 Style::new().fg(t.mention).add_modifier(Modifier::BOLD)
             }
             SpanKind::Mention => plain.add_modifier(Modifier::BOLD),
@@ -212,8 +212,9 @@ pub fn message(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
     if let Some(q) = &m.reply {
         let bar = Style::new().fg(t.sender(q.colour));
         segments.push(("┃ ".to_string(), bar));
-        segments.push((format!("{} ", q.from), bar.add_modifier(Modifier::BOLD)));
-        let room = first_w.saturating_sub(q.from.width() + 3);
+        let who = q.who();
+        segments.push((format!("{who} "), bar.add_modifier(Modifier::BOLD)));
+        let room = first_w.saturating_sub(who.width() + 3);
         segments.push((fmt::fit(&fmt::one_line(&q.summary), room), Style::new().fg(t.comment)));
         segments.push(("\n".into(), Style::new()));
     }
@@ -338,7 +339,8 @@ mod tests {
 
     fn lay(m: &Message, width: usize) -> Vec<String> {
         let theme = Theme::with(true);
-        let ctx = Ctx { theme: &theme, tz: UTC, me: Some("person:0") };
+        let me = ["person:0".to_string()];
+        let ctx = Ctx { theme: &theme, tz: UTC, me: &me };
         shown(&message(m, Shape { width, name: true, time: true, unfolded: false }, &ctx))
     }
 
@@ -381,7 +383,7 @@ mod tests {
     #[test]
     fn a_reply_quotes_its_message_on_a_line_and_reactions_follow() {
         let mut m = theirs("eu levo o vinho");
-        m.reply = Some(Quote { from: "Mãe".into(), colour: 0, summary: "trazes o vinho?".into() });
+        m.reply = Some(Quote { from: Some("Mãe".into()), colour: 0, summary: "trazes o vinho?".into() });
         m.reactions = vec![Reaction { emoji: "❤".into(), n: 2, mine: true }];
         m.edited = true;
         let lines = lay(&m, 60);

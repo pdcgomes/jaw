@@ -44,8 +44,29 @@ fn row_of(screen: &str, text: &str) -> Option<usize> {
     screen.lines().position(|l| l.contains(text))
 }
 
+fn message(id: &str, v: u64, sort: &str) -> Message {
+    Message {
+        id: id.into(),
+        v,
+        chat: "c".into(),
+        sort: sort.into(),
+        at: 0,
+        from: None,
+        mine: false,
+        kind: Kind::Text,
+        spans: vec![],
+        reply: None,
+        reactions: vec![],
+        status: None,
+        edited: false,
+        deleted: false,
+        summary: None,
+        system: None,
+    }
+}
+
 fn theirs(id: &str, sort: &str, at: i64, text: &str) -> Message {
-    let mut m = crate::window::tests::message(id, 1, sort);
+    let mut m = message(id, 1, sort);
     m.at = at;
     m.from = Some(Sender { id: "person:20".into(), name: "Marta".into(), colour: 0 });
     m.spans = vec![Span { t: SpanKind::Text, s: text.into(), person: None }];
@@ -53,7 +74,7 @@ fn theirs(id: &str, sort: &str, at: i64, text: &str) -> Message {
 }
 
 fn arrive(v: &mut View, chat: &str, upsert: Vec<Message>) {
-    v.apply(Update::Messages { chat: chat.into(), reset: false, upsert, remove: vec![], older: None, newer: None });
+    v.apply(Update::Messages { chat: chat.into(), update: jaw_client::Update { upsert, ..Default::default() } });
 }
 
 #[test]
@@ -236,7 +257,7 @@ fn a_chat_opened_with_unread_messages_starts_at_the_first_of_them() {
     let screen = frame(&mut v);
     assert!(screen.contains(" new ↓"), "the rest are counted below:\n{screen}");
     let Scroll::Anchor { id, top, .. } = &v.scroll else { panic!("{:?}", v.scroll) };
-    let first = v.messages.as_ref().unwrap().nth_newest_theirs(14).unwrap();
+    let first = v.messages.as_ref().unwrap().rows().rev().filter(|m| !m.mine).nth(13).unwrap();
     assert_eq!((id, *top), (&first.id, 1), "the first unread, a line from the top");
 }
 
@@ -249,13 +270,13 @@ fn the_selected_chat_holds_its_row_while_the_list_reorders() {
     let mut tiago: Chat = v.chats.get("tiago").unwrap().clone();
     tiago.v += 1;
     tiago.sort = format!("0~{:013}", NOW + 1);
-    v.apply(Update::Chats { reset: false, upsert: vec![tiago.clone()], remove: vec![], total: 13 });
+    v.apply(Update::Chats(jaw_client::Update { upsert: vec![tiago.clone()], total: Some(13), ..Default::default() }));
     assert_eq!(row_of(&frame(&mut v), "Lisbon Climbing"), Some(row), "held while moving through the list");
     v.clock = Some(NOW + HOLD + 1);
     v.tick();
     let after = frame(&mut v);
     assert_eq!(row_of(&after, "Lisbon Climbing"), Some(row), "and kept on its row once it reorders:\n{after}");
-    assert_eq!(v.chats.order()[2], "tiago");
+    assert_eq!(v.chats.rows().nth(2).map(|c| c.id.as_str()), Some("tiago"));
 }
 
 #[test]
@@ -383,7 +404,7 @@ fn other_kinds_show_their_one_line_summary() {
     {
         assert!(screen.contains(said), "{said}:\n{screen}");
     }
-    let unknown = crate::window::tests::message("u", 1, "1");
+    let unknown = message("u", 1, "1");
     assert_eq!(Message { kind: Kind::Unknown, ..unknown }.kind, Kind::Unknown);
 }
 

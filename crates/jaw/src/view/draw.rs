@@ -8,7 +8,7 @@ use crate::art::{self, Look};
 use crate::data::{Chat, Message, Tick};
 use crate::fmt;
 use crate::layout;
-use crate::window::Messages;
+use jaw_client::Messages;
 use jaw_proto::{ConnectionState, LinkStep};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -233,7 +233,7 @@ impl View {
         left.extend(self.header_state(w));
         left.push(Span::raw(" "));
         let mut right = vec![Span::raw(" ")];
-        let unread = self.chats.unread();
+        let unread: u32 = self.chats.rows().map(|c| c.unread).sum();
         if unread > 0 && self.reach == Reach::Up && !self.linking() {
             right.push(Span::styled(format!("{} unread", fmt::num(unread as u64)), Style::new().fg(t.text)));
             right.push(Span::styled(" · ", Style::new().fg(t.comment)));
@@ -273,7 +273,8 @@ impl View {
                 _ => vec![("p", "link with a phone number", true), ("q", "quit", true)],
             };
         }
-        if self.reach != Reach::Up {
+        // Out of reach with the screen kept, its keys still work on what's there.
+        if self.reach != Reach::Up && !(matches!(self.reach, Reach::Unreachable { .. }) && !self.chats.is_empty()) {
             return vec![("ctrl-c", "quit", true)];
         }
         if self.narrow() && self.picking {
@@ -366,7 +367,7 @@ impl View {
             return;
         }
         let order: Vec<String> =
-            self.chats.order().iter().skip(self.list_top).take(self.list_rows).map(|s| s.to_string()).collect();
+            self.chats.rows().skip(self.list_top).take(self.list_rows).map(|c| c.id.clone()).collect();
         let w = inner.width as usize;
         let now = self.now();
         for (k, id) in order.iter().enumerate() {
@@ -438,7 +439,7 @@ impl View {
         let preview_w = w.saturating_sub(2);
         let mut second = vec![Span::raw("  ")];
         if typing {
-            let who = if chat.group() { format!("{} typing…", chat.typing.join(", ")) } else { "typing…".into() };
+            let who = self.who_types(chat);
             second.push(Span::styled(fmt::fit(&who, preview_w), Style::new().fg(t.online)));
         } else if let Some(draft) = chat.draft.as_ref().filter(|d| !d.is_empty() && !open) {
             second.push(Span::styled("draft: ", Style::new().fg(t.comment).add_modifier(Modifier::ITALIC)));
@@ -470,8 +471,7 @@ impl View {
         let Some(chat) = self.open.as_deref().and_then(|id| self.chat_known(id)) else { return Line::default() };
         let mut more = vec![];
         if !chat.typing.is_empty() {
-            let who =
-                if chat.group() { format!("· {} typing… ", chat.typing.join(", ")) } else { "· typing… ".into() };
+            let who = format!("· {} ", self.who_types(chat));
             more.push(Span::styled(who, Style::new().fg(t.online)));
         }
         self.title(&chat.name, more)
@@ -501,7 +501,11 @@ impl View {
     fn draw_composer(&mut self, f: &mut Frame, area: Rect) {
         let t = self.theme;
         let typing = self.focus == Focus::Typing && self.overlay.is_none();
-        let block = self.panel(if typing { t.focus } else { t.gutter }).padding(Padding::horizontal(1));
+        let mut block = self.panel(if typing { t.focus } else { t.gutter }).padding(Padding::horizontal(1));
+        if let Some(why) = &self.unsent {
+            block =
+                block.title_bottom(Line::from(Span::styled(format!(" not sent: {why} "), Style::new().fg(t.comment))));
+        }
         let inner = block.inner(area);
         f.render_widget(block, area);
         self.areas.composer = inner;
@@ -581,7 +585,7 @@ impl View {
         Line::from(vec![Span::raw(" ".repeat(lead)), Span::styled(text, Style::new().fg(t.muted))])
     }
 
-    fn placing(&mut self, w: &Messages, m: &Message, width: usize, top: i32) -> Placing {
+    fn placing(&mut self, w: &Messages<Message>, m: &Message, width: usize, top: i32) -> Placing {
         let prev = w.before(&m.sort);
         let shape = self.shape(m, prev, width);
         let new_day = prev.is_none_or(|p| !fmt::same_day(p.at, m.at, self.tz));
@@ -594,7 +598,7 @@ impl View {
 
     /// Fills the screen from the anchor up and down, keeps the newest at the bottom when it's in
     /// sight, and the oldest at the top when there's nothing before it.
-    fn place(&mut self, w: &Messages, width: usize, h: i32) -> (VecDeque<Placing>, bool) {
+    fn place(&mut self, w: &Messages<Message>, width: usize, h: i32) -> (VecDeque<Placing>, bool) {
         let (anchor, top) = match &self.scroll {
             Scroll::Bottom => (w.newest(), None),
             Scroll::Anchor { id, sort, top } => (w.get(id).or_else(|| w.nearest(sort)), Some(*top)),
@@ -715,7 +719,7 @@ impl View {
             self.seen = Some(sort);
         }
         self.settle(&window, &blocks, at_bottom, h);
-        let new = self.seen.as_deref().map_or(0, |s| window.count_after(s)) as u32 + window.newer;
+        let new = self.seen.as_deref().map_or(0, |s| window.count_after(s)) as u32 + window.arrived() as u32;
         if !at_bottom && new > 0 {
             let label = format!("─ {new} new ↓ ");
             let line = Line::from(vec![
@@ -731,7 +735,7 @@ impl View {
     }
 
     /// After a frame: where the conversation is anchored now, and whether its window should move.
-    fn settle(&mut self, w: &Messages, blocks: &VecDeque<Placing>, at_bottom: bool, h: i32) {
+    fn settle(&mut self, w: &Messages<Message>, blocks: &VecDeque<Placing>, at_bottom: bool, h: i32) {
         let selected = match &self.focus {
             Focus::Message(id) => blocks.iter().find(|b| &b.id == id && b.top >= 0 && b.bottom() <= h),
             Focus::Typing => None,
@@ -745,15 +749,13 @@ impl View {
         };
         let Some(chat) = self.open.clone() else { return };
         let (Some(front), Some(back)) = (blocks.front(), blocks.back()) else { return };
-        let asked = |v: &View, id: &str| v.asked_around.as_deref() == Some(id);
-        if w.older && w.count_before(&front.sort, super::EDGE) < super::EDGE && !asked(self, &front.id) {
-            let id = front.id.clone();
-            self.watch(&chat, crate::data::Around::Message(id));
-        } else if at_bottom && !w.following {
-            self.watch(&chat, crate::data::Around::Newest);
-        } else if !w.following && w.count_after(&back.sort) < super::EDGE && !asked(self, &back.id) {
-            let id = back.id.clone();
-            self.watch(&chat, crate::data::Around::Message(id));
+        // At the bottom the window follows the newest; it moves for older ones once you've scrolled.
+        if !at_bottom && w.older && w.count_before(&front.sort, super::EDGE) < super::EDGE {
+            self.watch(&chat, View::around(&front.id));
+        } else if at_bottom && !w.following() {
+            self.watch(&chat, View::newest());
+        } else if !w.following() && !w.holds_newest() && w.count_after(&back.sort) < super::EDGE {
+            self.watch(&chat, View::around(&back.id));
         }
     }
 
