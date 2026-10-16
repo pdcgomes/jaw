@@ -280,6 +280,7 @@ impl View {
             KeyCode::Enter | KeyCode::Right => {
                 if let Some(id) = self.selected.clone() {
                     self.open_chat(&id);
+                    self.jawd.opened(&id);
                 }
             }
             KeyCode::Char('?') => self.overlay = Some(Overlay::Keys),
@@ -402,6 +403,7 @@ impl View {
                     if let Some(id) = hit {
                         self.selected = Some(id.clone());
                         self.open_chat(&id);
+                        self.jawd.opened(&id);
                     }
                 } else if inside(self.areas.composer, x, y) {
                     self.focus = Focus::Typing;

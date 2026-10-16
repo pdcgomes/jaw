@@ -589,6 +589,8 @@ impl Jawd for Demo {
         }
     }
 
+    fn opened(&mut self, _chat: &str) {}
+
     fn typing(&mut self, _chat: &str, _state: Typing) {}
 
     fn focus(&mut self, _focused: bool) {}

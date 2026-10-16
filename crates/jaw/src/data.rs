@@ -258,6 +258,8 @@ pub trait Jawd {
     fn watch_chats(&mut self, around: Option<&str>, before: usize, after: usize);
     /// The open chat's messages: a new window, or the same one moved.
     fn watch_messages(&mut self, chat: &str, around: Around, before: usize, after: usize);
+    /// You opened a chat yourself, which the palette ranks by; passing through it doesn't count.
+    fn opened(&mut self, chat: &str);
     fn send_text(&mut self, chat: &str, text: &str);
     fn draft(&mut self, chat: &str, text: &str);
     /// Everything in the chat up to and including `up_to` has been seen.
