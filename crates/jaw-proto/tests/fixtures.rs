@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use jaw_proto::find::{ChatOpened, Find, Found};
 use jaw_proto::{Connection, FromJawd, Hello, Outcome, Push, Reply, Request, Status, Welcome};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -58,6 +59,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                 match method {
                     "hello" => params::<Hello>(&name, &request.params),
                     "status" => assert!(request.params.is_null(), "{name} has params"),
+                    "find" => params::<Find>(&name, &request.params),
+                    "chat.opened" => params::<ChatOpened>(&name, &request.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -67,6 +70,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                 match method {
                     "hello" => params::<Welcome>(&name, result),
                     "status" => params::<Status>(&name, result),
+                    "find" => params::<Found>(&name, result),
+                    "chat.opened" => assert_eq!(result, &serde_json::json!({}), "{name} has a result"),
                     _ => panic!("no type for {name}'s result"),
                 }
             }

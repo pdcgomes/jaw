@@ -1,0 +1,1 @@
+{"id":12,"method":"find","params":{"query":"ar","kinds":["chat","person","folder","message"],"limit":10}}

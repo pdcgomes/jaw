@@ -15,6 +15,28 @@ pub enum Change {
     Chat(Chat),
     Person(Person),
     Message(Message),
+    Opened(Opened),
+}
+
+/// You opened a chat yourself, so it ranks higher in the palette; a chat jaw hasn't seen is made.
+#[derive(Clone, Debug, Default)]
+pub struct Opened {
+    /// Its JID.
+    pub chat: String,
+    /// When, in milliseconds since the epoch.
+    pub at: i64,
+}
+
+/// How long until an open counts half as much.
+pub const FRECENCY_HALF_LIFE_MS: i64 = 7 * 24 * 3600 * 1000;
+
+/// A chat's frecency at `now`: `frecency` was its opens as they counted at `opened_at`, and each
+/// counts half as much a half-life later.
+pub fn frecency(frecency: f64, opened_at: Option<i64>, now: i64) -> f64 {
+    match opened_at {
+        Some(at) => frecency * 0.5f64.powf((now - at).max(0) as f64 / FRECENCY_HALF_LIFE_MS as f64),
+        None => frecency,
+    }
 }
 
 /// A chat as WhatsApp describes it. Fields left `None` keep what the chat has.
@@ -182,7 +204,24 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         Change::Chat(chat) => upsert_chat(db, stamps, chat),
         Change::Person(person) => upsert_person(db, stamps, person),
         Change::Message(message) => upsert_message(db, stamps, message),
+        Change::Opened(opened) => open_chat(db, stamps, opened),
     }
+}
+
+/// Counts an open in the chat's frecency. An open older than the chat's last counts as decayed
+/// as it would be by now.
+fn open_chat(db: &Connection, stamps: &mut Stamps, opened: &Opened) -> Result<bool> {
+    let n = ensure_chat(db, stamps, &opened.chat)?;
+    let (was, opened_at): (f64, Option<i64>) = db
+        .prepare_cached("SELECT frecency, opened_at FROM chats WHERE n = ?1")?
+        .query_row([n], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let latest = opened_at.unwrap_or(opened.at).max(opened.at);
+    let now = frecency(was, opened_at, latest) + frecency(1.0, Some(opened.at), latest);
+    let seq = stamps.seq(CHAT, Some(n));
+    db.prepare_cached("UPDATE chats SET frecency = ?2, opened_at = ?3, v = ?4 WHERE n = ?1")?
+        .execute(params![n, now, latest, seq])?;
+    stamps.record(db, CHAT, n, Some(n), seq)?;
+    Ok(true)
 }
 
 /// A JID without its device: messages from someone's phone and their laptop are from them.

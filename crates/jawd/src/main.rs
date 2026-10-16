@@ -2,6 +2,7 @@
 //! repeat, and serves them on a Unix socket. docs/plans/2026-10-16-jaw-design.md is its design.
 
 mod engine;
+mod find;
 mod sock;
 mod state;
 mod store;
@@ -84,6 +85,18 @@ enum Bench {
         #[arg(long, default_value_t = 300)]
         runs: u32,
     },
+    /// The palette's find: a made-up account with named people and chats, then keystrokes timed
+    Find {
+        #[arg(long, default_value_t = 1_000_000)]
+        messages: u32,
+        #[arg(long, default_value_t = 2_000)]
+        chats: u32,
+        #[arg(long, default_value_t = 5_000)]
+        people: u32,
+        /// How many times each keystroke is timed
+        #[arg(long, default_value_t = 50)]
+        runs: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -94,8 +107,20 @@ fn main() -> Result<()> {
         Some(Command::Bench(Bench::Link { count, size, commit })) => bench_link(cli.engine, count, size, commit),
         Some(Command::Bench(Bench::Lanes { background, interactive })) => bench_lanes(background, interactive),
         Some(Command::Bench(Bench::Store { messages, chats, runs })) => bench_store(messages, chats, runs),
+        Some(Command::Bench(Bench::Find { messages, chats, people, runs })) => {
+            bench_find(find::bench::Plan { messages, chats, people, runs })
+        }
         None => run(&home, cli.engine),
     }
+}
+
+/// Builds a jaw.db in a folder of its own, removed afterwards, and times the palette's find on it.
+fn bench_find(plan: find::bench::Plan) -> Result<()> {
+    let scratch = std::env::temp_dir().join(format!("jaw-bench-find-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let outcome = runtime()?.block_on(find::bench::run(&scratch, plan));
+    let _ = std::fs::remove_dir_all(&scratch);
+    outcome
 }
 
 /// Builds and times a jaw.db in a folder of its own, removed afterwards.
@@ -138,7 +163,9 @@ fn run(home: &Path, kind: EngineKind) -> Result<()> {
         let engine = supervisor.as_ref().ok().cloned();
         tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, spool));
         let pools: Vec<Arc<dyn work::Report>> = vec![Arc::new(store.reads().clone())];
+        let finder = find::Finder::start(store.clone()).await?;
         let state = Arc::new(state::State::new(home, supervisor, pools, live, Some(store), pushes)?);
+        let _ = state.finder.set(finder);
         let outcome = tokio::select! {
             served = sock::serve(state, listener) => served,
             _ = shutdown() => Ok(()),

@@ -14,6 +14,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 libc = "0.2"
+nucleo-matcher = "0.3"
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"

@@ -13,8 +13,9 @@ clap.workspace = true
 crossbeam-channel.workspace = true
 jaw-client.workspace = true
 jaw-proto.workspace = true
+nucleo-matcher.workspace = true
 prost.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["hooks"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

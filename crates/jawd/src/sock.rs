@@ -7,13 +7,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use jaw_proto::find::{ChatOpened, Find};
 use jaw_proto::{Error, Hello, LinkStart, Outcome, PROTOCOL, Push, Reply, Request, code};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::engine::{EngineError, pb};
+use crate::find::{Cancel, Cancelled};
 use crate::state::State;
 
 pub fn listen(path: &Path) -> Result<UnixListener> {
@@ -53,11 +55,18 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
     let mut greeted = false;
     // Pushes start once the connection has said hello.
     let mut pushes: Option<broadcast::Receiver<Push>> = None;
+    // Finds answer when they're done, so the next line, perhaps a newer find, is read meanwhile.
+    let (found, mut finished) = mpsc::unbounded_channel();
+    let mut finding = Finding::default();
     loop {
         tokio::select! {
             line = lines.next_line() => {
                 let Some(line) = line? else { return Ok(()) };
                 if line.trim().is_empty() {
+                    continue;
+                }
+                if greeted && let Ok(request) = serde_json::from_str::<Request>(&line) && request.method == "find" {
+                    finding.start(state, request, found.clone());
                     continue;
                 }
                 let reply = answer(state, &line, &mut greeted).await;
@@ -66,12 +75,57 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
                     pushes = Some(state.pushes.subscribe());
                 }
             }
+            Some(reply) = finished.recv() => send(&mut write, &reply).await?,
             push = next(&mut pushes) => match push {
                 Ok(push) => send(&mut write, &push).await?,
                 // A connection too slow for its pushes misses the oldest; the next says how things are.
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => pushes = None,
             },
+        }
+    }
+}
+
+/// A connection's find in progress: the next find cancels it, and so does the connection ending.
+#[derive(Default)]
+struct Finding(Option<Arc<Cancel>>);
+
+impl Finding {
+    /// Cancels the last find, whose reply says so, and starts this one, which replies on `found`.
+    fn start(&mut self, state: &State, request: Request, found: mpsc::UnboundedSender<Reply>) {
+        if let Some(last) = self.0.take() {
+            last.cancel();
+        }
+        let id = request.id;
+        let params = if request.params.is_null() { serde_json::json!({}) } else { request.params };
+        let find = match serde_json::from_value::<Find>(params) {
+            Ok(find) => find,
+            Err(e) => {
+                let _ = found.send(failed(id, Error::new(code::INVALID_PARAMS, format!("find's params: {e}"))));
+                return;
+            }
+        };
+        let Some(finder) = state.finder.get().cloned() else {
+            let _ = found.send(failed(id, Error::new(code::INTERNAL, "jawd has no store open to find things in")));
+            return;
+        };
+        let cancel = Arc::new(Cancel::default());
+        self.0 = Some(cancel.clone());
+        tokio::spawn(async move {
+            let reply = match finder.find(find, cancel).await {
+                Ok(result) => succeeded(id, &result),
+                Err(e) if e.is::<Cancelled>() => failed(id, Error::new(code::CANCELLED, e.to_string())),
+                Err(e) => failed(id, Error::new(code::INTERNAL, format!("jawd couldn't search: {e:#}"))),
+            };
+            let _ = found.send(reply);
+        });
+    }
+}
+
+impl Drop for Finding {
+    fn drop(&mut self) {
+        if let Some(last) = self.0.take() {
+            last.cancel();
         }
     }
 }
@@ -144,6 +198,17 @@ async fn answer(state: &State, line: &str, greeted: &mut bool) -> Reply {
                 Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("link.start's params: {e}"))),
             }
         }
+        "chat.opened" => match (serde_json::from_value::<ChatOpened>(request.params), state.finder.get()) {
+            (Err(e), _) => failed(id, Error::new(code::INVALID_PARAMS, format!("chat.opened's params: {e}"))),
+            (Ok(_), None) => failed(id, Error::new(code::INTERNAL, "jawd has no store open to keep that in")),
+            (Ok(opened), Some(finder)) => match finder.opened(opened.chat).await {
+                Ok(()) => succeeded(id, &serde_json::json!({})),
+                Err(e) => failed(
+                    id,
+                    Error::new(code::INTERNAL, format!("jawd couldn't keep that the chat was opened: {e:#}")),
+                ),
+            },
+        },
         "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
         "link.logout" => engine(state, id, pb::command::Kind::Logout(pb::Logout {})).await,
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
@@ -174,10 +239,15 @@ fn failed(id: u64, error: Error) -> Reply {
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Write};
+    use std::time::Duration;
 
     use jaw_proto::{AccountState, ConnectionState, Status};
+    use serde_json::json;
 
     use super::*;
+    use crate::find::Finder;
+    use crate::store::{Change, Lane, Message, Store};
+    use crate::work::Priority;
 
     /// jawd serving on a socket in a folder of its own, for as long as the test runs.
     async fn serving() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -255,6 +325,86 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_newer_find_cancels_the_last_and_each_is_answered() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let state = State::new(
+            home.path(),
+            Err(("go", "no engine in this test".into())),
+            Vec::new(),
+            Arc::default(),
+            Some(store.clone()),
+            broadcast::channel(16).0,
+        )
+        .unwrap();
+        let _ = state.finder.set(Finder::start(store.clone()).await.unwrap());
+        tokio::spawn(serve(Arc::new(state), listener));
+        let chat = "120363000000000001@g.us";
+        let message = Message {
+            chat: chat.into(),
+            id: "m1".into(),
+            at: 1_000,
+            kind: "text",
+            text: Some("jantar amanhã".into()),
+            summary: "jantar amanhã".into(),
+            ..Message::default()
+        };
+        store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+        // Every reader waits at a gate, so the first find is still waiting when the second comes.
+        let (gate, waiting) = crossbeam_channel::bounded::<()>(0);
+        for _ in 0..4 {
+            let waiting = waiting.clone();
+            let reads = store.reads().clone();
+            tokio::spawn(async move {
+                reads
+                    .query(Priority::Interactive, move |_| {
+                        let _ = waiting.recv();
+                        Ok(())
+                    })
+                    .await
+            });
+        }
+        let replies = tokio::task::spawn_blocking(move || {
+            let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut reply = || {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                serde_json::from_str::<Value>(&line).unwrap()
+            };
+            stream.write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":1,\"client\":\"test\",\"version\":\"0\"}}\n").unwrap();
+            reply();
+            stream.write_all(b"{\"id\":2,\"method\":\"find\",\"params\":{\"query\":\"jant\"}}\n").unwrap();
+            stream.write_all(b"{\"id\":3,\"method\":\"find\",\"params\":{\"query\":\"jantar\"}}\n").unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            drop(gate);
+            let mut replies = vec![reply(), reply()];
+            for line in [
+                r#"{"id":4,"method":"find","params":{"query":7}}"#,
+                &format!(r#"{{"id":5,"method":"chat.opened","params":{{"chat":"{chat}"}}}}"#),
+            ] {
+                stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+                replies.push(reply());
+            }
+            replies.sort_by_key(|reply| reply["id"].as_u64());
+            replies
+        })
+        .await
+        .unwrap();
+        assert_eq!(replies[0]["error"]["code"], code::CANCELLED, "{}", replies[0]);
+        assert_eq!(replies[0]["error"]["message"], "a newer find replaced this one");
+        let results = replies[1]["result"]["results"].as_array().unwrap();
+        assert_eq!(
+            (results.len(), &results[0]["kind"], &results[0]["row"]["id"]),
+            (1, &json!("message"), &json!("m1"))
+        );
+        assert_eq!(replies[2]["error"]["code"], code::INVALID_PARAMS);
+        assert_eq!(replies[3]["result"], json!({}));
     }
 
     #[tokio::test(flavor = "multi_thread")]

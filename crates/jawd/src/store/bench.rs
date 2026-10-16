@@ -25,12 +25,12 @@ pub struct Plan {
 }
 
 /// The chats with the most messages, each a tenth of them.
-const BIG_CHATS: usize = 3;
+pub(crate) const BIG_CHATS: usize = 3;
 const PAGE: usize = 100;
-const DAY_MS: i64 = 24 * 3600 * 1000;
-const SPAN_MS: i64 = 3 * 365 * DAY_MS;
+pub(crate) const DAY_MS: i64 = 24 * 3600 * 1000;
+pub(crate) const SPAN_MS: i64 = 3 * 365 * DAY_MS;
 /// Messages in each batch handed to the writer.
-const BATCH: usize = 2_000;
+pub(crate) const BATCH: usize = 2_000;
 
 const WORDS: &[&str] = &[
     "não",
@@ -113,17 +113,17 @@ const WORDS: &[&str] = &[
     "série",
 ];
 
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
         self.0
     }
 
-    fn below(&mut self, n: u64) -> u64 {
+    pub(crate) fn below(&mut self, n: u64) -> u64 {
         self.next() % n.max(1)
     }
 }
@@ -152,7 +152,7 @@ fn text(rng: &mut Rng) -> String {
 }
 
 /// How many messages each chat has: a tenth of them in each big chat, the rest in a long tail.
-fn sizes(messages: usize, chats: usize) -> Vec<usize> {
+pub(crate) fn sizes(messages: usize, chats: usize) -> Vec<usize> {
     let big = (messages / 10).max(1);
     let mut sizes = vec![big; BIG_CHATS.min(chats)];
     let rest = messages.saturating_sub(big * sizes.len());
@@ -171,20 +171,20 @@ fn sizes(messages: usize, chats: usize) -> Vec<usize> {
     sizes
 }
 
-fn phone(n: usize) -> String {
+pub(crate) fn phone(n: usize) -> String {
     format!("3519{n:08}@s.whatsapp.net")
 }
 
-fn lid(n: usize) -> String {
+pub(crate) fn lid(n: usize) -> String {
     format!("{}@lid", 100_000_000_000u64 + n as u64)
 }
 
-fn chat_id(n: usize) -> String {
+pub(crate) fn chat_id(n: usize) -> String {
     if n % 5 == 2 { format!("120363{n:012}@g.us") } else { phone(n) }
 }
 
 /// One made-up message, with a raw protobuf shaped like WhatsApp's.
-fn message(rng: &mut Rng, chat: &str, group: bool, at: i64, count: u64) -> Message {
+pub(crate) fn message(rng: &mut Rng, chat: &str, group: bool, at: i64, count: u64) -> Message {
     let text = text(rng);
     let mine = rng.below(if group { 10 } else { 2 }) == 0;
     let sender = (!mine).then(|| if group { lid(rng.below(1_000) as usize) } else { chat.to_string() });
@@ -223,10 +223,10 @@ fn message(rng: &mut Rng, chat: &str, group: bool, at: i64, count: u64) -> Messa
     }
 }
 
-struct Timings(Vec<Duration>);
+pub(crate) struct Timings(pub(crate) Vec<Duration>);
 
 impl Timings {
-    fn line(&mut self, what: &str) -> String {
+    pub(crate) fn line(&mut self, what: &str) -> String {
         self.0.sort_unstable();
         let at = |q: usize| self.0[(self.0.len() * q / 100).min(self.0.len() - 1)];
         format!(
@@ -238,7 +238,7 @@ impl Timings {
     }
 }
 
-fn ms(d: Duration) -> f64 {
+pub(crate) fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 

@@ -2,7 +2,7 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -11,6 +11,7 @@ use tokio::sync::broadcast;
 
 use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
+use crate::find::Finder;
 use crate::store::Store;
 use crate::sync::Shared;
 use crate::work::Report;
@@ -26,6 +27,8 @@ pub struct State {
     store: Option<Store>,
     /// What every greeted connection is sent: linking, the connection's state.
     pub pushes: broadcast::Sender<Push>,
+    /// The palette's search, once its index has loaded.
+    pub finder: OnceLock<Finder>,
 }
 
 impl State {
@@ -40,7 +43,17 @@ impl State {
         pushes: broadcast::Sender<Push>,
     ) -> Result<State> {
         let owner = std::fs::metadata(home).with_context(|| format!("can't read {}", home.display()))?.uid();
-        Ok(State { home: home.to_path_buf(), owner, engine, missing: missing(), pools, live, store, pushes })
+        Ok(State {
+            home: home.to_path_buf(),
+            owner,
+            engine,
+            missing: missing(),
+            pools,
+            live,
+            store,
+            pushes,
+            finder: OnceLock::new(),
+        })
     }
 
     pub fn engine(&self) -> Result<&Supervisor, &str> {

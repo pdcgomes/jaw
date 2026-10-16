@@ -28,12 +28,14 @@ The engine link, between jawd and jaw-engine, is a different protocol: `proto/en
 | -32600 | JSON that isn't a request |
 | -32601 | A method jawd doesn't know |
 | -32602 | Parameters it can't use; `data` says which |
+| -32603 | Something went wrong inside jawd; `message` says what |
 | 1 | Not linked: the account needs linking first |
 | 2 | The engine isn't available right now; `data.retry_ms` says when to try again |
 | 3 | Not found: the chat, message, folder or person doesn't exist |
 | 4 | Not allowed, and why: editing a message older than WhatsApp allows, deleting someone else's message for everyone, voting twice on a single-choice poll |
 | 5 | A limit, and which: presence subscriptions, a file too large to send |
 | 6 | Protocol versions don't match |
+| 7 | Cancelled: a newer request replaced this one, as each `find` replaces the last |
 
 `message` is a sentence an interface can show as it is.
 
@@ -161,6 +163,26 @@ The whole tree; it's small. Each folder: `id`, `parent`, `name`, `position`, `sm
 - **While catching up** after time offline, the chat list reorders at most every 2 seconds; rows update in place in between.
 - **A slow client** never holds jawd up. Its pending updates are bounded by its windows, since only the newest of each row is kept; one too far behind gets `resync` for its watches and watches again.
 
+## Finding
+
+`find` is the palette's one search, sent at each keystroke. A newer `find` on the same connection cancels the one before, which is answered with error 7, so typing never queues searches and an interface keeps only the reply to its latest.
+
+```json
+{"id":12,"method":"find","params":{"query":"ar","limit":10}}
+{"id":12,"result":{"results":[{"kind":"chat","score":62,"text":[{"t":"mark","s":"A"},{"t":"text","s":"na "},{"t":"mark","s":"R"},{"t":"text","s":"ibeiro"}],"field":"name","row":{"id":"351912345678@s.whatsapp.net","name":"Ana Ribeiro","…":"…"}}],"counts":{"chat":1,"person":2,"message":214}}}
+```
+
+- **Names first:** chats, people and folders, matched fuzzily against jawd's index in memory: initials ("ar" finds Ana Ribeiro), word starts and parts of words, ignoring case and accents on either side ("ines" finds Inês, and "Inês" finds Ines). Letters scattered inside words don't match. A group is matched by its name; a one-to-one chat by its person's name, the name they gave themselves, a business's verified name and their number, which needs three digits typed and matches a run of them. Someone with a one-to-one chat is found as that chat, so `person` results are people you have no chat with yet.
+- **Then messages,** from the full-text index, newest first, accent-blind, with every word typed: a word of three letters or more matches the words it starts ("jan" finds jantar), and one of one or two letters matches only itself ("ja" finds já), since gathering every word that starts with one or two letters costs most of a keystroke's budget. `chat` narrows them to one chat; names are found anywhere. Links (M2), media and files (M3) will come after messages; until then those kinds find nothing.
+- `limit` is the most results of each kind, 10 by default and 200 at most, so names never crowd out messages.
+- `score` ranks results of a kind: word starts and runs above scattered letters, raised by up to half for chats you open often, so a chat you open daily goes ahead of one that matched as well, but not ahead of one that matched half as well again: initials still beat letters inside a word. Messages have 0 and come in time order.
+- `text` is what matched, as spans: `text`, and `mark` where the query matched. For a message, it's a stretch around its first match, at most 160 characters, with `…` where text is left out, on one line.
+- `field` says which name matched (`name`, `push_name`, `verified_name` or `phone`), `chat_name` is a message's chat, and `folders` are the folders a chat or person is in.
+- `row` is what was found: a chat as `chats.watch` sends it, a message as `messages.watch` does, a person (`id`, `name`, `phone`), or a folder (`id`, `name`, `parent`; built-in folders have their fixed IDs, the rest `folder:` and a number).
+- `counts` says how many of each kind matched, for the strip above the results: names exactly, messages up to 1,000, where 1,000 means at least that many.
+- **Nothing typed** returns the chats you open most, then the newest; `score` is then a chat's frecency in hundredths of an open.
+- **Frecency** is opens per chat, each counting half as much a week later, kept in jaw.db and shared by every interface. `chat.opened` is how an interface says you opened a chat yourself, from the palette, the chat list or a favourite; a window watched again after reconnecting isn't an open.
+
 ## Reconnecting
 
 A client that loses its connection reconnects, sends `hello` with `since` (the last `seq` it saw), and watches its windows again. Rows that haven't changed since `since` are left out of the results, so a reconnect costs what changed, not the windows. If `since` is older than the feed keeps (7 days), the watches return everything, as a first watch does.
@@ -179,7 +201,8 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `unwatch` | `watch` | |
 | `search` | `query`, `chat` (optional), `limit`, `cursor` | `hits` (message rows with the match marked) and the next `cursor` |
 | `contacts.find` | `query` | People and chats to start or open, best first; numbers are checked against WhatsApp |
-| `find` | `query`, `kinds` (any of `chat`, `person`, `folder`, `message`, `link`, `media`, `file`; all by default), `chat` (optional), `limit` | `results`, best first, each with its `kind`, a `score`, the match marked, and the row it found; a newer `find` from the same connection cancels this one |
+| `find` | `query`, `kinds` (any of `chat`, `person`, `folder`, `message`, `link`, `media`, `file`; all by default), `chat` (optional), `limit` (of each kind) | `results`, best first, each with its `kind`, a `score`, the match marked, and the row it found, and `counts` of each kind; a newer `find` from the same connection cancels this one. See Finding |
+| `chat.opened` | `chat` | |
 | `library.watch` | `kind` (`photo`, `video`, `voice`, `file`, `link` or `all`), and optionally `chat`, `person`, `since`, `until`, `text`, with `around`, `before`, `after` | `watch`, `total`, `rows`: each the message's media, file or link with its preview, sender, chat and time, and the message's `id` to jump to |
 | `send.text` | `chat`, `text`, `reply`, `mentions`, `preview` (default true) | `message` |
 | `send.media` | `chat`, `files` (each a `path`, `kind` and `caption`), `quality` (`sd` or `hd`), `reply` | `messages` |

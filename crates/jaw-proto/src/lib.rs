@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod find;
 pub mod local;
 
 /// The version this crate speaks. jawd serves one, and refuses a hello with another.
@@ -71,12 +72,14 @@ pub mod code {
     pub const INVALID_REQUEST: i32 = -32600;
     pub const UNKNOWN_METHOD: i32 = -32601;
     pub const INVALID_PARAMS: i32 = -32602;
+    pub const INTERNAL: i32 = -32603;
     pub const NOT_LINKED: i32 = 1;
     pub const ENGINE_UNAVAILABLE: i32 = 2;
     pub const NOT_FOUND: i32 = 3;
     pub const NOT_ALLOWED: i32 = 4;
     pub const LIMIT: i32 = 5;
     pub const VERSION: i32 = 6;
+    pub const CANCELLED: i32 = 7;
 }
 
 /// `hello`'s params: the first request on every connection.

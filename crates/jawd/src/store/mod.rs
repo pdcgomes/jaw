@@ -18,11 +18,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded, select_biased, unbounded};
 use rusqlite::{Connection, params};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 pub use self::read::Reads;
 use self::write::Stamps;
-pub use self::write::{Change, Chat, Message, Packed, Person};
+pub use self::write::{Change, Chat, Message, Opened, Packed, Person, frecency};
 use crate::engine::Ack;
 
 /// A message from history, as it's kept until it's converted.
@@ -87,6 +87,7 @@ pub struct Store {
     live: Sender<Live>,
     background: Sender<Background>,
     reads: Reads,
+    committed: watch::Receiver<i64>,
 }
 
 const BATCH_ROWS: usize = 1_000;
@@ -115,18 +116,25 @@ impl Store {
         let (live, live_rx) = unbounded();
         let (background, background_rx) = bounded(16);
         let commits = Arc::new(AtomicU64::new(0));
+        let (seq, committed) = watch::channel(stamps.last());
         let writer = Writer {
             db,
             stamps,
             realtime: realtime_rx,
             live: live_rx,
             commits: commits.clone(),
+            seq,
             pruned: Instant::now(),
             commit: Duration::ZERO,
         };
         std::thread::Builder::new().name("jawd-writer".into()).spawn(move || writer.run(background_rx))?;
         std::thread::Builder::new().name("jawd-checkpoint".into()).spawn(move || checkpoint(checkpointer, commits))?;
-        Ok(Store { path, realtime, live, background, reads })
+        Ok(Store { path, realtime, live, background, reads, committed })
+    }
+
+    /// The feed's last committed seq, which changes as each transaction with events commits.
+    pub fn committed(&self) -> watch::Receiver<i64> {
+        self.committed.clone()
     }
 
     /// Keeps an engine event, then sends its ack. It never waits: realtime writes aren't bounded.
@@ -187,6 +195,8 @@ struct Writer {
     realtime: Receiver<Realtime>,
     live: Receiver<Live>,
     commits: Arc<AtomicU64>,
+    /// The feed's last committed seq, for whoever follows the feed.
+    seq: watch::Sender<i64>,
     pruned: Instant,
     /// What committing a background transaction has lately cost, so the next stops in time for
     /// its commit to fit in its 10 ms too.
@@ -275,6 +285,8 @@ impl Writer {
         match &made {
             Ok(_) => {
                 self.commits.fetch_add(1, Ordering::Relaxed);
+                let last = self.stamps.last();
+                self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
             }
             Err(_) => self.stamps.rolled_back(),
         }

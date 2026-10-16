@@ -306,6 +306,12 @@ pub fn chats(db: &Connection, archived: bool, after: Option<&ChatCursor>, limit:
     Ok(rows)
 }
 
+/// A chat by its n, as the chat list shows it.
+pub fn chat(db: &Connection, n: i64) -> Result<Option<ChatRow>> {
+    let sql = format!("{CHAT_COLUMNS} WHERE c.n = ?1");
+    Ok(db.prepare_cached(&sql)?.query_row([n], chat_row).optional()?)
+}
+
 /// What message_row reads, from `messages m` joined with MESSAGE_JOINS.
 const MESSAGE_COLUMNS: &str = "
     SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''),
@@ -484,6 +490,42 @@ pub fn search(db: &Connection, typed: &str, chat: Option<&str>, before: Option<i
         .collect::<rusqlite::Result<_>>()?;
     let cursor = (hits.len() == limit).then(|| hits.last().map(|hit| hit.t)).flatten();
     Ok(Found { hits, cursor })
+}
+
+/// The newest `most` messages matching `query`, an FTS5 query, by their t, in `chat` or in every
+/// chat. Only FTS5's rowids are read, so a long list costs little more than a short one; a prefix
+/// query's cost is in FTS5 gathering every word with the prefix, which it does once.
+pub fn matching(db: &Connection, query: &str, chat: Option<&str>, most: usize) -> Result<Vec<i64>> {
+    let ts = match chat {
+        None => db
+            .prepare_cached("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1 ORDER BY rowid DESC LIMIT ?2")?
+            .query_map(params![query, most as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?,
+        Some(chat) => db
+            .prepare_cached(
+                "SELECT messages_fts.rowid FROM messages_fts CROSS JOIN messages m ON m.t = messages_fts.rowid
+                WHERE messages_fts MATCH ?1 AND m.chat = (SELECT n FROM chats WHERE id = ?2)
+                ORDER BY messages_fts.rowid DESC LIMIT ?3",
+            )?
+            .query_map(params![query, chat, most as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?,
+    };
+    Ok(ts)
+}
+
+/// Messages by their t, in the order given, each with the text search reads; one that's gone is
+/// left out.
+pub fn messages_by_t(db: &Connection, ts: &[i64]) -> Result<Vec<(MessageRow, String)>> {
+    let sql = format!("{MESSAGE_COLUMNS} FROM messages m {MESSAGE_JOINS} WHERE m.t = ?1");
+    let mut select = db.prepare_cached(&sql)?;
+    let mut rows = Vec::with_capacity(ts.len());
+    for &t in ts {
+        let row = select
+            .query_row([t], |r| Ok((message_row(r)?, r.get::<_, Option<String>>(8)?.unwrap_or_default())))
+            .optional()?;
+        rows.extend(row);
+    }
+    Ok(rows)
 }
 
 /// A change in the feed: the row of `kind` with n `key` changed, or was removed, at `seq`.
