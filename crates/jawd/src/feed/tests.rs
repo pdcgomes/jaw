@@ -180,6 +180,19 @@ impl Watcher {
         }
     }
 
+    /// Runs the client for `long`, taking what it sends.
+    async fn run_for(&mut self, long: Duration) {
+        let until = Instant::now() + long;
+        while let Ok(ready) = tokio::time::timeout_at(until.into(), self.client.ready()).await {
+            if let Ready::Changes(Ok(changes)) = &ready {
+                self.seen = self.seen.max(changes.seq);
+            }
+            self.client.handle(ready).await;
+            self.drain();
+        }
+        self.drain();
+    }
+
     async fn turn(&mut self) {
         let ready = tokio::time::timeout(Duration::from_secs(10), self.client.ready()).await.expect("nothing happened");
         if let Ready::Changes(Ok(changes)) = &ready {
@@ -632,8 +645,9 @@ async fn a_lone_change_after_quiet_goes_at_once_rather_than_waiting_to_coalesce(
     let task = running(client);
     let mut delays = Vec::new();
     for n in 0..10i64 {
-        // Longer than a burst, so each message comes after a quiet spell.
-        tokio::time::sleep(ms(120)).await;
+        // Twice a burst, so each message comes after a quiet spell however long the last read took
+        // on a busy machine: every read counts for a window's pace.
+        tokio::time::sleep(ms(200)).await;
         let id = format!("lone{n}");
         bed.apply(vec![Change::Message(text(OPEN, &id, 2_000 + n, Some(OPEN), "on its own"))]).await;
         let committed = Instant::now();
@@ -653,10 +667,29 @@ async fn a_lone_change_after_quiet_goes_at_once_rather_than_waiting_to_coalesce(
     assert!(delays.iter().all(|&delay| delay < ms(50)), "a lone message waited to coalesce: {delays:?}");
 }
 
+/// Writes 2,000 messages, four a millisecond and half of them to the open chat, each in a
+/// transaction of its own, and says how long they took and the feed's seq at the end.
+async fn burst(store: Store, run: &'static str, from: i64) -> (Duration, i64) {
+    let started = Instant::now();
+    let mut seq = 0;
+    for n in 0..2_000i64 {
+        let chat = if n % 2 == 0 { OPEN.to_string() } else { person(1 + (n as usize % 20)) };
+        let message = text(&chat, &format!("{run}{n}"), from + n, Some(&chat), "x");
+        seq = store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap().seq;
+        if n % 4 == 3 {
+            tokio::time::sleep(ms(1)).await;
+        }
+    }
+    (started.elapsed(), seq)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_client_is_bounded_holds_nobody_up_and_is_told_to_watch_again() {
     let bed = Bed::new(brisk());
     bed.apply(vec![Change::Message(text(OPEN, "first", 1_000, Some(OPEN), "hi"))]).await;
+    // The same writes with nobody watching, to compare with: a writer that waited on a client
+    // whose queue stays full would never finish, and one slowed by it would show here.
+    let (alone, _) = burst(bed.store.clone(), "a", 2_000).await;
     let room = 4;
     let mut slow = bed.watcher(room);
     let slow_chats = slow.watch("chats.watch", json!({"around": "top", "after": 10})).await;
@@ -664,30 +697,7 @@ async fn a_slow_client_is_bounded_holds_nobody_up_and_is_told_to_watch_again() {
     let mut quick = bed.watcher(64);
     let quick_messages = quick.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 30})).await;
 
-    let writing = {
-        let store = bed.store.clone();
-        tokio::spawn(async move {
-            let mut slowest = Duration::ZERO;
-            let mut seq = 0;
-            for n in 0..2_000i64 {
-                let chat = if n % 2 == 0 { OPEN.to_string() } else { person(1 + (n as usize % 20)) };
-                let started = Instant::now();
-                let applied = store
-                    .apply(
-                        Lane::Live,
-                        vec![Change::Message(text(&chat, &format!("b{n}"), 2_000 + n, Some(&chat), "x"))],
-                    )
-                    .await
-                    .unwrap();
-                slowest = slowest.max(started.elapsed());
-                seq = applied.seq;
-                if n % 4 == 3 {
-                    tokio::time::sleep(ms(1)).await;
-                }
-            }
-            (slowest, seq)
-        })
-    };
+    let writing = tokio::spawn(burst(bed.store.clone(), "b", 10_000));
     // Both clients run; only the quick one's interface reads.
     let mut quick_during = 0;
     while !writing.is_finished() {
@@ -707,9 +717,12 @@ async fn a_slow_client_is_bounded_holds_nobody_up_and_is_told_to_watch_again() {
         }
         assert!(slow.lines.len() <= room);
     }
-    let (slowest, seq) = writing.await.unwrap();
+    let (watched, seq) = writing.await.unwrap();
     assert!(quick_during >= 5, "the quick interface got {quick_during} batches while the slow one held its queue full");
-    assert!(slowest < Duration::from_millis(500), "a write waited {slowest:?}");
+    assert!(
+        watched < alone * 3 + ms(250),
+        "the writes took {watched:?} with a slow interface watching and {alone:?} with nobody"
+    );
     quick.settle(seq).await;
     let want = Want::Messages { chat: OPEN.into(), anchor: None, before: 30, after: 0 };
     quick.windows[&quick_messages].assert_matches(&fresh(&bed.store, &want).await, "the quick interface");
@@ -975,4 +988,177 @@ async fn reconnecting_with_since_returns_only_what_changed() {
     chats.assert_matches(&fresh(&bed.store, &chats_want).await, "the chat list, reconnected");
     messages.assert_matches(&fresh(&bed.store, &messages_want).await, "the messages window, reconnected");
     assert_eq!(ids(&everything).len(), 10, "a since past the feed's last is from another jaw.db, so everything comes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn changes_a_window_doesnt_show_cost_it_at_most_one_read_each_burst() {
+    let bed = Bed::new(Timing::default());
+    let far = |n: usize| format!("35193{n:07}@s.whatsapp.net");
+    let near = |n: usize| format!("35194{n:07}@s.whatsapp.net");
+    let mut seeding = Vec::new();
+    for n in 0..250 {
+        seeding.push(Change::Message(text(&far(n), &format!("f{n}"), 1_000 + n as i64, Some(&far(n)), "hi")));
+    }
+    // Enough newer chats that the far ones never reach the top 20.
+    for n in 0..30 {
+        seeding.push(Change::Message(text(&near(n), &format!("n{n}"), 500_000 + n as i64, Some(&near(n)), "hi")));
+        seeding.push(Change::Message(text(OPEN, &format!("o{n}"), 900_000 + n as i64, Some(OPEN), "hi")));
+    }
+    bed.apply(seeding).await;
+    let mut watcher = bed.watcher(1024);
+    let chats = watcher.watch("chats.watch", json!({"around": "top", "after": 20})).await;
+    let messages = watcher.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 20})).await;
+    let Watcher { client, mut lines, mut windows, .. } = watcher;
+    let task = running(client);
+    let collecting = tokio::spawn(async move {
+        let mut got = Vec::new();
+        while let Some(line) = lines.recv().await {
+            got.push(line);
+        }
+        got
+    });
+    let reads = bed.feed.reads();
+    let started = Instant::now();
+    for n in 0..2_000usize {
+        // Unread counts and names of chats far down the list: each touches the chat list, and none
+        // changes what it shows.
+        let change = if n % 2 == 0 {
+            Change::Read(Read { chat: far(n % 250), at: 1, ids: Vec::new(), phone: Some(((n % 7) as u32, 0)) })
+        } else {
+            Change::Person(Person { jids: vec![far(n % 250)], name: Some(format!("Someone {n}")), ..Person::default() })
+        };
+        bed.apply(vec![change]).await;
+        if n % 2 == 1 {
+            tokio::time::sleep_until((started + ms(n as u64 / 2)).into()).await;
+        }
+    }
+    tokio::time::sleep(ms(100)).await;
+    let took = started.elapsed();
+    let read = bed.feed.reads() - reads;
+    // One window is touched, so at most one read each 50 ms, and one at once after the quiet.
+    let most = (took.as_secs_f64() * 20.0).ceil() as u64 + 2;
+    assert!(read <= most, "{read} window reads in {took:?}, where {most} would do");
+    assert!(read >= 5, "the chat list was read only {read} times while its chats changed");
+    task.abort();
+    let _ = task.await;
+    for line in collecting.await.unwrap() {
+        let FromJawd::Push(push) = serde_json::from_slice(&line).unwrap() else { panic!("a reply among the pushes") };
+        let watch = push.params["watch"].as_str().unwrap().to_string();
+        windows.get_mut(&watch).unwrap().take(&push.params, "upsert");
+    }
+    let want = Want::Chats { archived: false, anchor: None, before: 0, after: 20 };
+    windows[&chats].assert_matches(&fresh(&bed.store, &want).await, "the chat list");
+    let want = Want::Messages { chat: OPEN.into(), anchor: None, before: 20, after: 0 };
+    windows[&messages].assert_matches(&fresh(&bed.store, &want).await, "the open chat");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_whose_read_fails_is_read_again_at_its_pace_then_resynced() {
+    let bed = Bed::new(brisk());
+    let seeding = (0..20).map(|n| Change::Message(text(OPEN, &format!("o{n}"), 1_000 + n, Some(OPEN), "hi")));
+    bed.apply(seeding.collect()).await;
+    let mut watcher = bed.watcher(64);
+    let params = json!({"chat": OPEN, "around": "newest", "before": 10});
+    let watch = watcher.watch("messages.watch", params.clone()).await;
+    let want = Want::Messages { chat: OPEN.into(), anchor: None, before: 10, after: 0 };
+    // A row the window shows that can't be read, written behind the store's back.
+    let side = rusqlite::Connection::open(bed.home.path().join("jaw.db")).unwrap();
+    side.busy_timeout(Duration::from_secs(5)).unwrap();
+    // The schema's CHECK (json_valid(spans)) keeps the store from writing such a row.
+    side.pragma_update(None, "ignore_check_constraints", true).unwrap();
+    let spans = |spans: Option<&str>| {
+        side.execute("UPDATE messages SET spans = ?1 WHERE id = 'o15'", [spans]).unwrap();
+    };
+
+    spans(Some("{"));
+    bed.apply(vec![Change::Message(text(OPEN, "new1", 5_000, Some(OPEN), "while it can't be read"))]).await;
+    let reads = bed.feed.reads();
+    let trying = brisk().behind / 2;
+    watcher.run_for(trying).await;
+    let tried = bed.feed.reads() - reads;
+    let most = (trying.as_millis() / brisk().burst.as_millis()) as u64 + 2;
+    assert!((2..=most).contains(&tried), "{tried} reads in {trying:?}: at least twice, and no faster than its pace");
+    assert!(!watcher.windows[&watch].rows.contains_key("new1"), "nothing could be sent");
+    assert!(watcher.resynced.is_empty(), "it hasn't failed for long");
+
+    // Mended in time, the window catches up with what it owed.
+    spans(None);
+    watcher.run_for(ms(100)).await;
+    watcher.windows[&watch].assert_matches(&fresh(&bed.store, &want).await, "the window once its rows read again");
+    assert!(watcher.resynced.is_empty());
+
+    // Broken for longer than `behind`, the interface is told to watch again, and watching again says why.
+    spans(Some("{"));
+    let broke = Instant::now();
+    bed.apply(vec![Change::Message(text(OPEN, "new2", 6_000, Some(OPEN), "still can't be read"))]).await;
+    while watcher.resynced.is_empty() {
+        watcher.turn().await;
+        watcher.drain();
+    }
+    assert!(broke.elapsed() >= brisk().behind, "resynced after {:?}", broke.elapsed());
+    assert_eq!(watcher.resynced, [watch]);
+    let refused = watcher.call("messages.watch", params).await.unwrap_err();
+    assert_eq!(refused.code, code::INTERNAL, "{}", refused.message);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_match_fresh_queries_while_writes_race_their_reads() {
+    for seed in 1..=8u64 {
+        let bed = Bed::new(brisk());
+        let mut world = World::new(seed + 1000);
+        let mut seeding: Vec<Change> =
+            world.chats.iter().map(|chat| Change::Chat(Chat { id: chat.clone(), ..Chat::default() })).collect();
+        seeding.extend((0..60).flat_map(|_| world.new_message_or_two()));
+        bed.apply(seeding).await;
+        let mut watcher = bed.watcher(64);
+        let wants = [
+            Want::Chats { archived: false, anchor: None, before: 0, after: 5 },
+            Want::Chats { archived: false, anchor: Some(person(3)), before: 2, after: 2 },
+            Want::Chats { archived: true, anchor: None, before: 0, after: 3 },
+            Want::Messages { chat: OPEN.into(), anchor: None, before: 6, after: 0 },
+            Want::Messages { chat: OPEN.into(), anchor: anchor_on(&bed, OPEN, 8).await, before: 3, after: 3 },
+            Want::Messages { chat: GROUP.into(), anchor: None, before: 4, after: 0 },
+        ];
+        let watched = watch_all(&mut watcher, &wants).await;
+        let (paused, mut pauses) = mpsc::channel::<i64>(1);
+        let (go, mut going) = mpsc::channel::<()>(1);
+        let store = bed.store.clone();
+        let writer = tokio::spawn(async move {
+            for _ in 0..25 {
+                let mut seq = 0;
+                for _ in 0..1 + world.rng.below(30) {
+                    seq = store.apply(Lane::Live, world.change()).await.unwrap().seq;
+                    // Mostly back to back, sometimes after a quiet spell longer than a burst, so the
+                    // next change goes at once while the client may still be reading for the last.
+                    match world.rng.below(6) {
+                        0 => tokio::time::sleep(ms(12 + world.rng.below(10) as u64)).await,
+                        1 => tokio::time::sleep(ms(world.rng.below(3) as u64)).await,
+                        _ => tokio::task::yield_now().await,
+                    }
+                }
+                paused.send(seq).await.unwrap();
+                going.recv().await.unwrap();
+            }
+        });
+        loop {
+            tokio::select! {
+                ready = watcher.client.ready() => {
+                    if let Ready::Changes(Ok(changes)) = &ready {
+                        watcher.seen = watcher.seen.max(changes.seq);
+                    }
+                    watcher.client.handle(ready).await;
+                    watcher.drain();
+                }
+                pause = pauses.recv() => match pause {
+                    Some(seq) => {
+                        watcher.settle(seq).await;
+                        check(&bed, &watcher, &watched, &format!("seed {seed}, paused at {seq}")).await;
+                        go.send(()).await.unwrap();
+                    }
+                    None => break,
+                },
+            }
+        }
+        writer.await.unwrap();
+    }
 }

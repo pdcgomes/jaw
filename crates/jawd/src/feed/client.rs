@@ -4,11 +4,14 @@
 //! its windows however far behind its interface is, and the lines it sends go into a bounded
 //! queue it never waits on: when the queue is full the windows stay marked, and once the queue
 //! has had no room for `Timing::behind` they're dropped and the interface is told to watch again.
+//! A window whose read fails stays marked and is read again at its usual pace, and one that has
+//! failed for `Timing::behind` is dropped the same way.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use jaw_proto::windows::{
@@ -47,6 +50,8 @@ pub struct Client {
     catching_up: CatchingUp,
     timing: Timing,
     out: mpsc::Sender<Vec<u8>>,
+    /// Every connection's window reads.
+    reads: Arc<AtomicU64>,
     /// The seq hello said the interface last saw, for the watches it sends again.
     since: Option<u64>,
     windows: BTreeMap<String, Window>,
@@ -63,8 +68,11 @@ struct Window {
     /// When the first and the latest changes waiting to be sent came, if any are.
     first: Option<Instant>,
     last: Option<Instant>,
-    /// When its last batch went, so the next waits at least `Timing::burst`.
-    sent: Option<Instant>,
+    /// When it was last read, so the next read waits at least `Timing::burst`, whether or not that
+    /// one sent anything.
+    read: Option<Instant>,
+    /// Since when its reads have failed.
+    failing: Option<Instant>,
     /// When a chat list last took its order from a fresh query, and whether it owes one.
     reordered: Instant,
     reorder: bool,
@@ -295,7 +303,16 @@ async fn recv(changes: &mut Option<broadcast::Receiver<Arc<Changes>>>) -> Result
 impl Window {
     fn new(spec: Spec) -> Window {
         let now = Instant::now();
-        Window { spec, state: State::default(), first: None, last: None, sent: None, reordered: now, reorder: false }
+        Window {
+            spec,
+            state: State::default(),
+            first: None,
+            last: None,
+            read: None,
+            failing: None,
+            reordered: now,
+            reorder: false,
+        }
     }
 
     /// Notes a change waiting since `at`.
@@ -304,14 +321,16 @@ impl Window {
         self.last = Some(self.last.map_or(at, |last| last.max(at)));
     }
 
-    /// When the changes waiting are due: the first after a quiet spell at once, so a lone message
-    /// goes as soon as it's committed; those that follow it once the feed has been quiet for
-    /// `quiet` or the first has waited `burst`, and never sooner than `burst` after the last batch.
+    /// When the changes waiting are due: the first after the window has gone unread for `burst` at
+    /// once, so a lone message goes as soon as it's committed; those that follow it once the feed
+    /// has been quiet for `quiet` or the first has waited `burst`, and never sooner than `burst`
+    /// after the last read. Every read counts, so a stream of changes the window doesn't show (a
+    /// count or a name further down the list) costs at most one read each `burst`.
     fn due(&self, timing: &Timing) -> Option<Instant> {
         let (first, last) = (self.first?, self.last?);
-        match self.sent {
-            Some(sent) if first < sent + timing.burst => {
-                Some((last + timing.quiet).min(first + timing.burst).max(sent + timing.burst))
+        match self.read {
+            Some(read) if first < read + timing.burst => {
+                Some((last + timing.quiet).min(first + timing.burst).max(read + timing.burst))
             }
             _ => Some(first),
         }
@@ -366,6 +385,7 @@ impl Client {
         catching_up: CatchingUp,
         timing: Timing,
         out: mpsc::Sender<Vec<u8>>,
+        reads: Arc<AtomicU64>,
     ) -> Client {
         Client {
             store,
@@ -373,6 +393,7 @@ impl Client {
             catching_up,
             timing,
             out,
+            reads,
             since: None,
             windows: BTreeMap::new(),
             next: 1,
@@ -597,16 +618,26 @@ impl Client {
                 .then(|| window.state.held.values().map(|held| held.n).collect());
             let reordered = only.is_none().then_some(now);
             let snapshot = self.snapshot(window.spec.clone(), only).await;
+            self.reads.fetch_add(1, Ordering::Relaxed);
             let Some(window) = self.windows.get_mut(&watch) else { continue };
+            window.read = Some(Instant::now());
             let (mut snapshot, spec) = match snapshot {
                 Ok(snapshot) => snapshot,
+                // The window stays marked, so it's read again a `burst` later.
                 Err(e) => {
-                    eprintln!("jawd: can't bring {watch} up to date: {}", e.message);
-                    window.first = None;
-                    window.last = None;
+                    let failing = *window.failing.get_or_insert_with(|| {
+                        eprintln!("jawd: can't bring {watch} up to date, and will keep trying: {}", e.message);
+                        now
+                    });
+                    if failing.elapsed() >= self.timing.behind {
+                        eprintln!("jawd: {watch} still can't be read, so its interface is told to watch it again");
+                        self.windows.remove(&watch);
+                        self.resync.push(watch);
+                    }
                     continue;
                 }
             };
+            window.failing = None;
             window.spec = spec;
             if reordered.is_none()
                 && let Rows::Chats(rows) = &mut snapshot.rows
@@ -621,10 +652,7 @@ impl Client {
             match push(watch, update, &window.state) {
                 None => window.keep(state, reordered),
                 Some(line) => match self.out.try_send(line) {
-                    Ok(()) => {
-                        window.keep(state, reordered);
-                        window.sent = Some(Instant::now());
-                    }
+                    Ok(()) => window.keep(state, reordered),
                     Err(_) => {
                         self.blocked.get_or_insert_with(Instant::now);
                         return;

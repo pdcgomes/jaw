@@ -2,7 +2,7 @@
 //! tells every connection which rows changed. Each connection's `Client` keeps its windows, marks
 //! the ones a change touches, reads each again and sends what differs from what its interface
 //! holds: the first change after a quiet spell at once, then the rest of a burst when the feed has
-//! been quiet for 5 ms or every 50 ms, a window's batches never less than 50 ms apart. A window is
+//! been quiet for 5 ms or every 50 ms, each window read no more than once each 50 ms. A window is
 //! always what a fresh query gives, so it can't drift, and a connection keeps only its windows'
 //! rows' hashes: a slow interface never holds jawd up, it only gets fewer, larger batches, and one
 //! that stops reading for long is told to watch again.
@@ -15,6 +15,7 @@ mod window;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, watch};
@@ -43,13 +44,13 @@ pub struct Changes {
 pub struct Timing {
     /// How long the feed is quiet before the rest of a burst goes.
     pub quiet: Duration,
-    /// The longest a change waits during a burst, the shortest time between a window's batches,
-    /// and how long a window must have been sent nothing for a change to go at once.
+    /// The longest a change waits during a burst, the shortest time between a window's reads, and
+    /// so its batches, and how long a window must go unread for a change to go at once.
     pub burst: Duration,
     /// How often the chat list reorders while catching up.
     pub hold: Duration,
-    /// How long an interface can leave its updates unread before its windows are dropped and it's
-    /// told to watch again.
+    /// How long an interface can leave its updates unread, or a window's reads keep failing, before
+    /// its windows are dropped and it's told to watch them again.
     pub behind: Duration,
 }
 
@@ -88,6 +89,7 @@ pub struct Feed {
     committed: watch::Receiver<i64>,
     catching_up: CatchingUp,
     timing: Timing,
+    reads: Arc<AtomicU64>,
 }
 
 impl Feed {
@@ -96,7 +98,7 @@ impl Feed {
         let (changes, _) = broadcast::channel(CHANGES_KEPT);
         let committed = store.committed();
         tokio::spawn(follow(store.clone(), committed.clone(), changes.clone()));
-        Feed { store, changes, committed, catching_up, timing }
+        Feed { store, changes, committed, catching_up, timing, reads: Arc::default() }
     }
 
     /// The feed's last committed seq.
@@ -106,7 +108,13 @@ impl Feed {
 
     /// A connection's windows, sending their updates to `out` as lines.
     pub fn client(&self, out: mpsc::Sender<Vec<u8>>) -> Client {
-        Client::new(self.store.clone(), self.changes.subscribe(), self.catching_up.clone(), self.timing, out)
+        let changes = self.changes.subscribe();
+        Client::new(self.store.clone(), changes, self.catching_up.clone(), self.timing, out, self.reads.clone())
+    }
+
+    /// How many times any connection has read one of its windows again since jawd started.
+    pub fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
     }
 }
 
