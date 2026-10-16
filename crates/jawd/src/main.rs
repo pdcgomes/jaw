@@ -285,7 +285,11 @@ async fn stop(Started { state, notifications }: Started, socket: &Path) {
     }
     if let Some(store) = state.store() {
         match tokio::time::timeout(EMPTYING, store.truncate()).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                if let Err(e) = store.remove_backups() {
+                    eprintln!("jawd: can't remove the backups taken before upgrading jaw.db: {e:#}");
+                }
+            }
             Ok(Err(e)) => eprintln!("jawd: can't empty the WAL at the stop: {e:#}"),
             Err(_) => eprintln!("jawd: the WAL wasn't emptied in time at the stop"),
         }

@@ -237,6 +237,16 @@ const IDLE: Duration = Duration::from_secs(10);
 /// While background work waits for the checkpointer, how often the writer looks again.
 const HOLD_POLL: Duration = Duration::from_millis(1);
 
+/// The WAL's limits and the writer's busy timeout, which tests make smaller.
+#[derive(Clone, Copy)]
+struct Limits {
+    wal_soft: u64,
+    wal_hard: u64,
+    busy_ms: i64,
+}
+
+const LIMITS: Limits = Limits { wal_soft: WAL_SOFT, wal_hard: WAL_HARD, busy_ms: BUSY_MS };
+
 /// What a connection to jaw.db is for, which decides how it's set up.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -325,12 +335,13 @@ fn wal_checkpoint(db: &Connection, mode: &str) -> Result<(bool, u64, u64)> {
 impl Store {
     /// Opens jaw.db in `home`, bringing its schema up to date, and starts the writer and readers.
     pub fn open(home: &Path) -> Result<Store> {
-        Store::open_with(home, WAL_SOFT, WAL_HARD)
+        Store::open_with(home, LIMITS)
     }
 
-    fn open_with(home: &Path, soft: u64, hard: u64) -> Result<Store> {
+    fn open_with(home: &Path, limits: Limits) -> Result<Store> {
         let path = home.join("jaw.db");
         let mut db = connect(&path, Role::Writer)?;
+        pragma(&db, "busy_timeout", limits.busy_ms)?;
         schema::migrate(&mut db)?;
         let stamps = Stamps::load(&db)?;
         let reads = Reads::open(&path)?;
@@ -344,7 +355,7 @@ impl Store {
         let backlog = db.query_row("SELECT EXISTS (SELECT 1 FROM fts_backlog)", [], |r| r.get(0))?;
         let stats = Arc::new(Mutex::new(Stats::default()));
         let inboxed = Arc::new(Notify::new());
-        let wal = Arc::new(Wal::new(soft, hard));
+        let wal = Arc::new(Wal::new(limits.wal_soft, limits.wal_hard));
         let writer = Writer {
             stats: stats.clone(),
             inboxed: inboxed.clone(),
@@ -421,6 +432,12 @@ impl Store {
             .send(Live::Changes { changes, done, queued: Instant::now(), durable: true })
             .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?;
         applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Removes the backups taken before upgrades, once jawd has stopped cleanly after one, and
+    /// says how many there were.
+    pub fn remove_backups(&self) -> Result<usize> {
+        schema::remove_backups(self.path.parent().context("jaw.db has no folder")?)
     }
 
     /// Copies the whole WAL into jaw.db and empties it, as at a clean stop.
@@ -1721,7 +1738,7 @@ mod tests {
     async fn the_wal_stays_bounded_while_history_pours_in_and_live_writes_never_wait_for_it() {
         let home = tempfile::tempdir().unwrap();
         let (soft, hard) = (256, 512);
-        let store = Store::open_with(home.path(), soft, hard).unwrap();
+        let store = Store::open_with(home.path(), Limits { wal_soft: soft, wal_hard: hard, ..LIMITS }).unwrap();
         let history: Vec<Message> =
             (0..20_000).map(|n| text("351910000001@s.whatsapp.net", &format!("h{n}"), n, "history")).collect();
         let batch = {
@@ -1748,5 +1765,51 @@ mod tests {
         store.truncate().await.unwrap();
         assert_eq!(std::fs::metadata(home.path().join("jaw.db-wal")).unwrap().len(), 0);
         assert_eq!(store.count("messages").unwrap(), 20_000 + live as u64);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn writes_that_meet_a_lock_held_past_the_busy_timeout_are_tried_again_and_all_land() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open_with(home.path(), Limits { busy_ms: 50, ..LIMITS }).unwrap();
+        let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut trouble = store.trouble();
+        let chat = "351910000001@s.whatsapp.net";
+        let live = {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply(Lane::Live, messages([text(chat, "l", 1_000, "live")])).await })
+        };
+        let durable = {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply_durable(messages([text(chat, "d", 2_000, "done")])).await })
+        };
+        store.inbox("message", 3, b"kept".to_vec(), None);
+        tokio::time::timeout(Duration::from_secs(10), trouble.wait_for(Option::is_some)).await.unwrap().unwrap();
+        assert!(trouble.borrow().as_deref().unwrap().contains("locked"), "{:?}", trouble.borrow());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!live.is_finished() && !durable.is_finished(), "ten busy timeouts later, nothing has given up");
+        holder.execute_batch("COMMIT").unwrap();
+        live.await.unwrap().unwrap();
+        durable.await.unwrap().unwrap();
+        let ids: Vec<String> = query(&store, move |db| read::messages(db, chat, Around::Newest, 10))
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, ["l", "d"]);
+        let kept: Vec<u8> = query(&store, |db| Ok(db.query_row("SELECT payload FROM inbox", [], |r| r.get(0))?)).await;
+        assert_eq!(kept, b"kept");
+        tokio::time::timeout(Duration::from_secs(5), trouble.wait_for(Option::is_none)).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_backups_taken_before_an_upgrade_go_once_jawd_stops_cleanly() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        std::fs::write(home.path().join("jaw.db.before-v2"), b"a backup").unwrap();
+        std::fs::write(home.path().join("jaw.db.before-v3.part"), b"half a backup").unwrap();
+        assert_eq!(store.remove_backups().unwrap(), 2);
+        assert!(home.path().join("jaw.db").is_file());
+        assert_eq!(store.remove_backups().unwrap(), 0);
     }
 }

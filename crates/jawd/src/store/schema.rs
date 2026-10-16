@@ -4,10 +4,15 @@
 //! IMMEDIATE transaction, and a data step, whose cost grows with the rows, in one of its own. The
 //! schema must be the one the migrations make, before and after, or jawd refuses to write.
 
+use std::ffi::CString;
+use std::fs::File;
 use std::ops::Range;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::fallible_iterator::FallibleIterator;
+use rusqlite::{Batch, Connection, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
 pub(super) const MIGRATIONS: &[&str] = &[
@@ -609,47 +614,161 @@ fn steps(kinds: &[Kind], from: usize) -> Vec<Range<usize>> {
 }
 
 pub fn migrate(db: &mut Connection) -> Result<()> {
-    let locked = locked(LOCK)?;
-    if locked.len() != MIGRATIONS.len() {
-        bail!("migrations.lock has {} migrations and schema.rs {}", locked.len(), MIGRATIONS.len());
+    Runner::default().run(db)
+}
+
+/// Runs the migrations. Tests can make one statement fail, as a fault would, and say how much
+/// space is free.
+#[derive(Default)]
+pub(super) struct Runner {
+    /// The statement, counted from 0 across the run, that fails.
+    fail_at: Option<usize>,
+    /// The free space to take, instead of asking the file system.
+    free: Option<u64>,
+    /// How many statements have run.
+    ran: usize,
+}
+
+impl Runner {
+    fn run(&mut self, db: &mut Connection) -> Result<()> {
+        let locked = locked(LOCK)?;
+        if locked.len() != MIGRATIONS.len() {
+            bail!(
+                "migrations.lock has {} migrations and schema.rs {}; each migration needs its line (see the top of migrations.lock)",
+                locked.len(),
+                MIGRATIONS.len()
+            );
+        }
+        if let Some(n) =
+            MIGRATIONS.iter().zip(&locked).position(|(migration, locked)| sha256(migration) != locked.sha256)
+        {
+            bail!("jaw.db's migration {} isn't the text it was merged with, so this jawd won't run it", n + 1);
+        }
+        let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let version = usize::try_from(version).unwrap_or(usize::MAX);
+        if version > MIGRATIONS.len() {
+            bail!("jaw.db is from a newer jawd (schema {version}, this jawd knows {})", MIGRATIONS.len());
+        }
+        mine(db, version)?;
+        if version > 0 && fingerprint(db)? != expected(version)? {
+            bail!(
+                "jaw.db's schema isn't the one jaw's migrations make at version {version}, so jawd won't write to it: \
+                 it was changed by hand, by a migration edited since, or by another build's migration {version}"
+            );
+        }
+        let kinds: Vec<Kind> = locked.iter().map(|l| l.kind).collect();
+        let steps = steps(&kinds, version);
+        // A new database has nothing to keep.
+        let file = db.path().filter(|path| !path.is_empty()).map(PathBuf::from);
+        if let Some(path) = file
+            && version > 0
+            && steps.iter().any(|step| kinds[step.start] == Kind::Data)
+        {
+            back_up(db, &path, version, self.free)?;
+        }
+        for Range { start: at, end } in steps {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for (n, migration) in MIGRATIONS.iter().enumerate().take(end).skip(at) {
+                self.execute(&tx, migration).with_context(|| format!("jaw.db's migration {}", n + 1))?;
+            }
+            tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+            tx.pragma_update(None, "user_version", end as i64)?;
+            if fingerprint(&tx)? != expected(end)? {
+                bail!("jaw.db's migrations to version {end} didn't make the schema they make on an empty database");
+            }
+            tx.commit()?;
+        }
+        let id: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0))?;
+        if id != APPLICATION_ID {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.pragma_update(None, "application_id", APPLICATION_ID)?;
+            tx.commit()?;
+        }
+        super::check(db, "application_id", &APPLICATION_ID.to_string())?;
+        super::check(db, "user_version", &MIGRATIONS.len().to_string())?;
+        Ok(())
     }
-    if let Some(n) = MIGRATIONS.iter().zip(&locked).position(|(migration, locked)| sha256(migration) != locked.sha256) {
-        bail!("jaw.db's migration {} isn't the text it was merged with, so this jawd won't run it", n + 1);
+
+    /// Runs a migration's statements one at a time.
+    fn execute(&mut self, db: &Connection, migration: &str) -> Result<()> {
+        let mut statements = Batch::new(db, migration);
+        while let Some(mut statement) = statements.next()? {
+            if self.fail_at == Some(self.ran) {
+                bail!("a fault at statement {}", self.ran);
+            }
+            statement.raw_execute()?;
+            self.ran += 1;
+        }
+        Ok(())
     }
-    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let version = usize::try_from(version).unwrap_or(usize::MAX);
-    if version > MIGRATIONS.len() {
-        bail!("jaw.db is from a newer jawd (schema {version}, this jawd knows {})", MIGRATIONS.len());
-    }
-    mine(db, version)?;
-    if version > 0 && fingerprint(db)? != expected(version)? {
+}
+
+/// The name a backup of jaw.db before migrating from `version` takes beside it.
+fn backup_name(version: usize) -> String {
+    format!("{BACKUP}{version}")
+}
+
+const BACKUP: &str = "jaw.db.before-v";
+
+/// Copies jaw.db, as it is at `version`, to a backup beside it before a data step changes its rows,
+/// once there's room for the backup and the step: free space at least 1.2 times the database. The
+/// copy is synced, then renamed into place and its folder synced, so a backup found is whole.
+fn back_up(db: &Connection, path: &Path, version: usize, free: Option<u64>) -> Result<()> {
+    let folder = path.parent().context("jaw.db has no folder")?;
+    let pages: i64 = db.pragma_query_value(None, "page_count", |row| row.get(0))?;
+    let page: i64 = db.pragma_query_value(None, "page_size", |row| row.get(0))?;
+    let needed = (pages * page).max(0) as u64 * 6 / 5;
+    let free = match free {
+        Some(free) => free,
+        None => free_space(folder)?,
+    };
+    if free < needed {
         bail!(
-            "jaw.db's schema isn't the one jaw's migrations make at version {version}, so jawd won't write to it: \
-             it was changed by hand, by a migration edited since, or by another build's migration {version}"
+            "upgrading jaw.db needs {:.0} MB free beside it, for a backup and the upgrade, and there's {:.0} MB: \
+             make room and start jawd again",
+            needed as f64 / 1e6,
+            free as f64 / 1e6
         );
     }
-    let kinds: Vec<Kind> = locked.iter().map(|l| l.kind).collect();
-    for Range { start: at, end } in steps(&kinds, version) {
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for (n, migration) in MIGRATIONS.iter().enumerate().take(end).skip(at) {
-            tx.execute_batch(migration).with_context(|| format!("jaw.db's migration {}", n + 1))?;
-        }
-        tx.pragma_update(None, "application_id", APPLICATION_ID)?;
-        tx.pragma_update(None, "user_version", end as i64)?;
-        if fingerprint(&tx)? != expected(end)? {
-            bail!("jaw.db's migrations to version {end} didn't make the schema they make on an empty database");
-        }
-        tx.commit()?;
+    let backup = folder.join(backup_name(version));
+    let part = folder.join(format!("{}.part", backup_name(version)));
+    match std::fs::remove_file(&part) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
     }
-    let id: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0))?;
-    if id != APPLICATION_ID {
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.pragma_update(None, "application_id", APPLICATION_ID)?;
-        tx.commit()?;
-    }
-    super::check(db, "application_id", &APPLICATION_ID.to_string())?;
-    super::check(db, "user_version", &MIGRATIONS.len().to_string())?;
+    let into = part.to_str().context("jaw.db's folder isn't UTF-8")?;
+    db.execute("VACUUM INTO ?1", [into]).context("can't back jaw.db up before upgrading it")?;
+    File::open(&part)?.sync_all()?;
+    std::fs::rename(&part, &backup)?;
+    File::open(folder)?.sync_all()?;
     Ok(())
+}
+
+/// Removes the backups taken before upgrades, once jawd has stopped cleanly after one.
+pub(super) fn remove_backups(folder: &Path) -> Result<usize> {
+    let mut removed = 0;
+    for entry in std::fs::read_dir(folder)? {
+        let entry = entry?;
+        if entry.file_name().to_str().is_some_and(|name| name.starts_with(BACKUP)) {
+            std::fs::remove_file(entry.path())?;
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        File::open(folder)?.sync_all()?;
+    }
+    Ok(removed)
+}
+
+fn free_space(folder: &Path) -> Result<u64> {
+    let name = CString::new(folder.as_os_str().as_bytes())?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `name` is a NUL-terminated path and `stats` is a statvfs to fill in.
+    if unsafe { libc::statvfs(name.as_ptr(), &mut stats) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("can't read {}'s free space", folder.display()));
+    }
+    Ok(stats.f_bavail as u64 * stats.f_frsize as u64)
 }
 
 #[cfg(test)]
@@ -740,15 +859,127 @@ mod tests {
     #[test]
     fn each_merged_migration_is_still_the_text_it_was_merged_with() {
         let locked = locked(LOCK).unwrap();
-        assert_eq!(locked.len(), MIGRATIONS.len(), "each migration has its line in migrations.lock");
-        for (n, (migration, locked)) in MIGRATIONS.iter().zip(&locked).enumerate() {
+        for (n, migration) in MIGRATIONS.iter().enumerate() {
+            let hash = sha256(migration);
+            let Some(locked) = locked.get(n) else {
+                panic!(
+                    "migration {} has no line in migrations.lock: add `{} schema {hash}`, or `data` for a step whose cost grows with the rows",
+                    n + 1,
+                    n + 1
+                );
+            };
             assert_eq!(
-                sha256(migration),
+                hash,
                 locked.sha256,
                 "migration {} isn't the text it was merged with; a merged migration is never edited, so add a new one",
                 n + 1
             );
         }
+        assert_eq!(locked.len(), MIGRATIONS.len(), "migrations.lock has lines for migrations schema.rs doesn't have");
+    }
+
+    /// A database at `version`, in memory or in a file, with a row in the inbox and in history.
+    fn at(path: Option<&Path>, version: usize) -> Connection {
+        let db = match path {
+            Some(path) => Connection::open(path).unwrap(),
+            None => Connection::open_in_memory().unwrap(),
+        };
+        for migration in &MIGRATIONS[..version] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", version as i64).unwrap();
+        if version > 0 {
+            db.execute("INSERT INTO inbox (kind, at, payload) VALUES ('message', 1, x'01')", []).unwrap();
+            db.execute("INSERT INTO history_raw (chat, id, at, raw) VALUES ('c', 'i', 2, x'02')", []).unwrap();
+        }
+        db
+    }
+
+    fn user_version(db: &Connection) -> usize {
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap() as usize
+    }
+
+    fn rows(db: &Connection) -> (i64, i64) {
+        db.query_row("SELECT (SELECT count(*) FROM inbox), (SELECT count(*) FROM history_raw)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap()
+    }
+
+    /// How many statements migration `n` runs.
+    fn statements(n: usize) -> usize {
+        let db = at(None, n - 1);
+        let mut statements = Batch::new(&db, MIGRATIONS[n - 1]);
+        let mut count = 0;
+        while let Some(mut statement) = statements.next().unwrap() {
+            statement.raw_execute().unwrap();
+            count += 1;
+        }
+        count
+    }
+
+    #[test]
+    fn a_fault_at_any_statement_of_any_migration_leaves_the_database_as_it_was_before_that_step() {
+        let kinds: Vec<Kind> = locked(LOCK).unwrap().iter().map(|l| l.kind).collect();
+        let counts: Vec<usize> = (1..=MIGRATIONS.len()).map(statements).collect();
+        assert!(counts.iter().all(|&n| n > 0), "every migration runs statements: {counts:?}");
+        for from in 0..MIGRATIONS.len() {
+            // The version each pending statement's transaction began at.
+            let mut began = Vec::new();
+            for step in steps(&kinds, from) {
+                for n in step.clone() {
+                    began.extend(std::iter::repeat_n(step.start, counts[n]));
+                }
+            }
+            for (k, &start) in began.iter().enumerate() {
+                let mut db = at(None, from);
+                let fault = Runner { fail_at: Some(k), ..Runner::default() }.run(&mut db).unwrap_err();
+                assert!(format!("{fault:#}").contains("a fault at statement"), "from {from}, statement {k}: {fault:#}");
+                assert_eq!(user_version(&db), start, "from {from}, statement {k}");
+                assert_eq!(fingerprint(&db).unwrap(), expected(start).unwrap(), "from {from}, statement {k}");
+                if from > 0 {
+                    assert_eq!(rows(&db), (1, 1), "from {from}, statement {k}");
+                }
+                migrate(&mut db).unwrap();
+                assert_eq!(fingerprint(&db).unwrap(), expected(MIGRATIONS.len()).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn a_data_step_waits_for_a_whole_synced_backup_at_the_old_version_and_a_schema_step_needs_none() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("jaw.db");
+        let mut db = at(Some(&path), 2);
+        migrate(&mut db).unwrap();
+        let backup = Connection::open_with_flags(
+            home.path().join("jaw.db.before-v2"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(user_version(&backup), 2);
+        assert_eq!(fingerprint(&backup).unwrap(), expected(2).unwrap());
+        assert_eq!(rows(&backup), (1, 1));
+        let check: String = backup.query_row("PRAGMA quick_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(check, "ok");
+        assert!(!home.path().join("jaw.db.before-v2.part").exists());
+
+        let other = tempfile::tempdir().unwrap();
+        let mut db = at(Some(&other.path().join("jaw.db")), 3);
+        migrate(&mut db).unwrap();
+        assert_eq!(std::fs::read_dir(other.path()).unwrap().count(), 1, "only jaw.db");
+    }
+
+    #[test]
+    fn an_upgrade_with_a_data_step_and_too_little_room_is_refused_and_changes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let mut db = at(Some(&home.path().join("jaw.db")), 2);
+        let refused = Runner { free: Some(10_000), ..Runner::default() }.run(&mut db).unwrap_err().to_string();
+        assert!(refused.contains("MB free beside it") && refused.contains("there's 0 MB"), "{refused}");
+        assert_eq!(user_version(&db), 2);
+        assert_eq!(fingerprint(&db).unwrap(), expected(2).unwrap());
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1, "no backup");
+        assert!(free_space(home.path()).unwrap() > 0);
     }
 
     #[test]
