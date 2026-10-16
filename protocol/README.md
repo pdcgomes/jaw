@@ -106,7 +106,7 @@ A chat row:
 
 - `around`: `newest` (the window follows new messages), `unread` (the first unread one: counting back the chat's `unread` among messages others sent, found when the window is watched; `newest` when nothing's unread), or a message's `id`.
 - While a window follows `newest`, new messages come into it and the oldest leave. A window around a message keeps `after` rows after it: new messages fill that room, and past it only raise `newer`, which an interface shows as "2 new".
-- `older` says whether there's more before the window; moving past the oldest message jaw has asks the phone for more (`history.more`), and they arrive as upserts. `newer` is how many messages come after the window's last row: an interface that notes it when it moves the window shows the growth since as new.
+- `older` says whether there's more before the window; moving past the oldest message jaw has asks the phone for more (`history.more`), and they arrive as upserts. `newer` is how many messages come after the window's last row, counted up to 1,000 so it costs the same at any depth: an interface that notes it when it moves the window shows the growth since as new.
 - A chat jaw has no messages for yet is an empty window, which fills when they come.
 
 ```json

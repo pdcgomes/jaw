@@ -113,7 +113,7 @@ pub struct MessagesWatched {
     pub total: u64,
     /// Whether there are messages before the window.
     pub older: bool,
-    /// How many messages come after the window's last row.
+    /// How many messages come after the window's last row, counted up to 1,000.
     pub newer: u64,
     pub rows: Vec<MessageRow>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -728,6 +728,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_database_from_before_message_counts_has_them_counted_and_then_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let chat = "351910000001@s.whatsapp.net";
+        {
+            let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
+            db.pragma_update(None, "journal_mode", "WAL").unwrap();
+            let tx = db.transaction().unwrap();
+            for migration in &schema::MIGRATIONS[..2] {
+                tx.execute_batch(migration).unwrap();
+            }
+            tx.execute("INSERT INTO chats (n, id, kind, v) VALUES (1, ?1, 'direct', 1)", [chat]).unwrap();
+            for n in 0..3 {
+                tx.execute(
+                    "INSERT INTO messages (chat, id, at, t, kind, v) VALUES (1, ?1, ?2, ?2, 'text', 1)",
+                    params![format!("m{n}"), n],
+                )
+                .unwrap();
+            }
+            tx.pragma_update(None, "user_version", 2).unwrap();
+            tx.commit().unwrap();
+        }
+        let store = Store::open(home.path()).unwrap();
+        assert_eq!(query(&store, move |db| read::message_count(db, chat)).await, 3);
+        store.apply(Lane::Live, messages([text(chat, "m3", 10, "one more")])).await.unwrap();
+        store.apply(Lane::Live, messages([text(chat, "m3", 10, "one more, edited")])).await.unwrap();
+        store.apply(Lane::Live, vec![Change::DeleteMessage { chat: chat.into(), id: "m0".into() }]).await.unwrap();
+        assert_eq!(query(&store, move |db| read::message_count(db, chat)).await, 3, "one came, one changed, one went");
+        assert_eq!(query(&store, |db| read::message_count(db, "nobody@s.whatsapp.net")).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_deleted_message_leaves_its_event_and_its_chat_shows_the_one_before_in_its_place() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();

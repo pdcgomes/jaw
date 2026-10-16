@@ -249,6 +249,12 @@ pub(super) const MIGRATIONS: &[&str] = &[
         chat INTEGER
     );
     ",
+    // 3: how many messages each chat has, kept as they come and go, so a window's total is read,
+    // not counted.
+    "
+    ALTER TABLE chats ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0;
+    UPDATE chats SET message_count = (SELECT count(*) FROM messages WHERE chat = chats.n);
+    ",
 ];
 
 pub fn migrate(db: &mut Connection) -> Result<()> {

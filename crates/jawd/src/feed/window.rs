@@ -53,6 +53,9 @@ pub(super) struct MessageAnchor {
     pub cursor: MessageCursor,
 }
 
+/// The furthest `newer` counts, so it costs the same however far back a window is.
+const MOST_NEWER: u64 = 1_000;
+
 /// A window as one read transaction found it. Rows come in the list's order, each with its n.
 pub(super) struct Snapshot {
     pub seq: i64,
@@ -138,7 +141,7 @@ pub(super) fn query(db: &Connection, mut spec: Spec, only: Option<Vec<i64>>) -> 
                     let first = rows.first().map_or(anchor.cursor, |row| row.cursor());
                     let last = rows.last().map_or(anchor.cursor, |row| row.cursor());
                     snapshot.older = read::messages_before(&db, &spec.chat, first)?;
-                    snapshot.newer = read::messages_after(&db, &spec.chat, last)?;
+                    snapshot.newer = read::messages_after(&db, &spec.chat, last, MOST_NEWER)?;
                     rows
                 }
             };

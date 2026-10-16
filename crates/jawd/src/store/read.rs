@@ -631,21 +631,24 @@ pub fn messages_from(db: &Connection, chat: &str, cursor: MessageCursor, limit: 
     messages(db, chat, Around::After(MessageCursor { at: cursor.at, n: cursor.n.saturating_sub(1) }), limit)
 }
 
-/// How many messages `chat` has.
+/// How many messages `chat` has, as the writer keeps count.
 pub fn message_count(db: &Connection, chat: &str) -> Result<u64> {
-    let count: i64 = db
-        .prepare_cached("SELECT count(*) FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1)")?
-        .query_row([chat], |r| r.get(0))?;
-    Ok(count.max(0) as u64)
+    let count: Option<i64> = db
+        .prepare_cached("SELECT message_count FROM chats WHERE id = ?1")?
+        .query_row([chat], |r| r.get(0))
+        .optional()?;
+    Ok(count.unwrap_or(0).max(0) as u64)
 }
 
-/// How many messages in `chat` come after `cursor`.
-pub fn messages_after(db: &Connection, chat: &str, cursor: MessageCursor) -> Result<u64> {
+/// How many messages in `chat` come after `cursor`, counting no further than `most`, so it costs
+/// the same however deep the cursor is.
+pub fn messages_after(db: &Connection, chat: &str, cursor: MessageCursor, most: u64) -> Result<u64> {
     let count: i64 = db
         .prepare_cached(
-            "SELECT count(*) FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1) AND (at, n) > (?2, ?3)",
+            "SELECT count(*) FROM (SELECT 1 FROM messages
+            WHERE chat = (SELECT n FROM chats WHERE id = ?1) AND (at, n) > (?2, ?3) LIMIT ?4)",
         )?
-        .query_row(params![chat, cursor.at, cursor.n], |r| r.get(0))?;
+        .query_row(params![chat, cursor.at, cursor.n, most as i64], |r| r.get(0))?;
     Ok(count.max(0) as u64)
 }
 

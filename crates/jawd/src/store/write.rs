@@ -241,6 +241,7 @@ fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) ->
         .optional()?;
     let Some((chat, n)) = found else { return Ok(false) };
     db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([n])?;
+    db.prepare_cached("UPDATE chats SET message_count = message_count - 1 WHERE n = ?1")?.execute([chat])?;
     let seq = stamps.seq(MESSAGE, Some(n));
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
     let seq = stamps.seq(CHAT, Some(chat));
@@ -555,6 +556,9 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     };
     let Some(n) = changed else { return Ok(false) };
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+    if existing.is_none() {
+        db.prepare_cached("UPDATE chats SET message_count = message_count + 1 WHERE n = ?1")?.execute([chat])?;
+    }
     // The chat's newest message sets its sort; older history never moves it.
     let seq = stamps.seq(CHAT, Some(chat));
     let moved = db
