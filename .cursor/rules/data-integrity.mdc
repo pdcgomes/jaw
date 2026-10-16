@@ -1,0 +1,37 @@
+---
+description: Data integrity in jaw. Every change to the data layer (jaw.db, session.db, the spool, acks, migrations, queries, PRAGMAs) follows the design's Data integrity rules and is audited by the database expert before it lands.
+alwaysApply: true
+---
+
+# Data integrity
+
+Nothing is ever lost and the data is never inconsistent (the design's seventh principle). The data layer is the most critical part of jaw.
+
+## What counts as the data layer
+
+Any change that touches, or changes the behaviour of:
+- `crates/jawd/src/store/`, `crates/jawd/src/sync*`, `crates/jawd/src/feed/`, `crates/jawd/src/find*`
+- `engine/internal/wa/` and `proto/engine/` (session.db, acks, the spool)
+- any SQL, migration, index, trigger, PRAGMA, transaction boundary, ack or file written for the data, wherever it is
+
+`scripts/check-data-audit.py` holds the list of paths; extend it when the data layer grows.
+
+## Rules
+
+Read "jawd › Storage › Data integrity" and "Migrations" in `docs/plans/2026-10-16-jaw-design.md` before changing the data layer, and follow every rule there. The ones broken most easily:
+- Nothing is acknowledged before a synced commit (`FULL`, `fullfsync` on macOS). `checkpoint_fullfsync` on every connection.
+- Every write is an idempotent upsert with merge rules; replays, duplicates and out-of-order arrivals change nothing twice. Failures are quarantined, never dropped.
+- Counters are derived (triggers or recomputed in the same transaction), never adjusted by hand.
+- A merged migration is never edited; take the next number when you merge; declare its kind (schema step, data step, backfill) and its tables' class; never drop jaw's own data.
+- No `OFFSET`, no scans of large tables, no temporary b-tree sorts, no `ANALYZE`; pin new statements' plans in the plan test.
+- Row keys others hold are never reused (`AUTOINCREMENT` where rows are deleted).
+- Every file and queue is bounded and reported in `jawd status`.
+
+## The audit, before landing
+
+1. When the gate passes, and before pushing, have the database expert audit the branch: launch the `database-expert` subagent (`.cursor/agents/database-expert.md`; if that type isn't offered, launch a general-purpose subagent with that file as its brief) with the worktree path and `origin/main..HEAD`.
+2. Fix everything it marks as data loss or inconsistency, then have it audit again. It writes `docs/audits/YYYY-MM-DD-<topic>.md` ending in `Verdict: approved`.
+3. Commit the note in the branch, and give every commit that touches the data layer the trailer `Data-Audit: docs/audits/<file>.md`, for example `git rebase origin/main -x 'git commit --amend --no-edit --trailer "Data-Audit: docs/audits/2026-10-17-sync.md"'`.
+4. `make check-audit` must pass locally; CI runs the same check and fails a push without it.
+
+Never skip, fake or self-write the audit, and never land a data-layer change whose audit isn't `Verdict: approved`.

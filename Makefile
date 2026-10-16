@@ -4,7 +4,7 @@ GO ?= go
 CARGO ?= cargo
 BUF := github.com/bufbuild/buf/cmd/buf@v1.74.0
 
-.PHONY: build engine rust test lint fmt proto sync-protos check-generated clean
+.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit clean
 
 build: engine rust
 
@@ -41,6 +41,10 @@ sync-protos:
 check-generated: proto
 	python3 scripts/sync-protos.py --check
 	git diff --exit-code -- engine/internal/link/enginepb
+
+# Every commit since origin/main that touches the data layer names an approved audit.
+check-audit:
+	python3 scripts/check-data-audit.py origin/main HEAD
 
 clean:
 	$(CARGO) clean
