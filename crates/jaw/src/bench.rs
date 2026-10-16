@@ -20,6 +20,8 @@ pub struct Flood {
     pub seconds: f64,
     /// A key this often.
     pub every: Duration,
+    /// How long the flood runs before the keys begin, so they're measured once it's steady.
+    pub warm: Duration,
 }
 
 pub struct Report {
@@ -105,10 +107,11 @@ pub fn flood(f: &Flood) -> Result<Report> {
     view.resize(f.width, f.height);
     let mut terminal = Terminal::new(TestBackend::new(f.width, f.height))?;
     let mut probe = Probe::default();
-    let flooding = demo.flood(f.rate, f.seconds);
-    let (every, seconds) = (f.every, f.seconds);
+    let flooding = demo.flood(f.rate, f.warm.as_secs_f64() + f.seconds);
+    let (every, seconds, warm) = (f.every, f.seconds, f.warm);
     let presser = std::thread::spawn(move || {
         let keys = script();
+        std::thread::sleep(warm);
         let begun = Instant::now();
         let end = begun + Duration::from_secs_f64(seconds);
         let mut i = 0;
@@ -154,21 +157,33 @@ mod tests {
     #[test]
     fn a_keypress_is_drawn_within_16_ms_at_p99_while_2000_messages_a_second_arrive() {
         let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let report =
-            flood(&Flood { width: 140, height: 40, rate: 2_000, seconds: 4.0, every: Duration::from_millis(12) })
-                .unwrap();
+        let report = flood(&Flood {
+            width: 140,
+            height: 40,
+            rate: 2_000,
+            seconds: 4.0,
+            every: Duration::from_millis(12),
+            warm: Duration::from_secs(1),
+        })
+        .unwrap();
         eprintln!("{}", report.describe());
         assert!(report.keys.len() >= 200, "{}", report.describe());
-        assert!(report.messages as f64 >= 2_000.0 * 3.5, "{}", report.describe());
+        assert!(report.messages as f64 >= 2_000.0 * 4.5, "{}", report.describe());
         assert!(report.at(0.99) <= Duration::from_millis(16), "{}", report.describe());
     }
 
     #[test]
     fn a_flood_alone_is_drawn_at_most_60_times_a_second() {
         let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-        let report =
-            flood(&Flood { width: 100, height: 30, rate: 2_000, seconds: 2.0, every: Duration::from_secs(60) })
-                .unwrap();
+        let report = flood(&Flood {
+            width: 100,
+            height: 30,
+            rate: 2_000,
+            seconds: 2.0,
+            every: Duration::from_secs(60),
+            warm: Duration::ZERO,
+        })
+        .unwrap();
         assert!(report.keys.is_empty());
         assert!(report.frames as f64 / report.seconds <= 61.0, "{}", report.describe());
         assert!(report.frames as f64 / report.seconds >= 20.0, "it keeps drawing what arrives: {}", report.describe());

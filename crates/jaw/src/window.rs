@@ -36,10 +36,14 @@ impl Chats {
         self.sort();
     }
 
+    /// Sorts the order in place, which is nearly sorted already when one chat has moved; it's
+    /// rebuilt only when chats came or went.
     fn sort(&mut self) {
-        let mut order: Vec<&Chat> = self.rows.values().collect();
-        order.sort_by(|a, b| b.sort.cmp(&a.sort).then_with(|| a.id.cmp(&b.id)));
-        self.order = order.into_iter().map(|c| c.id.clone()).collect();
+        let rows = &self.rows;
+        if self.order.len() != rows.len() || self.order.iter().any(|id| !rows.contains_key(id)) {
+            self.order = rows.keys().cloned().collect();
+        }
+        self.order.sort_by(|a, b| rows[b].sort.cmp(&rows[a].sort).then_with(|| a.cmp(b)));
     }
 
     pub fn get(&self, id: &str) -> Option<&Chat> {

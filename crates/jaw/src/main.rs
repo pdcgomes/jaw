@@ -114,7 +114,14 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Bench { rate, seconds, width, height }) => {
-            let flood = bench::Flood { width, height, rate, seconds, every: Duration::from_millis(12) };
+            let flood = bench::Flood {
+                width,
+                height,
+                rate,
+                seconds,
+                every: Duration::from_millis(12),
+                warm: Duration::from_secs(1),
+            };
             println!("{}", bench::flood(&flood)?.describe());
             Ok(())
         }
