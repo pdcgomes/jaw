@@ -118,6 +118,9 @@ enum Bench {
         window: u32,
         #[arg(long, default_value_t = 300)]
         chats: u32,
+        /// Messages written one at a time after the burst, 200 ms apart
+        #[arg(long, default_value_t = 50)]
+        lone: u32,
     },
 }
 
@@ -132,7 +135,9 @@ fn main() -> Result<()> {
         Some(Command::Bench(Bench::Find { messages, chats, people, runs })) => {
             bench_find(find::bench::Plan { messages, chats, people, runs })
         }
-        Some(Command::Bench(Bench::Feed { rate, seconds, window, chats })) => bench_feed(rate, seconds, window, chats),
+        Some(Command::Bench(Bench::Feed { rate, seconds, window, chats, lone })) => {
+            bench_feed(feed::bench::Plan { rate, seconds, window, chats, lone })
+        }
         None => run(&home, cli.engine, cli.no_notify),
     }
 }
@@ -147,10 +152,10 @@ fn bench_find(plan: find::bench::Plan) -> Result<()> {
 }
 
 /// Serves a made-up jaw.db in a folder of its own, removed afterwards.
-fn bench_feed(rate: u32, seconds: u32, window: u32, chats: u32) -> Result<()> {
+fn bench_feed(plan: feed::bench::Plan) -> Result<()> {
     let scratch = std::env::temp_dir().join(format!("jaw-bench-feed-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;
-    let outcome = runtime()?.block_on(feed::bench::run(&scratch, feed::bench::Plan { rate, seconds, window, chats }));
+    let outcome = runtime()?.block_on(feed::bench::run(&scratch, plan));
     let _ = std::fs::remove_dir_all(&scratch);
     outcome
 }

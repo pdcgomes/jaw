@@ -51,11 +51,6 @@ pub struct Client {
     since: Option<u64>,
     windows: BTreeMap<String, Window>,
     next: u64,
-    /// When the first and the latest changes waiting to be sent came.
-    first: Option<Instant>,
-    last: Option<Instant>,
-    /// When the last batch went, so the next waits at least `Timing::burst`.
-    flushed: Option<Instant>,
     /// Since when a flush has waited for room in the queue.
     blocked: Option<Instant>,
     /// Watches dropped for falling behind, owed a `resync`.
@@ -65,7 +60,11 @@ pub struct Client {
 struct Window {
     spec: Spec,
     state: State,
-    dirty: bool,
+    /// When the first and the latest changes waiting to be sent came, if any are.
+    first: Option<Instant>,
+    last: Option<Instant>,
+    /// When its last batch went, so the next waits at least `Timing::burst`.
+    sent: Option<Instant>,
     /// When a chat list last took its order from a fresh query, and whether it owes one.
     reordered: Instant,
     reorder: bool,
@@ -294,6 +293,30 @@ async fn recv(changes: &mut Option<broadcast::Receiver<Arc<Changes>>>) -> Result
 }
 
 impl Window {
+    fn new(spec: Spec) -> Window {
+        let now = Instant::now();
+        Window { spec, state: State::default(), first: None, last: None, sent: None, reordered: now, reorder: false }
+    }
+
+    /// Notes a change waiting since `at`.
+    fn wait(&mut self, at: Instant) {
+        self.first = Some(self.first.map_or(at, |first| first.min(at)));
+        self.last = Some(self.last.map_or(at, |last| last.max(at)));
+    }
+
+    /// When the changes waiting are due: the first after a quiet spell at once, so a lone message
+    /// goes as soon as it's committed; those that follow it once the feed has been quiet for
+    /// `quiet` or the first has waited `burst`, and never sooner than `burst` after the last batch.
+    fn due(&self, timing: &Timing) -> Option<Instant> {
+        let (first, last) = (self.first?, self.last?);
+        match self.sent {
+            Some(sent) if first < sent + timing.burst => {
+                Some((last + timing.quiet).min(first + timing.burst).max(sent + timing.burst))
+            }
+            _ => Some(first),
+        }
+    }
+
     fn touched_by(&self, changes: &Changes) -> bool {
         match (&self.spec, self.state.chat) {
             (Spec::Chats(_), _) => !changes.chats.is_empty() || !changes.people.is_empty(),
@@ -324,7 +347,8 @@ impl Window {
     /// Takes what its interface now holds; `reordered` says when, if it took a new order.
     fn keep(&mut self, state: State, reordered: Option<Instant>) {
         self.state = state;
-        self.dirty = false;
+        self.first = None;
+        self.last = None;
         match reordered {
             Some(at) => {
                 self.reordered = at;
@@ -352,9 +376,6 @@ impl Client {
             since: None,
             windows: BTreeMap::new(),
             next: 1,
-            first: None,
-            last: None,
-            flushed: None,
             blocked: None,
             resync: Vec::new(),
         }
@@ -472,8 +493,7 @@ impl Client {
         let (update, state) = settle(&have, snapshot, since);
         let watch = format!("w{}", self.next);
         self.next += 1;
-        let mut window =
-            Window { spec, state: State::default(), dirty: false, reordered: Instant::now(), reorder: false };
+        let mut window = Window::new(spec);
         window.keep(state, Some(Instant::now()));
         self.windows.insert(watch.clone(), window);
         Ok(result(watch, update))
@@ -492,6 +512,10 @@ impl Client {
     /// blocked one waiting too long. Cancelling it loses nothing.
     pub async fn ready(&mut self) -> Ready {
         let flush_at = if self.blocked.is_none() { self.flush_at() } else { None };
+        // tokio's timers tick each millisecond, which a flush already due shouldn't wait for.
+        if flush_at.is_some_and(|at| at <= Instant::now()) {
+            return Ready::Flush;
+        }
         let behind_at = self.blocked.filter(|_| !self.windows.is_empty()).map(|since| since + self.timing.behind);
         let out = self.blocked.map(|_| self.out.clone());
         tokio::select! {
@@ -507,40 +531,27 @@ impl Client {
         match ready {
             Ready::Changes(Ok(changes)) => self.mark(&changes),
             Ready::Changes(Err(RecvError::Lagged(_))) => {
+                let now = Instant::now();
                 for window in self.windows.values_mut() {
-                    window.dirty = true;
+                    window.wait(now);
                 }
-                self.waiting(Instant::now());
             }
             Ready::Changes(Err(RecvError::Closed)) => self.changes = None,
             Ready::Flush | Ready::Room => self.flush().await,
             Ready::Behind => {
                 if self.blocked.is_some_and(|since| since.elapsed() >= self.timing.behind) {
                     self.resync.extend(std::mem::take(&mut self.windows).into_keys());
-                    self.first = None;
-                    self.last = None;
                 }
             }
         }
     }
 
     fn mark(&mut self, changes: &Changes) {
-        let mut touched = false;
         for window in self.windows.values_mut() {
             if window.touched_by(changes) {
-                window.dirty = true;
-                touched = true;
+                window.wait(changes.at);
             }
         }
-        if touched {
-            self.waiting(changes.at);
-        }
-    }
-
-    /// Notes a change waiting since `at`.
-    fn waiting(&mut self, at: Instant) {
-        self.first = Some(self.first.map_or(at, |first| first.min(at)));
-        self.last = Some(self.last.map_or(at, |last| last.max(at)));
     }
 
     fn flush_at(&self) -> Option<Instant> {
@@ -548,19 +559,11 @@ impl Client {
             return Some(Instant::now());
         }
         let holding = (self.catching_up)();
-        let mut at = None;
-        if let (Some(first), Some(last)) = (self.first, self.last)
-            && self.windows.values().any(|window| window.dirty)
-        {
-            let due = (last + self.timing.quiet).min(first + self.timing.burst);
-            at = Some(self.flushed.map_or(due, |flushed| due.max(flushed + self.timing.burst)));
-        }
-        for window in self.windows.values() {
-            if let Some(reorder) = window.reorder_at(holding, &self.timing) {
-                at = Some(at.map_or(reorder, |at: Instant| at.min(reorder)));
-            }
-        }
-        at
+        self.windows
+            .values()
+            .flat_map(|window| [window.due(&self.timing), window.reorder_at(holding, &self.timing)])
+            .flatten()
+            .min()
     }
 
     /// Sends what each due window's interface lacks, until the queue is full.
@@ -574,11 +577,13 @@ impl Client {
         }
         let holding = (self.catching_up)();
         let now = Instant::now();
-        self.flushed = Some(now);
         let due: Vec<String> = self
             .windows
             .iter()
-            .filter(|(_, window)| window.dirty || (window.reorder && window.may_reorder(now, holding, &self.timing)))
+            .filter(|(_, window)| {
+                window.due(&self.timing).is_some_and(|due| due <= now)
+                    || (window.reorder && window.may_reorder(now, holding, &self.timing))
+            })
             .map(|(watch, _)| watch.clone())
             .collect();
         for watch in due {
@@ -597,7 +602,8 @@ impl Client {
                 Ok(snapshot) => snapshot,
                 Err(e) => {
                     eprintln!("jawd: can't bring {watch} up to date: {}", e.message);
-                    window.dirty = false;
+                    window.first = None;
+                    window.last = None;
                     continue;
                 }
             };
@@ -615,7 +621,10 @@ impl Client {
             match push(watch, update, &window.state) {
                 None => window.keep(state, reordered),
                 Some(line) => match self.out.try_send(line) {
-                    Ok(()) => window.keep(state, reordered),
+                    Ok(()) => {
+                        window.keep(state, reordered);
+                        window.sent = Some(Instant::now());
+                    }
                     Err(_) => {
                         self.blocked.get_or_insert_with(Instant::now);
                         return;
@@ -623,14 +632,12 @@ impl Client {
                 },
             }
         }
-        self.first = None;
-        self.last = None;
         self.blocked = None;
     }
 
     /// Whether it has updates or resyncs it hasn't sent.
     #[cfg(test)]
     pub fn pending(&self) -> bool {
-        !self.resync.is_empty() || self.windows.values().any(|window| window.dirty || window.reorder)
+        !self.resync.is_empty() || self.windows.values().any(|window| window.first.is_some() || window.reorder)
     }
 }

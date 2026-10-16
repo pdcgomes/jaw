@@ -619,6 +619,41 @@ async fn a_burst_of_2000_changes_becomes_at_most_20_batches_a_second_per_window(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_lone_change_after_quiet_goes_at_once_rather_than_waiting_to_coalesce() {
+    // Coalescing waits of 100 ms, so a change that waited for one couldn't hide in a debug build's
+    // slowness; the 5 ms budget itself is measured in a release build by jawd bench feed.
+    let slow = Timing { quiet: ms(100), burst: ms(100), ..Timing::default() };
+    let bed = Bed::new(slow);
+    bed.apply(vec![Change::Message(text(OPEN, "first", 1_000, Some(OPEN), "hi"))]).await;
+    let mut watcher = bed.watcher(64);
+    watcher.watch("chats.watch", json!({"around": "top", "after": 20})).await;
+    let messages = watcher.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 50})).await;
+    let Watcher { client, mut lines, .. } = watcher;
+    let task = running(client);
+    let mut delays = Vec::new();
+    for n in 0..10i64 {
+        // Longer than a burst, so each message comes after a quiet spell.
+        tokio::time::sleep(ms(120)).await;
+        let id = format!("lone{n}");
+        bed.apply(vec![Change::Message(text(OPEN, &id, 2_000 + n, Some(OPEN), "on its own"))]).await;
+        let committed = Instant::now();
+        loop {
+            let line = tokio::time::timeout(Duration::from_secs(1), lines.recv()).await.unwrap().unwrap();
+            let FromJawd::Push(push) = serde_json::from_slice(&line).unwrap() else {
+                panic!("a reply among the pushes")
+            };
+            let carries = push.params["upsert"].as_array().into_iter().flatten().any(|row| row["id"] == id.as_str());
+            if push.params["watch"] == messages.as_str() && carries {
+                delays.push(committed.elapsed());
+                break;
+            }
+        }
+    }
+    task.abort();
+    assert!(delays.iter().all(|&delay| delay < ms(50)), "a lone message waited to coalesce: {delays:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_slow_client_is_bounded_holds_nobody_up_and_is_told_to_watch_again() {
     let bed = Bed::new(brisk());
     bed.apply(vec![Change::Message(text(OPEN, "first", 1_000, Some(OPEN), "hi"))]).await;

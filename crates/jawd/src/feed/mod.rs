@@ -1,8 +1,8 @@
 //! The change feed and windows. One task reads the store's events as the writer commits them and
 //! tells every connection which rows changed. Each connection's `Client` keeps its windows, marks
-//! the ones a change touches, and when the feed has been quiet for 5 ms, or every 50 ms during a
-//! burst, and never sooner than 50 ms after its last batch, reads each again and sends what
-//! differs from what its interface holds. A window is
+//! the ones a change touches, reads each again and sends what differs from what its interface
+//! holds: the first change after a quiet spell at once, then the rest of a burst when the feed has
+//! been quiet for 5 ms or every 50 ms, a window's batches never less than 50 ms apart. A window is
 //! always what a fresh query gives, so it can't drift, and a connection keeps only its windows'
 //! rows' hashes: a slow interface never holds jawd up, it only gets fewer, larger batches, and one
 //! that stops reading for long is told to watch again.
@@ -41,9 +41,10 @@ pub struct Changes {
 /// How a client's windows are paced.
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
-    /// How long the feed is quiet before a batch goes.
+    /// How long the feed is quiet before the rest of a burst goes.
     pub quiet: Duration,
-    /// The longest a change waits during a burst, and the shortest time between batches.
+    /// The longest a change waits during a burst, the shortest time between a window's batches,
+    /// and how long a window must have been sent nothing for a change to go at once.
     pub burst: Duration,
     /// How often the chat list reorders while catching up.
     pub hold: Duration,

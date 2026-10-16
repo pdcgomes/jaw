@@ -1,8 +1,9 @@
 //! `jawd bench feed`: an interface on the real socket watching the chat list and a chat's newest
 //! messages while made-up messages are written at a steady rate, as the converter would write
-//! them, with a few deleted for me. It reports the batches a second each window got, how long
-//! each message took from its commit to the interface reading its push, and the CPU jawd spent,
-//! with the writes alone first so the windows' share shows.
+//! them, with a few deleted for me, then messages one at a time after quiet spells. It reports
+//! the batches a second each window got during the burst, how long each message took from its
+//! commit to the interface reading its push, in the burst and alone, and the CPU jawd spent, with
+//! the writes alone first so the windows' share shows.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
@@ -27,7 +28,12 @@ pub struct Plan {
     pub seconds: u32,
     pub window: u32,
     pub chats: u32,
+    /// Messages written one at a time after the burst, each after a quiet spell.
+    pub lone: u32,
 }
+
+/// How long the feed is quiet before each lone message.
+const LONE_EVERY: Duration = Duration::from_millis(200);
 
 /// The chat the interface has open, and how many messages it has before the bench writes.
 const OPEN: &str = "351900000000@s.whatsapp.net";
@@ -118,19 +124,36 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
     let started = Instant::now();
     let together = write(&store, &plan, seconds, "b", commits.clone()).await?;
     let wrote = started.elapsed();
+    let burst_ended = Instant::now() + Duration::from_millis(200);
+    for n in 0..plan.lone {
+        tokio::time::sleep(LONE_EVERY).await;
+        let id = format!("l{n}");
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+        store.apply(Lane::Live, vec![message(OPEN.into(), id.clone(), at)]).await?;
+        commits.lock().expect("commit times").insert(id, Instant::now());
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
     stop.store(true, Ordering::Relaxed);
-    let seen = client.join().map_err(|_| anyhow::anyhow!("the bench's interface panicked"))??;
+    let mut seen = client.join().map_err(|_| anyhow::anyhow!("the bench's interface panicked"))??;
+    seen.chats.retain(|&at| at < burst_ended);
+    seen.messages.retain(|&at| at < burst_ended);
 
     let commits = commits.lock().expect("commit times");
-    let mut delays: Vec<Duration> = seen
-        .rows
-        .iter()
-        .filter_map(|(id, read)| commits.get(id).map(|committed: &Instant| read.saturating_duration_since(*committed)))
-        .collect();
-    delays.sort();
-    let percentile =
-        |p: f64| delays.get(((delays.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or_default();
+    let delays_of = |run: &str| {
+        let mut delays: Vec<Duration> = seen
+            .rows
+            .iter()
+            .filter(|(id, _)| id.starts_with(run))
+            .filter_map(|(id, read)| commits.get(id).map(|committed| read.saturating_duration_since(*committed)))
+            .collect();
+        delays.sort();
+        delays
+    };
+    let (delays, lone) = (delays_of("b"), delays_of("l"));
+    let percentile = |delays: &[Duration], p: f64| {
+        let at = delays.get(((delays.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or_default();
+        at.as_secs_f64() * 1e3
+    };
     let per_second = |n: usize| n as f64 / wrote.as_secs_f64();
     let busiest = |times: &[Instant]| {
         let mut most = 0;
@@ -159,9 +182,17 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
     );
     println!(
         "commit to push   p50 {:.1} ms, p99 {:.1} ms, max {:.1} ms (committed to read by the interface)",
-        percentile(0.5).as_secs_f64() * 1e3,
-        percentile(0.99).as_secs_f64() * 1e3,
-        delays.last().copied().unwrap_or_default().as_secs_f64() * 1e3
+        percentile(&delays, 0.5),
+        percentile(&delays, 0.99),
+        percentile(&delays, 1.0)
+    );
+    println!(
+        "a lone message   p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms from commit to push, for {} messages {} ms apart after the burst",
+        percentile(&lone, 0.5),
+        percentile(&lone, 0.99),
+        percentile(&lone, 1.0),
+        lone.len(),
+        LONE_EVERY.as_millis()
     );
     println!(
         "jawd's CPU       {:.1}% of a core writing alone, {:.1}% with the interface watching (its own parsing left out, {:.1}%)",
