@@ -257,6 +257,19 @@ Makefile                build, test, install, demo, perf, proto
 - **M7 A second engine:** whatsapp-rust wired in as `RustEngine`, run beside the Go engine on the spare number, and compared on the contract suite, the live checklist, the load harness, reconnects and logouts, and build size and time; the default is picked for M8.
 - **M8 Ready to live with:** full load runs, every failure state, a README with pictures, `make install` and a Homebrew tap; before going public, a look at WhatsApp's terms and Meta's rules on side projects.
 
+## After the release: catching up and asking
+
+When many unread messages pile up, a catch-up feed says what's going on in each chat and what's worth your attention; and you can ask in plain words, such as "my wife asked me to do something later today, what was it?", and get the answer with the messages it rests on. It's M9, after the release, and nothing earlier depends on it, but its shape is set now so earlier steps keep the door open.
+
+- **Private by default.** Everything runs on the machine: a local model, local embeddings, nothing sent anywhere. Bringing your own key for a hosted model is a choice made per chat or folder, sends only the snippets retrieved for that question, and shows them before they go. The vectors and notes jaw derives are kept as the messages are, in jaw's folder.
+- **Its own process.** Models need gigabytes, so they run in a helper jawd starts when they're needed, as it does ffmpeg, and jawd's own budgets don't change: generation through llama.cpp or MLX on the Mac, and a small multilingual embedding model, since chats mix languages.
+- **Vectors in jaw.db,** through sqlite-vec, compiled in like FTS5, stored as int8: one store, the same migrations and backups. Exact search should do for a million messages; an in-process HNSW index is the step up if it doesn't.
+- **Conversation windows, not single messages:** a chat is cut at gaps in time and changes of speaker, so "ok" isn't embedded alone; long messages are embedded on their own too.
+- **Retrieval that mixes kinds:** the question's people are resolved through contacts, folders and relationships you can tell jaw ("my wife" is a person); its times become filters ("later today"); FTS5 and the vectors both search within those filters and their results are merged; the model answers from what they found and cites each message.
+- **Work done ahead,** in the background lane, never ahead of a live message: media turned into text (voice transcribed, images described and their text read, each optional), what's asked of you, dates, plans and decisions pulled out as notes that point to their messages, and summaries kept per chat until new messages arrive, so the catch-up feed opens at once.
+- **To measure first:** which local models summarise busy group chats well enough on an M-series Mac, how fast and in how much memory, and how fast history embeds; the feature only promises what the measurements show.
+- **In the protocol:** `catch_up.watch`, a window of chats with their summaries and what needs you, and `ask`, whose answer streams in with its citations.
+
 ## Later
 
 - Sending stickers; group admin; several numbers; video inside the terminal (mpv's kitty output); voice messages transcribed on the machine.
