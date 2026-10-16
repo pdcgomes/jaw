@@ -29,17 +29,50 @@ pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, merges: Mer
         Ok(other) => eprintln!("jawd: the engine answered groups with {other:?}"),
         Err(e) => eprintln!("jawd: can't list the groups: {e}"),
     }
-    if resync {
-        let names: Vec<String> = COLLECTIONS.iter().map(|name| name.to_string()).collect();
-        let started = std::time::Instant::now();
-        match engine.call(pb::command::Kind::AppStateResync(pb::AppStateResync { names })).await {
-            Ok(_) => eprintln!("jawd: fetched app state again in full in {:.1} s", started.elapsed().as_secs_f64()),
-            Err(e) => eprintln!("jawd: can't fetch the app state again: {e}"),
-        }
+    if resync && !resynced(&engine).await {
+        tokio::spawn(resync_again(engine.clone()));
     }
     lids(&store, &engine).await;
     merges.poke();
     avatars.seed(&store).await;
+}
+
+/// Asks the engine to fetch every app-state collection again in full, saying whether it did.
+async fn resynced(engine: &Supervisor) -> bool {
+    let names: Vec<String> = COLLECTIONS.iter().map(|name| name.to_string()).collect();
+    let started = std::time::Instant::now();
+    match engine.call(pb::command::Kind::AppStateResync(pb::AppStateResync { names })).await {
+        Ok(_) => {
+            eprintln!("jawd: fetched app state again in full in {:.1} s", started.elapsed().as_secs_f64());
+            true
+        }
+        Err(e) => {
+            eprintln!("jawd: can't fetch the app state again: {e}");
+            false
+        }
+    }
+}
+
+/// The first wait before fetching app state again after it failed; it doubles to RESYNC_MOST.
+const RESYNC_FIRST: std::time::Duration = std::time::Duration::from_secs(1);
+const RESYNC_MOST: std::time::Duration = std::time::Duration::from_secs(60);
+/// How many times a failed refetch is tried again before it waits for the next engine.
+const RESYNC_TRIES: u32 = 10;
+
+/// Tries the full refetch again while the engine that failed it runs, since until it succeeds
+/// what an engine stopped in the middle of left behind stays missing. An engine started again
+/// fetches it itself.
+async fn resync_again(engine: Supervisor) {
+    let restarts = engine.status().restarts;
+    let mut pause = RESYNC_FIRST;
+    for _ in 0..RESYNC_TRIES {
+        tokio::time::sleep(pause).await;
+        if engine.status().restarts != restarts || resynced(&engine).await {
+            return;
+        }
+        pause = (pause * 2).min(RESYNC_MOST);
+    }
+    eprintln!("jawd: gave up fetching the app state again; the next engine to connect fetches it");
 }
 
 async fn store_changes(store: &Store, changes: Vec<Change>, what: &str) {

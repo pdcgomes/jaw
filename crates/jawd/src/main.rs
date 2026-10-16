@@ -227,9 +227,34 @@ const STOPPING: Duration = Duration::from_secs(3);
 struct Started {
     state: Arc<state::State>,
     notifications: Option<tokio::task::JoinHandle<()>>,
+    /// jaw.lock, held while jawd runs.
+    _lock: std::fs::File,
+}
+
+/// Takes jaw.lock in `home`, or says another jawd has it, so two never open jaw.db together: two
+/// would race the backup an upgrade takes, and each other's writes.
+fn lock(home: &Path) -> Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let path = home.join("jaw.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("can't open {}", path.display()))?;
+    // SAFETY: the descriptor is the open file's, which outlives the call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            anyhow::bail!("another jawd is running on {}", home.display());
+        }
+        return Err(e).with_context(|| format!("can't lock {}", path.display()));
+    }
+    Ok(file)
 }
 
 async fn start(home: &Path, kind: EngineKind, no_notify: bool) -> Result<Started> {
+    let lock = lock(home)?;
     let store = store::Store::open(home)?;
     std::fs::create_dir_all(home.join("spool"))?;
     sync::running(&store).await?;
@@ -264,7 +289,7 @@ async fn start(home: &Path, kind: EngineKind, no_notify: bool) -> Result<Started
             notify::Timing::default(),
         )
     });
-    Ok(Started { state, notifications })
+    Ok(Started { state, notifications, _lock: lock })
 }
 
 /// Stops jawd in the order that keeps its data whole: first it stops taking work, so no interface
@@ -272,7 +297,7 @@ async fn start(home: &Path, kind: EngineKind, no_notify: bool) -> Result<Started
 /// and started no more, whatever its supervisor was waiting for, and anything it handed over that
 /// jawd hadn't acked comes again from WhatsApp; only then does jaw.db note a clean stop, and the
 /// store closes last, once jawd's tasks are dropped.
-async fn stop(Started { state, notifications }: Started, socket: &Path) {
+async fn stop(Started { state, notifications, .. }: Started, socket: &Path) {
     state.stop();
     let _ = std::fs::remove_file(socket);
     if let Some(notifications) = notifications {
@@ -286,8 +311,8 @@ async fn stop(Started { state, notifications }: Started, socket: &Path) {
     if let Some(store) = state.store() {
         match tokio::time::timeout(EMPTYING, store.truncate()).await {
             Ok(Ok(())) => {
-                if let Err(e) = store.remove_backups() {
-                    eprintln!("jawd: can't remove the backups taken before upgrading jaw.db: {e:#}");
+                if let Err(e) = store.remove_old_backups() {
+                    eprintln!("jawd: can't remove the old backups taken before upgrading jaw.db: {e:#}");
                 }
             }
             Ok(Err(e)) => eprintln!("jawd: can't empty the WAL at the stop: {e:#}"),
@@ -535,5 +560,15 @@ mod tests {
         assert!(pushes > 0, "the window was busy");
         assert!(took < STOPPING / 3, "stopping took {took:?}");
         assert!(!socket.exists(), "the socket is removed");
+    }
+
+    #[test]
+    fn a_second_jawd_on_the_same_folder_is_refused_until_the_first_has_gone() {
+        let home = tempfile::tempdir().unwrap();
+        let first = lock(home.path()).unwrap();
+        let refused = lock(home.path()).unwrap_err().to_string();
+        assert!(refused.contains("another jawd is running"), "{refused}");
+        drop(first);
+        lock(home.path()).unwrap();
     }
 }

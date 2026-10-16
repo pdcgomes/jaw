@@ -218,11 +218,6 @@ UPDATE chats SET frecency = ?2, opened_at = ?3, v = ?4 WHERE n = ?1
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
-SELECT m.chat, m.n FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = ?1 AND m.id = ?2
-    SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    SEARCH m USING COVERING INDEX messages_by_id (chat=? AND id=?)
-
--- src/store/write.rs
 INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -279,8 +274,8 @@ SELECT n FROM person_jids WHERE jid = ?1
 
 -- src/store/write.rs
 INSERT INTO people (v) VALUES (?1) RETURNING n
-    SEARCH folder_items USING COVERING INDEX folder_items_by_person (person=?)
     SEARCH chats USING COVERING INDEX chats_by_person (person=?)
+    SEARCH folder_items USING COVERING INDEX folder_items_by_person (person=?)
     SEARCH person_jids USING COVERING INDEX person_jids_by_person (person=?)
 
 -- src/store/write.rs
@@ -347,8 +342,8 @@ DELETE FROM folder_items WHERE person = ?1
 -- src/store/write.rs
 DELETE FROM people WHERE n = ?1
     SEARCH people USING INTEGER PRIMARY KEY (rowid=?)
-    SEARCH folder_items USING COVERING INDEX folder_items_by_person (person=?)
     SEARCH chats USING COVERING INDEX chats_by_person (person=?)
+    SEARCH folder_items USING COVERING INDEX folder_items_by_person (person=?)
     SEARCH person_jids USING COVERING INDEX person_jids_by_person (person=?)
 
 -- src/store/write.rs
@@ -394,13 +389,8 @@ SELECT gone, keep FROM chat_merges ORDER BY gone LIMIT 1
     SCAN chat_merges
 
 -- src/store/write.rs
-SELECT g.n, k.n FROM messages g LEFT JOIN messages k ON k.chat = ?2 AND k.id = g.id WHERE g.chat = ?1 LIMIT ?3
-    SEARCH g USING COVERING INDEX messages_by_id (chat=?)
-    SEARCH k USING COVERING INDEX messages_by_id (chat=? AND id=?) LEFT-JOIN
-
--- src/store/write.rs
-UPDATE messages SET chat = ?2, v = ?3 WHERE n = ?1
-    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+SELECT n FROM messages WHERE chat = ?1 LIMIT ?2
+    SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
 
 -- src/store/write.rs
 UPDATE chats SET last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), last_at = coalesce((SELECT at FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), 0), v = ?2 WHERE n = ?1
@@ -425,6 +415,44 @@ DELETE FROM chats WHERE n = ?1
     SEARCH group_members USING PRIMARY KEY (chat=?)
 
 -- src/store/write.rs
+SELECT id FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2
+    SEARCH tombstones USING PRIMARY KEY (chat=? AND id=?)
+
+-- src/store/write.rs
+SELECT n FROM messages WHERE chat = ?1 AND id = ?2
+    SEARCH messages USING COVERING INDEX messages_by_id (chat=? AND id=?)
+
+-- src/store/write.rs
+UPDATE messages SET chat = ?2, v = ?3 WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+SELECT id FROM chats WHERE n = ?1
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+SELECT 1 FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+SELECT 1 FROM chat_merges WHERE keep = ?1
+    SEARCH chat_merges USING COVERING INDEX chat_merges_by_keep (keep=?)
+
+-- src/store/write.rs
+SELECT m.chat, m.n FROM chat_merges c JOIN messages m ON m.chat = c.gone AND m.id = ?2 WHERE c.keep = ?1 LIMIT 1
+    SEARCH c USING COVERING INDEX chat_merges_by_keep (keep=?)
+    SEARCH m USING COVERING INDEX messages_by_id (chat=? AND id=?)
+
+-- src/store/write.rs
+SELECT c.n, m.n FROM chats c LEFT JOIN messages m ON m.chat = c.n AND m.id = ?2 WHERE c.id = ?1
+    SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH m USING COVERING INDEX messages_by_id (chat=? AND id=?) LEFT-JOIN
+
+-- src/store/write.rs
 UPDATE messages AS k SET text = iif(g.edited_at > coalesce(k.edited_at, -1), g.text, k.text), spans = iif(g.edited_at > coalesce(k.edited_at, -1), g.spans, k.spans), summary = iif(g.edited_at > coalesce(k.edited_at, -1), g.summary, k.summary), edited_at = max(coalesce(k.edited_at, g.edited_at), coalesce(g.edited_at, k.edited_at)), status = iif(coalesce(?4 ->> g.status, -1) > coalesce(?4 ->> k.status, -1), g.status, k.status), starred = max(k.starred, g.starred), mentions_me = max(k.mentions_me, g.mentions_me), raw = coalesce(k.raw, g.raw), envelope = coalesce(k.envelope, g.envelope), v = ?3 FROM (SELECT * FROM messages WHERE n = ?2) AS g WHERE k.n = ?1
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
@@ -442,6 +470,12 @@ INSERT OR IGNORE INTO poll_votes (message, voter, position, at) SELECT ?1, voter
     SEARCH poll_votes USING PRIMARY KEY (message=?)
 
 -- src/store/write.rs
+DELETE FROM media WHERE message = ?1 AND path IS NULL AND variant IN (SELECT variant FROM media WHERE message = ?2 AND path IS NOT NULL)
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+    LIST SUBQUERY 1
+      SEARCH media USING PRIMARY KEY (message=?)
+
+-- src/store/write.rs
 UPDATE OR IGNORE media SET message = ?1 WHERE message = ?2
     SEARCH media USING PRIMARY KEY (message=?)
 
@@ -452,10 +486,6 @@ SELECT deleted FROM messages WHERE n = ?1
 -- src/store/write.rs
 SELECT t FROM messages WHERE t BETWEEN ?1 AND ?2 ORDER BY t DESC LIMIT 1
     SEARCH messages USING COVERING INDEX sqlite_autoindex_messages_1 (t>? AND t<?)
-
--- src/store/write.rs
-SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2
-    SEARCH tombstones USING PRIMARY KEY (chat=? AND id=?)
 
 -- src/store/write.rs
 SELECT n, t, deleted, edited_at, starred, text, spans, summary, status FROM messages WHERE chat = ?1 AND id = ?2
@@ -495,11 +525,6 @@ SELECT n, sender, mine, at, effect FROM pending WHERE chat = ?1 AND target = ?2 
 -- src/store/write.rs
 DELETE FROM pending WHERE n = ?1
     SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
-
--- src/store/write.rs
-SELECT m.chat, m.n FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = ?1 AND m.id = ?2
-    SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    SEARCH m USING COVERING INDEX messages_by_id (chat=? AND id=?)
 
 -- src/store/write.rs
 SELECT 1 FROM tombstones t JOIN chats c ON c.n = t.chat WHERE c.id = ?1 AND t.id = ?2

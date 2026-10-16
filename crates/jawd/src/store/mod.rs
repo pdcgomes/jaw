@@ -102,6 +102,15 @@ struct Made {
     taken: usize,
 }
 
+/// Whether the transaction about to commit on `db` runs at FULL with F_FULLFSYNC, as the
+/// connection itself says, so a commit is counted synced, and an ack sent, only for what it ran
+/// under.
+fn commits_synced(db: &Connection) -> Result<bool> {
+    let synchronous: i64 = db.prepare_cached("PRAGMA synchronous")?.query_row([], |r| r.get(0))?;
+    let fullfsync: i64 = db.prepare_cached("PRAGMA fullfsync")?.query_row([], |r| r.get(0))?;
+    Ok(synchronous >= 2 && fullfsync == 1)
+}
+
 /// What the writer has done lately, for `status`.
 #[derive(Default)]
 struct Stats {
@@ -434,10 +443,10 @@ impl Store {
         applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
     }
 
-    /// Removes the backups taken before upgrades, once jawd has stopped cleanly after one, and
-    /// says how many there were.
-    pub fn remove_backups(&self) -> Result<usize> {
-        schema::remove_backups(self.path.parent().context("jaw.db has no folder")?)
+    /// Removes, at a clean stop, the backup taken before an upgrade once it's older than
+    /// KEEP_BACKUP, and any half written, and says how many went.
+    pub fn remove_old_backups(&self) -> Result<usize> {
+        schema::remove_old_backups(self.path.parent().context("jaw.db has no folder")?, std::time::SystemTime::now())
     }
 
     /// Copies the whole WAL into jaw.db and empties it, as at a clean stop.
@@ -479,7 +488,26 @@ impl Store {
         Ok(count.max(0) as u64)
     }
 
-    /// The WAL, the commits synced and whether jaw.db can be written, for `status`.
+    /// The whole backups taken before upgrades beside jaw.db, and until when each is kept.
+    fn backups(&self) -> Vec<jaw_proto::Backup> {
+        let Some(folder) = self.path.parent() else { return Vec::new() };
+        let ms = |time: std::time::SystemTime| {
+            time.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        };
+        schema::backups(folder)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|backup| backup.whole)
+            .map(|backup| jaw_proto::Backup {
+                file: backup.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+                bytes: backup.bytes,
+                taken_ms: ms(backup.taken),
+                kept_until_ms: ms(backup.taken + schema::KEEP_BACKUP),
+            })
+            .collect()
+    }
+
+    /// The WAL, the commits synced, the backups kept and whether jaw.db can be written, for `status`.
     pub fn storage(&self) -> jaw_proto::Storage {
         let stats = self.stats.lock().expect("the writer's stats");
         let wal_bytes = std::fs::metadata(self.path.with_extension("db-wal")).map_or(0, |m| m.len());
@@ -489,6 +517,7 @@ impl Store {
             frames_waiting: self.wal.waiting(),
             wal_peak_frames: self.wal.peak.load(Ordering::Relaxed),
             synced_commits: stats.synced,
+            backups: self.backups(),
             background_waits: stats.held_times,
             background_waited_ms: stats.held_for.as_millis() as u64,
             trouble: self.trouble.borrow().clone(),
@@ -771,13 +800,13 @@ impl Writer {
             }
             let began = Instant::now();
             match self.store_inbox() {
-                Ok(()) => {
+                Ok(synced) => {
                     self.recovered();
                     self.committed();
                     let ran = began.elapsed();
                     let mut stats = self.stats.lock().expect("the writer's stats");
                     stats.transactions += 1;
-                    stats.synced += 1;
+                    stats.synced += u64::from(synced);
                     stats.runs.add(ran);
                     for row in self.inbox.drain(..) {
                         stats.waits.add(began.saturating_duration_since(row.queued));
@@ -798,7 +827,9 @@ impl Writer {
         }
     }
 
-    fn store_inbox(&mut self) -> Result<()> {
+    /// Commits the inbox rows waiting, saying whether the commit ran synced; one that would run
+    /// unsynced is refused.
+    fn store_inbox(&mut self) -> Result<bool> {
         self.synced(true)?;
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
@@ -807,8 +838,12 @@ impl Writer {
                 insert.execute(params![row.kind, row.at_ms, row.payload])?;
             }
         }
+        let synced = commits_synced(&tx)?;
+        if !synced {
+            bail!("the inbox's commit would run unsynced, so nothing is acked");
+        }
         tx.commit()?;
-        Ok(())
+        Ok(synced)
     }
 
     /// Whether a background transaction may begin, as the WAL stands. Past the soft limit it waits
@@ -928,7 +963,7 @@ impl Writer {
         let applied = self
             .retrying(|w| {
                 w.synced(durable)?;
-                w.transaction(&changes, &groups, false)
+                w.transaction(&changes, &groups, false, durable)
             })
             .map(|made| Applied {
                 changed: made.changed,
@@ -937,9 +972,6 @@ impl Writer {
                 took: started.elapsed(),
                 seq: self.stamps.last(),
             });
-        if durable && applied.is_ok() {
-            self.stats.lock().expect("the writer's stats").synced += 1;
-        }
         self.count(Some(waited), started.elapsed());
         let _ = done.send(applied.map_err(|e| format!("{e:#}")));
     }
@@ -962,8 +994,15 @@ impl Writer {
     /// Makes the groups of `changes` in one transaction, all of them for a live one; a background
     /// one stops between groups at BATCH_ROWS, at BATCH_TIME with its commit, or as soon as an inbox
     /// or live write is waiting. Each group runs in a savepoint: one that fails is rolled back and
-    /// kept in quarantine with its error, and the rest go on. Says how many changes were taken.
-    fn transaction(&mut self, changes: &[Change], groups: &[Range<usize>], background: bool) -> Result<Made> {
+    /// kept in quarantine with its error, and the rest go on. A durable one is refused unless it
+    /// commits synced. Says how many changes were taken.
+    fn transaction(
+        &mut self,
+        changes: &[Change],
+        groups: &[Range<usize>],
+        background: bool,
+        durable: bool,
+    ) -> Result<Made> {
         let began = Instant::now();
         self.stamps.begin();
         let start = groups.first().map_or(0, |g| g.start);
@@ -1009,8 +1048,15 @@ impl Writer {
                 }
             }
             write::settle(&tx, &mut self.stamps)?;
+            let synced = commits_synced(&tx)?;
+            if durable && !synced {
+                bail!("a durable change's commit would run unsynced, so it isn't made");
+            }
             let body = began.elapsed();
             tx.commit()?;
+            if synced {
+                self.stats.lock().expect("the writer's stats").synced += 1;
+            }
             if background {
                 self.changes_pace.learn(body, began.elapsed() - body, made.taken);
                 self.count(None, began.elapsed());
@@ -1051,7 +1097,7 @@ impl Writer {
             self.wait_for_room();
             let made = self.retrying(|w| {
                 w.synced(false)?;
-                w.transaction(changes, rest, true)
+                w.transaction(changes, rest, true, false)
             })?;
             applied.changed += made.changed;
             applied.quarantined += made.quarantined;
@@ -1680,10 +1726,14 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         let inboxed = store.inboxed();
+        // An inbox commit that would run unsynced is refused and tried again, so it never lands.
+        let landed = |notified| async move {
+            tokio::time::timeout(Duration::from_secs(5), notified).await.expect("the inbox row was never committed");
+        };
         let notified = inboxed.notified();
         store.inbox("message", 0, vec![1], None);
-        notified.await;
-        assert_eq!(store.storage().synced_commits, 1);
+        landed(notified).await;
+        assert_eq!(store.storage().synced_commits, 1, "counted from the setting the commit ran under");
         let chat = "351910000001@s.whatsapp.net";
         store.apply(Lane::Live, messages([text(chat, "m1", 1_000, "converted")])).await.unwrap();
         assert_eq!(store.storage().synced_commits, 1, "a conversion commits at NORMAL");
@@ -1691,7 +1741,7 @@ mod tests {
         assert_eq!(store.storage().synced_commits, 2);
         let notified = inboxed.notified();
         store.inbox("message", 0, vec![2], None);
-        notified.await;
+        landed(notified).await;
         assert_eq!(store.storage().synced_commits, 3, "after a NORMAL commit, the next inbox row is synced again");
     }
 
@@ -1803,13 +1853,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_backups_taken_before_an_upgrade_go_once_jawd_stops_cleanly() {
+    async fn the_backup_taken_before_an_upgrade_stays_for_its_time_and_goes_at_a_clean_stop_after() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
-        std::fs::write(home.path().join("jaw.db.before-v2"), b"a backup").unwrap();
+        let backup = home.path().join("jaw.db.before-v2");
+        std::fs::write(&backup, b"a backup").unwrap();
         std::fs::write(home.path().join("jaw.db.before-v3.part"), b"half a backup").unwrap();
-        assert_eq!(store.remove_backups().unwrap(), 2);
-        assert!(home.path().join("jaw.db").is_file());
-        assert_eq!(store.remove_backups().unwrap(), 0);
+        assert_eq!(store.remove_old_backups().unwrap(), 1, "only the half-written one goes");
+        assert!(backup.is_file(), "a backup younger than its time stays");
+        let shown = store.storage().backups;
+        assert_eq!(shown.len(), 1);
+        assert_eq!((shown[0].file.as_str(), shown[0].bytes), ("jaw.db.before-v2", 8));
+        let taken = std::time::SystemTime::now() - schema::KEEP_BACKUP - Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&backup).unwrap().set_modified(taken).unwrap();
+        assert_eq!(store.remove_old_backups().unwrap(), 1);
+        assert!(!backup.exists() && home.path().join("jaw.db").is_file());
+        assert!(store.storage().backups.is_empty());
     }
 }

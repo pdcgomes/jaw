@@ -216,6 +216,143 @@ async fn a_persons_two_chats_become_one_when_their_number_and_lid_are_joined() {
     assert!(rows.last().unwrap().reactions.get().contains("👍"), "with the reaction that waited under the LID");
 }
 
+/// Joins Ana's number and LID, so her LID chat starts being merged into her number's, and says
+/// whether chats are being merged.
+async fn joined(store: &Store) {
+    apply(store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
+}
+
+async fn merging(store: &Store) -> bool {
+    query(store, |db| Ok(db.query_row("SELECT EXISTS (SELECT 1 FROM chat_merges)", [], |r| r.get(0))?)).await
+}
+
+async fn merged(store: &Store) {
+    while merging(store).await {
+        store.apply(Lane::Background, vec![Change::MergeStep]).await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_names_a_message_still_in_a_chat_being_merged_finds_it_there() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(
+        &store,
+        vec![
+            Change::Message(message(ANA, "p1", AT, "under the number")),
+            Change::Message(message(ANA_LID, "kept", AT + 1, "stays")),
+            Change::Message(message(ANA_LID, "deleted", AT + 2, "deleted for me")),
+            Change::Message(message(ANA_LID, "revoked", AT + 3, "deleted for everyone")),
+            Change::Message(message(ANA_LID, "edited", AT + 4, "before")),
+        ],
+    )
+    .await;
+    joined(&store).await;
+    assert!(merging(&store).await, "the LID chat's messages haven't moved yet");
+    let edit = Amendment::Edit { text: Some("after".into()), spans: None, summary: "after".into() };
+    apply(
+        &store,
+        vec![
+            amend(ANA_LID, "deleted", AT + 10, None, Amendment::DeleteForMe),
+            amend(ANA, "revoked", AT + 11, Some(ANA), Amendment::Revoke),
+            amend(ANA_LID, "edited", AT + 12, Some(ANA), edit),
+        ],
+    )
+    .await;
+    merged(&store).await;
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    let shown: Vec<(&str, &str, bool)> = rows.iter().map(|r| (r.id.as_str(), r.summary.as_str(), r.deleted)).collect();
+    assert_eq!(
+        shown.iter().map(|r| r.0).collect::<Vec<_>>(),
+        ["p1", "kept", "revoked", "edited"],
+        "the deleted one stays gone"
+    );
+    assert!(shown[2].2, "deleted for everyone");
+    assert_eq!(shown[3].1, "after");
+    assert_eq!(store.count("pending").unwrap(), 0, "nothing waits for a message jaw has");
+    apply(&store, vec![amend(ANA_LID, "deleted", AT + 10, None, Amendment::DeleteForMe)]).await;
+    apply(&store, vec![Change::Message(message(ANA_LID, "deleted", AT + 2, "deleted for me"))]).await;
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    assert!(rows.iter().all(|r| r.id != "deleted"), "a replay and a copy don't bring it back");
+    assert_eq!(query(&store, |db| read::message_count(db, ANA)).await, 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_step_applies_what_waited_for_a_message_and_drops_one_deleted_for_me() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(
+        &store,
+        vec![
+            Change::Message(message(ANA_LID, "deleted", AT, "deleted for me")),
+            Change::Message(message(ANA_LID, "revoked", AT + 1, "deleted for everyone")),
+            Change::Message(message(ANA, "p1", AT + 2, "under the number")),
+        ],
+    )
+    .await;
+    joined(&store).await;
+    // As if they'd been written before this jawd looked in chats being merged: a tombstone and a
+    // revoke waiting under the kept chat for messages the merge hasn't moved.
+    {
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        db.execute("INSERT INTO tombstones (chat, id, at) SELECT n, 'deleted', 1 FROM chats WHERE id = ?1", [ANA])
+            .unwrap();
+        db.execute(
+            "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) VALUES (?1, 'revoked', 'revoke', ?2, x'', ?1, 0, ?3)",
+            rusqlite::params![ANA, AT + 5, serde_json::to_string(&Amendment::Revoke).unwrap()],
+        )
+        .unwrap();
+    }
+    merged(&store).await;
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    assert_eq!(rows.iter().map(|r| (r.id.as_str(), r.deleted)).collect::<Vec<_>>(), [("revoked", true), ("p1", false)]);
+    assert_eq!(store.count("pending").unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_copies_of_a_message_folded_into_one_keep_the_file_downloaded_for_either() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(&store, vec![Change::Message(mine(ANA, "both", AT)), Change::Message(mine(ANA_LID, "both", AT))]).await;
+    {
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        db.execute_batch(&format!(
+            "INSERT INTO media (message, variant, state) SELECT m.n, 'sd', 'remote' FROM messages m
+                JOIN chats c ON c.n = m.chat WHERE c.id = '{ANA}';
+            INSERT INTO media (message, variant, path, state) SELECT m.n, 'sd', 'media/both.jpg', 'here' FROM messages m
+                JOIN chats c ON c.n = m.chat WHERE c.id = '{ANA_LID}';"
+        ))
+        .unwrap();
+    }
+    joined(&store).await;
+    merged(&store).await;
+    let kept: (i64, Option<String>) = query(&store, |db| {
+        Ok(db.query_row("SELECT count(*), max(path) FROM media", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    })
+    .await;
+    assert_eq!(kept, (1, Some("media/both.jpg".into())));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_merged_away_leaves_a_key_no_new_chat_takes() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(
+        &store,
+        vec![Change::Message(message(ANA, "p1", AT, "number")), Change::Message(message(ANA_LID, "l1", AT + 1, "lid"))],
+    )
+    .await;
+    let gone: i64 =
+        query(&store, |db| Ok(db.query_row("SELECT n FROM chats WHERE id = ?1", [ANA_LID], |r| r.get(0))?)).await;
+    joined(&store).await;
+    merged(&store).await;
+    apply(&store, vec![Change::Message(message(RUI, "r1", AT + 2, "someone new"))]).await;
+    let rui = chat(&store, RUI).await;
+    assert!(rui.n > gone, "Rui's chat took {} after the merged chat's {gone}", rui.n);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_copy_of_a_message_never_undoes_a_newer_edit_or_the_live_envelope() {
     let home = tempfile::tempdir().unwrap();

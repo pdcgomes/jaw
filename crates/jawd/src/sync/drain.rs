@@ -399,7 +399,9 @@ pub async fn history_raw(store: Store, live: Shared) {
     }
 }
 
-/// History rows as changes, each followed by its row's removal. A row that doesn't decode stays.
+/// History rows as changes, each followed by its row's removal. A row that becomes a message keeps
+/// its raw there; any other (an edit, a live location's last place, a status, an empty shell) is
+/// kept whole in history_kept, since it can't be fetched again. A row that doesn't decode stays.
 pub fn history_rows(rows: Vec<(String, String, Vec<u8>)>, me: &Me) -> Vec<Change> {
     let mut changes = Vec::new();
     for (chat, id, raw) in rows {
@@ -408,7 +410,14 @@ pub fn history_rows(rows: Vec<(String, String, Vec<u8>)>, me: &Me) -> Vec<Change
                 if info.key.remote_jid.as_deref() != Some(chat.as_str()) {
                     info.key.remote_jid = Some(chat.clone());
                 }
-                changes.extend(convert::message(&info, me, false));
+                let converted = convert::message(&info, me, false);
+                let its_row =
+                    converted.iter().any(|c| matches!(c, Change::Message(m) if m.id == id && m.raw.is_some()));
+                changes.extend(converted);
+                if !its_row {
+                    changes
+                        .push(Change::HistoryKept { id: format!("history_raw {chat} {id}"), raw: Packed::new(&raw) });
+                }
                 changes.push(Change::Drained(Drained::History { chat, id }));
             }
             Err(e) => eprintln!("jawd: a message of history in {chat} doesn't decode, so it's kept raw: {e}"),

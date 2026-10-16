@@ -15,6 +15,15 @@ use rusqlite::fallible_iterator::FallibleIterator;
 use rusqlite::{Batch, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
+/// jaw.db's migrations, in order. A table's class says what may be done to it (see "Migrations" in
+/// the design); migrations from 5 on declare it beside each table, and those made before are:
+/// - raw: `inbox`, `history_raw`, `app_state` (the app state not applied yet), `pending` (what
+///   waits for a message, with its raw);
+/// - fetched from WhatsApp: `person_jids`, `group_members`, `poll_options`, and `media`'s
+///   description of each file (its `path`, `state`, `progress` and previews are jaw's own);
+/// - jaw's own: `folders`, `folder_items`, `outbox`, `sync_state`, and `reactions`, `receipts` and
+///   `poll_votes`, which keep no raw once applied, so can't be rebuilt from it;
+/// - derived: `events` (the feed), `fts_backlog` and `messages_fts` (search).
 pub(super) const MIGRATIONS: &[&str] = &[
     // 1: what the engine sends, kept before WhatsApp hears it arrived, and history as it came.
     "
@@ -396,9 +405,63 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // engine's whole event for a live one beside its WebMessageInfo, and whether it mentions you;
     // each chat's message count is kept by triggers; and each chat's read position starts where
     // its newest message is, with the counts it had. Measured at 6.6 s per million messages on the
-    // reference Mac, its commit and foreign_key_check included.
+    // reference Mac, its commit and foreign_key_check included. chats is rebuilt first, the same
+    // way, since a chat merged into another is removed and the feed names chats by n; first,
+    // because the triggers on messages name it, and a table can't be renamed into place while a
+    // trigger names one that isn't there.
     "
-    -- Class: derived from raw.
+    -- Class: fetched from WhatsApp, with jaw's own draft, frecency and opened_at, and its counts
+    -- derived from messages.
+    CREATE TABLE chats_rebuilt (
+        n INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        name TEXT,
+        person INTEGER REFERENCES people (n) ON DELETE SET NULL,
+        community TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        archived INTEGER NOT NULL DEFAULT 0,
+        muted_until INTEGER NOT NULL DEFAULT 0,
+        marked_unread INTEGER NOT NULL DEFAULT 0,
+        unread INTEGER NOT NULL DEFAULT 0,
+        mentions INTEGER NOT NULL DEFAULT 0,
+        ephemeral INTEGER NOT NULL DEFAULT 0,
+        draft TEXT,
+        avatar TEXT,
+        frecency REAL NOT NULL DEFAULT 0,
+        opened_at INTEGER,
+        last_at INTEGER NOT NULL DEFAULT 0,
+        last_message INTEGER,
+        v INTEGER NOT NULL,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        sort TEXT GENERATED ALWAYS AS
+            (iif(pinned > 0, '1~' || printf('%013d', pinned), '0~' || printf('%013d', last_at))) VIRTUAL,
+        avatar_id TEXT,
+        read_at INTEGER,
+        read_known INTEGER NOT NULL DEFAULT 0,
+        phone_unread INTEGER,
+        phone_mentions INTEGER
+    );
+    INSERT INTO chats_rebuilt (n, id, kind, name, person, community, pinned, archived, muted_until, marked_unread,
+        unread, mentions, ephemeral, draft, avatar, frecency, opened_at, last_at, last_message, v, message_count,
+        avatar_id, read_at, read_known, phone_unread, phone_mentions)
+    SELECT n, id, kind, name, person, community, pinned, archived, muted_until, marked_unread, unread, mentions,
+        ephemeral, draft, avatar, frecency, opened_at, last_at, last_message, v, message_count, avatar_id, read_at,
+        read_known, phone_unread, phone_mentions
+    FROM chats ORDER BY n;
+    DROP TABLE chats;
+    ALTER TABLE chats_rebuilt RENAME TO chats;
+    INSERT INTO sqlite_sequence (name, seq) SELECT 'chats', 0
+        WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'chats');
+    UPDATE sqlite_sequence SET seq = max(seq, coalesce((SELECT max(key) FROM events WHERE type = 'chat'), 0),
+        coalesce((SELECT max(chat) FROM events), 0))
+        WHERE name = 'chats';
+    CREATE INDEX chats_by_person ON chats (person) WHERE person IS NOT NULL;
+    CREATE INDEX chats_by_sort ON chats (archived, sort, n);
+
+    -- Class: derived from raw, except what amendments did to it (edits, deletions for everyone,
+    -- receipts' status, stars), which keeps no raw once applied: a rebuild from raw alone would
+    -- lose that, so until amendments keep theirs, take it as jaw's own.
     CREATE TABLE messages_rebuilt (
         n INTEGER PRIMARY KEY AUTOINCREMENT,
         chat INTEGER NOT NULL REFERENCES chats (n) ON DELETE CASCADE,
@@ -724,14 +787,22 @@ fn backup_name(version: usize) -> String {
 
 const BACKUP: &str = "jaw.db.before-v";
 
+/// The free space, as a multiple of jaw.db, that an upgrade with data steps needs beside it: the
+/// backup, the step's WAL (one transaction, as big as what it writes) and jaw.db's own growth,
+/// since a rebuilt table's new pages come before the old ones are freed. Migration 6 took 2.48 to
+/// 2.64 times jaw.db from 50,000 to 1,000,000 messages (`measure_the_room_the_data_steps_take`),
+/// and this leaves a margin over that.
+const DATA_STEP_ROOM: f64 = 3.0;
+
 /// Copies jaw.db, as it is at `version`, to a backup beside it before a data step changes its rows,
-/// once there's room for the backup and the step: free space at least 1.2 times the database. The
-/// copy is synced, then renamed into place and its folder synced, so a backup found is whole.
+/// once there's room for the backup and the step: free space at least DATA_STEP_ROOM times the
+/// database. The copy is synced, then renamed into place and its folder synced, so a backup found
+/// is whole.
 fn back_up(db: &Connection, path: &Path, version: usize, free: Option<u64>) -> Result<()> {
     let folder = path.parent().context("jaw.db has no folder")?;
     let pages: i64 = db.pragma_query_value(None, "page_count", |row| row.get(0))?;
     let page: i64 = db.pragma_query_value(None, "page_size", |row| row.get(0))?;
-    let needed = (pages * page).max(0) as u64 * 6 / 5;
+    let needed = ((pages * page).max(0) as f64 * DATA_STEP_ROOM) as u64;
     let free = match free {
         Some(free) => free,
         None => free_space(folder)?,
@@ -755,16 +826,54 @@ fn back_up(db: &Connection, path: &Path, version: usize, free: Option<u64>) -> R
     File::open(&part)?.sync_all()?;
     std::fs::rename(&part, &backup)?;
     File::open(folder)?.sync_all()?;
+    // The newest backup holds everything an older one does, so only it is kept.
+    for older in backups(folder)?.into_iter().filter(|older| older.path != backup) {
+        std::fs::remove_file(older.path)?;
+    }
+    File::open(folder)?.sync_all()?;
     Ok(())
 }
 
-/// Removes the backups taken before upgrades, once jawd has stopped cleanly after one.
-pub(super) fn remove_backups(folder: &Path) -> Result<usize> {
-    let mut removed = 0;
+/// How long the backup taken before an upgrade is kept: long enough to notice what the upgrade
+/// got wrong, and to recover what it lost, before a clean stop removes it.
+pub(super) const KEEP_BACKUP: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+
+/// A backup of jaw.db beside it: one taken before an upgrade, or one half written.
+pub(super) struct Backup {
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub taken: std::time::SystemTime,
+    pub whole: bool,
+}
+
+/// The backups beside jaw.db in `folder`, oldest first.
+pub(super) fn backups(folder: &Path) -> Result<Vec<Backup>> {
+    let mut found = Vec::new();
     for entry in std::fs::read_dir(folder)? {
         let entry = entry?;
-        if entry.file_name().to_str().is_some_and(|name| name.starts_with(BACKUP)) {
-            std::fs::remove_file(entry.path())?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
+        if name.starts_with(BACKUP) {
+            let meta = entry.metadata()?;
+            found.push(Backup {
+                path: entry.path(),
+                bytes: meta.len(),
+                taken: meta.modified()?,
+                whole: !name.ends_with(".part"),
+            });
+        }
+    }
+    found.sort_by_key(|backup| backup.taken);
+    Ok(found)
+}
+
+/// Removes, at a clean stop, the backups older than KEEP_BACKUP and any half written; says how
+/// many went.
+pub(super) fn remove_old_backups(folder: &Path, now: std::time::SystemTime) -> Result<usize> {
+    let mut removed = 0;
+    for backup in backups(folder)? {
+        let old = now.duration_since(backup.taken).is_ok_and(|age| age >= KEEP_BACKUP);
+        if old || !backup.whole {
+            std::fs::remove_file(&backup.path)?;
             removed += 1;
         }
     }
@@ -787,6 +896,9 @@ fn free_space(folder: &Path) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
     use super::*;
 
     #[test]
@@ -801,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuilding_messages_and_people_keeps_every_row_and_never_reuses_a_key_an_event_names() {
+    fn rebuilding_chats_messages_and_people_keeps_every_row_and_never_reuses_a_key_an_event_names() {
         let mut db = Connection::open_in_memory().unwrap();
         for migration in &MIGRATIONS[..5] {
             db.execute_batch(migration).unwrap();
@@ -816,7 +928,9 @@ mod tests {
                 VALUES (1, 1, 'a', 10, 10, 1, 'text', 'olá Ana', '[{\"t\":\"text\",\"s\":\"olá Ana\"}]', 1),
                     (2, 1, 'b', 20, 20, 1, 'text', 'second', NULL, 1), (3, 1, 'c', 30, 30, 2, 'text', 'third', NULL, 1);
             INSERT INTO reactions (message, sender, emoji, at) VALUES (1, 2, '👍', 11);
-            INSERT INTO events (seq, at, type, key, chat) VALUES (1, 0, 'message', 9, 1), (2, 0, 'person', 7, NULL);",
+            INSERT INTO tombstones (chat, id, at) VALUES (1, 'gone', 5);
+            INSERT INTO events (seq, at, type, key, chat) VALUES (1, 0, 'message', 9, 1), (2, 0, 'person', 7, NULL),
+                (3, 0, 'chat', 12, 12);",
         )
         .unwrap();
         db.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -842,6 +956,13 @@ mod tests {
         assert_eq!(count("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'fourth'"), 1);
         db.execute("INSERT INTO people (v) VALUES (2)", []).unwrap();
         assert_eq!(count("SELECT max(n) FROM people"), 8, "past the person an event names");
+        assert_eq!(
+            count("SELECT count(*) FROM tombstones"),
+            1,
+            "nothing that refers to a chat went with the old table"
+        );
+        db.execute("INSERT INTO chats (id, kind, v) VALUES ('rui@s.whatsapp.net', 'direct', 3)", []).unwrap();
+        assert_eq!(count("SELECT max(n) FROM chats"), 13, "past the chat a removed chat's event names");
         let wrong = db
             .execute("INSERT INTO messages (chat, id, at, t, kind, mine, v) VALUES (1, 'e', 50, 50, 'text', 2, 3)", []);
         assert!(wrong.is_err(), "a boolean that isn't one is refused");
@@ -994,6 +1115,80 @@ mod tests {
         assert_eq!(fingerprint(&db).unwrap(), expected(2).unwrap());
         assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1, "no backup");
         assert!(free_space(home.path()).unwrap() > 0);
+    }
+
+    /// Measures what the data steps take on disk beside jaw.db at their peak, for DATA_STEP_ROOM:
+    /// `JAW_MEASURE_MESSAGES=1000000 cargo test --release -p jawd measure_the_room -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, minutes long at a million messages"]
+    fn measure_the_room_the_data_steps_take() {
+        let messages: i64 = std::env::var("JAW_MEASURE_MESSAGES").ok().and_then(|n| n.parse().ok()).unwrap_or(200_000);
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("jaw.db");
+        let mut db = Connection::open(&path).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        for migration in &MIGRATIONS[..5] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", 5).unwrap();
+        db.execute_batch(&format!(
+            "BEGIN;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000)
+            INSERT INTO people (n, name, v) SELECT x, 'Person ' || x, 1 FROM c;
+            INSERT INTO person_jids (n, jid, person) SELECT n, printf('3519%08d@s.whatsapp.net', n), n FROM people;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000)
+            INSERT INTO chats (n, id, kind, person, last_at, v) SELECT x, printf('3519%08d@s.whatsapp.net', x), 'direct', x, x, 1 FROM c;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {messages})
+            INSERT INTO messages (n, chat, id, at, t, sender, kind, text, spans, summary, raw, v)
+            SELECT x, 1 + x % 2000, printf('3EB0%016d', x), 1790000000000 + x * 1000, (1790000000000 + x * 1000) << 20,
+                1 + x % 5000, 'text', 'mensagem número ' || x || ' com algumas palavras de conversa',
+                json_array(json_object('t', 'text', 's', 'mensagem número ' || x)), 'mensagem ' || x, randomblob(300), x
+            FROM c;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 50000)
+            INSERT INTO events (seq, at, type, key, chat) SELECT x, 0, 'message', {messages} - x, 1 + x % 2000 FROM c;
+            COMMIT;
+            PRAGMA wal_checkpoint(TRUNCATE);"
+        ))
+        .unwrap();
+        let bytes = |db: &Connection| {
+            let pages: i64 = db.pragma_query_value(None, "page_count", |r| r.get(0)).unwrap();
+            let page: i64 = db.pragma_query_value(None, "page_size", |r| r.get(0)).unwrap();
+            (pages * page) as u64
+        };
+        let before = bytes(&db);
+        let (stop, peak) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
+        let sampler = {
+            let (stop, peak, folder) = (stop.clone(), peak.clone(), home.path().to_path_buf());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let used: u64 = std::fs::read_dir(&folder)
+                        .unwrap()
+                        .filter_map(|e| e.ok()?.metadata().ok())
+                        .map(|m| m.len())
+                        .sum();
+                    peak.fetch_max(used, Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+        };
+        let began = std::time::Instant::now();
+        Runner::default().run(&mut db).unwrap();
+        let took = began.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        sampler.join().unwrap();
+        let peak = peak.load(Ordering::Relaxed);
+        let beside = peak.saturating_sub(before);
+        eprintln!(
+            "{messages} messages: jaw.db {:.0} MB at version 5; upgraded in {:.1} s; the folder peaked at {:.0} MB, \
+             {:.0} MB beside jaw.db, {:.2} times it (DATA_STEP_ROOM is {DATA_STEP_ROOM}); jaw.db after: {:.0} MB",
+            before as f64 / 1e6,
+            took.as_secs_f64(),
+            peak as f64 / 1e6,
+            beside as f64 / 1e6,
+            beside as f64 / before as f64,
+            bytes(&db) as f64 / 1e6,
+        );
+        assert!((beside as f64) < before as f64 * DATA_STEP_ROOM, "the data steps took more room than is asked for");
     }
 
     #[test]

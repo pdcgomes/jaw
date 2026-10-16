@@ -91,6 +91,12 @@ impl Connection {
 }
 
 /// `status` as `jawd status` and `jaw status` print it.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
 pub fn describe(status: &Status) -> String {
     let account = match status.account.state {
         AccountState::Unlinked => "not linked yet".to_string(),
@@ -209,6 +215,14 @@ pub fn describe(status: &Status) -> String {
             ));
         }
         lines.push(wal);
+        for backup in &storage.backups {
+            let days = (backup.kept_until_ms - now_ms()).max(0) / 86_400_000;
+            lines.push(format!(
+                "backup    {}, {:.1} MB, taken before an upgrade; kept {days} more days",
+                backup.file,
+                backup.bytes as f64 / 1e6
+            ));
+        }
     }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));

@@ -497,7 +497,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, backg
         Change::DeleteMessage { chat, id } => delete_message(db, stamps, chat, id),
         Change::Amend(amend) => amend_message(db, stamps, amend),
         Change::Edited { amend, shown } => {
-            if target(db, amend)?.is_some() {
+            if target(db, stamps, amend)?.is_some() {
                 amend_message(db, stamps, amend)
             } else {
                 upsert_message(db, stamps, shown, background)
@@ -616,6 +616,11 @@ fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     let chat = ensure_chat(db, stamps, &chat_jid(db, &read.chat)?)?;
     let mut at = read.at;
     if !read.ids.is_empty() {
+        if merging_into(db, chat)? {
+            for id in &read.ids {
+                moved_from_merging(db, stamps, chat, id)?;
+            }
+        }
         let newest: Option<i64> = db
             .prepare_cached("SELECT max(at) FROM messages WHERE chat = ?1 AND id IN (SELECT value FROM json_each(?2))")?
             .query_row(params![chat, serde_json::to_string(&read.ids)?], |r| r.get(0))?;
@@ -656,13 +661,7 @@ fn open_chat(db: &Connection, stamps: &mut Stamps, opened: &Opened) -> Result<bo
 }
 
 fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) -> Result<bool> {
-    let found: Option<(i64, i64)> = db
-        .prepare_cached(
-            "SELECT m.chat, m.n FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = ?1 AND m.id = ?2",
-        )?
-        .query_row(params![chat_jid(db, chat)?, id], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?;
-    let Some((chat, n)) = found else { return Ok(false) };
+    let Some((chat, n)) = located(db, stamps, &chat_jid(db, chat)?, id)? else { return Ok(false) };
     delete_row(db, stamps, chat, n)
 }
 
@@ -1039,22 +1038,12 @@ fn merge_step(db: &Connection, stamps: &mut Stamps) -> Result<bool> {
     else {
         return Ok(false);
     };
-    let moving: Vec<(i64, Option<i64>)> = db
-        .prepare_cached(
-            "SELECT g.n, k.n FROM messages g LEFT JOIN messages k ON k.chat = ?2 AND k.id = g.id WHERE g.chat = ?1 LIMIT ?3",
-        )?
-        .query_map(params![gone, keep, MERGE_STEP], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let moving: Vec<i64> = db
+        .prepare_cached("SELECT n FROM messages WHERE chat = ?1 LIMIT ?2")?
+        .query_map(params![gone, MERGE_STEP], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    for &(n, both) in &moving {
-        match both {
-            Some(kept) => fold(db, stamps, keep, kept, n)?,
-            None => {
-                let seq = stamps.seq(MESSAGE, Some(n));
-                db.prepare_cached("UPDATE messages SET chat = ?2, v = ?3 WHERE n = ?1")?
-                    .execute(params![n, keep, seq])?;
-                stamps.record(db, MESSAGE, n, Some(keep), seq)?;
-            }
-        }
+    for &n in &moving {
+        move_merged(db, stamps, gone, keep, n)?;
     }
     stamps.unsettle(keep);
     if moving.len() as i64 == MERGE_STEP {
@@ -1073,6 +1062,74 @@ fn merge_step(db: &Connection, stamps: &mut Stamps) -> Result<bool> {
     let seq = stamps.seq(CHAT, Some(gone));
     stamps.record(db, CHAT, gone, Some(gone), seq)?;
     Ok(true)
+}
+
+/// Moves message `n` of chat `gone`, being merged, into `keep`, as what's done to it there says:
+/// one deleted for me there is deleted, one the kept chat has too is folded into that, and any
+/// other moves; then what waited there for it is applied. Says where it is now, if anywhere.
+fn move_merged(db: &Connection, stamps: &mut Stamps, gone: i64, keep: i64, n: i64) -> Result<Option<i64>> {
+    let id: String = db.prepare_cached("SELECT id FROM messages WHERE n = ?1")?.query_row([n], |r| r.get(0))?;
+    if db.prepare_cached("SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2")?.exists(params![keep, id])? {
+        delete_row(db, stamps, gone, n)?;
+        return Ok(None);
+    }
+    let kept: Option<i64> = db
+        .prepare_cached("SELECT n FROM messages WHERE chat = ?1 AND id = ?2")?
+        .query_row(params![keep, id], |r| r.get(0))
+        .optional()?;
+    let n = match kept {
+        Some(kept) => {
+            fold(db, stamps, keep, kept, n)?;
+            kept
+        }
+        None => {
+            let seq = stamps.seq(MESSAGE, Some(n));
+            db.prepare_cached("UPDATE messages SET chat = ?2, v = ?3 WHERE n = ?1")?.execute(params![n, keep, seq])?;
+            stamps.record(db, MESSAGE, n, Some(keep), seq)?;
+            n
+        }
+    };
+    stamps.unsettle(keep);
+    let keep_jid: String = db.prepare_cached("SELECT id FROM chats WHERE n = ?1")?.query_row([keep], |r| r.get(0))?;
+    apply_pending(db, stamps, keep, n, &keep_jid, &id)?;
+    Ok(db.prepare_cached("SELECT 1 FROM messages WHERE n = ?1")?.exists([n])?.then_some(n))
+}
+
+/// Whether a chat is being merged into chat `keep`.
+fn merging_into(db: &Connection, keep: i64) -> Result<bool> {
+    Ok(db.prepare_cached("SELECT 1 FROM chat_merges WHERE keep = ?1")?.exists([keep])?)
+}
+
+/// Moves message `id` into chat `keep` now if it's still in a chat being merged into it, so what
+/// names it finds it where it stays rather than where it's going. Says where it is now, if
+/// anywhere.
+fn moved_from_merging(db: &Connection, stamps: &mut Stamps, keep: i64, id: &str) -> Result<Option<i64>> {
+    let found: Option<(i64, i64)> = db
+        .prepare_cached(
+            "SELECT m.chat, m.n FROM chat_merges c JOIN messages m ON m.chat = c.gone AND m.id = ?2 WHERE c.keep = ?1 LIMIT 1",
+        )?
+        .query_row(params![keep, id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    match found {
+        Some((gone, n)) => move_merged(db, stamps, gone, keep, n),
+        None => Ok(None),
+    }
+}
+
+/// The chat and n of message `id` in the chat `chat_jid` (already resolved by chat_jid), moving it
+/// there first from a chat being merged into it.
+fn located(db: &Connection, stamps: &mut Stamps, chat_jid: &str, id: &str) -> Result<Option<(i64, i64)>> {
+    let found: Option<(i64, Option<i64>)> = db
+        .prepare_cached(
+            "SELECT c.n, m.n FROM chats c LEFT JOIN messages m ON m.chat = c.n AND m.id = ?2 WHERE c.id = ?1",
+        )?
+        .query_row(params![chat_jid, id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    Ok(match found {
+        None => None,
+        Some((chat, Some(n))) => Some((chat, n)),
+        Some((chat, None)) => moved_from_merging(db, stamps, chat, id)?.map(|n| (chat, n)),
+    })
 }
 
 /// Folds message `gone` into `kept`, the same message in the chat being kept: a later edit, a star,
@@ -1110,6 +1167,12 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
     db.prepare_cached(
         "INSERT OR IGNORE INTO poll_votes (message, voter, position, at)
             SELECT ?1, voter, position, at FROM poll_votes WHERE message = ?2",
+    )?
+    .execute([kept, gone])?;
+    // A file downloaded for either copy is kept over one the other only knows how to fetch.
+    db.prepare_cached(
+        "DELETE FROM media WHERE message = ?1 AND path IS NULL
+            AND variant IN (SELECT variant FROM media WHERE message = ?2 AND path IS NOT NULL)",
     )?
     .execute([kept, gone])?;
     db.prepare_cached("UPDATE OR IGNORE media SET message = ?1 WHERE message = ?2")?.execute([kept, gone])?;
@@ -1187,6 +1250,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
     if db.prepare_cached("SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2")?.exists(params![chat, message.id])? {
         return Ok(false);
     }
+    moved_from_merging(db, stamps, chat, &message.id)?;
     let sender = message.sender.as_deref().map(|jid| ensure_jid(db, stamps, jid)).transpose()?;
     let existing: Option<Kept> = db
         .prepare_cached(
@@ -1356,14 +1420,9 @@ fn apply_pending(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, chat_j
     Ok(())
 }
 
-/// The chat and n of the message an amendment names, if jaw has it.
-fn target(db: &Connection, amend: &Amend) -> Result<Option<(i64, i64)>> {
-    Ok(db
-        .prepare_cached(
-            "SELECT m.chat, m.n FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = ?1 AND m.id = ?2",
-        )?
-        .query_row(params![chat_jid(db, &amend.chat)?, amend.target], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?)
+/// The chat and n of the message an amendment names, if jaw has it, wherever a merge has it.
+fn target(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<Option<(i64, i64)>> {
+    located(db, stamps, &chat_jid(db, &amend.chat)?, &amend.target)
 }
 
 /// Whether the message an amendment names was deleted for me, so nothing more is done to it.
@@ -1378,7 +1437,7 @@ fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<
     if tombstoned(db, &chat, &amend.target)? {
         return Ok(false);
     }
-    let found = target(db, amend)?;
+    let found = target(db, stamps, amend)?;
     if found.is_none() && amend.what == Amendment::DeleteForMe {
         // A message deleted for me before jaw has it never comes.
         let n = ensure_chat(db, stamps, &chat)?;

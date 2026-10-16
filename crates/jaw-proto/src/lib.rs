@@ -290,6 +290,20 @@ pub struct Storage {
     /// Why jaw.db can't be written, while it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trouble: Option<String>,
+    /// The backups of jaw.db taken before upgrades, kept beside it for a while.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backups: Vec<Backup>,
+}
+
+/// A backup of jaw.db taken before an upgrade changed its rows, and until when it's kept.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Backup {
+    /// Its file's name, beside jaw.db.
+    pub file: String,
+    pub bytes: u64,
+    pub taken_ms: i64,
+    /// It goes at the first clean stop after this.
+    pub kept_until_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

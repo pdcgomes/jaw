@@ -244,6 +244,80 @@ async fn history_kept_raw_by_an_earlier_jawd_is_converted_and_removed() {
     assert_eq!(found.hits[0].message.id, "h1234");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn history_kept_raw_that_doesnt_become_a_message_is_kept_whole() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let info = |id: &str, message: Option<e2e::Message>| WebMessageInfo {
+        key: MessageKey { remote_jid: Some(ANA.into()), from_me: Some(false), id: Some(id.into()), participant: None },
+        message,
+        message_timestamp: Some((AT / 1000) as u64),
+        ..Default::default()
+    };
+    let edit = e2e::Message {
+        protocol_message: Some(Box::new(e2e::ProtocolMessage {
+            key: Some(MessageKey {
+                remote_jid: Some(ANA.into()),
+                from_me: Some(false),
+                id: Some("said".into()),
+                participant: None,
+            }),
+            r#type: Some(e2e::protocol_message::Type::MessageEdit as i32),
+            edited_message: Some(Box::new(text("said better"))),
+            timestamp_ms: Some(AT + 5),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let last_place = WebMessageInfo {
+        final_live_location: Some(e2e::LiveLocationMessage {
+            degrees_latitude: Some(38.7),
+            degrees_longitude: Some(-9.1),
+            ..Default::default()
+        }),
+        duration: Some(3600),
+        ..info("place", None)
+    };
+    let rows = [
+        ("said", info("said", Some(text("said")))),
+        ("edit", info("edit", Some(edit))),
+        ("place", last_place),
+        ("shell", info("shell", None)),
+    ];
+    {
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        for (id, info) in &rows {
+            db.execute(
+                "INSERT INTO history_raw (chat, id, at, raw) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![ANA, id, AT, info.encode_to_vec()],
+            )
+            .unwrap();
+        }
+    }
+    drain::history_raw(store.clone(), Arc::default()).await;
+    assert_eq!(store.count("history_raw").unwrap(), 0);
+    let kept: Vec<(String, Vec<u8>)> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT id, raw FROM history_kept ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    let kept: Vec<(String, Vec<u8>)> =
+        kept.into_iter().map(|(id, raw)| (id, crate::store::unpack(&raw).unwrap())).collect();
+    let expected: Vec<(String, Vec<u8>)> = ["edit", "place", "shell"]
+        .iter()
+        .map(|id| {
+            let (_, info) = rows.iter().find(|(row, _)| row == id).unwrap();
+            (format!("history_raw {ANA} {id}"), info.encode_to_vec())
+        })
+        .collect();
+    assert_eq!(kept, expected, "each kept as it was, and the message that became a row isn't kept twice");
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    assert_eq!(rows.iter().map(|r| r.summary.as_str()).collect::<Vec<_>>(), ["said better"]);
+}
+
 fn app_state(index: &[&str], f: impl FnOnce(&mut action::SyncActionValue)) -> Vec<u8> {
     let mut value = action::SyncActionValue { timestamp: Some(AT), ..Default::default() };
     f(&mut value);
@@ -843,6 +917,8 @@ enum Blob {
 #[derive(Clone, Default)]
 struct Scripted {
     asked: Arc<Mutex<Vec<&'static str>>>,
+    /// How many of the next app-state refetches fail.
+    failing_resyncs: Arc<Mutex<usize>>,
     blobs: Arc<Mutex<std::collections::HashMap<String, Blob>>>,
     stop: Arc<tokio::sync::Notify>,
     events: Arc<Mutex<Option<mpsc::Sender<crate::engine::Incoming>>>>,
@@ -877,7 +953,13 @@ impl Scripted {
             Kind::LidLookup(_) => ("lids", Ok(pb::reply::Kind::LidPairs(Default::default()))),
             Kind::AppStateResync(resync) => {
                 assert_eq!(resync.names.len(), refresh::COLLECTIONS.len(), "every collection");
-                ("resync", Ok(pb::reply::Kind::Done(pb::Done {})))
+                let mut failing = self.failing_resyncs.lock().unwrap();
+                if *failing > 0 {
+                    *failing -= 1;
+                    ("resync", Err(EngineError::Failed { message: "no answer".into(), retry: true }))
+                } else {
+                    ("resync", Ok(pb::reply::Kind::Done(pb::Done {})))
+                }
             }
             Kind::HistoryDownload(download) => {
                 let notification = e2e::HistorySyncNotification::decode(download.notification.as_slice()).unwrap();
@@ -974,6 +1056,33 @@ async fn every_engine_that_connects_fetches_app_state_again_and_a_reconnection_o
     assert_eq!((engine.asked("contacts"), engine.asked("resync")), (1, 1), "the same engine connecting again");
     engine.stop.notify_one();
     until("the engine started again to resync", || engine.asked("resync") == 2).await;
+    running.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_app_state_refetch_that_fails_is_tried_again_while_its_engine_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let engine = Scripted::default();
+    *engine.failing_resyncs.lock().unwrap() = 2;
+    let (supervisor, incoming) = supervised(&engine);
+    let running = tokio::spawn(run(
+        incoming,
+        store.clone(),
+        Arc::default(),
+        broadcast::channel(16).0,
+        Some(supervisor.clone()),
+        home.path().to_path_buf(),
+    ));
+    // Tried again after 1 s and then 2 s more.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while engine.asked("resync") < 3 {
+        assert!(std::time::Instant::now() < deadline, "tried {} times", engine.asked("resync"));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(supervisor.status().restarts, 0, "by the same engine");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(engine.asked("resync"), 3, "and no more once it has");
     running.abort();
 }
 
