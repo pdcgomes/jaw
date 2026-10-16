@@ -74,6 +74,16 @@ enum Bench {
         #[arg(long, default_value_t = 300)]
         interactive: u32,
     },
+    /// jaw.db: a made-up account built through the writer, then its pages, chat list and search timed
+    Store {
+        #[arg(long, default_value_t = 1_000_000)]
+        messages: u32,
+        #[arg(long, default_value_t = 2_000)]
+        chats: u32,
+        /// How many times each query is timed
+        #[arg(long, default_value_t = 300)]
+        runs: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -83,8 +93,18 @@ fn main() -> Result<()> {
         Some(Command::Status) => status(&home),
         Some(Command::Bench(Bench::Link { count, size, commit })) => bench_link(cli.engine, count, size, commit),
         Some(Command::Bench(Bench::Lanes { background, interactive })) => bench_lanes(background, interactive),
+        Some(Command::Bench(Bench::Store { messages, chats, runs })) => bench_store(messages, chats, runs),
         None => run(&home, cli.engine),
     }
+}
+
+/// Builds and times a jaw.db in a folder of its own, removed afterwards.
+fn bench_store(messages: u32, chats: u32, runs: u32) -> Result<()> {
+    let scratch = std::env::temp_dir().join(format!("jaw-bench-store-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let outcome = runtime()?.block_on(store::bench::run(&scratch, store::bench::Plan { messages, chats, runs }));
+    let _ = std::fs::remove_dir_all(&scratch);
+    outcome
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -117,7 +137,8 @@ fn run(home: &Path, kind: EngineKind) -> Result<()> {
         let (pushes, _) = tokio::sync::broadcast::channel(256);
         let engine = supervisor.as_ref().ok().cloned();
         tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, spool));
-        let state = Arc::new(state::State::new(home, supervisor, Vec::new(), live, Some(store), pushes)?);
+        let pools: Vec<Arc<dyn work::Report>> = vec![Arc::new(store.reads().clone())];
+        let state = Arc::new(state::State::new(home, supervisor, pools, live, Some(store), pushes)?);
         let outcome = tokio::select! {
             served = sock::serve(state, listener) => served,
             _ = shutdown() => Ok(()),

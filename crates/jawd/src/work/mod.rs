@@ -8,6 +8,7 @@ mod samples;
 mod serial;
 
 pub use pool::{Pool, Priority};
+pub use samples::Samples;
 pub use serial::Serial;
 
 /// What a pool reports for `status`.

@@ -1,0 +1,508 @@
+//! The read pool: read-only connections to jaw.db, each on a thread of its own, one per core up
+//! to 4, taking interactive queries ahead of background ones. A tokio task hands a query over and
+//! awaits its answer, so it never blocks on SQLite, and in WAL mode a reader never waits for the
+//! writer. The queries are keyset queries: a page costs the same at any depth.
+
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use crossbeam_channel::{Receiver, Sender, select_biased, unbounded};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use serde::Serialize;
+use serde_json::value::RawValue;
+use tokio::sync::oneshot;
+
+use crate::work::{Priority, Report, Samples};
+
+/// The most readers, whatever the cores.
+const MOST_READERS: usize = 4;
+
+struct Job {
+    queued: Instant,
+    interactive: bool,
+    run: Box<dyn FnOnce(&Connection) + Send>,
+}
+
+#[derive(Default)]
+struct Stats {
+    running: u32,
+    done: u64,
+    wait_interactive: Samples,
+    wait_background: Samples,
+    run: Samples,
+}
+
+/// Hands queries to the readers. Readers end once every `Reads` is dropped.
+#[derive(Clone)]
+pub struct Reads {
+    interactive: Sender<Job>,
+    background: Sender<Job>,
+    workers: usize,
+    stats: Arc<Mutex<Stats>>,
+}
+
+impl Reads {
+    /// Opens the readers on jaw.db at `path`, whose schema must already be up to date.
+    pub(super) fn open(path: &Path) -> Result<Reads> {
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MOST_READERS);
+        let (interactive, interactive_rx) = unbounded();
+        let (background, background_rx) = unbounded();
+        let stats = Arc::new(Mutex::new(Stats::default()));
+        for n in 0..workers {
+            let db = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+            )
+            .with_context(|| format!("can't open {} to read", path.display()))?;
+            db.busy_timeout(Duration::from_secs(5))?;
+            db.set_prepared_statement_cache_capacity(64);
+            let (interactive, background, stats) = (interactive_rx.clone(), background_rx.clone(), stats.clone());
+            std::thread::Builder::new()
+                .name(format!("jawd-reader-{n}"))
+                .spawn(move || read(db, interactive, background, stats))?;
+        }
+        Ok(Reads { interactive, background, workers, stats })
+    }
+
+    /// Runs `query` on a reader, interactive queries ahead of background ones, and returns its answer.
+    pub async fn query<T, F>(&self, priority: Priority, query: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+    {
+        let (answer, answered) = oneshot::channel();
+        let job = Job {
+            queued: Instant::now(),
+            interactive: priority == Priority::Interactive,
+            run: Box::new(move |db| {
+                let _ = answer.send(query(db));
+            }),
+        };
+        let lane = if job.interactive { &self.interactive } else { &self.background };
+        lane.send(job).map_err(|_| anyhow::anyhow!("jawd's readers have stopped"))?;
+        answered.await.map_err(|_| anyhow::anyhow!("a reader stopped before it answered"))?
+    }
+}
+
+fn read(db: Connection, interactive: Receiver<Job>, background: Receiver<Job>, stats: Arc<Mutex<Stats>>) {
+    loop {
+        let job = select_biased! {
+            recv(interactive) -> job => job,
+            recv(background) -> job => job,
+        };
+        let Ok(job) = job else { return };
+        let started = Instant::now();
+        {
+            let mut stats = stats.lock().expect("the readers' stats");
+            stats.running += 1;
+            let waits = if job.interactive { &mut stats.wait_interactive } else { &mut stats.wait_background };
+            waits.add(started - job.queued);
+        }
+        (job.run)(&db);
+        let mut stats = stats.lock().expect("the readers' stats");
+        stats.running -= 1;
+        stats.done += 1;
+        stats.run.add(started.elapsed());
+    }
+}
+
+impl Report for Reads {
+    fn report(&self) -> jaw_proto::Pool {
+        let stats = self.stats.lock().expect("the readers' stats");
+        jaw_proto::Pool {
+            name: "reads".into(),
+            workers: self.workers as u32,
+            running: stats.running,
+            queued_interactive: self.interactive.len() as u32,
+            queued_background: self.background.len() as u32,
+            done: stats.done,
+            wait_interactive: stats.wait_interactive.percentiles(),
+            wait_background: stats.wait_background.percentiles(),
+            run: stats.run.percentiles(),
+        }
+    }
+}
+
+/// A chat, as the chat list shows it.
+#[derive(Debug, Serialize)]
+pub struct ChatRow {
+    pub n: i64,
+    pub id: String,
+    pub v: i64,
+    /// Pinned first, then by newest message, compared bytewise and read from the top down.
+    pub sort: String,
+    pub kind: String,
+    pub name: String,
+    pub person: Option<i64>,
+    pub avatar: Option<String>,
+    pub last: Option<Last>,
+    pub unread: i64,
+    pub mentions: i64,
+    pub pinned: bool,
+    pub muted_until: Option<i64>,
+    pub archived: bool,
+    pub marked_unread: bool,
+    pub draft: Option<String>,
+    pub community: Option<String>,
+}
+
+/// A chat's newest message, for its line in the chat list.
+#[derive(Debug, Serialize)]
+pub struct Last {
+    pub from: Option<String>,
+    pub mine: bool,
+    pub summary: String,
+    pub kind: String,
+    pub status: Option<String>,
+    pub at: i64,
+}
+
+/// Where a page of the chat list starts: after this chat.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatCursor {
+    sort: String,
+    n: i64,
+}
+
+impl ChatRow {
+    pub fn cursor(&self) -> ChatCursor {
+        ChatCursor { sort: self.sort.clone(), n: self.n }
+    }
+}
+
+/// A message, ready to draw.
+#[derive(Debug, Serialize)]
+pub struct MessageRow {
+    pub n: i64,
+    pub chat: String,
+    pub id: String,
+    pub v: i64,
+    pub at: i64,
+    pub from: Option<From>,
+    pub mine: bool,
+    pub kind: String,
+    pub status: Option<String>,
+    pub spans: Box<RawValue>,
+    pub summary: String,
+    pub reply: Option<Box<RawValue>>,
+    pub detail: Option<Box<RawValue>>,
+    pub forwarded: i64,
+    pub edited: bool,
+    pub deleted: bool,
+    pub expires_at: Option<i64>,
+    pub starred: bool,
+    pub view_once: bool,
+}
+
+/// Who sent a message: the person and the name to show.
+#[derive(Debug, Serialize)]
+pub struct From {
+    pub id: i64,
+    pub name: String,
+}
+
+/// A message's place in its chat, for paging from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MessageCursor {
+    at: i64,
+    n: i64,
+}
+
+impl MessageRow {
+    pub fn cursor(&self) -> MessageCursor {
+        MessageCursor { at: self.at, n: self.n }
+    }
+}
+
+/// Which page of a chat's messages.
+#[derive(Clone, Copy, Debug)]
+pub enum Around {
+    /// The newest.
+    Newest,
+    /// The ones just before this message, not including it.
+    Before(MessageCursor),
+    /// The ones just after this message, not including it.
+    After(MessageCursor),
+}
+
+/// The name to show for someone with these names, or their number when jaw knows no name.
+fn shown(name: Option<String>, push_name: Option<String>, verified: Option<String>, jid: Option<&str>) -> String {
+    name.or(push_name).or(verified).unwrap_or_else(|| match jid.and_then(|jid| jid.split_once('@')) {
+        Some((user, "s.whatsapp.net")) => format!("+{user}"),
+        Some((user, _)) => user.to_string(),
+        None => String::new(),
+    })
+}
+
+const CHAT_COLUMNS: &str = "
+    SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until,
+        c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name,
+        m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name,
+        mp.verified_name, mj.jid
+    FROM chats c
+    LEFT JOIN people p ON p.n = c.person
+    LEFT JOIN messages m ON m.n = c.last_message
+    LEFT JOIN person_jids mj ON mj.n = m.sender
+    LEFT JOIN people mp ON mp.n = mj.person";
+
+fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
+    let id: String = r.get(1)?;
+    let name = match r.get::<_, Option<String>>(5)? {
+        Some(name) => name,
+        None => shown(r.get(16)?, r.get(17)?, r.get(18)?, Some(&id)),
+    };
+    let last = match r.get::<_, Option<i64>>(19)? {
+        Some(_) => {
+            let from = match r.get::<_, Option<String>>(28)? {
+                Some(jid) => Some(shown(r.get(25)?, r.get(26)?, r.get(27)?, Some(&jid))),
+                None => None,
+            };
+            Some(Last {
+                from,
+                at: r.get(20)?,
+                mine: r.get(21)?,
+                kind: r.get(22)?,
+                status: r.get(23)?,
+                summary: r.get(24)?,
+            })
+        }
+        None => None,
+    };
+    let muted_until: i64 = r.get(11)?;
+    Ok(ChatRow {
+        n: r.get(0)?,
+        id,
+        v: r.get(2)?,
+        sort: r.get(3)?,
+        kind: r.get(4)?,
+        name,
+        person: r.get(6)?,
+        avatar: r.get(7)?,
+        unread: r.get(8)?,
+        mentions: r.get(9)?,
+        pinned: r.get::<_, i64>(10)? > 0,
+        muted_until: (muted_until != 0).then_some(muted_until),
+        archived: r.get(12)?,
+        marked_unread: r.get(13)?,
+        draft: r.get(14)?,
+        community: r.get(15)?,
+        last,
+    })
+}
+
+/// A page of the chat list, pinned first and then by newest message: the first `limit` chats, or
+/// the next `limit` after `after`. Archived chats are a list of their own.
+pub fn chats(db: &Connection, archived: bool, after: Option<&ChatCursor>, limit: usize) -> Result<Vec<ChatRow>> {
+    let (sort, n) = after.map_or(("2", i64::MAX), |after| (after.sort.as_str(), after.n));
+    let sql = format!(
+        "{CHAT_COLUMNS} WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4"
+    );
+    let rows = db
+        .prepare_cached(&sql)?
+        .query_map(params![archived, sort, n, limit as i64], chat_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// What message_row reads, from `messages m` joined with MESSAGE_JOINS.
+const MESSAGE_COLUMNS: &str = "
+    SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''),
+        m.reply, m.detail,
+        m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once,
+        p.n, p.name, p.push_name, p.verified_name, j.jid";
+
+/// How many columns MESSAGE_COLUMNS has, for queries that select more after them.
+const MESSAGE_COLUMN_COUNT: usize = 24;
+
+const MESSAGE_JOINS: &str = "
+    JOIN chats c ON c.n = m.chat
+    LEFT JOIN person_jids j ON j.n = m.sender
+    LEFT JOIN people p ON p.n = j.person";
+
+#[derive(Serialize)]
+struct Span<'a> {
+    t: &'static str,
+    s: &'a str,
+}
+
+fn json(text: Option<String>) -> rusqlite::Result<Option<Box<RawValue>>> {
+    text.map(|text| {
+        RawValue::from_string(text)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+    })
+    .transpose()
+}
+
+fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
+    let text: Option<String> = r.get(8)?;
+    let spans = match r.get::<_, Option<String>>(9)? {
+        Some(spans) => spans,
+        None => match text.as_deref() {
+            Some(text) if !text.is_empty() => serde_json::to_string(&[Span { t: "text", s: text }])
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+            _ => "[]".into(),
+        },
+    };
+    let from = match r.get::<_, Option<i64>>(19)? {
+        Some(id) => {
+            let jid: Option<String> = r.get(23)?;
+            Some(From { id, name: shown(r.get(20)?, r.get(21)?, r.get(22)?, jid.as_deref()) })
+        }
+        None => None,
+    };
+    Ok(MessageRow {
+        n: r.get(0)?,
+        chat: r.get(1)?,
+        id: r.get(2)?,
+        v: r.get(3)?,
+        at: r.get(4)?,
+        mine: r.get(5)?,
+        kind: r.get(6)?,
+        status: r.get(7)?,
+        spans: json(Some(spans))?.expect("spans are always there"),
+        summary: r.get(10)?,
+        reply: json(r.get(11)?)?,
+        detail: json(r.get(12)?)?,
+        forwarded: r.get(13)?,
+        edited: r.get::<_, Option<i64>>(14)?.is_some(),
+        deleted: r.get(15)?,
+        expires_at: r.get(16)?,
+        starred: r.get(17)?,
+        view_once: r.get(18)?,
+        from,
+    })
+}
+
+/// A page of `limit` messages in `chat`, oldest first, by keyset on (chat, time, rowid) and never
+/// by offset, so the 50,000th page costs what the first does. An unknown chat has none.
+pub fn messages(db: &Connection, chat: &str, around: Around, limit: usize) -> Result<Vec<MessageRow>> {
+    let from =
+        format!("{MESSAGE_COLUMNS} FROM messages m {MESSAGE_JOINS} WHERE m.chat = (SELECT n FROM chats WHERE id = ?1)");
+    let limit = limit as i64;
+    let mut rows: Vec<MessageRow> = match around {
+        Around::Newest => {
+            let sql = format!("{from} ORDER BY m.at DESC, m.n DESC LIMIT ?2");
+            db.prepare_cached(&sql)?.query_map(params![chat, limit], message_row)?.collect::<rusqlite::Result<_>>()?
+        }
+        Around::Before(cursor) => {
+            let sql = format!("{from} AND (m.at, m.n) < (?2, ?3) ORDER BY m.at DESC, m.n DESC LIMIT ?4");
+            db.prepare_cached(&sql)?
+                .query_map(params![chat, cursor.at, cursor.n, limit], message_row)?
+                .collect::<rusqlite::Result<_>>()?
+        }
+        Around::After(cursor) => {
+            let sql = format!("{from} AND (m.at, m.n) > (?2, ?3) ORDER BY m.at, m.n LIMIT ?4");
+            return Ok(db
+                .prepare_cached(&sql)?
+                .query_map(params![chat, cursor.at, cursor.n, limit], message_row)?
+                .collect::<rusqlite::Result<_>>()?);
+        }
+    };
+    rows.reverse();
+    Ok(rows)
+}
+
+/// A message by its chat and ID, with its raw protobuf decompressed.
+pub fn message(db: &Connection, chat: &str, id: &str) -> Result<Option<(MessageRow, Option<Vec<u8>>)>> {
+    let sql = format!(
+        "{MESSAGE_COLUMNS} FROM messages m {MESSAGE_JOINS} WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND m.id = ?2"
+    );
+    let Some(row) = db.prepare_cached(&sql)?.query_row(params![chat, id], message_row).optional()? else {
+        return Ok(None);
+    };
+    let packed: Option<Vec<u8>> =
+        db.prepare_cached("SELECT raw FROM messages WHERE n = ?1")?.query_row([row.n], |r| r.get(0))?;
+    let raw = packed.map(|packed| super::write::unpack(&packed)).transpose()?;
+    Ok(Some((row, raw)))
+}
+
+/// A message search found, with where the query matched in its text, as byte ranges.
+#[derive(Debug, Serialize)]
+pub struct Hit {
+    pub message: MessageRow,
+    pub text: String,
+    pub marks: Vec<(usize, usize)>,
+    /// Its place in search order, newest first.
+    #[serde(skip)]
+    t: i64,
+}
+
+/// A page of search hits, and where the next page starts if there may be one.
+#[derive(Debug, Serialize)]
+pub struct Found {
+    pub hits: Vec<Hit>,
+    pub cursor: Option<i64>,
+}
+
+/// The FTS5 query for what someone typed: every word, each matching the start of a word, so
+/// typing finds as it goes. Quoting keeps FTS5's own syntax out of it.
+fn fts_query(typed: &str) -> String {
+    typed.split_whitespace().map(|word| format!("\"{}\"*", word.replace('"', "\"\""))).collect::<Vec<_>>().join(" ")
+}
+
+const MARK_START: char = '\u{2}';
+const MARK_END: char = '\u{3}';
+
+/// The text FTS5's highlight() marked, without its marks, and where they were.
+fn unmark(marked: &str) -> (String, Vec<(usize, usize)>) {
+    let mut text = String::with_capacity(marked.len());
+    let mut marks = Vec::new();
+    let mut start = 0;
+    for c in marked.chars() {
+        match c {
+            MARK_START => start = text.len(),
+            MARK_END => marks.push((start, text.len())),
+            c => text.push(c),
+        }
+    }
+    (text, marks)
+}
+
+/// Messages matching `typed`, newest first, accent-blind ("nao" finds "não"), in `chat` or in
+/// every chat; `before` is the cursor a previous page returned.
+pub fn search(db: &Connection, typed: &str, chat: Option<&str>, before: Option<i64>, limit: usize) -> Result<Found> {
+    let query = fts_query(typed);
+    if query.is_empty() {
+        return Ok(Found { hits: Vec::new(), cursor: None });
+    }
+    // CROSS JOIN keeps FTS5 the outer loop, so it reads its rowids newest first and stops at the limit.
+    let sql = format!(
+        "{MESSAGE_COLUMNS}, messages_fts.rowid, highlight(messages_fts, 0, char(2), char(3))
+        FROM messages_fts CROSS JOIN messages m ON m.t = messages_fts.rowid {MESSAGE_JOINS}
+        WHERE messages_fts MATCH ?1 AND messages_fts.rowid < ?2 AND (?3 IS NULL OR c.id = ?3)
+        ORDER BY messages_fts.rowid DESC LIMIT ?4"
+    );
+    let hits: Vec<Hit> = db
+        .prepare_cached(&sql)?
+        .query_map(params![query, before.unwrap_or(i64::MAX), chat, limit as i64], |r| {
+            let marked: String = r.get(MESSAGE_COLUMN_COUNT + 1)?;
+            let (text, marks) = unmark(&marked);
+            Ok(Hit { message: message_row(r)?, text, marks, t: r.get(MESSAGE_COLUMN_COUNT)? })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let cursor = (hits.len() == limit).then(|| hits.last().map(|hit| hit.t)).flatten();
+    Ok(Found { hits, cursor })
+}
+
+/// A change in the feed: the row of `kind` with n `key` changed, or was removed, at `seq`.
+#[derive(Debug, Serialize)]
+pub struct Event {
+    pub seq: i64,
+    pub at: i64,
+    pub kind: String,
+    pub key: i64,
+    pub chat: Option<i64>,
+}
+
+/// Up to `limit` events after `since`, oldest first.
+pub fn events(db: &Connection, since: i64, limit: usize) -> Result<Vec<Event>> {
+    let events = db
+        .prepare_cached("SELECT seq, at, type, key, chat FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2")?
+        .query_map(params![since, limit as i64], |r| {
+            Ok(Event { seq: r.get(0)?, at: r.get(1)?, kind: r.get(2)?, key: r.get(3)?, chat: r.get(4)? })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(events)
+}
