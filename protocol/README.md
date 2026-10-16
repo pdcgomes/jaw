@@ -254,6 +254,29 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `notice` | `text` and `tone` (`info`, `warning`, `error`): something an interface should say once |
 | `resync` | `watch`: watch it again |
 
+## Voice (proposed)
+
+Proposed with the `jaw-voice` crate in M5, for jawd to wire in; until then the `voice.*` rows above are the draft. It keeps their names and fills in what they leave open.
+
+```json
+{"id":31,"method":"voice.play","params":{"message":"3EB0A1B2C3D4E5F6","at":9.0,"speed":1.5}}
+{"method":"playback","params":{"message":"3EB0A1B2C3D4E5F6","state":"playing","at":9.1,"seconds":31.0,"speed":1.5}}
+{"method":"recording","params":{"state":"stopped","seconds":7.4,"waveform":[0,12,48,"…",30],"end":"stopped"}}
+```
+
+- **One thing at a time.** One message plays at once, on jawd's machine; a new `voice.play` stops the last, which gets `playback` with `stopped`. `voice.record` stops playback first.
+- `voice.play`: `message`, `at` in seconds (0 by default) and `speed` (1, 1.5 or 2; 1 by default). Without `at`, a paused message carries on where it paused. A voice message that isn't downloaded yet is fetched first, at interactive priority. `recording: true` instead of `message` plays the stopped recording, to listen before sending.
+- `voice.pause`, `voice.seek` (`at`) and `voice.speed` (`speed`) act on what's playing or paused, and answer with nothing; the `playback` push says what happened. Faster speeds keep the voice's pitch.
+- **`playback`:** `message` (or `recording: true`), `state`, `at`, `seconds` (the length) and `speed`, ten times a second while playing and at each change. `state` is `playing`, `paused`, `ended` (`at` is then `seconds`), `stopped` (another message or a recording took over) or `failed`, with `error` saying why in words to show (no audio output, a file that isn't a voice message).
+- `voice.record`: `chat`. jawd records, tells WhatsApp you're recording in that chat while it lasts, and answers error 4 if it's already recording. Recordings stop themselves at 15 minutes.
+- **`recording`:** `state` and `seconds`, with
+  - `recording`: `level`, 0 to 100, ten times a second;
+  - `silent`: once, when the microphone has given nothing but digital silence for a second, as macOS gives when it hasn't allowed jawd the microphone; recording carries on;
+  - `stopped`: `waveform` (64 numbers from 0 to 100, as WhatsApp sends) and `end`: `stopped`, `limit`, or `interrupted` with `reason` when the microphone went away (what came before is kept);
+  - `cancelled`, or `failed` with `error`; nothing is kept after either.
+- `voice.stop` stops recording and keeps it, to listen to or send. `voice.send` sends the stopped recording as a voice message, or stops and sends one still recording (Enter while recording), and returns `message`. `voice.cancel` throws it away, recording or stopped.
+- The played receipt: jawd sends it for someone else's voice message when it first starts playing, once.
+
 ## Presence
 
 jawd tells WhatsApp you're online while any interface's `focus` is true, and away 30 seconds after the last one loses it, so your phone keeps its notifications while you're not looking. WhatsApp only sends others' presence while you're online.
