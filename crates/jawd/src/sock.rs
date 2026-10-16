@@ -31,6 +31,8 @@ struct Session {
     greeted: bool,
     windows: Option<feed::Client>,
     viewer: Viewer,
+    /// Whether this interface has focus, for whether you're online.
+    presence: Option<crate::send::Viewer>,
 }
 
 pub fn listen(path: &Path) -> Result<UnixListener> {
@@ -76,6 +78,7 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
         greeted: false,
         windows: state.feed().map(|feed| feed.client(out.clone())),
         viewer: state.attention().viewer(),
+        presence: None,
     };
     // Pushes start once the connection has said hello.
     let mut pushes: Option<broadcast::Receiver<Push>> = None;
@@ -220,6 +223,7 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
             Ok(hello) if hello.protocol == PROTOCOL => {
                 session.greeted = true;
                 session.viewer.focus(hello.focus);
+                session.presence = state.sending().map(|sending| sending.viewer(hello.focus));
                 if let Some(windows) = session.windows.as_mut() {
                     windows.hello(hello.since);
                 }
@@ -305,6 +309,13 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
             None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so there's nothing to watch")),
         },
         "history.more" => history_more(state, id, request.params).await,
+        "send.text" | "send.retry" | "chat.start" | "draft.set" | "read" | "typing" => match state.sending() {
+            Some(sending) => match sending.call(&request.method, request.params).await {
+                Ok(result) => succeeded(id, &result),
+                Err(error) => failed(id, error),
+            },
+            None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it can't send")),
+        },
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
     }
 }

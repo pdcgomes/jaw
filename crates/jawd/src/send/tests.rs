@@ -1,0 +1,777 @@
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use jaw_proto::{Push, code};
+use prost::Message as _;
+use rusqlite::{Connection, OptionalExtension};
+use serde_json::{Value, json};
+use tokio::sync::{broadcast, mpsc};
+
+use super::*;
+use crate::engine::demo::{self, DemoEngine, Replies, World};
+use crate::engine::supervisor::{Backoff, Supervisor};
+use crate::store::{Lane, Message, Person};
+
+const ANA: &str = "351912345678@s.whatsapp.net";
+const CLIMBING: &str = "120363012345678901@g.us";
+const RUI: &str = "351913333333@s.whatsapp.net";
+
+fn quick() -> Timing {
+    Timing {
+        retry_first: Duration::from_millis(5),
+        retry_most: Duration::from_millis(20),
+        give_up: Duration::from_secs(5),
+        read_every: Duration::from_millis(150),
+        typing_again: Duration::from_millis(150),
+        typing_quiet: Duration::from_millis(250),
+        online_after: Duration::from_millis(30),
+        away_after: Duration::from_millis(150),
+    }
+}
+
+/// jawd's sending on a jaw.db in `home`, with the demo engine on `world`, connected.
+struct Running {
+    store: Store,
+    sending: Sending,
+    world: Arc<World>,
+    pushes: broadcast::Sender<Push>,
+    supervisor: Option<Supervisor>,
+}
+
+impl Running {
+    async fn on(home: &Path, world: Arc<World>, engine: bool) -> Running {
+        Running::timed(home, world, engine, quick()).await
+    }
+
+    async fn timed(home: &Path, world: Arc<World>, engine: bool, timing: Timing) -> Running {
+        let store = Store::open(home).unwrap();
+        let live: crate::sync::Shared = Arc::default();
+        let (pushes, _) = broadcast::channel(256);
+        let (events, incoming) = mpsc::channel(1024);
+        let supervisor = engine.then(|| {
+            let engine = DemoEngine::sharing(vec![demo::connected()], world.clone());
+            Supervisor::spawn(Arc::new(engine), events, Backoff::default())
+        });
+        let mut connected = pushes.subscribe();
+        let sync =
+            crate::sync::run(incoming, store.clone(), live.clone(), pushes.clone(), supervisor.clone(), home.into());
+        tokio::spawn(sync);
+        let sending = Sending::start(store.clone(), supervisor.clone(), live, &pushes, timing).await.unwrap();
+        if engine {
+            let online = async {
+                while let Ok(push) = connected.recv().await {
+                    if push.method == "connection" && push.params["state"] == "online" {
+                        return;
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), online).await.expect("the demo engine never connected");
+        }
+        Running { store, sending, world, pushes, supervisor }
+    }
+
+    async fn new(home: &Path) -> Running {
+        let world: Arc<World> = Arc::default();
+        world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+        Running::on(home, world, true).await
+    }
+
+    async fn chats(&self, chats: &[&str]) {
+        let changes = chats.iter().map(|id| Change::Chat(Chat { id: id.to_string(), ..Chat::default() })).collect();
+        self.store.apply(Lane::Live, changes).await.unwrap();
+    }
+
+    async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
+        self.sending.call(method, params).await
+    }
+
+    async fn send(&self, chat: &str, text: &str) -> String {
+        let sent = self.call("send.text", json!({ "chat": chat, "text": text })).await.unwrap();
+        sent["message"].as_str().unwrap().to_string()
+    }
+
+    async fn query<T: Send + 'static>(
+        &self,
+        query: impl FnOnce(&Connection) -> anyhow::Result<T> + Send + 'static,
+    ) -> T {
+        self.store.reads().query(Priority::Interactive, query).await.unwrap()
+    }
+
+    /// Waits, a commit at a time, until `done` holds of jaw.db.
+    async fn until(&self, what: &str, done: impl Fn(&Connection) -> anyhow::Result<bool> + Clone + Send + 'static) {
+        let mut committed = self.store.committed();
+        let waited = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let done = done.clone();
+                if self.query(move |db| done(db)).await {
+                    return;
+                }
+                committed.changed().await.unwrap();
+            }
+        });
+        waited.await.unwrap_or_else(|_| panic!("{what} never happened"));
+    }
+
+    /// Waits until message `id` has got at least as far as `status`, since receipts can take it
+    /// further between two looks.
+    async fn until_status(&self, chat: &str, id: &str, status: &'static str) {
+        const ORDER: [&str; 6] = ["pending", "failed", "sent", "delivered", "read", "played"];
+        let rank = |status: Option<&str>| status.and_then(|s| ORDER.iter().position(|o| *o == s));
+        let (chat, id) = (chat.to_string(), id.to_string());
+        self.until(&format!("{id} {status}"), move |db| {
+            let now = read::message(db, &chat, &id)?.and_then(|(row, _)| row.status);
+            Ok(rank(now.as_deref()) >= rank(Some(status)))
+        })
+        .await;
+    }
+
+    async fn outbox(&self) -> Vec<(String, String)> {
+        self.query(|db| {
+            Ok(db
+                .prepare("SELECT m.id, o.state FROM outbox o JOIN messages m ON m.n = o.message ORDER BY o.n")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await
+    }
+
+    /// Someone else's message arriving live in `chat`.
+    async fn arrives(&self, chat: &str, sender: &str, id: &str, at: i64) {
+        let message = Message {
+            chat: chat.into(),
+            id: id.into(),
+            at,
+            sender: Some(sender.into()),
+            kind: "text",
+            text: Some(format!("message {id}")),
+            summary: format!("message {id}"),
+            live: true,
+            ..Message::default()
+        };
+        self.store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+    }
+
+    fn marked_read(&self) -> Vec<pb::MarkRead> {
+        self.world
+            .asked()
+            .into_iter()
+            .filter_map(|kind| match kind {
+                pb::command::Kind::MarkRead(mark) => Some(mark),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn presences(&self) -> Vec<(String, i32)> {
+        self.world
+            .asked()
+            .into_iter()
+            .filter_map(|kind| match kind {
+                pb::command::Kind::ChatPresence(p) => Some((p.chat, p.state)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn online(&self) -> Vec<bool> {
+        self.world
+            .asked()
+            .into_iter()
+            .filter_map(|kind| match kind {
+                pb::command::Kind::Presence(p) => Some(p.available),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// One run of jawd in a runtime of its own on a thread of its own, ended at once when `life`
+/// returns, with whatever it had in flight, as a crash ends it.
+async fn lifetime<F>(home: &Path, world: Arc<World>, timing: Timing, life: impl FnOnce(Running) -> F + Send + 'static)
+where
+    F: std::future::Future<Output = ()>,
+{
+    let home = home.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        runtime.block_on(async move { life(Running::timed(&home, world, true, timing).await).await });
+        runtime.shutdown_background();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_shows_pending_at_once_then_goes_sent_delivered_and_read() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    running.world.gate(true);
+    running.call("draft.set", json!({ "chat": ANA, "text": "on my w" })).await.unwrap();
+    let sent = running.call("send.text", json!({ "chat": ANA, "text": "on my way" })).await.unwrap();
+    let id = sent["message"].as_str().unwrap().to_string();
+    assert!(
+        id.starts_with("3EB0")
+            && id.len() == 22
+            && id[4..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()),
+        "{id}"
+    );
+    let row = &sent["row"];
+    assert_eq!(
+        (row["id"].as_str(), row["status"].as_str(), row["mine"].as_bool()),
+        (Some(id.as_str()), Some("pending"), Some(true))
+    );
+    assert_eq!(row["spans"], json!([{ "t": "text", "s": "on my way" }]));
+    let chat = running.query(|db| Ok(read::chats(db, false, None, 10)?.remove(0))).await;
+    assert_eq!(
+        (chat.draft, chat.last.unwrap().status.as_deref()),
+        (None, Some("pending")),
+        "the draft went with what was sent"
+    );
+    running.world.gate(false);
+    running.until_status(ANA, &id, "read").await;
+    let sends = running.world.sends();
+    assert_eq!(sends.len(), 1);
+    assert_eq!((sends[0].chat.as_str(), sends[0].id.as_str()), (ANA, id.as_str()));
+    let raw = wa_proto::wa_web_protobufs_e2e::Message::decode(sends[0].raw.as_slice()).unwrap();
+    assert_eq!(raw.conversation.as_deref(), Some("on my way"));
+    assert!(running.outbox().await.is_empty(), "a message the server has leaves the outbox");
+    let receipts: (i64, bool, bool) = running
+        .query(|db| {
+            Ok(db.query_row(
+                "SELECT count(*), max(delivered_at) IS NOT NULL, max(read_at) IS NOT NULL FROM receipts",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await;
+    assert_eq!(receipts, (1, true, true), "Ana's receipt, delivered and read");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_a_group_a_message_is_delivered_once_anyone_has_it_and_read_once_anyone_has_read_it() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(300) });
+    running.chats(&[CLIMBING]).await;
+    let id = running.send(CLIMBING, "Saturday at 9?").await;
+    running.until_status(CLIMBING, &id, "delivered").await;
+    running.until_status(CLIMBING, &id, "read").await;
+    let receipts: Vec<(String, bool, bool)> = running
+        .query(|db| {
+            Ok(db
+                .prepare(
+                    "SELECT j.jid, r.delivered_at IS NOT NULL, r.read_at IS NOT NULL FROM receipts r
+                    JOIN person_jids j ON j.n = r.recipient ORDER BY j.jid",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+    assert_eq!(
+        receipts,
+        [(RUI.to_string(), true, true), ("351914444444@s.whatsapp.net".to_string(), true, false)],
+        "each recipient's receipts are kept"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_message_and_its_outbox_row_are_committed_before_send_text_answers_and_survive_a_crash() {
+    let home = tempfile::tempdir().unwrap();
+    let world: Arc<World> = Arc::default();
+    world.hold(true);
+    let (path, id) = (home.path().to_path_buf(), Arc::new(std::sync::Mutex::new(String::new())));
+    let kept = id.clone();
+    lifetime(home.path(), world.clone(), quick(), move |running| async move {
+        running.chats(&[ANA]).await;
+        let id = running.send(ANA, "kept").await;
+        // Another connection, as another process would open, sees both rows the moment it answers.
+        let db = Connection::open(path.join("jaw.db")).unwrap();
+        let found: Option<(String, String)> = db
+            .query_row(
+                "SELECT m.status, o.state FROM messages m JOIN outbox o ON o.message = m.n WHERE m.id = ?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(found, Some(("pending".into(), "queued".into())));
+        *kept.lock().unwrap() = id;
+    })
+    .await;
+    let id = id.lock().unwrap().clone();
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    let state: String = db
+        .query_row("SELECT o.state FROM outbox o JOIN messages m ON m.n = o.message WHERE m.id = ?1", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(state, "queued", "the outbox row outlived jawd");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_mid_send_sends_the_same_id_again_and_the_message_arrives_once() {
+    let home = tempfile::tempdir().unwrap();
+    let world: Arc<World> = Arc::default();
+    world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    world.hold(true);
+    lifetime(home.path(), world.clone(), quick(), |running| async move {
+        running.chats(&[ANA]).await;
+        running.send(ANA, "did it go?").await;
+        running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Send(_)))).await;
+    })
+    .await;
+    world.hold(false);
+    let running = Running::on(home.path(), world.clone(), true).await;
+    let sends = world.sends();
+    let id = sends[0].id.clone();
+    running.until_status(ANA, &id, "read").await;
+    let sends = world.sends();
+    assert_eq!(sends.len(), 2, "sent once before the crash and once after");
+    assert!(sends.iter().all(|send| send.id == id), "both times with the ID jawd made");
+    assert_eq!(world.given(), 1, "Ana got it once");
+    let count = running.query(|db| read::message_count(db, ANA)).await;
+    assert_eq!(count, 1);
+    assert!(running.outbox().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_the_server_had_before_a_restart_is_not_sent_again() {
+    let home = tempfile::tempdir().unwrap();
+    let world: Arc<World> = Arc::default();
+    world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    lifetime(home.path(), world.clone(), quick(), |running| async move {
+        running.chats(&[ANA]).await;
+        let id = running.send(ANA, "once").await;
+        running.until_status(ANA, &id, "sent").await;
+    })
+    .await;
+    let running = Running::on(home.path(), world.clone(), true).await;
+    running.chats(&[RUI]).await;
+    let later = running.send(RUI, "and another").await;
+    running.until_status(RUI, &later, "sent").await;
+    let ids: Vec<String> = world.sends().into_iter().map(|send| send.id).collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert_eq!(ids[1], later);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_that_fails_is_tried_again_with_the_same_id_until_it_goes() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    running.world.fail_next(3);
+    let id = running.send(ANA, "third time lucky").await;
+    running.until_status(ANA, &id, "sent").await;
+    let sends = running.world.sends();
+    assert_eq!(sends.len(), 4);
+    assert!(sends.iter().all(|send| send.id == id));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_that_keeps_failing_is_failed_until_it_is_retried_by_hand_even_across_a_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let world: Arc<World> = Arc::default();
+    world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    world.fail_next(u32::MAX);
+    let id = Arc::new(std::sync::Mutex::new(String::new()));
+    let kept = id.clone();
+    let impatient = Timing { give_up: Duration::from_millis(300), ..quick() };
+    lifetime(home.path(), world.clone(), impatient, move |running| async move {
+        running.chats(&[ANA]).await;
+        let id = running.send(ANA, "nobody home").await;
+        running.until_status(ANA, &id, "failed").await;
+        let chat = running.query(|db| Ok(read::chats(db, false, None, 10)?.remove(0))).await;
+        assert_eq!(chat.last.unwrap().status.as_deref(), Some("failed"), "the chat list shows it failed");
+        *kept.lock().unwrap() = id;
+    })
+    .await;
+    let id = id.lock().unwrap().clone();
+    let tries = world.sends().len();
+    assert!(tries >= 3, "tried {tries} times before giving up");
+    world.fail_next(0);
+    let running = Running::on(home.path(), world.clone(), true).await;
+    assert_eq!(running.outbox().await, [(id.clone(), "failed".to_string())], "a restart doesn't send a failed message");
+    let unknown = running.call("send.retry", json!({ "message": "3EB0000000000000000000" })).await.unwrap_err();
+    assert_eq!(unknown.code, code::NOT_FOUND);
+    running.call("send.retry", json!({ "message": id })).await.unwrap();
+    running.until_status(ANA, &id, "read").await;
+    assert_eq!(world.sends().len(), tries + 1);
+    assert!(running.outbox().await.is_empty());
+    running.call("send.retry", json!({ "message": id })).await.unwrap_err();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_chats_messages_go_in_order_with_sixteen_chats_sending_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Arc::new(Running::new(home.path()).await);
+    running.world.gate(true);
+    let chats: Vec<String> = (0..24).map(|n| format!("3519200000{n:02}@s.whatsapp.net")).collect();
+    running.chats(&chats.iter().map(String::as_str).collect::<Vec<_>>()).await;
+    let mut writing = Vec::new();
+    for chat in chats.clone() {
+        let running = running.clone();
+        writing.push(tokio::spawn(async move {
+            let mut ids = Vec::new();
+            for n in 0..6 {
+                ids.push(running.send(&chat, &format!("{n}")).await);
+            }
+            (chat, ids)
+        }));
+    }
+    let mut written = Vec::new();
+    for writing in writing {
+        written.push(writing.await.unwrap());
+    }
+    let sends = |asked: &[pb::command::Kind]| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count();
+    running.world.until(|asked| sends(asked) == 16).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        (sends(&running.world.asked()), running.world.most_at_once()),
+        (16, 16),
+        "sixteen chats send at once while the server holds them, and no more"
+    );
+    running.world.gate(false);
+    running.world.until(|asked| sends(asked) == 24 * 6).await;
+    let sent = running.world.sends();
+    for (chat, ids) in &written {
+        let order: Vec<&str> = sent.iter().filter(|send| &send.chat == chat).map(|send| send.id.as_str()).collect();
+        assert_eq!(order, ids.iter().map(String::as_str).collect::<Vec<_>>(), "{chat} sent out of order");
+    }
+    assert_eq!(running.world.most_at_once(), 16);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_start_by_number_asks_whatsapp_and_makes_one_chat_for_the_number_and_its_lid() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let started = running.call("chat.start", json!({ "phone": "+351 912-345-678" })).await.unwrap();
+    assert_eq!((started["chat"]["id"].as_str(), started["chat"]["kind"].as_str()), (Some(ANA), Some("direct")));
+    let asked = running.world.asked();
+    assert!(asked.iter().any(|k| matches!(k, pb::command::Kind::OnWhatsapp(o) if o.phones == ["351912345678"])));
+    running.arrives("1000351912345678@lid", "1000351912345678@lid", "m1", 1_000).await;
+    let again = running.call("chat.start", json!({ "phone": "351912345678" })).await.unwrap();
+    assert_eq!(again["chat"]["id"].as_str(), Some(ANA));
+    let chats = running.query(|db| Ok(db.query_row("SELECT count(*) FROM chats", [], |r| r.get::<_, i64>(0))?)).await;
+    assert_eq!(chats, 1, "the LID's message went to the number's chat");
+    let nobody = running.call("chat.start", json!({ "phone": "+999 123 4567" })).await.unwrap_err();
+    assert_eq!((nobody.code, nobody.message.as_str()), (code::NOT_FOUND, "+9991234567 isn't on WhatsApp"));
+    let garbled = running.call("chat.start", json!({ "phone": "call me" })).await.unwrap_err();
+    assert_eq!(garbled.code, code::INVALID_PARAMS);
+    let neither = running.call("chat.start", json!({})).await.unwrap_err();
+    assert_eq!(neither.code, code::INVALID_PARAMS);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_start_by_person_finds_their_chat_under_any_of_their_jids_or_makes_one() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let lid = "100000000001@lid";
+    let ana = Person { jids: vec![ANA.into(), lid.into()], name: Some("Ana".into()), ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(ana)]).await.unwrap();
+    running.arrives(lid, lid, "m1", 1_000).await;
+    let person: i64 = running
+        .query(move |db| Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [ANA], |r| r.get(0))?))
+        .await;
+    let started = running.call("chat.start", json!({ "person": format!("person:{person}") })).await.unwrap();
+    assert_eq!((started["chat"]["id"].as_str(), started["chat"]["name"].as_str()), (Some(lid), Some("Ana")));
+    let rui = Person { jids: vec![RUI.into()], name: Some("Rui".into()), ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(rui)]).await.unwrap();
+    let person: i64 = running
+        .query(move |db| Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [RUI], |r| r.get(0))?))
+        .await;
+    let made = running.call("chat.start", json!({ "person": format!("person:{person}") })).await.unwrap();
+    assert_eq!((made["chat"]["id"].as_str(), made["chat"]["name"].as_str()), (Some(RUI), Some("Rui")));
+    let again = running.call("chat.start", json!({ "person": format!("person:{person}") })).await.unwrap();
+    assert_eq!(again["chat"]["id"].as_str(), Some(RUI));
+    let chats = running.query(|db| Ok(db.query_row("SELECT count(*) FROM chats", [], |r| r.get::<_, i64>(0))?)).await;
+    assert_eq!(chats, 2);
+    let unknown = running.call("chat.start", json!({ "person": "person:9999" })).await.unwrap_err();
+    assert_eq!(unknown.code, code::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_is_kept_for_every_interface_shown_in_the_chat_list_and_cleared_when_empty() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    running.call("draft.set", json!({ "chat": ANA, "text": "see you" })).await.unwrap();
+    let draft = || running.query(|db| Ok(read::chats(db, false, None, 10)?.remove(0).draft));
+    assert_eq!(draft().await.as_deref(), Some("see you"));
+    let before = running.query(|db| Ok(read::chats(db, false, None, 10)?.remove(0).v)).await;
+    running.call("draft.set", json!({ "chat": ANA, "text": "see you" })).await.unwrap();
+    let after = running.query(|db| Ok(read::chats(db, false, None, 10)?.remove(0).v)).await;
+    assert_eq!(after, before, "the same draft again changes nothing");
+    running.call("draft.set", json!({ "chat": ANA, "text": "" })).await.unwrap();
+    assert_eq!(draft().await, None);
+    let unknown = running.call("draft.set", json!({ "chat": RUI, "text": "hi" })).await.unwrap_err();
+    assert_eq!(unknown.code, code::NOT_FOUND);
+    let long = running.call("draft.set", json!({ "chat": ANA, "text": "a".repeat(TEXT_MOST + 1) })).await.unwrap_err();
+    assert_eq!(long.code, code::LIMIT);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_text_refuses_what_it_cant_send_yet_and_chats_it_doesnt_have() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let refused = |params: Value| running.call("send.text", params);
+    assert_eq!(refused(json!({ "chat": ANA, "text": "  \n" })).await.unwrap_err().code, code::INVALID_PARAMS);
+    assert_eq!(
+        refused(json!({ "chat": ANA, "text": "hi", "reply": "3EB0AA" })).await.unwrap_err().code,
+        code::INVALID_PARAMS
+    );
+    assert_eq!(refused(json!({ "chat": RUI, "text": "hi" })).await.unwrap_err().code, code::NOT_FOUND);
+    assert_eq!(refused(json!({ "chat": ANA, "text": "a".repeat(TEXT_MOST + 1) })).await.unwrap_err().code, code::LIMIT);
+    assert_eq!(refused(json!({ "chat": ANA })).await.unwrap_err().code, code::INVALID_PARAMS);
+    assert!(running.world.sends().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disappearing_chats_messages_carry_its_timer() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let chat = Chat { id: ANA.into(), ephemeral: Some(86_400), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(chat)]).await.unwrap();
+    let id = running.send(ANA, "gone tomorrow").await;
+    running.until_status(ANA, &id, "sent").await;
+    let raw = wa_proto::wa_web_protobufs_e2e::Message::decode(running.world.sends()[0].raw.as_slice()).unwrap();
+    let text = raw.extended_text_message.unwrap();
+    assert_eq!((text.text.as_deref(), text.context_info.unwrap().expiration), (Some("gone tomorrow"), Some(86_400)));
+    let row = running.query(move |db| Ok(read::message(db, ANA, &id)?.unwrap().0)).await;
+    assert!(row.expires_at.is_some_and(|at| at > row.at));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_moves_the_read_position_and_marks_read_once_a_spell_however_fast_it_is_read() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    for n in 0..10 {
+        running.arrives(ANA, ANA, &format!("m{n}"), 1_000 + n).await;
+    }
+    let unread = || running.query(|db| Ok(read::chats(db, false, None, 10)?.remove(0).unread));
+    assert_eq!(unread().await, 10);
+    running.call("read", json!({ "chat": ANA, "up_to": "m3" })).await.unwrap();
+    assert_eq!(unread().await, 6, "counted again from where it's read");
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
+    for upto in ["m5", "m7", "m9", "m2"] {
+        running.call("read", json!({ "chat": ANA, "up_to": upto })).await.unwrap();
+    }
+    assert_eq!(unread().await, 0, "and it never goes back");
+    running
+        .world
+        .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::MarkRead(_))).count() >= 2)
+        .await;
+    tokio::time::sleep(quick().read_every * 2).await;
+    let marks = running.marked_read();
+    assert_eq!(marks.len(), 2, "one at once, then one for the rest of the spell: {marks:?}");
+    assert_eq!(marks[0].ids, ["m3", "m2", "m1", "m0"]);
+    assert_eq!(marks[1].ids, ["m9", "m8", "m7", "m6", "m5", "m4"]);
+    assert!(marks.iter().all(|mark| mark.chat == ANA && mark.sender.is_empty()));
+    let missing = running.call("read", json!({ "chat": ANA, "up_to": "nope" })).await.unwrap_err();
+    assert_eq!(missing.code, code::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_read_here_first_owes_only_what_it_had_unread() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    for n in 0..5 {
+        running.arrives(ANA, ANA, &format!("m{n}"), 1_000 + n).await;
+    }
+    let read_on_phone = crate::store::Read { chat: ANA.into(), at: 1_002, ids: vec!["m2".into()], phone: None };
+    running.store.apply(Lane::Live, vec![Change::Read(read_on_phone)]).await.unwrap();
+    running.call("read", json!({ "chat": ANA, "up_to": "m4" })).await.unwrap();
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
+    assert_eq!(running.marked_read()[0].ids, ["m4", "m3"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_receipts_in_a_group_name_each_sender() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let sofia = "351915555555@s.whatsapp.net";
+    for (n, sender) in [RUI, sofia, RUI].into_iter().enumerate() {
+        running.arrives(CLIMBING, sender, &format!("g{n}"), 1_000 + n as i64).await;
+    }
+    running.call("read", json!({ "chat": CLIMBING, "up_to": "g2" })).await.unwrap();
+    running
+        .world
+        .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::MarkRead(_))).count() == 2)
+        .await;
+    let mut marks: Vec<(String, Vec<String>)> = running.marked_read().into_iter().map(|m| (m.sender, m.ids)).collect();
+    marks.sort();
+    assert_eq!(
+        marks,
+        [(RUI.to_string(), vec!["g2".to_string(), "g0".to_string()]), (sofia.to_string(), vec!["g1".to_string()])]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_receipts_owed_when_jawd_stops_are_sent_when_it_starts_again() {
+    let home = tempfile::tempdir().unwrap();
+    let world: Arc<World> = Arc::default();
+    {
+        let offline = Running::on(home.path(), world.clone(), false).await;
+        offline.arrives(ANA, ANA, "m1", 1_000).await;
+        offline.call("read", json!({ "chat": ANA, "up_to": "m1" })).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let running = Running::on(home.path(), world, true).await;
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
+    assert_eq!(running.marked_read()[0].ids, ["m1"]);
+    tokio::time::sleep(quick().read_every * 2).await;
+    assert_eq!(running.marked_read().len(), 1, "once told, it's not owed any more");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typing_is_said_when_it_starts_again_only_now_and_then_and_stopped_after_a_quiet_spell() {
+    use pb::chat_presence::State;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let typing = |state: &str| running.call("typing", json!({ "chat": ANA, "state": state }));
+    for _ in 0..5 {
+        typing("composing").await.unwrap();
+    }
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::ChatPresence(_)))).await;
+    assert_eq!(running.presences(), [(ANA.to_string(), State::Composing as i32)]);
+    tokio::time::sleep(quick().typing_again).await;
+    typing("composing").await.unwrap();
+    typing("recording").await.unwrap();
+    typing("paused").await.unwrap();
+    typing("paused").await.unwrap();
+    running
+        .world
+        .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::ChatPresence(_))).count() == 4)
+        .await;
+    let said: Vec<i32> = running.presences().into_iter().map(|(_, state)| state).collect();
+    assert_eq!(said, [State::Composing, State::Composing, State::Recording, State::Paused].map(|s| s as i32));
+    typing("composing").await.unwrap();
+    running
+        .world
+        .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::ChatPresence(_))).count() == 6)
+        .await;
+    let said: Vec<i32> = running.presences().into_iter().map(|(_, state)| state).skip(4).collect();
+    assert_eq!(said, [State::Composing, State::Paused].map(|s| s as i32), "stopped once nobody said it again");
+    assert_eq!(typing("nonsense").await.unwrap_err().code, code::INVALID_PARAMS);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn you_are_online_only_while_an_interface_has_focus_and_away_once_none_has_for_a_while() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Presence(_)))).await;
+    assert_eq!(running.online(), [false], "away from the start, with nothing in front");
+    let terminal = running.sending.viewer(true);
+    let other = running.sending.viewer(false);
+    running
+        .world
+        .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Presence(_))).count() == 2)
+        .await;
+    assert_eq!(running.online(), [false, true]);
+    terminal.focus(false);
+    tokio::time::sleep(quick().away_after / 3).await;
+    other.focus(true);
+    tokio::time::sleep(quick().away_after * 2).await;
+    assert_eq!(running.online(), [false, true], "switching windows doesn't flicker");
+    drop(other);
+    running
+        .world
+        .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Presence(_))).count() == 3)
+        .await;
+    assert_eq!(running.online(), [false, true, false]);
+    terminal.focus(true);
+    running
+        .world
+        .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Presence(_))).count() == 4)
+        .await;
+    let offline = jaw_proto::Connection::new(jaw_proto::ConnectionState::Offline);
+    let online = jaw_proto::Connection::new(jaw_proto::ConnectionState::Online);
+    for connection in [offline, online] {
+        let _ = running
+            .pushes
+            .send(Push { method: "connection".into(), params: serde_json::to_value(connection).unwrap() });
+    }
+    running
+        .world
+        .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Presence(_))).count() == 5)
+        .await;
+    assert_eq!(running.online(), [false, true, false, true, true], "told again when the connection comes back");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sending_goes_through_the_socket_with_the_pending_row_in_its_answer() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let socket = jaw_proto::local::socket(home.path());
+    let listener = crate::sock::listen(&socket).unwrap();
+    let state = crate::state::State::new(
+        home.path(),
+        Ok(running.supervisor.clone().unwrap()),
+        Vec::new(),
+        Arc::default(),
+        Some(running.store.clone()),
+        running.pushes.clone(),
+    )
+    .unwrap()
+    .with_sending(running.sending.clone());
+    tokio::spawn(crate::sock::serve(Arc::new(state), listener));
+    let replies = tokio::task::spawn_blocking(move || {
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        [
+            json!({ "id": 1, "method": "hello", "params": { "protocol": 1, "client": "test", "version": "0", "focus": true } }),
+            json!({ "id": 2, "method": "send.text", "params": { "chat": ANA, "text": "olá" } }),
+            json!({ "id": 3, "method": "typing", "params": { "chat": ANA, "state": "composing" } }),
+            json!({ "id": 4, "method": "chat.start", "params": { "phone": "+351 913 333 333" } }),
+        ]
+        .into_iter()
+        .map(|line| {
+            stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+            loop {
+                let mut reply = String::new();
+                reader.read_line(&mut reply).unwrap();
+                let reply: Value = serde_json::from_str(&reply).unwrap();
+                if reply["id"] == line["id"] {
+                    return reply;
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap();
+    assert_eq!(replies[1]["result"]["row"]["status"], "pending", "{}", replies[1]);
+    assert_eq!(replies[2]["result"], json!({}));
+    assert_eq!(replies[3]["result"]["chat"]["id"], RUI);
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Presence(p) if p.available))).await;
+}
+
+#[test]
+fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    drop(Store::open(home.path()).unwrap());
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    let statements = [
+        (
+            start::DIRECT_CHAT_BY_JID,
+            "SEARCH j USING INDEX sqlite_autoindex_person_jids_1 (jid=?)\nSEARCH c USING INDEX chats_by_person (person=?)",
+        ),
+        (start::DIRECT_CHAT_BY_PERSON, "SEARCH chats USING INDEX chats_by_person (person=?)"),
+        (start::PERSON_JIDS, "SEARCH person_jids USING INDEX person_jids_by_person (person=?)"),
+        (outbox::CHAT_EPHEMERAL, "SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)"),
+    ];
+    for (sql, expected) in statements {
+        let mut explain = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan: Vec<String> = explain
+            .query_map(rusqlite::params_from_iter(std::iter::repeat_n(0, explain.parameter_count())), |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(plan.join("\n"), expected, "{sql}");
+    }
+}

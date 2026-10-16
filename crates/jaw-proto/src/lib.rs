@@ -7,6 +7,7 @@ use serde_json::Value;
 
 pub mod find;
 pub mod local;
+pub mod send;
 pub mod sync;
 pub mod windows;
 
@@ -330,6 +331,9 @@ pub struct Stored {
     /// Of those, merges whose steps kept failing, left until jawd starts again.
     #[serde(default)]
     pub merges_stuck: u64,
+    /// Messages of yours waiting to send, or failed and waiting for a retry.
+    #[serde(default)]
+    pub outbox: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

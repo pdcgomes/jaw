@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, watch};
 
 pub use self::client::{Client, Ready};
+pub(crate) use self::window::{chat_row, message_row};
 use crate::store::{Store, read};
 use crate::work::Priority;
 

@@ -1,0 +1,233 @@
+//! Sending: what you write, read and type, on its way to WhatsApp. `send.text` makes the message's
+//! ID up front, as whatsmeow does, and writes the message (pending) and its outbox row in one
+//! synced commit before it answers, so the row every window shows is the real message and nothing
+//! sent is lost; each chat's sends then go one after another through the engine with that ID
+//! (`outbox`). Reading moves the chat's read position and owes WhatsApp read receipts, sent at most
+//! every so often per chat (`reads`); typing is said at most every so often and stopped after a
+//! quiet spell (`typing`); you're online only while an interface has focus (`presence`); and
+//! `chat.start` finds or makes a chat by number or person (`start`).
+
+pub mod bench;
+mod outbox;
+mod presence;
+mod reads;
+mod start;
+mod typing;
+
+#[cfg(test)]
+mod tests;
+
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use jaw_proto::send::{ChatStart, DraftSet, Read, SendRetry, SendText, Typing};
+use jaw_proto::{Error, Push, code};
+use rusqlite::Connection;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use tokio::sync::{Mutex, Notify, broadcast};
+
+pub use self::presence::Viewer;
+use crate::engine::supervisor::Supervisor;
+use crate::engine::{EngineError, pb};
+use crate::store::{Applied, Change, Chat, Store, read};
+use crate::sync::Shared;
+use crate::work::{Priority, Report, Serial};
+
+/// How long sending waits for things, which tests shorten.
+#[derive(Clone, Copy, Debug)]
+pub struct Timing {
+    /// The pause after a send fails, at first and at most; it doubles each time.
+    pub retry_first: Duration,
+    pub retry_most: Duration,
+    /// How long a message is tried, from its first attempt since jawd started, before it's failed.
+    pub give_up: Duration,
+    /// The shortest time between two of a chat's read receipts.
+    pub read_every: Duration,
+    /// How often typing is said again while it goes on, and how long after the interface last
+    /// said so it's stopped.
+    pub typing_again: Duration,
+    pub typing_quiet: Duration,
+    /// How long an interface must have had focus before you're online, and none before you're away.
+    pub online_after: Duration,
+    pub away_after: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Timing {
+            retry_first: Duration::from_secs(1),
+            retry_most: Duration::from_secs(60),
+            give_up: Duration::from_secs(600),
+            read_every: Duration::from_secs(2),
+            typing_again: Duration::from_secs(10),
+            typing_quiet: Duration::from_secs(10),
+            online_after: Duration::from_millis(500),
+            away_after: Duration::from_secs(30),
+        }
+    }
+}
+
+/// How many chats send at once.
+const CHATS_AT_ONCE: usize = 16;
+
+#[derive(Clone)]
+pub struct Sending {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    store: Store,
+    engine: Option<Supervisor>,
+    sends: Arc<Serial>,
+    timing: Timing,
+    /// Enqueues one at a time, so a chat's sends are queued in the order they were committed.
+    enqueue: Mutex<()>,
+    /// Woken each time the connection to WhatsApp comes back, for whatever waits to try again.
+    online: Notify,
+    reads: reads::Reads,
+    typing: typing::Typists,
+    presence: presence::Presence,
+}
+
+impl Sending {
+    /// Starts sending: what the outbox held is queued again in each chat's order, read receipts still
+    /// owed are sent, and presence follows focus and the connection, which `live` says now and
+    /// `pushes` as it changes.
+    pub async fn start(
+        store: Store,
+        engine: Option<Supervisor>,
+        live: Shared,
+        pushes: &broadcast::Sender<Push>,
+        timing: Timing,
+    ) -> anyhow::Result<Sending> {
+        let (presence, focused) = presence::Presence::new();
+        let inner = Arc::new(Inner {
+            store,
+            engine,
+            sends: Serial::new("sends", CHATS_AT_ONCE),
+            timing,
+            enqueue: Mutex::new(()),
+            online: Notify::new(),
+            reads: reads::Reads::default(),
+            typing: typing::Typists::new(),
+            presence,
+        });
+        typing::start(&inner);
+        let pushes = pushes.subscribe();
+        let online = presence::connected(&live.lock().expect("live state").connection);
+        tokio::spawn(presence::follow(inner.clone(), pushes, focused, online));
+        outbox::resume(&inner).await?;
+        reads::resume(&inner).await?;
+        Ok(Sending { inner })
+    }
+
+    /// The sends' lane, for `status`.
+    pub fn lane(&self) -> Arc<dyn Report> {
+        self.inner.sends.clone()
+    }
+
+    /// A connection's part in whether you're online, with focus or not to begin with.
+    pub fn viewer(&self, focused: bool) -> Viewer {
+        presence::viewer(&self.inner, focused)
+    }
+
+    /// Answers one of the sending methods: `send.text`, `send.retry`, `chat.start`, `draft.set`,
+    /// `read` and `typing`.
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
+        let inner = &self.inner;
+        match method {
+            "send.text" => result(outbox::send_text(inner, params_of::<SendText>(method, params)?).await?),
+            "send.retry" => outbox::retry(inner, params_of::<SendRetry>(method, params)?).await,
+            "chat.start" => result(start::start(inner, params_of::<ChatStart>(method, params)?).await?),
+            "draft.set" => draft(inner, params_of::<DraftSet>(method, params)?).await,
+            "read" => reads::read(inner, params_of::<Read>(method, params)?).await,
+            "typing" => typing::typing(inner, params_of::<Typing>(method, params)?),
+            _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
+        }
+    }
+}
+
+/// The longest text a message or a draft can have, in characters, as WhatsApp allows.
+const TEXT_MOST: usize = 65_536;
+
+async fn draft(inner: &Inner, draft: DraftSet) -> Result<Value, Error> {
+    if draft.text.chars().count() > TEXT_MOST {
+        return Err(Error::new(code::LIMIT, format!("a draft can be {TEXT_MOST} characters at most")));
+    }
+    let chat = draft.chat.clone();
+    if query(inner, move |db| read::chat_n(db, &chat)).await?.is_none() {
+        return Err(no_chat(&draft.chat));
+    }
+    let change = Change::Chat(Chat { id: draft.chat, draft: Some(draft.text), ..Chat::default() });
+    durably(inner, vec![change], "keep the draft").await?;
+    Ok(Value::Object(Default::default()))
+}
+
+fn result(value: impl Serialize) -> Result<Value, Error> {
+    Ok(serde_json::to_value(value).expect("jawd's own types serialize"))
+}
+
+fn params_of<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, Error> {
+    let params = if params.is_null() { Value::Object(Default::default()) } else { params };
+    serde_json::from_value(params).map_err(|e| Error::new(code::INVALID_PARAMS, format!("{method}'s params: {e}")))
+}
+
+fn no_chat(chat: &str) -> Error {
+    Error::new(code::NOT_FOUND, format!("jawd has no chat {chat}; chat.start finds or makes one"))
+}
+
+fn internal(what: &str, e: anyhow::Error) -> Error {
+    Error::new(code::INTERNAL, format!("jawd couldn't {what}: {e:#}"))
+}
+
+/// Runs a query on the read pool, ahead of background ones.
+async fn query<T: Send + 'static>(
+    inner: &Inner,
+    query: impl FnOnce(&Connection) -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, Error> {
+    inner.store.reads().query(Priority::Interactive, query).await.map_err(|e| internal("read jaw.db", e))
+}
+
+/// Makes `changes` in one transaction synced to the disk before it returns, as everything an
+/// interface is told is done must be; `what` says what for, if it fails.
+async fn durably(inner: &Inner, changes: Vec<Change>, what: &str) -> Result<Applied, Error> {
+    let applied = inner.store.apply_durable(changes).await.map_err(|e| internal(what, e))?;
+    if applied.quarantined > 0 {
+        return Err(Error::new(code::INTERNAL, format!("jawd couldn't {what}; what failed is kept in quarantine")));
+    }
+    Ok(applied)
+}
+
+/// Asks the engine running now, if there is one.
+async fn engine(inner: &Inner, kind: pb::command::Kind) -> Result<pb::reply::Kind, EngineError> {
+    match &inner.engine {
+        Some(engine) => engine.call(kind).await,
+        None => Err(EngineError::Unavailable("jawd runs no engine".into())),
+    }
+}
+
+/// Whether what the engine said means trying again later might work.
+fn retryable(e: &EngineError) -> bool {
+    match e {
+        EngineError::Gone | EngineError::Unavailable(_) => true,
+        EngineError::Failed { retry, .. } => *retry,
+    }
+}
+
+/// The protocol's error for something the engine couldn't do.
+fn engine_error(e: EngineError) -> Error {
+    match e {
+        EngineError::Failed { message, retry: false } => Error::new(code::NOT_ALLOWED, message),
+        e => {
+            let mut error = Error::new(code::ENGINE_UNAVAILABLE, e.to_string());
+            error.data = Some(serde_json::json!({ "retry_ms": 1_000 }));
+            error
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
+}

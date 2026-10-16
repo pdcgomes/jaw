@@ -126,7 +126,7 @@ A message row, render-ready:
 | `reply` | The quoted message: its `id`, who wrote it, and a one-line `summary` |
 | `forwarded` | How many times, 0 if it wasn't |
 | `reactions` | Each emoji, how many, and whether one is yours |
-| `status` | On yours: `pending`, `sent`, `delivered`, `read`, `played` or `failed`; in groups, the least far any recipient has got |
+| `status` | On yours: `pending`, `sent`, `delivered`, `read`, `played` or `failed`; in groups, delivered once anyone has it and read once anyone has read it, with each recipient's times in `message.info` |
 | `edited`, `deleted`, `expires_at`, `view_once`, `starred` | As they are |
 | `media` | For media kinds: `w`, `h` (the original's size in pixels, which the interface keeps the shape of), `seconds`, `bytes`, `name`, `mime`, `hd` (an HD copy exists), `previews` (`{"256": path, "768": path}`, each JPEG, or PNG for a sticker with its transparency, at most that many pixels on its long side, either absent until it's made), `thumbnail` (the tiny copy that came in the message, as a file, for drawing before a preview is made), `path` (the file, once downloaded), `state` (`remote`, `downloading` with `progress`, `local`, `expired`, `waiting_for_phone` or `gone`). Paths are relative to `hello`'s `root` |
 | `album` | For `album`: `items`, each an `id`, a `kind` (`image` or `video`) and its `media` as above, in the order sent; the row's own `spans` are the album's caption |
@@ -188,6 +188,24 @@ The whole tree; it's small. Each folder: `id`, `parent`, `name`, `position`, `sm
 - **Nothing typed** returns the chats you open most, then the newest; `score` is then a chat's frecency in hundredths of an open.
 - **Frecency** is opens per chat, each counting half as much a week later, kept in jaw.db and shared by every interface. `chat.opened` is how an interface says you opened a chat yourself, from the palette, the chat list or a favourite; a window watched again after reconnecting isn't an open.
 
+## Sending
+
+```json
+{"id":7,"method":"send.text","params":{"chat":"351912345678@s.whatsapp.net","text":"on my way"}}
+{"id":7,"result":{"message":"3EB0C431F2A9B8E7D61A2B","row":{"id":"3EB0C431F2A9B8E7D61A2B","status":"pending","…":"…"}}}
+{"id":9,"method":"chat.start","params":{"phone":"+351 913 333 333"}}
+{"id":9,"result":{"chat":{"id":"351913333333@s.whatsapp.net","kind":"direct","…":"…"}}}
+```
+
+- **`send.text`** answers once the message is on disk, synced, with its outbox entry, so it's sent however jawd stops. `message` is its ID, made by jawd in WhatsApp's format (`3EB0` and 18 hex digits), which WhatsApp knows it by too; `row` is the message as `messages.watch` sends it, `pending`, and every window showing the chat gets it at the same moment. It then moves on by itself: `sent` once the server has it (its `at` becoming the server's time), `delivered` and `read` as receipts come. The chat's draft is cleared, since it's what was sent.
+  - `chat` must be a chat jawd has (error 3 otherwise; `chat.start` makes one). Text that's only spaces is -32602; more than 65,536 characters, or 1,000 messages already waiting to send, is error 5. `reply` and `mentions` are -32602 until M2, with `data.param` naming which; `preview` changes nothing until then. In a chat with disappearing messages on, the message carries its timer.
+  - Each chat's messages go in the order they were sent, up to 16 chats at once. A send that fails (no connection, the server busy) is tried again after 1 s, doubling to a minute, for ten minutes; then the message is `failed` until `send.retry`. A message is never sent twice with different IDs: after a restart, what was waiting goes again with its own ID, which WhatsApp and the recipients' phones take for the same message.
+- **`send.retry`** (`message`) queues a `failed` message of yours again, `pending` once more; one already on its way, or sent, answers with nothing to do. Error 3 if jawd has no such message waiting.
+- **`chat.start`** takes `phone` (international form; `+`, spaces, dashes and brackets are fine) or `person` (`person:` and a number, as `find` gives them) and answers with `chat`, as `chats.watch` sends it, found or made. A number is checked with WhatsApp first (error 3 if it isn't on WhatsApp, 2 if the engine isn't connected), and WhatsApp's LID for it is kept with it, so messages addressed either way are one chat. A person's chat is found under any JID they're known by before one is made.
+- **`draft.set`** keeps `text` as the chat's draft for every interface, shown in the chat list as `draft`; empty text clears it. Error 3 for a chat jawd doesn't have, 5 past 65,536 characters.
+- **`read`** says you've read `chat` up to `up_to`, a message's ID: the chat's read position moves forward (never back), its `unread` is counted again from there, and jawd marks the messages read on WhatsApp, at once and then at most every 2 seconds per chat, however fast an interface reads. When read receipts are off on the phone, only your own devices hear. Error 3 for a chat or message jawd doesn't have.
+- **`typing`** (`chat`, `state`: `composing`, `recording` or `paused`) answers at once. jawd tells WhatsApp when typing starts or changes, again every 10 seconds while it's said, and stops it 10 seconds after an interface last said so, or at once on `paused`.
+
 ## Reconnecting
 
 A client that loses its connection reconnects, sends `hello` with `since` (the last `seq` it saw), and watches its windows again, each with `have`: the `id`s of the rows it holds for that window. Rows in `have` that haven't changed since `since` are left out of the results, and `remove` lists the ones in `have` that are no longer in the window, so a reconnect costs what changed, not the windows; rows that came into the window come whole, changed or not. A watch can give its own `since`, which wins over hello's; without `have`, a watch returns every row. If `since` is older than the feed keeps (7 days), or newer than its last `seq` (jaw.db was made again), the watches return everything, as a first watch does.
@@ -213,7 +231,9 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `find` | `query`, `kinds` (any of `chat`, `person`, `folder`, `message`, `link`, `media`, `file`; all by default), `chat` (optional), `limit` (of each kind) | `results`, best first, each with its `kind`, a `score`, the match marked, and the row it found, and `counts` of each kind; a newer `find` from the same connection cancels this one. See Finding |
 | `chat.opened` | `chat` | |
 | `library.watch` | `kind` (`photo`, `video`, `voice`, `file`, `link` or `all`), and optionally `chat`, `person`, `since`, `until`, `text`, with `around`, `before`, `after` | `watch`, `total`, `rows`: each the message's media, file or link with its preview, sender, chat and time, and the message's `id` to jump to |
-| `send.text` | `chat`, `text`, `reply`, `mentions`, `preview` (default true) | `message` |
+| `send.text` | `chat`, `text`, `reply`, `mentions`, `preview` (default true) | `message` and `row`. See Sending |
+| `send.retry` | `message` | |
+| `chat.start` | `phone` or `person` | `chat`. See Sending |
 | `send.media` | `chat`, `files` (each a `path`, `kind` and `caption`), `quality` (`sd` or `hd`), `reply` | `messages` |
 | `send.poll` | `chat`, `question`, `options`, `max` | `message` |
 | `poll.vote` | `message`, `options` | |
@@ -222,9 +242,9 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `delete` | `message`, `for` (`me` or `everyone`) | |
 | `forward` | `messages`, `to` (chats) | `messages` |
 | `star` | `message`, `starred` | |
-| `read` | `chat`, `up_to` (a message) | |
-| `typing` | `chat`, `state` (`composing`, `recording` or `paused`) | |
-| `draft.set` | `chat`, `text` | |
+| `read` | `chat`, `up_to` (a message) | See Sending |
+| `typing` | `chat`, `state` (`composing`, `recording` or `paused`) | See Sending |
+| `draft.set` | `chat`, `text` | See Sending |
 | `chat.pin`, `chat.archive`, `chat.mute`, `chat.mark_unread`, `chat.clear`, `chat.delete` | `chat`, and `pinned`, `archived`, `until` or `unread` | |
 | `chat.info` | `chat` | Its members and their roles, its community, its disappearing timer, its media count |
 | `message.info` | `message` | Each recipient's delivered, read and played times |
@@ -372,7 +392,7 @@ jawd sends them itself, so they come with no interface open: Notification Center
 
 ## Presence
 
-jawd tells WhatsApp you're online while any interface's `focus` is true, and away 30 seconds after the last one loses it, so your phone keeps its notifications while you're not looking. WhatsApp only sends others' presence while you're online.
+jawd tells WhatsApp you're online once an interface's `focus` has been true for half a second, and away 30 seconds after the last one loses it (or its connection ends), so your phone keeps its notifications while you're not looking and switching windows doesn't flicker. It says so again each time the connection to WhatsApp comes back. WhatsApp only sends others' presence while you're online.
 
 It follows the presence of the people in roster windows and open chats, while some interface has focus, at most 20 new people a minute and 200 per connection to WhatsApp, favourites first; subscribing to everyone is what presence trackers do. Past the limit, rows show their last known state.
 

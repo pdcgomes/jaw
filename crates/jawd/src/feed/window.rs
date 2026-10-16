@@ -153,7 +153,7 @@ pub(super) fn query(db: &Connection, mut spec: Spec, only: Option<Vec<i64>>) -> 
 }
 
 /// A chat's sort on the wire: the store's, then its n, so no two chats share one.
-pub(super) fn chat_row(row: read::ChatRow) -> proto::ChatRow {
+pub(crate) fn chat_row(row: read::ChatRow) -> proto::ChatRow {
     proto::ChatRow {
         sort: format!("{}~{:012}", row.sort, row.n),
         id: row.id,
@@ -186,7 +186,7 @@ pub(super) fn chat_row(row: read::ChatRow) -> proto::ChatRow {
 const COLOURS: i64 = 8;
 
 /// A message's sort on the wire: its time, then its n, both zero-padded so they compare bytewise.
-pub(super) fn message_row(row: read::MessageRow) -> proto::MessageRow {
+pub(crate) fn message_row(row: read::MessageRow) -> proto::MessageRow {
     let json = |raw: &serde_json::value::RawValue| serde_json::from_str::<Value>(raw.get()).unwrap_or(Value::Null);
     let detail = match row.detail.as_deref().map(json) {
         Some(Value::Object(detail)) => detail,

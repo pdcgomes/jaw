@@ -14,6 +14,7 @@ use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
 use crate::feed::Feed;
 use crate::find::Finder;
+use crate::send::Sending;
 use crate::store::Store;
 use crate::sync::Shared;
 use crate::work::Report;
@@ -36,6 +37,7 @@ pub struct State {
     notifications: String,
     /// Whether jawd is stopping, so connections end and take no more work.
     stopping: watch::Sender<bool>,
+    sending: Option<Sending>,
 }
 
 impl State {
@@ -64,6 +66,7 @@ impl State {
             attention: Arc::default(),
             notifications: "off".into(),
             stopping: watch::channel(false).0,
+            sending: None,
         })
     }
 
@@ -92,6 +95,16 @@ impl State {
     pub async fn stopping(&self) {
         let mut stopping = self.stopping.subscribe();
         let _ = stopping.wait_for(|stopping| *stopping).await;
+    }
+
+    /// Sends, reads and types through `sending`.
+    pub fn with_sending(mut self, sending: Sending) -> State {
+        self.sending = Some(sending);
+        self
+    }
+
+    pub fn sending(&self) -> Option<&Sending> {
+        self.sending.as_ref()
     }
 
     /// Serves windows from `feed`.
@@ -171,6 +184,7 @@ impl State {
                     quarantined: store.count("quarantine").ok()?,
                     merging: store.count("chat_merges").ok()?,
                     merges_stuck: self.live.lock().expect("live state").merges_stuck,
+                    outbox: store.count("outbox").ok()?,
                 })
             }),
             interfaces: Some(Interfaces {

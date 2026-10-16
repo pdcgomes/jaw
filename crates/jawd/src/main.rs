@@ -7,6 +7,7 @@ mod engine;
 mod feed;
 mod find;
 mod notify;
+mod send;
 mod sock;
 mod state;
 mod store;
@@ -129,6 +130,16 @@ enum Bench {
         #[arg(long, default_value_t = 0)]
         far: u32,
     },
+    /// Sending: send.text answered with its synced commit, and sends there and back through the demo engine
+    Send {
+        #[arg(long, default_value_t = 1_000)]
+        count: u32,
+        /// Sends timed from asking to sent and to read
+        #[arg(long, default_value_t = 200)]
+        trips: u32,
+        #[arg(long, default_value_t = 50)]
+        chats: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -145,8 +156,20 @@ fn main() -> Result<()> {
         Some(Command::Bench(Bench::Feed { rate, seconds, window, chats, lone, interfaces, far })) => {
             bench_feed(feed::bench::Plan { rate, seconds, window, chats, lone, interfaces, far })
         }
+        Some(Command::Bench(Bench::Send { count, trips, chats })) => {
+            bench_send(send::bench::Plan { count, trips, chats })
+        }
         None => run(&home, cli.engine, cli.no_notify),
     }
+}
+
+/// Times sending on a jaw.db in a folder of its own, removed afterwards.
+fn bench_send(plan: send::bench::Plan) -> Result<()> {
+    let scratch = std::env::temp_dir().join(format!("jaw-bench-send-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let outcome = runtime()?.block_on(send::bench::run(&scratch, plan));
+    let _ = std::fs::remove_dir_all(&scratch);
+    outcome
 }
 
 /// Builds a jaw.db in a folder of its own, removed afterwards, and times the palette's find on it.
@@ -298,8 +321,10 @@ async fn start(home: &Path, lock: std::fs::File, kind: EngineKind, no_notify: bo
     let (pushes, _) = tokio::sync::broadcast::channel(256);
     tokio::spawn(trouble(store.trouble(), pushes.clone()));
     let engine = supervisor.as_ref().ok().cloned();
-    tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, home.to_path_buf()));
-    let pools: Vec<Arc<dyn work::Report>> = vec![Arc::new(store.clone()), Arc::new(store.reads().clone())];
+    tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine.clone(), home.to_path_buf()));
+    let sending = send::Sending::start(store.clone(), engine, live.clone(), &pushes, send::Timing::default()).await?;
+    let pools: Vec<Arc<dyn work::Report>> =
+        vec![Arc::new(store.clone()), Arc::new(store.reads().clone()), sending.lane()];
     let finder = find::Finder::start(store.clone()).await?;
     let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
     let notifier = notify::chosen(no_notify);
@@ -310,6 +335,7 @@ async fn start(home: &Path, lock: std::fs::File, kind: EngineKind, no_notify: bo
     eprintln!("jawd: notifications {says}");
     let state = state::State::new(home, supervisor, pools, live.clone(), Some(store.clone()), pushes.clone())?
         .with_feed(feed)
+        .with_sending(sending)
         .with_notifications(says);
     let state = Arc::new(state);
     let _ = state.finder.set(finder);
