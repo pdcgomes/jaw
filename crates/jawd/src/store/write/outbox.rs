@@ -7,6 +7,7 @@
 //! that position.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -22,8 +23,16 @@ pub const RECEIPTS_AT_ONCE: usize = 1_000;
 pub const OUTBOX_MOST: u64 = 1_000;
 /// How long an interface's key for a message it sent is kept.
 pub const KEY_KEPT_MS: i64 = 24 * 3600 * 1000;
-/// How many of a member's messages one step of regrouping looks at again, about a millisecond's worth.
+/// What one step of regrouping may look at, in messages times the group's members: looking at a
+/// message may walk all its recipients, at about 1.5 µs each, so a step stays under 2 ms whatever
+/// the group's size.
+const REGROUP_WORK: i64 = 1_024;
+/// The most messages one step looks at, for small groups, where each look's own cost counts.
 const REGROUP_AT_ONCE: i64 = 16;
+/// How long a step goes on before it stops after the message it's on, on a machine slower than that.
+const REGROUP_FOR: Duration = Duration::from_millis(2);
+/// How many of a settled message's recipients one step lets go of.
+const LET_GO_AT_ONCE: i64 = 128;
 /// How many keys past their day one enqueue removes.
 const KEYS_PRUNED: i64 = 64;
 
@@ -42,6 +51,8 @@ pub enum Step {
     Failed { outbox: i64, error: String, next_at: Option<i64> },
     /// WhatsApp refused a message that may already have gone; it waits for a receipt until `until`.
     Unconfirmed { outbox: i64, error: String, until: i64 },
+    /// No receipt came for a message waiting for one, so it has failed until it's retried by hand.
+    NoReceipt { outbox: i64, error: String },
     /// A failed message is queued again by hand, and pending again.
     Retry { outbox: i64 },
     /// You've read `chat` up to message `id`.
@@ -51,6 +62,8 @@ pub enum Step {
     /// The next few of your messages that `member`, who left group `chat`, was sent are looked at
     /// again, since they no longer wait for them.
     Regroup { chat: i64, member: i64 },
+    /// The next few of the recipients of `message`, which has got as far as it can, are let go of.
+    LetGo { message: i64 },
 }
 
 /// Where an enqueue says what it came to, for whoever asked for it. The last attempt at its
@@ -91,16 +104,16 @@ const CLEAR_DRAFT: &str = "UPDATE chats SET draft = NULL, v = ?2 WHERE n = ?1 AN
 const OUTBOXED_MESSAGE: &str =
     "SELECT m.n, m.chat, m.status FROM outbox o JOIN messages m ON m.n = o.message WHERE o.n = ?1";
 const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2";
-const DEQUEUE: &str = "DELETE FROM outbox WHERE n = ?1";
-const RECEIVED: &str = "DELETE FROM outbox WHERE message = ?1";
+const DEQUEUE: &str = "DELETE FROM outbox WHERE message = ?1";
 const SENT: &str = "UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1 AND status IS NOT ?2";
 const EXPIRES: &str = "UPDATE messages SET expires_at = ?2 + c.ephemeral * 1000 FROM chats c
     WHERE messages.n = ?1 AND c.n = messages.chat AND c.ephemeral > 0 AND messages.expires_at IS NULL";
 const ATTEMPTED: &str = "UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = coalesce(?3, next_at),
         state = iif(?3 IS NULL, 'failed', 'queued')
-    WHERE n = ?1";
+    WHERE n = ?1 AND state = 'queued'";
 const UNCONFIRMED: &str = "UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = ?3, state = 'unconfirmed'
     WHERE n = ?1 AND state = 'queued'";
+const NO_RECEIPT: &str = "UPDATE outbox SET error = ?2, state = 'failed' WHERE n = ?1 AND state = 'unconfirmed'";
 const FAILED: &str = "UPDATE messages SET status = 'failed', v = ?2 WHERE n = ?1";
 const REQUEUE: &str =
     "UPDATE outbox SET state = 'queued', attempts = 0, error = NULL, next_at = ?2 WHERE n = ?1 AND state = 'failed'";
@@ -135,7 +148,12 @@ const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 const RECIPIENTS: &str = "INSERT OR IGNORE INTO recipients (message, member, chat)
     SELECT ?1, g.member, ?2 FROM group_members g JOIN person_jids j ON j.n = g.member
     WHERE g.chat = ?2 AND j.person NOT IN (SELECT p.person FROM json_each(?3) e JOIN person_jids p ON p.jid = e.value)";
-const RECIPIENTS_DONE: &str = "DELETE FROM recipients WHERE message = ?1";
+const SETTLED: &str =
+    "INSERT OR IGNORE INTO settled (message) SELECT ?1 WHERE EXISTS (SELECT 1 FROM recipients WHERE message = ?1)";
+const LET_GO: &str = "DELETE FROM recipients WHERE message = ?1 AND member IN
+    (SELECT member FROM recipients WHERE message = ?1 ORDER BY member LIMIT ?2)";
+const LET_GO_DONE: &str = "DELETE FROM settled WHERE message = ?1";
+const SETTLED_ROWS: &str = "SELECT message FROM settled LIMIT ?1";
 /// A message's recipients: those it was sent to who are still members of group ?2, you apart, in
 /// case it was sent before jaw knew your JIDs, ?3.
 macro_rules! sent_to {
@@ -190,6 +208,7 @@ const LAGGARDS: [(&str, [&str; 2]); 3] = [
 const LEFT: &str =
     "INSERT INTO regroup (chat, member) VALUES (?1, ?2) ON CONFLICT (chat, member) DO UPDATE SET after = 0";
 const REGROUP_FROM: &str = "SELECT after FROM regroup WHERE chat = ?1 AND member = ?2";
+const GROUP_SIZE: &str = "SELECT count(*) FROM group_members WHERE chat = ?1";
 const SENT_TO_MEMBER: &str =
     "SELECT message FROM recipients WHERE chat = ?1 AND member = ?2 AND message > ?3 ORDER BY message LIMIT ?4";
 const REGROUP_ON: &str = "UPDATE regroup SET after = ?3 WHERE chat = ?1 AND member = ?2";
@@ -207,10 +226,12 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
         Step::Sent { outbox }
         | Step::Failed { outbox, .. }
         | Step::Unconfirmed { outbox, .. }
+        | Step::NoReceipt { outbox, .. }
         | Step::Retry { outbox } => ("outbox", outbox.to_string(), None),
         Step::Read { chat, id } => ("read", format!("{chat} {id}"), None),
         Step::Told { chat, n, .. } => ("told", format!("{chat} {n}"), None),
         Step::Regroup { chat, member } => ("regroup", format!("{chat} {member}"), None),
+        Step::LetGo { message } => ("let go", message.to_string(), None),
     }
 }
 
@@ -223,6 +244,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
             db.prepare_cached(UNCONFIRMED)?.execute(params![outbox, error, until])?;
             Ok(false)
         }
+        Step::NoReceipt { outbox, error } => no_receipt(db, stamps, *outbox, error),
         Step::Retry { outbox } => retry(db, stamps, *outbox),
         Step::Read { chat, id } => read(db, stamps, chat, id),
         Step::Told { chat, at, n } => {
@@ -230,6 +252,12 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
             Ok(false)
         }
         Step::Regroup { chat, member } => regroup(db, stamps, *chat, *member),
+        Step::LetGo { message } => {
+            if db.prepare_cached(LET_GO)?.execute(params![message, LET_GO_AT_ONCE])? < LET_GO_AT_ONCE as usize {
+                db.prepare_cached(LET_GO_DONE)?.execute([message])?;
+            }
+            Ok(false)
+        }
     }
 }
 
@@ -307,12 +335,9 @@ fn touched(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, seq: i64) ->
 
 /// The message's time stays when you sent it, as the phone shows it, rather than the server's,
 /// which would move it among the messages around it and away from where search keeps it.
-/// A message in a chat with disappearing messages starts its timer once it has gone, as it can wait
-/// to go for longer than the timer.
 fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     let Some((n, chat, status)) = outboxed(db, outbox)? else { return Ok(false) };
-    db.prepare_cached(DEQUEUE)?.execute([outbox])?;
-    db.prepare_cached(EXPIRES)?.execute(params![n, now_ms()])?;
+    received(db, n)?;
     let status = advanced(status.as_deref(), Some("sent"));
     let seq = stamps.seq(MESSAGE, Some(n));
     if db.prepare_cached(SENT)?.execute(params![n, status, seq])? == 0 {
@@ -322,26 +347,54 @@ fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     Ok(true)
 }
 
-/// A receipt for message `n` of yours means the server has it, so nothing of it is left to send.
+/// The server has message `n` of yours, as its answer or any receipt says, whichever comes first:
+/// nothing of it is left to send, and in a chat with disappearing messages its timer starts, since
+/// it can wait to go for longer than the timer.
 pub(super) fn received(db: &Connection, n: i64) -> Result<()> {
-    db.prepare_cached(RECEIVED)?.execute([n])?;
-    Ok(())
-}
-
-/// Once a message of yours has got as far as it can (read, or for what's played, played), who it
-/// was sent to no longer matters.
-pub(super) fn settled(db: &Connection, n: i64, kind: &str, status: &str) -> Result<()> {
-    let played = matches!(kind, "voice" | "audio" | "video" | "video_note");
-    if status == "played" || (status == "read" && !played) {
-        db.prepare_cached(RECIPIENTS_DONE)?.execute([n])?;
+    if db.prepare_cached(DEQUEUE)?.execute([n])? > 0 {
+        db.prepare_cached(EXPIRES)?.execute(params![n, now_ms()])?;
     }
     Ok(())
 }
 
+/// Once a message of yours has got as far as it can (read, or for what's played, played), who it
+/// was sent to no longer matters, and they're let go of in the background. Until they all are, the
+/// ones left can't move its status, which is as far as it goes.
+pub(super) fn settled(db: &Connection, n: i64, kind: &str, status: &str) -> Result<()> {
+    let played = matches!(kind, "voice" | "audio" | "video" | "video_note");
+    if status == "played" || (status == "read" && !played) {
+        db.prepare_cached(SETTLED)?.execute([n])?;
+    }
+    Ok(())
+}
+
+/// Some of the messages whose recipients are still to be let go of.
+pub fn settled_messages(db: &Connection, most: usize) -> Result<Vec<i64>> {
+    Ok(db.prepare_cached(SETTLED_ROWS)?.query_map([most as i64], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+}
+
+/// An attempt at a queued message failed; one that's still queued after it is still pending.
 fn failed(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, next_at: Option<i64>) -> Result<bool> {
     let Some((n, chat, status)) = outboxed(db, outbox)? else { return Ok(false) };
-    db.prepare_cached(ATTEMPTED)?.execute(params![outbox, error, next_at])?;
-    if next_at.is_some() || advanced(status.as_deref(), Some("failed")) == status.as_deref() {
+    if db.prepare_cached(ATTEMPTED)?.execute(params![outbox, error, next_at])? == 0 || next_at.is_some() {
+        return Ok(false);
+    }
+    shown_failed(db, stamps, chat, n, status.as_deref())
+}
+
+/// A message waiting for a receipt had none in time; one that had is no longer in the outbox, or
+/// no longer waiting.
+fn no_receipt(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str) -> Result<bool> {
+    let Some((n, chat, status)) = outboxed(db, outbox)? else { return Ok(false) };
+    if db.prepare_cached(NO_RECEIPT)?.execute(params![outbox, error])? == 0 {
+        return Ok(false);
+    }
+    shown_failed(db, stamps, chat, n, status.as_deref())
+}
+
+/// Message `n`, at `status`, shows failed, unless it has got further.
+fn shown_failed(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, status: Option<&str>) -> Result<bool> {
+    if advanced(status, Some("failed")) == status {
         return Ok(false);
     }
     let seq = stamps.seq(MESSAGE, Some(n));
@@ -455,19 +508,28 @@ pub(super) fn members_left(db: &Connection, chat: i64, members: &[i64]) -> Resul
     Ok(())
 }
 
-/// Looks at the next REGROUP_AT_ONCE of your messages in `chat` that `member` was sent again.
+/// Looks again at the next few of your messages in `chat` that `member` was sent, as many as
+/// REGROUP_WORK allows in a group that size, and stops sooner once REGROUP_FOR has passed.
 fn regroup(db: &Connection, stamps: &mut Stamps, chat: i64, member: i64) -> Result<bool> {
+    let began = Instant::now();
     let Some(after): Option<i64> =
         db.prepare_cached(REGROUP_FROM)?.query_row([chat, member], |r| r.get(0)).optional()?
     else {
         return Ok(false);
     };
+    let members: i64 = db.prepare_cached(GROUP_SIZE)?.query_row([chat], |r| r.get(0))?;
+    let most = (REGROUP_WORK / members.max(1)).clamp(1, REGROUP_AT_ONCE);
     let messages: Vec<i64> = db
         .prepare_cached(SENT_TO_MEMBER)?
-        .query_map(params![chat, member, after, REGROUP_AT_ONCE], |r| r.get(0))?
+        .query_map(params![chat, member, after, most], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let mut changed = false;
+    let mut last = None;
     for &n in &messages {
+        if last.is_some() && began.elapsed() >= REGROUP_FOR {
+            break;
+        }
+        last = Some(n);
         let Some((kept, kind)): Option<(Option<String>, String)> =
             db.prepare_cached(MINE_IN)?.query_row([n, chat], |r| Ok((r.get(0)?, r.get(1)?))).optional()?
         else {
@@ -482,8 +544,8 @@ fn regroup(db: &Connection, stamps: &mut Stamps, chat: i64, member: i64) -> Resu
             changed = true;
         }
     }
-    match messages.last() {
-        Some(&last) if messages.len() as i64 == REGROUP_AT_ONCE => {
+    match last {
+        Some(last) if messages.last() != Some(&last) || messages.len() as i64 == most => {
             db.prepare_cached(REGROUP_ON)?.execute([chat, member, last])?;
         }
         _ => {
@@ -629,7 +691,7 @@ mod tests {
                 "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("the chat shows it", CHAT_SHOWS, "SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)"),
-            ("dequeue", DEQUEUE, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("dequeue", DEQUEUE, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
             ("sent", SENT, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
             (
                 "expires",
@@ -744,12 +806,20 @@ mod tests {
                 OUTBOX_OF,
                 "SEARCH outbox USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?)",
             ),
-            ("received", RECEIVED, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
             ("unconfirmed", UNCONFIRMED, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("no receipt", NO_RECEIPT, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
             ("unconfirmed rows", UNCONFIRMED_ROWS, "SCAN outbox"),
-            ("recipients done", RECIPIENTS_DONE, "SEARCH recipients USING PRIMARY KEY (message=?)"),
+            ("settled", SETTLED, "SEARCH recipients EXISTS USING PRIMARY KEY (message=?)"),
+            (
+                "let go",
+                LET_GO,
+                "SEARCH recipients USING PRIMARY KEY (message=? AND member=?)\nLIST SUBQUERY 1\nSEARCH recipients USING PRIMARY KEY (message=?)",
+            ),
+            ("let go of all", LET_GO_DONE, "SEARCH settled USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("settled rows", SETTLED_ROWS, "SCAN settled"),
             ("left", LEFT, ""),
             ("regroup from", REGROUP_FROM, "SEARCH regroup USING PRIMARY KEY (chat=? AND member=?)"),
+            ("a group's size", GROUP_SIZE, "SEARCH group_members USING PRIMARY KEY (chat=?)"),
             ("regroup on", REGROUP_ON, "SEARCH regroup USING PRIMARY KEY (chat=? AND member=?)"),
             ("regroup done", REGROUP_DONE, "SEARCH regroup USING PRIMARY KEY (chat=? AND member=?)"),
             ("regroups", REGROUPS, "SCAN regroup"),
@@ -901,6 +971,93 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_a_message_still_waiting_for_a_receipt_fails_for_want_of_one() {
+        use crate::store::{Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |step: Step| store.apply(Lane::Live, vec![Change::Outbox(step)]);
+        let step = Step::Enqueue {
+            message: Box::new(mine("m1", 1_000)),
+            kind: "text",
+            raw: vec![1],
+            key: None,
+            written: Written::default(),
+        };
+        apply(step).await.unwrap();
+        let state = || {
+            store.reads().query(crate::work::Priority::Interactive, |db| {
+                Ok(db.query_row(
+                    "SELECT m.status, o.state, o.attempts FROM outbox o JOIN messages m ON m.n = o.message",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+                )?)
+            })
+        };
+        let no_receipt = || Step::NoReceipt { outbox: 1, error: "no receipt".into() };
+        assert_eq!(apply(no_receipt()).await.unwrap().changed, 0);
+        assert_eq!(state().await.unwrap(), ("pending".into(), "queued".into(), 0), "a queued message is left alone");
+        apply(Step::Unconfirmed { outbox: 1, error: "refused".into(), until: 9 }).await.unwrap();
+        apply(Step::Failed { outbox: 1, error: "late".into(), next_at: None }).await.unwrap();
+        assert_eq!(
+            state().await.unwrap(),
+            ("pending".into(), "unconfirmed".into(), 1),
+            "an attempt's failure doesn't touch what waits for a receipt"
+        );
+        assert_eq!(apply(no_receipt()).await.unwrap().changed, 1);
+        assert_eq!(state().await.unwrap(), ("failed".into(), "failed".into(), 1));
+        assert_eq!(apply(no_receipt()).await.unwrap().changed, 0, "and only once");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_disappearing_message_starts_its_timer_whether_a_receipt_or_the_servers_answer_comes_first() {
+        use crate::store::{Amend, Amendment, Change, Chat, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let chat = Chat { id: "a@s.whatsapp.net".into(), ephemeral: Some(86_400), ..Chat::default() };
+        store.apply(Lane::Live, vec![Change::Chat(chat)]).await.unwrap();
+        for id in ["m1", "m2"] {
+            let step = Step::Enqueue {
+                message: Box::new(mine(id, 1_000)),
+                kind: "text",
+                raw: vec![1],
+                key: None,
+                written: Written::default(),
+            };
+            store.apply(Lane::Live, vec![Change::Outbox(step)]).await.unwrap();
+        }
+        let delivered = |id: &str| {
+            Change::Amend(Amend {
+                chat: "a@s.whatsapp.net".into(),
+                target: id.into(),
+                sender: Some("a@s.whatsapp.net".into()),
+                mine: false,
+                at: 2_000,
+                what: Amendment::Status { status: "delivered".into() },
+                raw: None,
+            })
+        };
+        let expires = || {
+            store.reads().query(crate::work::Priority::Interactive, |db| {
+                Ok(db
+                    .prepare("SELECT expires_at FROM messages ORDER BY id")?
+                    .query_map([], |r| r.get::<_, Option<i64>>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+        };
+        assert_eq!(expires().await.unwrap(), [None, None], "neither has gone yet");
+        let began = now_ms();
+        store.apply(Lane::Live, vec![delivered("m1")]).await.unwrap();
+        store.apply(Lane::Live, vec![Change::Outbox(Step::Sent { outbox: 2 })]).await.unwrap();
+        let first = expires().await.unwrap();
+        let day = 86_400 * 1000;
+        assert!(first.iter().all(|at| at.is_some_and(|at| at >= began + day)), "{first:?}");
+        store.apply(Lane::Live, vec![Change::Outbox(Step::Sent { outbox: 1 })]).await.unwrap();
+        store.apply(Lane::Live, vec![delivered("m2")]).await.unwrap();
+        assert_eq!(expires().await.unwrap(), first, "what settles it second leaves the timer as it started");
+        assert_eq!(store.count("outbox").unwrap(), 0);
+    }
+
     /// Group `chat` with `members` and you, known as ME_JID.
     fn group(chat: &str, members: impl IntoIterator<Item = String>) -> Vec<crate::store::Change> {
         use crate::store::{Change, Members};
@@ -951,17 +1108,23 @@ mod tests {
             .unwrap()
     }
 
-    /// Steps of regrouping until nothing is left to look at, as the background lane takes them.
+    /// Steps of regrouping until nothing is left to look at, and of letting go of the recipients of
+    /// what's settled, as the background lane takes them. Says how many steps regrouping took.
     async fn regroup_all(store: &crate::store::Store) -> usize {
         use crate::store::{Change, Lane};
         let mut steps = 0;
         loop {
-            let left = store.reads().query(crate::work::Priority::Interactive, |db| regroups(db, 64)).await.unwrap();
-            if left.is_empty() {
+            let (left, settled) = store
+                .reads()
+                .query(crate::work::Priority::Interactive, |db| Ok((regroups(db, 64)?, settled_messages(db, 64)?)))
+                .await
+                .unwrap();
+            if left.is_empty() && settled.is_empty() {
                 return steps;
             }
-            let changes = left.iter().map(|&(chat, member)| Change::Outbox(Step::Regroup { chat, member })).collect();
-            store.apply(Lane::Background, changes).await.unwrap();
+            let regroup = left.iter().map(|&(chat, member)| Change::Outbox(Step::Regroup { chat, member }));
+            let let_go = settled.iter().map(|&message| Change::Outbox(Step::LetGo { message }));
+            store.apply(Lane::Background, regroup.chain(let_go).collect()).await.unwrap();
             steps += left.len();
         }
     }
@@ -1018,6 +1181,56 @@ mod tests {
         let steps = regroup_all(&store).await;
         assert!(steps >= 199, "each member who left is a step of its own at least: {steps}");
         assert!(statuses(&store, BIG).await.iter().all(|s| s == "read"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn in_a_group_of_a_thousand_a_step_of_regrouping_looks_at_one_message_so_it_stays_short() {
+        use crate::store::{Change, Lane, Members, Store};
+        const HUGE: &str = "120363000000000004@g.us";
+        const MESSAGES: usize = 32;
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        store.apply(Lane::Live, group(HUGE, (1..=1_024).map(member))).await.unwrap();
+        let sends = (0..MESSAGES).map(|n| Change::Outbox(in_group(HUGE, format!("h{n}")))).collect();
+        store.apply(Lane::Live, sends).await.unwrap();
+        // Read by everyone but member 1, written straight in: 32,000 receipts through the writer
+        // would take a debug build minutes, and nothing here depends on how they came.
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(10)).unwrap();
+        db.execute(
+            "INSERT INTO receipts (message, recipient, read_at) SELECT r.message, r.member, 2000 FROM recipients r
+            JOIN person_jids j ON j.n = r.member WHERE j.jid <> ?1",
+            [member(1)],
+        )
+        .unwrap();
+        drop(db);
+        let left = Members { chat: HUGE.into(), all: false, set: Vec::new(), remove: vec![member(1)] };
+        store.apply(Lane::Live, vec![Change::Members(left)]).await.unwrap();
+        let (mut regrouping, mut letting_go) = (Vec::new(), Vec::new());
+        loop {
+            let left = store.reads().query(crate::work::Priority::Interactive, |db| regroups(db, 1)).await.unwrap();
+            let Some(&(chat, member)) = left.first() else { break };
+            let step = Change::Outbox(Step::Regroup { chat, member });
+            regrouping.push(store.apply(Lane::Background, vec![step]).await.unwrap().took);
+        }
+        assert!(statuses(&store, HUGE).await.iter().all(|s| s == "read"), "{:?}", statuses(&store, HUGE).await);
+        assert_eq!(regrouping.len(), MESSAGES + 1, "a message a step, and one to find there's none left");
+        loop {
+            let settled =
+                store.reads().query(crate::work::Priority::Interactive, |db| settled_messages(db, 1)).await.unwrap();
+            let Some(&message) = settled.first() else { break };
+            let step = Change::Outbox(Step::LetGo { message });
+            letting_go.push(store.apply(Lane::Background, vec![step]).await.unwrap().took);
+        }
+        assert_eq!(letting_go.len(), MESSAGES * 9, "1,024 recipients a message, 128 a step, then none left");
+        assert_eq!(store.count("recipients").unwrap(), 0, "all let go of once read by all");
+        // A WAL checkpoint can fall in any one commit, until durability's checkpointer takes them.
+        if !cfg!(debug_assertions) {
+            for (what, took) in [("regrouping", &regrouping), ("letting go", &letting_go)] {
+                let over = took.iter().filter(|took| **took >= Duration::from_millis(3)).count();
+                assert!(over <= 1 + took.len() / 100, "{over} steps of {what} took 3 ms or more: {took:?}");
+            }
+        }
     }
 
     #[test]

@@ -32,8 +32,6 @@ pub(super) const CHAT_EPHEMERAL: &str = "SELECT ephemeral FROM chats WHERE id = 
 
 /// The longest key an interface may give a message.
 const KEY_MOST: usize = 128;
-/// How long a message WhatsApp refused, when it may already have gone, waits for a receipt.
-pub(super) const UNCONFIRMED_FOR: Duration = Duration::from_secs(24 * 3600);
 /// How many attempts while WhatsApp can be reached, about a day's worth at the longest pause,
 /// before a failure that might pass is taken as one that won't.
 const ATTEMPTS_MOST: i64 = 1_500;
@@ -149,11 +147,11 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
     durably(inner, vec![Change::Outbox(step)], "keep the message, so it isn't sent").await?;
     match written.take() {
         Some(Enqueued::Queued { id, chat, outbox, .. }) => {
+            let sent = answer(inner, chat.clone(), id).await;
             if let Some(outbox) = outbox {
-                queue(inner, outbox, chat.clone(), false);
+                queue(inner, outbox, chat, false);
             }
-            drop(_order);
-            Ok(answer(inner, chat, id).await)
+            Ok(sent)
         }
         Some(Enqueued::Full { waiting, failed }) => {
             let mut error = Error::new(
@@ -187,22 +185,19 @@ pub(super) async fn resume(inner: &Arc<Inner>) -> anyhow::Result<()> {
     }
     let now = now_ms();
     for (outbox, until) in inner.store.reads().query(Priority::Interactive, outbox::unconfirmed).await? {
-        let left = Duration::from_millis(until.saturating_sub(now).max(0) as u64).min(UNCONFIRMED_FOR);
+        let left = Duration::from_millis(until.saturating_sub(now).max(0) as u64).min(inner.timing.unconfirmed_for);
         unconfirmed(inner, outbox, left);
     }
     Ok(())
 }
 
-/// Fails outbox row `outbox` after `left`, if no receipt has come for it by then.
+/// Fails outbox row `outbox` after `left`, if it's still waiting for a receipt by then.
 fn unconfirmed(inner: &Arc<Inner>, outbox: i64, left: Duration) {
     let inner = inner.clone();
     tokio::spawn(async move {
         tokio::time::sleep(left).await;
         let error = "WhatsApp refused it when it may already have gone, and no receipt came".to_string();
-        let failed = Step::Failed { outbox, error, next_at: None };
-        if let Err(e) = inner.store.apply(Lane::Live, vec![Change::Outbox(failed)]).await {
-            eprintln!("jawd: can't note that outbox row {outbox} had no receipt: {e:#}");
-        }
+        settle(&inner, vec![Change::Outbox(Step::NoReceipt { outbox, error })]).await;
     });
 }
 
@@ -267,16 +262,14 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
         (true, true) => Step::Unconfirmed {
             outbox,
             error: failure.to_string(),
-            until: now_ms() + UNCONFIRMED_FOR.as_millis() as i64,
+            until: now_ms() + inner.timing.unconfirmed_for.as_millis() as i64,
         },
         (true, false) => Step::Failed { outbox, error: failure.to_string(), next_at: None },
     };
     let unconfirming = matches!(step, Step::Unconfirmed { .. });
-    if let Err(e) = inner.store.apply(Lane::Live, vec![Change::Outbox(step)]).await {
-        eprintln!("jawd: can't note that {} didn't send: {e:#}", row.id);
-    }
+    settle(&inner, vec![Change::Outbox(step)]).await;
     if unconfirming {
-        unconfirmed(&inner, outbox, UNCONFIRMED_FOR);
+        unconfirmed(&inner, outbox, inner.timing.unconfirmed_for);
     }
     if gives_up {
         eprintln!("jawd: WhatsApp refused {} in {}: {failure}", row.id, row.chat);
@@ -303,15 +296,16 @@ fn sent_changes(row: &Outboxed, sent: &pb::Sent) -> Vec<Change> {
     changes
 }
 
-/// Keeps what a send came to, trying again until it's kept: the server has the message, so it
-/// mustn't be sent again for want of a commit.
+/// Keeps what a send came to, trying again until it's kept: a message the server has mustn't be
+/// sent again for want of a commit, and one that failed must be counted as tried, or a later
+/// refusal of what may have gone would fail it outright.
 async fn settle(inner: &Inner, changes: Vec<Change>) {
     let mut pause = inner.timing.retry_first;
     loop {
         match inner.store.apply(Lane::Live, changes.clone()).await {
             Ok(_) => return,
             Err(e) => {
-                eprintln!("jawd: can't keep that a message was sent, so it's tried again in {pause:?}: {e:#}");
+                eprintln!("jawd: can't keep what became of a send, so it's tried again in {pause:?}: {e:#}");
                 tokio::time::sleep(pause).await;
                 pause = (pause * 2).min(inner.timing.retry_most);
             }

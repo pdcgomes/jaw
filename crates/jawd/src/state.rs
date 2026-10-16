@@ -187,6 +187,9 @@ impl State {
                     outbox: store.count("outbox").ok()?,
                     unconfirmed: store.count("outbox WHERE state = 'unconfirmed'").ok()?,
                     recipients: store.count("recipients").ok()?,
+                    regroup: store.count("regroup").ok()?,
+                    settled: store.count("settled").ok()?,
+                    send_keys: store.count("send_keys").ok()?,
                 })
             }),
             interfaces: Some(Interfaces {

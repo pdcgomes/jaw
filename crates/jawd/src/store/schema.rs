@@ -604,7 +604,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- Who a message of yours in a group went to: the group's members when you sent it, you apart.
     -- It's delivered once every one of them who's still a member has it, and read once every one
     -- has read it; members who joined after don't count, and those who left don't hold it up. A
-    -- message's rows go once it has got as far as it can, read or, for a voice message, played.
+    -- message's rows are let go of once it has got as far as it can, read or, for a voice message,
+    -- played (settled, below).
     CREATE TABLE recipients (
         message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
         member INTEGER NOT NULL REFERENCES person_jids (n),
@@ -612,6 +613,13 @@ pub(super) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (message, member)
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX recipients_by_member ON recipients (chat, member, message);
+
+    -- Messages of yours that have got as far as they can, whose recipients are still to be let go
+    -- of, 128 at a time in the background: one message's rows touch a page of
+    -- recipients_by_member for every few members, too many for one short transaction in a big group.
+    CREATE TABLE settled (
+        message INTEGER PRIMARY KEY REFERENCES messages (n) ON DELETE CASCADE
+    ) STRICT;
 
     -- Members who left a group, whose messages from you there are looked at again in the
     -- background, a few at a time, from after the last one looked at.

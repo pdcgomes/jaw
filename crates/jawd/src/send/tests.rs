@@ -22,6 +22,7 @@ fn quick() -> Timing {
     Timing {
         retry_first: Duration::from_millis(5),
         retry_most: Duration::from_millis(20),
+        unconfirmed_for: Duration::from_secs(3_600),
         read_every: Duration::from_millis(150),
         typing_again: Duration::from_millis(150),
         typing_quiet: Duration::from_millis(250),
@@ -534,6 +535,48 @@ async fn a_refused_resend_of_what_may_have_gone_waits_for_a_receipt_instead_of_f
     running.receipt(ANA, &id, ANA, "delivered").await;
     assert_eq!(running.status(ANA, &id).await.as_deref(), Some("delivered"));
     assert!(running.outbox().await.is_empty(), "the receipt settles it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_resend_with_no_receipt_fails_once_its_time_has_passed_and_can_be_retried() {
+    let home = tempfile::tempdir().unwrap();
+    let id = crash(home.path(), "held").await;
+    let world = world();
+    world.refuse_next(1);
+    let timing = Timing { unconfirmed_for: Duration::from_millis(400), ..quick() };
+    let running = Running::timed(home.path(), world, true, true, timing).await;
+    let unconfirmed = |db: &Connection| {
+        Ok(db.query_row("SELECT count(*) FROM outbox WHERE state = 'unconfirmed'", [], |r| r.get::<_, i64>(0))? == 1)
+    };
+    eventually(&running, "the resend's refusal", unconfirmed).await;
+    let began = std::time::Instant::now();
+    running.until_status(ANA, &id, "failed").await;
+    assert!(began.elapsed() < Duration::from_secs(10));
+    assert_eq!(running.outbox().await, [(id.clone(), "failed".to_string())]);
+    let error: String = running.query(|db| Ok(db.query_row("SELECT error FROM outbox", [], |r| r.get(0))?)).await;
+    assert!(error.contains("no receipt came"), "{error}");
+    running.call("send.retry", json!({ "message": id })).await.unwrap();
+    running.until_status(ANA, &id, "read").await;
+    assert!(running.outbox().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_gives_a_message_waiting_for_a_receipt_only_the_time_it_had_left() {
+    let home = tempfile::tempdir().unwrap();
+    let id = crash(home.path(), "held").await;
+    // As a refused resend leaves it, with 1.5 s of its wait left when jawd starts again.
+    let until = now_ms() + 1_500;
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.execute("UPDATE outbox SET state = 'unconfirmed', attempts = 1, error = 'refused', next_at = ?1", [until])
+        .unwrap();
+    drop(db);
+    let running = Running::on(home.path(), world(), true).await;
+    assert_eq!(running.status(ANA, &id).await.as_deref(), Some("pending"), "still waiting");
+    running.until_status(ANA, &id, "failed").await;
+    let late = now_ms() - until;
+    assert!(late >= 0, "it waited what it had left, failing {}ms early", -late);
+    assert!(late < 10_000, "and not the hour a fresh wait has here: {late}ms late");
+    assert!(running.world.sends().is_empty(), "what waits for a receipt isn't sent again");
 }
 
 #[tokio::test(flavor = "multi_thread")]

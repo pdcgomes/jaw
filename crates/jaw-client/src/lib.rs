@@ -182,6 +182,8 @@ pub fn describe(status: &Status) -> String {
             (stored.merges_stuck, "merges that kept failing, left until jawd starts again"),
             (stored.outbox, "messages of yours to send"),
             (stored.unconfirmed, "of them refused when they may have gone, waiting for a receipt"),
+            (stored.regroup, "members who left groups, whose ticks there are to look at again"),
+            (stored.settled, "group messages read by all, whose recipients are to let go of"),
         ]
         .iter()
         .filter(|(n, _)| *n > 0)

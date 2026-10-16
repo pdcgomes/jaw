@@ -43,6 +43,8 @@ pub struct Timing {
     /// The pause after a send fails on the way, at first and at most; it doubles each time.
     pub retry_first: Duration,
     pub retry_most: Duration,
+    /// How long a message WhatsApp refused, when it may already have gone, waits for a receipt.
+    pub unconfirmed_for: Duration,
     /// The shortest time between two of a chat's read receipts.
     pub read_every: Duration,
     /// How often typing is said again while it goes on, and how long after the interface last
@@ -59,6 +61,7 @@ impl Default for Timing {
         Timing {
             retry_first: Duration::from_secs(1),
             retry_most: Duration::from_secs(60),
+            unconfirmed_for: Duration::from_secs(24 * 3600),
             read_every: Duration::from_secs(2),
             typing_again: Duration::from_secs(10),
             typing_quiet: Duration::from_secs(10),

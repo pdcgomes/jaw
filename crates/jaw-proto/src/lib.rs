@@ -340,6 +340,15 @@ pub struct Stored {
     /// Who your group messages were sent to, kept until each has been read by all.
     #[serde(default)]
     pub recipients: u64,
+    /// Members who left groups, whose messages from you there are still to be looked at again.
+    #[serde(default)]
+    pub regroup: u64,
+    /// Group messages of yours read by all, whose recipients are still to be let go of.
+    #[serde(default)]
+    pub settled: u64,
+    /// The keys interfaces gave the messages they sent, kept for a day.
+    #[serde(default)]
+    pub send_keys: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
