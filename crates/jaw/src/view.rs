@@ -6,6 +6,7 @@ mod actions;
 mod draw;
 mod keys;
 mod palette;
+mod sidebar;
 mod voice;
 
 use crate::composer::Composer;
@@ -113,7 +114,7 @@ struct Laid {
 /// A chat's rows in the list as last drawn, and what they depended on: its version, whether it
 /// was open, the width, and the minute its time was written in.
 struct ChatRows {
-    key: (u64, bool, usize, i64),
+    key: (u64, bool, usize, i64, bool),
     rows: Rc<(Line<'static>, Line<'static>)>,
 }
 
@@ -192,6 +193,13 @@ pub struct View {
     pictureless: HashSet<String>,
     /// The size the last frame was drawn at, for drawing every picture again after a resize.
     drawn_size: (u16, u16),
+    /// The folder the chat list and roster show, the tree, the roster, and the sidebar's state.
+    pub folder: String,
+    folders: Vec<crate::data::FolderRow>,
+    roster: Vec<crate::data::RosterRow>,
+    sidebar: sidebar::Sidebar,
+    /// Communities opened in the chat list to show their groups.
+    communities_open: HashSet<String>,
     /// Messages whose sending lost its answer: the chat, the text, and once jawd is back, when to
     /// stop waiting for its row and say it wasn't sent.
     unsure: Vec<(String, String, Option<i64>)>,
@@ -289,6 +297,11 @@ impl View {
             images: Images::here(Protocol::None, (8, 16)),
             pictureless: HashSet::new(),
             drawn_size: (0, 0),
+            folder: "all".into(),
+            folders: sidebar::built_in(),
+            roster: vec![],
+            sidebar: sidebar::Sidebar::default(),
+            communities_open: HashSet::new(),
             unsure: vec![],
             replying: None,
             editing: None,
@@ -398,7 +411,9 @@ impl View {
                 // so nothing moves.
                 if linked && !self.watching {
                     self.watching = true;
-                    self.jawd.watch_chats(Place::top(LIST_ROWS));
+                    self.jawd.watch_chats(&self.folder, Place::top(LIST_ROWS));
+                    self.jawd.watch_folders();
+                    self.jawd.watch_roster(&self.folder);
                 } else if !linked {
                     self.start_linking();
                 }
@@ -417,7 +432,9 @@ impl View {
                     self.connection = Connection::new(ConnectionState::CatchingUp);
                     if !self.watching {
                         self.watching = true;
-                        self.jawd.watch_chats(Place::top(LIST_ROWS));
+                        self.jawd.watch_chats(&self.folder, Place::top(LIST_ROWS));
+                        self.jawd.watch_folders();
+                        self.jawd.watch_roster(&self.folder);
                     }
                 }
                 self.link = Some(step);
@@ -445,7 +462,7 @@ impl View {
                     self.rows_laid.retain(|id, _| chats.get(id).is_some());
                 }
                 if self.open.is_none() {
-                    let first = self.chats.rows().next().map(|c| c.id.clone());
+                    let first = self.list_order().into_iter().next();
                     if let Some(first) = first {
                         self.open_chat(&first);
                         self.picking = true;
@@ -491,7 +508,7 @@ impl View {
                 if self.starting.take().is_some() {
                     let id = chat.id.clone();
                     if self.chats.get(&id).is_none() {
-                        self.outside = Some(chat);
+                        self.outside = Some(*chat);
                     }
                     self.open_chat(&id);
                     self.jawd.opened(&id);
@@ -512,6 +529,18 @@ impl View {
             Update::Recorded(r) => self.on_recorded(r),
             Update::VoiceRefused(why) => self.voice_refused(why),
             Update::Members { chat, members } => self.on_members(chat, members),
+            Update::Folders { upsert, remove, whole } => self.on_folders(upsert, remove, whole),
+            Update::Roster { folder, upsert, remove, whole } => self.on_roster(folder, upsert, remove, whole),
+            Update::FolderMade(row) => self.folder_made(*row),
+            Update::FolderRefused { folder, why } => {
+                if self.folder == folder {
+                    self.folder = "all".into();
+                    self.chats = Chats::new("all", Place::top(LIST_ROWS));
+                    self.rows_laid.clear();
+                    self.jawd.watch_roster("all");
+                }
+                self.say(why);
+            }
             Update::Info { message, info } => self.on_info(message, info),
             Update::Starting { failed } => self.reach = Reach::Starting { failed },
             Update::Unreachable { why, retry_in } => {
@@ -539,11 +568,12 @@ impl View {
     }
 
     fn selected_index(&self) -> Option<usize> {
-        self.chats.position(self.selected.as_deref()?)
+        let selected = self.selected.as_deref()?;
+        self.list_order().iter().position(|id| id == selected)
     }
 
     fn clamp_list(&mut self) {
-        let most = self.chats.len().saturating_sub(self.list_rows.max(1));
+        let most = self.list_order().len().saturating_sub(self.list_rows.max(1));
         self.list_top = self.list_top.min(most);
     }
 

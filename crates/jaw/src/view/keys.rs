@@ -102,8 +102,16 @@ impl View {
             self.on_linking_key(k);
             return;
         }
+        if ctrl && k.code == KeyCode::Char('b') {
+            self.toggle_sidebar();
+            return;
+        }
         if alt && matches!(k.code, KeyCode::Up | KeyCode::Down) {
             self.step_chat(if k.code == KeyCode::Up { -1 } else { 1 });
+            return;
+        }
+        if self.sidebar.keys.is_some() {
+            self.on_sidebar_key(k);
             return;
         }
         if self.narrow() && self.picking {
@@ -298,7 +306,7 @@ impl View {
             KeyCode::Char('f') => self.palette_forward(&m),
             KeyCode::Char('i') => self.info(&m),
             KeyCode::Char('s') => self.say("saving files comes with M3"),
-            KeyCode::Char('m') => self.say("folders come with M6"),
+            KeyCode::Char('m') => self.file_this(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Keys),
             KeyCode::Char(_) | KeyCode::Backspace if !ctrl && !alt => {
                 self.focus = Focus::Typing;
@@ -317,11 +325,14 @@ impl View {
             KeyCode::Home => self.move_selection(isize::MIN / 2),
             KeyCode::End => self.move_selection(isize::MAX / 2),
             KeyCode::Enter | KeyCode::Right => {
-                if let Some(id) = self.selected.clone() {
+                if let Some(id) = self.selected.clone()
+                    && !self.toggle_community(&id)
+                {
                     self.open_chat(&id);
                     self.jawd.opened(&id);
                 }
             }
+            KeyCode::Char('m') => self.file_this(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Keys),
             KeyCode::Char('q') => self.quit = true,
             _ => {}
@@ -329,7 +340,7 @@ impl View {
     }
 
     fn move_selection(&mut self, by: isize) {
-        let order: Vec<String> = self.chats.rows().map(|c| c.id.clone()).collect();
+        let order = self.list_order();
         if order.is_empty() {
             return;
         }
@@ -346,6 +357,7 @@ impl View {
         self.move_selection(by);
         if !(self.narrow() && self.picking)
             && let Some(id) = self.selected.clone()
+            && !self.toggle_community(&id)
         {
             self.open_chat(&id);
         }

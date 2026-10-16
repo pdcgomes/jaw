@@ -41,6 +41,104 @@ pub struct Chat {
     /// The names of who's typing or recording now.
     #[serde(default)]
     pub typing: Vec<String>,
+    /// For a group in a community: the community.
+    #[serde(default)]
+    pub community: Option<String>,
+    /// The IDs of your folders it sits in directly.
+    #[serde(default)]
+    pub folders: Vec<String>,
+}
+
+/// A folder in the tree, as `folders.watch` sends it: built in, smart or yours.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct FolderRow {
+    pub id: String,
+    #[serde(default)]
+    pub parent: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub position: i64,
+    /// A smart folder's rule; null for the others.
+    #[serde(default)]
+    pub smart: Option<serde_json::Value>,
+    /// Its chats' unread total and mentions, each chat counted once.
+    #[serde(default)]
+    pub unread: u32,
+    #[serde(default)]
+    pub mentions: u32,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub favourite: Option<u8>,
+}
+
+impl FolderRow {
+    /// One of the five always there: All, Unread, Groups, Communities, Archived.
+    pub fn built_in(&self) -> bool {
+        matches!(self.id.as_str(), "all" | "unread" | "groups" | "communities" | "archived")
+    }
+
+    /// One of yours, which you can rename, move and file into.
+    pub fn yours(&self) -> bool {
+        !self.built_in() && self.smart.is_none()
+    }
+}
+
+/// Someone in the roster, as `roster.watch` sends them.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct RosterRow {
+    pub id: String,
+    #[serde(default)]
+    pub sort: String,
+    pub name: String,
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub about: Option<String>,
+    #[serde(default)]
+    pub presence: Presence,
+    #[serde(default)]
+    pub chat: Option<String>,
+    #[serde(default)]
+    pub folders: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceState {
+    Online,
+    Typing,
+    Recording,
+    Seen,
+    #[default]
+    Hidden,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub struct Presence {
+    pub state: PresenceState,
+    #[serde(default)]
+    pub at: Option<i64>,
+    /// Whether jawd follows this person now; when not, what's shown is what was last known.
+    #[serde(default = "yes")]
+    pub known: bool,
+}
+
+impl Default for Presence {
+    fn default() -> Presence {
+        Presence { state: PresenceState::Hidden, at: None, known: true }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Presence {
+    /// Online, typing or recording.
+    pub fn around(&self) -> bool {
+        matches!(self.state, PresenceState::Online | PresenceState::Typing | PresenceState::Recording)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -579,7 +677,7 @@ pub enum Update {
     },
     /// The chat a person now has, started from the palette.
     ChatStarted {
-        chat: Chat,
+        chat: Box<Chat>,
     },
     /// Something to say once, in the footer.
     Notice(String),
@@ -596,6 +694,26 @@ pub enum Update {
     Recorded(Recorded),
     /// jawd turned down something asked of voice, and why.
     VoiceRefused(String),
+    /// The folder tree: rows changed or gone, or with `whole` every row.
+    Folders {
+        upsert: Vec<FolderRow>,
+        remove: Vec<String>,
+        whole: bool,
+    },
+    /// The roster for `folder`: rows changed or gone, or with `whole` every row.
+    Roster {
+        folder: String,
+        upsert: Vec<RosterRow>,
+        remove: Vec<String>,
+        whole: bool,
+    },
+    /// A folder just made, to fill or pick.
+    FolderMade(Box<FolderRow>),
+    /// jawd can't show this folder's chats yet; the list is back on All.
+    FolderRefused {
+        folder: String,
+        why: String,
+    },
     /// A chat's members, for completing `@` names.
     Members {
         chat: String,
@@ -668,7 +786,20 @@ pub enum Typing {
 /// What the interface asks of jawd. Nothing here waits: what comes of it arrives as `Update`s.
 pub trait Jawd {
     /// The chat list on All, or the same window moved.
-    fn watch_chats(&mut self, place: Place);
+    /// A folder's chat list, or the same window moved.
+    fn watch_chats(&mut self, folder: &str, place: Place);
+    /// The folder tree, kept current with `Update::Folders`.
+    fn watch_folders(&mut self);
+    /// A folder's people, kept current with `Update::Roster`.
+    fn watch_roster(&mut self, folder: &str);
+    fn folder_create(&mut self, name: &str, parent: Option<&str>);
+    fn folder_rename(&mut self, folder: &str, name: &str);
+    /// Nests a folder in `parent`, or puts it at the top with `None`.
+    fn folder_move(&mut self, folder: &str, parent: Option<&str>);
+    fn folder_delete(&mut self, folder: &str);
+    /// Files a chat or a person into a folder, or takes it out.
+    fn folder_add(&mut self, folder: &str, item: &str);
+    fn folder_remove(&mut self, folder: &str, item: &str);
     /// The open chat's messages: a new window, or the same one moved.
     fn watch_messages(&mut self, chat: &str, place: Place);
     /// You opened a chat yourself, which the palette ranks by; passing through it doesn't count.

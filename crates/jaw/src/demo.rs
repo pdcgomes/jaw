@@ -6,6 +6,7 @@
 
 mod actions;
 mod find;
+mod folders;
 pub mod pictures;
 mod voice;
 
@@ -80,13 +81,19 @@ struct Open {
 }
 
 enum Later {
-    Tick { chat: String, id: String, tick: Tick },
+    Tick {
+        chat: String,
+        id: String,
+        tick: Tick,
+    },
     Beat(usize),
     Qr,
     Linked,
     CatchUp,
     Retry,
     Started,
+    /// The next of who comes and goes in the roster.
+    Presence(usize),
 }
 
 pub struct Account {
@@ -109,6 +116,7 @@ pub struct Account {
     /// What's playing or paused, and what's being recorded.
     player: Option<voice::Player>,
     recorder: Option<voice::Recorder>,
+    folders: folders::Folders,
 }
 
 struct Shared {
@@ -169,6 +177,7 @@ impl Demo {
             opens: HashMap::new(),
             player: None,
             recorder: None,
+            folders: folders::Folders::made_up(now),
         };
         let demo = Demo {
             shared: Arc::new(Shared {
@@ -183,6 +192,7 @@ impl Demo {
         };
         {
             let mut a = demo.lock();
+            a.file_chats();
             match state {
                 State::Starting => {
                     a.send(Update::Starting { failed: None });
@@ -193,7 +203,10 @@ impl Demo {
             }
             match state {
                 State::CatchingUp => a.after(400, Later::CatchUp),
-                State::Online => a.after(3_000, Later::Beat(0)),
+                State::Online => {
+                    a.after(3_000, Later::Beat(0));
+                    a.after(4_000, Later::Presence(0));
+                }
                 _ => {}
             }
         }
@@ -425,6 +438,7 @@ impl Account {
                 self.hello();
                 self.after(3_000, Later::Beat(0));
             }
+            Later::Presence(i) => self.presence_step(i),
         }
     }
 
@@ -478,14 +492,25 @@ impl Account {
         }
     }
 
+    /// How many chats the chat list's folder holds.
     fn total(&self) -> u64 {
-        self.threads.iter().filter(|t| !t.chat.archived).count() as u64
+        let list = &self.folders.list;
+        self.threads.iter().filter(|t| self.in_folder(list, &t.chat, None)).count() as u64
     }
 
+    /// A chat's row changed: into the chat list if its folder holds it, out if not, and the
+    /// folders' counts after it.
     fn push_chat(&mut self, t: usize) {
         let row = self.threads[t].chat.clone();
-        let total = self.total();
-        self.send(Update::Chats(Window { upsert: vec![row], total: Some(total), ..Window::default() }));
+        let list = self.folders.list.clone();
+        let total = Some(self.total());
+        let update = if self.in_folder(&list, &row, None) {
+            Window { upsert: vec![row], total, ..Window::default() }
+        } else {
+            Window { remove: vec![row.id], total, ..Window::default() }
+        };
+        self.send(Update::Chats(update));
+        self.folders_changed();
     }
 
     /// A message comes into chat `t`: its row moves up, and the open window takes it if it
@@ -594,9 +619,9 @@ impl Account {
 
 /// What the interface asks of the made-up account, done on it.
 impl Account {
-    fn on_watch_chats(&mut self, place: Place) {
-        let rows = self.threads.iter().map(|t| t.chat.clone()).filter(|c| !c.archived).collect();
-        let total = self.total();
+    fn on_watch_chats(&mut self, folder: &str, place: Place) {
+        let rows = self.list_rows(folder);
+        let total = rows.len() as u64;
         let moved = Some(Moved { place, newer: 0 });
         self.send(Update::Chats(Window { upsert: rows, total: Some(total), moved, ..Window::default() }));
     }
@@ -670,7 +695,7 @@ impl Account {
         self.threads.push(thread);
         let total = self.total();
         self.send(Update::Chats(Window { upsert: vec![chat.clone()], total: Some(total), ..Window::default() }));
-        self.send(Update::ChatStarted { chat });
+        self.send(Update::ChatStarted { chat: Box::new(chat) });
     }
 
     /// A chat by number: a contact's if it's theirs, the one jaw has if any, or a new one named
@@ -690,7 +715,7 @@ impl Account {
         let id = format!("{digits}@s.whatsapp.net");
         if let Some(&t) = self.index.get(&id) {
             let chat = self.threads[t].chat.clone();
-            self.send(Update::ChatStarted { chat });
+            self.send(Update::ChatStarted { chat: Box::new(chat) });
             return;
         }
         let now = self.now();
@@ -702,7 +727,7 @@ impl Account {
         self.threads.push(thread);
         let total = self.total();
         self.send(Update::Chats(Window { upsert: vec![chat.clone()], total: Some(total), ..Window::default() }));
-        self.send(Update::ChatStarted { chat });
+        self.send(Update::ChatStarted { chat: Box::new(chat) });
     }
 
     /// A failed message of yours, pending again, then on its way.
@@ -730,8 +755,48 @@ impl Account {
 
 impl Jawd for Demo {
     /// The made-up account's list fits one window, so it sends every chat wherever it's asked.
-    fn watch_chats(&mut self, place: Place) {
-        self.defer(move |a| a.on_watch_chats(place));
+    fn watch_chats(&mut self, folder: &str, place: Place) {
+        let folder = folder.to_string();
+        self.defer(move |a| a.on_watch_chats(&folder, place));
+    }
+
+    fn watch_folders(&mut self) {
+        self.defer(|a| a.on_watch_folders());
+    }
+
+    fn watch_roster(&mut self, folder: &str) {
+        let folder = folder.to_string();
+        self.defer(move |a| a.on_watch_roster(&folder));
+    }
+
+    fn folder_create(&mut self, name: &str, parent: Option<&str>) {
+        let (name, parent) = (name.to_string(), parent.map(String::from));
+        self.defer(move |a| a.on_folder_create(&name, parent.as_deref()));
+    }
+
+    fn folder_rename(&mut self, folder: &str, name: &str) {
+        let (folder, name) = (folder.to_string(), name.to_string());
+        self.defer(move |a| a.on_folder_rename(&folder, &name));
+    }
+
+    fn folder_move(&mut self, folder: &str, parent: Option<&str>) {
+        let (folder, parent) = (folder.to_string(), parent.map(String::from));
+        self.defer(move |a| a.on_folder_move(&folder, parent.as_deref()));
+    }
+
+    fn folder_delete(&mut self, folder: &str) {
+        let folder = folder.to_string();
+        self.defer(move |a| a.on_folder_delete(&folder));
+    }
+
+    fn folder_add(&mut self, folder: &str, item: &str) {
+        let (folder, item) = (folder.to_string(), item.to_string());
+        self.defer(move |a| a.on_folder_add(&folder, &item));
+    }
+
+    fn folder_remove(&mut self, folder: &str, item: &str) {
+        let (folder, item) = (folder.to_string(), item.to_string());
+        self.defer(move |a| a.on_folder_remove(&folder, &item));
     }
 
     fn watch_messages(&mut self, chat: &str, place: Place) {
@@ -976,6 +1041,8 @@ impl Writing {
             marked_unread: false,
             draft: None,
             typing: vec![],
+            community: None,
+            folders: vec![],
         };
         Writing { thread: Thread { chat, messages: vec![] }, now, seq: 0 }
     }
@@ -1227,6 +1294,36 @@ fn made_up(now: i64) -> Vec<Thread> {
     w.thread.chat.muted_until = Some(i64::MAX);
     w.theirs(6.0 * h, &person("person:40", "Recepção", 6), "Aulas de sábado canceladas esta semana");
     threads.push(w.done(14, 0));
+
+    // A community, its groups under it, the announcement group first.
+    let days = 24.0 * h;
+    let junta = person("person:41", "Junta de Freguesia", 5);
+    let groups: [(&str, &str, ChatKind, f64, &str, u32); 3] = [
+        (
+            "bairro-avisos",
+            "Avisos do Bairro",
+            ChatKind::Announcement,
+            11.0 * days,
+            "Recolha de monos na quinta-feira",
+            1,
+        ),
+        ("bairro-festa", "Festa de Natal", ChatKind::Group, 12.0 * days, "quem traz as luzes?", 2),
+        ("bairro-biblioteca", "Biblioteca", ChatKind::Group, 13.0 * days, "o clube de leitura muda para terça", 0),
+    ];
+    let mut unread = 0;
+    for (id, name, kind, ago, said, n) in groups {
+        let mut w = Writing::new(id, name, kind, now);
+        w.thread.chat.community = Some("bairro".into());
+        w.theirs(ago, &junta, said);
+        unread += n;
+        threads.push(w.done(n, 0));
+    }
+    let mut w = Writing::new("bairro", "Bairro de Alvalade", ChatKind::Community, now);
+    w.theirs(11.0 * days, &junta, "Recolha de monos na quinta-feira");
+    let mut community = w.done(0, 0);
+    community.chat.unread = unread;
+    community.messages.clear();
+    threads.push(community);
 
     threads
 }

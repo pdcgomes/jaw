@@ -64,6 +64,17 @@ pub fn when(at: i64, now: i64, tz: FixedOffset) -> String {
     }
 }
 
+/// When someone was last seen, as the roster says it: 5 min ago, 2 h ago, yesterday, Mon.
+pub fn ago(at: i64, now: i64, tz: FixedOffset) -> String {
+    let minutes = (now - at).max(0) / MINUTE;
+    match minutes {
+        0 => "just now".into(),
+        1..=59 => format!("{minutes} min ago"),
+        _ if days_before(at, now, tz) == 0 => format!("{} h ago", minutes / 60),
+        _ => when(at, now, tz),
+    }
+}
+
 /// When something ends, such as a ban: its date and time.
 pub fn until(at: i64, tz: FixedOffset) -> String {
     local(at, tz).format("%-d %B, %H:%M").to_string()

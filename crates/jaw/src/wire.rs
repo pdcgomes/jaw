@@ -38,6 +38,12 @@ enum Asked {
     Members(String),
     /// Forwarding to this many chats.
     Forward(usize),
+    /// The folder tree's window.
+    Folders,
+    /// A folder's roster window.
+    Roster(String),
+    /// A folder being made.
+    FolderMade,
     /// Background work that says nothing either way.
     Quiet,
 }
@@ -53,6 +59,12 @@ pub struct Wire {
     client: Client<Chat, Message>,
     tx: Sender<Event>,
     list: Option<WindowId>,
+    /// The folder the chat list's window shows.
+    list_folder: String,
+    /// The folder tree's watch, once asked for, and its ID once jawd answers.
+    folders: Option<Option<String>>,
+    /// The roster's folder, and its watch's ID once jawd answers.
+    roster: Option<(String, Option<String>)>,
     open: Option<(WindowId, String)>,
     asked: HashMap<u64, Asked>,
     /// The client's id for each `find`, to the interface's.
@@ -126,7 +138,18 @@ impl Wire {
         let client = Client::start(config, move || {
             let _ = wake.send(Event::Jawd);
         });
-        Wire { client, tx, list: None, open: None, asked: HashMap::new(), finds: HashMap::new(), starting: None }
+        Wire {
+            client,
+            tx,
+            list: None,
+            list_folder: "all".into(),
+            folders: None,
+            roster: None,
+            open: None,
+            asked: HashMap::new(),
+            finds: HashMap::new(),
+            starting: None,
+        }
     }
 
     /// Connects to jawd on `home`, starting it first if nothing answers there.
@@ -175,6 +198,8 @@ impl Wire {
             Asked::Info(message) => Some(Update::Info { message, info: Err(why_not(failure, "a message's info")) }),
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
             Asked::Forward(_) => Some(Update::Notice(why_not(failure, "forwarding"))),
+            Asked::Folders | Asked::Roster(_) => None,
+            Asked::FolderMade => Some(Update::Notice(why_not(failure, "making folders"))),
             Asked::Quiet => None,
         }
     }
@@ -203,6 +228,12 @@ impl Wire {
         match e {
             From::Connected(w) => {
                 self.starting = None;
+                if self.folders.take().is_some() {
+                    self.watch_folders();
+                }
+                if let Some((folder, _)) = self.roster.take() {
+                    self.watch_roster(&folder);
+                }
                 let mut me = vec![];
                 if let Some(m) = w.account.me {
                     me.push(m.id);
@@ -224,7 +255,7 @@ impl Wire {
                 match (asked, outcome) {
                     (Asked::StartChat, Ok(result)) => {
                         if let Ok(chat) = serde_json::from_value::<Chat>(result["chat"].clone()) {
-                            out.push(Update::ChatStarted { chat });
+                            out.push(Update::ChatStarted { chat: Box::new(chat) });
                         }
                     }
                     (Asked::Info(message), Ok(result)) => {
@@ -234,6 +265,23 @@ impl Wire {
                     (Asked::Members(chat), Ok(result)) => {
                         let members = serde_json::from_value(result["members"].clone()).unwrap_or_default();
                         out.push(Update::Members { chat, members });
+                    }
+                    (Asked::Folders, Ok(result)) => {
+                        self.folders = Some(result["watch"].as_str().map(String::from));
+                        let upsert = serde_json::from_value(result["rows"].clone()).unwrap_or_default();
+                        out.push(Update::Folders { upsert, remove: vec![], whole: true });
+                    }
+                    (Asked::Roster(folder), Ok(result)) => {
+                        if self.roster.as_ref().is_some_and(|(f, _)| *f == folder) {
+                            self.roster = Some((folder.clone(), result["watch"].as_str().map(String::from)));
+                            let upsert = serde_json::from_value(result["rows"].clone()).unwrap_or_default();
+                            out.push(Update::Roster { folder, upsert, remove: vec![], whole: true });
+                        }
+                    }
+                    (Asked::FolderMade, Ok(result)) => {
+                        if let Ok(folder) = serde_json::from_value(result["folder"].clone()) {
+                            out.push(Update::FolderMade(Box::new(folder)));
+                        }
                     }
                     (Asked::Forward(n), Ok(_)) => out.push(Update::Notice(if n == 1 {
                         "forwarded".into()
@@ -274,6 +322,27 @@ impl Wire {
                     out.push(Update::Notice(text.to_string()));
                 }
             }
+            From::Push(push) if push.method == "folders" => {
+                let upsert = serde_json::from_value(push.params["upsert"].clone()).unwrap_or_default();
+                let remove = serde_json::from_value(push.params["remove"].clone()).unwrap_or_default();
+                out.push(Update::Folders { upsert, remove, whole: false });
+            }
+            From::Push(push) if push.method == "roster" => {
+                let watch = push.params["watch"].as_str();
+                if let Some((folder, Some(w))) = &self.roster
+                    && Some(w.as_str()) == watch
+                {
+                    let upsert = serde_json::from_value(push.params["upsert"].clone()).unwrap_or_default();
+                    let remove = serde_json::from_value(push.params["remove"].clone()).unwrap_or_default();
+                    out.push(Update::Roster { folder: folder.clone(), upsert, remove, whole: false });
+                }
+            }
+            From::Window { window, failure } if Some(window) == self.list && self.list_folder != "all" => {
+                let folder = std::mem::replace(&mut self.list_folder, "all".into());
+                self.client.unwatch(window);
+                self.list = Some(self.client.watch_chats("all", Place::top(100)));
+                out.push(Update::FolderRefused { folder, why: why_not(&failure, "folders") });
+            }
             From::Push(push) if push.method == "playback" => {
                 out.extend(serde_json::from_value(push.params).ok().map(Update::Playback));
             }
@@ -287,11 +356,55 @@ impl Wire {
 }
 
 impl Jawd for Wire {
-    fn watch_chats(&mut self, place: Place) {
+    fn watch_chats(&mut self, folder: &str, place: Place) {
         match self.list {
-            Some(w) => self.client.move_window(w, place),
-            None => self.list = Some(self.client.watch_chats("all", place)),
+            Some(w) if self.list_folder == folder => self.client.move_window(w, place),
+            other => {
+                if let Some(w) = other {
+                    self.client.unwatch(w);
+                }
+                self.list_folder = folder.to_string();
+                self.list = Some(self.client.watch_chats(folder, place));
+            }
         }
+    }
+
+    fn watch_folders(&mut self) {
+        self.folders = Some(None);
+        self.ask("folders.watch", json!({}), Asked::Folders);
+    }
+
+    fn watch_roster(&mut self, folder: &str) {
+        if let Some((_, Some(w))) = self.roster.take() {
+            self.ask("unwatch", json!({ "watch": w }), Asked::Quiet);
+        }
+        self.roster = Some((folder.to_string(), None));
+        let params = json!({ "folder": folder, "around": "top", "before": 0, "after": 200, "offline": true });
+        self.ask("roster.watch", params, Asked::Roster(folder.to_string()));
+    }
+
+    fn folder_create(&mut self, name: &str, parent: Option<&str>) {
+        self.ask("folder.create", json!({ "name": name, "parent": parent }), Asked::FolderMade);
+    }
+
+    fn folder_rename(&mut self, folder: &str, name: &str) {
+        self.ask("folder.rename", json!({ "folder": folder, "name": name }), Asked::Did("renaming folders"));
+    }
+
+    fn folder_move(&mut self, folder: &str, parent: Option<&str>) {
+        self.ask("folder.move", json!({ "folder": folder, "parent": parent }), Asked::Did("moving folders"));
+    }
+
+    fn folder_delete(&mut self, folder: &str) {
+        self.ask("folder.delete", json!({ "folder": folder }), Asked::Did("deleting folders"));
+    }
+
+    fn folder_add(&mut self, folder: &str, item: &str) {
+        self.ask("folder.add", json!({ "folder": folder, "item": item }), Asked::Did("filing into folders"));
+    }
+
+    fn folder_remove(&mut self, folder: &str, item: &str) {
+        self.ask("folder.remove", json!({ "folder": folder, "item": item }), Asked::Did("filing into folders"));
     }
 
     fn watch_messages(&mut self, chat: &str, place: Place) {

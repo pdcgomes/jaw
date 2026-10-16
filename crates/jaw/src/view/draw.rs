@@ -96,7 +96,7 @@ fn centred(lines: Vec<Line<'static>>, area: Rect) -> Paragraph<'static> {
 }
 
 impl View {
-    fn panel(&self, border: Color) -> Block<'static> {
+    pub(super) fn panel(&self, border: Color) -> Block<'static> {
         Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(border))
@@ -104,7 +104,7 @@ impl View {
     }
 
     /// A panel's title as ooze writes one: its name, then what more there is to say, dimmer.
-    fn title(&self, name: &str, more: Vec<Span<'static>>) -> Line<'static> {
+    pub(super) fn title(&self, name: &str, more: Vec<Span<'static>>) -> Line<'static> {
         let mut spans = vec![Span::styled(format!(" {name} "), Style::new().fg(self.theme.text))];
         spans.extend(more);
         Line::from(spans)
@@ -241,7 +241,8 @@ impl View {
         left.extend(self.header_state(w));
         left.push(Span::raw(" "));
         let mut right = vec![Span::raw(" ")];
-        let unread: u32 = self.chats.rows().map(|c| c.unread).sum();
+        let unread: u32 =
+            self.chats.rows().filter(|c| c.kind != crate::data::ChatKind::Community).map(|c| c.unread).sum();
         if unread > 0 && self.reach == Reach::Up && !self.linking() {
             right.push(Span::styled(format!("{} unread", fmt::num(unread as u64)), Style::new().fg(t.text)));
             right.push(Span::styled(" · ", Style::new().fg(t.comment)));
@@ -270,6 +271,9 @@ impl View {
                 ("ctrl-g", "its message", true),
                 ("esc", "closes", true),
             ];
+        }
+        if self.sidebar.keys.is_some() {
+            return self.sidebar_hints();
         }
         if self.linking() {
             return match (&self.phone, &self.link, self.connection.state) {
@@ -358,23 +362,37 @@ impl View {
     }
 
     fn draw_main(&mut self, f: &mut Frame, body: Rect) {
-        if body.width < NARROW {
-            if self.picking || self.open.is_none() {
-                self.draw_list(f, body, true);
-            } else {
-                self.draw_conversation(f, body);
-            }
-            return;
+        let beside = body.width >= super::sidebar::SIDEBAR_FROM && !self.sidebar.folded;
+        let over = self.sidebar.keys.is_some() && !beside;
+        let mut rest = body;
+        if beside {
+            let [side, after] =
+                Layout::horizontal([Constraint::Length(super::sidebar::SIDEBAR), Constraint::Min(20)]).areas(body);
+            self.draw_sidebar(f, side);
+            rest = after;
         }
-        let [list, conversation] = Layout::horizontal([Constraint::Length(LIST), Constraint::Min(20)]).areas(body);
-        self.draw_list(f, list, false);
-        self.draw_conversation(f, conversation);
+        if rest.width < NARROW {
+            if self.picking || self.open.is_none() {
+                self.draw_list(f, rest, true);
+            } else {
+                self.draw_conversation(f, rest);
+            }
+        } else {
+            let [list, conversation] = Layout::horizontal([Constraint::Length(LIST), Constraint::Min(20)]).areas(rest);
+            self.draw_list(f, list, false);
+            self.draw_conversation(f, conversation);
+        }
+        if over {
+            let w = super::sidebar::SIDEBAR.max(LIST).min(body.width);
+            self.draw_sidebar(f, Rect::new(body.x, body.y, w, body.height));
+        }
     }
 
     fn draw_list(&mut self, f: &mut Frame, area: Rect, focused: bool) {
         let t = self.theme;
         let border = if focused && self.overlay.is_none() { t.focus } else { t.gutter };
-        let title = self.title("chats", vec![Span::styled("· All ", Style::new().fg(t.comment))]);
+        let shows = format!("· {} ", self.folder_name(&self.folder));
+        let title = self.title("chats", vec![Span::styled(shows, Style::new().fg(t.comment))]);
         let block = self.panel(border).title(title).padding(Padding::horizontal(1));
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -382,12 +400,12 @@ impl View {
         self.list_rows = (inner.height / 2) as usize;
         self.clamp_list();
         if self.chats.is_empty() {
-            let line = Line::from(Span::styled("No chats yet.", Style::new().fg(t.comment)));
+            let said = if self.folder == "all" { "No chats yet." } else { "No chats in this folder." };
+            let line = Line::from(Span::styled(said, Style::new().fg(t.comment)));
             f.buffer_mut().set_line(inner.x, inner.y, &line, inner.width);
             return;
         }
-        let order: Vec<String> =
-            self.chats.rows().skip(self.list_top).take(self.list_rows).map(|c| c.id.clone()).collect();
+        let order: Vec<String> = self.list_order().into_iter().skip(self.list_top).take(self.list_rows).collect();
         let w = inner.width as usize;
         let now = self.now();
         for (k, id) in order.iter().enumerate() {
@@ -395,7 +413,7 @@ impl View {
             let y = inner.y + 2 * k as u16;
             let selected = self.selected.as_deref() == Some(id.as_str());
             let open = self.open.as_deref() == Some(id.as_str());
-            let key = (chat.v, open, w, now / fmt::MINUTE);
+            let key = (chat.v, open, w, now / fmt::MINUTE, self.communities_open.contains(id));
             let rows = match self.rows_laid.get(id.as_str()) {
                 Some(laid) if laid.key == key => laid.rows.clone(),
                 _ => {
@@ -441,23 +459,32 @@ impl View {
         }
         let right_w: usize = right.iter().map(|s| s.width()).sum();
         let typing = !chat.typing.is_empty();
-        let mark = if typing { Span::styled("●", Style::new().fg(t.online)) } else { Span::raw(" ") };
+        let community = chat.kind == crate::data::ChatKind::Community;
+        let mark = match (typing, community, self.communities_open.contains(&chat.id)) {
+            (true, _, _) => Span::styled("●", Style::new().fg(t.online)),
+            (false, true, true) => Span::styled("▾", Style::new().fg(t.comment)),
+            (false, true, false) => Span::styled("▸", Style::new().fg(t.comment)),
+            _ => Span::raw(" "),
+        };
+        let inside = chat.community.as_deref().is_some_and(|c| self.chats.get(c).is_some());
+        let lead = if inside { "   " } else { " " };
         let pin = if chat.pinned { " ▴" } else { "" };
-        let name_w = w.saturating_sub(2 + right_w + pin.len().min(2) + 1);
+        let name_w = w.saturating_sub(1 + lead.len() + right_w + pin.len().min(2) + 1);
         let name_style = Style::new().fg(if muted { t.muted } else { t.fg });
         let name_style = if chat.unread > 0 { name_style.add_modifier(Modifier::BOLD) } else { name_style };
         let first = fill(
             vec![
                 mark,
-                Span::raw(" "),
+                Span::raw(lead),
                 Span::styled(fmt::fit(&chat.name, name_w), name_style),
                 Span::styled(pin, Style::new().fg(t.comment)),
             ],
             right,
             w,
         );
-        let preview_w = w.saturating_sub(2);
-        let mut second = vec![Span::raw("  ")];
+        let indent = if inside { "    " } else { "  " };
+        let preview_w = w.saturating_sub(indent.len());
+        let mut second = vec![Span::raw(indent)];
         if typing {
             let who = self.who_types(chat);
             second.push(Span::styled(fmt::fit(&who, preview_w), Style::new().fg(t.online)));
@@ -1064,7 +1091,7 @@ impl View {
             pair(("ctrl-k", "the palette: anything", true), Some(("?", "these keys", true))),
             pair(("alt-↑ ↓", "the chat before, after", true), Some(("/search", "words in this chat", true))),
             pair(("esc", "the chat list, when narrow", true), Some(("the mouse", "click, scroll, open", true))),
-            pair(("ctrl-b", "the sidebar · M6", false), Some(("ctrl-c", "quit", true))),
+            pair(("ctrl-b", "the sidebar", true), Some(("ctrl-c", "quit", true))),
         ];
         let w = 84.min(f.area().width.saturating_sub(2));
         let h = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));

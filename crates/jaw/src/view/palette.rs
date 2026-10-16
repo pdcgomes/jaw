@@ -68,6 +68,22 @@ pub enum Does {
     React(String, String),
     /// Deletes a message for you, or for everyone.
     DeleteFor(String, bool),
+    /// Asks a new folder's name, at the top or in a folder of yours.
+    NewFolder(Option<String>),
+    Rename(String),
+    /// Asks where to move a folder.
+    MoveFolder(String),
+    /// Moves a folder into another, or to the top.
+    MoveTo(String, Option<String>),
+    DeleteFolder(String),
+    /// Files the open chat, or the one picked, into folders.
+    File,
+    /// Ticks a folder while filing.
+    Tick(String),
+    /// Takes a chat out of a folder.
+    Unfile(String, String),
+    /// Ctrl-B's sidebar.
+    Sidebar,
 }
 
 /// What the palette is for: finding, or one of a message's actions that picks something.
@@ -89,6 +105,25 @@ pub enum Mode {
     Forward {
         messages: Vec<String>,
         picked: Vec<(String, String)>,
+    },
+    /// Filing a chat or a person: the folders ticked, those it was in, and a folder being made to
+    /// tick once jawd has made it.
+    File {
+        item: String,
+        name: String,
+        ticked: Vec<String>,
+        was: Vec<String>,
+        pending: Option<String>,
+    },
+    /// A folder's name, for a new one (in `parent`) or for `folder`; `then` goes back to filing.
+    Name {
+        folder: Option<String>,
+        parent: Option<String>,
+        then: Option<Box<Mode>>,
+    },
+    /// Where to move a folder.
+    Move {
+        folder: String,
     },
 }
 
@@ -254,6 +289,111 @@ impl View {
         self.ask();
     }
 
+    /// The palette filing `item` into folders, ticking those it's in.
+    pub fn palette_file(&mut self, item: &str, name: &str, folders: Vec<String>) {
+        let mut p = Palette::new();
+        p.narrow = Narrow::Actions;
+        p.answered = true;
+        p.mode =
+            Mode::File { item: item.into(), name: name.into(), ticked: folders.clone(), was: folders, pending: None };
+        self.palette = Some(p);
+    }
+
+    fn palette_name(&mut self, folder: Option<String>, parent: Option<String>, then: Option<Box<Mode>>) {
+        let mut p = Palette::new();
+        p.narrow = Narrow::Actions;
+        p.answered = true;
+        if let Some(name) = folder.as_deref().map(|f| self.folder_name(f)) {
+            p.query.set(&name);
+        }
+        p.mode = Mode::Name { folder, parent, then };
+        self.palette = Some(p);
+    }
+
+    /// Your folders in the tree's order, every one open, with their depths.
+    fn your_folders(&self) -> Vec<(String, usize)> {
+        let mut rows: Vec<&crate::data::FolderRow> = self.folders.iter().filter(|f| f.yours()).collect();
+        rows.sort_by_key(|f| (f.position, f.name.clone()));
+        let mut out = vec![];
+        let mut stack: Vec<(&crate::data::FolderRow, usize)> =
+            rows.iter().copied().filter(|f| f.parent.is_none()).rev().map(|f| (f, 0)).collect();
+        while let Some((f, depth)) = stack.pop() {
+            out.push((f.id.clone(), depth));
+            stack.extend(
+                rows.iter().copied().filter(|c| c.parent.as_deref() == Some(&f.id)).rev().map(|c| (c, depth + 1)),
+            );
+        }
+        out
+    }
+
+    /// Enter while filing: into the folders ticked, out of those unticked.
+    fn file_go(&mut self) {
+        let Some(Palette { mode: Mode::File { item, name, ticked, was, .. }, .. }) = self.palette.take() else {
+            return;
+        };
+        let into: Vec<&String> = ticked.iter().filter(|f| !was.contains(f)).collect();
+        let out: Vec<&String> = was.iter().filter(|f| !ticked.contains(f)).collect();
+        for f in &into {
+            self.jawd.folder_add(f, &item);
+        }
+        for f in &out {
+            self.jawd.folder_remove(f, &item);
+        }
+        let names = |fs: &[&String]| fs.iter().map(|f| self.folder_name(f)).collect::<Vec<_>>().join(", ");
+        let said = match (into.is_empty(), out.is_empty()) {
+            (true, true) => return,
+            (false, true) => format!("{name} filed in {}", names(&into)),
+            (true, false) => format!("{name} taken out of {}", names(&out)),
+            (false, false) => format!("{name} filed in {} and out of {}", names(&into), names(&out)),
+        };
+        self.say(said);
+    }
+
+    /// Enter while naming a folder.
+    fn name_go(&mut self) {
+        let Some(Palette { mode: Mode::Name { folder, parent, then }, query, .. }) = self.palette.take() else {
+            return;
+        };
+        let name = query.text().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        match folder {
+            Some(f) => {
+                self.jawd.folder_rename(&f, &name);
+                self.say(format!("renamed {name}"));
+            }
+            None => {
+                self.jawd.folder_create(&name, parent.as_deref());
+                if let Some(mut then) = then {
+                    if let Mode::File { pending, .. } = then.as_mut() {
+                        *pending = Some(name.clone());
+                    }
+                    let mut p = Palette::new();
+                    p.narrow = Narrow::Actions;
+                    p.answered = true;
+                    p.mode = *then;
+                    self.palette = Some(p);
+                } else {
+                    self.say(format!("made {name}"));
+                }
+            }
+        }
+    }
+
+    /// A folder jawd has just made: ticked if it was made while filing.
+    pub fn folder_made(&mut self, row: crate::data::FolderRow) {
+        if let Some(Palette { mode: Mode::File { ticked, pending, .. }, .. }) = self.palette.as_mut()
+            && pending.as_deref() == Some(row.name.as_str())
+        {
+            ticked.push(row.id.clone());
+            *pending = None;
+        }
+        if !self.folders.iter().any(|f| f.id == row.id) {
+            self.folders.push(row);
+        }
+    }
+
     /// The palette picking a reaction for `m`.
     pub fn palette_react(&mut self, m: &crate::data::Message) {
         let mut p = Palette::new();
@@ -401,6 +541,29 @@ impl View {
                 on("Copy this message", "y", 'y'),
             ]);
         }
+        all.push(Action::new("New folder", "at the top of the tree", Does::NewFolder(None)));
+        if let Some(f) = self.folder(&self.folder).filter(|f| f.yours()) {
+            let (id, name) = (f.id.clone(), f.name.clone());
+            all.extend([
+                Action::new(format!("New folder in {name}"), "nested in it", Does::NewFolder(Some(id.clone()))),
+                Action::new(format!("Rename {name}"), "the folder shown", Does::Rename(id.clone())),
+                Action::new(format!("Move {name} into another folder"), "or to the top", Does::MoveFolder(id.clone())),
+                Action::new(
+                    format!("Delete the folder {name}"),
+                    "its chats stay wherever else they are",
+                    Does::DeleteFolder(id.clone()),
+                ),
+            ]);
+            if let Some(chat) = self.open.as_ref().and_then(|o| self.chats.get(o)).filter(|c| c.folders.contains(&id)) {
+                all.push(Action::new(
+                    format!("Take this chat out of {name}"),
+                    chat.name.clone(),
+                    Does::Unfile(id, chat.id.clone()),
+                ));
+            }
+        }
+        let shown = if self.sidebar_shown() { "Fold the sidebar" } else { "Show the sidebar" };
+        all.push(Action::new(shown, "the folders and the roster", Does::Sidebar).key("ctrl-b"));
         // "This chat" is the one open, or the one selected while the list has the screen.
         let this = if self.narrow() && self.picking { self.selected.as_deref() } else { self.open.as_deref() };
         if let Some(c) = this.and_then(|id| self.chat_known(id)) {
@@ -433,7 +596,7 @@ impl View {
             Action::new("Library", "everything shared", Does::Later("the library comes with M3"))
                 .key("ctrl-l")
                 .later("M3"),
-            Action::new("File into folders", "", Does::Later("folders come with M6")).key("m").later("M6"),
+            Action::new("File this chat into folders", "", Does::File).key("m"),
             Action::new("The keys", "every key jaw has", Does::Keys).key("?"),
             Action::new("Quit", "", Does::Quit).key("ctrl-c"),
         ]);
@@ -474,6 +637,42 @@ impl View {
     pub fn palette_items(&self) -> Vec<Item> {
         let Some(p) = &self.palette else { return vec![] };
         match &p.mode {
+            Mode::File { name, ticked, .. } => {
+                let mut items = vec![Item::Heading("file into", fmt::fit(name, 48))];
+                for (id, depth) in self.your_folders() {
+                    let on = ticked.contains(&id);
+                    let mut a =
+                        Action::new(format!("{}{}", "    ".repeat(depth), self.folder_name(&id)), "", Does::Tick(id));
+                    a.lead = Some(if on { "[x]" } else { "[ ]" }.into());
+                    items.push(Item::Action(a));
+                }
+                return items;
+            }
+            Mode::Name { folder, parent, .. } => {
+                let what = match (folder, parent) {
+                    (Some(f), _) => format!("renaming {}", self.folder_name(f)),
+                    (None, Some(p)) => format!("a new folder in {}", self.folder_name(p)),
+                    (None, None) => "a new folder".into(),
+                };
+                return vec![Item::Heading("folder", what)];
+            }
+            Mode::Move { folder } => {
+                let mut items = vec![Item::Heading("move", format!("{} into", self.folder_name(folder)))];
+                items.push(Item::Action(Action::new(
+                    "The top",
+                    "with no folder above it",
+                    Does::MoveTo(folder.clone(), None),
+                )));
+                let under = self.subtree(folder);
+                for (id, depth) in self.your_folders().into_iter().filter(|(id, _)| !under.contains(id)) {
+                    let name = format!("{}{}", "    ".repeat(depth), self.folder_name(&id));
+                    items.push(Item::Action(Action::new(name, "", Does::MoveTo(folder.clone(), Some(id)))));
+                }
+                return items;
+            }
+            _ => {}
+        }
+        match &p.mode {
             Mode::React { message, summary } => return self.react_items(message, summary, p.query.text()),
             Mode::Delete { message, summary, everyone } => {
                 let mut items = vec![Item::Heading("delete", fmt::fit(summary, 48))];
@@ -487,7 +686,7 @@ impl View {
                 items.push(Item::Action(all));
                 return items;
             }
-            Mode::Forward { .. } | Mode::Find => {}
+            _ => {}
         }
         if let Some((id, name)) = &p.muting {
             let now = self.now();
@@ -620,6 +819,25 @@ impl View {
                 return;
             }
             (Mode::React { .. } | Mode::Delete { .. }, KeyCode::Tab | KeyCode::BackTab) => return,
+            (Mode::File { .. }, KeyCode::Char(' ')) => {
+                let at = p.selected;
+                if let Some((id, _)) = self.your_folders().get(at).cloned() {
+                    self.act(Does::Tick(id));
+                }
+                return;
+            }
+            (Mode::File { .. }, KeyCode::Char('n')) => {
+                let then = self.palette.take().map(|p| Box::new(p.mode));
+                self.palette_name(None, None, then);
+                return;
+            }
+            (
+                Mode::File { .. } | Mode::Move { .. },
+                KeyCode::Char(_) | KeyCode::Tab | KeyCode::BackTab | KeyCode::Backspace,
+            ) => {
+                return;
+            }
+            (Mode::Name { .. }, KeyCode::Tab | KeyCode::BackTab) => return,
             (Mode::Forward { .. }, KeyCode::Tab) => {
                 self.forward_pick();
                 return;
@@ -762,8 +980,11 @@ impl View {
 
     /// Enter: opens a chat, goes to a message, starts a chat with someone, or does an action.
     pub fn palette_act(&mut self) {
-        if self.palette.as_ref().is_some_and(|p| matches!(p.mode, Mode::Forward { .. })) {
-            return self.forward_go();
+        match self.palette.as_ref().map(|p| &p.mode) {
+            Some(Mode::Forward { .. }) => return self.forward_go(),
+            Some(Mode::File { .. }) => return self.file_go(),
+            Some(Mode::Name { .. }) => return self.name_go(),
+            _ => {}
         }
         let Some(item) = self.palette_selected() else { return };
         match item {
@@ -790,7 +1011,10 @@ impl View {
                         self.jawd.start_chat(&person.id);
                         self.say(format!("a chat with {} begins", person.name));
                     }
-                    Hit::Folder(_) => self.say("folders come with M6"),
+                    Hit::Folder(folder) => {
+                        self.palette = None;
+                        self.pick_folder(&folder.id);
+                    }
                     Hit::Shared => self.say("links come with M2, and photos and files with M3"),
                 }
             }
@@ -877,6 +1101,51 @@ impl View {
                 self.starting = Some(phone.clone());
                 self.jawd.start_chat_by_phone(&phone);
                 self.say(format!("a chat with {phone} begins"));
+            }
+            Does::NewFolder(parent) => self.palette_name(None, parent, None),
+            Does::Rename(id) => self.palette_name(Some(id), None, None),
+            Does::MoveFolder(folder) => {
+                let mut p = Palette::new();
+                p.narrow = Narrow::Actions;
+                p.answered = true;
+                p.mode = Mode::Move { folder };
+                self.palette = Some(p);
+            }
+            Does::MoveTo(folder, parent) => {
+                close(self);
+                let name = self.folder_name(&folder);
+                let into = parent.as_deref().map_or_else(|| "the top".to_string(), |p| self.folder_name(p));
+                self.jawd.folder_move(&folder, parent.as_deref());
+                self.say(format!("{name} moved to {into}"));
+            }
+            Does::DeleteFolder(folder) => {
+                close(self);
+                let name = self.folder_name(&folder);
+                self.jawd.folder_delete(&folder);
+                self.say(format!("{name} deleted; its chats stay wherever else they are"));
+            }
+            Does::File => {
+                close(self);
+                self.file_this();
+            }
+            Does::Tick(id) => {
+                if let Some(Palette { mode: Mode::File { ticked, .. }, .. }) = self.palette.as_mut() {
+                    match ticked.iter().position(|t| *t == id) {
+                        Some(i) => {
+                            ticked.remove(i);
+                        }
+                        None => ticked.push(id),
+                    }
+                }
+            }
+            Does::Unfile(folder, chat) => {
+                close(self);
+                self.jawd.folder_remove(&folder, &chat);
+                self.say(format!("taken out of {}", self.folder_name(&folder)));
+            }
+            Does::Sidebar => {
+                close(self);
+                self.toggle_sidebar();
             }
             Does::OnMessage(id, c) => {
                 close(self);
@@ -1014,6 +1283,9 @@ impl View {
         f.render_widget(Clear, area);
         let mode = self.palette.as_ref().map_or(Mode::Find, |p| p.mode.clone());
         let (title, foot) = match &mode {
+            Mode::File { .. } => (" file ", " space ticks · n new folder · ⏎ files · esc closes "),
+            Mode::Name { .. } => (" folder ", " ⏎ names it · esc closes "),
+            Mode::Move { .. } => (" move ", " ↑↓ moves · ⏎ puts it there · esc closes "),
             Mode::Find => (" palette ", " ↑↓ moves · tab narrows · ⏎ does it · ctrl-g its message · esc closes "),
             Mode::React { .. } => (" react ", " 1-6 the quick ones · type for any other · ⏎ reacts · esc closes "),
             Mode::Delete { .. } => (" delete ", " ↑↓ moves · ⏎ deletes · esc closes "),
@@ -1053,6 +1325,10 @@ impl View {
         if text.is_empty() {
             let hint = if p.muting.is_some() {
                 "for how long?"
+            } else if let Mode::Name { .. } = p.mode {
+                "the folder's name"
+            } else if let Mode::File { .. } | Mode::Move { .. } = p.mode {
+                ""
             } else if let Mode::React { .. } = p.mode {
                 "an emoji's name, or 1 to 6"
             } else if let Mode::Delete { .. } = p.mode {

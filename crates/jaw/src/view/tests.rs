@@ -95,7 +95,7 @@ fn at_140_columns_the_chat_list_sits_beside_the_conversation() {
     assert!(screen.contains("Ana   vens jantar sexta? a tua mãe pergunta"), "{screen}");
     let mine = screen.lines().find(|l| l.contains("cheguei, boa noite")).unwrap();
     let at = mine.chars().position(|c| c == 'c').unwrap();
-    assert_eq!(at, 34 + 2 + 102 / 3, "yours start a third of the way across the conversation:\n{mine}");
+    assert_eq!(at, 26 + 34 + 2 + 76 / 3, "yours start a third of the way across the conversation:\n{mine}");
     assert!(mine.ends_with("✓✓  23:12 │"), "{mine}");
     assert!(screen.contains("Yesterday") && screen.contains("Today"), "day separators:\n{screen}");
     assert!(screen.lines().last().unwrap().starts_with(" ⏎ send  alt-⏎ new line  ↑ messages"), "{screen}");
@@ -567,8 +567,8 @@ fn ctrl_g_goes_to_a_message_and_says_what_it_does_on_anything_else() {
 fn a_folder_and_what_comes_later_say_when_they_come() {
     let (mut v, rx) = view(140, 34);
     press(&mut v, &rx, "<c-k>archived\n");
-    assert!(frame(&mut v).contains("folders come with M6"));
-    press(&mut v, &rx, "<c-u>new poll\n");
+    assert!(frame(&mut v).contains("chats · Archived"), "a folder found shows its chats");
+    press(&mut v, &rx, "<c-k>new poll\n");
     assert!(frame(&mut v).contains("polls come with M2"));
     assert!(v.palette.is_some(), "it stays open");
 }
@@ -1354,4 +1354,168 @@ fn a_number_typed_in_the_palette_starts_a_chat_with_it() {
     assert_eq!(v.open.as_deref(), Some("351913777777@s.whatsapp.net"));
     press(&mut v, &rx, "<c-k>12 34");
     assert!(!frame(&mut v).contains("Start a chat with"), "too few digits to be a number");
+}
+
+#[test]
+fn from_120_columns_the_sidebar_has_the_folders_and_the_roster_beside_the_list() {
+    for width in [140, 120] {
+        let (mut v, _rx) = view(width, 44);
+        let screen = frame(&mut v);
+        let first = screen.lines().nth(1).unwrap();
+        assert!(first.starts_with("╭ folders ─") && first.contains("╭ chats · All"), "at {width}:\n{screen}");
+        for said in ["│   All", "│ ▸ Family", "│ ◇ Waiting on me", "roster · All", "● João"] {
+            assert!(screen.contains(said), "{said} at {width}:\n{screen}");
+        }
+        assert!(line_with(&screen, "▸ Family").contains("@1"), "a mention carried up to the folder:\n{screen}");
+    }
+}
+
+#[test]
+fn below_120_columns_the_sidebar_folds_and_ctrl_b_draws_it_over_the_list() {
+    for width in [100, 80] {
+        let (mut v, rx) = view(width, 40);
+        assert!(!frame(&mut v).contains("╭ folders"), "folded at {width}");
+        press(&mut v, &rx, "<c-b>");
+        let screen = frame(&mut v);
+        assert!(
+            screen.contains("╭ folders") && v.hints().contains(&("⏎", "shows its chats", true)),
+            "at {width}:\n{screen}"
+        );
+        press(&mut v, &rx, "<esc>");
+        assert!(!frame(&mut v).contains("╭ folders"));
+    }
+}
+
+#[test]
+fn ctrl_b_gives_a_wide_sidebar_the_keys_and_folds_it_and_brings_it_back() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<c-b>");
+    assert!(frame(&mut v).contains("ctrl-b folds it"));
+    press(&mut v, &rx, "<c-b>");
+    let screen = frame(&mut v);
+    assert!(!screen.contains("╭ folders") && screen.lines().nth(1).unwrap().starts_with("╭ chats"), "{screen}");
+    press(&mut v, &rx, "<c-b>");
+    assert!(frame(&mut v).contains("╭ folders"));
+}
+
+#[test]
+fn picking_a_folder_makes_the_chat_list_its_window_and_the_roster_its_people() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-b><down><down><down><down><down><down>\n");
+    assert_eq!(v.folder, "folder:4");
+    let screen = frame(&mut v);
+    assert!(screen.contains("chats · Work") && screen.contains("roster · Work"), "{screen}");
+    assert!(
+        screen.contains("Mariana Lopes") && screen.contains("Tiago Fonseca") && !screen.contains("Escola do Bairro"),
+        "{screen}"
+    );
+    assert!(screen.contains("Ana Ribeiro · typing"), "the open chat stays open:\n{screen}");
+    press(&mut v, &rx, "<up><up><up><up><up><up>\n");
+    assert!(frame(&mut v).contains("chats · All"));
+}
+
+#[test]
+fn a_folder_opens_to_show_the_folders_in_it_and_counts_each_chat_once() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-b><down><down><down><down><down><right>");
+    let screen = frame(&mut v);
+    assert!(
+        screen.contains("▾ Family") && screen.contains("│     Parents") && screen.contains("│     Cousins"),
+        "{screen}"
+    );
+    let family = v.folders.iter().find(|f| f.name == "Family").unwrap();
+    assert_eq!(family.count, 5, "Família, Avó, Mãe, Sofia, and Inês with no chat, each once");
+    press(&mut v, &rx, "<left>");
+    assert!(!frame(&mut v).contains("Parents"));
+}
+
+#[test]
+fn the_roster_has_who_is_around_first_then_who_was_seen_last_and_enter_opens_their_chat() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-b><down><down><down><down><down>\n");
+    assert_eq!(v.folder, "folder:1");
+    let screen = frame(&mut v);
+    let at = |name: &str| row_of(&screen, &format!("│ ○ {name}")).or(row_of(&screen, &format!("│ ● {name}")));
+    assert!(
+        at("Mãe").unwrap() < at("Inês Gomes").unwrap() && at("Inês Gomes").unwrap() < at("Avó Lurdes").unwrap(),
+        "{screen}"
+    );
+    assert!(
+        line_with(&screen, "○ Mãe").contains("5 min ago") && line_with(&screen, "○ Avó Lurdes").contains("yesterday")
+    );
+    press(&mut v, &rx, "<tab>\n");
+    assert_eq!(v.open.as_deref(), Some("mae"), "Mãe is the first, and her chat opens");
+}
+
+#[test]
+fn presence_changing_moves_people_in_the_roster() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-b><down><down><down><down><down>\n");
+    let mut row = v.roster.iter().find(|r| r.name == "Inês Gomes").cloned().unwrap();
+    row.presence = crate::data::Presence { state: crate::data::PresenceState::Online, at: None, known: true };
+    row.sort = "0~inês gomes".into();
+    v.apply(Update::Roster { folder: "folder:1".into(), upsert: vec![row], remove: vec![], whole: false });
+    let screen = frame(&mut v);
+    assert!(row_of(&screen, "● Inês Gomes").unwrap() < row_of(&screen, "○ Mãe").unwrap(), "{screen}");
+}
+
+#[test]
+fn m_files_the_open_chat_into_folders_ticked_with_space() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<up>m");
+    let screen = frame(&mut v);
+    assert!(
+        screen.contains(" file ") && screen.contains("[ ] Family") && screen.contains("[x] Ana's 40th"),
+        "{screen}"
+    );
+    press(&mut v, &rx, " <down><down> \n");
+    let ana = v.chats.get("ana").unwrap();
+    assert!(ana.folders.contains(&"folder:1".to_string()) && ana.folders.contains(&"folder:3".to_string()), "{ana:?}");
+    assert!(frame(&mut v).contains("filed in Family, Cousins"));
+}
+
+#[test]
+fn n_while_filing_makes_a_new_folder_and_ticks_it() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<up>mnTrabalho\n");
+    assert!(frame(&mut v).contains("[x] Trabalho"));
+    press(&mut v, &rx, "\n");
+    let made = v.folders.iter().find(|f| f.name == "Trabalho").unwrap().id.clone();
+    assert!(v.chats.get("ana").unwrap().folders.contains(&made));
+}
+
+#[test]
+fn folders_are_made_renamed_nested_and_deleted_from_the_palette() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-k>new folder\nTeatro\n");
+    let teatro = v.folders.iter().find(|f| f.name == "Teatro").expect("made").id.clone();
+    v.pick_folder(&teatro);
+    run::settle(&mut v, &rx);
+    press(&mut v, &rx, "<c-k>rename teatro\n<c-u>Teatro e cinema\n");
+    assert!(v.folders.iter().any(|f| f.name == "Teatro e cinema"));
+    press(&mut v, &rx, "<c-k>move teatro\n");
+    let screen = frame(&mut v);
+    assert!(screen.contains(" move ") && screen.contains("The top") && !screen.contains("    Teatro"), "{screen}");
+    press(&mut v, &rx, "<down>\n");
+    let row = v.folders.iter().find(|f| f.id == teatro).unwrap();
+    assert_eq!(row.parent.as_deref(), Some("folder:1"), "nested in Family");
+    press(&mut v, &rx, "<c-k>delete the folder\n");
+    assert!(!v.folders.iter().any(|f| f.id == teatro));
+    assert_eq!(v.folder, "all", "its list goes back to All");
+}
+
+#[test]
+fn a_community_is_one_row_that_opens_to_its_groups_announcements_first() {
+    let (mut v, rx) = view(80, 60);
+    let screen = frame(&mut v);
+    assert!(screen.contains("▸ Bairro de Alvalade") && !screen.contains("Festa de Natal"), "{screen}");
+    for _ in 0..15 {
+        press(&mut v, &rx, "<down>");
+    }
+    assert_eq!(v.selected.as_deref(), Some("bairro"));
+    press(&mut v, &rx, "\n");
+    let screen = frame(&mut v);
+    let (announce, festa) = (row_of(&screen, "Avisos do Bairro").unwrap(), row_of(&screen, "Festa de Natal").unwrap());
+    assert!(screen.contains("▾ Bairro de Alvalade") && announce < festa, "{screen}");
+    assert!(line_with(&screen, "Festa de Natal").contains("│     Festa"), "indented under it:\n{screen}");
 }
