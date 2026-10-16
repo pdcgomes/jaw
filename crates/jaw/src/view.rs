@@ -95,6 +95,13 @@ struct Laid {
     lines: Rc<Vec<Line<'static>>>,
 }
 
+/// A chat's rows in the list as last drawn, and what they depended on: its version, whether it
+/// was open, the width, and the minute its time was written in.
+struct ChatRows {
+    key: (u64, bool, usize, i64),
+    rows: Rc<(Line<'static>, Line<'static>)>,
+}
+
 /// Where things were last drawn, for the mouse and for keys that depend on the layout.
 #[derive(Debug, Default)]
 struct Areas {
@@ -146,6 +153,8 @@ pub struct View {
     unread_at_open: u32,
     placed: HashMap<String, Placed>,
     laid: HashMap<String, Laid>,
+    /// Each chat's rows in the list, kept per version, whether it's open, width and minute.
+    rows_laid: HashMap<String, ChatRows>,
     unfolded: HashSet<String>,
     asked_around: Option<String>,
 
@@ -204,6 +213,7 @@ impl View {
             unread_at_open: 0,
             placed: HashMap::new(),
             laid: HashMap::new(),
+            rows_laid: HashMap::new(),
             unfolded: HashSet::new(),
             asked_around: None,
             composer: Composer::default(),
@@ -298,7 +308,12 @@ impl View {
                 self.link = Some(step);
             }
             Update::Chats { reset, upsert, remove, total } => {
+                let left = reset || !remove.is_empty();
                 self.keep_selected_row(|v| v.chats.apply(reset, upsert, &remove, total));
+                if left {
+                    let chats = &self.chats;
+                    self.rows_laid.retain(|id, _| chats.get(id).is_some());
+                }
                 if self.open.as_ref().is_none_or(|id| self.chats.get(id).is_none()) {
                     let first = self.chats.order().first().map(|s| s.to_string());
                     if let Some(first) = first {

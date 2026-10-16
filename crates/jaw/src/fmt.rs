@@ -31,30 +31,36 @@ pub fn same_day(a: i64, b: i64, tz: FixedOffset) -> bool {
 }
 
 pub fn clock(at: i64, tz: FixedOffset) -> String {
-    local(at, tz).format("%H:%M").to_string()
+    let minutes = wall(at, tz).rem_euclid(DAY) / MINUTE;
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+const WEEKDAYS: [&str; 7] = ["Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"];
+
+/// The day of the week, from the days since 1 January 1970, which was a Thursday.
+fn weekday(at: i64, tz: FixedOffset) -> &'static str {
+    WEEKDAYS[wall(at, tz).div_euclid(DAY).rem_euclid(7) as usize]
 }
 
 /// A day separator's label: Today, Yesterday, a weekday within the week, or the date.
 pub fn day(at: i64, now: i64, tz: FixedOffset) -> String {
-    let t = local(at, tz);
     match days_before(at, now, tz) {
         0 => "Today".into(),
         1 => "Yesterday".into(),
-        2..=6 => t.format("%A").to_string(),
-        _ if t.year() == local(now, tz).year() => t.format("%A %-d %B").to_string(),
-        _ => t.format("%-d %B %Y").to_string(),
+        2..=6 => weekday(at, tz).to_string(),
+        _ if local(at, tz).year() == local(now, tz).year() => local(at, tz).format("%A %-d %B").to_string(),
+        _ => local(at, tz).format("%-d %B %Y").to_string(),
     }
 }
 
 /// When a chat's newest message came, as the chat list says it.
 pub fn when(at: i64, now: i64, tz: FixedOffset) -> String {
-    let t = local(at, tz);
     match days_before(at, now, tz) {
         0 => clock(at, tz),
         1 => "yesterday".into(),
-        2..=6 => t.format("%a").to_string(),
-        _ if t.year() == local(now, tz).year() => t.format("%-d %b").to_string(),
-        _ => t.format("%-d %b %Y").to_string(),
+        2..=6 => weekday(at, tz)[..3].to_string(),
+        _ if local(at, tz).year() == local(now, tz).year() => local(at, tz).format("%-d %b").to_string(),
+        _ => local(at, tz).format("%-d %b %Y").to_string(),
     }
 }
 

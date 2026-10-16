@@ -5,7 +5,7 @@
 
 use super::{Focus, LIST, NARROW, Overlay, Placed, Reach, Scroll, View};
 use crate::art::{self, Look};
-use crate::data::{Message, Tick};
+use crate::data::{Chat, Message, Tick};
 use crate::fmt;
 use crate::layout;
 use crate::window::Messages;
@@ -53,6 +53,41 @@ fn fill(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Li
     Line::from(spans)
 }
 
+/// A line drawn into the buffer as `set_line` would, but leaving cells that only a plain space
+/// would cover as the panel filled them, which spares a frame most of its width, and honouring a
+/// centred line's alignment.
+fn put(buf: &mut Buffer, x: u16, y: u16, line: &Line, width: u16) {
+    let end = x + width;
+    let mut at = x;
+    if line.alignment == Some(ratatui::layout::Alignment::Center) {
+        at += width.saturating_sub(line.width() as u16) / 2;
+    }
+    for span in &line.spans {
+        if at >= end {
+            break;
+        }
+        let style = line.style.patch(span.style);
+        if style == Style::default() && span.content.bytes().all(|b| b == b' ') {
+            at = at.saturating_add(span.content.len() as u16);
+            continue;
+        }
+        // Plain ASCII is a cell a byte, so it goes straight in; the rest to ratatui, which knows
+        // graphemes and wide characters.
+        let text: &str = &span.content;
+        let ascii = text.bytes().position(|b| !b.is_ascii_graphic() && b != b' ').unwrap_or(text.len());
+        for c in text[..ascii].chars() {
+            if at >= end {
+                return;
+            }
+            buf[(at, y)].set_char(c).set_style(style);
+            at += 1;
+        }
+        if ascii < text.len() && at < end {
+            at = buf.set_stringn(at, y, &text[ascii..], (end - at) as usize, style).0;
+        }
+    }
+}
+
 fn centred(lines: Vec<Line<'static>>, area: Rect) -> Paragraph<'static> {
     let pad = area.height.saturating_sub(lines.len() as u16) / 2;
     let mut out = vec![Line::default(); pad as usize];
@@ -78,15 +113,18 @@ impl View {
     pub fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
         let t = self.theme;
-        f.render_widget(Block::new().style(Style::new().bg(t.bg).fg(t.fg)), area);
         self.areas = super::Areas { width: area.width, ..Default::default() };
         self.drawn_at = self.now() / 1_000;
+        let ground = Style::new().bg(t.bg).fg(t.fg);
         if area.height < 4 || area.width < 20 {
-            f.render_widget(Paragraph::new("jaw needs a bigger window"), area);
+            f.render_widget(Paragraph::new("jaw needs a bigger window").style(ground), area);
             return;
         }
         let [top, body, foot] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        // The panels fill the body themselves; the header and the keys have only this.
+        f.buffer_mut().set_style(top, ground);
+        f.buffer_mut().set_style(foot, ground);
         self.draw_header(f.buffer_mut(), top);
         match &self.reach {
             Reach::Waiting => f.render_widget(self.panel(t.gutter), body),
@@ -323,77 +361,21 @@ impl View {
             let Some(chat) = self.chats.get(id) else { continue };
             let y = inner.y + 2 * k as u16;
             let selected = self.selected.as_deref() == Some(id.as_str());
-            let muted = chat.muted(now);
-            let mut right: Vec<Span<'static>> = vec![];
-            if let Some(last) = &chat.last {
-                right.push(Span::styled(fmt::when(last.at, now, self.tz), Style::new().fg(t.comment)));
-            }
-            if chat.mentions > 0 {
-                right.push(Span::raw(" "));
-                right.push(Span::styled(
-                    format!("@{}", chat.mentions),
-                    Style::new().fg(t.mention).add_modifier(Modifier::BOLD),
-                ));
-            }
-            if chat.unread > 0 {
-                right.push(Span::raw(" "));
-                let style = if muted {
-                    Style::new().fg(t.comment)
-                } else {
-                    Style::new().fg(t.unread).add_modifier(Modifier::BOLD)
-                };
-                right.push(Span::styled(chat.unread.to_string(), style));
-            }
-            let right_w: usize = right.iter().map(|s| s.width()).sum();
-            let typing = !chat.typing.is_empty();
-            let mark = if typing { Span::styled("●", Style::new().fg(t.online)) } else { Span::raw(" ") };
-            let pin = if chat.pinned { " ▴" } else { "" };
-            let name_w = w.saturating_sub(2 + right_w + pin.len().min(2) + 1);
-            let name_style = Style::new().fg(if muted { t.muted } else { t.fg });
-            let name_style = if chat.unread > 0 { name_style.add_modifier(Modifier::BOLD) } else { name_style };
-            let first = fill(
-                vec![
-                    mark,
-                    Span::raw(" "),
-                    Span::styled(fmt::fit(&chat.name, name_w), name_style),
-                    Span::styled(pin, Style::new().fg(t.comment)),
-                ],
-                right,
-                w,
-            );
-            let preview_w = w.saturating_sub(2);
-            let mut second = vec![Span::raw("  ")];
             let open = self.open.as_deref() == Some(id.as_str());
-            if typing {
-                let who =
-                    if chat.group() { format!("{} typing…", chat.typing.join(", ")) } else { "typing…".into() };
-                second.push(Span::styled(fmt::fit(&who, preview_w), Style::new().fg(t.online)));
-            } else if let Some(draft) = chat.draft.as_ref().filter(|d| !d.is_empty() && !open) {
-                second.push(Span::styled("draft: ", Style::new().fg(t.comment).add_modifier(Modifier::ITALIC)));
-                second.push(Span::styled(
-                    fmt::fit(&fmt::one_line(draft), preview_w.saturating_sub(7)),
-                    Style::new().fg(t.text),
-                ));
-            } else if let Some(last) = &chat.last {
-                let mut room = preview_w;
-                if let Some(tick) = last.status {
-                    let tick = layout::ticks(tick, &t);
-                    room = room.saturating_sub(tick.width() + 1);
-                    second.push(tick);
-                    second.push(Span::raw(" "));
+            let key = (chat.v, open, w, now / fmt::MINUTE);
+            let rows = match self.rows_laid.get(id.as_str()) {
+                Some(laid) if laid.key == key => laid.rows.clone(),
+                _ => {
+                    let rows = Rc::new(self.chat_row(chat, open, w, now));
+                    self.rows_laid.insert(id.clone(), super::ChatRows { key, rows: rows.clone() });
+                    rows
                 }
-                let said = match &last.from {
-                    Some(from) => format!("{from}: {}", fmt::one_line(&last.summary)),
-                    None => fmt::one_line(&last.summary),
-                };
-                second.push(Span::styled(fmt::fit(&said, room), Style::new().fg(t.muted)));
-            } else {
-                second.push(Span::styled("no messages yet", Style::new().fg(t.comment)));
-            }
+            };
+            let (first, second) = &*rows;
             let buf = f.buffer_mut();
-            buf.set_line(inner.x, y, &first, inner.width);
+            put(buf, inner.x, y, first, inner.width);
             if y + 1 < inner.y + inner.height {
-                buf.set_line(inner.x, y + 1, &Line::from(second), inner.width);
+                put(buf, inner.x, y + 1, second, inner.width);
             }
             if selected {
                 let band = Rect::new(area.x + 1, y, area.width.saturating_sub(2), 2.min(inner.y + inner.height - y));
@@ -401,6 +383,74 @@ impl View {
             }
             self.areas.chat_rows.push((y, id.clone()));
         }
+    }
+
+    /// A chat's two rows in the list: its name, time and counts, then what it last said.
+    fn chat_row(&self, chat: &Chat, open: bool, w: usize, now: i64) -> (Line<'static>, Line<'static>) {
+        let t = self.theme;
+        let muted = chat.muted(now);
+        let mut right: Vec<Span<'static>> = vec![];
+        if let Some(last) = &chat.last {
+            right.push(Span::styled(fmt::when(last.at, now, self.tz), Style::new().fg(t.comment)));
+        }
+        if chat.mentions > 0 {
+            right.push(Span::raw(" "));
+            right.push(Span::styled(
+                format!("@{}", chat.mentions),
+                Style::new().fg(t.mention).add_modifier(Modifier::BOLD),
+            ));
+        }
+        if chat.unread > 0 {
+            right.push(Span::raw(" "));
+            let style =
+                if muted { Style::new().fg(t.comment) } else { Style::new().fg(t.unread).add_modifier(Modifier::BOLD) };
+            right.push(Span::styled(chat.unread.to_string(), style));
+        }
+        let right_w: usize = right.iter().map(|s| s.width()).sum();
+        let typing = !chat.typing.is_empty();
+        let mark = if typing { Span::styled("●", Style::new().fg(t.online)) } else { Span::raw(" ") };
+        let pin = if chat.pinned { " ▴" } else { "" };
+        let name_w = w.saturating_sub(2 + right_w + pin.len().min(2) + 1);
+        let name_style = Style::new().fg(if muted { t.muted } else { t.fg });
+        let name_style = if chat.unread > 0 { name_style.add_modifier(Modifier::BOLD) } else { name_style };
+        let first = fill(
+            vec![
+                mark,
+                Span::raw(" "),
+                Span::styled(fmt::fit(&chat.name, name_w), name_style),
+                Span::styled(pin, Style::new().fg(t.comment)),
+            ],
+            right,
+            w,
+        );
+        let preview_w = w.saturating_sub(2);
+        let mut second = vec![Span::raw("  ")];
+        if typing {
+            let who = if chat.group() { format!("{} typing…", chat.typing.join(", ")) } else { "typing…".into() };
+            second.push(Span::styled(fmt::fit(&who, preview_w), Style::new().fg(t.online)));
+        } else if let Some(draft) = chat.draft.as_ref().filter(|d| !d.is_empty() && !open) {
+            second.push(Span::styled("draft: ", Style::new().fg(t.comment).add_modifier(Modifier::ITALIC)));
+            second.push(Span::styled(
+                fmt::fit(&fmt::one_line(draft), preview_w.saturating_sub(7)),
+                Style::new().fg(t.text),
+            ));
+        } else if let Some(last) = &chat.last {
+            let mut room = preview_w;
+            if let Some(tick) = last.status {
+                let tick = layout::ticks(tick, &t);
+                room = room.saturating_sub(tick.width() + 1);
+                second.push(tick);
+                second.push(Span::raw(" "));
+            }
+            let said = match &last.from {
+                Some(from) => format!("{from}: {}", fmt::one_line(&last.summary)),
+                None => fmt::one_line(&last.summary),
+            };
+            second.push(Span::styled(fmt::fit(&said, room), Style::new().fg(t.muted)));
+        } else {
+            second.push(Span::styled("no messages yet", Style::new().fg(t.comment)));
+        }
+        (first, Line::from(second))
     }
 
     fn conversation_title(&self) -> Line<'static> {
@@ -612,7 +662,7 @@ impl View {
             let mut y = b.top;
             let mut put = |line: &Line, y: i32| {
                 if (0..h).contains(&y) {
-                    buf.set_line(area.x, area.y + y as u16, line, area.width);
+                    put(buf, area.x, area.y + y as u16, line, area.width);
                 }
             };
             if b.blank {
@@ -747,6 +797,7 @@ impl View {
             ];
             f.render_widget(Paragraph::new(lines).block(block), notice);
             if !self.link_asked {
+                f.buffer_mut().set_style(rest, Style::new().bg(t.bg));
                 return;
             }
             area = rest;
