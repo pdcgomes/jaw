@@ -35,3 +35,5 @@ Read "jawd › Storage › Data integrity" and "Migrations" in `docs/plans/2026-
 4. `make check-audit` must pass locally; the pre-push hook (`make hooks`) refuses a push to main without it, and CI runs it again. Never push with `--no-verify`, and never land from a worktree or a run that was told to hold.
 
 Never skip, fake or self-write the audit, and never land a data-layer change whose audit isn't `Verdict: approved`.
+
+Never copy the owner's `session.db` anywhere, and never run the Go engine on a folder holding it or a copy: tests on copies of the owner's `jaw.db` use `--engine demo`.

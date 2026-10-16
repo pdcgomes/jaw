@@ -29,6 +29,7 @@ A worktree path and a range (usually `origin/main..HEAD`), and what the change i
 ## How you work
 
 - Read-only on the product: never edit, commit, stash or check out anything in `~/src/jaw` or a builder's worktree. Never open anything under `~/Library/Application Support/jaw` for writing, and never stop or touch the owner's running jawd.
+- Never copy `session.db` (or anything else of the engine's) out of the owner's folder, and never run jawd with `--engine go` on a folder that holds the owner's `session.db` or a copy of it: that would be the owner's WhatsApp device connecting twice, moving its keys on from the real ones. Copies of `jaw.db` for upgrade tests run with `--engine demo`, or with the Go engine only on a folder with no `session.db` at all.
 - Measure in a scratch copy (`git clone <worktree> /tmp/<name>`, then check out the branch's head there) with `JAW_HOME` set to a temp folder. `jawd bench store`, `jawd bench link --commit` and `jawd bench feed` exist. Report numbers with method, not impressions.
 - The network goes through a proxy; crates.io is reachable, npm isn't. Don't try to bypass the sandbox.
 
