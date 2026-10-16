@@ -306,6 +306,27 @@ Proposed with the terminal's M2 actions, for jawd to build; until then the rows 
 - **`message.info`** (`message`): when your message was `sent`, and for each recipient (one in a direct chat, every member in a group) their `person`, `name` and the times it was `delivered`, `read` and, for voice, `played`, each null until it is. For someone else's message, `recipients` is empty and `sent` is when it was sent.
 - **`chat.info`** (`chat`) adds `members`: each member's `person`, the `name` to show, `phone` where jawd knows it, and `admin`, for completing `@` names; a direct chat's members are the other person and you.
 
+## Library (proposed)
+
+Proposed with the terminal's library in M3, for jawd to build; until then the `library.watch` row above is the draft. It keeps its name and fills in what it leaves open.
+
+```json
+{"id":60,"method":"library.watch","params":{"kind":"photo","chat":"120363000000000002@g.us","person":"person:4","since":1785542400000,"until":null,"text":"praia","around":"top","before":0,"after":100}}
+{"id":60,"result":{"watch":"w7","seq":81300,"total":6,"older":false,"counts":{"photo":6,"video":1,"voice":0,"file":0,"link":2},"rows":[{"id":"3EB0A1B2C3D4E5F6","sort":"1785763200000~3EB0A1B2C3D4E5F6","kind":"photo","message":"3EB0A1B2C3D4E5F6","chat":"120363000000000002@g.us","chat_name":"Família Gomes","from":{"id":"person:4","name":"Inês","colour":2},"mine":false,"at":1785763200000,"media":{"w":4032,"h":3024,"previews":{"256":"media/p/3eb0a1.256.jpg"}},"caption":[{"t":"text","s":"na "},{"t":"mark","s":"praia"}]}]}}
+{"method":"library","params":{"watch":"w7","seq":81301,"total":7,"counts":{"photo":7,"…":"…"},"upsert":[{"id":"…","…":"…"}]}}
+```
+
+- **What's asked.** `kind` is `photo`, `video` (GIFs and video notes too), `voice`, `file`, `link` or `all`. `chat` and `person` narrow to one chat and one sender (`person:` and a number, or `me` for yours); `since` and `until` are milliseconds since the epoch, either end open; `text` matches captions, file names and link titles, hosts and descriptions, as `find` matches messages: accent-blind, each word typed starting a word. Every filter can be absent.
+- **A window,** newest first, paged by keyset as the chat list is: `around` is `top` or an item's `id`, with `before` (newer) and `after` (older) rows, and `watch.move` re-anchors it. `older` says whether more come after the window's last row; `total` is how many items of the kind match. `kind` `all` is different: it isn't paged, and holds the newest `after` items of each kind, so an interface can show a shelf of each, and narrows to one kind to page.
+- **`counts`** are how many items of each kind match the other filters, for the kind strip, and come again in pushes when they change.
+- **Rows** are items, sorted by `sort` descending (the time, then the `id`). An item is a message's photo, video, voice message or file, one of an album's photos, or one of a message's links, so a message can give several. Each has its own `id` (the message's ID, with `:` and the place for an album's photos and `~` and the place for links), its `kind`, its `message` to go to, its `chat` and `chat_name`, `from` (absent on yours, with `mine` true), `at`, `caption` (the message's text, the words that matched marked as `find` marks them, empty when there's none), and what its kind needs:
+  - `photo` and `video`: `media` as message rows have it, with `seconds` for a video;
+  - `voice`: `voice` as message rows have it;
+  - `file`: `file`: its `name`, `type` (as shown: `PDF`, `GPX`), `bytes`, `pages` where known, and `path` once downloaded;
+  - `link`: `link`: its `url`, `host`, and the preview's `title` and `description` where it had one.
+- **Pushes.** `library` pushes upsert items as they come and change and remove those deleted, with `total`, `older` and `counts` when they change, as other windows' pushes do.
+- **Errors.** A `chat` or `person` jawd doesn't have is error 3; `since` after `until` is -32602.
+
 ## Folders and the roster (proposed)
 
 Proposed with the terminal's sidebar in M6, for jawd to build; until then `folders.watch`, `roster.watch`, `chats.watch`'s `folder` and the `folder.*` rows above are the draft. It keeps their names and fills in what they leave open. Folders are jaw's own, kept in jaw.db and shared by every interface; WhatsApp never sees them.
