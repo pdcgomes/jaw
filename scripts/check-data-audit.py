@@ -17,6 +17,7 @@ DATA_PATHS = (
     "crates/jawd/src/sync",
     "crates/jawd/src/feed/",
     "crates/jawd/src/find",
+    "crates/jawd/src/send",
     "engine/internal/wa/",
     "proto/engine/",
     "crates/jaw-voice/src/record/",
