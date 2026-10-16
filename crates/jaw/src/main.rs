@@ -2,6 +2,7 @@
 //! the interface on jawd, starting jawd first if it isn't running, `jaw demo` runs it on a
 //! made-up account, `jaw status` asks jawd how it is, and `jaw link` links an account.
 
+mod agent;
 mod art;
 mod bench;
 mod composer;
@@ -86,6 +87,9 @@ enum Command {
         #[arg(long)]
         jawd: bool,
     },
+    /// Starts jawd at login, as a LaunchAgent on macOS or a systemd user unit on Linux
+    #[command(subcommand)]
+    Agent(agent::Action),
 }
 
 fn main() -> Result<()> {
@@ -143,6 +147,7 @@ fn main() -> Result<()> {
             println!("{}", bench::flood(&flood)?.describe());
             Ok(())
         }
+        Some(Command::Agent(action)) => agent::run(action),
     }
 }
 
