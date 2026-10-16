@@ -40,6 +40,16 @@ jobs:
       # cpal reaches ALSA on Linux; libopus builds with the runners' own cmake.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # jaw-media's tests run ffmpeg: on Linux a static build, since HEIC needs 7.1 or newer and
+      # Ubuntu's is older; on macOS Homebrew's, which has VideoToolbox.
+      - name: ffmpeg
+        if: runner.os == 'Linux'
+        run: |
+          curl -sSfL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-n8.1-latest-linux64-gpl-8.1/bin" >> "$GITHUB_PATH"
+      - name: ffmpeg
+        if: runner.os == 'macOS'
+        run: command -v ffmpeg || brew install ffmpeg
       - run: make lint
       - run: make test
       - run: make check-generated

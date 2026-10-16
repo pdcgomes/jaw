@@ -24,6 +24,11 @@ DATA_PATHS = (
     "crates/jaw-voice/src/record/",
     "crates/jaw-voice/src/lib.rs",
     "crates/jaw-voice/src/tests.rs",
+    "crates/jaw-media/src/file.rs",
+    "crates/jaw-media/src/prepare.rs",
+    "crates/jaw-media/src/preview.rs",
+    "crates/jaw-media/src/run.rs",
+    "crates/jaw-media/src/job.rs",
 )
 
 NO_COMMIT = re.compile(r"^0+$")

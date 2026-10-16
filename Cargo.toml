@@ -17,6 +17,7 @@ cpal = "0.18"
 crossbeam-channel = "0.5"
 fast_image_resize = "6"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+jpeg-encoder = "0.7"
 libc = "0.2"
 nucleo-matcher = "0.3"
 ogg = "0.9"
@@ -38,6 +39,7 @@ unicode-width = "0.2"
 zstd = { version = "0.14", default-features = false }
 
 jaw-client = { path = "crates/jaw-client" }
+jaw-media = { path = "crates/jaw-media" }
 jaw-proto = { path = "crates/jaw-proto" }
 wa-proto = { path = "crates/wa-proto" }
 
