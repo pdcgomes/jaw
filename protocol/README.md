@@ -199,7 +199,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | Method | Params | Result |
 | --- | --- | --- |
 | `hello` | `protocol`, `client`, `version`, `focus`, `since` | See Hello |
-| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg) |
+| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), and `interfaces`: how many are `connected`, whether one is `focused`, and where `notifications` go |
 | `focus` | `focused` | |
 | `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes |
 | `link.cancel`, `link.logout` | | |
@@ -276,6 +276,25 @@ Proposed with the `jaw-voice` crate in M5, for jawd to wire in; until then the `
   - `cancelled`, or `failed` with `error`; nothing is kept after either.
 - `voice.stop` stops recording and keeps it, to listen to or send. `voice.send` sends the stopped recording as a voice message, or stops and sends one still recording (Enter while recording), and returns `message`. `voice.cancel` throws it away, recording or stopped.
 - The played receipt: jawd sends it for someone else's voice message when it first starts playing, once.
+
+## Focus and reading
+
+```json
+{"id":14,"method":"focus","params":{"focused":false}}
+{"id":14,"result":{}}
+```
+
+- `focus` says whether the interface is in front now: a terminal sends it as focus comes in and goes out, and `hello`'s `focus` says how a connection starts. It's per connection, and you count as looking while any connection's focus is true.
+- jawd keeps which chats each connection is reading: those its `messages.watch` windows show, until it unwatches them, and the chat it last said it opened with `chat.opened`, until it opens another or no window of its shows that one.
+- A chat a connection in front is reading gets no notifications, and presence follows focus (see Presence).
+
+## Notifications
+
+jawd sends them itself, so they come with no interface open: Notification Center on macOS, `notify-send` on Linux, and none where neither is. `jawd --no-notify` or `JAW_NOTIFY=off` turns them off, and `status` says where they go.
+
+- A new message from someone else, arriving since jawd started, notifies: the chat's name, how many are unread when it's more than one, and the message on one line (who wrote it, in a group), or its kind's word for media.
+- A burst in one chat is one notification; what comes in that chat in the next 10 seconds goes as one more when they've passed. More than three chats at once are one summary, as at the end of a catch-up, during which nothing goes.
+- Muted and archived chats, your own messages, history, and the chat an interface in front is reading stay quiet.
 
 ## Presence
 

@@ -6,9 +6,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use jaw_proto::{Account, Connection, Engine, Missing, PROTOCOL, Push, Status, Stored, Welcome};
-use tokio::sync::broadcast;
+use jaw_proto::{Account, Connection, Engine, Interfaces, Missing, PROTOCOL, Push, Status, Stored, Welcome};
+use tokio::sync::{broadcast, watch};
 
+use crate::attention::Attention;
 use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
 use crate::feed::Feed;
@@ -31,6 +32,10 @@ pub struct State {
     /// The palette's search, once its index has loaded.
     pub finder: OnceLock<Finder>,
     feed: Option<Feed>,
+    attention: Arc<Attention>,
+    notifications: String,
+    /// Whether jawd is stopping, so connections end and take no more work.
+    stopping: watch::Sender<bool>,
 }
 
 impl State {
@@ -56,7 +61,37 @@ impl State {
             pushes,
             finder: OnceLock::new(),
             feed: None,
+            attention: Arc::default(),
+            notifications: "off".into(),
+            stopping: watch::channel(false).0,
         })
+    }
+
+    /// What each interface is looking at: whether one is in front, and which chats they read.
+    pub fn attention(&self) -> &Arc<Attention> {
+        &self.attention
+    }
+
+    /// Whether any interface is in front.
+    pub fn focused(&self) -> bool {
+        self.attention.focused()
+    }
+
+    /// Says in `status` where notifications go, or why they don't.
+    pub fn with_notifications(mut self, notifications: String) -> State {
+        self.notifications = notifications;
+        self
+    }
+
+    /// Ends every connection, and refuses what they'd still send.
+    pub fn stop(&self) {
+        self.stopping.send_replace(true);
+    }
+
+    /// Waits until jawd is stopping.
+    pub async fn stopping(&self) {
+        let mut stopping = self.stopping.subscribe();
+        let _ = stopping.wait_for(|stopping| *stopping).await;
     }
 
     /// Serves windows from `feed`.
@@ -134,6 +169,11 @@ impl State {
                     people: store.count("people").ok()?,
                     unindexed: store.count("fts_backlog").ok()?,
                 })
+            }),
+            interfaces: Some(Interfaces {
+                connected: self.attention.connected() as u32,
+                focused: self.focused(),
+                notifications: self.notifications.clone(),
             }),
         }
     }

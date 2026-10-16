@@ -9,12 +9,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use jaw_proto::find::{ChatOpened, Find};
 use jaw_proto::sync::HistoryMore;
-use jaw_proto::{Error, Hello, LinkStart, Outcome, PROTOCOL, Push, Reply, Request, code};
+use jaw_proto::{Error, Focus, Hello, LinkStart, Outcome, PROTOCOL, Push, Reply, Request, code};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::attention::Viewer;
 use crate::engine::{EngineError, pb};
 use crate::feed;
 use crate::find::{Cancel, Cancelled};
@@ -25,10 +26,11 @@ use crate::sync::Refused;
 /// their windows instead, so a slow interface never holds anything else up.
 const WAITING_LINES: usize = 64;
 
-/// What a connection has said, and its windows.
+/// What a connection has said, its windows, and what it's looking at.
 struct Session {
     greeted: bool,
     windows: Option<feed::Client>,
+    viewer: Viewer,
 }
 
 pub fn listen(path: &Path) -> Result<UnixListener> {
@@ -41,9 +43,13 @@ pub fn listen(path: &Path) -> Result<UnixListener> {
     Ok(listener)
 }
 
+/// Serves every connection until jawd stops.
 pub async fn serve(state: Arc<State>, listener: UnixListener) -> Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = tokio::select! {
+            accepted = listener.accept() => accepted?,
+            _ = state.stopping() => return Ok(()),
+        };
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(e) = one(&state, stream).await {
@@ -66,7 +72,11 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
     let (read, write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     let out = writer(write);
-    let mut session = Session { greeted: false, windows: state.feed().map(|feed| feed.client(out.clone())) };
+    let mut session = Session {
+        greeted: false,
+        windows: state.feed().map(|feed| feed.client(out.clone())),
+        viewer: state.attention().viewer(),
+    };
     // Pushes start once the connection has said hello.
     let mut pushes: Option<broadcast::Receiver<Push>> = None;
     // Finds answer when they're done, so the next line, perhaps a newer find, is read meanwhile.
@@ -104,6 +114,7 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
                     windows.handle(ready).await;
                 }
             }
+            _ = state.stopping() => return Ok(()),
         }
     }
 }
@@ -208,6 +219,7 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
         "hello" => match serde_json::from_value::<Hello>(request.params) {
             Ok(hello) if hello.protocol == PROTOCOL => {
                 session.greeted = true;
+                session.viewer.focus(hello.focus);
                 if let Some(windows) = session.windows.as_mut() {
                     windows.hello(hello.since);
                 }
@@ -242,24 +254,54 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
                 Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("link.start's params: {e}"))),
             }
         }
+        "focus" => match serde_json::from_value::<Focus>(request.params) {
+            Ok(Focus { focused }) => {
+                session.viewer.focus(focused);
+                succeeded(id, &serde_json::json!({}))
+            }
+            Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("focus's params: {e}"))),
+        },
         "chat.opened" => match (serde_json::from_value::<ChatOpened>(request.params), state.finder.get()) {
             (Err(e), _) => failed(id, Error::new(code::INVALID_PARAMS, format!("chat.opened's params: {e}"))),
-            (Ok(_), None) => failed(id, Error::new(code::INTERNAL, "jawd has no store open to keep that in")),
-            (Ok(opened), Some(finder)) => match finder.opened(opened.chat).await {
-                Ok(()) => succeeded(id, &serde_json::json!({})),
-                Err(e) => failed(
-                    id,
-                    Error::new(code::INTERNAL, format!("jawd couldn't keep that the chat was opened: {e:#}")),
-                ),
-            },
+            (Ok(opened), finder) => {
+                session.viewer.opened(opened.chat.clone());
+                match finder {
+                    None => failed(id, Error::new(code::INTERNAL, "jawd has no store open to keep that in")),
+                    Some(finder) => match finder.opened(opened.chat).await {
+                        Ok(()) => succeeded(id, &serde_json::json!({})),
+                        Err(e) => failed(
+                            id,
+                            Error::new(code::INTERNAL, format!("jawd couldn't keep that the chat was opened: {e:#}")),
+                        ),
+                    },
+                }
+            }
         },
         "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
         "link.logout" => engine(state, id, pb::command::Kind::Logout(pb::Logout {})).await,
         "chats.watch" | "messages.watch" | "watch.move" | "unwatch" => match session.windows.as_mut() {
-            Some(windows) => match windows.call(&request.method, request.params).await {
-                Ok(result) => succeeded(id, &result),
-                Err(error) => failed(id, error),
-            },
+            Some(windows) => {
+                let chat = match request.method.as_str() {
+                    "messages.watch" => request.params.get("chat").and_then(Value::as_str).map(str::to_string),
+                    _ => None,
+                };
+                let unwatching = match request.method.as_str() {
+                    "unwatch" => request.params.get("watch").and_then(Value::as_str).map(str::to_string),
+                    _ => None,
+                };
+                match windows.call(&request.method, request.params).await {
+                    Ok(result) => {
+                        if let (Some(chat), Some(watch)) = (chat, result.get("watch").and_then(Value::as_str)) {
+                            session.viewer.watched(watch.into(), chat);
+                        }
+                        if let Some(watch) = unwatching {
+                            session.viewer.unwatched(&watch);
+                        }
+                        succeeded(id, &result)
+                    }
+                    Err(error) => failed(id, error),
+                }
+            }
             None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so there's nothing to watch")),
         },
         "history.more" => history_more(state, id, request.params).await,
@@ -476,6 +518,108 @@ mod tests {
         );
         assert_eq!(replies[2]["error"]["code"], code::INVALID_PARAMS);
         assert_eq!(replies[3]["result"], json!({}));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn focus_and_the_chats_a_connection_reads_last_as_long_as_it_does() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let feed = feed::Feed::start(store.clone(), Arc::new(|| false), feed::Timing::default());
+        let state = State::new(
+            home.path(),
+            Err(("go", "no engine in this test".into())),
+            Vec::new(),
+            Arc::default(),
+            Some(store),
+            broadcast::channel(16).0,
+        )
+        .unwrap()
+        .with_feed(feed);
+        let state = Arc::new(state);
+        tokio::spawn(serve(state.clone(), listener));
+        let ana = "351912345678@s.whatsapp.net";
+        let looking = {
+            let state = state.clone();
+            move || (state.attention().connected(), state.focused(), state.attention().reading(ana))
+        };
+        let seen = tokio::task::spawn_blocking(move || {
+            let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            let mut seen = Vec::new();
+            let mut lines = vec![
+                r#"{"id":1,"method":"hello","params":{"protocol":1,"client":"test","version":"0","focus":true}}"#
+                    .to_string(),
+                format!(
+                    r#"{{"id":2,"method":"messages.watch","params":{{"chat":"{ana}","around":"newest","before":10}}}}"#
+                ),
+                r#"{"id":3,"method":"focus","params":{"focused":false}}"#.to_string(),
+                r#"{"id":4,"method":"focus","params":{"focused":true}}"#.to_string(),
+            ];
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut watch = String::new();
+            for line in lines.drain(..) {
+                writer.write_all(format!("{line}\n").as_bytes()).unwrap();
+                let mut reply = String::new();
+                reader.read_line(&mut reply).unwrap();
+                let reply: Value = serde_json::from_str(&reply).unwrap();
+                assert!(reply.get("error").is_none(), "{reply}");
+                if let Some(w) = reply["result"]["watch"].as_str() {
+                    watch = w.to_string();
+                }
+                seen.push(looking());
+            }
+            let unwatch = format!(r#"{{"id":5,"method":"unwatch","params":{{"watch":"{watch}"}}}}"#);
+            writer.write_all(format!("{unwatch}\n").as_bytes()).unwrap();
+            let mut reply = String::new();
+            reader.read_line(&mut reply).unwrap();
+            seen.push(looking());
+            seen
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen, vec![(1, true, false), (1, true, true), (1, false, false), (1, true, true), (1, true, false)]);
+        for _ in 0..100 {
+            if state.attention().connected() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(state.attention().connected(), 0, "the connection that ended is forgotten");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_ends_every_connection_and_takes_no_new_ones() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let state = Arc::new(
+            State::new(
+                home.path(),
+                Err(("go", "no engine in this test".into())),
+                Vec::new(),
+                Arc::default(),
+                None,
+                broadcast::channel(16).0,
+            )
+            .unwrap(),
+        );
+        let served = tokio::spawn(serve(state.clone(), listener));
+        let path = socket.clone();
+        let (connection, _) =
+            tokio::task::spawn_blocking(move || jaw_client::Connection::open(&path, "test", "0").unwrap())
+                .await
+                .unwrap();
+        state.stop();
+        tokio::time::timeout(Duration::from_secs(1), served).await.unwrap().unwrap().unwrap();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = connection;
+            assert!(connection.call("status", Value::Null).is_err(), "the connection was ended");
+            assert!(std::os::unix::net::UnixStream::connect(&socket).is_err(), "nothing listens any more");
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -9,7 +9,7 @@ use jaw_proto::sync::{HistoryMore, Notice};
 use jaw_proto::windows::{
     ChatsPush, ChatsWatch, ChatsWatched, MessagesPush, MessagesWatch, MessagesWatched, Watch, WatchMove,
 };
-use jaw_proto::{Connection, FromJawd, Hello, Outcome, Push, Reply, Request, Status, Welcome};
+use jaw_proto::{Connection, Focus, FromJawd, Hello, Outcome, Push, Reply, Request, Status, Welcome};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -70,6 +70,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "watch.move" => params::<WatchMove>(&name, &request.params),
                     "unwatch" => params::<Watch>(&name, &request.params),
                     "history.more" => params::<HistoryMore>(&name, &request.params),
+                    "focus" => params::<Focus>(&name, &request.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -80,7 +81,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "hello" => params::<Welcome>(&name, result),
                     "status" => params::<Status>(&name, result),
                     "find" => params::<Found>(&name, result),
-                    "chat.opened" | "unwatch" | "history.more" => {
+                    "chat.opened" | "unwatch" | "history.more" | "focus" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
                     "chats.watch" => params::<ChatsWatched>(&name, result),

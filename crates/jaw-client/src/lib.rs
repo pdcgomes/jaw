@@ -180,6 +180,14 @@ pub fn describe(status: &Status) -> String {
             lines.push(format!("waiting   {}", waiting.join(", ")));
         }
     }
+    if let Some(interfaces) = &status.interfaces {
+        let front = if interfaces.focused { ", one in front" } else { "" };
+        let connected = match interfaces.connected {
+            1 => "1 interface".to_string(),
+            n => format!("{n} interfaces"),
+        };
+        lines.push(format!("open      {connected}{front}; notifications {}", interfaces.notifications));
+    }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));
     }

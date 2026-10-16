@@ -59,6 +59,8 @@ impl Engine for GoEngine {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                // Ctrl-C in jawd's terminal goes to its whole process group; jawd stops the engine.
+                .process_group(0)
                 .kill_on_drop(true)
                 .spawn()
                 .with_context(|| format!("can't start {}", self.program.display()))?;

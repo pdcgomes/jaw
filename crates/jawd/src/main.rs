@@ -1,10 +1,12 @@
 //! jawd, jaw's daemon: it keeps every chat and message, does the work interfaces would otherwise
 //! repeat, and serves them on a Unix socket. docs/plans/2026-10-16-jaw-design.md is its design.
 
+mod attention;
 mod convert;
 mod engine;
 mod feed;
 mod find;
+mod notify;
 mod sock;
 mod state;
 mod store;
@@ -14,9 +16,11 @@ mod work;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::engine::demo::DemoEngine;
@@ -34,6 +38,9 @@ struct Cli {
     /// The engine jawd reaches WhatsApp through
     #[arg(long, value_enum, default_value_t = EngineKind::Go, global = true)]
     engine: EngineKind,
+    /// Sends no notifications; JAW_NOTIFY=off does the same
+    #[arg(long)]
+    no_notify: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -126,7 +133,7 @@ fn main() -> Result<()> {
             bench_find(find::bench::Plan { messages, chats, people, runs })
         }
         Some(Command::Bench(Bench::Feed { rate, seconds, window, chats })) => bench_feed(rate, seconds, window, chats),
-        None => run(&home, cli.engine),
+        None => run(&home, cli.engine, cli.no_notify),
     }
 }
 
@@ -172,41 +179,124 @@ fn engine(kind: EngineKind, home: &Path) -> Result<Arc<dyn Engine>, (&'static st
     }
 }
 
-fn run(home: &Path, kind: EngineKind) -> Result<()> {
+fn run(home: &Path, kind: EngineKind, no_notify: bool) -> Result<()> {
     std::fs::create_dir_all(home).with_context(|| format!("can't make {}", home.display()))?;
     std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
-    runtime()?.block_on(async {
+    let runtime = runtime()?;
+    let outcome = runtime.block_on(async {
+        let mut signals = Signals::new()?;
         let socket = jaw_proto::local::socket(home);
         let listener = sock::listen(&socket)?;
-        let store = store::Store::open(home)?;
-        std::fs::create_dir_all(home.join("spool"))?;
-        let (events, incoming) = mpsc::channel(1024);
-        let supervisor = engine(kind, home).map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
-        let live: sync::Shared = Arc::default();
-        let (pushes, _) = tokio::sync::broadcast::channel(256);
-        let engine = supervisor.as_ref().ok().cloned();
-        tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, home.to_path_buf()));
-        let pools: Vec<Arc<dyn work::Report>> = vec![Arc::new(store.clone()), Arc::new(store.reads().clone())];
-        let finder = find::Finder::start(store.clone()).await?;
-        let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
-        let state = Arc::new(state::State::new(home, supervisor, pools, live, Some(store), pushes)?.with_feed(feed));
-        let _ = state.finder.set(finder);
-        let outcome = tokio::select! {
-            served = sock::serve(state, listener) => served,
-            _ = shutdown() => Ok(()),
+        let started = tokio::select! {
+            started = start(home, kind, no_notify) => started?,
+            signal = signals.next() => {
+                eprintln!("jawd: {signal} while starting, so it stops");
+                let _ = std::fs::remove_file(&socket);
+                return Ok(());
+            }
         };
-        let _ = std::fs::remove_file(&socket);
-        outcome
-    })
+        let served = tokio::select! {
+            served = sock::serve(started.state.clone(), listener) => served,
+            signal = signals.next() => {
+                eprintln!("jawd: {signal}, so it stops");
+                Ok(())
+            }
+        };
+        let began = Instant::now();
+        tokio::select! {
+            stopped = tokio::time::timeout(STOPPING, stop(started, &socket)) => match stopped {
+                Ok(()) => eprintln!("jawd: stopped in {} ms", began.elapsed().as_millis()),
+                Err(_) => eprintln!("jawd: didn't stop within {} s, so it stops now", STOPPING.as_secs()),
+            },
+            signal = signals.next() => {
+                eprintln!("jawd: {signal} again, so it stops at once");
+                std::process::exit(1);
+            }
+        }
+        served
+    });
+    // Whatever's still running was told to stop; what doesn't by now is abandoned.
+    runtime.shutdown_timeout(Duration::from_millis(100));
+    outcome
 }
 
-/// Waits for Ctrl-C or SIGTERM, which launchd and systemd send to stop jawd.
-async fn shutdown() {
-    let mut term =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("a SIGTERM handler");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
+/// How long jawd has to stop once asked; a second signal stops it at once.
+const STOPPING: Duration = Duration::from_secs(3);
+
+/// jawd running: what it serves, and what stopping it waits for.
+struct Started {
+    state: Arc<state::State>,
+    notifications: Option<tokio::task::JoinHandle<()>>,
+}
+
+async fn start(home: &Path, kind: EngineKind, no_notify: bool) -> Result<Started> {
+    let store = store::Store::open(home)?;
+    std::fs::create_dir_all(home.join("spool"))?;
+    let (events, incoming) = mpsc::channel(1024);
+    let supervisor = engine(kind, home).map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
+    let live: sync::Shared = Arc::default();
+    let (pushes, _) = tokio::sync::broadcast::channel(256);
+    let engine = supervisor.as_ref().ok().cloned();
+    tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, home.to_path_buf()));
+    let pools: Vec<Arc<dyn work::Report>> = vec![Arc::new(store.clone()), Arc::new(store.reads().clone())];
+    let finder = find::Finder::start(store.clone()).await?;
+    let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
+    let notifier = notify::chosen(no_notify);
+    let says = match &notifier {
+        Ok(notifier) => notifier.name().to_string(),
+        Err(why) => why.clone(),
+    };
+    eprintln!("jawd: notifications {says}");
+    let state = state::State::new(home, supervisor, pools, live.clone(), Some(store.clone()), pushes.clone())?
+        .with_feed(feed)
+        .with_notifications(says);
+    let state = Arc::new(state);
+    let _ = state.finder.set(finder);
+    let notifications = notifier.ok().map(|notifier| {
+        notify::start(
+            store,
+            state.attention().clone(),
+            feed::catching_up(live),
+            pushes.subscribe(),
+            Arc::from(notifier),
+            notify::Timing::default(),
+        )
+    });
+    Ok(Started { state, notifications })
+}
+
+/// Stops jawd in the order that keeps its data whole: first it stops taking work, so no interface
+/// is answered for something that won't be done; the store closes last, once jawd's tasks are
+/// dropped. The engine goes with jawd, and anything it handed over that jawd hadn't acked comes
+/// again from WhatsApp.
+async fn stop(Started { state, notifications }: Started, socket: &Path) {
+    state.stop();
+    let _ = std::fs::remove_file(socket);
+    if let Some(notifications) = notifications {
+        notifications.abort();
+    }
+}
+
+/// Ctrl-C and SIGTERM, which launchd and systemd send to stop jawd. Each can come more than once.
+struct Signals {
+    interrupt: Signal,
+    terminate: Signal,
+}
+
+impl Signals {
+    fn new() -> Result<Signals> {
+        Ok(Signals {
+            interrupt: signal(SignalKind::interrupt()).context("can't listen for Ctrl-C")?,
+            terminate: signal(SignalKind::terminate()).context("can't listen for SIGTERM")?,
+        })
+    }
+
+    /// Waits for the next, and says which it was.
+    async fn next(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.interrupt.recv() => "Ctrl-C",
+            _ = self.terminate.recv() => "SIGTERM",
+        }
     }
 }
 
@@ -262,8 +352,6 @@ fn bench_link(kind: EngineKind, count: u32, size: u32, commit: bool) -> Result<(
 /// A day's worth of work at once: a backlog of made-up downloads (1 to 5 ms each), interactive ones
 /// arriving every 3 ms while it runs, transcodes, and sends across 50 chats; then the pools' table.
 fn bench_lanes(background: u32, interactive: u32) -> Result<()> {
-    use std::time::Duration;
-
     use crate::work::{Pool, Priority, Report, Serial};
 
     runtime()?.block_on(async {
@@ -339,4 +427,75 @@ fn bench_lanes(background: u32, interactive: u32) -> Result<()> {
         println!("{}", jaw_client::pools(&reports));
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::store::{Change, Lane, Message};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jawd_stops_well_within_its_bound_while_messages_pour_into_a_watched_chat() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = sock::listen(&socket).unwrap();
+        let started = start(home.path(), EngineKind::Demo, true).await.unwrap();
+        tokio::spawn(sock::serve(started.state.clone(), listener));
+        let store = started.state.store().unwrap().clone();
+        let chat = "120363012345678901@g.us";
+        let pouring = Arc::new(AtomicBool::new(true));
+        let writer = {
+            let (store, pouring) = (store.clone(), pouring.clone());
+            tokio::spawn(async move {
+                let mut n = 0u64;
+                let mut tick = tokio::time::interval(Duration::from_millis(1));
+                while pouring.load(Ordering::Relaxed) {
+                    tick.tick().await;
+                    let changes = (0..2)
+                        .map(|_| {
+                            n += 1;
+                            let text = format!("message {n}");
+                            Change::Message(Message {
+                                chat: chat.into(),
+                                id: format!("m{n}"),
+                                at: 1_792_000_000_000 + n as i64,
+                                kind: "text",
+                                text: Some(text.clone()),
+                                summary: text,
+                                counts: true,
+                                ..Message::default()
+                            })
+                        })
+                        .collect();
+                    if store.apply(Lane::Live, changes).await.is_err() {
+                        return n;
+                    }
+                }
+                n
+            })
+        };
+        let path = socket.clone();
+        let reading = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&path, "test", "0").unwrap();
+            let watch = serde_json::json!({ "chat": chat, "around": "newest", "before": 100 });
+            connection.call("messages.watch", watch).unwrap();
+            let mut pushes = 0;
+            while connection.push().is_ok() {
+                pushes += 1;
+            }
+            pushes
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let began = Instant::now();
+        stop(started, &socket).await;
+        let took = began.elapsed();
+        pouring.store(false, Ordering::Relaxed);
+        let (written, pushes) = (writer.await.unwrap(), reading.await.unwrap());
+        eprintln!("stopped in {} ms after {written} messages and {pushes} pushes", took.as_millis());
+        assert!(pushes > 0, "the window was busy");
+        assert!(took < STOPPING / 3, "stopping took {took:?}");
+        assert!(!socket.exists(), "the socket is removed");
+    }
 }

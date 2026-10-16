@@ -97,6 +97,12 @@ pub struct Hello {
     pub since: Option<u64>,
 }
 
+/// `focus`'s params: whether the interface is in front now, as a terminal reports focus in and out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Focus {
+    pub focused: bool,
+}
+
 /// `hello`'s result.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Welcome {
@@ -250,6 +256,18 @@ pub struct Status {
     /// What jaw.db holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored: Option<Stored>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interfaces: Option<Interfaces>,
+}
+
+/// The interfaces connected to jawd, and where its notifications go.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Interfaces {
+    pub connected: u32,
+    /// Whether one of them is in front.
+    pub focused: bool,
+    /// Where notifications go (`Notification Center`, `notify-send`), or why they don't.
+    pub notifications: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
