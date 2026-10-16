@@ -238,6 +238,36 @@ pub enum Update {
     },
 }
 
+impl Update {
+    /// Takes `next` into this update when the two apply as one, as a burst of upserts to the same
+    /// window does; gives it back when they don't.
+    pub fn absorb(&mut self, next: Update) -> Option<Update> {
+        let clash = |upsert: &[String], remove: &[String]| remove.iter().any(|id| upsert.contains(id));
+        match (self, next) {
+            (
+                Update::Chats { upsert, remove, total, .. },
+                Update::Chats { reset: false, upsert: more, remove: gone, total: now },
+            ) if !clash(&upsert.iter().map(|c| c.id.clone()).collect::<Vec<_>>(), &gone) => {
+                upsert.extend(more);
+                remove.extend(gone);
+                *total = now;
+                None
+            }
+            (
+                Update::Messages { chat, upsert, remove, older, newer, .. },
+                Update::Messages { chat: other, reset: false, upsert: more, remove: gone, older: o, newer: n },
+            ) if *chat == other && !clash(&upsert.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), &gone) => {
+                upsert.extend(more);
+                remove.extend(gone);
+                *older = o.or(*older);
+                *newer = n.or(*newer);
+                None
+            }
+            (_, next) => Some(next),
+        }
+    }
+}
+
 /// Where a messages window is anchored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Around {

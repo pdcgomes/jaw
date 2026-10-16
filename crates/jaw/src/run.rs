@@ -76,24 +76,39 @@ where
             },
             None => rx.recv().ok(),
         };
-        let mut events: Vec<Event> = first.into_iter().collect();
-        while events.len() < 10_000 {
+        let take = |e: Event, view: &mut View, waiting: &mut VecDeque<Update>, keys: &mut Vec<Instant>| match e {
+            Event::Input(input, at) => {
+                let key = matches!(input, Input::Key(_) | Input::Paste(_));
+                view.on_input(input);
+                if key {
+                    keys.push(at);
+                }
+            }
+            Event::Update(u) => waiting.push_back(u),
+            Event::Stop => view.quit = true,
+        };
+        if let Some(e) = first {
+            take(e, view, &mut waiting, &mut keys);
+        }
+        for _ in 0..10_000 {
             match rx.try_recv() {
-                Ok(e) => events.push(e),
+                Ok(e) => take(e, view, &mut waiting, &mut keys),
                 Err(_) => break,
             }
         }
-        for e in events {
-            match e {
-                Event::Input(input, at) => {
-                    let key = matches!(input, Input::Key(_) | Input::Paste(_));
-                    view.on_input(input);
-                    if key {
-                        keys.push(at);
-                    }
+        let start = Instant::now();
+        while keys.is_empty() && !view.quit && start.elapsed() < APPLY {
+            let Some(mut batch) = waiting.pop_front() else { break };
+            while let Some(next) = waiting.pop_front() {
+                if let Some(next) = batch.absorb(next) {
+                    waiting.push_front(next);
+                    break;
                 }
-                Event::Update(u) => waiting.push_back(u),
-                Event::Stop => view.quit = true,
+            }
+            view.apply(batch);
+            // Input first: a key that came meanwhile is handled now and drawn next.
+            while let Ok(e) = rx.try_recv() {
+                take(e, view, &mut waiting, &mut keys);
             }
         }
         for e in view.take_effects() {
@@ -101,13 +116,6 @@ where
         }
         if view.quit {
             return Ok(());
-        }
-        let start = Instant::now();
-        while let Some(u) = waiting.pop_front() {
-            view.apply(u);
-            if start.elapsed() >= APPLY {
-                break;
-            }
         }
         view.tick();
         let due = last_frame.is_none_or(|t| t.elapsed() >= FRAME);
