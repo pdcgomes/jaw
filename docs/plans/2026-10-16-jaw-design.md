@@ -24,6 +24,7 @@ jaw isn't affiliated with WhatsApp or Meta, and WhatsApp's terms don't allow uno
 - **Modeless keys:** typing goes to the message box; single keys act on a selected message.
 - **One media pipeline** for every format, sending SD or HD as WhatsApp does, rather than cases per format.
 - **One tree of folders** holding chats and people, each able to sit in several; the roster shows the same folders with presence.
+- **Everything findable at once:** a command palette that fuzzy-searches chats, people, folders, actions and messages, and a library of every photo, video, voice message, file and link ever shared, across chats or in one, so nothing needs digging for through chat screens and menus.
 
 ## Principles
 
@@ -172,6 +173,15 @@ All three keep their files in one folder, `~/Library/Application Support/jaw` on
 - **Presence is bounded,** because subscribing to everyone is what presence trackers do, and WhatsApp polices it. jawd subscribes to the people in a roster window or an open chat, only while an interface has focus (which is also the only time WhatsApp sends presence), at most 20 new subscriptions a minute and 200 per connection, favourites first.
 - Folders, favourites and frecency are jaw's own, kept in `jaw.db` and shared by every interface; WhatsApp never sees them.
 
+### Finding anything
+
+- **One search behind the palette.** `find` takes what's typed and answers, best first, with chats, people, folders, messages, links, media and files, each result saying what it is. Interfaces add their own actions to it, since those are theirs.
+- **Names in memory.** Every chat's and person's name, phone number and folder, with their frecency, are kept in memory and matched fuzzily, so a keystroke's answer comes back within a few milliseconds and ranks what you open often first; initials and parts of words match, and accents are ignored.
+- **Text from the store.** Messages, captions, file names, link titles and poll questions come from FTS5, accent-blind, newest first, after the names, with the match marked. A new keystroke cancels the last query, so typing never queues up searches.
+- **Links kept as messages are converted:** each URL in a message, with its host, its preview's title and description, who sent it, where and when, in a `links` table that `find` and the library read.
+- **Media by kind:** the `media` table already holds each file's kind, size, dimensions, length and name, so the library pages through photos, videos, voice messages and documents by keyset like any window, with their 256-pixel previews.
+- **The library window** is `library.watch`: a kind (or all of them), and optionally a chat, a person, a time range and some text; rows are the message's media, link or file with what's needed to show it and jump to its message.
+
 ### The socket and windows
 
 - One JSON object per line; requests and replies shaped like JSON-RPC 2.0; `hello` first, with the protocol version. [protocol/README.md](../../protocol/README.md) specifies it.
@@ -193,7 +203,9 @@ All three keep their files in one folder, `~/Library/Application Support/jaw` on
 - Wrapping is cached per message, version and width; only visible messages are laid out; long ones fold after 40 lines.
 - **Images** with ratatui-image: the protocol is detected once at start with a short timeout (kitty, iTerm2, sixel or half-blocks), images are encoded on the workers from jawd's previews, and kitty's are sent once and then drawn as Unicode placeholders, so scrolling is only text. The image cache is capped in bytes.
 - **Media:** photos and stickers inline; videos, GIFs and video notes as posters with their length (Enter opens a player); voice with its waveform and playhead; documents, locations, contact cards and link previews as cards; polls with bars and counts, number keys to vote.
-- **Keys:** Ctrl-K finds any chat, person or folder; Alt-Up and Alt-Down move between chats; Alt-1 to Alt-9 go to favourites; Ctrl-B shows the sidebar, and Tab moves between folders and roster. Up from an empty box steps into the messages, where r replies, e edits, d deletes, + reacts, f forwards, y copies, Enter opens or plays, s saves and i shows its info; m files the selected chat or person into folders; Esc goes back to typing. Enter sends; Alt-Enter, or Shift-Enter with the kitty keyboard protocol, adds a line. @ and : complete names and emoji. Ctrl-O attaches files, dropped paths and clipboard images; Ctrl-R records a voice message. Slash commands (/poll, /search) cover the rest, and ? shows the keys. The mouse clicks, scrolls and opens.
+- **The palette:** Ctrl-K opens it over the screen. One line of fuzzy search finds chats to switch to, people to start a chat with, folders, every action (start a chat, new group message, mute, archive, pin, go to unread, a new poll, record, attach, link a device, the library), and messages, links and files; results are grouped by kind with the best match first, Enter does the obvious thing, Tab narrows to one kind, and the actions show their keys, so the palette also teaches them.
+- **The library:** every photo, video, voice message, file and link shared, across all chats or in the open one: photos and videos as a grid of previews, files and links as lists with who sent them, where and when, filters by kind, chat, person and date, and text search over titles, file names and captions. Enter opens the item, and another key jumps to its message in its chat. It opens from the palette, from a chat's info, and with a key of its own.
+- **Keys:** Ctrl-K opens the palette; Alt-Up and Alt-Down move between chats; Alt-1 to Alt-9 go to favourites; Ctrl-B shows the sidebar, and Tab moves between folders and roster. Up from an empty box steps into the messages, where r replies, e edits, d deletes, + reacts, f forwards, y copies, Enter opens or plays, s saves and i shows its info; m files the selected chat or person into folders; Esc goes back to typing. Enter sends; Alt-Enter, or Shift-Enter with the kitty keyboard protocol, adds a line. @ and : complete names and emoji. Ctrl-O attaches files, dropped paths and clipboard images; Ctrl-R records a voice message. Slash commands (/poll, /search) cover the rest, and ? shows the keys. The mouse clicks, scrolls and opens.
 - **States:** linking (the QR code in half-blocks beside the Mimic, or the phone code), starting jawd, catching up, phone offline, logged out, update needed.
 - `jaw demo` draws a made-up account, and `jaw snapshot --demo --width --height --keys` prints one frame as text after some keys, as ooze's do.
 
@@ -239,9 +251,9 @@ Makefile                build, test, install, demo, perf, proto
 ## Milestones
 
 - **M0 Foundations:** this design and the protocol draft; scaffold and CI; the engine link and trait with the demo engine; the spike on a spare number; work lanes with metrics.
-- **M1 Text, fast:** store, history, catch-up, windows and fan-out, people, sending text with ticks, typing, presence, read receipts, drafts, search, notifications, the agent; the client crate and the terminal interface; budgets measured.
-- **M2 Everything in a message:** replies, mentions, reactions, edits, deletes, forwards, link previews both ways, polls, locations, contact cards, disappearing and view-once, system and call lines, group senders and members, communities, app state.
-- **M3 Media in** and **M4 Media out**, **M5 Voice**, **M6 Folders and the roster**.
+- **M1 Text, fast:** store, history, catch-up, windows and fan-out, people, sending text with ticks, typing, presence, read receipts, drafts, search, notifications, the agent; the client crate and the terminal interface; the command palette over chats, people, folders, actions and messages; budgets measured.
+- **M2 Everything in a message:** replies, mentions, reactions, edits, deletes, forwards, link previews both ways, polls, locations, contact cards, disappearing and view-once, system and call lines, group senders and members, communities, app state; links kept as they're converted, and findable in the palette.
+- **M3 Media in**, with the library of photos, videos, voice messages, files and links, across chats and in one; **M4 Media out**, **M5 Voice**, **M6 Folders and the roster**.
 - **M7 A second engine:** whatsapp-rust wired in as `RustEngine`, run beside the Go engine on the spare number, and compared on the contract suite, the live checklist, the load harness, reconnects and logouts, and build size and time; the default is picked for M8.
 - **M8 Ready to live with:** full load runs, every failure state, a README with pictures, `make install` and a Homebrew tap; before going public, a look at WhatsApp's terms and Meta's rules on side projects.
 

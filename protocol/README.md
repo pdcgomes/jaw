@@ -179,6 +179,8 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `unwatch` | `watch` | |
 | `search` | `query`, `chat` (optional), `limit`, `cursor` | `hits` (message rows with the match marked) and the next `cursor` |
 | `contacts.find` | `query` | People and chats to start or open, best first; numbers are checked against WhatsApp |
+| `find` | `query`, `kinds` (any of `chat`, `person`, `folder`, `message`, `link`, `media`, `file`; all by default), `chat` (optional), `limit` | `results`, best first, each with its `kind`, a `score`, the match marked, and the row it found; a newer `find` from the same connection cancels this one |
+| `library.watch` | `kind` (`photo`, `video`, `voice`, `file`, `link` or `all`), and optionally `chat`, `person`, `since`, `until`, `text`, with `around`, `before`, `after` | `watch`, `total`, `rows`: each the message's media, file or link with its preview, sender, chat and time, and the message's `id` to jump to |
 | `send.text` | `chat`, `text`, `reply`, `mentions`, `preview` (default true) | `message` |
 | `send.media` | `chat`, `files` (each a `path`, `kind` and `caption`), `quality` (`sd` or `hd`), `reply` | `messages` |
 | `send.poll` | `chat`, `question`, `options`, `max` | `message` |
