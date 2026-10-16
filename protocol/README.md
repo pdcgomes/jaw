@@ -294,7 +294,8 @@ Proposed with the `jaw-voice` crate in M5, for jawd to wire in; until then the `
 jawd sends them itself, so they come with no interface open: Notification Center on macOS, `notify-send` on Linux, and none where neither is. `jawd --no-notify` or `JAW_NOTIFY=off` turns them off, and `status` says where they go.
 
 - A new message from someone else, arriving since jawd started, notifies: the chat's name, how many are unread when it's more than one, and the message on one line (who wrote it, in a group), or its kind's word for media.
-- A burst in one chat is one notification; what comes in that chat in the next 10 seconds goes as one more when they've passed. More than three chats at once are one summary, as at the end of a catch-up, during which nothing goes.
+- A burst in one chat is one notification; what comes in that chat in the next 10 seconds goes as one more when they've passed. More than three chats at once are one summary.
+- Nothing goes while catching up. When a catch-up ends, the chats whose newest message it brought are one notification, that chat's own or a summary such as "12 new messages in 4 chats", however long ago they were sent; so what came while jawd was off is one summary once it has caught up after starting.
 - Muted and archived chats, your own messages, history, and the chat an interface in front is reading stay quiet.
 
 ## Presence
