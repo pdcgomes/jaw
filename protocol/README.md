@@ -278,6 +278,34 @@ Proposed with the `jaw-voice` crate in M5, for jawd to wire in; until then the `
 - `voice.stop` stops recording and keeps it, to listen to or send. `voice.send` sends the stopped recording as a voice message, or stops and sends one still recording (Enter while recording), and returns `message`. `voice.cancel` throws it away, recording or stopped.
 - The played receipt: jawd sends it for someone else's voice message when it first starts playing, once.
 
+## Message actions (proposed)
+
+Proposed with the terminal's M2 actions, for jawd to build; until then the rows above for `send.text`'s `reply` and `mentions`, `react`, `edit`, `delete`, `forward`, `message.info` and `chat.info` are the draft. It keeps their names and fills in what they leave open. Each action's result reaches every interface the same way: the rows it changes, upserted into the windows that show them, so an interface draws what jawd says rather than what it guessed.
+
+```json
+{"id":40,"method":"send.text","params":{"chat":"120363000000000002@g.us","text":"@Inês Gomes vens buscar a avó?","reply":"3EB0A1B2C3D4E5F6","mentions":["person:4"]}}
+{"id":41,"method":"react","params":{"message":"3EB0A1B2C3D4E5F6","emoji":"❤️"}}
+{"id":42,"method":"edit","params":{"message":"3EB0C431F2A9B8E7D61A2B","text":"afinal chego às 21h"}}
+{"id":43,"method":"delete","params":{"message":"3EB0C431F2A9B8E7D61A2B","for":"everyone"}}
+{"id":44,"method":"forward","params":{"messages":["3EB0A1B2C3D4E5F6"],"to":["351913000031@s.whatsapp.net"]}}
+{"id":44,"result":{"messages":["3EB0D2A1C3B4E5F60718A9"]}}
+{"id":45,"method":"message.info","params":{"message":"3EB0C431F2A9B8E7D61A2B"}}
+{"id":45,"result":{"message":"3EB0C431F2A9B8E7D61A2B","sent":1792145090123,"recipients":[{"person":"person:4","name":"Inês","delivered":1792145091000,"read":1792145400000,"played":null}]}}
+{"id":46,"method":"chat.info","params":{"chat":"120363000000000002@g.us"}}
+{"id":46,"result":{"chat":"120363000000000002@g.us","members":[{"person":"person:4","name":"Inês Gomes","phone":"+351 913 002 210","admin":false}]}}
+```
+
+- **`send.text`'s `reply`** is the ID of the message answered, in the same chat (error 3 otherwise). The new row's `reply` carries that message's `id`, who wrote it and its one-line `summary`, as every quote does.
+- **`mentions`** are the person IDs mentioned, each written in `text` as `@` and the name the interface showed. jawd sends WhatsApp each person's JID, and the row's spans mark each `@name` as a `mention` with its `person`. A person not in the chat is -32602 with `data.param` `mentions`; mentions outside a group are dropped, as WhatsApp's phones drop them.
+- **`react`** (`message`, `emoji`): one reaction of yours per message, as WhatsApp keeps them; another emoji replaces it, and an empty one removes it. Any emoji WhatsApp takes, with or without its variation selector, which jawd keeps as it came. The row's `reactions` change, with `mine` on yours. Error 3 for a message jawd doesn't have, 4 for one deleted.
+- **`edit`** (`message`, `text`): your own text message or caption, within 15 minutes of sending, as WhatsApp allows; past that, someone else's, a deleted one or a kind with no text is error 4, with the reason in `message`. The row's `spans` become the new text's and `edited` true; replies quoting it keep their summary, as the phones do.
+- **`delete`** (`message`, `for`):
+  - `me` removes it from jaw only: it goes from every window as a `remove`, and from search, and jawd tells your other devices. Any message.
+  - `everyone` deletes your own for everyone within 60 hours of sending, as WhatsApp allows (error 4 after, or for someone else's; a group's admins deleting others' messages comes later). The row stays with `deleted` true and no spans, and shows as "This message was deleted", in yours and theirs; its media is dropped from the cache.
+- **`forward`** (`messages`, `to`): each message to each chat, in order, as new messages of yours with `forwarded` counting the times the original had been, plus one; WhatsApp marks five or more "forwarded many times". Answers with the new messages' IDs, chat by chat, once each is on disk as `send.text` is; media goes without being sent again where WhatsApp still has it. At most five chats at once, as the phones allow (error 5); a deleted message, a view-once one or one jawd hasn't the media for yet is error 4.
+- **`message.info`** (`message`): when your message was `sent`, and for each recipient (one in a direct chat, every member in a group) their `person`, `name` and the times it was `delivered`, `read` and, for voice, `played`, each null until it is. For someone else's message, `recipients` is empty and `sent` is when it was sent.
+- **`chat.info`** (`chat`) adds `members`: each member's `person`, the `name` to show, `phone` where jawd knows it, and `admin`, for completing `@` names; a direct chat's members are the other person and you.
+
 ## Focus and reading
 
 ```json
