@@ -30,6 +30,11 @@ pub struct Chat {
     #[serde(default)]
     pub muted_until: Option<i64>,
     #[serde(default)]
+    pub archived: bool,
+    /// Marked unread by hand, as on the phone.
+    #[serde(default)]
+    pub marked_unread: bool,
+    #[serde(default)]
     pub draft: Option<String>,
     /// The names of who's typing or recording now.
     #[serde(default)]
@@ -78,6 +83,9 @@ pub struct Last {
 pub struct Message {
     pub id: String,
     pub v: u64,
+    /// Its chat's JID.
+    #[serde(default)]
+    pub chat: String,
     /// Oldest first: rows show in ascending bytewise order of `sort`.
     pub sort: String,
     pub at: i64,
@@ -110,10 +118,19 @@ pub struct Message {
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Sender {
+    #[serde(deserialize_with = "id")]
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub colour: u8,
+}
+
+/// An ID that's a string, or a number where a fixture writes one.
+fn id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => Ok(s),
+        other => Ok(other.to_string()),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -196,6 +213,110 @@ pub enum Tick {
     Failed,
 }
 
+/// What `find` finds: names first, then what was said and shared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FoundKind {
+    Chat,
+    Person,
+    Folder,
+    Message,
+    Link,
+    Media,
+    File,
+}
+
+/// A run of what matched: `mark` where the query did.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Mark {
+    pub t: MarkKind,
+    pub s: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkKind {
+    Text,
+    Mark,
+    #[serde(other)]
+    Other,
+}
+
+/// Someone with no chat yet, as `find` returns them.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Person {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub phone: Option<String>,
+}
+
+/// A folder, as `find` returns it; built-in folders have their fixed IDs.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
+}
+
+/// What a result found, read from its `row` by its `kind`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Hit {
+    Chat(Chat),
+    Person(Person),
+    Folder(Folder),
+    Message(Message),
+    /// A link, a photo or a file: nothing finds them before M2 and M3.
+    Shared,
+}
+
+/// One of `find`'s results.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(try_from = "RawFound")]
+pub struct Found {
+    pub kind: FoundKind,
+    /// Ranks results of a kind; messages have 0 and come newest first.
+    pub score: i64,
+    /// What matched, marked: the name, or a stretch of the message around its first match.
+    pub text: Vec<Mark>,
+    /// For a message, its chat's name.
+    pub chat_name: Option<String>,
+    /// The folders a chat or person is in.
+    pub folders: Vec<String>,
+    pub hit: Hit,
+}
+
+#[derive(Deserialize)]
+struct RawFound {
+    kind: FoundKind,
+    #[serde(default)]
+    score: i64,
+    #[serde(default)]
+    text: Vec<Mark>,
+    #[serde(default)]
+    chat_name: Option<String>,
+    #[serde(default)]
+    folders: Vec<String>,
+    row: serde_json::Value,
+}
+
+impl TryFrom<RawFound> for Found {
+    type Error = serde_json::Error;
+
+    fn try_from(r: RawFound) -> Result<Found, serde_json::Error> {
+        let hit = match r.kind {
+            FoundKind::Chat => Hit::Chat(serde_json::from_value(r.row)?),
+            FoundKind::Person => Hit::Person(serde_json::from_value(r.row)?),
+            FoundKind::Folder => Hit::Folder(serde_json::from_value(r.row)?),
+            FoundKind::Message => Hit::Message(serde_json::from_value(r.row)?),
+            FoundKind::Link | FoundKind::Media | FoundKind::File => Hit::Shared,
+        };
+        Ok(Found { kind: r.kind, score: r.score, text: r.text, chat_name: r.chat_name, folders: r.folders, hit })
+    }
+}
+
+/// How many of each kind matched; for messages, 1,000 means at least that many.
+pub type Counts = std::collections::BTreeMap<FoundKind, u32>;
+
 /// What arrives on the main thread's channel from jawd, or from the made-up account.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {
@@ -224,6 +345,22 @@ pub enum Update {
         remove: Vec<String>,
         older: Option<bool>,
         newer: Option<u32>,
+    },
+    /// The answer to the `find` the interface numbered `id`.
+    Found {
+        id: u64,
+        results: Vec<Found>,
+        counts: Counts,
+    },
+    /// A `find` that failed, or was cancelled by a newer one.
+    FindFailed {
+        id: u64,
+        cancelled: bool,
+        why: String,
+    },
+    /// The chat a person now has, started from the palette.
+    ChatStarted {
+        chat: Chat,
     },
     /// Something to say once, in the footer.
     Notice(String),
@@ -299,11 +436,40 @@ pub trait Jawd {
     fn focus(&mut self, focused: bool);
     /// Starts linking by QR code, or by a code typed on the phone for `phone`.
     fn link_start(&mut self, phone: Option<String>);
+    /// The palette's search, numbered so only the answer to the latest is kept: one kind or all
+    /// of them, messages in one chat or everywhere, at most `limit` of each kind.
+    fn find(&mut self, id: u64, query: &str, kind: Option<FoundKind>, chat: Option<&str>, limit: usize);
+    /// A chat with someone who has none yet; it comes back as `Update::ChatStarted`.
+    fn start_chat(&mut self, person: &str);
+    /// Mutes a chat until then, `i64::MAX` for ever, or unmutes it with `None`.
+    fn mute(&mut self, chat: &str, until: Option<i64>);
+    fn archive(&mut self, chat: &str, archived: bool);
+    fn pin(&mut self, chat: &str, pinned: bool);
+    fn mark_unread(&mut self, chat: &str, unread: bool);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_answer_reads_into_results_by_kind() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/fixtures/find.result.json")).unwrap();
+        let results: Vec<Found> = serde_json::from_value(v["result"]["results"].clone()).unwrap();
+        let kinds: Vec<FoundKind> = results.iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, [FoundKind::Chat, FoundKind::Person, FoundKind::Folder, FoundKind::Message]);
+        assert!(matches!(&results[0].hit, Hit::Chat(c) if c.name == "Ana Ribeiro"));
+        assert_eq!(results[0].text[0], Mark { t: MarkKind::Mark, s: "A".into() });
+        assert_eq!(results[0].folders, ["Family"]);
+        assert!(matches!(&results[1].hit, Hit::Person(p) if p.phone.as_deref() == Some("+351913000031")));
+        assert!(matches!(&results[2].hit, Hit::Folder(f) if f.id == "archived"));
+        let Hit::Message(m) = &results[3].hit else { panic!("{:?}", results[3]) };
+        assert_eq!((m.chat.as_str(), m.from.as_ref().unwrap().id.as_str()), ("120363000000000001@g.us", "12"));
+        assert_eq!(results[3].chat_name.as_deref(), Some("Lisbon Climbing"));
+        let counts: Counts = serde_json::from_value(v["result"]["counts"].clone()).unwrap();
+        assert_eq!(counts[&FoundKind::Message], 214);
+    }
 
     /// The rows in protocol/README.md, read as the interface reads them.
     #[test]

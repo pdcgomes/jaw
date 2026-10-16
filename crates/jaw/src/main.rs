@@ -7,6 +7,7 @@ mod bench;
 mod composer;
 mod data;
 mod demo;
+mod find;
 mod fmt;
 mod layout;
 mod run;
@@ -78,6 +79,9 @@ enum Command {
         width: u16,
         #[arg(long, default_value_t = 40)]
         height: u16,
+        /// Presses the keys in the palette, which searches at each one
+        #[arg(long)]
+        palette: bool,
     },
 }
 
@@ -88,6 +92,7 @@ fn main() -> Result<()> {
         Some(Command::Link { phone }) => link(phone),
         Some(Command::Demo { state, flood }) => run::run(|tx| {
             let demo = demo::Demo::start(tx, demo::Clock::Wall, state, true);
+            demo.answer_on_a_thread();
             if let Some(rate) = flood {
                 demo.flood(rate, f64::INFINITY);
             }
@@ -113,7 +118,7 @@ fn main() -> Result<()> {
             print!("{frame}");
             Ok(())
         }
-        Some(Command::Bench { rate, seconds, width, height }) => {
+        Some(Command::Bench { rate, seconds, width, height, palette }) => {
             let flood = bench::Flood {
                 width,
                 height,
@@ -121,6 +126,7 @@ fn main() -> Result<()> {
                 seconds,
                 every: Duration::from_millis(12),
                 warm: Duration::from_secs(1),
+                palette,
             };
             println!("{}", bench::flood(&flood)?.describe());
             Ok(())

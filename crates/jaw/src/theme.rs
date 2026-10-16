@@ -63,6 +63,8 @@ pub struct Theme {
     /// The border of what has the keys, and the keys in the footer.
     pub focus: Color,
     pub link: Color,
+    /// Where a search matched what it found.
+    pub mark: Color,
     /// An unread count; a mention of you, and its count.
     pub unread: Color,
     pub mention: Color,
@@ -100,6 +102,7 @@ impl Theme {
             brand: c(p.teal),
             focus: c(p.blue),
             link: c(p.cyan),
+            mark: c(p.fg),
             unread: c(p.fg),
             mention: c(p.orange),
             arrived: c(p.orange),

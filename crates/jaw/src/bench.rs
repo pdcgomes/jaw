@@ -22,6 +22,8 @@ pub struct Flood {
     pub every: Duration,
     /// How long the flood runs before the keys begin, so they're measured once it's steady.
     pub warm: Duration,
+    /// Whether the keys are pressed in the palette, which searches at each one.
+    pub palette: bool,
 }
 
 pub struct Report {
@@ -88,6 +90,25 @@ fn script() -> Vec<KeyEvent> {
     keys
 }
 
+/// What someone does in the palette: types words to find, edits them, moves through what's found
+/// and narrows it, never closing it.
+fn palette_script() -> Vec<KeyEvent> {
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut keys = vec![];
+    for word in ["jantar", "vinho", "ana", "ar"] {
+        keys.extend(word.chars().map(|c| key(KeyCode::Char(c))));
+        keys.extend([
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Up),
+            key(KeyCode::Tab),
+            key(KeyCode::BackTab),
+        ]);
+        keys.push(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    }
+    keys
+}
+
 pub fn peak_bytes() -> u64 {
     // SAFETY: getrusage fills the struct it's given, which is ours and zeroed.
     let usage = unsafe {
@@ -103,15 +124,22 @@ pub fn flood(f: &Flood) -> Result<Report> {
     let start = Instant::now();
     let (tx, rx) = std::sync::mpsc::channel();
     let demo = Demo::start(tx.clone(), Clock::Wall, State::Online, false);
+    demo.answer_on_a_thread();
     let mut view = View::new(Box::new(demo.clone()));
     view.resize(f.width, f.height);
     let mut terminal = Terminal::new(TestBackend::new(f.width, f.height))?;
     let mut probe = Probe::default();
     let flooding = demo.flood(f.rate, f.warm.as_secs_f64() + f.seconds);
-    let (every, seconds, warm) = (f.every, f.seconds, f.warm);
+    let (every, seconds, warm, palette) = (f.every, f.seconds, f.warm, f.palette);
     let presser = std::thread::spawn(move || {
-        let keys = script();
+        let keys = if palette { palette_script() } else { script() };
         std::thread::sleep(warm);
+        if palette {
+            let open = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+            if tx.send(Event::Input(Input::Key(open), Instant::now())).is_err() {
+                return;
+            }
+        }
         let begun = Instant::now();
         let end = begun + Duration::from_secs_f64(seconds);
         let mut i = 0;
@@ -164,11 +192,30 @@ mod tests {
             seconds: 4.0,
             every: Duration::from_millis(12),
             warm: Duration::from_secs(1),
+            palette: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
         assert!(report.keys.len() >= 200, "{}", report.describe());
         assert!(report.messages as f64 >= 2_000.0 * 4.5, "{}", report.describe());
+        assert!(report.at(0.99) <= Duration::from_millis(16), "{}", report.describe());
+    }
+
+    #[test]
+    fn with_the_palette_open_a_keypress_is_drawn_within_16_ms_at_p99_while_2000_messages_a_second_arrive() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let flood = Flood {
+            width: 140,
+            height: 40,
+            rate: 2_000,
+            seconds: 4.0,
+            every: Duration::from_millis(12),
+            warm: Duration::from_secs(1),
+            palette: true,
+        };
+        let report = super::flood(&flood).unwrap();
+        eprintln!("{}", report.describe());
+        assert!(report.keys.len() >= 200, "{}", report.describe());
         assert!(report.at(0.99) <= Duration::from_millis(16), "{}", report.describe());
     }
 
@@ -182,6 +229,7 @@ mod tests {
             seconds: 2.0,
             every: Duration::from_secs(60),
             warm: Duration::ZERO,
+            palette: false,
         })
         .unwrap();
         assert!(report.keys.is_empty());

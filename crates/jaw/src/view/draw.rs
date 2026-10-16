@@ -113,7 +113,7 @@ impl View {
     pub fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
         let t = self.theme;
-        self.areas = super::Areas { width: area.width, ..Default::default() };
+        self.areas = super::Areas { width: area.width, height: area.height, ..Default::default() };
         self.drawn_at = self.now() / 1_000;
         let ground = Style::new().bg(t.bg).fg(t.fg);
         if area.height < 4 || area.width < 20 {
@@ -137,6 +137,9 @@ impl View {
             _ => self.draw_main(f, body),
         }
         self.draw_hints(f.buffer_mut(), foot);
+        if self.palette.is_some() {
+            self.draw_palette(f);
+        }
         if self.overlay == Some(Overlay::Keys) {
             self.draw_keys(f);
         }
@@ -252,6 +255,14 @@ impl View {
         if self.overlay.is_some() {
             return vec![("any key", "closes", true)];
         }
+        if self.palette.is_some() {
+            return vec![
+                ("⏎", "does it", true),
+                ("tab", "narrows", true),
+                ("ctrl-g", "its message", true),
+                ("esc", "closes", true),
+            ];
+        }
         if self.linking() {
             return match (&self.phone, &self.link, self.connection.state) {
                 (Some(_), _, _) => vec![("⏎", "get a code", true), ("esc", "back to the QR code", true)],
@@ -293,6 +304,7 @@ impl View {
                     ("⏎", "send", true),
                     ("alt-⏎", "new line", true),
                     ("↑", "messages", true),
+                    ("ctrl-k", "find", true),
                     ("alt-↑↓", "chats", true),
                 ];
                 if self.narrow() {
@@ -455,7 +467,7 @@ impl View {
 
     fn conversation_title(&self) -> Line<'static> {
         let t = &self.theme;
-        let Some(chat) = self.open.as_deref().and_then(|id| self.chats.get(id)) else { return Line::default() };
+        let Some(chat) = self.open.as_deref().and_then(|id| self.chat_known(id)) else { return Line::default() };
         let mut more = vec![];
         if !chat.typing.is_empty() {
             let who =
@@ -516,7 +528,7 @@ impl View {
     }
 
     fn draw_empty(&mut self, f: &mut Frame, area: Rect) {
-        let name = self.open.as_deref().and_then(|id| self.chats.get(id)).map(|c| (c.name.clone(), c.group()));
+        let name = self.open.as_deref().and_then(|id| self.chat_known(id)).map(|c| (c.name.clone(), c.group()));
         let said = match name {
             Some((name, true)) => format!("No messages in {name} yet. What you type goes to everyone in it."),
             Some((name, false)) => {
@@ -937,7 +949,8 @@ impl View {
             pair(("ctrl-r", "record · M5", false), Some(("esc", "back to typing", true))),
             Line::default(),
             head("moving", "anywhere"),
-            pair(("alt-↑ ↓", "the chat before, after", true), Some(("?", "these keys", true))),
+            pair(("ctrl-k", "the palette: anything", true), Some(("?", "these keys", true))),
+            pair(("alt-↑ ↓", "the chat before, after", true), Some(("/search", "words in this chat", true))),
             pair(("esc", "the chat list, when narrow", true), Some(("the mouse", "click, scroll, open", true))),
             pair(("ctrl-b", "the sidebar · M6", false), Some(("ctrl-c", "quit", true))),
         ];

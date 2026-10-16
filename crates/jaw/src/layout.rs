@@ -312,6 +312,7 @@ mod tests {
         Message {
             id: "m".into(),
             v: 1,
+            chat: String::new(),
             sort: "1".into(),
             at: NOW - 4 * fmt::MINUTE,
             from: Some(Sender { id: "person:1".into(), name: "Ana".into(), colour: 0 }),

@@ -79,6 +79,14 @@ impl View {
             }
             return;
         }
+        if self.palette.is_some() {
+            self.on_palette_key(k);
+            return;
+        }
+        if ctrl && k.code == KeyCode::Char('k') && self.reach == super::Reach::Up && !self.linking() {
+            self.palette_open();
+            return;
+        }
         if k.code == KeyCode::F(1) {
             self.overlay = Some(Overlay::Keys);
             return;
@@ -349,6 +357,10 @@ impl View {
     }
 
     fn on_paste(&mut self, s: &str) {
+        if self.palette.is_some() {
+            self.palette_paste(s);
+            return;
+        }
         if let Some(number) = self.phone.as_mut() {
             number.extend(s.chars().filter(char::is_ascii_digit));
             return;
@@ -379,6 +391,19 @@ impl View {
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
         let (x, y) = (m.column, m.row);
+        if self.palette.is_some() {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.dirty = true;
+                    self.palette_click(y, Rect::new(0, 0, self.areas.width, self.areas.height));
+                }
+                MouseEventKind::ScrollUp => self.palette_move(-1),
+                MouseEventKind::ScrollDown => self.palette_move(1),
+                _ => return,
+            }
+            self.dirty = true;
+            return;
+        }
         match m.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = m.kind == MouseEventKind::ScrollUp;

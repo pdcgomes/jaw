@@ -4,6 +4,7 @@
 
 mod draw;
 mod keys;
+mod palette;
 
 use crate::composer::Composer;
 use crate::data::{Around, Jawd, Message, Typing, Update};
@@ -114,6 +115,7 @@ struct Areas {
     composer: Rect,
     composer_width: usize,
     width: u16,
+    height: u16,
 }
 
 pub struct View {
@@ -167,6 +169,16 @@ pub struct View {
     read_due: Option<i64>,
 
     overlay: Option<Overlay>,
+    /// Ctrl-K's palette, while it's open.
+    palette: Option<palette::Palette>,
+    /// The newest request number the interface has given a `find`.
+    asked: u64,
+    /// The open chat's row when it isn't in the chat list, as an archived one found by the palette.
+    outside: Option<crate::data::Chat>,
+    /// The person a chat is being started with, to open it when it comes.
+    starting: Option<String>,
+    /// A message to anchor on and select once it's in the window.
+    jump: Option<String>,
     notice: Option<(String, i64)>,
     hold_until: Option<i64>,
     chomp_until: Option<i64>,
@@ -224,6 +236,11 @@ impl View {
             read_at: 0,
             read_due: None,
             overlay: None,
+            palette: None,
+            asked: 0,
+            outside: None,
+            starting: None,
+            jump: None,
             notice: None,
             hold_until: None,
             chomp_until: None,
@@ -309,12 +326,18 @@ impl View {
             }
             Update::Chats { reset, upsert, remove, total } => {
                 let left = reset || !remove.is_empty();
+                if let Some(open) = self.open.as_ref().filter(|o| remove.contains(o)) {
+                    self.outside = self.chats.get(open).cloned().or(self.outside.take());
+                }
+                if let Some(back) = upsert.iter().find(|c| self.outside.as_ref().is_some_and(|o| o.id == c.id)) {
+                    self.outside = (back.archived).then(|| back.clone());
+                }
                 self.keep_selected_row(|v| v.chats.apply(reset, upsert, &remove, total));
                 if left {
                     let chats = &self.chats;
                     self.rows_laid.retain(|id, _| chats.get(id).is_some());
                 }
-                if self.open.as_ref().is_none_or(|id| self.chats.get(id).is_none()) {
+                if self.open.is_none() {
                     let first = self.chats.order().first().map(|s| s.to_string());
                     if let Some(first) = first {
                         self.open_chat(&first);
@@ -338,10 +361,23 @@ impl View {
                 if first {
                     self.anchor_on_unread();
                 }
+                self.jump_if_here();
                 if let Focus::Message(id) = &self.focus
                     && self.messages.as_ref().is_some_and(|w| w.get(id).is_none())
                 {
                     self.focus = Focus::Typing;
+                }
+            }
+            Update::Found { id, results, counts } => self.found(id, results, counts),
+            Update::FindFailed { id, cancelled, why } => self.find_failed(id, cancelled, why),
+            Update::ChatStarted { chat } => {
+                if self.starting.take().is_some() {
+                    let id = chat.id.clone();
+                    if self.chats.get(&id).is_none() {
+                        self.outside = Some(chat);
+                    }
+                    self.open_chat(&id);
+                    self.jawd.opened(&id);
                 }
             }
             Update::Notice(text) => self.say(text),
@@ -398,6 +434,11 @@ impl View {
 
     /// Opens a chat: its draft into the box, its window from the newest, typing in the box.
     pub fn open_chat(&mut self, id: &str) {
+        self.open_chat_at(id, None);
+    }
+
+    /// Opens a chat at a message, or at its newest.
+    pub fn open_chat_at(&mut self, id: &str, at: Option<String>) {
         if self.open.as_deref() == Some(id) {
             self.selected = Some(id.to_string());
             self.picking = false;
@@ -420,7 +461,10 @@ impl View {
         self.read_upto = None;
         self.chomp_until = None;
         self.picking = false;
-        self.watch(id, Around::Newest);
+        if self.outside.as_ref().is_some_and(|o| o.id != id) {
+            self.outside = None;
+        }
+        self.watch(id, at.map_or(Around::Newest, Around::Message));
         self.reveal_selected_chat();
         self.dirty = true;
     }
@@ -463,6 +507,21 @@ impl View {
         self.jawd.watch_messages(chat, around, before, after);
     }
 
+    /// The message a jump is for, once it's in the window: anchored a third of the way down,
+    /// and selected.
+    fn jump_if_here(&mut self) {
+        let Some(id) = self.jump.clone() else { return };
+        let Some(m) = self.messages.as_ref().and_then(|w| w.get(&id)) else { return };
+        let top = self.areas_messages_height() / 3;
+        self.scroll = Scroll::Anchor { id: id.clone(), sort: m.sort.clone(), top };
+        self.focus = Focus::Message(id);
+        self.jump = None;
+    }
+
+    fn areas_messages_height(&self) -> i32 {
+        self.areas.messages.height.max(12) as i32
+    }
+
     /// A chat opened with unread messages starts at the first of them, the rest counted below.
     fn anchor_on_unread(&mut self) {
         let n = self.unread_at_open as usize;
@@ -496,6 +555,16 @@ impl View {
         let Some(chat) = self.open.clone() else { return };
         let text = self.composer.text().trim_end().to_string();
         if text.trim().is_empty() {
+            return;
+        }
+        if let Some(words) = text.strip_prefix("/search").filter(|w| w.is_empty() || w.starts_with(' ')) {
+            self.composer.take();
+            let name = self.chat_known(&chat).map_or_else(|| chat.clone(), |c| c.name.clone());
+            self.palette_search(Some((chat, name)), words.trim());
+            return;
+        }
+        if text == "/poll" || text.starts_with("/poll ") {
+            self.say("polls come with M2");
             return;
         }
         self.composer.take();

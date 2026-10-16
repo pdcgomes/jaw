@@ -1,7 +1,7 @@
 //! Frames as text at several sizes, keys driving the view, and anchoring as rows arrive.
 
 use super::*;
-use crate::data::{Chat, Kind, Sender, Span, SpanKind};
+use crate::data::{Chat, Hit, Kind, Sender, Span, SpanKind};
 use crate::demo::{Clock, Demo, State};
 use crate::run::{self, Event};
 use ratatui::crossterm::event::{
@@ -399,4 +399,203 @@ fn a_keypress_redraws_and_nothing_else_wakes_but_the_clock() {
     assert!(v.dirty);
     assert!(v.next_wake() <= NOW + 1_500, "the draft is saved once typing pauses");
     drop(rx);
+}
+
+fn palette_titles(v: &View) -> Vec<String> {
+    v.palette_items()
+        .into_iter()
+        .filter_map(|i| match i {
+            palette::Item::Heading(label, _) => Some(label.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn ctrl_k_opens_the_palette_over_the_screen_and_esc_closes_it_keeping_the_box() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "levo o vinho<c-k>");
+    let screen = frame(&mut v);
+    assert!(
+        screen.contains("╭ palette ─") && screen.contains("a chat, a person, something to do, or words"),
+        "{screen}"
+    );
+    assert!(screen.contains("recent") && screen.contains("Start a chat") && screen.contains("esc closes"), "{screen}");
+    press(&mut v, &rx, "<esc>");
+    assert!(v.palette.is_none());
+    assert_eq!(v.composer.text(), "levo o vinho", "the message box keeps its text");
+}
+
+#[test]
+fn only_the_answer_to_the_latest_find_is_kept() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<c-k>a");
+    let first = v.palette.as_ref().unwrap().asked;
+    press(&mut v, &rx, "r");
+    let latest = v.palette.as_ref().unwrap().asked;
+    assert!(latest > first);
+    let shown = v.palette.as_ref().unwrap().results.clone();
+    v.apply(Update::Found { id: first, results: vec![], counts: Default::default() });
+    assert_eq!(v.palette.as_ref().unwrap().results, shown, "an earlier answer that comes late changes nothing");
+    v.apply(Update::FindFailed { id: first, cancelled: true, why: "replaced".into() });
+    v.apply(Update::FindFailed { id: latest, cancelled: true, why: "replaced".into() });
+    assert!(v.palette.as_ref().unwrap().failed.is_none(), "a cancelled one says nothing");
+    v.apply(Update::FindFailed { id: latest, cancelled: false, why: "jaw.db is busy".into() });
+    assert!(frame(&mut v).contains("jawd couldn't search: jaw.db is busy"));
+}
+
+#[test]
+fn results_are_grouped_by_kind_names_first_and_a_verb_puts_actions_first() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<c-k>ar");
+    assert_eq!(palette_titles(&v), ["chats", "people", "folders", "actions"]);
+    let screen = frame(&mut v);
+    assert!(
+        screen.contains("● Ana Ribeiro")
+            && screen.contains("○ Artur Reis")
+            && screen.contains("no chat yet · ⏎ starts one"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains(" all   chats 4   people 4   folders 1   actions "),
+        "the strip counts each kind:\n{screen}"
+    );
+    press(&mut v, &rx, "<c-u>mute");
+    assert_eq!(palette_titles(&v)[0], "actions", "typing what you want to do puts the actions first");
+    press(&mut v, &rx, "<c-u>j");
+    assert!(!palette_titles(&v).contains(&"messages".to_string()), "one letter finds names and actions only");
+    press(&mut v, &rx, "antar");
+    let screen = frame(&mut v);
+    assert!(palette_titles(&v).contains(&"messages".to_string()), "{screen}");
+    assert!(screen.contains("Ana in Ana Ribeiro") || screen.contains("Ana vens jantar"), "{screen}");
+    assert!(screen.contains("messages · ") && screen.contains("tab shows them all"), "{screen}");
+}
+
+#[test]
+fn tab_narrows_to_one_kind_and_backspace_widens_again() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<c-k>jantar\t");
+    assert_eq!(v.palette.as_ref().unwrap().narrow, palette::Narrow::Kind(crate::data::FoundKind::Chat));
+    assert_eq!(palette_titles(&v), ["chats"]);
+    press(&mut v, &rx, "\t");
+    assert_eq!(v.palette.as_ref().unwrap().narrow, palette::Narrow::Kind(crate::data::FoundKind::Message));
+    let found = v.palette_items().iter().filter(|i| matches!(i, palette::Item::Found(_))).count();
+    assert!(found > 4, "narrowed, all of them show: {found}");
+    press(&mut v, &rx, "\t");
+    assert_eq!(v.palette.as_ref().unwrap().narrow, palette::Narrow::All, "and round to all again");
+    press(&mut v, &rx, "<s-tab><c-u><bs>");
+    assert_eq!(v.palette.as_ref().unwrap().narrow, palette::Narrow::All);
+}
+
+#[test]
+fn enter_opens_a_chat_and_says_it_was_opened() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<c-k>sofia\n");
+    assert!(v.palette.is_none());
+    assert_eq!(v.open.as_deref(), Some("sofia"));
+    press(&mut v, &rx, "<c-k>");
+    let first = v.palette_items().into_iter().find_map(|i| match i {
+        palette::Item::Found(n) => Some(n),
+        _ => None,
+    });
+    let r = &v.palette.as_ref().unwrap().results[first.unwrap()];
+    assert!(matches!(&r.hit, Hit::Chat(c) if c.id == "sofia"), "the chats opened most come first: {r:?}");
+}
+
+#[test]
+fn enter_on_a_person_starts_a_chat_with_them() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<c-k>artur\n");
+    let open = v.open.clone().unwrap();
+    assert_eq!(v.chats.get(&open).map(|c| c.name.as_str()), Some("Artur Reis"));
+    assert!(frame(&mut v).contains("No messages with Artur yet."));
+    press(&mut v, &rx, "<c-k>artur");
+    assert_eq!(palette_titles(&v), ["chats"], "now found as a chat");
+}
+
+#[test]
+fn enter_on_a_message_opens_its_chat_on_it_selected() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<c-k>miradouro\n");
+    assert_eq!(v.open.as_deref(), Some("familia"));
+    let Focus::Message(id) = v.focus.clone() else { panic!("{:?}", v.focus) };
+    let m = v.messages.as_ref().unwrap().get(&id).unwrap();
+    assert!(m.summary.as_deref().unwrap_or_default().contains("Miradouro"));
+    let screen = frame(&mut v);
+    assert!(screen.contains("Miradouro da Senhora do Monte") && screen.contains("esc back to typing"), "{screen}");
+}
+
+#[test]
+fn ctrl_g_goes_to_a_message_and_says_what_it_does_on_anything_else() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<c-k>ar<c-g>");
+    assert!(v.palette.is_some());
+    assert!(frame(&mut v).contains("ctrl-g goes to a message"));
+    press(&mut v, &rx, "<c-u>casadapraia<c-g>");
+    assert_eq!(v.open.as_deref(), Some("familia"));
+    assert!(matches!(v.focus, Focus::Message(_)));
+}
+
+#[test]
+fn a_folder_and_what_comes_later_say_when_they_come() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<c-k>archived\n");
+    assert!(frame(&mut v).contains("folders come with M6"));
+    press(&mut v, &rx, "<c-u>new poll\n");
+    assert!(frame(&mut v).contains("polls come with M2"));
+    assert!(v.palette.is_some(), "it stays open");
+}
+
+#[test]
+fn actions_pin_mute_archive_and_go_to_unread() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<c-k>pin this\n");
+    assert!(!v.chats.get("ana").unwrap().pinned, "Ana was pinned, so it offers to unpin her");
+    press(&mut v, &rx, "<c-k>pin this\n");
+    assert!(v.chats.get("ana").unwrap().pinned, "and then to pin her again");
+    press(&mut v, &rx, "<a-down>");
+    let open = v.open.clone().unwrap();
+    press(&mut v, &rx, "<c-k>mute this\n");
+    assert!(frame(&mut v).contains("For 8 hours") && v.palette.is_some(), "mute asks for how long");
+    press(&mut v, &rx, "<down><down>\n");
+    assert_eq!(v.chats.get(&open).and_then(|c| c.muted_until), Some(i64::MAX));
+    press(&mut v, &rx, "<c-k>archive this\n");
+    assert!(v.chats.get(&open).is_none(), "archived, it leaves the list");
+    assert_eq!(v.open.as_deref(), Some(open.as_str()), "and stays open");
+    let name = v.chat_known(&open).unwrap().name.clone();
+    press(&mut v, &rx, &format!("<c-k>{name}"));
+    assert!(frame(&mut v).contains("archived"), "the palette still finds it");
+    press(&mut v, &rx, "<c-u>go to unread\n");
+    assert!(v.open.as_ref().and_then(|id| v.chats.get(id)).is_some_and(|c| c.unread > 0 || c.marked_unread));
+}
+
+#[test]
+fn search_in_a_chat_finds_only_its_messages_and_backspace_widens_it() {
+    let (mut v, rx) = view(140, 34);
+    press(&mut v, &rx, "<a-down><a-down><a-down>/search vinho\n");
+    assert_eq!(v.open.as_deref(), Some("familia"));
+    let screen = frame(&mut v);
+    assert!(screen.contains(" in Família Gomes ") && screen.contains("vinho"), "{screen}");
+    let p = v.palette.as_ref().unwrap();
+    assert!(p.results.iter().all(|r| matches!(&r.hit, Hit::Message(m) if m.chat == "familia")), "{:?}", p.results);
+    press(&mut v, &rx, "<c-u><bs>");
+    assert!(v.palette.as_ref().unwrap().scope.is_none(), "Backspace on nothing widens to everywhere");
+    press(&mut v, &rx, "vinho");
+    assert!(
+        v.palette.as_ref().unwrap().results.iter().any(|r| matches!(&r.hit, Hit::Message(m) if m.chat != "familia"))
+    );
+}
+
+#[test]
+fn the_palette_fits_at_140_100_and_80_columns() {
+    for (w, h) in [(140, 34), (100, 30), (80, 24)] {
+        let (mut v, rx) = view(w, h);
+        press(&mut v, &rx, "<c-k>ar");
+        let screen = frame(&mut v);
+        assert!(
+            screen.contains("╭ palette ─") && screen.contains("Ana Ribeiro") && screen.contains("Artur Reis"),
+            "{w}:\n{screen}"
+        );
+        assert!(screen.lines().all(|l| crate::fmt::width(l) <= w as usize), "{w}:\n{screen}");
+    }
 }

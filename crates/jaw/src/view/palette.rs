@@ -1,0 +1,922 @@
+//! The palette: Ctrl-K's one line of search for anything, over the screen. Each keystroke asks
+//! jawd's `find` again and keeps only the answer to the latest; the interface's own actions are
+//! matched here as jawd matches names, and merged in. Results are grouped by kind, best first;
+//! Tab narrows to one kind, and Enter does the obvious thing with what's selected.
+
+use super::{Overlay, View};
+use crate::composer::Composer;
+use crate::data::{Chat, Counts, Found, FoundKind, Hit, Mark, MarkKind};
+use crate::find;
+use crate::fmt;
+use ratatui::Frame;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Padding};
+
+/// Results of each kind asked for when all kinds show, and when one does.
+const LIMIT: usize = 10;
+const NARROWED_LIMIT: usize = 50;
+/// Results of each kind shown when all kinds show; Tab shows the rest.
+const PER_KIND: usize = 4;
+/// The palette's widest, and its rows at most.
+const WIDTH: u16 = 78;
+const HEIGHT: u16 = 26;
+/// The kinds in the order they're shown and Tab steps through them.
+const ORDER: [FoundKind; 7] = [
+    FoundKind::Chat,
+    FoundKind::Person,
+    FoundKind::Folder,
+    FoundKind::Message,
+    FoundKind::Link,
+    FoundKind::Media,
+    FoundKind::File,
+];
+
+/// What the palette shows: every kind, one of jawd's, or the interface's own actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Narrow {
+    All,
+    Kind(FoundKind),
+    Actions,
+}
+
+/// What an action does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Does {
+    StartChat,
+    GoToUnread,
+    SearchMessages,
+    SearchHere(String, String),
+    Mute(String, String),
+    Unmute(String),
+    Archive(String, bool),
+    Pin(String, bool),
+    MarkUnread(String, bool),
+    Keys,
+    Quit,
+    /// Not yet: what it says when chosen.
+    Later(&'static str),
+    /// How long to mute for, once Mute asks.
+    MuteFor(String, i64, &'static str),
+}
+
+/// One of the interface's own actions, matched against what's typed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Action {
+    pub name: String,
+    detail: String,
+    /// Its key, so the palette teaches them.
+    key: Option<&'static str>,
+    /// The milestone it comes with, while it's not here yet.
+    later: Option<&'static str>,
+    pub does: Does,
+    marks: Vec<(usize, usize)>,
+    score: i64,
+}
+
+impl Action {
+    fn new(name: impl Into<String>, detail: impl Into<String>, does: Does) -> Action {
+        Action { name: name.into(), detail: detail.into(), key: None, later: None, does, marks: vec![], score: 0 }
+    }
+
+    fn key(mut self, key: &'static str) -> Action {
+        self.key = Some(key);
+        self
+    }
+
+    fn later(mut self, when: &'static str) -> Action {
+        self.later = Some(when);
+        self
+    }
+}
+
+/// A row of the palette's list: a kind's heading, or something to act on.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Item {
+    Heading(&'static str, String),
+    Found(usize),
+    Action(Action),
+}
+
+impl Item {
+    fn selectable(&self) -> bool {
+        !matches!(self, Item::Heading(..))
+    }
+}
+
+#[derive(Debug)]
+pub struct Palette {
+    pub query: Composer,
+    pub narrow: Narrow,
+    /// Messages in one chat only: its ID and name.
+    pub scope: Option<(String, String)>,
+    /// Mute asks how long: the chat and its name.
+    pub muting: Option<(String, String)>,
+    /// The newest `find` asked, the only one whose answer is kept.
+    pub asked: u64,
+    pub answered: bool,
+    pub results: Vec<Found>,
+    pub counts: Counts,
+    /// The strip's counts: every kind's from the last answer for all of them, so narrowing to
+    /// one keeps the others to Tab to.
+    strip: Counts,
+    pub failed: Option<String>,
+    /// Which of the selectable rows is selected.
+    pub selected: usize,
+    top: usize,
+}
+
+impl Palette {
+    pub fn new() -> Palette {
+        Palette {
+            query: Composer::default(),
+            narrow: Narrow::All,
+            scope: None,
+            muting: None,
+            asked: 0,
+            answered: false,
+            results: vec![],
+            counts: Counts::new(),
+            strip: Counts::new(),
+            failed: None,
+            selected: 0,
+            top: 0,
+        }
+    }
+}
+
+fn kind_name(k: FoundKind) -> &'static str {
+    match k {
+        FoundKind::Chat => "chats",
+        FoundKind::Person => "people",
+        FoundKind::Folder => "folders",
+        FoundKind::Message => "messages",
+        FoundKind::Link => "links",
+        FoundKind::Media => "media",
+        FoundKind::File => "files",
+    }
+}
+
+/// A count as the strip says it: 1,000 is at least that many.
+fn count(n: u32) -> String {
+    if n >= 1_000 { "1,000+".into() } else { fmt::num(n as u64) }
+}
+
+/// Spans cut to `w` columns, an ellipsis where they were cut.
+fn fit_spans(spans: Vec<Span<'static>>, w: usize) -> Vec<Span<'static>> {
+    let mut out = vec![];
+    let mut used = 0;
+    for s in spans {
+        let sw = s.width();
+        if used + sw <= w {
+            used += sw;
+            out.push(s);
+            continue;
+        }
+        let room = w.saturating_sub(used);
+        if room > 0 {
+            out.push(Span::styled(fmt::fit(&s.content, room), s.style));
+        }
+        break;
+    }
+    out
+}
+
+impl View {
+    pub fn palette_open(&mut self) {
+        self.palette = Some(Palette::new());
+        self.ask();
+    }
+
+    /// The palette narrowed to messages, in the open chat or everywhere, with words to look for.
+    pub fn palette_search(&mut self, scope: Option<(String, String)>, words: &str) {
+        let mut p = Palette::new();
+        p.narrow = Narrow::Kind(FoundKind::Message);
+        p.scope = scope;
+        p.query.set(words);
+        self.palette = Some(p);
+        self.ask();
+    }
+
+    /// Asks `find` for what's typed, numbered so only its answer is kept.
+    fn ask(&mut self) {
+        let Some(p) = self.palette.as_mut() else { return };
+        p.selected = 0;
+        p.top = 0;
+        p.failed = None;
+        let kind = match p.narrow {
+            Narrow::All => None,
+            Narrow::Kind(k) => Some(k),
+            Narrow::Actions => return,
+        };
+        self.asked += 1;
+        p.asked = self.asked;
+        p.answered = false;
+        let limit = if kind.is_some() { NARROWED_LIMIT } else { LIMIT };
+        let scope = p.scope.as_ref().map(|(id, _)| id.clone());
+        let query = p.query.text().to_string();
+        self.jawd.find(self.asked, &query, kind, scope.as_deref(), limit);
+    }
+
+    pub fn found(&mut self, id: u64, results: Vec<Found>, counts: Counts) {
+        let Some(p) = self.palette.as_mut().filter(|p| p.asked == id) else { return };
+        match p.narrow {
+            Narrow::Kind(k) => {
+                p.strip.insert(k, counts.get(&k).copied().unwrap_or(0));
+            }
+            _ => p.strip = counts.clone(),
+        }
+        p.results = results;
+        p.counts = counts;
+        p.answered = true;
+        p.selected = 0;
+        p.top = 0;
+        self.dirty = true;
+    }
+
+    pub fn find_failed(&mut self, id: u64, cancelled: bool, why: String) {
+        if let Some(p) = self.palette.as_mut().filter(|p| p.asked == id && !cancelled) {
+            p.failed = Some(why);
+            p.answered = true;
+            self.dirty = true;
+        }
+    }
+
+    /// The open chat's row, from the list or, for one found outside it, as it was found.
+    pub fn chat_known(&self, id: &str) -> Option<&Chat> {
+        self.chats.get(id).or(self.outside.as_ref().filter(|c| c.id == id))
+    }
+
+    /// The interface's own actions, those that apply now.
+    fn actions(&self) -> Vec<Action> {
+        let mut all = vec![
+            Action::new("Start a chat", "with anyone, or a number", Does::StartChat),
+            Action::new("Go to unread", self.unread_chats(), Does::GoToUnread),
+            Action::new("Search messages", "everywhere", Does::SearchMessages).key("/search"),
+        ];
+        // "This chat" is the one open, or the one selected while the list has the screen.
+        let this = if self.narrow() && self.picking { self.selected.as_deref() } else { self.open.as_deref() };
+        if let Some(c) = this.and_then(|id| self.chat_known(id)) {
+            let (id, name) = (c.id.clone(), c.name.clone());
+            all.push(Action::new("Search this chat", name.clone(), Does::SearchHere(id.clone(), name.clone())));
+            all.push(if c.muted(self.now()) {
+                Action::new("Unmute this chat", name.clone(), Does::Unmute(id.clone()))
+            } else {
+                Action::new(
+                    "Mute this chat",
+                    format!("{name} · ⏎ asks for how long"),
+                    Does::Mute(id.clone(), name.clone()),
+                )
+            });
+            let (verb, archived) = if c.archived { ("Unarchive", false) } else { ("Archive", true) };
+            all.push(Action::new(format!("{verb} this chat"), name.clone(), Does::Archive(id.clone(), archived)));
+            let (verb, pinned) = if c.pinned { ("Unpin", false) } else { ("Pin", true) };
+            all.push(Action::new(format!("{verb} this chat"), name.clone(), Does::Pin(id.clone(), pinned)));
+            let unread = c.unread > 0 || c.marked_unread;
+            let verb = if unread { "Mark this chat read" } else { "Mark this chat unread" };
+            all.push(Action::new(verb, name, Does::MarkUnread(id, !unread)));
+        }
+        all.extend([
+            Action::new("New poll", "in this chat", Does::Later("polls come with M2")).key("/poll").later("M2"),
+            Action::new("New group", "with people you pick", Does::Later("groups come with M2")).later("M2"),
+            Action::new("Attach files", "photos, videos, documents", Does::Later("attaching comes with M4"))
+                .key("ctrl-o")
+                .later("M4"),
+            Action::new("Record a voice message", "", Does::Later("voice messages come with M5"))
+                .key("ctrl-r")
+                .later("M5"),
+            Action::new("Library", "everything shared", Does::Later("the library comes with M3"))
+                .key("ctrl-l")
+                .later("M3"),
+            Action::new("File into folders", "", Does::Later("folders come with M6")).key("m").later("M6"),
+            Action::new("The keys", "every key jaw has", Does::Keys).key("?"),
+            Action::new("Quit", "", Does::Quit).key("ctrl-c"),
+        ]);
+        all
+    }
+
+    fn unread_chats(&self) -> String {
+        let n = self.chats.order().iter().filter_map(|id| self.chats.get(id)).filter(|c| c.unread > 0).count();
+        match n {
+            0 => "nothing unread".into(),
+            1 => "1 chat".into(),
+            n => format!("{n} chats"),
+        }
+    }
+
+    /// The actions that match what's typed, best first; before anything's typed, the common ones.
+    fn matching_actions(&self, query: &str) -> Vec<Action> {
+        let all = self.actions();
+        if query.trim().is_empty() {
+            let common =
+                ["Start a chat", "Go to unread", "New poll", "Attach files", "Record a voice message", "Library"];
+            return all.into_iter().filter(|a| common.contains(&a.name.as_str())).collect();
+        }
+        let mut found: Vec<Action> = all
+            .into_iter()
+            .filter_map(|mut a| {
+                let (score, marks) = find::name(query, &a.name)?;
+                a.score = score;
+                a.marks = marks;
+                Some(a)
+            })
+            .collect();
+        found.sort_by_key(|a| std::cmp::Reverse(a.score));
+        found
+    }
+
+    /// The palette's rows: headings and what's under them, in the order they show.
+    pub fn palette_items(&self) -> Vec<Item> {
+        let Some(p) = &self.palette else { return vec![] };
+        if let Some((id, name)) = &p.muting {
+            let now = self.now();
+            let mut items = vec![Item::Heading("mute", name.clone())];
+            for (label, until, said) in [
+                ("For 8 hours", now + 8 * 3_600_000, "muted for 8 hours"),
+                ("For a week", now + 7 * fmt::DAY, "muted for a week"),
+                ("Always", i64::MAX, "muted"),
+            ] {
+                items.push(Item::Action(Action::new(label, "", Does::MuteFor(id.clone(), until, said))));
+            }
+            return items;
+        }
+        let query = p.query.text();
+        let actions = if p.scope.is_some() { vec![] } else { self.matching_actions(query) };
+        let of = |k: FoundKind| p.results.iter().enumerate().filter(move |(_, r)| r.kind == k).map(|(i, _)| i);
+        let mut items = vec![];
+        let group = |items: &mut Vec<Item>, label: &'static str, found: Vec<Item>, total: usize, all: bool| {
+            if found.is_empty() {
+                return;
+            }
+            let shown = if all { found.len() } else { found.len().min(PER_KIND) };
+            let more =
+                if total > shown { format!("{}, tab shows them all", count(total as u32)) } else { String::new() };
+            items.push(Item::Heading(label, more));
+            items.extend(found.into_iter().take(shown));
+        };
+        let whole = p.narrow != Narrow::All;
+        let action_items = |actions: Vec<Action>| actions.into_iter().map(Item::Action).collect::<Vec<_>>();
+        match p.narrow {
+            Narrow::Actions => {
+                let n = actions.len();
+                group(&mut items, "actions", action_items(actions), n, true);
+                return items;
+            }
+            Narrow::Kind(k) => {
+                let found: Vec<Item> = of(k).map(Item::Found).collect();
+                let total = p.counts.get(&k).copied().unwrap_or(found.len() as u32) as usize;
+                group(&mut items, kind_name(k), found, total, whole);
+                return items;
+            }
+            Narrow::All => {}
+        }
+        if query.trim().is_empty() {
+            let recent: Vec<Item> = of(FoundKind::Chat).map(Item::Found).collect();
+            let n = recent.len();
+            group(&mut items, "recent", recent, n, false);
+            let n = actions.len();
+            group(&mut items, "actions", action_items(actions), n, true);
+            return items;
+        }
+        // Typing what you want to do puts the actions first: three letters or more that start one.
+        let letters = query.chars().filter(|c| c.is_alphanumeric()).count();
+        let verb = letters >= 3 && actions.first().is_some_and(|a| a.score >= 80);
+        let n_actions = actions.len();
+        let mut actions = Some(action_items(actions));
+        if verb {
+            group(&mut items, "actions", actions.take().unwrap_or_default(), n_actions, false);
+        }
+        for k in ORDER {
+            if k == FoundKind::Message
+                && let Some(a) = actions.take()
+            {
+                group(&mut items, "actions", a, n_actions, false);
+            }
+            let found: Vec<Item> = of(k).map(Item::Found).collect();
+            let total = p.counts.get(&k).copied().unwrap_or(found.len() as u32) as usize;
+            group(&mut items, kind_name(k), found, total, false);
+        }
+        items
+    }
+
+    /// The strip's kinds: all, then each that found something, then the actions if any match.
+    fn strip(&self) -> Vec<(Narrow, String)> {
+        let Some(p) = &self.palette else { return vec![] };
+        let mut out = vec![(Narrow::All, "all".to_string())];
+        for k in ORDER {
+            if k == FoundKind::Message {
+                let n = if p.scope.is_some() { 0 } else { self.matching_actions(p.query.text()).len() };
+                if n > 0 && !p.query.text().trim().is_empty() {
+                    out.push((Narrow::Actions, format!("actions {n}")));
+                }
+            }
+            match p.strip.get(&k) {
+                Some(&n) if n > 0 => out.push((Narrow::Kind(k), format!("{} {}", kind_name(k), count(n)))),
+                _ if p.narrow == Narrow::Kind(k) => out.push((Narrow::Kind(k), kind_name(k).to_string())),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn narrow_by(&mut self, by: isize) {
+        let strip = self.strip();
+        let Some(p) = self.palette.as_mut() else { return };
+        let at = strip.iter().position(|(n, _)| *n == p.narrow).unwrap_or(0) as isize;
+        let next = (at + by).rem_euclid(strip.len() as isize) as usize;
+        p.narrow = strip[next].0;
+        self.ask();
+    }
+
+    pub fn on_palette_key(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let Some(p) = self.palette.as_mut() else { return };
+        let before = p.query.text().to_string();
+        let q = &mut p.query;
+        match k.code {
+            KeyCode::Esc if p.muting.is_some() => p.muting = None,
+            KeyCode::Esc => self.palette = None,
+            KeyCode::Char('k') if ctrl => self.palette = None,
+            KeyCode::Enter => self.palette_act(),
+            KeyCode::Char('g') if ctrl => {
+                let item = self.palette_selected();
+                match item {
+                    Some(Item::Found(i))
+                        if self.palette_result(i).is_some_and(|r| matches!(r.hit, Hit::Message(_))) =>
+                    {
+                        self.palette_act()
+                    }
+                    _ => self.say("ctrl-g goes to a message in its chat; links and files have theirs from M2"),
+                }
+            }
+            KeyCode::Up | KeyCode::Char('p') if k.code == KeyCode::Up || ctrl => self.palette_move(-1),
+            KeyCode::Down | KeyCode::Char('n') if k.code == KeyCode::Down || ctrl => self.palette_move(1),
+            KeyCode::PageUp => self.palette_move(-8),
+            KeyCode::PageDown => self.palette_move(8),
+            KeyCode::Tab => self.narrow_by(1),
+            KeyCode::BackTab => self.narrow_by(-1),
+            KeyCode::Backspace if q.is_empty() => {
+                if p.scope.take().is_none() {
+                    p.narrow = Narrow::All;
+                }
+                self.ask();
+            }
+            KeyCode::Char(c) if ctrl => match c {
+                'a' => q.home(),
+                'e' => q.end(),
+                'u' => q.kill_line_back(),
+                'w' => q.kill_to_space(),
+                'y' => q.yank(),
+                'd' => q.delete(),
+                'h' => q.backspace(),
+                _ => {}
+            },
+            KeyCode::Char(c) if alt => match c {
+                'b' => q.word_left(),
+                'f' => q.word_right(),
+                'd' => q.kill_word_forward(),
+                _ => {}
+            },
+            KeyCode::Char(c) => q.insert(c.encode_utf8(&mut [0; 4])),
+            KeyCode::Backspace if alt || ctrl => q.kill_word_back(),
+            KeyCode::Backspace => q.backspace(),
+            KeyCode::Delete => q.delete(),
+            KeyCode::Left if alt || ctrl => q.word_left(),
+            KeyCode::Right if alt || ctrl => q.word_right(),
+            KeyCode::Left => q.left(),
+            KeyCode::Right => q.right(),
+            KeyCode::Home => q.home(),
+            KeyCode::End => q.end(),
+            _ => {}
+        }
+        if let Some(p) = self.palette.as_mut().filter(|p| p.query.text() != before) {
+            if let Narrow::Kind(k) = p.narrow {
+                p.strip.retain(|kind, _| *kind == k);
+            }
+            self.ask();
+        }
+    }
+
+    pub fn palette_paste(&mut self, s: &str) {
+        if let Some(p) = self.palette.as_mut() {
+            p.query.insert(&fmt::one_line(s));
+            self.ask();
+        }
+    }
+
+    pub fn palette_move(&mut self, by: isize) {
+        let n = self.palette_items().iter().filter(|i| i.selectable()).count();
+        if let Some(p) = self.palette.as_mut()
+            && n > 0
+        {
+            p.selected = (p.selected as isize + by).clamp(0, n as isize - 1) as usize;
+        }
+    }
+
+    fn palette_result(&self, i: usize) -> Option<&Found> {
+        self.palette.as_ref()?.results.get(i)
+    }
+
+    fn palette_selected(&self) -> Option<Item> {
+        let selected = self.palette.as_ref()?.selected;
+        self.palette_items().into_iter().filter(Item::selectable).nth(selected)
+    }
+
+    /// Enter: opens a chat, goes to a message, starts a chat with someone, or does an action.
+    pub fn palette_act(&mut self) {
+        let Some(item) = self.palette_selected() else { return };
+        match item {
+            Item::Heading(..) => {}
+            Item::Found(i) => {
+                let Some(found) = self.palette_result(i).cloned() else { return };
+                match found.hit {
+                    Hit::Chat(c) => {
+                        self.palette = None;
+                        let id = c.id.clone();
+                        if self.chats.get(&id).is_none() {
+                            self.outside = Some(c);
+                        }
+                        self.open_chat(&id);
+                        self.jawd.opened(&id);
+                    }
+                    Hit::Message(m) => {
+                        self.palette = None;
+                        self.go_to_message(&m.chat, &m.id);
+                    }
+                    Hit::Person(person) => {
+                        self.palette = None;
+                        self.starting = Some(person.id.clone());
+                        self.jawd.start_chat(&person.id);
+                        self.say(format!("a chat with {} begins", person.name));
+                    }
+                    Hit::Folder(_) => self.say("folders come with M6"),
+                    Hit::Shared => self.say("links come with M2, and photos and files with M3"),
+                }
+            }
+            Item::Action(a) => self.act(a.does),
+        }
+    }
+
+    fn act(&mut self, does: Does) {
+        let close = |v: &mut View| v.palette = None;
+        match does {
+            Does::StartChat => {
+                if let Some(p) = self.palette.as_mut() {
+                    p.narrow = Narrow::Kind(FoundKind::Person);
+                    p.query.take();
+                }
+                self.ask();
+            }
+            Does::GoToUnread => {
+                close(self);
+                let order: Vec<String> = self.chats.order().iter().map(|s| s.to_string()).collect();
+                let at = self.open.as_ref().and_then(|o| order.iter().position(|id| id == o)).map_or(0, |i| i + 1);
+                let next = (0..order.len()).map(|k| &order[(at + k) % order.len()]).find(|id| {
+                    self.chats
+                        .get(id)
+                        .is_some_and(|c| (c.unread > 0 || c.marked_unread) && self.open.as_ref() != Some(*id))
+                });
+                match next.cloned() {
+                    Some(id) => {
+                        self.open_chat(&id);
+                        self.jawd.opened(&id);
+                    }
+                    None => self.say("nothing unread"),
+                }
+            }
+            Does::SearchMessages => self.palette_search(None, ""),
+            Does::SearchHere(id, name) => self.palette_search(Some((id, name)), ""),
+            Does::Mute(id, name) => {
+                if let Some(p) = self.palette.as_mut() {
+                    p.muting = Some((id, name));
+                    p.selected = 0;
+                }
+            }
+            Does::MuteFor(id, until, said) => {
+                close(self);
+                self.jawd.mute(&id, Some(until));
+                self.say(said);
+            }
+            Does::Unmute(id) => {
+                close(self);
+                self.jawd.mute(&id, None);
+                self.say("unmuted");
+            }
+            Does::Archive(id, archived) => {
+                close(self);
+                self.jawd.archive(&id, archived);
+                self.say(if archived { "archived; the palette still finds it" } else { "back in the chat list" });
+            }
+            Does::Pin(id, pinned) => {
+                close(self);
+                self.jawd.pin(&id, pinned);
+                self.say(if pinned { "pinned" } else { "unpinned" });
+            }
+            Does::MarkUnread(id, unread) => {
+                close(self);
+                self.jawd.mark_unread(&id, unread);
+                self.say(if unread { "marked unread" } else { "marked read" });
+            }
+            Does::Keys => {
+                close(self);
+                self.overlay = Some(Overlay::Keys);
+            }
+            Does::Quit => self.quit = true,
+            Does::Later(said) => self.say(said),
+        }
+    }
+
+    /// Opens a message's chat anchored on it, the message selected.
+    fn go_to_message(&mut self, chat: &str, id: &str) {
+        self.jump = Some(id.to_string());
+        if self.open.as_deref() == Some(chat) {
+            self.watch(chat, crate::data::Around::Message(id.to_string()));
+        } else {
+            self.open_chat_at(chat, Some(id.to_string()));
+            self.jawd.opened(chat);
+        }
+        self.picking = false;
+    }
+
+    fn marks(&self, text: &[Mark], plain: Style) -> Vec<Span<'static>> {
+        let t = &self.theme;
+        let mark = Style::new().fg(t.mark).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        text.iter()
+            .map(|m| Span::styled(m.s.replace('\n', " "), if m.t == MarkKind::Mark { mark } else { plain }))
+            .collect()
+    }
+
+    /// A result's glyph, its name or words with the match marked, and what Enter would do.
+    fn found_row(&self, r: &Found) -> (Span<'static>, Vec<Span<'static>>, Vec<Span<'static>>) {
+        let t = &self.theme;
+        let dim = |s: String| vec![Span::styled(s, Style::new().fg(t.comment))];
+        let name = Style::new().fg(t.fg);
+        match &r.hit {
+            Hit::Chat(c) => {
+                let lead =
+                    if c.typing.is_empty() { Span::raw(" ") } else { Span::styled("●", Style::new().fg(t.online)) };
+                let mut said = vec![if c.group() { "group".to_string() } else { "chat".to_string() }];
+                if c.unread > 0 {
+                    said.push(format!("{} unread", c.unread));
+                }
+                if c.archived {
+                    said.push("archived".into());
+                }
+                if let Some(last) = &c.last {
+                    said.push(fmt::when(last.at, self.now(), self.tz));
+                }
+                said.extend(r.folders.iter().cloned());
+                (lead, self.marks(&r.text, name), dim(said.join(" · ")))
+            }
+            Hit::Person(_) => (
+                Span::styled("○", Style::new().fg(t.comment)),
+                self.marks(&r.text, name),
+                dim("no chat yet · ⏎ starts one".into()),
+            ),
+            Hit::Folder(_) => {
+                (Span::styled("◇", Style::new().fg(t.comment)), self.marks(&r.text, name), dim("folder · M6".into()))
+            }
+            Hit::Message(m) => {
+                let colour = m.from.as_ref().map_or(t.comment, |f| t.sender(f.colour));
+                let who = m.from.as_ref().map_or_else(|| "you".to_string(), |f| f.name.clone());
+                let mut main =
+                    vec![Span::styled(format!("{who} "), Style::new().fg(colour).add_modifier(Modifier::BOLD))];
+                let here = self.palette.as_ref().and_then(|p| p.scope.as_ref()).is_some();
+                if let Some(chat) = r.chat_name.as_ref().filter(|c| !here && **c != who) {
+                    main.push(Span::styled(format!("in {chat} "), Style::new().fg(t.comment)));
+                }
+                main.extend(self.marks(&r.text, Style::new().fg(t.text)));
+                (Span::styled("┃", Style::new().fg(colour)), main, dim(fmt::when(m.at, self.now(), self.tz)))
+            }
+            Hit::Shared => (Span::styled("↗", Style::new().fg(t.link)), self.marks(&r.text, name), dim("M2".into())),
+        }
+    }
+
+    fn action_row(&self, a: &Action) -> (Span<'static>, Vec<Span<'static>>, Vec<Span<'static>>) {
+        let t = &self.theme;
+        let later = a.later.is_some();
+        let name = Style::new().fg(if later { t.muted } else { t.fg });
+        let text = find::marked(&a.name, &a.marks);
+        let mut detail = vec![];
+        if !a.detail.is_empty() {
+            detail.push(Span::styled(a.detail.clone(), Style::new().fg(t.comment)));
+        }
+        if let Some(key) = a.key {
+            if !detail.is_empty() {
+                detail.push(Span::raw("  "));
+            }
+            let style =
+                if later { Style::new().fg(t.comment) } else { Style::new().fg(t.focus).add_modifier(Modifier::BOLD) };
+            detail.push(Span::styled(key, style));
+        }
+        if let Some(when) = a.later {
+            detail.push(Span::styled(format!(" · {when}"), Style::new().fg(t.gutter)));
+        }
+        (Span::styled("▸", Style::new().fg(t.comment)), self.marks(&text, name), detail)
+    }
+
+    pub fn draw_palette(&mut self, f: &mut Frame) {
+        let t = self.theme;
+        let screen = f.area();
+        let w = WIDTH.min(screen.width.saturating_sub(4));
+        let h = HEIGHT.min(screen.height.saturating_sub(3));
+        if w < 30 || h < 6 {
+            return;
+        }
+        let area = Rect::new(screen.x + (screen.width - w) / 2, screen.y + 2, w, h);
+        // The screen behind it, quieter.
+        for y in screen.y..screen.y + screen.height {
+            for x in screen.x..screen.x + screen.width {
+                if !(x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height) {
+                    let cell = &mut f.buffer_mut()[(x, y)];
+                    cell.set_fg(t.gutter);
+                    cell.modifier = Modifier::empty();
+                }
+            }
+        }
+        f.render_widget(Clear, area);
+        let foot = Line::from(Span::styled(
+            " ↑↓ moves · tab narrows · ⏎ does it · ctrl-g its message · esc closes ",
+            Style::new().fg(t.muted),
+        ));
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(t.focus))
+            .style(Style::new().bg(t.surface).fg(t.fg))
+            .title(Span::styled(" palette ", Style::new().fg(t.text)))
+            .title_bottom(foot)
+            .padding(Padding::horizontal(1));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let iw = inner.width as usize;
+        let items = self.palette_items();
+        let strip = self.strip();
+        let actions = self.palette.as_ref().map_or(0, |p| {
+            if p.scope.is_some() || p.narrow != Narrow::All {
+                0
+            } else {
+                self.matching_actions(p.query.text()).len() as u32
+            }
+        });
+        let Some(p) = self.palette.as_mut() else { return };
+
+        let mut query = vec![Span::styled("› ", Style::new().fg(t.comment))];
+        if let Some((_, name)) = &p.scope {
+            query.push(Span::styled(format!(" in {name} "), Style::new().fg(t.fg).bg(t.selection)));
+            query.push(Span::raw(" "));
+        }
+        let lead: usize = query.iter().map(|s| s.width()).sum();
+        let (_, (_, col)) = p.query.view(10_000);
+        let text = p.query.text().to_string();
+        query.push(Span::styled(text.clone(), Style::new().fg(t.fg)));
+        if text.is_empty() {
+            let hint = if p.muting.is_some() {
+                "for how long?"
+            } else if p.scope.is_some() {
+                "words said in this chat"
+            } else {
+                match p.narrow {
+                    Narrow::Kind(FoundKind::Person) => "a name or a number",
+                    Narrow::Kind(FoundKind::Message) => "words said anywhere",
+                    _ => "a chat, a person, something to do, or words",
+                }
+            };
+            query.push(Span::styled(format!(" {hint}"), Style::new().fg(t.gutter)));
+        }
+        let found: u32 = p.counts.values().sum::<u32>() + actions;
+        let right = match (&p.failed, p.answered) {
+            (Some(_), _) => String::new(),
+            (None, false) => "finding… ".into(),
+            (None, true) if text.is_empty() => String::new(),
+            (None, true) => format!("{} found ", count(found)),
+        };
+        let mut line = fit_spans(query, iw.saturating_sub(right.chars().count()));
+        let used: usize = line.iter().map(|s| s.width()).sum();
+        line.push(Span::raw(" ".repeat(iw.saturating_sub(used + right.chars().count()))));
+        line.push(Span::styled(right, Style::new().fg(t.comment)));
+        let buf = f.buffer_mut();
+        buf.set_line(inner.x, inner.y, &Line::from(line), inner.width);
+        if p.muting.is_none() {
+            let mut spans = vec![];
+            for (i, (n, label)) in strip.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let style = if *n == p.narrow {
+                    Style::new().fg(t.fg).bg(t.selection).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(t.comment)
+                };
+                spans.push(Span::styled(format!(" {label} "), style));
+            }
+            let used: usize = spans.iter().map(|s| s.width()).sum();
+            let tab = "tab narrows";
+            if used + tab.len() < iw {
+                spans.push(Span::raw(" ".repeat(iw - used - tab.len())));
+                spans.push(Span::styled(tab, Style::new().fg(t.gutter)));
+            }
+            buf.set_line(inner.x, inner.y + 1, &Line::from(fit_spans(spans, iw)), inner.width);
+        }
+        let list_y = inner.y + 3;
+        let rows = inner.height.saturating_sub(3) as usize;
+        if let Some(why) = p.failed.clone() {
+            let line = Line::from(Span::styled(format!("jawd couldn't search: {why}"), Style::new().fg(t.warn)));
+            buf.set_line(inner.x, list_y, &line, inner.width);
+            return;
+        }
+        if items.is_empty() && p.answered && !text.is_empty() {
+            let line = Line::from(Span::styled("Nothing matches.", Style::new().fg(t.comment)));
+            buf.set_line(inner.x, list_y, &line, inner.width);
+            return;
+        }
+        let selectable = items.iter().filter(|i| i.selectable()).count();
+        p.selected = p.selected.min(selectable.saturating_sub(1));
+        let sel_row = items.iter().enumerate().filter(|(_, i)| i.selectable()).nth(p.selected).map_or(0, |(r, _)| r);
+        if sel_row < p.top {
+            p.top = sel_row.saturating_sub(1);
+        } else if sel_row >= p.top + rows {
+            p.top = sel_row + 1 - rows;
+        }
+        let top = p.top;
+        let cursor = (inner.x + (lead + col).min(iw.saturating_sub(1)) as u16, inner.y);
+        let mut drawn = vec![];
+        for (r, item) in items.iter().enumerate().skip(top).take(rows) {
+            let y = list_y + (r - top) as u16;
+            let line = match item {
+                Item::Heading(label, more) => {
+                    let mut spans =
+                        vec![Span::styled(label.to_string(), Style::new().fg(t.muted).add_modifier(Modifier::BOLD))];
+                    if !more.is_empty() {
+                        spans.push(Span::styled(format!(" · {more}"), Style::new().fg(t.comment)));
+                    }
+                    let used: usize = spans.iter().map(|s| s.width()).sum::<usize>() + 1;
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled("─".repeat(iw.saturating_sub(used)), Style::new().fg(t.gutter)));
+                    Line::from(spans)
+                }
+                Item::Found(i) => {
+                    let Some(r) = self.palette.as_ref().and_then(|p| p.results.get(*i)) else { continue };
+                    let (lead, main, detail) = self.found_row(r);
+                    self.hit_line(lead, main, detail, iw)
+                }
+                Item::Action(a) => {
+                    let (lead, main, detail) = self.action_row(a);
+                    self.hit_line(lead, main, detail, iw)
+                }
+            };
+            drawn.push((y, line, r == sel_row && item.selectable()));
+        }
+        let buf = f.buffer_mut();
+        for (y, line, selected) in drawn {
+            buf.set_line(inner.x, y, &line, inner.width);
+            if selected {
+                buf.set_style(
+                    Rect::new(area.x + 1, y, area.width - 2, 1),
+                    Style::new().bg(t.selection).add_modifier(Modifier::BOLD),
+                );
+            }
+        }
+        f.set_cursor_position(cursor);
+    }
+
+    fn hit_line(
+        &self,
+        lead: Span<'static>,
+        main: Vec<Span<'static>>,
+        detail: Vec<Span<'static>>,
+        w: usize,
+    ) -> Line<'static> {
+        let detail_w: usize = detail.iter().map(|s| s.width()).sum();
+        let room = w.saturating_sub(4 + detail_w + 2);
+        let mut spans = vec![Span::raw("  "), lead, Span::raw(" ")];
+        let main = fit_spans(main, room);
+        let used = 4 + main.iter().map(|s| s.width()).sum::<usize>();
+        spans.extend(main);
+        spans.push(Span::raw(" ".repeat(w.saturating_sub(used + detail_w + 1))));
+        spans.extend(detail);
+        Line::from(spans)
+    }
+
+    /// Where a click in the palette lands: the selectable row under it, if any.
+    pub fn palette_click(&mut self, y: u16, screen: Rect) -> bool {
+        let w = WIDTH.min(screen.width.saturating_sub(4));
+        let h = HEIGHT.min(screen.height.saturating_sub(3));
+        let area = Rect::new(screen.x + (screen.width - w) / 2, screen.y + 2, w, h);
+        if y < area.y || y >= area.y + area.height {
+            self.palette = None;
+            return false;
+        }
+        let items = self.palette_items();
+        let Some(p) = self.palette.as_mut() else { return false };
+        let row = (y as isize - (area.y as isize + 4)) + p.top as isize;
+        if row < 0 || row as usize >= items.len() || !items[row as usize].selectable() {
+            return true;
+        }
+        p.selected = items[..row as usize].iter().filter(|i| i.selectable()).count();
+        self.palette_act();
+        true
+    }
+}

@@ -4,13 +4,17 @@
 //! window does. Live, a thread of its own has people type and write; a flood sends messages as
 //! fast as asked.
 
+mod find;
+
 use crate::data::{
-    Around, Chat, ChatKind, Jawd, Kind, Last, Message, Quote, Reaction, Sender, Span, SpanKind, Tick, Typing, Update,
+    Around, Chat, ChatKind, FoundKind, Jawd, Kind, Last, Message, Person, Quote, Reaction, Sender, Span, SpanKind,
+    Tick, Typing, Update,
 };
 use crate::fmt::{DAY, MINUTE};
 use crate::run::Event;
 use jaw_proto::{Connection, ConnectionState, LinkStep};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::Sender as Channel;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
@@ -93,11 +97,18 @@ pub struct Account {
     live: bool,
     gone: bool,
     qr: u32,
+    /// People with no chat yet.
+    contacts: Vec<Person>,
+    /// How often each chat was opened by hand, which `find` ranks by.
+    opens: HashMap<String, u32>,
 }
 
 struct Shared {
     account: Mutex<Account>,
     wake: Condvar,
+    /// The thread `find` is answered on, once it has one, and the newest query it was asked.
+    finder: Mutex<Option<Channel<find::Ask>>>,
+    latest: AtomicU64,
 }
 
 /// The made-up account as the interface's jawd.
@@ -139,8 +150,17 @@ impl Demo {
             live,
             gone: false,
             qr: 0,
+            contacts: contacts(),
+            opens: HashMap::new(),
         };
-        let demo = Demo { shared: Arc::new(Shared { account: Mutex::new(account), wake: Condvar::new() }) };
+        let demo = Demo {
+            shared: Arc::new(Shared {
+                account: Mutex::new(account),
+                wake: Condvar::new(),
+                finder: Mutex::new(None),
+                latest: AtomicU64::new(0),
+            }),
+        };
         {
             let mut a = demo.lock();
             match state {
@@ -165,6 +185,20 @@ impl Demo {
                 .expect("the demo's thread");
         }
         demo
+    }
+
+    /// Changes a chat's row as the phone would, and says so to the chat list: an archived chat
+    /// leaves All, and comes back when it's unarchived.
+    fn change(&self, chat: &str, how: impl FnOnce(&mut Chat)) {
+        let mut a = self.lock();
+        let Some(&t) = a.index.get(chat) else { return };
+        let c = &mut a.threads[t].chat;
+        how(c);
+        c.v += 1;
+        let (row, archived) = (c.clone(), c.archived);
+        let total = a.total();
+        let (upsert, remove) = if archived { (vec![], vec![row.id]) } else { (vec![row], vec![]) };
+        a.send(Update::Chats { reset: false, upsert, remove, total });
     }
 
     fn lock(&self) -> MutexGuard<'_, Account> {
@@ -379,6 +413,7 @@ impl Account {
         Message {
             id: format!("3EB0JAW{:09}", self.seq),
             v: 1,
+            chat: String::new(),
             sort: format!("{at:013}~{:09}", self.seq),
             at,
             mine: from.is_none(),
@@ -407,8 +442,9 @@ impl Account {
 
     /// A message comes into chat `t`: its row moves up, and the open window takes it if it
     /// follows the newest, or counts it as newer if it doesn't.
-    fn arrive(&mut self, t: usize, m: Message) {
+    fn arrive(&mut self, t: usize, mut m: Message) {
         let thread = &mut self.threads[t];
+        m.chat = thread.chat.id.clone();
         let mention = m.spans.iter().any(|s| s.t == SpanKind::Mention && s.person.as_deref() == Some(ME));
         thread.chat.last = Some(Last {
             from: m.from.as_ref().filter(|_| thread.chat.kind == ChatKind::Group).map(|f| f.name.clone()),
@@ -521,7 +557,7 @@ impl Account {
 impl Jawd for Demo {
     fn watch_chats(&mut self, _around: Option<&str>, _before: usize, _after: usize) {
         let mut a = self.lock();
-        let rows = a.threads.iter().map(|t| t.chat.clone()).collect();
+        let rows = a.threads.iter().map(|t| t.chat.clone()).filter(|c| !c.archived).collect();
         let total = a.total();
         a.send(Update::Chats { reset: true, upsert: rows, remove: vec![], total });
     }
@@ -589,11 +625,55 @@ impl Jawd for Demo {
         }
     }
 
-    fn opened(&mut self, _chat: &str) {}
+    fn opened(&mut self, chat: &str) {
+        *self.lock().opens.entry(chat.to_string()).or_default() += 1;
+    }
 
     fn typing(&mut self, _chat: &str, _state: Typing) {}
 
     fn focus(&mut self, _focused: bool) {}
+
+    fn find(&mut self, id: u64, query: &str, kind: Option<FoundKind>, chat: Option<&str>, limit: usize) {
+        self.ask(find::Ask { id, query: query.to_string(), kind, chat: chat.map(String::from), limit });
+    }
+
+    fn start_chat(&mut self, person: &str) {
+        let mut a = self.lock();
+        let Some(i) = a.contacts.iter().position(|p| p.id == person) else { return };
+        let p = a.contacts.remove(i);
+        let digits: String = p.phone.unwrap_or_default().chars().filter(char::is_ascii_digit).collect();
+        let now = a.now();
+        let mut w = Writing::new(&format!("{digits}@s.whatsapp.net"), &p.name, ChatKind::Direct, now);
+        w.thread.chat.sort = format!("0~{now:013}");
+        let thread = w.done(0, 0);
+        let chat = thread.chat.clone();
+        let at = a.threads.len();
+        a.index.insert(chat.id.clone(), at);
+        a.threads.push(thread);
+        let total = a.total();
+        a.send(Update::Chats { reset: false, upsert: vec![chat.clone()], remove: vec![], total });
+        a.send(Update::ChatStarted { chat });
+    }
+
+    fn mute(&mut self, chat: &str, until: Option<i64>) {
+        self.change(chat, |c| c.muted_until = until);
+    }
+
+    fn archive(&mut self, chat: &str, archived: bool) {
+        self.change(chat, |c| c.archived = archived);
+    }
+
+    fn pin(&mut self, chat: &str, pinned: bool) {
+        self.change(chat, |c| {
+            c.pinned = pinned;
+            let at = c.sort.split_once('~').map_or("0", |(_, at)| at).to_string();
+            c.sort = format!("{}~{at}", u8::from(pinned));
+        });
+    }
+
+    fn mark_unread(&mut self, chat: &str, unread: bool) {
+        self.change(chat, |c| c.marked_unread = unread);
+    }
 
     fn link_start(&mut self, phone: Option<String>) {
         let mut a = self.lock();
@@ -660,6 +740,18 @@ pub fn markup(text: &str) -> Vec<Span> {
     out
 }
 
+/// People on WhatsApp you have no chat with yet.
+fn contacts() -> Vec<Person> {
+    [("31", "Artur Reis"), ("32", "Alice Rocha"), ("33", "Tomás Duarte"), ("34", "Inês Duarte")]
+        .iter()
+        .map(|(n, name)| Person {
+            id: format!("person:{n}"),
+            name: name.to_string(),
+            phone: Some(format!("+3519130000{n}")),
+        })
+        .collect()
+}
+
 const NAMES: &[&str] = &["Ana", "Rui", "Inês", "Sofia", "Tiago", "Marta", "João", "Leonor"];
 const WORDS: &[&str] = &[
     "sim", "não", "amanhã", "hoje", "jantar", "vinho", "praia", "comboio", "às", "nove", "quem", "vem", "leva", "o",
@@ -690,6 +782,8 @@ impl Writing {
             mentions: 0,
             pinned: false,
             muted_until: None,
+            archived: false,
+            marked_unread: false,
             draft: None,
             typing: vec![],
         };
@@ -701,9 +795,11 @@ impl Writing {
         self.seq += 1;
         let at = self.now - (ago * MINUTE as f64) as i64;
         let id = format!("{}-{:05}", self.thread.chat.id.split('@').next().unwrap_or("chat"), self.seq);
+        let chat = self.thread.chat.id.clone();
         self.thread.messages.push(Message {
             id,
             v: 1,
+            chat,
             sort: format!("{at:013}~{:09}", self.seq),
             at,
             from: from.cloned(),

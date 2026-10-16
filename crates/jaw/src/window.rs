@@ -254,6 +254,8 @@ pub mod tests {
             mentions: 0,
             pinned: false,
             muted_until: None,
+            archived: false,
+            marked_unread: false,
             draft: None,
             typing: vec![],
         }
@@ -263,6 +265,7 @@ pub mod tests {
         Message {
             id: id.into(),
             v,
+            chat: "c".into(),
             sort: sort.into(),
             at: 0,
             from: None,
