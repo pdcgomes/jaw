@@ -1,7 +1,8 @@
 //! Read receipts. `read` moves the chat's read position forward in a synced commit, which counts
 //! its unread messages again and owes WhatsApp a receipt for the messages from others between how
 //! far it was told and there. A chat's receipts go at once, then at most once every
-//! `Timing::read_every`, however fast it's read, each naming every message owed since the last;
+//! `Timing::read_every`, however fast it's read, each naming the messages owed since the last, a
+//! thousand to a receipt, oldest first, with how far WhatsApp was told never past what it heard;
 //! what the engine couldn't send waits for the connection to come back. whatsmeow sends them as
 //! read-self when read receipts are off on the phone, so only your own devices hear.
 
@@ -74,14 +75,19 @@ fn want(inner: &Arc<Inner>, chat: i64) {
         let mut pause = inner.timing.retry_first;
         loop {
             inner.reads.chats.lock().expect("read receipts").entry(chat).or_default().again = false;
-            if let Err(e) = tell(&inner, chat).await {
-                eprintln!("jawd: can't send read receipts, so they wait for the connection: {e:#}");
-                tokio::select! {
-                    _ = tokio::time::sleep(pause) => {}
-                    _ = inner.online.notified() => {}
+            match tell(&inner, chat).await {
+                // More than one receipt's worth is owed: the next lot goes straight after.
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("jawd: can't send read receipts, so they wait for the connection: {e:#}");
+                    tokio::select! {
+                        _ = tokio::time::sleep(pause) => {}
+                        _ = inner.online.notified() => {}
+                    }
+                    pause = (pause * 2).min(inner.timing.retry_most);
+                    continue;
                 }
-                pause = (pause * 2).min(inner.timing.retry_most);
-                continue;
             }
             {
                 let mut chats = inner.reads.chats.lock().expect("read receipts");
@@ -97,19 +103,21 @@ fn want(inner: &Arc<Inner>, chat: i64) {
     });
 }
 
-/// Tells WhatsApp what `chat` owes, one receipt per sender in a group, then keeps how far it was told.
-async fn tell(inner: &Inner, chat: i64) -> anyhow::Result<()> {
+/// Tells WhatsApp the next lot of what `chat` owes, oldest first, one receipt per sender in a group,
+/// then keeps how far it was told, which is never past a message it named. Says whether more is owed.
+async fn tell(inner: &Inner, chat: i64) -> anyhow::Result<bool> {
     let Some(owed) =
         inner.store.reads().query(crate::work::Priority::Interactive, move |db| outbox::owed(db, chat)).await?
     else {
-        return Ok(());
+        return Ok(false);
     };
+    let more = owed.messages.len() == outbox::RECEIPTS_AT_ONCE;
     for mark in receipts(&owed) {
         engine(inner, pb::command::Kind::MarkRead(mark)).await?;
     }
     let told = Step::Told { chat, at: owed.upto.0, n: owed.upto.1 };
     inner.store.apply(Lane::Live, vec![Change::Outbox(told)]).await?;
-    Ok(())
+    Ok(more)
 }
 
 /// The receipts for what's owed: one for a one-to-one chat, one per sender in a group, where a

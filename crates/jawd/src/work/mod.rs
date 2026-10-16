@@ -9,7 +9,7 @@ mod serial;
 
 pub use pool::{Pool, Priority};
 pub use samples::Samples;
-pub use serial::Serial;
+pub use serial::{Next, Serial};
 
 /// What a pool reports for `status`.
 pub trait Report: Send + Sync {

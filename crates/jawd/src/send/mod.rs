@@ -12,6 +12,7 @@ pub mod bench;
 mod outbox;
 mod presence;
 mod reads;
+mod regroup;
 mod start;
 mod typing;
 
@@ -118,6 +119,7 @@ impl Sending {
             presence,
         });
         typing::start(&inner);
+        regroup::start(&inner);
         tokio::spawn(presence::follow(inner.clone(), pushes, focused, online));
         outbox::resume(&inner).await?;
         reads::resume(&inner).await?;

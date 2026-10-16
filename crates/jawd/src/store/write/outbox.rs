@@ -1,9 +1,12 @@
 //! The outbox and read positions: what sending writes and reads. A message you send is written as
 //! pending with its outbox row in one transaction, so it shows at once and is sent however jawd
-//! stops; the server's answer moves it to sent and removes the row; a failure counts an attempt,
-//! and the last one leaves it failed until it's retried by hand. Reading moves the chat's read
-//! position forward, unread is counted again from it, and the read receipts owed to WhatsApp are
-//! the messages between how far it has been told and that position.
+//! stops; the server's answer or any receipt removes the row; a refusal leaves it failed until it's
+//! retried by hand, or, when the message may already have gone, unconfirmed until a receipt says
+//! so or a day passes. Reading moves the chat's read position forward, unread is counted again from
+//! it, and the read receipts owed to WhatsApp are the messages between how far it has been told and
+//! that position.
+
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -12,43 +15,92 @@ use super::{CHAT, MESSAGE, Message, Stamps, advanced, chat_jid, now_ms, upsert_m
 
 /// The most unread messages counted, so a count costs the same however many there are.
 pub const UNREAD_COUNTED: i64 = 1_000;
-/// The most messages one flush of read receipts names, newest first.
+/// The most messages one read receipt names; more go in more receipts, oldest first.
 pub const RECEIPTS_AT_ONCE: usize = 1_000;
+/// The most messages the outbox holds, waiting, unconfirmed or failed; past it a new one is
+/// refused, and none already in it is dropped.
+pub const OUTBOX_MOST: u64 = 1_000;
+/// How long an interface's key for a message it sent is kept.
+pub const KEY_KEPT_MS: i64 = 24 * 3600 * 1000;
+/// How many of a member's messages one step of regrouping looks at again, about a millisecond's worth.
+const REGROUP_AT_ONCE: i64 = 16;
+/// How many keys past their day one enqueue removes.
+const KEYS_PRUNED: i64 = 64;
 
 /// A step for the writer.
 #[derive(Clone, Debug)]
 pub enum Step {
     /// A message of yours to send: its row, pending, and its outbox row, with `raw`, the
-    /// WAWebProtobufsE2E.Message to send. Its chat's draft is cleared, since it's what was sent.
-    Enqueue { message: Box<Message>, kind: &'static str, raw: Vec<u8> },
-    /// The server has outbox row `outbox`'s message, at its time `at`.
-    Sent { outbox: i64, at: Option<i64> },
+    /// WAWebProtobufsE2E.Message to send, unless the interface's `key` already named one or the
+    /// outbox is full. Its chat's draft is cleared, since it's what was sent. What it came to is
+    /// put in `written`.
+    Enqueue { message: Box<Message>, kind: &'static str, raw: Vec<u8>, key: Option<String>, written: Written },
+    /// The server has outbox row `outbox`'s message.
+    Sent { outbox: i64 },
     /// An attempt failed with `error`; it's tried again at `next_at`, or, without one, it has
     /// failed until it's retried by hand.
     Failed { outbox: i64, error: String, next_at: Option<i64> },
+    /// WhatsApp refused a message that may already have gone; it waits for a receipt until `until`.
+    Unconfirmed { outbox: i64, error: String, until: i64 },
     /// A failed message is queued again by hand, and pending again.
     Retry { outbox: i64 },
     /// You've read `chat` up to message `id`.
     Read { chat: String, id: String },
     /// WhatsApp has been told chat `chat` is read up to the message at (`at`, `n`).
     Told { chat: i64, at: i64, n: i64 },
+    /// The next few of your messages that `member`, who left group `chat`, was sent are looked at
+    /// again, since they no longer wait for them.
+    Regroup { chat: i64, member: i64 },
 }
 
+/// Where an enqueue says what it came to, for whoever asked for it. The last attempt at its
+/// transaction is the one that stands.
+#[derive(Clone, Debug, Default)]
+pub struct Written(Arc<Mutex<Option<Enqueued>>>);
+
+impl Written {
+    pub fn take(&self) -> Option<Enqueued> {
+        self.0.lock().expect("an enqueue's result").take()
+    }
+
+    fn put(&self, enqueued: Enqueued) {
+        *self.0.lock().expect("an enqueue's result") = Some(enqueued);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Enqueued {
+    /// The message, under its chat's JID as jaw keeps it, and its outbox row, if it's still to send:
+    /// the one written now, or the one an earlier request with the same key wrote.
+    Queued { message: i64, id: String, chat: String, outbox: Option<i64> },
+    /// The outbox holds as many as it may, so nothing was written.
+    Full { waiting: u64, failed: u64 },
+}
+
+const KEYED: &str = "SELECT m.n, m.id, c.id, o.n FROM send_keys k JOIN messages m ON m.n = k.message
+    JOIN chats c ON c.n = m.chat LEFT JOIN outbox o ON o.message = m.n WHERE k.key = ?1";
+const KEEP_KEY: &str = "INSERT INTO send_keys (key, message, at) VALUES (?1, ?2, ?3)";
+const PRUNE_KEYS: &str =
+    "DELETE FROM send_keys WHERE key IN (SELECT key FROM send_keys WHERE at < ?1 ORDER BY at LIMIT ?2)";
 const MESSAGE_BY_ID: &str =
     "SELECT m.n, m.chat FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = ?1 AND m.id = ?2";
 const ENQUEUE: &str = "INSERT INTO outbox (message, kind, raw, next_at, created_at) VALUES (?1, ?2, ?3, ?4, ?4)
     ON CONFLICT (message) DO NOTHING";
+const OUTBOX_OF: &str = "SELECT n FROM outbox WHERE message = ?1";
 const CLEAR_DRAFT: &str = "UPDATE chats SET draft = NULL, v = ?2 WHERE n = ?1 AND draft IS NOT NULL";
 const OUTBOXED_MESSAGE: &str =
     "SELECT m.n, m.chat, m.status FROM outbox o JOIN messages m ON m.n = o.message WHERE o.n = ?1";
 const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2";
 const DEQUEUE: &str = "DELETE FROM outbox WHERE n = ?1";
-const SENT: &str = "UPDATE messages SET status = ?2, at = coalesce(?3, at), v = ?4
-    WHERE n = ?1 AND (status IS NOT ?2 OR at IS NOT coalesce(?3, at))";
-const SENT_AT: &str = "UPDATE chats SET last_at = ?3 WHERE n = ?1 AND last_message = ?2";
+const RECEIVED: &str = "DELETE FROM outbox WHERE message = ?1";
+const SENT: &str = "UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1 AND status IS NOT ?2";
+const EXPIRES: &str = "UPDATE messages SET expires_at = ?2 + c.ephemeral * 1000 FROM chats c
+    WHERE messages.n = ?1 AND c.n = messages.chat AND c.ephemeral > 0 AND messages.expires_at IS NULL";
 const ATTEMPTED: &str = "UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = coalesce(?3, next_at),
         state = iif(?3 IS NULL, 'failed', 'queued')
     WHERE n = ?1";
+const UNCONFIRMED: &str = "UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = ?3, state = 'unconfirmed'
+    WHERE n = ?1 AND state = 'queued'";
 const FAILED: &str = "UPDATE messages SET status = 'failed', v = ?2 WHERE n = ?1";
 const REQUEUE: &str =
     "UPDATE outbox SET state = 'queued', attempts = 0, error = NULL, next_at = ?2 WHERE n = ?1 AND state = 'failed'";
@@ -60,28 +112,30 @@ const MOVE_READ: &str = "UPDATE reads SET at = ?2, n = ?3 WHERE chat = ?1";
 const FIRST_READ: &str = "INSERT INTO reads (chat, at, n, told_at, told_n) VALUES (?1, ?2, ?3, ?4, ?5)";
 const UNREAD_AFTER: &str =
     "SELECT count(*) FROM (SELECT 1 FROM messages WHERE chat = ?1 AND mine = 0 AND (at, n) > (?2, ?3) LIMIT ?4)";
-const SET_UNREAD: &str = "UPDATE chats SET unread = ?2, mentions = iif(?2 = 0, 0, mentions), marked_unread = 0, v = ?3
-    WHERE n = ?1 AND (unread IS NOT ?2 OR (?2 = 0 AND mentions <> 0) OR marked_unread <> 0)";
+const SET_UNREAD: &str = "UPDATE chats SET unread = ?2, mentions = iif(?2 = 0, 0, mentions), v = ?3
+    WHERE n = ?1 AND (unread IS NOT ?2 OR (?2 = 0 AND mentions <> 0))";
 const NEWEST_FROM_OTHERS: &str = "SELECT at, n FROM messages WHERE chat = ?1 AND mine = 0 AND (at, n) <= (?2, ?3)
     ORDER BY at DESC, n DESC LIMIT ?4";
 const TOLD: &str = "UPDATE reads SET told_at = ?2, told_n = ?3
     WHERE chat = ?1 AND (?2, ?3) > (told_at, told_n) AND (?2, ?3) <= (at, n)";
 const QUEUED: &str = "SELECT o.n, c.id FROM outbox o JOIN messages m ON m.n = o.message JOIN chats c ON c.n = m.chat
     WHERE o.state = 'queued' ORDER BY o.n";
+const UNCONFIRMED_ROWS: &str = "SELECT n, next_at FROM outbox WHERE state = 'unconfirmed'";
 const WAITING: &str = "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox";
-const OUTBOXED: &str = "SELECT o.n, c.id, m.id, o.raw, o.state = 'queued', m.status
+const OUTBOXED: &str = "SELECT o.n, c.id, m.id, o.raw, o.state, o.attempts, m.status
     FROM outbox o CROSS JOIN messages m ON m.n = o.message JOIN chats c ON c.n = m.chat";
 const OWING: &str = "SELECT chat FROM reads WHERE (told_at, told_n) < (at, n)";
 const OWED_CHAT: &str = "SELECT c.id, c.kind, r.at, r.n, r.told_at, r.told_n FROM reads r JOIN chats c ON c.n = r.chat
     WHERE r.chat = ?1 AND (r.told_at, r.told_n) < (r.at, r.n)";
-const OWED_MESSAGES: &str = "SELECT m.id, j.jid FROM messages m LEFT JOIN person_jids j ON j.n = m.sender
+const OWED_MESSAGES: &str = "SELECT m.id, j.jid, m.at, m.n FROM messages m LEFT JOIN person_jids j ON j.n = m.sender
     WHERE m.chat = ?1 AND m.mine = 0 AND (m.at, m.n) > (?2, ?3) AND (m.at, m.n) <= (?4, ?5)
-    ORDER BY m.at DESC, m.n DESC LIMIT ?6";
+    ORDER BY m.at, m.n LIMIT ?6";
 
 const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
-const RECIPIENTS: &str = "INSERT OR IGNORE INTO recipients (message, member)
-    SELECT ?1, g.member FROM group_members g JOIN person_jids j ON j.n = g.member
+const RECIPIENTS: &str = "INSERT OR IGNORE INTO recipients (message, member, chat)
+    SELECT ?1, g.member, ?2 FROM group_members g JOIN person_jids j ON j.n = g.member
     WHERE g.chat = ?2 AND j.person NOT IN (SELECT p.person FROM json_each(?3) e JOIN person_jids p ON p.jid = e.value)";
+const RECIPIENTS_DONE: &str = "DELETE FROM recipients WHERE message = ?1";
 /// A message's recipients: those it was sent to who are still members of group ?2, you apart, in
 /// case it was sent before jaw knew your JIDs, ?3.
 macro_rules! sent_to {
@@ -133,12 +187,16 @@ const LAGGARDS: [(&str, [&str; 2]); 3] = [
         ],
     ),
 ];
-const SENT_TO_MEMBER: &str = "SELECT message FROM recipients WHERE member = ?1 ORDER BY message DESC LIMIT ?2";
-const MINE_IN: &str = "SELECT status FROM messages WHERE n = ?1 AND chat = ?2 AND mine";
+const LEFT: &str =
+    "INSERT INTO regroup (chat, member) VALUES (?1, ?2) ON CONFLICT (chat, member) DO UPDATE SET after = 0";
+const REGROUP_FROM: &str = "SELECT after FROM regroup WHERE chat = ?1 AND member = ?2";
+const SENT_TO_MEMBER: &str =
+    "SELECT message FROM recipients WHERE chat = ?1 AND member = ?2 AND message > ?3 ORDER BY message LIMIT ?4";
+const REGROUP_ON: &str = "UPDATE regroup SET after = ?3 WHERE chat = ?1 AND member = ?2";
+const REGROUP_DONE: &str = "DELETE FROM regroup WHERE chat = ?1 AND member = ?2";
+const REGROUPS: &str = "SELECT chat, member FROM regroup LIMIT ?1";
+const MINE_IN: &str = "SELECT status, kind FROM messages WHERE n = ?1 AND chat = ?2 AND mine";
 const REGROUPED: &str = "UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1";
-
-/// How many of a member's latest messages from you are looked at again when they leave a group.
-const LEFT_LOOKED_AT: i64 = 100;
 
 /// Where a step that failed came from, for the quarantine.
 pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
@@ -146,29 +204,59 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
         Step::Enqueue { message, .. } => {
             ("send", format!("{} {}", message.chat, message.id), message.raw.as_ref().map(|p| p.0.as_slice()))
         }
-        Step::Sent { outbox, .. } | Step::Failed { outbox, .. } | Step::Retry { outbox } => {
-            ("outbox", outbox.to_string(), None)
-        }
+        Step::Sent { outbox }
+        | Step::Failed { outbox, .. }
+        | Step::Unconfirmed { outbox, .. }
+        | Step::Retry { outbox } => ("outbox", outbox.to_string(), None),
         Step::Read { chat, id } => ("read", format!("{chat} {id}"), None),
         Step::Told { chat, n, .. } => ("told", format!("{chat} {n}"), None),
+        Step::Regroup { chat, member } => ("regroup", format!("{chat} {member}"), None),
     }
 }
 
 pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result<bool> {
     match step {
-        Step::Enqueue { message, kind, raw } => enqueue(db, stamps, message, kind, raw),
-        Step::Sent { outbox, at } => sent(db, stamps, *outbox, *at),
+        Step::Enqueue { message, kind, raw, key, written } => enqueue(db, stamps, message, kind, raw, key, written),
+        Step::Sent { outbox } => sent(db, stamps, *outbox),
         Step::Failed { outbox, error, next_at } => failed(db, stamps, *outbox, error, *next_at),
+        Step::Unconfirmed { outbox, error, until } => {
+            db.prepare_cached(UNCONFIRMED)?.execute(params![outbox, error, until])?;
+            Ok(false)
+        }
         Step::Retry { outbox } => retry(db, stamps, *outbox),
         Step::Read { chat, id } => read(db, stamps, chat, id),
         Step::Told { chat, at, n } => {
             db.prepare_cached(TOLD)?.execute(params![chat, at, n])?;
             Ok(false)
         }
+        Step::Regroup { chat, member } => regroup(db, stamps, *chat, *member),
     }
 }
 
-fn enqueue(db: &Connection, stamps: &mut Stamps, message: &Message, kind: &str, raw: &[u8]) -> Result<bool> {
+fn enqueue(
+    db: &Connection,
+    stamps: &mut Stamps,
+    message: &Message,
+    kind: &str,
+    raw: &[u8],
+    key: &Option<String>,
+    written: &Written,
+) -> Result<bool> {
+    if let Some(key) = key {
+        let keyed: Option<(i64, String, String, Option<i64>)> = db
+            .prepare_cached(KEYED)?
+            .query_row([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .optional()?;
+        if let Some((message, id, chat, outbox)) = keyed {
+            written.put(Enqueued::Queued { message, id, chat, outbox });
+            return Ok(false);
+        }
+    }
+    let (waiting, failed) = waiting(db)?;
+    if waiting >= OUTBOX_MOST {
+        written.put(Enqueued::Full { waiting, failed });
+        return Ok(false);
+    }
     let chat = chat_jid(db, &message.chat)?;
     let resolved;
     let message = if chat == message.chat {
@@ -178,14 +266,21 @@ fn enqueue(db: &Connection, stamps: &mut Stamps, message: &Message, kind: &str, 
         &resolved
     };
     let changed = upsert_message(db, stamps, message, false)?;
-    let (n, chat): (i64, i64) = db
+    let (n, chat_n): (i64, i64) = db
         .prepare_cached(MESSAGE_BY_ID)?
         .query_row(params![message.chat, message.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    db.prepare_cached(ENQUEUE)?.execute(params![n, kind, raw, now_ms()])?;
-    db.prepare_cached(RECIPIENTS)?.execute(params![n, chat, me(db)?])?;
-    let seq = stamps.seq(CHAT, Some(chat));
-    if db.prepare_cached(CLEAR_DRAFT)?.execute([chat, seq])? > 0 {
-        stamps.record(db, CHAT, chat, Some(chat), seq)?;
+    let now = now_ms();
+    db.prepare_cached(ENQUEUE)?.execute(params![n, kind, raw, now])?;
+    let outbox: i64 = db.prepare_cached(OUTBOX_OF)?.query_row([n], |r| r.get(0))?;
+    db.prepare_cached(RECIPIENTS)?.execute(params![n, chat_n, me(db)?])?;
+    db.prepare_cached(PRUNE_KEYS)?.execute(params![now - KEY_KEPT_MS, KEYS_PRUNED])?;
+    if let Some(key) = key {
+        db.prepare_cached(KEEP_KEY)?.execute(params![key, n, now])?;
+    }
+    written.put(Enqueued::Queued { message: n, id: message.id.clone(), chat, outbox: Some(outbox) });
+    let seq = stamps.seq(CHAT, Some(chat_n));
+    if db.prepare_cached(CLEAR_DRAFT)?.execute([chat_n, seq])? > 0 {
+        stamps.record(db, CHAT, chat_n, Some(chat_n), seq)?;
         return Ok(true);
     }
     Ok(changed)
@@ -210,19 +305,37 @@ fn touched(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, seq: i64) ->
     Ok(())
 }
 
-fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64, at: Option<i64>) -> Result<bool> {
+/// The message's time stays when you sent it, as the phone shows it, rather than the server's,
+/// which would move it among the messages around it and away from where search keeps it.
+/// A message in a chat with disappearing messages starts its timer once it has gone, as it can wait
+/// to go for longer than the timer.
+fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     let Some((n, chat, status)) = outboxed(db, outbox)? else { return Ok(false) };
     db.prepare_cached(DEQUEUE)?.execute([outbox])?;
+    db.prepare_cached(EXPIRES)?.execute(params![n, now_ms()])?;
     let status = advanced(status.as_deref(), Some("sent"));
     let seq = stamps.seq(MESSAGE, Some(n));
-    if db.prepare_cached(SENT)?.execute(params![n, status, at, seq])? == 0 {
+    if db.prepare_cached(SENT)?.execute(params![n, status, seq])? == 0 {
         return Ok(false);
-    }
-    if let Some(at) = at {
-        db.prepare_cached(SENT_AT)?.execute(params![chat, n, at.max(0)])?;
     }
     touched(db, stamps, chat, n, seq)?;
     Ok(true)
+}
+
+/// A receipt for message `n` of yours means the server has it, so nothing of it is left to send.
+pub(super) fn received(db: &Connection, n: i64) -> Result<()> {
+    db.prepare_cached(RECEIVED)?.execute([n])?;
+    Ok(())
+}
+
+/// Once a message of yours has got as far as it can (read, or for what's played, played), who it
+/// was sent to no longer matters.
+pub(super) fn settled(db: &Connection, n: i64, kind: &str, status: &str) -> Result<()> {
+    let played = matches!(kind, "voice" | "audio" | "video" | "video_note");
+    if status == "played" || (status == "read" && !played) {
+        db.prepare_cached(RECIPIENTS_DONE)?.execute([n])?;
+    }
+    Ok(())
 }
 
 fn failed(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, next_at: Option<i64>) -> Result<bool> {
@@ -252,7 +365,7 @@ fn retry(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
 
 /// Moves `chat`'s read position forward to message `id` and counts its unread messages again from
 /// there. A chat read here for the first time owes WhatsApp receipts for as many of its newest
-/// messages from others as it had unread.
+/// messages from others as it had unread. Marked unread is the phone's to clear, in app state.
 fn read(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) -> Result<bool> {
     let chat = chat_jid(db, chat)?;
     let found: Option<(i64, i64, i64, i64)> = db
@@ -333,28 +446,59 @@ pub(super) fn group_reached(
     Ok(Some(None))
 }
 
-/// Members who left group `chat` no longer hold up your latest messages they were sent.
-pub(super) fn members_left(db: &Connection, stamps: &mut Stamps, chat: i64, members: &[i64]) -> Result<()> {
+/// Members who left group `chat` no longer hold up your messages they were sent there; they're
+/// looked at again in the background, so a big change stays a short transaction.
+pub(super) fn members_left(db: &Connection, chat: i64, members: &[i64]) -> Result<()> {
     for &member in members {
-        let messages: Vec<i64> = db
-            .prepare_cached(SENT_TO_MEMBER)?
-            .query_map(params![member, LEFT_LOOKED_AT], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for n in messages {
-            let Some(kept) =
-                db.prepare_cached(MINE_IN)?.query_row([n, chat], |r| r.get::<_, Option<String>>(0)).optional()?
-            else {
-                continue;
-            };
-            let Some(Some(reached)) = group_reached(db, n, chat, kept.as_deref())? else { continue };
-            if advanced(kept.as_deref(), Some(reached)) != kept.as_deref() {
-                let seq = stamps.seq(MESSAGE, Some(n));
-                db.prepare_cached(REGROUPED)?.execute(params![n, reached, seq])?;
-                touched(db, stamps, chat, n, seq)?;
-            }
-        }
+        db.prepare_cached(LEFT)?.execute([chat, member])?;
     }
     Ok(())
+}
+
+/// Looks at the next REGROUP_AT_ONCE of your messages in `chat` that `member` was sent again.
+fn regroup(db: &Connection, stamps: &mut Stamps, chat: i64, member: i64) -> Result<bool> {
+    let Some(after): Option<i64> =
+        db.prepare_cached(REGROUP_FROM)?.query_row([chat, member], |r| r.get(0)).optional()?
+    else {
+        return Ok(false);
+    };
+    let messages: Vec<i64> = db
+        .prepare_cached(SENT_TO_MEMBER)?
+        .query_map(params![chat, member, after, REGROUP_AT_ONCE], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut changed = false;
+    for &n in &messages {
+        let Some((kept, kind)): Option<(Option<String>, String)> =
+            db.prepare_cached(MINE_IN)?.query_row([n, chat], |r| Ok((r.get(0)?, r.get(1)?))).optional()?
+        else {
+            continue;
+        };
+        let Some(Some(reached)) = group_reached(db, n, chat, kept.as_deref())? else { continue };
+        if advanced(kept.as_deref(), Some(reached)) != kept.as_deref() {
+            let seq = stamps.seq(MESSAGE, Some(n));
+            db.prepare_cached(REGROUPED)?.execute(params![n, reached, seq])?;
+            touched(db, stamps, chat, n, seq)?;
+            settled(db, n, &kind, reached)?;
+            changed = true;
+        }
+    }
+    match messages.last() {
+        Some(&last) if messages.len() as i64 == REGROUP_AT_ONCE => {
+            db.prepare_cached(REGROUP_ON)?.execute([chat, member, last])?;
+        }
+        _ => {
+            db.prepare_cached(REGROUP_DONE)?.execute([chat, member])?;
+        }
+    }
+    Ok(changed)
+}
+
+/// Some of the members whose leaving is still to be looked at, as `(chat, member)`.
+pub fn regroups(db: &Connection, most: usize) -> Result<Vec<(i64, i64)>> {
+    Ok(db
+        .prepare_cached(REGROUPS)?
+        .query_map([most as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// An outbox row as the sender takes it.
@@ -364,13 +508,24 @@ pub struct Outboxed {
     pub chat: String,
     pub id: String,
     pub raw: Vec<u8>,
-    pub queued: bool,
+    /// `queued`, `unconfirmed` or `failed`.
+    pub state: String,
+    /// The attempts that failed, each of which reached the engine.
+    pub attempts: i64,
     pub status: Option<String>,
 }
 
 /// The rows waiting to be sent, oldest first, as `(outbox, chat)`.
 pub fn queued(db: &Connection) -> Result<Vec<(i64, String)>> {
     Ok(db.prepare_cached(QUEUED)?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The rows waiting for a receipt, as `(outbox, until)`.
+pub fn unconfirmed(db: &Connection) -> Result<Vec<(i64, i64)>> {
+    Ok(db
+        .prepare_cached(UNCONFIRMED_ROWS)?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// How many messages the outbox holds, and how many of them failed and wait for `send.retry`.
@@ -385,8 +540,9 @@ fn outboxed_row(r: &rusqlite::Row) -> rusqlite::Result<Outboxed> {
         chat: r.get(1)?,
         id: r.get(2)?,
         raw: r.get(3)?,
-        queued: r.get(4)?,
-        status: r.get(5)?,
+        state: r.get(4)?,
+        attempts: r.get(5)?,
+        status: r.get(6)?,
     })
 }
 
@@ -401,8 +557,13 @@ pub fn outboxed_by_id(db: &Connection, id: &str) -> Result<Option<Outboxed>> {
     Ok(db.prepare_cached(&format!("{OUTBOXED} WHERE m.id = ?1"))?.query_row([id], outboxed_row).optional()?)
 }
 
-/// Read receipts owed in one chat: its JID, how far it's read, and the messages from others
-/// between how far WhatsApp has been told and there, newest first, each with who sent it.
+/// The message an interface's key names, if it was sent in the last day, with its chat's JID.
+pub fn keyed(db: &Connection, key: &str) -> Result<Option<(String, String)>> {
+    Ok(db.prepare_cached(KEYED)?.query_row([key], |r| Ok((r.get(2)?, r.get(1)?))).optional()?)
+}
+
+/// Read receipts owed in one chat: its JID, how far this lot goes, and the messages from others
+/// between how far WhatsApp has been told and there, oldest first, each with who sent it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Owed {
     pub chat: i64,
@@ -417,18 +578,26 @@ pub fn owing(db: &Connection) -> Result<Vec<i64>> {
     Ok(db.prepare_cached(OWING)?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
-/// What chat `chat` owes WhatsApp, if anything.
+/// The next lot of what chat `chat` owes WhatsApp, if anything: up to RECEIPTS_AT_ONCE of the
+/// oldest messages owed, going as far as the last of them, or to the read position if that's all.
 pub fn owed(db: &Connection, chat: i64) -> Result<Option<Owed>> {
     let found: Option<(String, String, i64, i64, i64, i64)> = db
         .prepare_cached(OWED_CHAT)?
         .query_row([chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
         .optional()?;
     let Some((jid, kind, at, n, told_at, told_n)) = found else { return Ok(None) };
-    let messages = db
+    let rows: Vec<(String, Option<String>, i64, i64)> = db
         .prepare_cached(OWED_MESSAGES)?
-        .query_map(params![chat, told_at, told_n, at, n, RECEIPTS_AT_ONCE as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![chat, told_at, told_n, at, n, RECEIPTS_AT_ONCE as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(Some(Owed { chat, jid, group: kind != "direct", upto: (at, n), messages }))
+    let upto = match rows.last() {
+        Some(&(_, _, at, n)) if rows.len() == RECEIPTS_AT_ONCE => (at, n),
+        _ => (at, n),
+    };
+    let messages = rows.into_iter().map(|(id, sender, _, _)| (id, sender)).collect();
+    Ok(Some(Owed { chat, jid, group: kind != "direct", upto, messages }))
 }
 
 #[cfg(test)]
@@ -438,8 +607,8 @@ mod tests {
 
     /// Every statement sending runs, as SQLite plans it on a fresh database with no statistics, as
     /// jawd's always is: each reads an index, never scans a big table and never sorts in a
-    /// temporary b-tree. The outbox and reads are small, a row per message waiting and per chat
-    /// read, and may be read whole.
+    /// temporary b-tree. The outbox, reads and regroup are small (a row per message waiting, per
+    /// chat read and per member still to look at again) and may be read whole.
     #[test]
     fn every_statement_sending_runs_reads_an_index_and_sorts_nothing() {
         let mut db = Connection::open_in_memory().unwrap();
@@ -462,7 +631,11 @@ mod tests {
             ("the chat shows it", CHAT_SHOWS, "SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)"),
             ("dequeue", DEQUEUE, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
             ("sent", SENT, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
-            ("sent at", SENT_AT, "SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)"),
+            (
+                "expires",
+                EXPIRES,
+                "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
             ("attempted", ATTEMPTED, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
             ("failed", FAILED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
             ("queued again", REQUEUE, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
@@ -553,8 +726,33 @@ mod tests {
             (
                 "sent to a member",
                 SENT_TO_MEMBER,
-                "SEARCH recipients USING COVERING INDEX recipients_by_member (member=?)",
+                "SEARCH recipients USING COVERING INDEX recipients_by_member (chat=? AND member=? AND message>?)",
             ),
+            (
+                "keyed",
+                KEYED,
+                "SEARCH k USING PRIMARY KEY (key=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH o USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?) LEFT-JOIN",
+            ),
+            ("keep a key", KEEP_KEY, ""),
+            (
+                "prune keys",
+                PRUNE_KEYS,
+                "SEARCH send_keys USING PRIMARY KEY (key=?)\nLIST SUBQUERY 1\nSEARCH send_keys USING COVERING INDEX send_keys_by_at (at<?)",
+            ),
+            (
+                "outbox of a message",
+                OUTBOX_OF,
+                "SEARCH outbox USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?)",
+            ),
+            ("received", RECEIVED, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
+            ("unconfirmed", UNCONFIRMED, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("unconfirmed rows", UNCONFIRMED_ROWS, "SCAN outbox"),
+            ("recipients done", RECIPIENTS_DONE, "SEARCH recipients USING PRIMARY KEY (message=?)"),
+            ("left", LEFT, ""),
+            ("regroup from", REGROUP_FROM, "SEARCH regroup USING PRIMARY KEY (chat=? AND member=?)"),
+            ("regroup on", REGROUP_ON, "SEARCH regroup USING PRIMARY KEY (chat=? AND member=?)"),
+            ("regroup done", REGROUP_DONE, "SEARCH regroup USING PRIMARY KEY (chat=? AND member=?)"),
+            ("regroups", REGROUPS, "SCAN regroup"),
             ("mine in a chat", MINE_IN, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
             ("regrouped", REGROUPED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
         ];
@@ -635,7 +833,13 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         let apply = |step: Step| store.apply(Lane::Live, vec![Change::Outbox(step)]);
-        let enqueue = |id: &str| Step::Enqueue { message: Box::new(mine(id, 1_000)), kind: "text", raw: vec![1] };
+        let enqueue = |id: &str| Step::Enqueue {
+            message: Box::new(mine(id, 1_000)),
+            kind: "text",
+            raw: vec![1],
+            key: None,
+            written: Written::default(),
+        };
         apply(enqueue("m1")).await.unwrap();
         let again = apply(enqueue("m1")).await.unwrap();
         assert_eq!(again.changed, 0, "enqueuing the same message again changes nothing");
@@ -661,12 +865,17 @@ mod tests {
             what: Amendment::Status { status: "delivered".into() },
             raw: None,
         };
-        store.apply(Lane::Live, vec![Change::Amend(receipt)]).await.unwrap();
-        apply(Step::Sent { outbox: 1, at: Some(1_500) }).await.unwrap();
+        store.apply(Lane::Live, vec![Change::Amend(receipt.clone())]).await.unwrap();
         assert_eq!(
             state("m1").await.unwrap(),
-            ("delivered".into(), 1_500, None),
-            "sent comes after delivered and changes only its time"
+            ("delivered".into(), 1_000, None),
+            "a receipt takes the outbox row with it"
+        );
+        apply(Step::Sent { outbox: 1 }).await.unwrap();
+        assert_eq!(
+            state("m1").await.unwrap(),
+            ("delivered".into(), 1_000, None),
+            "sent after delivered changes nothing"
         );
         let late = apply(Step::Failed { outbox: 1, error: "late".into(), next_at: None }).await.unwrap();
         assert_eq!(late.changed, 0);
@@ -677,9 +886,138 @@ mod tests {
         assert_eq!(state("m2").await.unwrap(), ("failed".into(), 1_000, Some(format!("{outbox} failed 1"))));
         apply(Step::Retry { outbox }).await.unwrap();
         assert_eq!(state("m2").await.unwrap(), ("pending".into(), 1_000, Some(format!("{outbox} queued 0"))));
-        apply(Step::Sent { outbox, at: None }).await.unwrap();
+        apply(Step::Sent { outbox }).await.unwrap();
         let retried = apply(Step::Retry { outbox }).await.unwrap();
         assert_eq!((state("m2").await.unwrap().0.as_str(), retried.changed), ("sent", 0), "nothing takes sent back");
+        apply(enqueue("m3")).await.unwrap();
+        let (_, _, queued) = state("m3").await.unwrap();
+        let outbox: i64 = queued.unwrap().split(' ').next().unwrap().parse().unwrap();
+        apply(Step::Failed { outbox, error: "refused".into(), next_at: None }).await.unwrap();
+        store.apply(Lane::Live, vec![Change::Amend(Amend { target: "m3".into(), ..receipt })]).await.unwrap();
+        assert_eq!(
+            state("m3").await.unwrap(),
+            ("delivered".into(), 1_000, None),
+            "a delivered receipt leaves no failed outbox row behind"
+        );
+    }
+
+    /// Group `chat` with `members` and you, known as ME_JID.
+    fn group(chat: &str, members: impl IntoIterator<Item = String>) -> Vec<crate::store::Change> {
+        use crate::store::{Change, Members};
+        let mut set: Vec<(String, &'static str)> = members.into_iter().map(|jid| (jid, "member")).collect();
+        set.push((ME_JID.into(), "member"));
+        vec![
+            Change::Remember { key: "me".into(), value: ME_JID.into() },
+            Change::Members(Members { chat: chat.into(), all: true, set, remove: Vec::new() }),
+        ]
+    }
+
+    const ME_JID: &str = "351910000001@s.whatsapp.net";
+
+    fn member(n: usize) -> String {
+        format!("35192{n:07}@s.whatsapp.net")
+    }
+
+    fn in_group(chat: &str, id: String) -> Step {
+        let message = Message { chat: chat.into(), ..mine(&id, 1_000) };
+        Step::Enqueue { message: Box::new(message), kind: "text", raw: vec![1], key: None, written: Written::default() }
+    }
+
+    fn read_by(chat: &str, id: &str, who: &str) -> crate::store::Change {
+        use crate::store::{Amend, Amendment, Change};
+        Change::Amend(Amend {
+            chat: chat.into(),
+            target: id.into(),
+            sender: Some(who.into()),
+            mine: false,
+            at: 2_000,
+            what: Amendment::Status { status: "read".into() },
+            raw: None,
+        })
+    }
+
+    async fn statuses(store: &crate::store::Store, chat: &'static str) -> Vec<String> {
+        store
+            .reads()
+            .query(crate::work::Priority::Interactive, move |db| {
+                Ok(db
+                    .prepare(
+                        "SELECT m.status FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = ?1 ORDER BY m.n",
+                    )?
+                    .query_map([chat], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?)
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Steps of regrouping until nothing is left to look at, as the background lane takes them.
+    async fn regroup_all(store: &crate::store::Store) -> usize {
+        use crate::store::{Change, Lane};
+        let mut steps = 0;
+        loop {
+            let left = store.reads().query(crate::work::Priority::Interactive, |db| regroups(db, 64)).await.unwrap();
+            if left.is_empty() {
+                return steps;
+            }
+            let changes = left.iter().map(|&(chat, member)| Change::Outbox(Step::Regroup { chat, member })).collect();
+            store.apply(Lane::Background, changes).await.unwrap();
+            steps += left.len();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn when_the_last_member_who_hadnt_read_leaves_every_message_of_yours_there_is_read() {
+        use crate::store::{Change, Lane, Members, Store};
+        const CLIMBING: &str = "120363000000000001@g.us";
+        const OTHER: &str = "120363000000000002@g.us";
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        store.apply(Lane::Live, group(CLIMBING, (1..=5).map(member))).await.unwrap();
+        store.apply(Lane::Live, group(OTHER, [member(1)])).await.unwrap();
+        let mut changes = Vec::new();
+        for n in 0..100 {
+            changes.push(Change::Outbox(in_group(CLIMBING, format!("c{n}"))));
+        }
+        for n in 0..150 {
+            changes.push(Change::Outbox(in_group(OTHER, format!("o{n}"))));
+        }
+        store.apply(Lane::Live, changes).await.unwrap();
+        let receipts: Vec<Change> =
+            (0..100).flat_map(|n| (2..=5).map(move |m| read_by(CLIMBING, &format!("c{n}"), &member(m)))).collect();
+        store.apply(Lane::Live, receipts).await.unwrap();
+        assert!(statuses(&store, CLIMBING).await.iter().all(|s| s == "sent"), "member 1 hasn't read any");
+        let left = Members { chat: CLIMBING.into(), all: false, set: Vec::new(), remove: vec![member(1)] };
+        store.apply(Lane::Live, vec![Change::Members(left)]).await.unwrap();
+        assert!(statuses(&store, CLIMBING).await.iter().all(|s| s == "sent"), "the change only notes who left");
+        regroup_all(&store).await;
+        assert!(statuses(&store, CLIMBING).await.iter().all(|s| s == "read"), "{:?}", statuses(&store, CLIMBING).await);
+        assert!(statuses(&store, OTHER).await.iter().all(|s| s == "pending"), "the other group's are left alone");
+        let rows = store.count("recipients").unwrap();
+        assert_eq!(rows, 150, "a message read by all lets go of who it was sent to");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hundreds_leaving_at_once_is_a_short_change_and_regrouping_goes_in_short_steps() {
+        use crate::store::{Change, Lane, Members, Store};
+        const BIG: &str = "120363000000000003@g.us";
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        store.apply(Lane::Live, group(BIG, (1..=400).map(member))).await.unwrap();
+        let sends = (0..100).map(|n| Change::Outbox(in_group(BIG, format!("b{n}")))).collect();
+        store.apply(Lane::Live, sends).await.unwrap();
+        let receipts: Vec<Change> =
+            (0..100).flat_map(|n| (200..=400).map(move |m| read_by(BIG, &format!("b{n}"), &member(m)))).collect();
+        store.apply(Lane::Background, receipts).await.unwrap();
+        let left = Members { chat: BIG.into(), all: false, set: Vec::new(), remove: (1..200).map(member).collect() };
+        let began = std::time::Instant::now();
+        let applied = store.apply(Lane::Live, vec![Change::Members(left)]).await.unwrap();
+        let took = began.elapsed();
+        assert!(took < std::time::Duration::from_millis(500), "199 leaving took {took:?} in one transaction");
+        assert_eq!(applied.transactions, 1);
+        let steps = regroup_all(&store).await;
+        assert!(steps >= 199, "each member who left is a step of its own at least: {steps}");
+        assert!(statuses(&store, BIG).await.iter().all(|s| s == "read"));
     }
 
     #[test]

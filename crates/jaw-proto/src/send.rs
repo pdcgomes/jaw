@@ -10,6 +10,11 @@ use crate::windows::{ChatRow, MessageRow};
 pub struct SendText {
     pub chat: String,
     pub text: String,
+    /// The interface's own name for this message, a random string it makes once for each message it
+    /// composes: asking again with the same key, within a day, answers with the same message and
+    /// sends nothing new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

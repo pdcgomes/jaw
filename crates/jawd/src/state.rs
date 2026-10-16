@@ -185,6 +185,8 @@ impl State {
                     merging: store.count("chat_merges").ok()?,
                     merges_stuck: self.live.lock().expect("live state").merges_stuck,
                     outbox: store.count("outbox").ok()?,
+                    unconfirmed: store.count("outbox WHERE state = 'unconfirmed'").ok()?,
+                    recipients: store.count("recipients").ok()?,
                 })
             }),
             interfaces: Some(Interfaces {

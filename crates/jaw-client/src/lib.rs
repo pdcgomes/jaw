@@ -181,6 +181,7 @@ pub fn describe(status: &Status) -> String {
             (stored.merging, "chats being merged into another"),
             (stored.merges_stuck, "merges that kept failing, left until jawd starts again"),
             (stored.outbox, "messages of yours to send"),
+            (stored.unconfirmed, "of them refused when they may have gone, waiting for a receipt"),
         ]
         .iter()
         .filter(|(n, _)| *n > 0)

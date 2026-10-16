@@ -1630,22 +1630,35 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
             ))?
             .execute(params![n, recipient, at])?;
             // In a group, as on the phone, a message is delivered once every recipient has it and
-            // read once every one has read it; each recipient's own times stay in receipts.
-            let kept: Option<(Option<String>, bool)> = db
-                .prepare_cached("SELECT m.status, c.kind = 'direct' FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1 AND m.mine")?
-                .query_row([n], |r| Ok((r.get(0)?, r.get(1)?)))
+            // read once every one has read it; each recipient's own times stay in receipts. Any
+            // receipt says the server has it, so nothing of it is left to send.
+            let kept: Option<(Option<String>, bool, String)> = db
+                .prepare_cached(
+                    "SELECT m.status, c.kind = 'direct', m.kind FROM messages m JOIN chats c ON c.n = m.chat
+                    WHERE m.n = ?1 AND m.mine",
+                )?
+                .query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .optional()?;
+            if kept.is_some() {
+                outbox::received(db, n)?;
+            }
             let reached = match &kept {
-                Some((_, true)) => Some(status.as_str()),
-                Some((kept, false)) => {
-                    outbox::group_reached(db, n, chat, kept.as_deref())?.unwrap_or(Some(status.as_str()))
-                }
+                Some((_, true, _)) => Some(status.as_str()),
+                Some((kept, false, _)) => match outbox::group_reached(db, n, chat, kept.as_deref())? {
+                    None => Some(status.as_str()),
+                    Some(None) => Some("sent"),
+                    Some(Some(reached)) => Some(reached),
+                },
                 None => None,
             };
             match (kept, reached) {
-                (Some((kept, _)), Some(reached)) if advanced(kept.as_deref(), Some(reached)) != kept.as_deref() => db
-                    .prepare_cached("UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1")?
-                    .execute(params![n, reached, seq])?,
+                (Some((kept, _, kind)), Some(reached))
+                    if advanced(kept.as_deref(), Some(reached)) != kept.as_deref() =>
+                {
+                    outbox::settled(db, n, &kind, reached)?;
+                    db.prepare_cached("UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1")?
+                        .execute(params![n, reached, seq])?
+                }
                 _ => 0,
             }
         }
@@ -1696,7 +1709,7 @@ fn set_members(db: &Connection, stamps: &mut Stamps, members: &Members) -> Resul
         }
     }
     changed |= !left.is_empty();
-    outbox::members_left(db, stamps, chat, &left)?;
+    outbox::members_left(db, chat, &left)?;
     if changed {
         let seq = stamps.seq(CHAT, Some(chat));
         db.prepare_cached("UPDATE chats SET v = ?2 WHERE n = ?1")?.execute([chat, seq])?;

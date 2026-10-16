@@ -571,8 +571,10 @@ pub(super) const MIGRATIONS: &[&str] = &[
         kind TEXT NOT NULL,
         -- WAWebProtobufsE2E.Message, as it's sent.
         raw BLOB NOT NULL,
-        -- queued: sent as soon as its chat's earlier sends have gone; failed: waiting for send.retry.
-        state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'failed')),
+        -- queued: sent as soon as its chat's earlier sends have gone and WhatsApp can be reached;
+        -- unconfirmed: refused when it may already have gone, so waiting for a receipt until
+        -- next_at; failed: waiting for send.retry.
+        state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'unconfirmed', 'failed')),
         attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
         next_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
@@ -596,18 +598,38 @@ pub(super) const MIGRATIONS: &[&str] = &[
         CHECK ((told_at, told_n) <= (at, n))
     ) STRICT;
     ",
-    // 8: who a message of yours in a group went to, a schema step. jaw's own: the group's members
-    // as they were when you sent it can't be had again.
+    // 8: sending's other tables, a schema step. All jaw's own: never dropped or rebuilt from raw,
+    // and copied as they are by any rebuild.
     "
-    -- The group's members when you sent the message, you apart. It's delivered once every one of
-    -- them who's still a member has it, and read once every one has read it; members who joined
-    -- after don't count, and those who left don't hold it up.
+    -- Who a message of yours in a group went to: the group's members when you sent it, you apart.
+    -- It's delivered once every one of them who's still a member has it, and read once every one
+    -- has read it; members who joined after don't count, and those who left don't hold it up. A
+    -- message's rows go once it has got as far as it can, read or, for a voice message, played.
     CREATE TABLE recipients (
         message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
         member INTEGER NOT NULL REFERENCES person_jids (n),
+        chat INTEGER NOT NULL REFERENCES chats (n) ON DELETE CASCADE,
         PRIMARY KEY (message, member)
     ) STRICT, WITHOUT ROWID;
-    CREATE INDEX recipients_by_member ON recipients (member, message);
+    CREATE INDEX recipients_by_member ON recipients (chat, member, message);
+
+    -- Members who left a group, whose messages from you there are looked at again in the
+    -- background, a few at a time, from after the last one looked at.
+    CREATE TABLE regroup (
+        chat INTEGER NOT NULL REFERENCES chats (n) ON DELETE CASCADE,
+        member INTEGER NOT NULL REFERENCES person_jids (n),
+        after INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (chat, member)
+    ) STRICT, WITHOUT ROWID;
+
+    -- The key an interface gave each message it sent, for a day, so asking again with the same key
+    -- answers with the same message instead of sending a second.
+    CREATE TABLE send_keys (
+        key TEXT PRIMARY KEY CHECK (length(key) BETWEEN 1 AND 128),
+        message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
+        at INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX send_keys_by_at ON send_keys (at);
     ",
 ];
 

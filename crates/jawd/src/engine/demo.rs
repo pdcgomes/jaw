@@ -54,6 +54,8 @@ pub struct World {
     failing: Mutex<u32>,
     /// How many sends to refuse next, as WhatsApp refuses one to a number that isn't on it.
     refusing: Mutex<u32>,
+    /// Chats whose every send fails as a connection that's down does.
+    failing_chats: Mutex<HashSet<String>>,
     /// Whether the server takes sends without answering, as a connection that drops does.
     holding: AtomicBool,
     /// How many sends the server has had at once, at most.
@@ -74,6 +76,12 @@ impl World {
     #[cfg(test)]
     pub fn fail_next(&self, n: u32) {
         *self.failing.lock().expect("the demo world") = n;
+    }
+
+    /// Fails every send to `chats`, from now on.
+    #[cfg(test)]
+    pub fn fail_chats(&self, chats: &[String]) {
+        self.failing_chats.lock().expect("the demo world").extend(chats.iter().cloned());
     }
 
     /// Refuses the next `n` sends for good.
@@ -387,7 +395,7 @@ impl Sender {
                 retry: false,
             });
         }
-        if next(&world.failing) {
+        if next(&world.failing) || world.failing_chats.lock().expect("the demo world").contains(&send.chat) {
             return Err(EngineError::Failed { message: "websocket not connected".into(), retry: true });
         }
         let at = *world.has.lock().expect("the demo world").entry(send.id.clone()).or_insert_with(now_ms);

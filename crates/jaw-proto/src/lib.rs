@@ -334,6 +334,12 @@ pub struct Stored {
     /// Messages of yours waiting to send, or failed and waiting for a retry.
     #[serde(default)]
     pub outbox: u64,
+    /// Of those, the ones WhatsApp refused when they may already have gone, waiting for a receipt.
+    #[serde(default)]
+    pub unconfirmed: u64,
+    /// Who your group messages were sent to, kept until each has been read by all.
+    #[serde(default)]
+    pub recipients: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
