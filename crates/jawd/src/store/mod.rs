@@ -12,6 +12,7 @@ pub mod read;
 mod schema;
 mod write;
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,8 @@ use crate::work::{Report, Samples};
 pub struct Applied {
     /// The changes that changed something; the rest matched what was there.
     pub changed: usize,
+    /// The groups of changes that failed and were kept in quarantine instead.
+    pub quarantined: usize,
     pub transactions: usize,
     pub took: Duration,
     /// The feed's last seq once they were committed.
@@ -62,6 +65,16 @@ struct Live {
     changes: Vec<Change>,
     done: Done,
     queued: Instant,
+    /// Whether its commit must reach the disk before it's said to be done.
+    durable: bool,
+}
+
+/// What one transaction made of its changes.
+#[derive(Default)]
+struct Made {
+    changed: usize,
+    quarantined: usize,
+    taken: usize,
 }
 
 /// What the writer has done lately, for `status`.
@@ -177,10 +190,21 @@ impl Store {
         match lane {
             Lane::Live => self
                 .live
-                .send(Live { changes, done, queued: Instant::now() })
+                .send(Live { changes, done, queued: Instant::now(), durable: false })
                 .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?,
             Lane::Background => self.queue_background(Background::Changes { changes, done }).await?,
         }
+        applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Makes `changes` in the live lane in one transaction that reaches the disk before it's said
+    /// to be done, for what must survive a power cut, such as the commit after which a spool file
+    /// can go.
+    pub async fn apply_durable(&self, changes: Vec<Change>) -> Result<Applied> {
+        let (done, applied) = oneshot::channel();
+        self.live
+            .send(Live { changes, done, queued: Instant::now(), durable: true })
+            .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?;
         applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
     }
 
@@ -396,37 +420,86 @@ impl Writer {
         Ok(())
     }
 
-    fn live_write(&mut self, Live { changes, done, queued }: Live) {
+    /// Makes the writer's commits reach the disk before they return, or go back to letting the
+    /// checkpointer's syncs do it. On macOS only F_FULLFSYNC gets past the drive's cache.
+    fn durable(&mut self, durable: bool) {
+        let (synchronous, fullfsync) = if durable { ("FULL", "ON") } else { ("NORMAL", "OFF") };
+        if let Err(e) = self
+            .db
+            .pragma_update(None, "synchronous", synchronous)
+            .and_then(|_| self.db.pragma_update(None, "fullfsync", fullfsync))
+        {
+            eprintln!("jawd: can't set synchronous={synchronous}: {e}");
+        }
+    }
+
+    fn live_write(&mut self, Live { changes, done, queued, durable }: Live) {
         let started = Instant::now();
         self.unmerged = true;
         let waited = started - queued;
-        let applied = self.transaction(&changes, false).map(|(changed, _)| Applied {
-            changed,
+        let groups = write::groups(&changes);
+        if durable {
+            self.durable(true);
+        }
+        let applied = self.transaction(&changes, &groups, false).map(|made| Applied {
+            changed: made.changed,
+            quarantined: made.quarantined,
             transactions: 1,
             took: started.elapsed(),
             seq: self.stamps.last(),
         });
+        if durable {
+            self.durable(false);
+        }
         self.count(Some(waited), started.elapsed());
         let _ = done.send(applied.map_err(|e| format!("{e:#}")));
     }
 
-    /// Makes changes from the start of `changes` in one transaction, all of them for a live one; a
-    /// background one stops at BATCH_ROWS, at BATCH_TIME with its commit, or as soon as an inbox or
-    /// live write is waiting. Says how many changed something and how many were taken.
-    fn transaction(&mut self, changes: &[Change], background: bool) -> Result<(usize, usize)> {
+    /// Makes the groups of `changes` in one transaction, all of them for a live one; a background
+    /// one stops between groups at BATCH_ROWS, at BATCH_TIME with its commit, or as soon as an inbox
+    /// or live write is waiting. Each group runs in a savepoint: one that fails is rolled back and
+    /// kept in quarantine with its error, and the rest go on. Says how many changes were taken.
+    fn transaction(&mut self, changes: &[Change], groups: &[Range<usize>], background: bool) -> Result<Made> {
         let began = Instant::now();
         self.stamps.begin();
+        let start = groups.first().map_or(0, |g| g.start);
         let made = (|| {
-            let tx = self.db.transaction()?;
-            let (mut changed, mut taken) = (0, 0);
-            for change in changes {
-                changed += usize::from(write::apply(&tx, &mut self.stamps, change, background)?);
-                taken += 1;
+            let mut tx = self.db.transaction()?;
+            let mut made = Made::default();
+            for group in groups {
+                let mark = self.stamps.mark();
+                let mut savepoint = tx.savepoint()?;
+                let mut failed = None;
+                let mut changed = 0;
+                for change in &changes[group.clone()] {
+                    match write::apply(&savepoint, &mut self.stamps, change, background) {
+                        Ok(c) => changed += usize::from(c),
+                        Err(e) if write::transient(&e) => return Err(e),
+                        Err(e) => {
+                            failed = Some(e);
+                            break;
+                        }
+                    }
+                }
+                match failed {
+                    None => {
+                        savepoint.commit()?;
+                        made.changed += changed;
+                    }
+                    Some(e) => {
+                        savepoint.rollback()?;
+                        drop(savepoint);
+                        self.stamps.undo(mark);
+                        write::quarantine(&tx, &changes[group.clone()], &e)?;
+                        made.quarantined += 1;
+                    }
+                }
+                made.taken = group.end - start;
                 if background
-                    && (taken == BATCH_ROWS
+                    && (made.taken >= BATCH_ROWS
                         || !self.realtime.is_empty()
                         || !self.live.is_empty()
-                        || self.changes_pace.enough(began.elapsed(), taken))
+                        || self.changes_pace.enough(began.elapsed(), made.taken))
                 {
                     break;
                 }
@@ -434,10 +507,10 @@ impl Writer {
             let body = began.elapsed();
             tx.commit()?;
             if background {
-                self.changes_pace.learn(body, began.elapsed() - body, taken);
+                self.changes_pace.learn(body, began.elapsed() - body, made.taken);
                 self.count(None, began.elapsed());
             }
-            Ok((changed, taken))
+            Ok(made)
         })();
         match &made {
             Ok(_) => {
@@ -467,12 +540,15 @@ impl Writer {
     fn background_changes(&mut self, changes: &[Change]) -> Result<Applied> {
         let started = Instant::now();
         let mut applied = Applied::default();
-        let mut rest = changes;
+        let groups = write::groups(changes);
+        let mut rest = groups.as_slice();
         while !rest.is_empty() {
-            let (changed, taken) = self.transaction(rest, true)?;
-            applied.changed += changed;
+            let made = self.transaction(changes, rest, true)?;
+            applied.changed += made.changed;
+            applied.quarantined += made.quarantined;
             applied.transactions += 1;
-            rest = &rest[taken..];
+            let first = rest[0].start;
+            rest = &rest[rest.iter().take_while(|g| g.end <= first + made.taken).count()..];
             applied.seq = self.stamps.last();
             self.between();
         }
@@ -905,6 +981,110 @@ mod tests {
         assert_eq!(store.count("events").unwrap(), quiet + 2);
     }
 
+    fn inbox_rows(store: &Store, n: usize) -> impl std::future::Future<Output = ()> + '_ {
+        for _ in 0..n {
+            store.inbox("message", 0, vec![1], None);
+        }
+        async move {
+            while store.count("inbox").unwrap() < n as u64 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_conversion_that_fails_is_quarantined_with_its_row_kept_and_the_rest_go_on() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        inbox_rows(&store, 3).await;
+        let chat = "351910000001@s.whatsapp.net";
+        let batch = vec![
+            Change::Message(text(chat, "a", 1_000, "first")),
+            Change::Drained(Drained::Inbox(1)),
+            Change::Message(text(chat, "b", 2_000, "second")),
+            Change::Person(Person::default()),
+            Change::Drained(Drained::Inbox(2)),
+            Change::Message(text(chat, "c", 3_000, "third")),
+            Change::Drained(Drained::Inbox(3)),
+        ];
+        for lane in [Lane::Live, Lane::Background] {
+            let applied = store.apply(lane, batch.clone()).await.unwrap();
+            assert_eq!(applied.quarantined, 1, "in the {lane:?} lane");
+        }
+        let ids: Vec<String> = query(&store, move |db| read::messages(db, chat, Around::Newest, 10))
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, ["a", "c"], "the failed row's message rolled back with it, and the rows after it went in");
+        let left: Vec<i64> = query(&store, |db| {
+            Ok(db.prepare("SELECT seq FROM inbox")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+        assert_eq!(left, [2], "the row that didn't convert stays");
+        let kept: (String, String, String) = query(&store, |db| {
+            Ok(db.query_row("SELECT source, ref, error FROM quarantine", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?)
+        })
+        .await;
+        assert_eq!((kept.0.as_str(), kept.1.as_str()), ("inbox", "2"));
+        assert!(kept.2.contains("needs at least one JID"), "{}", kept.2);
+        let events: Vec<i64> = query(&store, |db| read::events(db, 0, 100)).await.into_iter().map(|e| e.seq).collect();
+        assert!(events.windows(2).all(|w| w[1] == w[0] + 1), "no seq is skipped or given twice: {events:?}");
+        store.apply(Lane::Live, messages([text(chat, "d", 4_000, "fourth")])).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_inboxs_seq_never_goes_back_once_it_has_drained() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        inbox_rows(&store, 3).await;
+        store.apply(Lane::Live, (1..=3).map(|seq| Change::Drained(Drained::Inbox(seq))).collect()).await.unwrap();
+        assert_eq!(store.count("inbox").unwrap(), 0);
+        store.inbox("message", 0, vec![1], None);
+        while store.count("inbox").unwrap() == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let seq: i64 = query(&store, |db| Ok(db.query_row("SELECT seq FROM inbox", [], |r| r.get(0))?)).await;
+        assert_eq!(seq, 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_database_at_version_4_keeps_its_inbox_and_its_largest_seq() {
+        let home = tempfile::tempdir().unwrap();
+        {
+            let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
+            let tx = db.transaction().unwrap();
+            for migration in &schema::MIGRATIONS[..4] {
+                tx.execute_batch(migration).unwrap();
+            }
+            for kind in ["a", "b", "c"] {
+                tx.execute("INSERT INTO inbox (kind, at, payload) VALUES (?1, 0, x'01')", [kind]).unwrap();
+            }
+            tx.execute("DELETE FROM inbox WHERE seq < 3", []).unwrap();
+            tx.pragma_update(None, "user_version", 4).unwrap();
+            tx.commit().unwrap();
+        }
+        let store = Store::open(home.path()).unwrap();
+        let kept: (i64, String, i64) = query(&store, |db| {
+            Ok(db.query_row(
+                "SELECT i.seq, i.kind, s.seq FROM inbox i, sqlite_sequence s WHERE s.name = 'inbox'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await;
+        assert_eq!(kept, (3, "c".to_string(), 3));
+        store.apply(Lane::Live, vec![Change::Drained(Drained::Inbox(3))]).await.unwrap();
+        store.inbox("message", 0, vec![1], None);
+        while store.count("inbox").unwrap() == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let seq: i64 = query(&store, |db| Ok(db.query_row("SELECT seq FROM inbox", [], |r| r.get(0))?)).await;
+        assert_eq!(seq, 4);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_deleted_for_me_from_the_phone_goes_as_one_deleted_here_does() {
         let home = tempfile::tempdir().unwrap();
@@ -932,7 +1112,12 @@ mod tests {
         assert_eq!(after.last.as_ref().unwrap().summary, "first");
         assert_eq!(after.sort, before.sort, "deleting doesn't move the chat");
         store.apply(Lane::Live, vec![delete("m2")]).await.unwrap();
-        assert_eq!(store.count("pending").unwrap(), 1, "a delete for a message jaw doesn't have waits for it");
-        assert_eq!(query(&store, move |db| read::message_count(db, chat)).await, 1);
+        assert_eq!(store.count("pending").unwrap(), 0, "a message deleted for me leaves a tombstone, not a wait");
+        store.apply(Lane::Live, vec![delete("m9")]).await.unwrap();
+        store
+            .apply(Lane::Live, messages([text(chat, "m2", 2_000, "second"), text(chat, "m9", 9_000, "later")]))
+            .await
+            .unwrap();
+        assert_eq!(query(&store, move |db| read::message_count(db, chat)).await, 1, "neither comes back");
     }
 }

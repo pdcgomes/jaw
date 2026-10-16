@@ -3,7 +3,8 @@
 //! until the blob's rows are in, and a blob already downloaded to the spool is used again, so a
 //! restart in the middle of history loses nothing and fetches nothing twice.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use jaw_proto::HistoryProgress;
@@ -16,6 +17,14 @@ use crate::convert;
 use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, pb};
 use crate::store::{Change, Drained, Lane, Store};
+
+/// What the converter hands the fetcher.
+pub enum Work {
+    Offer(Offer),
+    /// Every notification left in the inbox from before has been offered, so spool files no
+    /// offer names are left from blobs whose rows are already in.
+    Offered,
+}
 
 /// A history notification found in the inbox.
 pub struct Offer {
@@ -35,13 +44,28 @@ const RETRY_MOST: Duration = Duration::from_secs(60);
 
 /// Fetches and stores each blob offered, in order, until jawd stops.
 pub async fn run(
-    mut offers: mpsc::UnboundedReceiver<Offer>,
+    mut offers: mpsc::UnboundedReceiver<Work>,
     store: Store,
     engine: Supervisor,
     live: Shared,
     spool: PathBuf,
 ) {
-    while let Some(offer) = offers.recv().await {
+    let mut named = HashSet::new();
+    let mut swept = false;
+    while let Some(work) = offers.recv().await {
+        let offer = match work {
+            Work::Offer(offer) => offer,
+            Work::Offered => {
+                if !swept {
+                    swept = true;
+                    sweep(&spool, &named).await;
+                }
+                continue;
+            }
+        };
+        if !swept {
+            named.insert(spool_name(&offer.id));
+        }
         let mut pause = RETRY_FIRST;
         loop {
             match one(&offer, &store, &engine, &live, &spool).await {
@@ -52,11 +76,11 @@ pub async fn run(
                     pause = (pause * 2).min(RETRY_MOST);
                 }
                 Err(Failed::Never(why)) => {
-                    eprintln!("jawd: history {} can't be had, so its notification is dropped: {why}", offer.id);
-                    if let Err(e) =
-                        store.apply(Lane::Background, vec![Change::Drained(Drained::Inbox(offer.seq))]).await
-                    {
-                        eprintln!("jawd: can't drop history {}'s notification: {e:#}", offer.id);
+                    eprintln!("jawd: history {} can't be had: {why}; its notification is kept in quarantine", offer.id);
+                    let failed =
+                        vec![Change::Quarantined { source: "inbox", reference: offer.seq.to_string(), error: why }];
+                    if let Err(e) = store.apply(Lane::Background, failed).await {
+                        eprintln!("jawd: can't keep history {}'s notification in quarantine: {e:#}", offer.id);
                     }
                     break;
                 }
@@ -71,14 +95,29 @@ enum Failed {
     Never(String),
 }
 
-async fn one(
-    offer: &Offer,
-    store: &Store,
-    engine: &Supervisor,
-    live: &Shared,
-    spool: &std::path::Path,
-) -> Result<(), Failed> {
-    let path = spool.join(format!("{}.pb", offer.id.replace(['/', '\\'], "_")));
+/// A blob's file name in the spool.
+fn spool_name(id: &str) -> String {
+    format!("{}.pb", id.replace(['/', '\\'], "_"))
+}
+
+/// Removes spool files that no notification in the inbox names: blobs whose rows are in, and
+/// .part files a download left behind.
+async fn sweep(spool: &Path, named: &HashSet<String>) {
+    let Ok(mut entries) = tokio::fs::read_dir(spool).await else { return };
+    let mut removed = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !named.contains(&name) && tokio::fs::remove_file(entry.path()).await.is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        eprintln!("jawd: removed {removed} files from the spool whose history is already in");
+    }
+}
+
+async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, spool: &Path) -> Result<(), Failed> {
+    let path = spool.join(spool_name(&offer.id));
     let started = Instant::now();
     if !path.exists() {
         let command = pb::command::Kind::HistoryDownload(pb::HistoryDownload {
@@ -129,8 +168,10 @@ async fn one(
             part = rest;
         }
     }
+    // The blob goes only once the notification's removal is on disk; a power cut before that
+    // brings the notification back, and the blob is still there for it.
     store
-        .apply(Lane::Background, vec![Change::Drained(Drained::Inbox(offer.seq))])
+        .apply_durable(vec![Change::Drained(Drained::Inbox(offer.seq))])
         .await
         .map_err(|e| Failed::Later(format!("{e:#}")))?;
     let stored = storing.elapsed();

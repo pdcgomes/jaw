@@ -201,3 +201,31 @@ func TestAPictureIsWrittenWholeOrNotAtAll(t *testing.T) {
 		t.Fatalf("a failed download left %d files", len(entries))
 	}
 }
+
+func TestAReceiptIsKeptBeforeWhatsmeowAcksIt(t *testing.T) {
+	e, jawd, _, closeLink := engineWithoutSession(t, link.Protocol)
+	defer closeLink()
+	receipt := &events.Receipt{
+		MessageSource: types.MessageSource{Chat: mustJID(t, "351910000002@s.whatsapp.net"), Sender: mustJID(t, "351910000002@s.whatsapp.net")},
+		MessageIDs:    []types.MessageID{"3EB0AA"},
+		Type:          types.ReceiptTypeRead,
+	}
+	event, waited := handled(t, e, jawd, receipt)
+	if !waited || event.GetReceipt().GetType() != "read" || len(event.GetReceipt().GetIds()) != 1 {
+		t.Fatalf("a receipt came as %v, waited %v", event, waited)
+	}
+}
+
+func TestAHistoryBlobIsWrittenWholeOrNotAtAll(t *testing.T) {
+	folder := t.TempDir()
+	path := filepath.Join(folder, "spool", "3EB0AA.pb")
+	if err := writeWhole(path, []byte("a blob")); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(path); string(data) != "a blob" {
+		t.Fatalf("the blob holds %q", data)
+	}
+	if _, err := os.Stat(path + ".part"); !os.IsNotExist(err) {
+		t.Fatalf("the .part file is still there: %v", err)
+	}
+}

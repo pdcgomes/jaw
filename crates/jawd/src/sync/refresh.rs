@@ -17,9 +17,20 @@ const COLLECTIONS: [&str; 5] = ["critical_block", "critical_unblock_low", "regul
 /// The most LIDs asked about at once.
 const LIDS: usize = 5_000;
 
-/// Brings the account's people, groups and app state in. `linked_now` says the account was linked
-/// in this run, so whatsmeow syncs its app state in full by itself.
-pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, linked_now: bool) {
+/// Which app-state collections to fetch again in full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resync {
+    /// None: the account was linked in this run, so whatsmeow syncs its app state in full by itself.
+    None,
+    /// Those jaw.db has never had in full.
+    Missing,
+    /// All of them: jawd didn't stop cleanly, so whatsmeow may have moved a version on past events
+    /// jawd never stored. Applying them again changes nothing that's already right.
+    All,
+}
+
+/// Brings the account's people, groups and app state in.
+pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, resync: Resync) {
     match engine.call(pb::command::Kind::Contacts(pb::Contacts {})).await {
         Ok(pb::reply::Kind::ContactList(list)) => store_changes(&store, people::contacts(&list), "contacts").await,
         Ok(other) => eprintln!("jawd: the engine answered contacts with {other:?}"),
@@ -33,14 +44,14 @@ pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, linked_now:
         Ok(other) => eprintln!("jawd: the engine answered groups with {other:?}"),
         Err(e) => eprintln!("jawd: can't list the groups: {e}"),
     }
-    if !linked_now {
+    if resync != Resync::None {
         let names: Vec<String> = COLLECTIONS
             .iter()
-            .filter(|name| matches!(store.remembered(&format!("{APP_STATE}{name}")), Ok(None)))
+            .filter(|name| resync == Resync::All || matches!(store.remembered(&format!("{APP_STATE}{name}")), Ok(None)))
             .map(|name| name.to_string())
             .collect();
         if !names.is_empty() {
-            eprintln!("jawd: fetching app state jaw.db has never had: {}", names.join(", "));
+            eprintln!("jawd: fetching app state again in full ({resync:?}): {}", names.join(", "));
             if let Err(e) = engine.call(pb::command::Kind::AppStateResync(pb::AppStateResync { names })).await {
                 eprintln!("jawd: can't fetch the app state: {e}");
             }

@@ -12,6 +12,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 /// A change for the writer to make.
+#[derive(Clone, Debug)]
 pub enum Change {
     Chat(Chat),
     Person(Person),
@@ -39,6 +40,12 @@ pub enum Change {
     Remember {
         key: String,
         value: String,
+    },
+    /// A raw row that couldn't be converted, kept in quarantine with why.
+    Quarantined {
+        source: &'static str,
+        reference: String,
+        error: String,
     },
     /// An app-state mutation's index and its raw SyncActionValue, kept as the latest for its index.
     AppState {
@@ -82,6 +89,10 @@ pub enum Amendment {
         starred: bool,
     },
     DeleteForMe,
+    /// A receipt from a recipient: `delivered`, `read` or `played`.
+    Status {
+        status: String,
+    },
     /// Kept in `pending` for a later jawd that knows what to do with it, such as a poll vote.
     Keep {
         kind: String,
@@ -96,6 +107,7 @@ impl Amendment {
             Amendment::Revoke => "revoke",
             Amendment::Star { .. } => "star",
             Amendment::DeleteForMe => "delete",
+            Amendment::Status { .. } => "receipt",
             Amendment::Keep { kind } => kind,
         }
     }
@@ -264,22 +276,44 @@ pub(super) struct Stamps {
     next: i64,
     began: i64,
     touched: HashMap<(&'static str, i64), i64>,
+    /// The rows touched, in order, so a savepoint rolled back can be forgotten.
+    order: Vec<(&'static str, i64)>,
+}
+
+/// Where Stamps stood when a savepoint began.
+pub(super) struct Mark {
+    next: i64,
+    touched: usize,
 }
 
 impl Stamps {
     pub(super) fn load(db: &Connection) -> Result<Stamps> {
         let last: i64 = db.query_row("SELECT coalesce(max(seq), 0) FROM events", [], |row| row.get(0))?;
-        Ok(Stamps { next: last + 1, began: last + 1, touched: HashMap::new() })
+        Ok(Stamps { next: last + 1, began: last + 1, touched: HashMap::new(), order: Vec::new() })
     }
 
     pub(super) fn begin(&mut self) {
         self.began = self.next;
         self.touched.clear();
+        self.order.clear();
     }
 
     pub(super) fn rolled_back(&mut self) {
         self.next = self.began;
         self.touched.clear();
+        self.order.clear();
+    }
+
+    pub(super) fn mark(&self) -> Mark {
+        Mark { next: self.next, touched: self.order.len() }
+    }
+
+    /// Forgets what was stamped since `mark`, whose savepoint was rolled back.
+    pub(super) fn undo(&mut self, mark: Mark) {
+        for key in self.order.drain(mark.touched..) {
+            self.touched.remove(&key);
+        }
+        self.next = mark.next;
     }
 
     /// The seq a change to an existing row would take.
@@ -296,6 +330,7 @@ impl Stamps {
         db.prepare_cached("INSERT INTO events (seq, at, type, key, chat) VALUES (?1, ?2, ?3, ?4, ?5)")?
             .execute(params![seq, now_ms(), kind, key, chat])?;
         self.touched.insert((kind, key), seq);
+        self.order.push((kind, key));
         self.next += 1;
         Ok(())
     }
@@ -304,6 +339,83 @@ impl Stamps {
     pub(super) fn last(&self) -> i64 {
         self.next - 1
     }
+}
+
+/// Whether an error says the database can't be written right now (a full disk, an I/O error, a
+/// lock), so the whole transaction fails and is tried again, rather than this change being bad.
+pub(super) fn transient(e: &anyhow::Error) -> bool {
+    use rusqlite::ErrorCode::*;
+    e.chain().any(|cause| match cause.downcast_ref::<rusqlite::Error>() {
+        Some(rusqlite::Error::SqliteFailure(failure, _)) => matches!(
+            failure.code,
+            DiskFull
+                | SystemIoFailure
+                | DatabaseBusy
+                | DatabaseLocked
+                | ReadOnly
+                | CannotOpen
+                | OutOfMemory
+                | DatabaseCorrupt
+                | NotADatabase
+        ),
+        _ => false,
+    })
+}
+
+/// Where a group of changes came from, for the quarantine: the raw row it was converted from, or
+/// the change itself and its raw protobuf.
+fn provenance(group: &[Change]) -> (&'static str, String, Option<&[u8]>) {
+    match group.last() {
+        Some(Change::Drained(Drained::Inbox(seq))) => ("inbox", seq.to_string(), None),
+        Some(Change::Drained(Drained::History { chat, id })) => ("history_raw", format!("{chat} {id}"), None),
+        Some(Change::Message(m)) => ("message", format!("{} {}", m.chat, m.id), m.raw.as_ref().map(|p| p.0.as_slice())),
+        Some(Change::Edited { shown, .. }) => {
+            ("message", format!("{} {}", shown.chat, shown.id), shown.raw.as_ref().map(|p| p.0.as_slice()))
+        }
+        Some(Change::Amend(a)) => {
+            ("amendment", format!("{} {} {}", a.chat, a.target, a.what.kind()), a.raw.as_ref().map(|p| p.0.as_slice()))
+        }
+        Some(Change::Chat(c)) => ("chat", c.id.clone(), None),
+        Some(Change::Person(p)) => ("person", p.jids.join(" "), None),
+        Some(Change::Members(m)) => ("members", m.chat.clone(), None),
+        Some(Change::AppState { index, value }) => ("app_state", index.join(" "), Some(value.as_slice())),
+        Some(Change::Remember { key, .. }) => ("remember", key.clone(), None),
+        Some(Change::Quarantined { source, reference, .. }) => (source, reference.clone(), None),
+        Some(Change::Opened(o)) => ("opened", o.chat.clone(), None),
+        Some(Change::DeleteMessage { chat, id }) => ("delete", format!("{chat} {id}"), None),
+        None => ("nothing", String::new(), None),
+    }
+}
+
+/// Keeps a group of changes that failed, with its error, in place of it.
+pub(super) fn quarantine(db: &Connection, group: &[Change], error: &anyhow::Error) -> Result<()> {
+    let (source, reference, raw) = provenance(group);
+    eprintln!("jawd: kept a change that failed in quarantine ({source} {reference}): {error:#}");
+    record_quarantine(db, source, &reference, &format!("{error:#}"), raw)
+}
+
+fn record_quarantine(db: &Connection, source: &str, reference: &str, error: &str, raw: Option<&[u8]>) -> Result<()> {
+    db.prepare_cached(
+        "INSERT INTO quarantine (at, source, ref, error, raw) VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT (source, ref) DO UPDATE SET at = excluded.at, error = excluded.error, raw = coalesce(excluded.raw, raw)",
+    )?
+    .execute(params![now_ms(), source, reference, error, raw])?;
+    Ok(())
+}
+
+/// The changes split where each raw row's conversion ends: at each Drained, the changes before it
+/// go with it. Changes after the last Drained, or in a batch without one, are a group each.
+pub(super) fn groups(changes: &[Change]) -> Vec<std::ops::Range<usize>> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    for (i, change) in changes.iter().enumerate() {
+        if matches!(change, Change::Drained(_)) {
+            groups.push(start..i + 1);
+            start = i + 1;
+        }
+    }
+    groups.extend((start..changes.len()).map(|i| i..i + 1));
+    groups
 }
 
 fn now_ms() -> i64 {
@@ -341,6 +453,10 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, backg
                 .execute(params![key, value])?;
             Ok(false)
         }
+        Change::Quarantined { source, reference, error } => {
+            record_quarantine(db, source, reference, error, None)?;
+            Ok(false)
+        }
         Change::AppState { index, value } => {
             db.prepare_cached("INSERT OR REPLACE INTO app_state (key, value) VALUES (?1, ?2)")?
                 .execute(params![serde_json::to_string(index)?, value])?;
@@ -370,7 +486,7 @@ fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) ->
         .prepare_cached(
             "SELECT m.chat, m.n FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = ?1 AND m.id = ?2",
         )?
-        .query_row(params![chat, id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row(params![chat_jid(db, chat)?, id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
     let Some((chat, n)) = found else { return Ok(false) };
     delete_row(db, stamps, chat, n)
@@ -378,7 +494,12 @@ fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) ->
 
 /// Deletes message `n` from chat `chat`. A chat whose newest it was shows the one before it, and
 /// keeps its place.
+/// Deletes a message for me, leaving a tombstone so a copy arriving later doesn't bring it back.
 fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
+    db.prepare_cached(
+        "INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM messages WHERE n = ?1",
+    )?
+    .execute(params![n, now_ms()])?;
     if db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([n])? == 0 {
         return Ok(false);
     }
@@ -429,7 +550,7 @@ pub(super) fn index(db: &Connection, limit: usize, mut enough: impl FnMut(usize)
 /// A JID without its device: messages from someone's phone and their laptop are from them.
 fn user_jid(jid: &str) -> String {
     match jid.split_once('@') {
-        Some((user, server @ ("s.whatsapp.net" | "lid"))) => {
+        Some((user, server @ ("s.whatsapp.net" | "lid" | "hosted" | "hosted.lid"))) => {
             let user = user.split([':', '.']).next().unwrap_or(user);
             format!("{user}@{server}")
         }
@@ -438,7 +559,10 @@ fn user_jid(jid: &str) -> String {
 }
 
 fn is_person(jid: &str) -> bool {
-    jid.ends_with("@s.whatsapp.net") || jid.ends_with("@lid")
+    jid.ends_with("@s.whatsapp.net")
+        || jid.ends_with("@lid")
+        || jid.ends_with("@hosted")
+        || jid.ends_with("@hosted.lid")
 }
 
 fn kind_of(jid: &str) -> &'static str {
@@ -452,6 +576,24 @@ fn kind_of(jid: &str) -> &'static str {
 }
 
 /// The chat's n, making the chat if jaw hasn't seen it.
+/// The chat a JID names: its own, or, when jaw has no chat by that JID but has a one-to-one chat
+/// with the same person under another of their JIDs, that one, so a conversation addressed by phone
+/// number and by LID stays one chat.
+fn chat_jid(db: &Connection, jid: &str) -> Result<String> {
+    if !is_person(jid) || db.prepare_cached("SELECT 1 FROM chats WHERE id = ?1")?.exists([jid])? {
+        return Ok(jid.to_string());
+    }
+    let other: Option<String> = db
+        .prepare_cached(
+            "SELECT c.id FROM person_jids j JOIN chats c ON c.person = j.person AND c.kind = 'direct'
+            WHERE j.jid = ?1 ORDER BY c.n LIMIT 1",
+        )?
+        .query_row([user_jid(jid)], |r| r.get(0))
+        .optional()?;
+    Ok(other.unwrap_or_else(|| jid.to_string()))
+}
+
+/// The chat's n, making the chat if jaw hasn't seen it; `jid` is already resolved by chat_jid.
 fn ensure_chat(db: &Connection, stamps: &mut Stamps, jid: &str) -> Result<i64> {
     if let Some(n) =
         db.prepare_cached("SELECT n FROM chats WHERE id = ?1")?.query_row([jid], |r| r.get(0)).optional()?
@@ -483,6 +625,14 @@ const PERSON: &str = "person";
 const MESSAGE: &str = "message";
 
 fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool> {
+    let resolved;
+    let chat = match chat_jid(db, &chat.id)? {
+        id if id == chat.id => chat,
+        id => {
+            resolved = Chat { id, ..chat.clone() };
+            &resolved
+        }
+    };
     let existing: Option<(i64, String)> = db
         .prepare_cached("SELECT n, kind FROM chats WHERE id = ?1")?
         .query_row([&chat.id], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -675,14 +825,40 @@ struct Kept {
     text: Option<String>,
     spans: Option<String>,
     summary: Option<String>,
+    status: Option<String>,
+}
+
+/// How far a message of yours has got: a status never goes back, and `failed` replaces only
+/// `pending`, as a send that succeeds after failing replaces `failed`.
+fn status_rank(status: Option<&str>) -> i8 {
+    match status {
+        None => -1,
+        Some("pending") => 0,
+        Some("failed") => 1,
+        Some("sent") => 2,
+        Some("delivered") => 3,
+        Some("read") => 4,
+        Some("played") => 5,
+        Some(_) => -1,
+    }
+}
+
+/// The status a message keeps when `incoming` arrives for it with `kept` already stored.
+fn advanced<'a>(kept: Option<&'a str>, incoming: Option<&'a str>) -> Option<&'a str> {
+    if status_rank(incoming) > status_rank(kept) { incoming } else { kept }
 }
 
 fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, background: bool) -> Result<bool> {
-    let chat = ensure_chat(db, stamps, &message.chat)?;
+    let chat_id = chat_jid(db, &message.chat)?;
+    let chat = ensure_chat(db, stamps, &chat_id)?;
+    if db.prepare_cached("SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2")?.exists(params![chat, message.id])? {
+        return Ok(false);
+    }
     let sender = message.sender.as_deref().map(|jid| ensure_jid(db, stamps, jid)).transpose()?;
     let existing: Option<Kept> = db
         .prepare_cached(
-            "SELECT n, t, deleted, edited_at, starred, text, spans, summary FROM messages WHERE chat = ?1 AND id = ?2",
+            "SELECT n, t, deleted, edited_at, starred, text, spans, summary, status FROM messages
+            WHERE chat = ?1 AND id = ?2",
         )?
         .query_row(params![chat, message.id], |r| {
             Ok(Kept {
@@ -694,6 +870,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
                 text: r.get(5)?,
                 spans: r.get(6)?,
                 summary: r.get(7)?,
+                status: r.get(8)?,
             })
         })
         .optional()?;
@@ -707,7 +884,9 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
     let mut summary = (message.text.as_ref() != Some(&message.summary)).then(|| message.summary.clone());
     let mut edited_at = message.edited_at;
     let mut starred = message.starred;
+    let mut status = message.status.map(str::to_string);
     if let Some(kept) = &existing {
+        status = advanced(kept.status.as_deref(), status.as_deref()).map(str::to_string);
         if kept.edited_at.is_some() && message.edited_at.is_none() {
             (text, spans, summary, edited_at) =
                 (kept.text.clone(), kept.spans.clone(), kept.summary.clone(), kept.edited_at);
@@ -735,7 +914,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
         sender,
         message.mine,
         message.kind,
-        message.status,
+        status,
         text,
         spans,
         summary,
@@ -802,7 +981,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
     }
     if existing.is_none() {
-        apply_pending(db, stamps, chat, n, &message.chat, &message.id)?;
+        apply_pending(db, stamps, chat, n, &chat_id, &message.id)?;
     }
     Ok(true)
 }
@@ -836,12 +1015,34 @@ fn target(db: &Connection, amend: &Amend) -> Result<Option<(i64, i64)>> {
         .prepare_cached(
             "SELECT m.chat, m.n FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = ?1 AND m.id = ?2",
         )?
-        .query_row(params![amend.chat, amend.target], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row(params![chat_jid(db, &amend.chat)?, amend.target], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?)
 }
 
+/// Whether the message an amendment names was deleted for me, so nothing more is done to it.
+fn tombstoned(db: &Connection, chat: &str, id: &str) -> Result<bool> {
+    Ok(db
+        .prepare_cached("SELECT 1 FROM tombstones t JOIN chats c ON c.n = t.chat WHERE c.id = ?1 AND t.id = ?2")?
+        .exists(params![chat, id])?)
+}
+
 fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<bool> {
-    match target(db, amend)? {
+    let chat = chat_jid(db, &amend.chat)?;
+    if tombstoned(db, &chat, &amend.target)? {
+        return Ok(false);
+    }
+    let found = target(db, amend)?;
+    if found.is_none() && amend.what == Amendment::DeleteForMe {
+        // A message deleted for me before jaw has it never comes.
+        let n = ensure_chat(db, stamps, &chat)?;
+        db.prepare_cached("INSERT OR IGNORE INTO tombstones (chat, id, at) VALUES (?1, ?2, ?3)")?.execute(params![
+            n,
+            amend.target,
+            amend.at
+        ])?;
+        return Ok(false);
+    }
+    match found {
         Some((chat, n)) if !matches!(amend.what, Amendment::Keep { .. }) => apply_amendment(
             db,
             stamps,
@@ -855,7 +1056,7 @@ fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<
                 "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?
             .execute(params![
-                amend.chat,
+                chat,
                 amend.target,
                 amend.what.kind(),
                 amend.at,
@@ -881,9 +1082,9 @@ struct Doing<'a> {
 fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doing: Doing) -> Result<bool> {
     let Doing { what, sender, mine, at } = doing;
     // Someone new who reacts is made first, since making them takes the next seq.
-    let reactor = match (what, sender) {
-        (Amendment::React { .. }, Some(sender)) => Some(ensure_jid(db, stamps, sender)?),
-        (Amendment::React { .. }, None) => return Ok(false),
+    let someone = match (what, sender) {
+        (Amendment::React { .. } | Amendment::Status { .. }, Some(sender)) => Some(ensure_jid(db, stamps, sender)?),
+        (Amendment::React { .. } | Amendment::Status { .. }, None) => return Ok(false),
         _ => None,
     };
     if matches!(what, Amendment::DeleteForMe) {
@@ -892,7 +1093,7 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
     let seq = stamps.seq(MESSAGE, Some(n));
     let changed = match what {
         Amendment::React { emoji } => {
-            let sender = reactor.expect("a reaction's sender is made above");
+            let sender = someone.expect("a reaction's sender is made above");
             let changed = if emoji.is_empty() {
                 db.prepare_cached("DELETE FROM reactions WHERE message = ?1 AND sender = ?2")?.execute([n, sender])?
             } else {
@@ -924,6 +1125,31 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
         Amendment::Star { starred } => db
             .prepare_cached("UPDATE messages SET starred = ?2, v = ?3 WHERE n = ?1 AND starred IS NOT ?2")?
             .execute(params![n, starred, seq])?,
+        Amendment::Status { status } => {
+            let recipient = someone.expect("a receipt's recipient is made above");
+            let column = match status.as_str() {
+                "read" => "read_at",
+                "played" => "played_at",
+                _ => "delivered_at",
+            };
+            db.prepare_cached(&format!(
+                "INSERT INTO receipts (message, recipient, {column}) VALUES (?1, ?2, ?3)
+                ON CONFLICT (message, recipient) DO UPDATE SET {column} = coalesce({column}, excluded.{column})"
+            ))?
+            .execute(params![n, recipient, at])?;
+            // In a group a message has got only as far as its slowest recipient, which sending works out.
+            let (kept, direct): (Option<String>, bool) = db
+                .prepare_cached("SELECT m.status, c.kind = 'direct' FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1 AND m.mine")?
+                .query_row([n], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .unwrap_or((None, false));
+            if direct && advanced(kept.as_deref(), Some(status)) != kept.as_deref() {
+                db.prepare_cached("UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1")?
+                    .execute(params![n, status, seq])?
+            } else {
+                0
+            }
+        }
         Amendment::DeleteForMe | Amendment::Keep { .. } => 0,
     };
     if changed == 0 {
@@ -999,6 +1225,8 @@ mod tests {
     fn a_device_is_dropped_from_a_persons_jid_but_not_from_others() {
         assert_eq!(user_jid("351910000001:12@s.whatsapp.net"), "351910000001@s.whatsapp.net");
         assert_eq!(user_jid("9988776655:3@lid"), "9988776655@lid");
+        assert_eq!(user_jid("351910000001:7@hosted"), "351910000001@hosted");
+        assert_eq!(user_jid("9988776655:7@hosted.lid"), "9988776655@hosted.lid");
         assert_eq!(user_jid("120363000000000001@g.us"), "120363000000000001@g.us");
     }
 

@@ -171,6 +171,7 @@ pub fn describe(status: &Status) -> String {
             (stored.inbox, "events to convert"),
             (stored.history, "messages of history to convert"),
             (stored.unindexed, "messages to index for search"),
+            (stored.quarantined, "changes that failed, kept in quarantine"),
         ]
         .iter()
         .filter(|(n, _)| *n > 0)

@@ -25,7 +25,7 @@ pub use self::avatars::Avatars;
 use crate::convert;
 use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, Incoming, pb};
-use crate::store::{Change, Chat, Lane, Store};
+use crate::store::{Change, Lane, Store};
 use crate::work::Priority;
 
 /// The account's and the connection's state, as interfaces see them.
@@ -79,6 +79,9 @@ const PROGRESS_EVERY: u64 = 100;
 
 /// Where sync keeps the account's JIDs between runs.
 const ME: &str = "me";
+/// Where sync keeps whether jawd last stopped cleanly: "1" from a clean shutdown until the next
+/// start, "0" while it runs.
+const CLEAN: &str = "clean";
 
 /// Makes changes in the live lane without holding up the caller, saying if they fail.
 fn apply_soon(store: &Store, changes: Vec<Change>, what: &'static str) {
@@ -101,6 +104,12 @@ pub async fn run(
 ) {
     if let Ok(Some(me)) = store.remembered(ME) {
         live.lock().expect("live state").me = convert::Me::new(me.split(' ').map(str::to_string));
+    }
+    // whatsmeow moves an app-state collection's version on in session.db before jawd has stored
+    // what it carried, so after a stop that wasn't clean every collection is fetched again in full.
+    let unclean = !matches!(store.remembered(CLEAN), Ok(Some(clean)) if clean == "1");
+    if let Err(e) = store.apply(Lane::Live, vec![Change::Remember { key: CLEAN.into(), value: "0".into() }]).await {
+        eprintln!("jawd: can't note that jawd is running: {e:#}");
     }
     let (offered, offers) = mpsc::unbounded_channel();
     let avatars = Avatars::new();
@@ -134,19 +143,7 @@ pub async fn run(
                     "app state's version",
                 );
             }
-            Some(pb::event::Kind::Receipt(receipt)) => {
-                // Reading a chat on another device means it has no unread messages here either.
-                if receipt.r#type == "read-self" && !receipt.chat.is_empty() {
-                    let chat = Chat {
-                        id: convert::user_jid(&receipt.chat),
-                        unread: Some(0),
-                        mentions: Some(0),
-                        marked_unread: Some(false),
-                        ..Chat::default()
-                    };
-                    apply_soon(&store, vec![Change::Chat(chat)], "a chat read elsewhere");
-                }
-            }
+            Some(pb::event::Kind::Receipt(receipt)) => kept("receipt", receipt.encode_to_vec(), ack),
             Some(pb::event::Kind::Connection(connection)) => {
                 let (pushed, me) = {
                     let mut live = live.lock().expect("live state");
@@ -164,7 +161,14 @@ pub async fn run(
                     apply_soon(&store, vec![Change::Remember { key: ME.into(), value: me }], "the account's JIDs");
                     if !refreshed && let Some(engine) = &engine {
                         refreshed = true;
-                        tokio::spawn(refresh::run(store.clone(), engine.clone(), avatars.clone(), linked_now));
+                        let resync = if linked_now {
+                            refresh::Resync::None
+                        } else if unclean {
+                            refresh::Resync::All
+                        } else {
+                            refresh::Resync::Missing
+                        };
+                        tokio::spawn(refresh::run(store.clone(), engine.clone(), avatars.clone(), resync));
                     }
                 }
             }
@@ -204,6 +208,27 @@ pub async fn run(
         }
     }
 }
+
+/// Ends jawd's run cleanly: the engine stops taking events from WhatsApp, what it was handing over
+/// is kept, and then jaw.db says the stop was clean, so the next start needn't fetch app state again.
+pub async fn stopped(store: &Store, engine: Option<&Supervisor>) {
+    if let Some(engine) = engine {
+        let stop = engine.call(pb::command::Kind::LinkCancel(pb::LinkCancel {}));
+        if tokio::time::timeout(STOPPING, stop).await.is_err() {
+            eprintln!("jawd: the engine didn't stop in time, so the next start fetches app state again");
+            return;
+        }
+        tokio::time::sleep(SETTLING).await;
+    }
+    if let Err(e) = store.apply_durable(vec![Change::Remember { key: CLEAN.into(), value: "1".into() }]).await {
+        eprintln!("jawd: can't note a clean stop: {e:#}");
+    }
+}
+
+/// How long the engine has to disconnect at a clean stop, and how long what it was handing over
+/// has to be kept after.
+const STOPPING: std::time::Duration = std::time::Duration::from_secs(2);
+const SETTLING: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Counts a message that arrived while catching up, and says how far it has got now and then.
 fn caught(live: &Shared, pushes: &broadcast::Sender<Push>, chat: &str) {

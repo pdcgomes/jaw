@@ -285,6 +285,9 @@ pub struct Stored {
     /// Messages not yet indexed for search.
     #[serde(default)]
     pub unindexed: u64,
+    /// Changes that failed to convert, kept with their errors.
+    #[serde(default)]
+    pub quarantined: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

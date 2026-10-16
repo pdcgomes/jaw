@@ -243,7 +243,8 @@ func avatarFile(state enginepb.AvatarFile_State, id string, size uint64) *engine
 // pictures fetches profile pictures through HTTPS_PROXY when it's set, as whatsmeow does.
 var pictures = &http.Client{Timeout: time.Minute, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
 
-// download writes what url answers to path, through a .part file renamed once it's whole.
+// download writes what url answers to path, through a .part file synced and renamed once it's
+// whole, so a row never points at a file a power cut left half written.
 func download(ctx context.Context, url, path string) (uint64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -266,6 +267,9 @@ func download(ctx context.Context, url, path string) (uint64, error) {
 		return 0, err
 	}
 	n, err := io.Copy(f, resp.Body)
+	if err == nil {
+		err = fullSync(f)
+	}
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
@@ -273,7 +277,10 @@ func download(ctx context.Context, url, path string) (uint64, error) {
 		_ = os.Remove(part)
 		return 0, err
 	}
-	return uint64(n), os.Rename(part, path)
+	if err := os.Rename(part, path); err != nil {
+		return 0, err
+	}
+	return uint64(n), syncDir(filepath.Dir(path))
 }
 
 // historyRequest asks the phone for messages from before the oldest jawd has in a chat.

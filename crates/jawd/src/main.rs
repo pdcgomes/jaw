@@ -275,6 +275,9 @@ async fn stop(Started { state, notifications }: Started, socket: &Path) {
     if let Some(notifications) = notifications {
         notifications.abort();
     }
+    if let Some(store) = state.store() {
+        sync::stopped(store, state.engine().ok()).await;
+    }
     if let Ok(engine) = state.engine() {
         engine.stop().await;
     }

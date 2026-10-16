@@ -198,7 +198,7 @@ func (e *Engine) handle(evt any) {
 	case *events.Picture:
 		e.keep(&enginepb.Event{Kind: &enginepb.Event_Picture{Picture: picture(v)}})
 	case *events.Receipt:
-		e.send(&enginepb.Event{Kind: &enginepb.Event_Receipt{Receipt: receipt(v)}})
+		e.keep(&enginepb.Event{Kind: &enginepb.Event_Receipt{Receipt: receipt(v)}})
 	case *events.Connected:
 		e.connection(enginepb.Connection_CONNECTED, "")
 	case *events.Disconnected:
@@ -486,15 +486,43 @@ func (e *Engine) historyDownload(c *enginepb.HistoryDownload) *enginepb.Reply {
 	}}}
 }
 
+// writeWhole writes data to path through a .part file, synced before it's renamed into place, and
+// syncs the folder after, so after a power cut the file is either whole or not there.
 func writeWhole(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	part := path + ".part"
-	if err := os.WriteFile(part, data, 0o600); err != nil {
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(part, path)
+	_, err = f.Write(data)
+	if err == nil {
+		err = fullSync(f)
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(part)
+		return err
+	}
+	if err := os.Rename(part, path); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+// syncDir makes a rename in dir durable.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return fullSync(d)
 }
 
 // bench sends Bench events the way a message is sent, each waiting for its ack, and measures the

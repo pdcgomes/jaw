@@ -15,7 +15,7 @@ use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 use super::{Avatars, Shared, fetch};
 use crate::convert::{self, Me, app_state, people};
 use crate::engine::pb;
-use crate::store::{Change, Chat, Drained, Lane, Store};
+use crate::store::{Amend, Amendment, Change, Chat, Drained, Lane, Store};
 use crate::work::Priority;
 
 /// Inbox rows read and converted at once.
@@ -107,6 +107,13 @@ pub fn convert_rows(rows: &[Row], me: &Me) -> Converted {
                 }
                 Err(e) => undecodable(row, e),
             },
+            "receipt" => match pb::Receipt::decode(row.payload.as_slice()) {
+                Ok(receipt) => {
+                    out.changes.extend(receipt_changes(&receipt));
+                    true
+                }
+                Err(e) => undecodable(row, e),
+            },
             "bench" => true,
             _ => false,
         };
@@ -115,6 +122,49 @@ pub fn convert_rows(rows: &[Row], me: &Me) -> Converted {
         }
     }
     out
+}
+
+/// What a receipt changes. Reading on another of your devices reads the chat here; a recipient's
+/// delivered, read or played marks your message, or waits in `pending` for it. The rest (retries,
+/// server errors and the like) are whatsmeow's business and change nothing jaw keeps.
+pub fn receipt_changes(receipt: &pb::Receipt) -> Vec<Change> {
+    let chat = convert::user_jid(&receipt.chat);
+    if chat.is_empty() {
+        return Vec::new();
+    }
+    let status = match receipt.r#type.as_str() {
+        "read-self" | "played-self" => {
+            return vec![Change::Chat(Chat {
+                id: chat,
+                unread: Some(0),
+                mentions: Some(0),
+                marked_unread: Some(false),
+                ..Chat::default()
+            })];
+        }
+        "" | "delivered" => "delivered",
+        "read" => "read",
+        "played" => "played",
+        _ => return Vec::new(),
+    };
+    if receipt.from_me || receipt.sender.is_empty() {
+        return Vec::new();
+    }
+    receipt
+        .ids
+        .iter()
+        .map(|id| {
+            Change::Amend(Amend {
+                chat: chat.clone(),
+                target: id.clone(),
+                sender: Some(convert::user_jid(&receipt.sender)),
+                mine: false,
+                at: receipt.timestamp_ms,
+                what: Amendment::Status { status: status.into() },
+                raw: None,
+            })
+        })
+        .collect()
 }
 
 /// A row that can't be decoded is kept, and said once.
@@ -145,7 +195,15 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
     if !info.sender_alt.is_empty() && convert::is_person(&info.sender) {
         out.changes.extend(people_joined(&info.sender, &info.sender_alt));
     }
-    out.changes.extend(convert::message(&web, me, true));
+    let changes = convert::message(&web, me, true);
+    // A poll vote or an encrypted reaction is readable only through what the engine decrypted,
+    // which the inbox row holds and a message's raw protobuf doesn't, so the row stays for the
+    // jawd that tallies them.
+    if changes.iter().any(|c| matches!(c, Change::Amend(Amend { what: Amendment::Keep { kind }, .. }) if kind != "pin"))
+    {
+        return false;
+    }
+    out.changes.extend(changes);
     true
 }
 
@@ -168,7 +226,7 @@ async fn read_inbox(store: &Store, after: i64) -> anyhow::Result<Vec<Row>> {
 }
 
 /// Converts the inbox as rows land, until jawd stops.
-pub async fn inbox(store: Store, live: Shared, offered: mpsc::UnboundedSender<fetch::Offer>, avatars: Avatars) {
+pub async fn inbox(store: Store, live: Shared, offered: mpsc::UnboundedSender<fetch::Work>, avatars: Avatars) {
     let inboxed = store.inboxed();
     let left: i64 = store
         .reads()
@@ -180,6 +238,8 @@ pub async fn inbox(store: Store, live: Shared, offered: mpsc::UnboundedSender<fe
     let mut after = 0;
     let started = Instant::now();
     let mut leftovers = 0usize;
+    let mut swept = false;
+    let mut pause = RETRY_FIRST;
     loop {
         let rows = match read_inbox(&store, after).await {
             Ok(rows) => rows,
@@ -190,6 +250,10 @@ pub async fn inbox(store: Store, live: Shared, offered: mpsc::UnboundedSender<fe
             }
         };
         let Some(last) = rows.last().map(|row| row.seq) else {
+            if !swept {
+                swept = true;
+                let _ = offered.send(fetch::Work::Offered);
+            }
             if leftovers > 0 {
                 eprintln!(
                     "jawd: converted {leftovers} inbox rows left from before in {:.1} s",
@@ -200,15 +264,37 @@ pub async fn inbox(store: Store, live: Shared, offered: mpsc::UnboundedSender<fe
             inboxed.notified().await;
             continue;
         };
-        after = last;
         let from_before = last <= left;
-        if from_before {
-            leftovers += rows.len();
-        }
+        let count = rows.len();
         let me = live.lock().expect("live state").me.clone();
         let Ok(converted) = tokio::task::spawn_blocking(move || convert_rows(&rows, &me)).await else { continue };
+        let applied = if from_before {
+            store.apply(Lane::Background, converted.changes).await.map(|applied| applied.quarantined)
+        } else {
+            apply_live(&store, converted.changes).await
+        };
+        // Rows that couldn't be stored at all (a full disk, an I/O error) are read again after a
+        // pause; a row whose own conversion failed is in quarantine and stays in the inbox.
+        match applied {
+            Ok(quarantined) => {
+                after = last;
+                pause = RETRY_FIRST;
+                if from_before {
+                    leftovers += count;
+                }
+                if quarantined > 0 {
+                    eprintln!("jawd: {quarantined} inbox rows didn't convert and are kept in quarantine");
+                }
+            }
+            Err(e) => {
+                eprintln!("jawd: can't store what the inbox held, so it's tried again in {pause:?}: {e:#}");
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(RETRY_MOST);
+                continue;
+            }
+        }
         for offer in converted.offers {
-            let _ = offered.send(offer);
+            let _ = offered.send(fetch::Work::Offer(offer));
         }
         if let Some(name) = converted.my_name
             && let Some(me) = live.lock().expect("live state").account.me.as_mut()
@@ -218,25 +304,28 @@ pub async fn inbox(store: Store, live: Shared, offered: mpsc::UnboundedSender<fe
         for jid in converted.pictures {
             avatars.want(&jid);
         }
-        let applied = if from_before {
-            store.apply(Lane::Background, converted.changes).await.map(|_| ())
-        } else {
-            apply_live(&store, converted.changes).await
-        };
-        if let Err(e) = applied {
-            eprintln!("jawd: can't store what the inbox held: {e:#}");
-        }
     }
 }
 
-/// Makes changes in the live lane, LIVE_CHANGES to a transaction.
-async fn apply_live(store: &Store, mut changes: Vec<Change>) -> anyhow::Result<()> {
+/// How long the converter waits before reading rows again that it couldn't store, at first and
+/// at most.
+const RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(10);
+const RETRY_MOST: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Makes changes in the live lane, LIVE_CHANGES or so to a transaction, never splitting one inbox
+/// row's changes from the removal of its row; says how many rows went to quarantine.
+async fn apply_live(store: &Store, mut changes: Vec<Change>) -> anyhow::Result<usize> {
+    let mut quarantined = 0;
     while !changes.is_empty() {
-        let rest = changes.split_off(changes.len().min(LIVE_CHANGES));
-        store.apply(Lane::Live, changes).await?;
+        let mut cut = changes.len().min(LIVE_CHANGES);
+        while cut < changes.len() && !matches!(changes[cut - 1], Change::Drained(_)) {
+            cut += 1;
+        }
+        let rest = changes.split_off(cut);
+        quarantined += store.apply(Lane::Live, changes).await?.quarantined;
         changes = rest;
     }
-    Ok(())
+    Ok(quarantined)
 }
 
 /// Converts the history an earlier jawd kept raw, HISTORY_READ rows at a time, deleting each row
@@ -270,16 +359,25 @@ pub async fn history_raw(store: Store, live: Shared) {
             }
         };
         let count = rows.len();
-        if let Some((chat, id, _)) = rows.last() {
-            after = (chat.clone(), id.clone());
-        }
+        let last = rows.last().map(|(chat, id, _)| (chat.clone(), id.clone()));
         let me = live.lock().expect("live state").me.clone();
         let Ok(changes) = tokio::task::spawn_blocking(move || history_rows(rows, &me)).await else { return };
-        if let Err(e) = store.apply(Lane::Background, changes).await {
-            eprintln!("jawd: can't store the history kept raw: {e:#}");
-            return;
+        match store.apply(Lane::Background, changes).await {
+            Ok(applied) => {
+                if applied.quarantined > 0 {
+                    eprintln!(
+                        "jawd: {} messages of history didn't convert and are kept in quarantine",
+                        applied.quarantined
+                    );
+                }
+                after = last.unwrap_or_default();
+                converted += count;
+            }
+            Err(e) => {
+                eprintln!("jawd: can't store the history kept raw, so it's tried again in {RETRY_MOST:?}: {e:#}");
+                tokio::time::sleep(RETRY_MOST).await;
+            }
         }
-        converted += count;
     }
     if converted > 0 {
         let seconds = started.elapsed().as_secs_f64();

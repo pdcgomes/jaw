@@ -52,7 +52,7 @@ impl Me {
 /// A JID without its device.
 pub fn user_jid(jid: &str) -> String {
     match jid.split_once('@') {
-        Some((user, server @ ("s.whatsapp.net" | "lid"))) => {
+        Some((user, server @ ("s.whatsapp.net" | "lid" | "hosted" | "hosted.lid"))) => {
             let user = user.split([':', '.']).next().unwrap_or(user);
             format!("{user}@{server}")
         }
@@ -61,7 +61,10 @@ pub fn user_jid(jid: &str) -> String {
 }
 
 pub fn is_person(jid: &str) -> bool {
-    jid.ends_with("@s.whatsapp.net") || jid.ends_with("@lid")
+    jid.ends_with("@s.whatsapp.net")
+        || jid.ends_with("@lid")
+        || jid.ends_with("@hosted")
+        || jid.ends_with("@hosted.lid")
 }
 
 /// A live message from the engine as WhatsApp's `WebMessageInfo`, the form history keeps, and the

@@ -168,6 +168,7 @@ impl State {
                     messages: store.count("messages").ok()?,
                     people: store.count("people").ok()?,
                     unindexed: store.count("fts_backlog").ok()?,
+                    quarantined: store.count("quarantine").ok()?,
                 })
             }),
             interfaces: Some(Interfaces {

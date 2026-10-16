@@ -303,6 +303,44 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- whether jaw uses it yet or not.
     CREATE TABLE app_state (key TEXT PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID;
     ",
+    // 5: the review's rules for what sync writes. The inbox's seq never goes back, so the converter,
+    // which reads past the last seq it took, never misses a row once the inbox has drained; a
+    // change that fails to convert is kept in quarantine; and a message deleted for me stays deleted.
+    "
+    -- The inbox's seq never goes back, even once the inbox has drained, so the converter, which
+    -- reads past the last seq it took, never misses a row. A rebuild of a small table: nothing
+    -- refers to it, and sqlite_sequence follows the rename at the largest seq copied.
+    CREATE TABLE inbox_rebuilt (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        payload BLOB NOT NULL
+    ) STRICT;
+    INSERT INTO inbox_rebuilt (seq, kind, at, payload) SELECT seq, kind, at, payload FROM inbox;
+    DROP TABLE inbox;
+    ALTER TABLE inbox_rebuilt RENAME TO inbox;
+
+    -- A change that failed, kept with its error and what it came from instead of being dropped:
+    -- `source` and `ref` name the raw row it was converted from (`inbox` and its seq, `history_raw`
+    -- and its chat and ID), or the change itself, whose raw protobuf is then kept in `raw`.
+    CREATE TABLE quarantine (
+        n INTEGER PRIMARY KEY,
+        at INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        ref TEXT NOT NULL,
+        error TEXT NOT NULL,
+        raw BLOB
+    ) STRICT;
+    CREATE UNIQUE INDEX quarantine_by_ref ON quarantine (source, ref);
+
+    -- Messages deleted for me, so a history copy or a message sent again doesn't bring them back.
+    CREATE TABLE tombstones (
+        chat INTEGER NOT NULL REFERENCES chats (n) ON DELETE CASCADE,
+        id TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        PRIMARY KEY (chat, id)
+    ) STRICT, WITHOUT ROWID;
+    ",
 ];
 
 pub fn migrate(db: &mut Connection) -> Result<()> {

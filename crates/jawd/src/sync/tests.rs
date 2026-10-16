@@ -583,3 +583,131 @@ fn a_history_blob_keeps_each_chat_as_the_phone_has_it() {
     assert_eq!((message.chat.as_str(), message.counts), (ANA, false));
     assert_eq!(parts[1].len(), 2, "the blob's LID map and push names");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_converter_drains_the_inbox_to_empty_then_converts_one_more() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let converter = converting(&store);
+    for n in 0..3 {
+        store.inbox("message", 0, live_message(ANA, ANA, &format!("m{n}"), AT + n, text("hi")).encode_to_vec(), None);
+    }
+    until("the inbox to drain", || store.count("inbox").unwrap() == 0 && store.count("messages").unwrap() == 3).await;
+    store.inbox("message", 0, live_message(ANA, ANA, "m3", AT + 9, text("one more")).encode_to_vec(), None);
+    until("one more to be converted", || store.count("messages").unwrap() == 4).await;
+    assert_eq!(store.count("inbox").unwrap(), 0);
+    converter.abort();
+}
+
+fn copy_of(chat: &str, id: &str, mine: bool, status: Option<i32>) -> WebMessageInfo {
+    WebMessageInfo {
+        key: MessageKey { remote_jid: Some(chat.into()), from_me: Some(mine), id: Some(id.into()), participant: None },
+        message: Some(text("the same message again")),
+        message_timestamp: Some((AT / 1000) as u64),
+        status,
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_arriving_again_never_undoes_a_delete_for_me_or_takes_a_status_back() {
+    use wa_proto::wa_web_protobufs_web::web_message_info::Status;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let read_copy = copy_of(ANA, "mine", true, Some(Status::Read as i32));
+    store.apply(Lane::Live, convert::message(&read_copy, &me(), true)).await.unwrap();
+    store.apply(Lane::Live, convert::message(&copy_of(ANA, "gone", false, None), &me(), true)).await.unwrap();
+    store.apply(Lane::Live, vec![amend("gone", crate::store::Amendment::DeleteForMe)]).await.unwrap();
+    let delivered_copy = copy_of(ANA, "mine", true, Some(Status::DeliveryAck as i32));
+    store.apply(Lane::Background, convert::message(&delivered_copy, &me(), false)).await.unwrap();
+    store.apply(Lane::Background, convert::message(&copy_of(ANA, "gone", false, None), &me(), false)).await.unwrap();
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    let shown: Vec<(&str, Option<&str>)> = rows.iter().map(|r| (r.id.as_str(), r.status.as_deref())).collect();
+    assert_eq!(shown, [("mine", Some("read"))]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_to_someones_lid_goes_into_the_chat_jaw_has_with_their_number() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    store.apply(Lane::Live, convert::message(&copy_of(ANA, "pn", false, None), &me(), true)).await.unwrap();
+    let joined = convert::people::lid_pairs(&pb::LidPairs {
+        pairs: vec![pb::LidPair { lid: "100000000001@lid".into(), phone: ANA.into() }],
+    });
+    store.apply(Lane::Live, joined).await.unwrap();
+    store
+        .apply(Lane::Live, convert::message(&copy_of("100000000001@lid", "lid", false, None), &me(), true))
+        .await
+        .unwrap();
+    assert_eq!(store.count("chats").unwrap(), 1, "one conversation, one chat");
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["pn", "lid"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn receipts_move_your_message_forward_even_when_they_come_first() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let receipt = |kind: &str, at: i64| pb::Receipt {
+        chat: ANA.into(),
+        sender: ANA.to_string(),
+        ids: vec!["mine".into()],
+        timestamp_ms: at,
+        r#type: kind.into(),
+        ..Default::default()
+    };
+    store.apply(Lane::Live, drain::receipt_changes(&receipt("read", AT + 2))).await.unwrap();
+    assert_eq!(store.count("pending").unwrap(), 1, "a receipt for a message jaw doesn't have yet waits for it");
+    store.apply(Lane::Live, convert::message(&copy_of(ANA, "mine", true, None), &me(), true)).await.unwrap();
+    store.apply(Lane::Live, drain::receipt_changes(&receipt("", AT + 1))).await.unwrap();
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    assert_eq!(rows[0].status.as_deref(), Some("read"), "delivered after read doesn't take it back");
+    let receipts: (Option<i64>, Option<i64>) = query(&store, |db| {
+        Ok(db.query_row("SELECT delivered_at, read_at FROM receipts", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    })
+    .await;
+    assert_eq!(receipts, (Some(AT + 1), Some(AT + 2)));
+    let read_elsewhere = drain::receipt_changes(&receipt("read-self", AT + 3));
+    assert!(matches!(read_elsewhere.as_slice(), [Change::Chat(chat)] if chat.unread == Some(0)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_stop_is_noted_and_the_next_start_unnotes_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    assert_eq!(store.remembered(CLEAN).unwrap(), None, "a database jawd never stopped cleanly");
+    stopped(&store, None).await;
+    assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("1"));
+    let (_events, incoming) = mpsc::channel(1);
+    let running = tokio::spawn(run(
+        incoming,
+        store.clone(),
+        Arc::default(),
+        broadcast::channel(4).0,
+        None,
+        home.path().to_path_buf(),
+    ));
+    until("the start to be noted", || store.remembered(CLEAN).unwrap().as_deref() == Some("0")).await;
+    running.abort();
+}
+
+#[test]
+fn a_live_poll_vote_stays_in_the_inbox_with_what_the_engine_decrypted() {
+    let vote = e2e::Message {
+        poll_update_message: Some(e2e::PollUpdateMessage {
+            poll_creation_message_key: Some(MessageKey {
+                remote_jid: Some(GROUP.into()),
+                from_me: Some(true),
+                id: Some("poll".into()),
+                participant: None,
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut live = live_message(GROUP, "100000000001@lid", "v1", AT, vote);
+    live.decrypted = vec![1, 2, 3];
+    let converted =
+        drain::convert_rows(&[Row { seq: 7, kind: "message".into(), payload: live.encode_to_vec() }], &me());
+    assert!(converted.changes.is_empty(), "nothing converted, and the row isn't drained");
+}
