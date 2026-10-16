@@ -605,7 +605,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- It's delivered once every one of them who's still a member has it, and read once every one
     -- has read it; members who joined after don't count, and those who left don't hold it up. A
     -- message's rows are let go of once it has got as far as it can, read or, for a voice message,
-    -- played (settled, below).
+    -- played (settled, below). So message.info's list of who had it and read it when comes from
+    -- receipts, which last as long as the message, never from here.
     CREATE TABLE recipients (
         message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
         member INTEGER NOT NULL REFERENCES person_jids (n),

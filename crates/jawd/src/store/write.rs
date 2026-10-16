@@ -1644,6 +1644,7 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
             }
             let reached = match &kept {
                 Some((_, true, _)) => Some(status.as_str()),
+                Some((kept, false, kind)) if outbox::at_end(kind, kept.as_deref()) => None,
                 Some((kept, false, _)) => match outbox::group_reached(db, n, chat, kept.as_deref())? {
                     None => Some(status.as_str()),
                     Some(None) => Some("sent"),

@@ -23,12 +23,16 @@ pub const RECEIPTS_AT_ONCE: usize = 1_000;
 pub const OUTBOX_MOST: u64 = 1_000;
 /// How long an interface's key for a message it sent is kept.
 pub const KEY_KEPT_MS: i64 = 24 * 3600 * 1000;
-/// What one step of regrouping may look at, in messages times the group's members: looking at a
-/// message may walk all its recipients, at about 1.5 µs each, so a step stays under 2 ms whatever
-/// the group's size.
+/// What one step of regrouping may look at, in messages times the larger of the group's members
+/// and the message's recipients: looking at a message may walk all who it was sent to, and every
+/// member now, at about 1.5 µs each, so a step stays under 2 ms whatever the group's size or how
+/// many have left it. A message that alone is more is looked at alone.
 const REGROUP_WORK: i64 = 1_024;
 /// The most messages one step looks at, for small groups, where each look's own cost counts.
-const REGROUP_AT_ONCE: i64 = 16;
+const REGROUP_AT_ONCE: usize = 16;
+/// The most of a member's messages one step goes through, those already at their end included,
+/// which cost a lookup each and aren't looked at.
+const REGROUP_SCANNED: i64 = 64;
 /// How long a step goes on before it stops after the message it's on, on a machine slower than that.
 const REGROUP_FOR: Duration = Duration::from_millis(2);
 /// How many of a settled message's recipients one step lets go of.
@@ -209,6 +213,7 @@ const LEFT: &str =
     "INSERT INTO regroup (chat, member) VALUES (?1, ?2) ON CONFLICT (chat, member) DO UPDATE SET after = 0";
 const REGROUP_FROM: &str = "SELECT after FROM regroup WHERE chat = ?1 AND member = ?2";
 const GROUP_SIZE: &str = "SELECT count(*) FROM group_members WHERE chat = ?1";
+const RECIPIENT_COUNT: &str = "SELECT count(*) FROM recipients WHERE message = ?1";
 const SENT_TO_MEMBER: &str =
     "SELECT message FROM recipients WHERE chat = ?1 AND member = ?2 AND message > ?3 ORDER BY message LIMIT ?4";
 const REGROUP_ON: &str = "UPDATE regroup SET after = ?3 WHERE chat = ?1 AND member = ?2";
@@ -361,11 +366,17 @@ pub(super) fn received(db: &Connection, n: i64) -> Result<()> {
 /// was sent to no longer matters, and they're let go of in the background. Until they all are, the
 /// ones left can't move its status, which is as far as it goes.
 pub(super) fn settled(db: &Connection, n: i64, kind: &str, status: &str) -> Result<()> {
-    let played = matches!(kind, "voice" | "audio" | "video" | "video_note");
-    if status == "played" || (status == "read" && !played) {
+    if at_end(kind, Some(status)) {
         db.prepare_cached(SETTLED)?.execute([n])?;
     }
     Ok(())
+}
+
+/// Whether a message of `kind` at `status` has got as far as it can, so no receipt or member
+/// leaving can move it.
+pub(super) fn at_end(kind: &str, status: Option<&str>) -> bool {
+    let played = matches!(kind, "voice" | "audio" | "video" | "video_note");
+    status == Some("played") || (status == Some("read") && !played)
 }
 
 /// Some of the messages whose recipients are still to be let go of.
@@ -508,8 +519,52 @@ pub(super) fn members_left(db: &Connection, chat: i64, members: &[i64]) -> Resul
     Ok(())
 }
 
-/// Looks again at the next few of your messages in `chat` that `member` was sent, as many as
-/// REGROUP_WORK allows in a group that size, and stops sooner once REGROUP_FOR has passed.
+/// A message of yours as regrouping looks at it: its status and kind.
+type Mine = (Option<String>, String);
+
+/// What one step of regrouping goes through, in order: each message, with its status and kind if
+/// it's to be looked at, or `None` if it's at its end or no longer yours there.
+#[derive(Debug, Default)]
+struct Plan {
+    messages: Vec<(i64, Option<Mine>)>,
+    /// The work the messages to look at add up to, as REGROUP_WORK counts it.
+    work: i64,
+    /// Whether there's nothing after them.
+    all: bool,
+}
+
+/// The next of your messages in `chat` that `member` was sent, from after `after`: as many to look
+/// at as REGROUP_WORK allows, and those at their end on the way, which aren't counted.
+fn plan(db: &Connection, chat: i64, member: i64, after: i64) -> Result<Plan> {
+    let members: i64 = db.prepare_cached(GROUP_SIZE)?.query_row([chat], |r| r.get(0))?;
+    let scanned: Vec<i64> = db
+        .prepare_cached(SENT_TO_MEMBER)?
+        .query_map(params![chat, member, after, REGROUP_SCANNED], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut plan = Plan { all: (scanned.len() as i64) < REGROUP_SCANNED, ..Plan::default() };
+    let mut looking = 0;
+    for &n in &scanned {
+        let mine: Option<Mine> =
+            db.prepare_cached(MINE_IN)?.query_row([n, chat], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        let Some((kept, kind)) = mine.filter(|(kept, kind)| !at_end(kind, kept.as_deref())) else {
+            plan.messages.push((n, None));
+            continue;
+        };
+        let recipients: i64 = db.prepare_cached(RECIPIENT_COUNT)?.query_row([n], |r| r.get(0))?;
+        let work = members.max(recipients).max(1);
+        if looking > 0 && (looking == REGROUP_AT_ONCE || plan.work + work > REGROUP_WORK) {
+            plan.all = false;
+            break;
+        }
+        plan.work += work;
+        looking += 1;
+        plan.messages.push((n, Some((kept, kind))));
+    }
+    Ok(plan)
+}
+
+/// Looks again at the next few of your messages in `chat` that `member` was sent, as `plan` picks
+/// them, and stops sooner once REGROUP_FOR has passed.
 fn regroup(db: &Connection, stamps: &mut Stamps, chat: i64, member: i64) -> Result<bool> {
     let began = Instant::now();
     let Some(after): Option<i64> =
@@ -517,35 +572,33 @@ fn regroup(db: &Connection, stamps: &mut Stamps, chat: i64, member: i64) -> Resu
     else {
         return Ok(false);
     };
-    let members: i64 = db.prepare_cached(GROUP_SIZE)?.query_row([chat], |r| r.get(0))?;
-    let most = (REGROUP_WORK / members.max(1)).clamp(1, REGROUP_AT_ONCE);
-    let messages: Vec<i64> = db
-        .prepare_cached(SENT_TO_MEMBER)?
-        .query_map(params![chat, member, after, most], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let plan = plan(db, chat, member, after)?;
     let mut changed = false;
     let mut last = None;
-    for &n in &messages {
-        if last.is_some() && began.elapsed() >= REGROUP_FOR {
-            break;
-        }
-        last = Some(n);
-        let Some((kept, kind)): Option<(Option<String>, String)> =
-            db.prepare_cached(MINE_IN)?.query_row([n, chat], |r| Ok((r.get(0)?, r.get(1)?))).optional()?
-        else {
+    let mut looked = false;
+    let mut stopped = false;
+    for (n, look) in &plan.messages {
+        let Some((kept, kind)) = look else {
+            last = Some(*n);
             continue;
         };
-        let Some(Some(reached)) = group_reached(db, n, chat, kept.as_deref())? else { continue };
+        if looked && began.elapsed() >= REGROUP_FOR {
+            stopped = true;
+            break;
+        }
+        looked = true;
+        last = Some(*n);
+        let Some(Some(reached)) = group_reached(db, *n, chat, kept.as_deref())? else { continue };
         if advanced(kept.as_deref(), Some(reached)) != kept.as_deref() {
-            let seq = stamps.seq(MESSAGE, Some(n));
+            let seq = stamps.seq(MESSAGE, Some(*n));
             db.prepare_cached(REGROUPED)?.execute(params![n, reached, seq])?;
-            touched(db, stamps, chat, n, seq)?;
-            settled(db, n, &kind, reached)?;
+            touched(db, stamps, chat, *n, seq)?;
+            settled(db, *n, kind, reached)?;
             changed = true;
         }
     }
     match last {
-        Some(last) if messages.last() != Some(&last) || messages.len() as i64 == most => {
+        Some(last) if stopped || !plan.all => {
             db.prepare_cached(REGROUP_ON)?.execute([chat, member, last])?;
         }
         _ => {
@@ -820,6 +873,7 @@ mod tests {
             ("left", LEFT, ""),
             ("regroup from", REGROUP_FROM, "SEARCH regroup USING PRIMARY KEY (chat=? AND member=?)"),
             ("a group's size", GROUP_SIZE, "SEARCH group_members USING PRIMARY KEY (chat=?)"),
+            ("a message's recipients", RECIPIENT_COUNT, "SEARCH recipients USING PRIMARY KEY (message=?)"),
             ("regroup on", REGROUP_ON, "SEARCH regroup USING PRIMARY KEY (chat=? AND member=?)"),
             ("regroup done", REGROUP_DONE, "SEARCH regroup USING PRIMARY KEY (chat=? AND member=?)"),
             ("regroups", REGROUPS, "SCAN regroup"),
@@ -1183,54 +1237,94 @@ mod tests {
         assert!(statuses(&store, BIG).await.iter().all(|s| s == "read"));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn in_a_group_of_a_thousand_a_step_of_regrouping_looks_at_one_message_so_it_stays_short() {
+    /// How long each step took: regrouping, then letting go.
+    type Steps = (Vec<Duration>, Vec<Duration>);
+
+    /// A group of 1,024 members and you, MESSAGES of yours read by the members `read` picks, then
+    /// those `leave` picks leaving in one change, and every step of regrouping and letting go
+    /// applied alone. Each step is checked against what it may do, which is the same however fast
+    /// the machine is.
+    async fn in_a_thousand(read: fn(usize) -> bool, leave: fn(usize) -> bool) -> Steps {
         use crate::store::{Change, Lane, Members, Store};
+        use crate::work::Priority::Interactive;
         const HUGE: &str = "120363000000000004@g.us";
-        const MESSAGES: usize = 32;
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         store.apply(Lane::Live, group(HUGE, (1..=1_024).map(member))).await.unwrap();
         let sends = (0..MESSAGES).map(|n| Change::Outbox(in_group(HUGE, format!("h{n}")))).collect();
         store.apply(Lane::Live, sends).await.unwrap();
-        // Read by everyone but member 1, written straight in: 32,000 receipts through the writer
-        // would take a debug build minutes, and nothing here depends on how they came.
+        // Written straight in: 32,000 receipts through the writer would take a debug build
+        // minutes, and nothing here depends on how they came.
+        let readers: Vec<String> = (1..=1_024).filter(|&m| read(m)).map(member).collect();
         let db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.busy_timeout(Duration::from_secs(10)).unwrap();
         db.execute(
             "INSERT INTO receipts (message, recipient, read_at) SELECT r.message, r.member, 2000 FROM recipients r
-            JOIN person_jids j ON j.n = r.member WHERE j.jid <> ?1",
-            [member(1)],
+            JOIN person_jids j ON j.n = r.member WHERE j.jid IN (SELECT value FROM json_each(?1))",
+            [serde_json::to_string(&readers).unwrap()],
         )
         .unwrap();
         drop(db);
-        let left = Members { chat: HUGE.into(), all: false, set: Vec::new(), remove: vec![member(1)] };
+        let remove = (1..=1_024).filter(|&m| leave(m)).map(member).collect();
+        let left = Members { chat: HUGE.into(), all: false, set: Vec::new(), remove };
         store.apply(Lane::Live, vec![Change::Members(left)]).await.unwrap();
         let (mut regrouping, mut letting_go) = (Vec::new(), Vec::new());
         loop {
-            let left = store.reads().query(crate::work::Priority::Interactive, |db| regroups(db, 1)).await.unwrap();
-            let Some(&(chat, member)) = left.first() else { break };
+            let next = store
+                .reads()
+                .query(Interactive, |db| {
+                    let Some(&(chat, member)) = regroups(db, 1)?.first() else { return Ok(None) };
+                    let after: i64 = db.query_row(REGROUP_FROM, [chat, member], |r| r.get(0))?;
+                    Ok(Some((chat, member, plan(db, chat, member, after)?)))
+                })
+                .await
+                .unwrap();
+            let Some((chat, member, plan)) = next else { break };
+            let looks = plan.messages.iter().filter(|(_, look)| look.is_some()).count();
+            assert!(looks <= REGROUP_AT_ONCE && (looks <= 1 || plan.work <= REGROUP_WORK), "{plan:?}");
             let step = Change::Outbox(Step::Regroup { chat, member });
             regrouping.push(store.apply(Lane::Background, vec![step]).await.unwrap().took);
         }
         assert!(statuses(&store, HUGE).await.iter().all(|s| s == "read"), "{:?}", statuses(&store, HUGE).await);
-        assert_eq!(regrouping.len(), MESSAGES + 1, "a message a step, and one to find there's none left");
         loop {
-            let settled =
-                store.reads().query(crate::work::Priority::Interactive, |db| settled_messages(db, 1)).await.unwrap();
+            let settled = store.reads().query(Interactive, |db| settled_messages(db, 1)).await.unwrap();
             let Some(&message) = settled.first() else { break };
+            let before = store.count("recipients").unwrap();
             let step = Change::Outbox(Step::LetGo { message });
             letting_go.push(store.apply(Lane::Background, vec![step]).await.unwrap().took);
+            let gone = before - store.count("recipients").unwrap();
+            assert!(gone <= LET_GO_AT_ONCE as u64, "a step let go of {gone}");
         }
         assert_eq!(letting_go.len(), MESSAGES * 9, "1,024 recipients a message, 128 a step, then none left");
         assert_eq!(store.count("recipients").unwrap(), 0, "all let go of once read by all");
-        // A WAL checkpoint can fall in any one commit, until durability's checkpointer takes them.
+        // A WAL checkpoint or another process can stall any one commit, so the wall clock is
+        // allowed one step in a hundred; what a step may do is checked above, exactly.
         if !cfg!(debug_assertions) {
             for (what, took) in [("regrouping", &regrouping), ("letting go", &letting_go)] {
                 let over = took.iter().filter(|took| **took >= Duration::from_millis(3)).count();
                 assert!(over <= 1 + took.len() / 100, "{over} steps of {what} took 3 ms or more: {took:?}");
             }
         }
+        (regrouping, letting_go)
+    }
+
+    const MESSAGES: usize = 32;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn in_a_group_of_a_thousand_a_step_of_regrouping_looks_at_one_message_so_it_stays_short() {
+        let (regrouping, _) = in_a_thousand(|m| m != 1, |m| m == 1).await;
+        assert_eq!(regrouping.len(), MESSAGES, "a message a step");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn when_most_of_a_thousand_leave_steps_are_sized_by_who_was_sent_to_and_skip_what_is_read() {
+        let (regrouping, _) = in_a_thousand(|m| m > 1_000, |m| m <= 1_000).await;
+        assert_eq!(
+            regrouping.len(),
+            MESSAGES + 999,
+            "the first to be looked at, a message a step since each was sent to 1,024; the rest, \
+            once each is read, a step each"
+        );
     }
 
     #[test]
