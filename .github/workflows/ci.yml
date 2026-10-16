@@ -37,6 +37,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # cpal reaches ALSA on Linux; libopus builds with the runners' own cmake.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: make lint
       - run: make test
       - run: make check-generated

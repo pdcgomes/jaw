@@ -1,0 +1,20 @@
+[package]
+name = "jaw-voice"
+description = "jaw's voice messages: Ogg Opus played and recorded on one audio thread, and WhatsApp's waveform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+cpal.workspace = true
+crossbeam-channel.workspace = true
+ogg.workspace = true
+opus.workspace = true
+rtrb.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+libc.workspace = true
+tempfile.workspace = true

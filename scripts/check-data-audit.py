@@ -19,6 +19,9 @@ DATA_PATHS = (
     "crates/jawd/src/find",
     "engine/internal/wa/",
     "proto/engine/",
+    "crates/jaw-voice/src/record/",
+    "crates/jaw-voice/src/lib.rs",
+    "crates/jaw-voice/src/tests.rs",
 )
 
 NO_COMMIT = re.compile(r"^0+$")
