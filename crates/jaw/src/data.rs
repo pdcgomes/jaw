@@ -307,7 +307,7 @@ mod tests {
 
     /// The rows in protocol/README.md, read as the interface reads them.
     #[test]
-    fn the_protocols_rows_read_into_the_interfaces() {
+    fn the_protocols_rows_read_into_the_interfaces_and_bursts_of_them_apply_as_one() {
         let chat: Chat = serde_json::from_str(r#"{"id":"351912345678@s.whatsapp.net","v":42,"sort":"1~1792145060000","kind":"direct","name":"Ana Ribeiro","avatar":"media/avatars/5f2c.jpg","last":{"from":"Ana","summary":"did you get the photos from Sunday?","kind":"text","status":null,"at":1792145060000},"unread":2,"mentions":0,"pinned":true,"muted_until":null,"archived":false,"draft":null,"typing":[],"community":null}"#).unwrap();
         assert_eq!(
             (chat.name.as_str(), chat.unread, chat.pinned, chat.kind),
@@ -316,9 +316,39 @@ mod tests {
         assert_eq!(chat.last.unwrap().summary, "did you get the photos from Sunday?");
 
         let message: Message = serde_json::from_str(r#"{"id":"3EB0A1B2C3D4E5F6","v":3,"sort":"1792145060000~000123","chat":"351912345678@s.whatsapp.net","at":1792145060000,"from":{"id":"person:12","name":"Ana","colour":3},"mine":false,"kind":"text","spans":[{"t":"text","s":"did you get the "},{"t":"bold","s":"photos"},{"t":"text","s":" from Sunday?"}],"reply":null,"reactions":[{"emoji":"❤","n":2,"mine":true}],"status":null,"edited":false,"deleted":false,"expires_at":null}"#).unwrap();
-        assert_eq!(message.from.unwrap().colour, 3);
+        assert_eq!(message.from.as_ref().map(|f| f.colour), Some(3));
         assert_eq!(message.spans[1], Span { t: SpanKind::Bold, s: "photos".into(), person: None });
         assert_eq!(message.reactions[0], Reaction { emoji: "❤".into(), n: 2, mine: true });
+
+        let mut burst = Update::Messages {
+            chat: "ana".into(),
+            reset: false,
+            upsert: vec![message.clone()],
+            remove: vec![],
+            older: None,
+            newer: None,
+        };
+        let more = Update::Messages {
+            chat: "ana".into(),
+            reset: false,
+            upsert: vec![],
+            remove: vec!["old".into()],
+            older: Some(true),
+            newer: None,
+        };
+        assert_eq!(burst.absorb(more), None, "a burst to one window applies as one");
+        assert!(matches!(&burst, Update::Messages { remove, older: Some(true), .. } if remove == &["old"]));
+        let undo = Update::Messages {
+            chat: "ana".into(),
+            reset: false,
+            upsert: vec![],
+            remove: vec![message.id.clone()],
+            older: None,
+            newer: None,
+        };
+        assert!(burst.absorb(undo).is_some(), "removing what the burst brought keeps them apart");
+        let other = Update::Chats { reset: false, upsert: vec![], remove: vec![], total: 1 };
+        assert!(burst.absorb(other).is_some(), "and so do two windows");
 
         let poll: Message =
             serde_json::from_str(r#"{"id":"P","v":1,"sort":"1~1","at":1,"kind":"a_kind_from_later","spans":[]}"#)
