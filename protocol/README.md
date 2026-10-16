@@ -121,14 +121,15 @@ A message row, render-ready:
 | `from` | The sender's person `id`, the name to show, and a `colour` index for group senders; absent on your own |
 | `mine` | Whether you sent it |
 | `sort` | Its time, then its place among messages, both zero-padded |
-| `kind` | `text`, `image`, `video`, `gif`, `video_note`, `voice`, `audio`, `document`, `sticker`, `location`, `live_location`, `contact`, `poll`, `event`, `system`, `call` or `unknown`; the fields below that its kind needs sit in the row beside the rest |
+| `kind` | `text`, `image`, `video`, `gif`, `video_note`, `voice`, `audio`, `document`, `sticker`, `album`, `location`, `live_location`, `contact`, `poll`, `event`, `system`, `call` or `unknown`; the fields below that its kind needs sit in the row beside the rest |
 | `spans` | The text and caption, parsed: `text`, `bold`, `italic`, `strike`, `mono`, `quote`, `list`, `link` (with `url`) and `mention` (with `person`) |
 | `reply` | The quoted message: its `id`, who wrote it, and a one-line `summary` |
 | `forwarded` | How many times, 0 if it wasn't |
 | `reactions` | Each emoji, how many, and whether one is yours |
 | `status` | On yours: `pending`, `sent`, `delivered`, `read`, `played` or `failed`; in groups, the least far any recipient has got |
 | `edited`, `deleted`, `expires_at`, `view_once`, `starred` | As they are |
-| `media` | For media kinds: `w`, `h`, `seconds`, `bytes`, `name`, `mime`, `hd` (an HD copy exists), `previews` (paths at 256 and 768 pixels), `path` (the file, once downloaded), `state` (`remote`, `downloading` with `progress`, `local`, `expired`, `waiting_for_phone` or `gone`) |
+| `media` | For media kinds: `w`, `h` (the original's size in pixels, which the interface keeps the shape of), `seconds`, `bytes`, `name`, `mime`, `hd` (an HD copy exists), `previews` (`{"256": path, "768": path}`, each JPEG, or PNG for a sticker with its transparency, at most that many pixels on its long side, either absent until it's made), `thumbnail` (the tiny copy that came in the message, as a file, for drawing before a preview is made), `path` (the file, once downloaded), `state` (`remote`, `downloading` with `progress`, `local`, `expired`, `waiting_for_phone` or `gone`). Paths are relative to `hello`'s `root` |
+| `album` | For `album`: `items`, each an `id`, a `kind` (`image` or `video`) and its `media` as above, in the order sent; the row's own `spans` are the album's caption |
 | `voice` | `seconds` and `waveform`, 64 values from 0 to 100 |
 | `link` | A link preview: `url`, `title`, `description`, `preview` |
 | `poll` | `question`, `options` (each with `name`, `votes` and `mine`), `max` (how many choices), `voters` |
