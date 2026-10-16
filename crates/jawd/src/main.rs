@@ -198,9 +198,15 @@ fn run(home: &Path, kind: EngineKind, no_notify: bool) -> Result<()> {
     let outcome = runtime.block_on(async {
         let mut signals = Signals::new()?;
         let socket = jaw_proto::local::socket(home);
-        let listener = sock::listen(&socket)?;
+        let (lock, listener) = open(home, &socket)?;
         let started = tokio::select! {
-            started = start(home, kind, no_notify) => started?,
+            started = start(home, lock, kind, no_notify) => match started {
+                Ok(started) => started,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&socket);
+                    return Err(e);
+                }
+            },
             signal = signals.next() => {
                 eprintln!("jawd: {signal} while starting, so it stops");
                 let _ = std::fs::remove_file(&socket);
@@ -265,8 +271,14 @@ fn lock(home: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
-async fn start(home: &Path, kind: EngineKind, no_notify: bool) -> Result<Started> {
+/// Takes jaw.lock, then listens on the socket, so a jawd refused because another holds the lock
+/// never touches the socket, even while the other is stopping and has removed its own.
+fn open(home: &Path, socket: &Path) -> Result<(std::fs::File, tokio::net::UnixListener)> {
     let lock = lock(home)?;
+    Ok((lock, sock::listen(socket)?))
+}
+
+async fn start(home: &Path, lock: std::fs::File, kind: EngineKind, no_notify: bool) -> Result<Started> {
     let store = store::Store::open(home)?;
     std::fs::create_dir_all(home.join("spool"))?;
     sync::running(&store).await?;
@@ -515,8 +527,8 @@ mod tests {
     async fn jawd_stops_well_within_its_bound_while_messages_pour_into_a_watched_chat() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
-        let listener = sock::listen(&socket).unwrap();
-        let started = start(home.path(), EngineKind::Demo, true).await.unwrap();
+        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let started = start(home.path(), lock, EngineKind::Demo, true).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let store = started.state.store().unwrap().clone();
         let chat = "120363012345678901@g.us";
@@ -572,6 +584,20 @@ mod tests {
         assert!(pushes > 0, "the window was busy");
         assert!(took < STOPPING / 3, "stopping took {took:?}");
         assert!(!socket.exists(), "the socket is removed");
+    }
+
+    #[tokio::test]
+    async fn a_jawd_refused_while_another_stops_leaves_no_socket_behind() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        // The other is stopping: its socket is gone, and it still holds jaw.lock.
+        let other = lock(home.path()).unwrap();
+        let refused = open(home.path(), &socket).unwrap_err().to_string();
+        assert!(refused.contains("another jawd is running"), "{refused}");
+        assert!(!socket.exists(), "the refused jawd didn't bind the socket");
+        drop(other);
+        let (_lock, _listener) = open(home.path(), &socket).unwrap();
+        assert!(socket.exists());
     }
 
     #[test]

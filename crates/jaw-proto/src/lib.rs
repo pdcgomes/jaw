@@ -324,6 +324,12 @@ pub struct Stored {
     /// Changes that failed to convert, kept with their errors.
     #[serde(default)]
     pub quarantined: u64,
+    /// Chats being merged into another, the same person's under another JID.
+    #[serde(default)]
+    pub merging: u64,
+    /// Of those, merges whose steps kept failing, left until jawd starts again.
+    #[serde(default)]
+    pub merges_stuck: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

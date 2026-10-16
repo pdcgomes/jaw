@@ -169,6 +169,8 @@ impl State {
                     people: store.count("people").ok()?,
                     unindexed: store.count("fts_backlog").ok()?,
                     quarantined: store.count("quarantine").ok()?,
+                    merging: store.count("chat_merges").ok()?,
+                    merges_stuck: self.live.lock().expect("live state").merges_stuck,
                 })
             }),
             interfaces: Some(Interfaces {

@@ -61,8 +61,22 @@ pub enum Change {
         raw: Packed,
     },
     /// Moves a few more messages of a chat being merged into the chat it's merged into, and
-    /// finishes the merge once none are left.
-    MergeStep,
+    /// finishes the merge once none are left: the merge named, or the first waiting.
+    MergeStep(Option<Merging>),
+}
+
+/// A merge of one chat into another, as a merge step names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Merging {
+    /// The n of the chat being merged away.
+    pub gone: i64,
+    /// Which chats, as its quarantine row says if a step fails: see `merge_reference`.
+    pub reference: String,
+}
+
+/// How a merge is named where it's kept in quarantine: the two chats' JIDs.
+pub fn merge_reference(gone: &str, keep: &str) -> String {
+    format!("{gone} into {keep}")
 }
 
 /// Where a chat was read up to: everything at or before `at`, or before the newest of `ids` that
@@ -446,7 +460,9 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<&[u8]>) {
         Some(Change::DeleteMessage { chat, id }) => ("delete", format!("{chat} {id}"), None),
         Some(Change::Read(read)) => ("read", format!("{} {}", read.chat, read.at), None),
         Some(Change::HistoryKept { id, raw }) => ("history", id.clone(), Some(raw.0.as_slice())),
-        Some(Change::MergeStep) => ("merge", String::new(), None),
+        Some(Change::MergeStep(merging)) => {
+            ("merge", merging.as_ref().map(|m| m.reference.clone()).unwrap_or_default(), None)
+        }
         None => ("nothing", String::new(), None),
     }
 }
@@ -504,12 +520,17 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, backg
             }
         }
         Change::Members(members) => set_members(db, stamps, members),
+        // A row drained has been converted, so what an earlier failure kept of it goes too.
         Change::Drained(Drained::Inbox(seq)) => {
             db.prepare_cached("DELETE FROM inbox WHERE seq = ?1")?.execute([seq])?;
+            db.prepare_cached("DELETE FROM quarantine WHERE source = 'inbox' AND ref = ?1")?
+                .execute([seq.to_string()])?;
             Ok(false)
         }
         Change::Drained(Drained::History { chat, id }) => {
             db.prepare_cached("DELETE FROM history_raw WHERE chat = ?1 AND id = ?2")?.execute(params![chat, id])?;
+            db.prepare_cached("DELETE FROM quarantine WHERE source = 'history_raw' AND ref = ?1")?
+                .execute([format!("{chat} {id}")])?;
             Ok(false)
         }
         Change::Remember { key, value } => {
@@ -535,7 +556,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, backg
             .execute(params![id, now_ms(), raw.0])?;
             Ok(false)
         }
-        Change::MergeStep => merge_step(db, stamps),
+        Change::MergeStep(merging) => merge_step(db, stamps, merging.as_ref().map(|m| m.gone)),
     }
 }
 
@@ -1030,14 +1051,18 @@ const MERGE_STEP: i64 = 200;
 /// Moves up to MERGE_STEP messages of the first chat being merged into the chat it's merged into,
 /// folding a message both have into one by the usual rules. Once none are left, the kept chat shows
 /// its newest message and the other chat is removed. Says whether anything changed.
-fn merge_step(db: &Connection, stamps: &mut Stamps) -> Result<bool> {
-    let Some((gone, keep)): Option<(i64, i64)> = db
-        .prepare_cached("SELECT gone, keep FROM chat_merges ORDER BY gone LIMIT 1")?
-        .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?
-    else {
-        return Ok(false);
+fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result<bool> {
+    let found: Option<(i64, i64)> = match gone {
+        Some(gone) => db
+            .prepare_cached("SELECT gone, keep FROM chat_merges WHERE gone = ?1")?
+            .query_row([gone], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?,
+        None => db
+            .prepare_cached("SELECT gone, keep FROM chat_merges ORDER BY gone LIMIT 1")?
+            .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?,
     };
+    let Some((gone, keep)) = found else { return Ok(false) };
     let moving: Vec<i64> = db
         .prepare_cached("SELECT n FROM messages WHERE chat = ?1 LIMIT ?2")?
         .query_map(params![gone, MERGE_STEP], |r| r.get(0))?
@@ -1057,6 +1082,11 @@ fn merge_step(db: &Connection, stamps: &mut Stamps) -> Result<bool> {
     )?
     .execute(params![keep, seq])?;
     stamps.record(db, CHAT, keep, Some(keep), seq)?;
+    let (gone_jid, keep_jid): (String, String) = db
+        .prepare_cached("SELECT g.id, k.id FROM chats g, chats k WHERE g.n = ?1 AND k.n = ?2")?
+        .query_row([gone, keep], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    db.prepare_cached("DELETE FROM quarantine WHERE source = 'merge' AND ref = ?1")?
+        .execute([merge_reference(&gone_jid, &keep_jid)])?;
     db.prepare_cached("DELETE FROM chat_merges WHERE gone = ?1")?.execute([gone])?;
     db.prepare_cached("DELETE FROM chats WHERE n = ?1")?.execute([gone])?;
     let seq = stamps.seq(CHAT, Some(gone));

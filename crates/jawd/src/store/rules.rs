@@ -201,7 +201,7 @@ async fn a_persons_two_chats_become_one_when_their_number_and_lid_are_joined() {
     assert_eq!(query(&store, |db| read::chats(db, false, None, 10)).await.len(), 2);
     apply(&store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
     while query(&store, |db| Ok(db.query_row("SELECT EXISTS (SELECT 1 FROM chat_merges)", [], |r| r.get(0))?)).await {
-        store.apply(Lane::Background, vec![Change::MergeStep]).await.unwrap();
+        store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
     }
     let chats = query(&store, |db| read::chats(db, false, None, 10)).await;
     assert_eq!(chats.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), [ANA]);
@@ -228,7 +228,7 @@ async fn merging(store: &Store) -> bool {
 
 async fn merged(store: &Store) {
     while merging(store).await {
-        store.apply(Lane::Background, vec![Change::MergeStep]).await.unwrap();
+        store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
     }
 }
 
@@ -275,6 +275,51 @@ async fn what_names_a_message_still_in_a_chat_being_merged_finds_it_there() {
     let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
     assert!(rows.iter().all(|r| r.id != "deleted"), "a replay and a copy don't bring it back");
     assert_eq!(query(&store, |db| read::message_count(db, ANA)).await, 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn during_a_merge_what_names_a_message_shows_at_once_before_any_step_moves_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(
+        &store,
+        vec![
+            Change::Message(message(ANA, "p1", AT, "under the number")),
+            Change::Message(message(ANA_LID, "revoked", AT + 1, "deleted for everyone")),
+            Change::Message(message(ANA_LID, "edited", AT + 2, "before")),
+            Change::Message(mine(ANA_LID, "both", AT + 3)),
+            Change::Message(message(ANA_LID, "read up to", AT + 4, "read on the phone")),
+        ],
+    )
+    .await;
+    joined(&store).await;
+    let edit = Amendment::Edit { text: Some("after".into()), spans: None, summary: "after".into() };
+    apply(
+        &store,
+        vec![
+            amend(ANA, "revoked", AT + 10, Some(ANA), Amendment::Revoke),
+            amend(ANA_LID, "edited", AT + 11, Some(ANA), edit),
+            Change::Message(Message { status: Some("read"), ..mine(ANA, "both", AT + 3) }),
+            Change::Read(Read { chat: ANA.into(), at: 0, ids: vec!["read up to".into()], ..Read::default() }),
+        ],
+    )
+    .await;
+    assert!(merging(&store).await, "no merge step has run");
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    let shown =
+        |id: &str| rows.iter().find(|r| r.id == id).unwrap_or_else(|| panic!("{id} isn't in the kept chat yet"));
+    assert!(shown("revoked").deleted, "a revoke, through located");
+    assert_eq!(shown("edited").summary, "after", "an edit, through located");
+    assert_eq!(shown("both").status.as_deref(), Some("read"), "a copy, through upsert_message");
+    assert_eq!(rows.iter().filter(|r| r.id == "both").count(), 1);
+    let both: i64 =
+        query(&store, |db| Ok(db.query_row("SELECT count(*) FROM messages WHERE id = 'both'", [], |r| r.get(0))?))
+            .await;
+    assert_eq!(both, 1, "one row, not one in each chat");
+    let read_at: Option<i64> =
+        query(&store, |db| Ok(db.query_row("SELECT read_at FROM chats WHERE id = ?1", [ANA], |r| r.get(0))?)).await;
+    assert_eq!(read_at, Some(AT + 4), "a mark-read naming the message, through set_read");
+    assert_eq!(store.count("pending").unwrap(), 0, "nothing waits for a message jaw has");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -333,6 +378,30 @@ async fn two_copies_of_a_message_folded_into_one_keep_the_file_downloaded_for_ei
     })
     .await;
     assert_eq!(kept, (1, Some("media/both.jpg".into())));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_kept_in_quarantine_leaves_it_once_it_converts() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    store.inbox("message", 0, b"a history notification".to_vec(), None);
+    apply(&store, Vec::new()).await;
+    let failed = |source: &'static str, reference: &str| Change::Quarantined {
+        source,
+        reference: reference.into(),
+        error: "can't be had yet".into(),
+    };
+    apply(&store, vec![failed("inbox", "1"), failed("history_raw", &format!("{ANA} h1"))]).await;
+    assert_eq!(store.count("quarantine").unwrap(), 2);
+    apply(
+        &store,
+        vec![
+            Change::Drained(Drained::Inbox(1)),
+            Change::Drained(Drained::History { chat: ANA.into(), id: "h1".into() }),
+        ],
+    )
+    .await;
+    assert_eq!(store.count("quarantine").unwrap(), 0, "what failed has since converted");
 }
 
 #[tokio::test(flavor = "multi_thread")]

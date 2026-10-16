@@ -178,6 +178,8 @@ pub fn describe(status: &Status) -> String {
             (stored.history, "messages of history to convert"),
             (stored.unindexed, "messages to index for search"),
             (stored.quarantined, "changes that failed, kept in quarantine"),
+            (stored.merging, "chats being merged into another"),
+            (stored.merges_stuck, "merges that kept failing, left until jawd starts again"),
         ]
         .iter()
         .filter(|(n, _)| *n > 0)

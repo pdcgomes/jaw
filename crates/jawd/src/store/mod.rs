@@ -41,7 +41,8 @@ use tokio::sync::{Notify, oneshot, watch};
 pub use self::read::Reads;
 use self::write::Stamps;
 pub use self::write::{
-    Amend, Amendment, Change, Chat, Drained, Members, Message, Opened, Packed, Person, Read, frecency,
+    Amend, Amendment, Change, Chat, Drained, Members, Merging, Message, Opened, Packed, Person, Read, frecency,
+    merge_reference,
 };
 #[cfg(test)]
 pub use self::write::{unpack, unpack_for_tests};

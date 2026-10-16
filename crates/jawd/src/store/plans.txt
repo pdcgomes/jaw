@@ -169,8 +169,16 @@ DELETE FROM inbox WHERE seq = ?1
     SEARCH inbox USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
+DELETE FROM quarantine WHERE source = 'inbox' AND ref = ?1
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
+
+-- src/store/write.rs
 DELETE FROM history_raw WHERE chat = ?1 AND id = ?2
     SEARCH history_raw USING PRIMARY KEY (chat=? AND id=?)
+
+-- src/store/write.rs
+DELETE FROM quarantine WHERE source = 'history_raw' AND ref = ?1
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
 
 -- src/store/write.rs
 INSERT OR REPLACE INTO sync_state (key, value) VALUES (?1, ?2)
@@ -385,6 +393,10 @@ UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archive
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
+SELECT gone, keep FROM chat_merges WHERE gone = ?1
+    SEARCH chat_merges USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
 SELECT gone, keep FROM chat_merges ORDER BY gone LIMIT 1
     SCAN chat_merges
 
@@ -399,6 +411,15 @@ UPDATE chats SET last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY
       SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
     SCALAR SUBQUERY 1
       SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
+
+-- src/store/write.rs
+SELECT g.id, k.id FROM chats g, chats k WHERE g.n = ?1 AND k.n = ?2
+    SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+DELETE FROM quarantine WHERE source = 'merge' AND ref = ?1
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
 
 -- src/store/write.rs
 DELETE FROM chat_merges WHERE gone = ?1
@@ -616,10 +637,10 @@ SELECT chat, id, raw FROM history_raw WHERE (chat, id) > (?1, ?2) ORDER BY chat,
     SEARCH history_raw USING PRIMARY KEY ((chat,id)>(?,?))
 
 -- src/sync/merge.rs
-SELECT EXISTS (SELECT 1 FROM chat_merges)
-    SCAN CONSTANT ROW
-    SCALAR SUBQUERY 1
-      SCAN chat_merges
+SELECT m.gone, g.id, k.id FROM chat_merges m JOIN chats g ON g.n = m.gone JOIN chats k ON k.n = m.keep ORDER BY m.gone
+    SCAN m
+    SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/sync/mod.rs
 SELECT m.id, m.mine, m.at FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = ?1 ORDER BY m.at, m.n LIMIT 1

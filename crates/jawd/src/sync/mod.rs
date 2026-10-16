@@ -41,6 +41,8 @@ pub struct Live {
     me: convert::Me,
     /// The chats messages arrived in while catching up, for the summary at the end.
     caught_chats: HashSet<String>,
+    /// Merges whose steps kept failing, left until jawd starts again.
+    pub merges_stuck: u64,
 }
 
 impl Default for Live {
@@ -53,6 +55,7 @@ impl Default for Live {
             history: None,
             me: convert::Me::default(),
             caught_chats: HashSet::new(),
+            merges_stuck: 0,
         }
     }
 }
@@ -120,7 +123,7 @@ pub async fn run(
     let (offered, offers) = mpsc::unbounded_channel();
     let avatars = Avatars::new();
     let merges = Merges::default();
-    tokio::spawn(merge::run(store.clone(), merges.clone()));
+    tokio::spawn(merge::run(store.clone(), merges.clone(), live.clone(), merge::Timing::default()));
     tokio::spawn(drain::inbox(store.clone(), live.clone(), offered, avatars.clone(), merges.clone()));
     tokio::spawn(drain::history_raw(store.clone(), live.clone()));
     if let Some(engine) = &engine {

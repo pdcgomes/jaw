@@ -15,7 +15,10 @@ const ALLOWED: &[(&str, &str)] = &[
     ("FROM person_jids j WHERE j.jid LIKE '%@lid'", "once each time an engine connects, stopping at its limit"),
     ("SELECT count(*) FROM quarantine", "quarantine holds what failed, a handful of rows"),
     ("SELECT gone, keep FROM chat_merges ORDER BY gone LIMIT 1", "chats being merged, rarely more than one"),
-    ("SELECT EXISTS (SELECT 1 FROM chat_merges)", "stops at its first row"),
+    (
+        "SELECT m.gone, g.id, k.id FROM chat_merges m",
+        "chats being merged, a row for each person whose number and LID were just joined, gone once merged",
+    ),
     ("SELECT n FROM fts_backlog ORDER BY n DESC LIMIT", "a scan down the rowid that stops at its limit"),
     ("json_group_array(json_object('emoji'", "one message's reactions, grouped by emoji"),
     ("SELECT coalesce(max(seq), 0) FROM events", "once, when the writer starts"),
