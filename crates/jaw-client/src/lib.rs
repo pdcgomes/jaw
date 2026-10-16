@@ -88,6 +88,7 @@ pub fn describe(status: &Status) -> String {
         AccountState::Unlinked => "not linked yet".to_string(),
         AccountState::Linking => "linking".to_string(),
         AccountState::Linked => match &status.account.me {
+            Some(me) if me.name.is_empty() => format!("linked as {}", me.phone),
             Some(me) => format!("linked as {} ({})", me.name, me.phone),
             None => "linked".to_string(),
         },
