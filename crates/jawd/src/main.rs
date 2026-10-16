@@ -1,6 +1,7 @@
 //! jawd, jaw's daemon: it keeps every chat and message, does the work interfaces would otherwise
 //! repeat, and serves them on a Unix socket. docs/plans/2026-10-16-jaw-design.md is its design.
 
+mod convert;
 mod engine;
 mod feed;
 mod find;
@@ -178,15 +179,14 @@ fn run(home: &Path, kind: EngineKind) -> Result<()> {
         let socket = jaw_proto::local::socket(home);
         let listener = sock::listen(&socket)?;
         let store = store::Store::open(home)?;
-        let spool = home.join("spool");
-        std::fs::create_dir_all(&spool)?;
+        std::fs::create_dir_all(home.join("spool"))?;
         let (events, incoming) = mpsc::channel(1024);
         let supervisor = engine(kind, home).map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
         let live: sync::Shared = Arc::default();
         let (pushes, _) = tokio::sync::broadcast::channel(256);
         let engine = supervisor.as_ref().ok().cloned();
-        tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, spool));
-        let pools: Vec<Arc<dyn work::Report>> = vec![Arc::new(store.reads().clone())];
+        tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine, home.to_path_buf()));
+        let pools: Vec<Arc<dyn work::Report>> = vec![Arc::new(store.clone()), Arc::new(store.reads().clone())];
         let finder = find::Finder::start(store.clone()).await?;
         let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
         let state = Arc::new(state::State::new(home, supervisor, pools, live, Some(store), pushes)?.with_feed(feed));

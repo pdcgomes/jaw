@@ -163,16 +163,40 @@ func (e *Engine) durable(event *enginepb.Event) bool {
 	}
 }
 
+// keep sends an event jawd must store and waits until it has. If jawd has gone, it never returns:
+// returning would let whatsmeow tell WhatsApp the event arrived, or move past it, and the engine is
+// about to exit anyway, so WhatsApp sends it again.
+func (e *Engine) keep(event *enginepb.Event) {
+	if !e.durable(event) {
+		select {}
+	}
+}
+
 // handle is whatsmeow's event handler. It runs on whatsmeow's one queue, so it hands each event on
-// and returns; only a message waits, for jawd's ack.
+// and returns; what whatsmeow won't send again waits for jawd's ack.
 func (e *Engine) handle(evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
-		if !e.durable(&enginepb.Event{Kind: &enginepb.Event_Message{Message: e.message(v)}}) {
-			// jawd has gone, so this message isn't stored. Returning would let whatsmeow tell
-			// WhatsApp it arrived; the engine is about to exit, and WhatsApp will send it again.
-			select {}
+		e.keep(&enginepb.Event{Kind: &enginepb.Event_Message{Message: e.message(v)}})
+	case *events.AppState:
+		if state, err := appState(v); err == nil {
+			e.keep(&enginepb.Event{Kind: &enginepb.Event_AppState{AppState: state}})
+		} else {
+			e.log.Errorf("can't encode the app state %v: %v", v.Index, err)
 		}
+	case *events.AppStateSyncComplete:
+		e.send(&enginepb.Event{Kind: &enginepb.Event_AppStateSynced{AppStateSynced: &enginepb.AppStateSynced{
+			Name:    string(v.Name),
+			Version: v.Version,
+		}}})
+	case *events.PushName:
+		e.keep(&enginepb.Event{Kind: &enginepb.Event_PushName{PushName: pushName(v)}})
+	case *events.JoinedGroup:
+		e.keep(&enginepb.Event{Kind: &enginepb.Event_Group{Group: groupInfo(&v.GroupInfo)}})
+	case *events.GroupInfo:
+		e.keep(&enginepb.Event{Kind: &enginepb.Event_GroupChange{GroupChange: groupChange(v)}})
+	case *events.Picture:
+		e.keep(&enginepb.Event{Kind: &enginepb.Event_Picture{Picture: picture(v)}})
 	case *events.Receipt:
 		e.send(&enginepb.Event{Kind: &enginepb.Event_Receipt{Receipt: receipt(v)}})
 	case *events.Connected:
@@ -345,6 +369,23 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 		return done()
 	case *enginepb.Command_HistoryDownload:
 		return e.historyDownload(c.HistoryDownload)
+	case *enginepb.Command_Contacts:
+		return e.contacts()
+	case *enginepb.Command_LidLookup:
+		return e.lidLookup(c.LidLookup)
+	}
+	if e.client.Store.ID == nil {
+		return failure("no account is linked yet", false)
+	}
+	switch c := cmd.Kind.(type) {
+	case *enginepb.Command_Groups:
+		return e.groups()
+	case *enginepb.Command_AppStateResync:
+		return e.appStateResync(c.AppStateResync)
+	case *enginepb.Command_Avatar:
+		return e.avatar(c.Avatar)
+	case *enginepb.Command_HistoryRequest:
+		return e.historyRequest(c.HistoryRequest)
 	}
 	return failure(fmt.Sprintf("the engine doesn't know %T", cmd.Kind), false)
 }

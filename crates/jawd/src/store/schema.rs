@@ -255,6 +255,54 @@ pub(super) const MIGRATIONS: &[&str] = &[
     ALTER TABLE chats ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0;
     UPDATE chats SET message_count = (SELECT count(*) FROM messages WHERE chat = chats.n);
     ",
+    // 4: history's text waits in fts_backlog to be indexed in short steps of its own, so FTS5's
+    // work never lands in a transaction a live message waits behind. It's keyed by the message's
+    // n, which only goes up, so the backlog adds no pages to a commit beyond its last few. A
+    // message still in the backlog isn't in the index, so the triggers leave the index alone for it.
+    "
+    CREATE TABLE fts_backlog (n INTEGER PRIMARY KEY);
+    -- FTS5 merges its segments in the writer's idle moments, a few pages at a time, rather than at
+    -- the commit of whichever transaction happens to fill a level.
+    INSERT INTO messages_fts (messages_fts, rank) VALUES ('automerge', 0);
+    INSERT INTO messages_fts (messages_fts, rank) VALUES ('crisismerge', 64);
+    DROP TRIGGER messages_fts_insert;
+    DROP TRIGGER messages_fts_delete;
+    DROP TRIGGER messages_fts_update;
+    CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages
+    WHEN new.text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = new.n) BEGIN
+        INSERT INTO messages_fts (rowid, text) VALUES (new.t, new.text);
+    END;
+    CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts (messages_fts, rowid, text) SELECT 'delete', old.t, old.text
+            WHERE old.text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = old.n);
+        DELETE FROM fts_backlog WHERE n = old.n;
+    END;
+    CREATE TRIGGER messages_fts_update AFTER UPDATE OF text ON messages
+    WHEN old.text IS NOT new.text AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = old.n) BEGIN
+        INSERT INTO messages_fts (messages_fts, rowid, text) SELECT 'delete', old.t, old.text WHERE old.text IS NOT NULL;
+        INSERT INTO messages_fts (rowid, text) SELECT new.t, new.text WHERE new.text IS NOT NULL;
+    END;
+
+    -- Pinned chats sort among themselves by when they were pinned, the latest first.
+    DROP INDEX chats_by_sort;
+    ALTER TABLE chats DROP COLUMN sort;
+    ALTER TABLE chats ADD COLUMN sort TEXT GENERATED ALWAYS AS
+        (iif(pinned > 0, '1~' || printf('%013d', pinned), '0~' || printf('%013d', last_at))) VIRTUAL;
+    CREATE INDEX chats_by_sort ON chats (archived, sort, n);
+    -- The picture's ID WhatsApp gave, so it's fetched again only when it changes.
+    ALTER TABLE chats ADD COLUMN avatar_id TEXT;
+    ALTER TABLE reactions ADD COLUMN mine INTEGER NOT NULL DEFAULT 0;
+    -- What a pending amendment does, already converted, and who did it, so it's applied when its
+    -- message arrives without parsing its raw protobuf again.
+    ALTER TABLE pending ADD COLUMN sender TEXT;
+    ALTER TABLE pending ADD COLUMN mine INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE pending ADD COLUMN effect TEXT NOT NULL DEFAULT '';
+    -- What sync remembers between runs, such as the account's JIDs and which app state is synced.
+    CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+    -- Each app-state mutation's latest value as WhatsApp sent it, by its index as a JSON array,
+    -- whether jaw uses it yet or not.
+    CREATE TABLE app_state (key TEXT PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID;
+    ",
 ];
 
 pub fn migrate(db: &mut Connection) -> Result<()> {

@@ -7,6 +7,7 @@ use serde_json::Value;
 
 pub mod find;
 pub mod local;
+pub mod sync;
 pub mod windows;
 
 /// The version this crate speaks. jawd serves one, and refuses a hello with another.
@@ -253,10 +254,19 @@ pub struct Status {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stored {
-    /// Events kept as they arrived, messages among them.
+    /// Events kept as they arrived and not converted yet, messages among them.
     pub inbox: u64,
-    /// Messages from history.
+    /// Messages from history waiting to be converted.
     pub history: u64,
+    #[serde(default)]
+    pub chats: u64,
+    #[serde(default)]
+    pub messages: u64,
+    #[serde(default)]
+    pub people: u64,
+    /// Messages not yet indexed for search.
+    #[serde(default)]
+    pub unindexed: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

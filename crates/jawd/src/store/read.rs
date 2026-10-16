@@ -194,6 +194,8 @@ pub struct MessageRow {
     pub expires_at: Option<i64>,
     pub starred: bool,
     pub view_once: bool,
+    /// Each emoji, how many reacted with it, and whether you did, in the order they first came.
+    pub reactions: Box<RawValue>,
 }
 
 /// Who sent a message: the person and the name to show.
@@ -317,10 +319,13 @@ const MESSAGE_COLUMNS: &str = "
     SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''),
         m.reply, m.detail,
         m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once,
-        p.n, p.name, p.push_name, p.verified_name, j.jid";
+        p.n, p.name, p.push_name, p.verified_name, j.jid,
+        (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false'))))
+            FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions
+                WHERE message = m.n GROUP BY emoji ORDER BY first))";
 
 /// How many columns MESSAGE_COLUMNS has, for queries that select more after them.
-const MESSAGE_COLUMN_COUNT: usize = 24;
+const MESSAGE_COLUMN_COUNT: usize = 25;
 
 const MESSAGE_JOINS: &str = "
     JOIN chats c ON c.n = m.chat
@@ -377,6 +382,7 @@ fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
         expires_at: r.get(16)?,
         starred: r.get(17)?,
         view_once: r.get(18)?,
+        reactions: json(r.get(24)?)?.unwrap_or_else(|| RawValue::from_string("[]".into()).expect("[] is JSON")),
         from,
     })
 }

@@ -2,8 +2,10 @@
 //! and takes the inbox first: a message is committed, then acked, before WhatsApp hears it
 //! arrived. Live changes (conversions as messages arrive, and actions) come next, each in a
 //! transaction of its own. Background changes and history go in transactions of at most 1,000
-//! rows or 10 ms, with any inbox and live writes that came meanwhile taken between them. Queries go
-//! to the read pool, so a page never waits behind a sync.
+//! rows or 3 ms with their commit, ending early as soon as an inbox or live write is waiting, which
+//! is taken before the next. Text written in the background is indexed for search afterwards, in
+//! steps as short, while nothing else is waiting. Queries go to the read pool, so a page never waits
+//! behind a sync.
 
 pub mod bench;
 pub mod read;
@@ -11,36 +13,22 @@ mod schema;
 mod write;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded, select_biased, unbounded};
-use rusqlite::{Connection, params};
-use tokio::sync::{oneshot, watch};
+use rusqlite::{Connection, OptionalExtension, params};
+use tokio::sync::{Notify, oneshot, watch};
 
 pub use self::read::Reads;
 use self::write::Stamps;
-pub use self::write::{Change, Chat, Message, Opened, Packed, Person, frecency};
+#[cfg(test)]
+pub use self::write::unpack_for_tests;
+pub use self::write::{Amend, Amendment, Change, Chat, Drained, Members, Message, Opened, Packed, Person, frecency};
 use crate::engine::Ack;
-
-/// A message from history, as it's kept until it's converted.
-pub struct HistoryRow {
-    pub chat: String,
-    pub id: String,
-    pub at_ms: i64,
-    /// WAWebProtobufsWeb.WebMessageInfo.
-    pub raw: Vec<u8>,
-}
-
-/// How a batch of history went into the database.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Written {
-    pub rows: usize,
-    pub transactions: usize,
-    pub took: Duration,
-}
+use crate::work::{Report, Samples};
 
 /// How a batch of changes went into the database.
 #[derive(Clone, Copy, Debug, Default)]
@@ -65,7 +53,7 @@ pub enum Lane {
 
 enum Realtime {
     /// An engine event to keep; `ack` goes once it's committed.
-    Inbox { kind: &'static str, at_ms: i64, payload: Vec<u8>, ack: Option<Ack> },
+    Inbox { kind: &'static str, at_ms: i64, payload: Vec<u8>, ack: Option<Ack>, queued: Instant },
 }
 
 type Done = oneshot::Sender<Result<Applied, String>>;
@@ -73,11 +61,28 @@ type Done = oneshot::Sender<Result<Applied, String>>;
 struct Live {
     changes: Vec<Change>,
     done: Done,
+    queued: Instant,
+}
+
+/// What the writer has done lately, for `status`.
+#[derive(Default)]
+struct Stats {
+    transactions: u64,
+    /// How long inbox and live writes waited for the writer.
+    waits: Samples,
+    /// How long each transaction took, commit included.
+    runs: Samples,
 }
 
 enum Background {
-    History { rows: Vec<HistoryRow>, done: oneshot::Sender<Result<Written, String>> },
-    Changes { changes: Vec<Change>, done: Done },
+    Changes {
+        changes: Vec<Change>,
+        done: Done,
+    },
+    /// Indexes everything waiting for search, then answers.
+    Index {
+        done: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[derive(Clone)]
@@ -88,10 +93,18 @@ pub struct Store {
     background: Sender<Background>,
     reads: Reads,
     committed: watch::Receiver<i64>,
+    stats: Arc<Mutex<Stats>>,
+    inboxed: Arc<Notify>,
 }
 
 const BATCH_ROWS: usize = 1_000;
-const BATCH_TIME: Duration = Duration::from_millis(10);
+/// What a background transaction may take, its commit included, since a live write waits for it.
+const BATCH_TIME: Duration = Duration::from_millis(3);
+/// The pause between two steps of indexing for search. A writer that never pauses looks like a
+/// batch job to the OS, which then lets other threads ahead of it when a live write comes.
+const INDEX_PAUSE: Duration = Duration::from_millis(1);
+/// The pages of FTS5 merging a step does, about a millisecond's worth.
+const MERGE_PAGES: i64 = 64;
 const WRITER_CACHE_KIB: i64 = 32 * 1024;
 
 impl Store {
@@ -117,7 +130,12 @@ impl Store {
         let (background, background_rx) = bounded(16);
         let commits = Arc::new(AtomicU64::new(0));
         let (seq, committed) = watch::channel(stamps.last());
+        let backlog = db.query_row("SELECT EXISTS (SELECT 1 FROM fts_backlog)", [], |r| r.get(0))?;
+        let stats = Arc::new(Mutex::new(Stats::default()));
+        let inboxed = Arc::new(Notify::new());
         let writer = Writer {
+            stats: stats.clone(),
+            inboxed: inboxed.clone(),
             db,
             stamps,
             realtime: realtime_rx,
@@ -125,11 +143,15 @@ impl Store {
             commits: commits.clone(),
             seq,
             pruned: Instant::now(),
-            commit: Duration::ZERO,
+            changes_pace: Pace::default(),
+            index_pace: Pace::default(),
+            backlog,
+            unmerged: true,
+            indexed: Vec::new(),
         };
         std::thread::Builder::new().name("jawd-writer".into()).spawn(move || writer.run(background_rx))?;
         std::thread::Builder::new().name("jawd-checkpoint".into()).spawn(move || checkpoint(checkpointer, commits))?;
-        Ok(Store { path, realtime, live, background, reads, committed })
+        Ok(Store { path, realtime, live, background, reads, committed, stats, inboxed })
     }
 
     /// The feed's last committed seq, which changes as each transaction with events commits.
@@ -137,16 +159,14 @@ impl Store {
         self.committed.clone()
     }
 
-    /// Keeps an engine event, then sends its ack. It never waits: realtime writes aren't bounded.
-    pub fn inbox(&self, kind: &'static str, at_ms: i64, payload: Vec<u8>, ack: Option<Ack>) {
-        let _ = self.realtime.send(Realtime::Inbox { kind, at_ms, payload, ack });
+    /// What's woken each time an engine event is committed to the inbox.
+    pub fn inboxed(&self) -> Arc<Notify> {
+        self.inboxed.clone()
     }
 
-    /// Stores history rows, waiting for room behind earlier batches, and says how it went.
-    pub async fn history(&self, rows: Vec<HistoryRow>) -> Result<Written> {
-        let (done, written) = oneshot::channel();
-        self.queue_background(Background::History { rows, done }).await?;
-        written.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
+    /// Keeps an engine event, then sends its ack. It never waits: realtime writes aren't bounded.
+    pub fn inbox(&self, kind: &'static str, at_ms: i64, payload: Vec<u8>, ack: Option<Ack>) {
+        let _ = self.realtime.send(Realtime::Inbox { kind, at_ms, payload, ack, queued: Instant::now() });
     }
 
     /// Makes `changes` in `lane`, each with its event, and says how it went once they're committed.
@@ -155,9 +175,10 @@ impl Store {
     pub async fn apply(&self, lane: Lane, changes: Vec<Change>) -> Result<Applied> {
         let (done, applied) = oneshot::channel();
         match lane {
-            Lane::Live => {
-                self.live.send(Live { changes, done }).map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?
-            }
+            Lane::Live => self
+                .live
+                .send(Live { changes, done, queued: Instant::now() })
+                .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?,
             Lane::Background => self.queue_background(Background::Changes { changes, done }).await?,
         }
         applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
@@ -170,9 +191,22 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))
     }
 
+    /// Waits until every message written so far can be found by search.
+    pub async fn indexed(&self) -> Result<()> {
+        let (done, indexed) = oneshot::channel();
+        self.queue_background(Background::Index { done }).await?;
+        indexed.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
+    }
+
     /// The read pool.
     pub fn reads(&self) -> &Reads {
         &self.reads
+    }
+
+    /// What sync remembered under `key`, read on a connection of its own.
+    pub fn remembered(&self, key: &str) -> Result<Option<String>> {
+        let db = Connection::open(&self.path)?;
+        Ok(db.query_row("SELECT value FROM sync_state WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }
 
     /// How many rows `table` holds, read on a connection of its own so the writer doesn't wait.
@@ -183,6 +217,23 @@ impl Store {
     }
 }
 
+impl Report for Store {
+    fn report(&self) -> jaw_proto::Pool {
+        let stats = self.stats.lock().expect("the writer's stats");
+        jaw_proto::Pool {
+            name: "writer".into(),
+            workers: 1,
+            running: 0,
+            queued_interactive: (self.realtime.len() + self.live.len()) as u32,
+            queued_background: self.background.len() as u32,
+            done: stats.transactions,
+            wait_interactive: stats.waits.percentiles(),
+            wait_background: None,
+            run: stats.runs.percentiles(),
+        }
+    }
+}
+
 /// How often the checkpointer copies the WAL into the database, when anything was committed.
 const CHECKPOINT_EVERY: Duration = Duration::from_secs(1);
 
@@ -190,6 +241,8 @@ const CHECKPOINT_EVERY: Duration = Duration::from_secs(1);
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
 struct Writer {
+    stats: Arc<Mutex<Stats>>,
+    inboxed: Arc<Notify>,
     db: Connection,
     stamps: Stamps,
     realtime: Receiver<Realtime>,
@@ -198,9 +251,45 @@ struct Writer {
     /// The feed's last committed seq, for whoever follows the feed.
     seq: watch::Sender<i64>,
     pruned: Instant,
-    /// What committing a background transaction has lately cost, so the next stops in time for
-    /// its commit to fit in its 10 ms too.
-    commit: Duration,
+    changes_pace: Pace,
+    index_pace: Pace,
+    /// Whether fts_backlog may hold messages to index.
+    backlog: bool,
+    /// Whether FTS5 may have segments to merge.
+    unmerged: bool,
+    /// Who waits for everything written to be indexed.
+    indexed: Vec<oneshot::Sender<Result<(), String>>>,
+}
+
+/// What a kind of background transaction's commit has lately cost for each row it took. SQLite
+/// writes every page a transaction dirtied at commit, and history's rows land all over the
+/// indexes, so a commit can cost more than the work before it. The next transaction stops in time
+/// for its commit to fit in BATCH_TIME too.
+#[derive(Clone, Copy, Default)]
+struct Pace {
+    commit_per_row: Duration,
+    per_row: Duration,
+}
+
+impl Pace {
+    fn enough(&self, body: Duration, rows: usize) -> bool {
+        body + self.commit_per_row * rows as u32 >= BATCH_TIME
+    }
+
+    /// How many rows a transaction can take in BATCH_TIME, as rows have lately cost.
+    fn rows(&self) -> usize {
+        if self.per_row.is_zero() {
+            return 100;
+        }
+        (BATCH_TIME.as_nanos() / self.per_row.as_nanos()).clamp(1, BATCH_ROWS as u128) as usize
+    }
+
+    fn learn(&mut self, body: Duration, commit: Duration, rows: usize) {
+        if rows > 0 {
+            self.commit_per_row = (self.commit_per_row * 3 + commit / rows as u32) / 4;
+            self.per_row = (self.per_row * 3 + (body + commit) / rows as u32) / 4;
+        }
+    }
 }
 
 impl Writer {
@@ -214,6 +303,7 @@ impl Writer {
         self.prune();
         let (realtime, live) = (self.realtime.clone(), self.live.clone());
         loop {
+            let idle = if self.backlog || self.unmerged { INDEX_PAUSE } else { Duration::from_secs(3600) };
             select_biased! {
                 recv(realtime) -> write => match write {
                     Ok(write) => self.realtime_write(write),
@@ -224,10 +314,6 @@ impl Writer {
                     Err(_) => return,
                 },
                 recv(background) -> write => match write {
-                    Ok(Background::History { rows, done }) => {
-                        let written = self.history(&rows);
-                        let _ = done.send(written.map_err(|e| format!("{e:#}")));
-                    }
                     Ok(Background::Changes { changes, done }) => {
                         let applied = self.background_changes(&changes);
                         let _ = done.send(applied.map_err(|e| format!("{e:#}")));
@@ -235,50 +321,121 @@ impl Writer {
                             self.prune();
                         }
                     }
+                    Ok(Background::Index { done }) => {
+                        if self.backlog || self.unmerged {
+                            self.indexed.push(done);
+                        } else {
+                            let _ = done.send(Ok(()));
+                        }
+                    }
                     Err(_) => return,
                 },
+                // Merging first keeps FTS5's levels short of a merge it would do all at once.
+                default(idle) => {
+                    let step = if self.unmerged { self.merge() } else if self.backlog { self.index() } else { Ok(()) };
+                    if let Err(e) = &step {
+                        eprintln!("jawd: can't index messages for search: {e:#}");
+                        (self.backlog, self.unmerged) = (false, false);
+                    }
+                    if !self.backlog && !self.unmerged {
+                        for done in self.indexed.drain(..) {
+                            let _ = done.send(step.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
+                        }
+                    }
+                }
             }
         }
     }
 
     fn realtime_write(&mut self, write: Realtime) {
-        realtime_write(&mut self.db, write);
+        let Realtime::Inbox { queued, .. } = &write;
+        let began = Instant::now();
+        let waited = began - *queued;
+        if realtime_write(&mut self.db, write) {
+            self.inboxed.notify_one();
+        }
         self.commits.fetch_add(1, Ordering::Relaxed);
+        self.count(Some(waited), began.elapsed());
     }
 
-    fn live_write(&mut self, Live { changes, done }: Live) {
+    fn count(&self, waited: Option<Duration>, ran: Duration) {
+        let mut stats = self.stats.lock().expect("the writer's stats");
+        stats.transactions += 1;
+        if let Some(waited) = waited {
+            stats.waits.add(waited);
+        }
+        stats.runs.add(ran);
+    }
+
+    /// Merges MERGE_PAGES of FTS5's segments, if any level has enough to merge.
+    fn merge(&mut self) -> Result<()> {
+        let began = Instant::now();
+        let before = self.db.total_changes();
+        self.db.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)", [MERGE_PAGES])?;
+        self.unmerged = self.db.total_changes() > before + 1;
+        self.commits.fetch_add(1, Ordering::Relaxed);
+        self.count(None, began.elapsed());
+        Ok(())
+    }
+
+    /// Indexes a short transaction's worth of fts_backlog for search.
+    fn index(&mut self) -> Result<()> {
+        let began = Instant::now();
+        let tx = self.db.transaction()?;
+        let (realtime, live, pace) = (&self.realtime, &self.live, self.index_pace);
+        let (taken, more) = write::index(&tx, pace.rows(), |taken| {
+            !realtime.is_empty() || !live.is_empty() || pace.enough(began.elapsed(), taken)
+        })?;
+        let body = began.elapsed();
+        tx.commit()?;
+        self.index_pace.learn(body, began.elapsed() - body, taken);
+        self.unmerged = true;
+        self.count(None, began.elapsed());
+        self.commits.fetch_add(1, Ordering::Relaxed);
+        self.backlog = more;
+        Ok(())
+    }
+
+    fn live_write(&mut self, Live { changes, done, queued }: Live) {
         let started = Instant::now();
-        let applied = self.transaction(&changes, usize::MAX, Duration::MAX).map(|(changed, _)| Applied {
+        self.unmerged = true;
+        let waited = started - queued;
+        let applied = self.transaction(&changes, false).map(|(changed, _)| Applied {
             changed,
             transactions: 1,
             took: started.elapsed(),
             seq: self.stamps.last(),
         });
+        self.count(Some(waited), started.elapsed());
         let _ = done.send(applied.map_err(|e| format!("{e:#}")));
     }
 
-    /// Makes changes from the start of `changes` in one transaction, until `rows` are taken or
-    /// `time` would be passed once the commit is counted, and says how many changed something and
-    /// how many were taken.
-    fn transaction(&mut self, changes: &[Change], rows: usize, time: Duration) -> Result<(usize, usize)> {
+    /// Makes changes from the start of `changes` in one transaction, all of them for a live one; a
+    /// background one stops at BATCH_ROWS, at BATCH_TIME with its commit, or as soon as an inbox or
+    /// live write is waiting. Says how many changed something and how many were taken.
+    fn transaction(&mut self, changes: &[Change], background: bool) -> Result<(usize, usize)> {
         let began = Instant::now();
         self.stamps.begin();
         let made = (|| {
             let tx = self.db.transaction()?;
             let (mut changed, mut taken) = (0, 0);
-            let committing = self.commit.min(time / 2);
             for change in changes {
-                changed += usize::from(write::apply(&tx, &mut self.stamps, change)?);
+                changed += usize::from(write::apply(&tx, &mut self.stamps, change, background)?);
                 taken += 1;
-                if taken == rows || time.saturating_sub(began.elapsed()) <= committing {
+                if background
+                    && (taken == BATCH_ROWS
+                        || !self.realtime.is_empty()
+                        || !self.live.is_empty()
+                        || self.changes_pace.enough(began.elapsed(), taken))
+                {
                     break;
                 }
             }
             let body = began.elapsed();
             tx.commit()?;
-            let commit = began.elapsed() - body;
-            if time < Duration::MAX {
-                self.commit = (self.commit * 3 + commit) / 4;
+            if background {
+                self.changes_pace.learn(body, began.elapsed() - body, taken);
+                self.count(None, began.elapsed());
             }
             Ok((changed, taken))
         })();
@@ -287,6 +444,7 @@ impl Writer {
                 self.commits.fetch_add(1, Ordering::Relaxed);
                 let last = self.stamps.last();
                 self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
+                self.backlog |= background;
             }
             Err(_) => self.stamps.rolled_back(),
         }
@@ -311,7 +469,7 @@ impl Writer {
         let mut applied = Applied::default();
         let mut rest = changes;
         while !rest.is_empty() {
-            let (changed, taken) = self.transaction(rest, BATCH_ROWS, BATCH_TIME)?;
+            let (changed, taken) = self.transaction(rest, true)?;
             applied.changed += changed;
             applied.transactions += 1;
             rest = &rest[taken..];
@@ -320,38 +478,6 @@ impl Writer {
         }
         applied.took = started.elapsed();
         Ok(applied)
-    }
-
-    /// Inserts history rows in transactions of at most BATCH_ROWS or BATCH_TIME, doing any inbox
-    /// and live writes that arrived between them.
-    fn history(&mut self, rows: &[HistoryRow]) -> Result<Written> {
-        let started = Instant::now();
-        let mut written = Written::default();
-        let mut rest = rows;
-        while !rest.is_empty() {
-            let began = Instant::now();
-            let tx = self.db.transaction()?;
-            let mut taken = 0;
-            {
-                let mut insert =
-                    tx.prepare_cached("INSERT OR IGNORE INTO history_raw (chat, id, at, raw) VALUES (?1, ?2, ?3, ?4)")?;
-                for row in rest {
-                    insert.execute(params![row.chat, row.id, row.at_ms, row.raw])?;
-                    taken += 1;
-                    if taken == BATCH_ROWS || began.elapsed() >= BATCH_TIME {
-                        break;
-                    }
-                }
-            }
-            tx.commit()?;
-            self.commits.fetch_add(1, Ordering::Relaxed);
-            written.rows += taken;
-            written.transactions += 1;
-            rest = &rest[taken..];
-            self.between();
-        }
-        written.took = started.elapsed();
-        Ok(written)
     }
 
     /// Removes events older than the feed keeps, a short transaction at a time.
@@ -393,9 +519,10 @@ fn checkpoint(db: Connection, commits: Arc<AtomicU64>) {
     }
 }
 
-fn realtime_write(db: &mut Connection, write: Realtime) {
+/// Makes a realtime write, saying whether it was committed.
+fn realtime_write(db: &mut Connection, write: Realtime) -> bool {
     match write {
-        Realtime::Inbox { kind, at_ms, payload, ack } => {
+        Realtime::Inbox { kind, at_ms, payload, ack, .. } => {
             let stored =
                 db.execute("INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)", params![kind, at_ms, payload]);
             match stored {
@@ -403,9 +530,13 @@ fn realtime_write(db: &mut Connection, write: Realtime) {
                     if let Some(ack) = ack {
                         ack.send();
                     }
+                    true
                 }
                 // Without its ack, the engine keeps waiting and WhatsApp keeps the message.
-                Err(e) => eprintln!("jawd: can't keep a {kind} in the inbox, so it isn't acked: {e}"),
+                Err(e) => {
+                    eprintln!("jawd: can't keep a {kind} in the inbox, so it isn't acked: {e}");
+                    false
+                }
             }
         }
     }
@@ -469,25 +600,6 @@ mod tests {
         while store.count("inbox").unwrap() < 3 {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn history_goes_in_short_transactions() {
-        let home = tempfile::tempdir().unwrap();
-        let store = Store::open(home.path()).unwrap();
-        let rows: Vec<HistoryRow> = (0..2_500)
-            .map(|n| HistoryRow { chat: format!("chat{}", n % 7), id: format!("id{n}"), at_ms: n, raw: vec![1; 300] })
-            .collect();
-        let written = store.history(rows).await.unwrap();
-        assert_eq!(written.rows, 2_500);
-        assert!(written.transactions >= 3, "{} transactions", written.transactions);
-        assert_eq!(store.count("history_raw").unwrap(), 2_500);
-        let again = store
-            .history(vec![HistoryRow { chat: "chat0".into(), id: "id0".into(), at_ms: 0, raw: vec![] }])
-            .await
-            .unwrap();
-        assert_eq!(again.rows, 1);
-        assert_eq!(store.count("history_raw").unwrap(), 2_500, "a message seen again is kept once");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -572,6 +684,7 @@ mod tests {
         changes.push(text(ana, "plain", 5_000_000, "NAO, de todo"));
         changes.push(text(ana, "unrelated", 6_000_000, "nothing to see"));
         store.apply(Lane::Background, messages(changes)).await.unwrap();
+        store.indexed().await.unwrap();
 
         let first = query(&store, |db| read::search(db, "nao", None, None, 10)).await;
         let ids: Vec<&str> = first.hits.iter().map(|hit| hit.message.id.as_str()).collect();
@@ -790,5 +903,36 @@ mod tests {
         store.apply(Lane::Live, vec![delete("m1")]).await.unwrap();
         assert!(query(&store, |db| read::chats(db, false, None, 10)).await[0].last.is_none());
         assert_eq!(store.count("events").unwrap(), quiet + 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_deleted_for_me_from_the_phone_goes_as_one_deleted_here_does() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let chat = "351910000001@s.whatsapp.net";
+        store
+            .apply(Lane::Live, messages([text(chat, "m1", 1_000, "first"), text(chat, "m2", 2_000, "second")]))
+            .await
+            .unwrap();
+        let before = query(&store, |db| read::chats(db, false, None, 10)).await.remove(0);
+        let delete = |id: &str| {
+            Change::Amend(Amend {
+                chat: chat.into(),
+                target: id.into(),
+                sender: None,
+                mine: true,
+                at: 3_000,
+                what: Amendment::DeleteForMe,
+                raw: None,
+            })
+        };
+        assert_eq!(store.apply(Lane::Live, vec![delete("m2")]).await.unwrap().changed, 1);
+        assert_eq!(query(&store, move |db| read::message_count(db, chat)).await, 1);
+        let after = query(&store, |db| read::chats(db, false, None, 10)).await.remove(0);
+        assert_eq!(after.last.as_ref().unwrap().summary, "first");
+        assert_eq!(after.sort, before.sort, "deleting doesn't move the chat");
+        store.apply(Lane::Live, vec![delete("m2")]).await.unwrap();
+        assert_eq!(store.count("pending").unwrap(), 1, "a delete for a message jaw doesn't have waits for it");
+        assert_eq!(query(&store, move |db| read::message_count(db, chat)).await, 1);
     }
 }

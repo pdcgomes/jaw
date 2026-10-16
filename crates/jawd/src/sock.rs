@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use jaw_proto::find::{ChatOpened, Find};
+use jaw_proto::sync::HistoryMore;
 use jaw_proto::{Error, Hello, LinkStart, Outcome, PROTOCOL, Push, Reply, Request, code};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -18,6 +19,7 @@ use crate::engine::{EngineError, pb};
 use crate::feed;
 use crate::find::{Cancel, Cancelled};
 use crate::state::State;
+use crate::sync::Refused;
 
 /// Lines waiting for an interface to read them. A reply waits for room; window updates wait in
 /// their windows instead, so a slow interface never holds anything else up.
@@ -260,7 +262,27 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
             },
             None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so there's nothing to watch")),
         },
+        "history.more" => history_more(state, id, request.params).await,
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
+    }
+}
+
+/// Asks the phone for older messages in a chat; they arrive as upserts once it answers.
+async fn history_more(state: &State, id: u64, params: Value) -> Reply {
+    let more = match serde_json::from_value::<HistoryMore>(params) {
+        Ok(more) => more,
+        Err(e) => return failed(id, Error::new(code::INVALID_PARAMS, format!("history.more's params: {e}"))),
+    };
+    let (Some(store), Ok(engine)) = (state.store(), state.engine()) else {
+        return failed(id, Error::new(code::ENGINE_UNAVAILABLE, "there's no engine or store to ask the phone with"));
+    };
+    match crate::sync::history_more(store, engine, more.chat).await {
+        Ok(()) => succeeded(id, &serde_json::json!({})),
+        Err(Refused::NotFound(why)) => failed(id, Error::new(code::NOT_FOUND, why)),
+        Err(Refused::Engine(EngineError::Failed { message, retry: false })) => {
+            failed(id, Error::new(code::NOT_ALLOWED, message))
+        }
+        Err(Refused::Engine(e)) => failed(id, Error::new(code::ENGINE_UNAVAILABLE, e.to_string())),
     }
 }
 

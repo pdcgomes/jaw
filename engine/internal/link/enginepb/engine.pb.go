@@ -153,6 +153,61 @@ func (Connection_State) EnumDescriptor() ([]byte, []int) {
 	return file_engine_proto_rawDescGZIP(), []int{3, 0}
 }
 
+type AvatarFile_State int32
+
+const (
+	AvatarFile_STATE_UNSPECIFIED AvatarFile_State = 0
+	// Written to the path asked for.
+	AvatarFile_DOWNLOADED AvatarFile_State = 1
+	// Its ID is still the one jawd has.
+	AvatarFile_UNCHANGED AvatarFile_State = 2
+	// There's none, or it's hidden from this account.
+	AvatarFile_NONE AvatarFile_State = 3
+)
+
+// Enum value maps for AvatarFile_State.
+var (
+	AvatarFile_State_name = map[int32]string{
+		0: "STATE_UNSPECIFIED",
+		1: "DOWNLOADED",
+		2: "UNCHANGED",
+		3: "NONE",
+	}
+	AvatarFile_State_value = map[string]int32{
+		"STATE_UNSPECIFIED": 0,
+		"DOWNLOADED":        1,
+		"UNCHANGED":         2,
+		"NONE":              3,
+	}
+)
+
+func (x AvatarFile_State) Enum() *AvatarFile_State {
+	p := new(AvatarFile_State)
+	*p = x
+	return p
+}
+
+func (x AvatarFile_State) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (AvatarFile_State) Descriptor() protoreflect.EnumDescriptor {
+	return file_engine_proto_enumTypes[2].Descriptor()
+}
+
+func (AvatarFile_State) Type() protoreflect.EnumType {
+	return &file_engine_proto_enumTypes[2]
+}
+
+func (x AvatarFile_State) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use AvatarFile_State.Descriptor instead.
+func (AvatarFile_State) EnumDescriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{40, 0}
+}
+
 // One message on the link. A command's reply carries the command's id; nothing else needs one.
 type Frame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -369,6 +424,12 @@ type Event struct {
 	//	*Event_OfflinePreview
 	//	*Event_OfflineDone
 	//	*Event_Bench
+	//	*Event_AppState
+	//	*Event_PushName
+	//	*Event_Group
+	//	*Event_GroupChange
+	//	*Event_Picture
+	//	*Event_AppStateSynced
 	Kind          isEvent_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -481,6 +542,60 @@ func (x *Event) GetBench() *Bench {
 	return nil
 }
 
+func (x *Event) GetAppState() *AppState {
+	if x != nil {
+		if x, ok := x.Kind.(*Event_AppState); ok {
+			return x.AppState
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetPushName() *PushName {
+	if x != nil {
+		if x, ok := x.Kind.(*Event_PushName); ok {
+			return x.PushName
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetGroup() *GroupInfo {
+	if x != nil {
+		if x, ok := x.Kind.(*Event_Group); ok {
+			return x.Group
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetGroupChange() *GroupChange {
+	if x != nil {
+		if x, ok := x.Kind.(*Event_GroupChange); ok {
+			return x.GroupChange
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetPicture() *Picture {
+	if x != nil {
+		if x, ok := x.Kind.(*Event_Picture); ok {
+			return x.Picture
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetAppStateSynced() *AppStateSynced {
+	if x != nil {
+		if x, ok := x.Kind.(*Event_AppStateSynced); ok {
+			return x.AppStateSynced
+		}
+	}
+	return nil
+}
+
 type isEvent_Kind interface {
 	isEvent_Kind()
 }
@@ -513,6 +628,30 @@ type Event_Bench struct {
 	Bench *Bench `protobuf:"bytes,8,opt,name=bench,proto3,oneof"`
 }
 
+type Event_AppState struct {
+	AppState *AppState `protobuf:"bytes,9,opt,name=app_state,json=appState,proto3,oneof"`
+}
+
+type Event_PushName struct {
+	PushName *PushName `protobuf:"bytes,10,opt,name=push_name,json=pushName,proto3,oneof"`
+}
+
+type Event_Group struct {
+	Group *GroupInfo `protobuf:"bytes,11,opt,name=group,proto3,oneof"`
+}
+
+type Event_GroupChange struct {
+	GroupChange *GroupChange `protobuf:"bytes,12,opt,name=group_change,json=groupChange,proto3,oneof"`
+}
+
+type Event_Picture struct {
+	Picture *Picture `protobuf:"bytes,13,opt,name=picture,proto3,oneof"`
+}
+
+type Event_AppStateSynced struct {
+	AppStateSynced *AppStateSynced `protobuf:"bytes,14,opt,name=app_state_synced,json=appStateSynced,proto3,oneof"`
+}
+
 func (*Event_Connection) isEvent_Kind() {}
 
 func (*Event_Link) isEvent_Kind() {}
@@ -526,6 +665,18 @@ func (*Event_OfflinePreview) isEvent_Kind() {}
 func (*Event_OfflineDone) isEvent_Kind() {}
 
 func (*Event_Bench) isEvent_Kind() {}
+
+func (*Event_AppState) isEvent_Kind() {}
+
+func (*Event_PushName) isEvent_Kind() {}
+
+func (*Event_Group) isEvent_Kind() {}
+
+func (*Event_GroupChange) isEvent_Kind() {}
+
+func (*Event_Picture) isEvent_Kind() {}
+
+func (*Event_AppStateSynced) isEvent_Kind() {}
 
 type Connection struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -1358,6 +1509,652 @@ func (x *OfflineDone) GetCount() uint32 {
 	return 0
 }
 
+// One app-state mutation, as whatsmeow decoded it: pin, archive, mute, mark read or unread, star,
+// delete for me, a contact's name, the account's own name and the rest. Sent with a seq, since
+// whatsmeow won't send it again.
+type AppState struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The mutation's index, such as ["pin_v1", "351910000001@s.whatsapp.net"].
+	Index []string `protobuf:"bytes,1,rep,name=index,proto3" json:"index,omitempty"`
+	// WAWebProtobufSyncAction.SyncActionValue.
+	Value         []byte `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppState) Reset() {
+	*x = AppState{}
+	mi := &file_engine_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppState) ProtoMessage() {}
+
+func (x *AppState) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppState.ProtoReflect.Descriptor instead.
+func (*AppState) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *AppState) GetIndex() []string {
+	if x != nil {
+		return x.Index
+	}
+	return nil
+}
+
+func (x *AppState) GetValue() []byte {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+// An app-state collection whatsmeow has synced in full; its mutations came before this.
+type AppStateSynced struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Version       uint64                 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppStateSynced) Reset() {
+	*x = AppStateSynced{}
+	mi := &file_engine_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppStateSynced) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppStateSynced) ProtoMessage() {}
+
+func (x *AppStateSynced) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppStateSynced.ProtoReflect.Descriptor instead.
+func (*AppStateSynced) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *AppStateSynced) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *AppStateSynced) GetVersion() uint64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+// Someone's push name, which whatsmeow saw change on a message. Sent with a seq.
+type PushName struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Jid   string                 `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	// Their other JID, LID or phone number, when whatsmeow knows it.
+	JidAlt        string `protobuf:"bytes,2,opt,name=jid_alt,json=jidAlt,proto3" json:"jid_alt,omitempty"`
+	PushName      string `protobuf:"bytes,3,opt,name=push_name,json=pushName,proto3" json:"push_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PushName) Reset() {
+	*x = PushName{}
+	mi := &file_engine_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PushName) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PushName) ProtoMessage() {}
+
+func (x *PushName) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PushName.ProtoReflect.Descriptor instead.
+func (*PushName) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *PushName) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+func (x *PushName) GetJidAlt() string {
+	if x != nil {
+		return x.JidAlt
+	}
+	return ""
+}
+
+func (x *PushName) GetPushName() string {
+	if x != nil {
+		return x.PushName
+	}
+	return ""
+}
+
+// A group as whatsmeow's types.GroupInfo describes it: one jaw joined (sent with a seq), or one
+// of GetJoinedGroups' answers.
+type GroupInfo struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Jid       string                 `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	Name      string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Topic     string                 `protobuf:"bytes,3,opt,name=topic,proto3" json:"topic,omitempty"`
+	Owner     string                 `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
+	CreatedMs int64                  `protobuf:"varint,5,opt,name=created_ms,json=createdMs,proto3" json:"created_ms,omitempty"`
+	Announce  bool                   `protobuf:"varint,6,opt,name=announce,proto3" json:"announce,omitempty"`
+	Locked    bool                   `protobuf:"varint,7,opt,name=locked,proto3" json:"locked,omitempty"`
+	// The disappearing-message timer, or 0 for off.
+	EphemeralSeconds uint32 `protobuf:"varint,8,opt,name=ephemeral_seconds,json=ephemeralSeconds,proto3" json:"ephemeral_seconds,omitempty"`
+	// A community, whose groups name it in linked_parent.
+	IsParent     bool   `protobuf:"varint,9,opt,name=is_parent,json=isParent,proto3" json:"is_parent,omitempty"`
+	LinkedParent string `protobuf:"bytes,10,opt,name=linked_parent,json=linkedParent,proto3" json:"linked_parent,omitempty"`
+	// A community's announcement group.
+	IsDefaultSub   bool           `protobuf:"varint,11,opt,name=is_default_sub,json=isDefaultSub,proto3" json:"is_default_sub,omitempty"`
+	AddressingMode string         `protobuf:"bytes,12,opt,name=addressing_mode,json=addressingMode,proto3" json:"addressing_mode,omitempty"`
+	Participants   []*Participant `protobuf:"bytes,13,rep,name=participants,proto3" json:"participants,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *GroupInfo) Reset() {
+	*x = GroupInfo{}
+	mi := &file_engine_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GroupInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GroupInfo) ProtoMessage() {}
+
+func (x *GroupInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GroupInfo.ProtoReflect.Descriptor instead.
+func (*GroupInfo) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *GroupInfo) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+func (x *GroupInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *GroupInfo) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *GroupInfo) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *GroupInfo) GetCreatedMs() int64 {
+	if x != nil {
+		return x.CreatedMs
+	}
+	return 0
+}
+
+func (x *GroupInfo) GetAnnounce() bool {
+	if x != nil {
+		return x.Announce
+	}
+	return false
+}
+
+func (x *GroupInfo) GetLocked() bool {
+	if x != nil {
+		return x.Locked
+	}
+	return false
+}
+
+func (x *GroupInfo) GetEphemeralSeconds() uint32 {
+	if x != nil {
+		return x.EphemeralSeconds
+	}
+	return 0
+}
+
+func (x *GroupInfo) GetIsParent() bool {
+	if x != nil {
+		return x.IsParent
+	}
+	return false
+}
+
+func (x *GroupInfo) GetLinkedParent() string {
+	if x != nil {
+		return x.LinkedParent
+	}
+	return ""
+}
+
+func (x *GroupInfo) GetIsDefaultSub() bool {
+	if x != nil {
+		return x.IsDefaultSub
+	}
+	return false
+}
+
+func (x *GroupInfo) GetAddressingMode() string {
+	if x != nil {
+		return x.AddressingMode
+	}
+	return ""
+}
+
+func (x *GroupInfo) GetParticipants() []*Participant {
+	if x != nil {
+		return x.Participants
+	}
+	return nil
+}
+
+type Participant struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The JID to message them on: their LID or their phone number's.
+	Jid        string `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	Phone      string `protobuf:"bytes,2,opt,name=phone,proto3" json:"phone,omitempty"`
+	Lid        string `protobuf:"bytes,3,opt,name=lid,proto3" json:"lid,omitempty"`
+	Admin      bool   `protobuf:"varint,4,opt,name=admin,proto3" json:"admin,omitempty"`
+	SuperAdmin bool   `protobuf:"varint,5,opt,name=super_admin,json=superAdmin,proto3" json:"super_admin,omitempty"`
+	// An obfuscated number, for anonymous members of announcement groups.
+	DisplayName   string `protobuf:"bytes,6,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Participant) Reset() {
+	*x = Participant{}
+	mi := &file_engine_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Participant) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Participant) ProtoMessage() {}
+
+func (x *Participant) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Participant.ProtoReflect.Descriptor instead.
+func (*Participant) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *Participant) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+func (x *Participant) GetPhone() string {
+	if x != nil {
+		return x.Phone
+	}
+	return ""
+}
+
+func (x *Participant) GetLid() string {
+	if x != nil {
+		return x.Lid
+	}
+	return ""
+}
+
+func (x *Participant) GetAdmin() bool {
+	if x != nil {
+		return x.Admin
+	}
+	return false
+}
+
+func (x *Participant) GetSuperAdmin() bool {
+	if x != nil {
+		return x.SuperAdmin
+	}
+	return false
+}
+
+func (x *Participant) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+// What changed in a group, as whatsmeow's events.GroupInfo says. Sent with a seq.
+type GroupChange struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Jid              string                 `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	Sender           string                 `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
+	SenderPn         string                 `protobuf:"bytes,3,opt,name=sender_pn,json=senderPn,proto3" json:"sender_pn,omitempty"`
+	TimestampMs      int64                  `protobuf:"varint,4,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
+	Name             *string                `protobuf:"bytes,5,opt,name=name,proto3,oneof" json:"name,omitempty"`
+	Topic            *string                `protobuf:"bytes,6,opt,name=topic,proto3,oneof" json:"topic,omitempty"`
+	Announce         *bool                  `protobuf:"varint,7,opt,name=announce,proto3,oneof" json:"announce,omitempty"`
+	Locked           *bool                  `protobuf:"varint,8,opt,name=locked,proto3,oneof" json:"locked,omitempty"`
+	EphemeralSeconds *uint32                `protobuf:"varint,9,opt,name=ephemeral_seconds,json=ephemeralSeconds,proto3,oneof" json:"ephemeral_seconds,omitempty"`
+	Deleted          bool                   `protobuf:"varint,10,opt,name=deleted,proto3" json:"deleted,omitempty"`
+	// A group linked to or unlinked from this community.
+	Linked        string   `protobuf:"bytes,11,opt,name=linked,proto3" json:"linked,omitempty"`
+	Unlinked      string   `protobuf:"bytes,12,opt,name=unlinked,proto3" json:"unlinked,omitempty"`
+	Join          []string `protobuf:"bytes,13,rep,name=join,proto3" json:"join,omitempty"`
+	Leave         []string `protobuf:"bytes,14,rep,name=leave,proto3" json:"leave,omitempty"`
+	Promote       []string `protobuf:"bytes,15,rep,name=promote,proto3" json:"promote,omitempty"`
+	Demote        []string `protobuf:"bytes,16,rep,name=demote,proto3" json:"demote,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GroupChange) Reset() {
+	*x = GroupChange{}
+	mi := &file_engine_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GroupChange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GroupChange) ProtoMessage() {}
+
+func (x *GroupChange) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GroupChange.ProtoReflect.Descriptor instead.
+func (*GroupChange) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *GroupChange) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+func (x *GroupChange) GetSender() string {
+	if x != nil {
+		return x.Sender
+	}
+	return ""
+}
+
+func (x *GroupChange) GetSenderPn() string {
+	if x != nil {
+		return x.SenderPn
+	}
+	return ""
+}
+
+func (x *GroupChange) GetTimestampMs() int64 {
+	if x != nil {
+		return x.TimestampMs
+	}
+	return 0
+}
+
+func (x *GroupChange) GetName() string {
+	if x != nil && x.Name != nil {
+		return *x.Name
+	}
+	return ""
+}
+
+func (x *GroupChange) GetTopic() string {
+	if x != nil && x.Topic != nil {
+		return *x.Topic
+	}
+	return ""
+}
+
+func (x *GroupChange) GetAnnounce() bool {
+	if x != nil && x.Announce != nil {
+		return *x.Announce
+	}
+	return false
+}
+
+func (x *GroupChange) GetLocked() bool {
+	if x != nil && x.Locked != nil {
+		return *x.Locked
+	}
+	return false
+}
+
+func (x *GroupChange) GetEphemeralSeconds() uint32 {
+	if x != nil && x.EphemeralSeconds != nil {
+		return *x.EphemeralSeconds
+	}
+	return 0
+}
+
+func (x *GroupChange) GetDeleted() bool {
+	if x != nil {
+		return x.Deleted
+	}
+	return false
+}
+
+func (x *GroupChange) GetLinked() string {
+	if x != nil {
+		return x.Linked
+	}
+	return ""
+}
+
+func (x *GroupChange) GetUnlinked() string {
+	if x != nil {
+		return x.Unlinked
+	}
+	return ""
+}
+
+func (x *GroupChange) GetJoin() []string {
+	if x != nil {
+		return x.Join
+	}
+	return nil
+}
+
+func (x *GroupChange) GetLeave() []string {
+	if x != nil {
+		return x.Leave
+	}
+	return nil
+}
+
+func (x *GroupChange) GetPromote() []string {
+	if x != nil {
+		return x.Promote
+	}
+	return nil
+}
+
+func (x *GroupChange) GetDemote() []string {
+	if x != nil {
+		return x.Demote
+	}
+	return nil
+}
+
+// A user's or group's picture changed. Sent with a seq.
+type Picture struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Jid           string                 `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	Author        string                 `protobuf:"bytes,2,opt,name=author,proto3" json:"author,omitempty"`
+	TimestampMs   int64                  `protobuf:"varint,3,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
+	Removed       bool                   `protobuf:"varint,4,opt,name=removed,proto3" json:"removed,omitempty"`
+	PictureId     string                 `protobuf:"bytes,5,opt,name=picture_id,json=pictureId,proto3" json:"picture_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Picture) Reset() {
+	*x = Picture{}
+	mi := &file_engine_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Picture) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Picture) ProtoMessage() {}
+
+func (x *Picture) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Picture.ProtoReflect.Descriptor instead.
+func (*Picture) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *Picture) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+func (x *Picture) GetAuthor() string {
+	if x != nil {
+		return x.Author
+	}
+	return ""
+}
+
+func (x *Picture) GetTimestampMs() int64 {
+	if x != nil {
+		return x.TimestampMs
+	}
+	return 0
+}
+
+func (x *Picture) GetRemoved() bool {
+	if x != nil {
+		return x.Removed
+	}
+	return false
+}
+
+func (x *Picture) GetPictureId() string {
+	if x != nil {
+		return x.PictureId
+	}
+	return ""
+}
+
 // A made-up message for measuring the link, sent with a seq like a real one.
 type Bench struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1368,7 +2165,7 @@ type Bench struct {
 
 func (x *Bench) Reset() {
 	*x = Bench{}
-	mi := &file_engine_proto_msgTypes[12]
+	mi := &file_engine_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1380,7 +2177,7 @@ func (x *Bench) String() string {
 func (*Bench) ProtoMessage() {}
 
 func (x *Bench) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[12]
+	mi := &file_engine_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1393,7 +2190,7 @@ func (x *Bench) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Bench.ProtoReflect.Descriptor instead.
 func (*Bench) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{12}
+	return file_engine_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Bench) GetPayload() []byte {
@@ -1413,7 +2210,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_engine_proto_msgTypes[13]
+	mi := &file_engine_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1425,7 +2222,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[13]
+	mi := &file_engine_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1438,7 +2235,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{13}
+	return file_engine_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Ack) GetSeq() uint64 {
@@ -1458,6 +2255,12 @@ type Command struct {
 	//	*Command_Logout
 	//	*Command_HistoryDownload
 	//	*Command_BenchRun
+	//	*Command_Groups
+	//	*Command_Contacts
+	//	*Command_LidLookup
+	//	*Command_AppStateResync
+	//	*Command_Avatar
+	//	*Command_HistoryRequest
 	Kind          isCommand_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1465,7 +2268,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_engine_proto_msgTypes[14]
+	mi := &file_engine_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1477,7 +2280,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[14]
+	mi := &file_engine_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1490,7 +2293,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{14}
+	return file_engine_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Command) GetKind() isCommand_Kind {
@@ -1554,6 +2357,60 @@ func (x *Command) GetBenchRun() *BenchRun {
 	return nil
 }
 
+func (x *Command) GetGroups() *Groups {
+	if x != nil {
+		if x, ok := x.Kind.(*Command_Groups); ok {
+			return x.Groups
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetContacts() *Contacts {
+	if x != nil {
+		if x, ok := x.Kind.(*Command_Contacts); ok {
+			return x.Contacts
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetLidLookup() *LidLookup {
+	if x != nil {
+		if x, ok := x.Kind.(*Command_LidLookup); ok {
+			return x.LidLookup
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetAppStateResync() *AppStateResync {
+	if x != nil {
+		if x, ok := x.Kind.(*Command_AppStateResync); ok {
+			return x.AppStateResync
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetAvatar() *Avatar {
+	if x != nil {
+		if x, ok := x.Kind.(*Command_Avatar); ok {
+			return x.Avatar
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetHistoryRequest() *HistoryRequest {
+	if x != nil {
+		if x, ok := x.Kind.(*Command_HistoryRequest); ok {
+			return x.HistoryRequest
+		}
+	}
+	return nil
+}
+
 type isCommand_Kind interface {
 	isCommand_Kind()
 }
@@ -1582,6 +2439,30 @@ type Command_BenchRun struct {
 	BenchRun *BenchRun `protobuf:"bytes,6,opt,name=bench_run,json=benchRun,proto3,oneof"`
 }
 
+type Command_Groups struct {
+	Groups *Groups `protobuf:"bytes,7,opt,name=groups,proto3,oneof"`
+}
+
+type Command_Contacts struct {
+	Contacts *Contacts `protobuf:"bytes,8,opt,name=contacts,proto3,oneof"`
+}
+
+type Command_LidLookup struct {
+	LidLookup *LidLookup `protobuf:"bytes,9,opt,name=lid_lookup,json=lidLookup,proto3,oneof"`
+}
+
+type Command_AppStateResync struct {
+	AppStateResync *AppStateResync `protobuf:"bytes,10,opt,name=app_state_resync,json=appStateResync,proto3,oneof"`
+}
+
+type Command_Avatar struct {
+	Avatar *Avatar `protobuf:"bytes,11,opt,name=avatar,proto3,oneof"`
+}
+
+type Command_HistoryRequest struct {
+	HistoryRequest *HistoryRequest `protobuf:"bytes,12,opt,name=history_request,json=historyRequest,proto3,oneof"`
+}
+
 func (*Command_Ping) isCommand_Kind() {}
 
 func (*Command_LinkStart) isCommand_Kind() {}
@@ -1594,6 +2475,333 @@ func (*Command_HistoryDownload) isCommand_Kind() {}
 
 func (*Command_BenchRun) isCommand_Kind() {}
 
+func (*Command_Groups) isCommand_Kind() {}
+
+func (*Command_Contacts) isCommand_Kind() {}
+
+func (*Command_LidLookup) isCommand_Kind() {}
+
+func (*Command_AppStateResync) isCommand_Kind() {}
+
+func (*Command_Avatar) isCommand_Kind() {}
+
+func (*Command_HistoryRequest) isCommand_Kind() {}
+
+// Every group the account is in, from WhatsApp; answered with GroupList.
+type Groups struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Groups) Reset() {
+	*x = Groups{}
+	mi := &file_engine_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Groups) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Groups) ProtoMessage() {}
+
+func (x *Groups) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Groups.ProtoReflect.Descriptor instead.
+func (*Groups) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{22}
+}
+
+// The contacts and push names whatsmeow keeps, with the LID of each phone number it knows, read
+// from session.db; answered with ContactList.
+type Contacts struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Contacts) Reset() {
+	*x = Contacts{}
+	mi := &file_engine_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Contacts) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Contacts) ProtoMessage() {}
+
+func (x *Contacts) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Contacts.ProtoReflect.Descriptor instead.
+func (*Contacts) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{23}
+}
+
+// The phone number whatsmeow's LID map has for each of these LIDs; answered with LidPairs.
+type LidLookup struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Lids          []string               `protobuf:"bytes,1,rep,name=lids,proto3" json:"lids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LidLookup) Reset() {
+	*x = LidLookup{}
+	mi := &file_engine_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LidLookup) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LidLookup) ProtoMessage() {}
+
+func (x *LidLookup) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LidLookup.ProtoReflect.Descriptor instead.
+func (*LidLookup) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *LidLookup) GetLids() []string {
+	if x != nil {
+		return x.Lids
+	}
+	return nil
+}
+
+// Fetches app-state collections again in full from version 0, sending each mutation as an AppState
+// event; Done once they're all sent.
+type AppStateResync struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// regular, regular_low, regular_high, critical_block, critical_unblock_low.
+	Names         []string `protobuf:"bytes,1,rep,name=names,proto3" json:"names,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppStateResync) Reset() {
+	*x = AppStateResync{}
+	mi := &file_engine_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppStateResync) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppStateResync) ProtoMessage() {}
+
+func (x *AppStateResync) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppStateResync.ProtoReflect.Descriptor instead.
+func (*AppStateResync) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *AppStateResync) GetNames() []string {
+	if x != nil {
+		return x.Names
+	}
+	return nil
+}
+
+// Downloads a user's or group's picture to `path`, unless its ID is still `existing_id`; answered
+// with AvatarFile.
+type Avatar struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Jid           string                 `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	ExistingId    string                 `protobuf:"bytes,2,opt,name=existing_id,json=existingId,proto3" json:"existing_id,omitempty"`
+	Path          string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	Community     bool                   `protobuf:"varint,4,opt,name=community,proto3" json:"community,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Avatar) Reset() {
+	*x = Avatar{}
+	mi := &file_engine_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Avatar) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Avatar) ProtoMessage() {}
+
+func (x *Avatar) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Avatar.ProtoReflect.Descriptor instead.
+func (*Avatar) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *Avatar) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+func (x *Avatar) GetExistingId() string {
+	if x != nil {
+		return x.ExistingId
+	}
+	return ""
+}
+
+func (x *Avatar) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *Avatar) GetCommunity() bool {
+	if x != nil {
+		return x.Community
+	}
+	return false
+}
+
+// Asks the phone for `count` messages from before the oldest jaw has in a chat. They come as a
+// history notification of type ON_DEMAND; Done once the request is sent.
+type HistoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Chat          string                 `protobuf:"bytes,1,opt,name=chat,proto3" json:"chat,omitempty"`
+	OldestId      string                 `protobuf:"bytes,2,opt,name=oldest_id,json=oldestId,proto3" json:"oldest_id,omitempty"`
+	OldestFromMe  bool                   `protobuf:"varint,3,opt,name=oldest_from_me,json=oldestFromMe,proto3" json:"oldest_from_me,omitempty"`
+	OldestMs      int64                  `protobuf:"varint,4,opt,name=oldest_ms,json=oldestMs,proto3" json:"oldest_ms,omitempty"`
+	Count         uint32                 `protobuf:"varint,5,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HistoryRequest) Reset() {
+	*x = HistoryRequest{}
+	mi := &file_engine_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HistoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HistoryRequest) ProtoMessage() {}
+
+func (x *HistoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HistoryRequest.ProtoReflect.Descriptor instead.
+func (*HistoryRequest) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *HistoryRequest) GetChat() string {
+	if x != nil {
+		return x.Chat
+	}
+	return ""
+}
+
+func (x *HistoryRequest) GetOldestId() string {
+	if x != nil {
+		return x.OldestId
+	}
+	return ""
+}
+
+func (x *HistoryRequest) GetOldestFromMe() bool {
+	if x != nil {
+		return x.OldestFromMe
+	}
+	return false
+}
+
+func (x *HistoryRequest) GetOldestMs() int64 {
+	if x != nil {
+		return x.OldestMs
+	}
+	return 0
+}
+
+func (x *HistoryRequest) GetCount() uint32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
 type Ping struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1602,7 +2810,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_engine_proto_msgTypes[15]
+	mi := &file_engine_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1614,7 +2822,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[15]
+	mi := &file_engine_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1627,7 +2835,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{15}
+	return file_engine_proto_rawDescGZIP(), []int{28}
 }
 
 // Links an account: by QR code, or by a code typed on the phone when `phone` is given.
@@ -1641,7 +2849,7 @@ type LinkStart struct {
 
 func (x *LinkStart) Reset() {
 	*x = LinkStart{}
-	mi := &file_engine_proto_msgTypes[16]
+	mi := &file_engine_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1653,7 +2861,7 @@ func (x *LinkStart) String() string {
 func (*LinkStart) ProtoMessage() {}
 
 func (x *LinkStart) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[16]
+	mi := &file_engine_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1666,7 +2874,7 @@ func (x *LinkStart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LinkStart.ProtoReflect.Descriptor instead.
 func (*LinkStart) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{16}
+	return file_engine_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *LinkStart) GetPhone() string {
@@ -1684,7 +2892,7 @@ type LinkCancel struct {
 
 func (x *LinkCancel) Reset() {
 	*x = LinkCancel{}
-	mi := &file_engine_proto_msgTypes[17]
+	mi := &file_engine_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1696,7 +2904,7 @@ func (x *LinkCancel) String() string {
 func (*LinkCancel) ProtoMessage() {}
 
 func (x *LinkCancel) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[17]
+	mi := &file_engine_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1709,7 +2917,7 @@ func (x *LinkCancel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LinkCancel.ProtoReflect.Descriptor instead.
 func (*LinkCancel) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{17}
+	return file_engine_proto_rawDescGZIP(), []int{30}
 }
 
 type Logout struct {
@@ -1720,7 +2928,7 @@ type Logout struct {
 
 func (x *Logout) Reset() {
 	*x = Logout{}
-	mi := &file_engine_proto_msgTypes[18]
+	mi := &file_engine_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1732,7 +2940,7 @@ func (x *Logout) String() string {
 func (*Logout) ProtoMessage() {}
 
 func (x *Logout) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[18]
+	mi := &file_engine_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1745,7 +2953,7 @@ func (x *Logout) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Logout.ProtoReflect.Descriptor instead.
 func (*Logout) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{18}
+	return file_engine_proto_rawDescGZIP(), []int{31}
 }
 
 // Downloads one history blob, from the HistorySyncNotification inside a message jawd stored, and
@@ -1761,7 +2969,7 @@ type HistoryDownload struct {
 
 func (x *HistoryDownload) Reset() {
 	*x = HistoryDownload{}
-	mi := &file_engine_proto_msgTypes[19]
+	mi := &file_engine_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1773,7 +2981,7 @@ func (x *HistoryDownload) String() string {
 func (*HistoryDownload) ProtoMessage() {}
 
 func (x *HistoryDownload) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[19]
+	mi := &file_engine_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1786,7 +2994,7 @@ func (x *HistoryDownload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryDownload.ProtoReflect.Descriptor instead.
 func (*HistoryDownload) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{19}
+	return file_engine_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *HistoryDownload) GetNotification() []byte {
@@ -1814,7 +3022,7 @@ type BenchRun struct {
 
 func (x *BenchRun) Reset() {
 	*x = BenchRun{}
-	mi := &file_engine_proto_msgTypes[20]
+	mi := &file_engine_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1826,7 +3034,7 @@ func (x *BenchRun) String() string {
 func (*BenchRun) ProtoMessage() {}
 
 func (x *BenchRun) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[20]
+	mi := &file_engine_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1839,7 +3047,7 @@ func (x *BenchRun) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BenchRun.ProtoReflect.Descriptor instead.
 func (*BenchRun) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{20}
+	return file_engine_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *BenchRun) GetCount() uint32 {
@@ -1865,6 +3073,10 @@ type Reply struct {
 	//	*Reply_Pong
 	//	*Reply_HistoryFile
 	//	*Reply_BenchResult
+	//	*Reply_GroupList
+	//	*Reply_ContactList
+	//	*Reply_LidPairs
+	//	*Reply_AvatarFile
 	Kind          isReply_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1872,7 +3084,7 @@ type Reply struct {
 
 func (x *Reply) Reset() {
 	*x = Reply{}
-	mi := &file_engine_proto_msgTypes[21]
+	mi := &file_engine_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1884,7 +3096,7 @@ func (x *Reply) String() string {
 func (*Reply) ProtoMessage() {}
 
 func (x *Reply) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[21]
+	mi := &file_engine_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1897,7 +3109,7 @@ func (x *Reply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Reply.ProtoReflect.Descriptor instead.
 func (*Reply) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{21}
+	return file_engine_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *Reply) GetKind() isReply_Kind {
@@ -1952,6 +3164,42 @@ func (x *Reply) GetBenchResult() *BenchResult {
 	return nil
 }
 
+func (x *Reply) GetGroupList() *GroupList {
+	if x != nil {
+		if x, ok := x.Kind.(*Reply_GroupList); ok {
+			return x.GroupList
+		}
+	}
+	return nil
+}
+
+func (x *Reply) GetContactList() *ContactList {
+	if x != nil {
+		if x, ok := x.Kind.(*Reply_ContactList); ok {
+			return x.ContactList
+		}
+	}
+	return nil
+}
+
+func (x *Reply) GetLidPairs() *LidPairs {
+	if x != nil {
+		if x, ok := x.Kind.(*Reply_LidPairs); ok {
+			return x.LidPairs
+		}
+	}
+	return nil
+}
+
+func (x *Reply) GetAvatarFile() *AvatarFile {
+	if x != nil {
+		if x, ok := x.Kind.(*Reply_AvatarFile); ok {
+			return x.AvatarFile
+		}
+	}
+	return nil
+}
+
 type isReply_Kind interface {
 	isReply_Kind()
 }
@@ -1976,6 +3224,22 @@ type Reply_BenchResult struct {
 	BenchResult *BenchResult `protobuf:"bytes,5,opt,name=bench_result,json=benchResult,proto3,oneof"`
 }
 
+type Reply_GroupList struct {
+	GroupList *GroupList `protobuf:"bytes,6,opt,name=group_list,json=groupList,proto3,oneof"`
+}
+
+type Reply_ContactList struct {
+	ContactList *ContactList `protobuf:"bytes,7,opt,name=contact_list,json=contactList,proto3,oneof"`
+}
+
+type Reply_LidPairs struct {
+	LidPairs *LidPairs `protobuf:"bytes,8,opt,name=lid_pairs,json=lidPairs,proto3,oneof"`
+}
+
+type Reply_AvatarFile struct {
+	AvatarFile *AvatarFile `protobuf:"bytes,9,opt,name=avatar_file,json=avatarFile,proto3,oneof"`
+}
+
 func (*Reply_Failure) isReply_Kind() {}
 
 func (*Reply_Done) isReply_Kind() {}
@@ -1985,6 +3249,344 @@ func (*Reply_Pong) isReply_Kind() {}
 func (*Reply_HistoryFile) isReply_Kind() {}
 
 func (*Reply_BenchResult) isReply_Kind() {}
+
+func (*Reply_GroupList) isReply_Kind() {}
+
+func (*Reply_ContactList) isReply_Kind() {}
+
+func (*Reply_LidPairs) isReply_Kind() {}
+
+func (*Reply_AvatarFile) isReply_Kind() {}
+
+type GroupList struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Groups        []*GroupInfo           `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GroupList) Reset() {
+	*x = GroupList{}
+	mi := &file_engine_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GroupList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GroupList) ProtoMessage() {}
+
+func (x *GroupList) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GroupList.ProtoReflect.Descriptor instead.
+func (*GroupList) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *GroupList) GetGroups() []*GroupInfo {
+	if x != nil {
+		return x.Groups
+	}
+	return nil
+}
+
+type ContactList struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Contacts      []*Contact             `protobuf:"bytes,1,rep,name=contacts,proto3" json:"contacts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ContactList) Reset() {
+	*x = ContactList{}
+	mi := &file_engine_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContactList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContactList) ProtoMessage() {}
+
+func (x *ContactList) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContactList.ProtoReflect.Descriptor instead.
+func (*ContactList) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *ContactList) GetContacts() []*Contact {
+	if x != nil {
+		return x.Contacts
+	}
+	return nil
+}
+
+// whatsmeow's types.ContactInfo for a JID.
+type Contact struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Jid          string                 `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	FirstName    string                 `protobuf:"bytes,2,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
+	FullName     string                 `protobuf:"bytes,3,opt,name=full_name,json=fullName,proto3" json:"full_name,omitempty"`
+	PushName     string                 `protobuf:"bytes,4,opt,name=push_name,json=pushName,proto3" json:"push_name,omitempty"`
+	BusinessName string                 `protobuf:"bytes,5,opt,name=business_name,json=businessName,proto3" json:"business_name,omitempty"`
+	// Their LID, for a phone number whatsmeow's LID map knows.
+	Lid           string `protobuf:"bytes,6,opt,name=lid,proto3" json:"lid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Contact) Reset() {
+	*x = Contact{}
+	mi := &file_engine_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Contact) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Contact) ProtoMessage() {}
+
+func (x *Contact) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Contact.ProtoReflect.Descriptor instead.
+func (*Contact) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *Contact) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+func (x *Contact) GetFirstName() string {
+	if x != nil {
+		return x.FirstName
+	}
+	return ""
+}
+
+func (x *Contact) GetFullName() string {
+	if x != nil {
+		return x.FullName
+	}
+	return ""
+}
+
+func (x *Contact) GetPushName() string {
+	if x != nil {
+		return x.PushName
+	}
+	return ""
+}
+
+func (x *Contact) GetBusinessName() string {
+	if x != nil {
+		return x.BusinessName
+	}
+	return ""
+}
+
+func (x *Contact) GetLid() string {
+	if x != nil {
+		return x.Lid
+	}
+	return ""
+}
+
+type LidPairs struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Pairs         []*LidPair             `protobuf:"bytes,1,rep,name=pairs,proto3" json:"pairs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LidPairs) Reset() {
+	*x = LidPairs{}
+	mi := &file_engine_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LidPairs) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LidPairs) ProtoMessage() {}
+
+func (x *LidPairs) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LidPairs.ProtoReflect.Descriptor instead.
+func (*LidPairs) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *LidPairs) GetPairs() []*LidPair {
+	if x != nil {
+		return x.Pairs
+	}
+	return nil
+}
+
+type LidPair struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Lid           string                 `protobuf:"bytes,1,opt,name=lid,proto3" json:"lid,omitempty"`
+	Phone         string                 `protobuf:"bytes,2,opt,name=phone,proto3" json:"phone,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LidPair) Reset() {
+	*x = LidPair{}
+	mi := &file_engine_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LidPair) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LidPair) ProtoMessage() {}
+
+func (x *LidPair) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LidPair.ProtoReflect.Descriptor instead.
+func (*LidPair) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *LidPair) GetLid() string {
+	if x != nil {
+		return x.Lid
+	}
+	return ""
+}
+
+func (x *LidPair) GetPhone() string {
+	if x != nil {
+		return x.Phone
+	}
+	return ""
+}
+
+type AvatarFile struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         AvatarFile_State       `protobuf:"varint,1,opt,name=state,proto3,enum=jaw.engine.AvatarFile_State" json:"state,omitempty"`
+	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
+	Bytes         uint64                 `protobuf:"varint,3,opt,name=bytes,proto3" json:"bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AvatarFile) Reset() {
+	*x = AvatarFile{}
+	mi := &file_engine_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AvatarFile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AvatarFile) ProtoMessage() {}
+
+func (x *AvatarFile) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AvatarFile.ProtoReflect.Descriptor instead.
+func (*AvatarFile) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *AvatarFile) GetState() AvatarFile_State {
+	if x != nil {
+		return x.State
+	}
+	return AvatarFile_STATE_UNSPECIFIED
+}
+
+func (x *AvatarFile) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *AvatarFile) GetBytes() uint64 {
+	if x != nil {
+		return x.Bytes
+	}
+	return 0
+}
 
 type Failure struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1998,7 +3600,7 @@ type Failure struct {
 
 func (x *Failure) Reset() {
 	*x = Failure{}
-	mi := &file_engine_proto_msgTypes[22]
+	mi := &file_engine_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2010,7 +3612,7 @@ func (x *Failure) String() string {
 func (*Failure) ProtoMessage() {}
 
 func (x *Failure) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[22]
+	mi := &file_engine_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2023,7 +3625,7 @@ func (x *Failure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Failure.ProtoReflect.Descriptor instead.
 func (*Failure) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{22}
+	return file_engine_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *Failure) GetMessage() string {
@@ -2048,7 +3650,7 @@ type Done struct {
 
 func (x *Done) Reset() {
 	*x = Done{}
-	mi := &file_engine_proto_msgTypes[23]
+	mi := &file_engine_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2060,7 +3662,7 @@ func (x *Done) String() string {
 func (*Done) ProtoMessage() {}
 
 func (x *Done) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[23]
+	mi := &file_engine_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2073,7 +3675,7 @@ func (x *Done) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Done.ProtoReflect.Descriptor instead.
 func (*Done) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{23}
+	return file_engine_proto_rawDescGZIP(), []int{42}
 }
 
 type Pong struct {
@@ -2085,7 +3687,7 @@ type Pong struct {
 
 func (x *Pong) Reset() {
 	*x = Pong{}
-	mi := &file_engine_proto_msgTypes[24]
+	mi := &file_engine_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2097,7 +3699,7 @@ func (x *Pong) String() string {
 func (*Pong) ProtoMessage() {}
 
 func (x *Pong) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[24]
+	mi := &file_engine_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2110,7 +3712,7 @@ func (x *Pong) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pong.ProtoReflect.Descriptor instead.
 func (*Pong) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{24}
+	return file_engine_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *Pong) GetAtMs() int64 {
@@ -2135,7 +3737,7 @@ type HistoryFile struct {
 
 func (x *HistoryFile) Reset() {
 	*x = HistoryFile{}
-	mi := &file_engine_proto_msgTypes[25]
+	mi := &file_engine_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2147,7 +3749,7 @@ func (x *HistoryFile) String() string {
 func (*HistoryFile) ProtoMessage() {}
 
 func (x *HistoryFile) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[25]
+	mi := &file_engine_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2160,7 +3762,7 @@ func (x *HistoryFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryFile.ProtoReflect.Descriptor instead.
 func (*HistoryFile) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{25}
+	return file_engine_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *HistoryFile) GetPath() string {
@@ -2219,7 +3821,7 @@ type BenchResult struct {
 
 func (x *BenchResult) Reset() {
 	*x = BenchResult{}
-	mi := &file_engine_proto_msgTypes[26]
+	mi := &file_engine_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2231,7 +3833,7 @@ func (x *BenchResult) String() string {
 func (*BenchResult) ProtoMessage() {}
 
 func (x *BenchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[26]
+	mi := &file_engine_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2244,7 +3846,7 @@ func (x *BenchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BenchResult.ProtoReflect.Descriptor instead.
 func (*BenchResult) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{26}
+	return file_engine_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *BenchResult) GetCount() uint32 {
@@ -2299,7 +3901,7 @@ const file_engine_proto_rawDesc = "" +
 	"\x05Hello\x12\x1a\n" +
 	"\bprotocol\x18\x01 \x01(\rR\bprotocol\x12\x18\n" +
 	"\aprogram\x18\x02 \x01(\tR\aprogram\x12\x1c\n" +
-	"\twhatsmeow\x18\x03 \x01(\tR\twhatsmeow\"\x95\x03\n" +
+	"\twhatsmeow\x18\x03 \x01(\tR\twhatsmeow\"\xe5\x05\n" +
 	"\x05Event\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x128\n" +
 	"\n" +
@@ -2310,7 +3912,14 @@ const file_engine_proto_rawDesc = "" +
 	"\areceipt\x18\x05 \x01(\v2\x13.jaw.engine.ReceiptH\x00R\areceipt\x12E\n" +
 	"\x0foffline_preview\x18\x06 \x01(\v2\x1a.jaw.engine.OfflinePreviewH\x00R\x0eofflinePreview\x12<\n" +
 	"\foffline_done\x18\a \x01(\v2\x17.jaw.engine.OfflineDoneH\x00R\vofflineDone\x12)\n" +
-	"\x05bench\x18\b \x01(\v2\x11.jaw.engine.BenchH\x00R\x05benchB\x06\n" +
+	"\x05bench\x18\b \x01(\v2\x11.jaw.engine.BenchH\x00R\x05bench\x123\n" +
+	"\tapp_state\x18\t \x01(\v2\x14.jaw.engine.AppStateH\x00R\bappState\x123\n" +
+	"\tpush_name\x18\n" +
+	" \x01(\v2\x14.jaw.engine.PushNameH\x00R\bpushName\x12-\n" +
+	"\x05group\x18\v \x01(\v2\x15.jaw.engine.GroupInfoH\x00R\x05group\x12<\n" +
+	"\fgroup_change\x18\f \x01(\v2\x17.jaw.engine.GroupChangeH\x00R\vgroupChange\x12/\n" +
+	"\apicture\x18\r \x01(\v2\x13.jaw.engine.PictureH\x00R\apicture\x12F\n" +
+	"\x10app_state_synced\x18\x0e \x01(\v2\x1a.jaw.engine.AppStateSyncedH\x00R\x0eappStateSyncedB\x06\n" +
 	"\x04kind\"\x8c\x03\n" +
 	"\n" +
 	"Connection\x122\n" +
@@ -2399,11 +4008,75 @@ const file_engine_proto_rawDesc = "" +
 	"\rnotifications\x18\x04 \x01(\rR\rnotifications\x12(\n" +
 	"\x10app_data_changes\x18\x05 \x01(\rR\x0eappDataChanges\"#\n" +
 	"\vOfflineDone\x12\x14\n" +
-	"\x05count\x18\x01 \x01(\rR\x05count\"!\n" +
+	"\x05count\x18\x01 \x01(\rR\x05count\"6\n" +
+	"\bAppState\x12\x14\n" +
+	"\x05index\x18\x01 \x03(\tR\x05index\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\">\n" +
+	"\x0eAppStateSynced\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x04R\aversion\"R\n" +
+	"\bPushName\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\x12\x17\n" +
+	"\ajid_alt\x18\x02 \x01(\tR\x06jidAlt\x12\x1b\n" +
+	"\tpush_name\x18\x03 \x01(\tR\bpushName\"\xab\x03\n" +
+	"\tGroupInfo\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
+	"\x05topic\x18\x03 \x01(\tR\x05topic\x12\x14\n" +
+	"\x05owner\x18\x04 \x01(\tR\x05owner\x12\x1d\n" +
+	"\n" +
+	"created_ms\x18\x05 \x01(\x03R\tcreatedMs\x12\x1a\n" +
+	"\bannounce\x18\x06 \x01(\bR\bannounce\x12\x16\n" +
+	"\x06locked\x18\a \x01(\bR\x06locked\x12+\n" +
+	"\x11ephemeral_seconds\x18\b \x01(\rR\x10ephemeralSeconds\x12\x1b\n" +
+	"\tis_parent\x18\t \x01(\bR\bisParent\x12#\n" +
+	"\rlinked_parent\x18\n" +
+	" \x01(\tR\flinkedParent\x12$\n" +
+	"\x0eis_default_sub\x18\v \x01(\bR\fisDefaultSub\x12'\n" +
+	"\x0faddressing_mode\x18\f \x01(\tR\x0eaddressingMode\x12;\n" +
+	"\fparticipants\x18\r \x03(\v2\x17.jaw.engine.ParticipantR\fparticipants\"\xa1\x01\n" +
+	"\vParticipant\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\x12\x14\n" +
+	"\x05phone\x18\x02 \x01(\tR\x05phone\x12\x10\n" +
+	"\x03lid\x18\x03 \x01(\tR\x03lid\x12\x14\n" +
+	"\x05admin\x18\x04 \x01(\bR\x05admin\x12\x1f\n" +
+	"\vsuper_admin\x18\x05 \x01(\bR\n" +
+	"superAdmin\x12!\n" +
+	"\fdisplay_name\x18\x06 \x01(\tR\vdisplayName\"\x86\x04\n" +
+	"\vGroupChange\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\x12\x16\n" +
+	"\x06sender\x18\x02 \x01(\tR\x06sender\x12\x1b\n" +
+	"\tsender_pn\x18\x03 \x01(\tR\bsenderPn\x12!\n" +
+	"\ftimestamp_ms\x18\x04 \x01(\x03R\vtimestampMs\x12\x17\n" +
+	"\x04name\x18\x05 \x01(\tH\x00R\x04name\x88\x01\x01\x12\x19\n" +
+	"\x05topic\x18\x06 \x01(\tH\x01R\x05topic\x88\x01\x01\x12\x1f\n" +
+	"\bannounce\x18\a \x01(\bH\x02R\bannounce\x88\x01\x01\x12\x1b\n" +
+	"\x06locked\x18\b \x01(\bH\x03R\x06locked\x88\x01\x01\x120\n" +
+	"\x11ephemeral_seconds\x18\t \x01(\rH\x04R\x10ephemeralSeconds\x88\x01\x01\x12\x18\n" +
+	"\adeleted\x18\n" +
+	" \x01(\bR\adeleted\x12\x16\n" +
+	"\x06linked\x18\v \x01(\tR\x06linked\x12\x1a\n" +
+	"\bunlinked\x18\f \x01(\tR\bunlinked\x12\x12\n" +
+	"\x04join\x18\r \x03(\tR\x04join\x12\x14\n" +
+	"\x05leave\x18\x0e \x03(\tR\x05leave\x12\x18\n" +
+	"\apromote\x18\x0f \x03(\tR\apromote\x12\x16\n" +
+	"\x06demote\x18\x10 \x03(\tR\x06demoteB\a\n" +
+	"\x05_nameB\b\n" +
+	"\x06_topicB\v\n" +
+	"\t_announceB\t\n" +
+	"\a_lockedB\x14\n" +
+	"\x12_ephemeral_seconds\"\x8f\x01\n" +
+	"\aPicture\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\x12\x16\n" +
+	"\x06author\x18\x02 \x01(\tR\x06author\x12!\n" +
+	"\ftimestamp_ms\x18\x03 \x01(\x03R\vtimestampMs\x12\x18\n" +
+	"\aremoved\x18\x04 \x01(\bR\aremoved\x12\x1d\n" +
+	"\n" +
+	"picture_id\x18\x05 \x01(\tR\tpictureId\"!\n" +
 	"\x05Bench\x12\x18\n" +
 	"\apayload\x18\x01 \x01(\fR\apayload\"\x17\n" +
 	"\x03Ack\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\"\xd9\x02\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\"\xb0\x05\n" +
 	"\aCommand\x12&\n" +
 	"\x04ping\x18\x01 \x01(\v2\x10.jaw.engine.PingH\x00R\x04ping\x126\n" +
 	"\n" +
@@ -2412,8 +4085,35 @@ const file_engine_proto_rawDesc = "" +
 	"linkCancel\x12,\n" +
 	"\x06logout\x18\x04 \x01(\v2\x12.jaw.engine.LogoutH\x00R\x06logout\x12H\n" +
 	"\x10history_download\x18\x05 \x01(\v2\x1b.jaw.engine.HistoryDownloadH\x00R\x0fhistoryDownload\x123\n" +
-	"\tbench_run\x18\x06 \x01(\v2\x14.jaw.engine.BenchRunH\x00R\bbenchRunB\x06\n" +
-	"\x04kind\"\x06\n" +
+	"\tbench_run\x18\x06 \x01(\v2\x14.jaw.engine.BenchRunH\x00R\bbenchRun\x12,\n" +
+	"\x06groups\x18\a \x01(\v2\x12.jaw.engine.GroupsH\x00R\x06groups\x122\n" +
+	"\bcontacts\x18\b \x01(\v2\x14.jaw.engine.ContactsH\x00R\bcontacts\x126\n" +
+	"\n" +
+	"lid_lookup\x18\t \x01(\v2\x15.jaw.engine.LidLookupH\x00R\tlidLookup\x12F\n" +
+	"\x10app_state_resync\x18\n" +
+	" \x01(\v2\x1a.jaw.engine.AppStateResyncH\x00R\x0eappStateResync\x12,\n" +
+	"\x06avatar\x18\v \x01(\v2\x12.jaw.engine.AvatarH\x00R\x06avatar\x12E\n" +
+	"\x0fhistory_request\x18\f \x01(\v2\x1a.jaw.engine.HistoryRequestH\x00R\x0ehistoryRequestB\x06\n" +
+	"\x04kind\"\b\n" +
+	"\x06Groups\"\n" +
+	"\n" +
+	"\bContacts\"\x1f\n" +
+	"\tLidLookup\x12\x12\n" +
+	"\x04lids\x18\x01 \x03(\tR\x04lids\"&\n" +
+	"\x0eAppStateResync\x12\x14\n" +
+	"\x05names\x18\x01 \x03(\tR\x05names\"m\n" +
+	"\x06Avatar\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\x12\x1f\n" +
+	"\vexisting_id\x18\x02 \x01(\tR\n" +
+	"existingId\x12\x12\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12\x1c\n" +
+	"\tcommunity\x18\x04 \x01(\bR\tcommunity\"\x9a\x01\n" +
+	"\x0eHistoryRequest\x12\x12\n" +
+	"\x04chat\x18\x01 \x01(\tR\x04chat\x12\x1b\n" +
+	"\toldest_id\x18\x02 \x01(\tR\boldestId\x12$\n" +
+	"\x0eoldest_from_me\x18\x03 \x01(\bR\foldestFromMe\x12\x1b\n" +
+	"\toldest_ms\x18\x04 \x01(\x03R\boldestMs\x12\x14\n" +
+	"\x05count\x18\x05 \x01(\rR\x05count\"\x06\n" +
 	"\x04Ping\"!\n" +
 	"\tLinkStart\x12\x14\n" +
 	"\x05phone\x18\x01 \x01(\tR\x05phone\"\f\n" +
@@ -2425,14 +4125,48 @@ const file_engine_proto_rawDesc = "" +
 	"\x04path\x18\x02 \x01(\tR\x04path\"4\n" +
 	"\bBenchRun\x12\x14\n" +
 	"\x05count\x18\x01 \x01(\rR\x05count\x12\x12\n" +
-	"\x04size\x18\x02 \x01(\rR\x04size\"\x8c\x02\n" +
+	"\x04size\x18\x02 \x01(\rR\x04size\"\xf2\x03\n" +
 	"\x05Reply\x12/\n" +
 	"\afailure\x18\x01 \x01(\v2\x13.jaw.engine.FailureH\x00R\afailure\x12&\n" +
 	"\x04done\x18\x02 \x01(\v2\x10.jaw.engine.DoneH\x00R\x04done\x12&\n" +
 	"\x04pong\x18\x03 \x01(\v2\x10.jaw.engine.PongH\x00R\x04pong\x12<\n" +
 	"\fhistory_file\x18\x04 \x01(\v2\x17.jaw.engine.HistoryFileH\x00R\vhistoryFile\x12<\n" +
-	"\fbench_result\x18\x05 \x01(\v2\x17.jaw.engine.BenchResultH\x00R\vbenchResultB\x06\n" +
-	"\x04kind\"9\n" +
+	"\fbench_result\x18\x05 \x01(\v2\x17.jaw.engine.BenchResultH\x00R\vbenchResult\x126\n" +
+	"\n" +
+	"group_list\x18\x06 \x01(\v2\x15.jaw.engine.GroupListH\x00R\tgroupList\x12<\n" +
+	"\fcontact_list\x18\a \x01(\v2\x17.jaw.engine.ContactListH\x00R\vcontactList\x123\n" +
+	"\tlid_pairs\x18\b \x01(\v2\x14.jaw.engine.LidPairsH\x00R\blidPairs\x129\n" +
+	"\vavatar_file\x18\t \x01(\v2\x16.jaw.engine.AvatarFileH\x00R\n" +
+	"avatarFileB\x06\n" +
+	"\x04kind\":\n" +
+	"\tGroupList\x12-\n" +
+	"\x06groups\x18\x01 \x03(\v2\x15.jaw.engine.GroupInfoR\x06groups\">\n" +
+	"\vContactList\x12/\n" +
+	"\bcontacts\x18\x01 \x03(\v2\x13.jaw.engine.ContactR\bcontacts\"\xab\x01\n" +
+	"\aContact\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\x12\x1d\n" +
+	"\n" +
+	"first_name\x18\x02 \x01(\tR\tfirstName\x12\x1b\n" +
+	"\tfull_name\x18\x03 \x01(\tR\bfullName\x12\x1b\n" +
+	"\tpush_name\x18\x04 \x01(\tR\bpushName\x12#\n" +
+	"\rbusiness_name\x18\x05 \x01(\tR\fbusinessName\x12\x10\n" +
+	"\x03lid\x18\x06 \x01(\tR\x03lid\"5\n" +
+	"\bLidPairs\x12)\n" +
+	"\x05pairs\x18\x01 \x03(\v2\x13.jaw.engine.LidPairR\x05pairs\"1\n" +
+	"\aLidPair\x12\x10\n" +
+	"\x03lid\x18\x01 \x01(\tR\x03lid\x12\x14\n" +
+	"\x05phone\x18\x02 \x01(\tR\x05phone\"\xaf\x01\n" +
+	"\n" +
+	"AvatarFile\x122\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x1c.jaw.engine.AvatarFile.StateR\x05state\x12\x0e\n" +
+	"\x02id\x18\x02 \x01(\tR\x02id\x12\x14\n" +
+	"\x05bytes\x18\x03 \x01(\x04R\x05bytes\"G\n" +
+	"\x05State\x12\x15\n" +
+	"\x11STATE_UNSPECIFIED\x10\x00\x12\x0e\n" +
+	"\n" +
+	"DOWNLOADED\x10\x01\x12\r\n" +
+	"\tUNCHANGED\x10\x02\x12\b\n" +
+	"\x04NONE\x10\x03\"9\n" +
 	"\aFailure\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\x12\x14\n" +
 	"\x05retry\x18\x02 \x01(\bR\x05retry\"\x06\n" +
@@ -2470,72 +4204,113 @@ func file_engine_proto_rawDescGZIP() []byte {
 	return file_engine_proto_rawDescData
 }
 
-var file_engine_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_engine_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_engine_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_engine_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
 var file_engine_proto_goTypes = []any{
 	(Version)(0),            // 0: jaw.engine.Version
 	(Connection_State)(0),   // 1: jaw.engine.Connection.State
-	(*Frame)(nil),           // 2: jaw.engine.Frame
-	(*Hello)(nil),           // 3: jaw.engine.Hello
-	(*Event)(nil),           // 4: jaw.engine.Event
-	(*Connection)(nil),      // 5: jaw.engine.Connection
-	(*Link)(nil),            // 6: jaw.engine.Link
-	(*QrCode)(nil),          // 7: jaw.engine.QrCode
-	(*Linked)(nil),          // 8: jaw.engine.Linked
-	(*Message)(nil),         // 9: jaw.engine.Message
-	(*MessageInfo)(nil),     // 10: jaw.engine.MessageInfo
-	(*Receipt)(nil),         // 11: jaw.engine.Receipt
-	(*OfflinePreview)(nil),  // 12: jaw.engine.OfflinePreview
-	(*OfflineDone)(nil),     // 13: jaw.engine.OfflineDone
-	(*Bench)(nil),           // 14: jaw.engine.Bench
-	(*Ack)(nil),             // 15: jaw.engine.Ack
-	(*Command)(nil),         // 16: jaw.engine.Command
-	(*Ping)(nil),            // 17: jaw.engine.Ping
-	(*LinkStart)(nil),       // 18: jaw.engine.LinkStart
-	(*LinkCancel)(nil),      // 19: jaw.engine.LinkCancel
-	(*Logout)(nil),          // 20: jaw.engine.Logout
-	(*HistoryDownload)(nil), // 21: jaw.engine.HistoryDownload
-	(*BenchRun)(nil),        // 22: jaw.engine.BenchRun
-	(*Reply)(nil),           // 23: jaw.engine.Reply
-	(*Failure)(nil),         // 24: jaw.engine.Failure
-	(*Done)(nil),            // 25: jaw.engine.Done
-	(*Pong)(nil),            // 26: jaw.engine.Pong
-	(*HistoryFile)(nil),     // 27: jaw.engine.HistoryFile
-	(*BenchResult)(nil),     // 28: jaw.engine.BenchResult
+	(AvatarFile_State)(0),   // 2: jaw.engine.AvatarFile.State
+	(*Frame)(nil),           // 3: jaw.engine.Frame
+	(*Hello)(nil),           // 4: jaw.engine.Hello
+	(*Event)(nil),           // 5: jaw.engine.Event
+	(*Connection)(nil),      // 6: jaw.engine.Connection
+	(*Link)(nil),            // 7: jaw.engine.Link
+	(*QrCode)(nil),          // 8: jaw.engine.QrCode
+	(*Linked)(nil),          // 9: jaw.engine.Linked
+	(*Message)(nil),         // 10: jaw.engine.Message
+	(*MessageInfo)(nil),     // 11: jaw.engine.MessageInfo
+	(*Receipt)(nil),         // 12: jaw.engine.Receipt
+	(*OfflinePreview)(nil),  // 13: jaw.engine.OfflinePreview
+	(*OfflineDone)(nil),     // 14: jaw.engine.OfflineDone
+	(*AppState)(nil),        // 15: jaw.engine.AppState
+	(*AppStateSynced)(nil),  // 16: jaw.engine.AppStateSynced
+	(*PushName)(nil),        // 17: jaw.engine.PushName
+	(*GroupInfo)(nil),       // 18: jaw.engine.GroupInfo
+	(*Participant)(nil),     // 19: jaw.engine.Participant
+	(*GroupChange)(nil),     // 20: jaw.engine.GroupChange
+	(*Picture)(nil),         // 21: jaw.engine.Picture
+	(*Bench)(nil),           // 22: jaw.engine.Bench
+	(*Ack)(nil),             // 23: jaw.engine.Ack
+	(*Command)(nil),         // 24: jaw.engine.Command
+	(*Groups)(nil),          // 25: jaw.engine.Groups
+	(*Contacts)(nil),        // 26: jaw.engine.Contacts
+	(*LidLookup)(nil),       // 27: jaw.engine.LidLookup
+	(*AppStateResync)(nil),  // 28: jaw.engine.AppStateResync
+	(*Avatar)(nil),          // 29: jaw.engine.Avatar
+	(*HistoryRequest)(nil),  // 30: jaw.engine.HistoryRequest
+	(*Ping)(nil),            // 31: jaw.engine.Ping
+	(*LinkStart)(nil),       // 32: jaw.engine.LinkStart
+	(*LinkCancel)(nil),      // 33: jaw.engine.LinkCancel
+	(*Logout)(nil),          // 34: jaw.engine.Logout
+	(*HistoryDownload)(nil), // 35: jaw.engine.HistoryDownload
+	(*BenchRun)(nil),        // 36: jaw.engine.BenchRun
+	(*Reply)(nil),           // 37: jaw.engine.Reply
+	(*GroupList)(nil),       // 38: jaw.engine.GroupList
+	(*ContactList)(nil),     // 39: jaw.engine.ContactList
+	(*Contact)(nil),         // 40: jaw.engine.Contact
+	(*LidPairs)(nil),        // 41: jaw.engine.LidPairs
+	(*LidPair)(nil),         // 42: jaw.engine.LidPair
+	(*AvatarFile)(nil),      // 43: jaw.engine.AvatarFile
+	(*Failure)(nil),         // 44: jaw.engine.Failure
+	(*Done)(nil),            // 45: jaw.engine.Done
+	(*Pong)(nil),            // 46: jaw.engine.Pong
+	(*HistoryFile)(nil),     // 47: jaw.engine.HistoryFile
+	(*BenchResult)(nil),     // 48: jaw.engine.BenchResult
 }
 var file_engine_proto_depIdxs = []int32{
-	3,  // 0: jaw.engine.Frame.hello:type_name -> jaw.engine.Hello
-	4,  // 1: jaw.engine.Frame.event:type_name -> jaw.engine.Event
-	15, // 2: jaw.engine.Frame.ack:type_name -> jaw.engine.Ack
-	16, // 3: jaw.engine.Frame.command:type_name -> jaw.engine.Command
-	23, // 4: jaw.engine.Frame.reply:type_name -> jaw.engine.Reply
-	5,  // 5: jaw.engine.Event.connection:type_name -> jaw.engine.Connection
-	6,  // 6: jaw.engine.Event.link:type_name -> jaw.engine.Link
-	9,  // 7: jaw.engine.Event.message:type_name -> jaw.engine.Message
-	11, // 8: jaw.engine.Event.receipt:type_name -> jaw.engine.Receipt
-	12, // 9: jaw.engine.Event.offline_preview:type_name -> jaw.engine.OfflinePreview
-	13, // 10: jaw.engine.Event.offline_done:type_name -> jaw.engine.OfflineDone
-	14, // 11: jaw.engine.Event.bench:type_name -> jaw.engine.Bench
-	1,  // 12: jaw.engine.Connection.state:type_name -> jaw.engine.Connection.State
-	7,  // 13: jaw.engine.Link.qr:type_name -> jaw.engine.QrCode
-	8,  // 14: jaw.engine.Link.done:type_name -> jaw.engine.Linked
-	10, // 15: jaw.engine.Message.info:type_name -> jaw.engine.MessageInfo
-	17, // 16: jaw.engine.Command.ping:type_name -> jaw.engine.Ping
-	18, // 17: jaw.engine.Command.link_start:type_name -> jaw.engine.LinkStart
-	19, // 18: jaw.engine.Command.link_cancel:type_name -> jaw.engine.LinkCancel
-	20, // 19: jaw.engine.Command.logout:type_name -> jaw.engine.Logout
-	21, // 20: jaw.engine.Command.history_download:type_name -> jaw.engine.HistoryDownload
-	22, // 21: jaw.engine.Command.bench_run:type_name -> jaw.engine.BenchRun
-	24, // 22: jaw.engine.Reply.failure:type_name -> jaw.engine.Failure
-	25, // 23: jaw.engine.Reply.done:type_name -> jaw.engine.Done
-	26, // 24: jaw.engine.Reply.pong:type_name -> jaw.engine.Pong
-	27, // 25: jaw.engine.Reply.history_file:type_name -> jaw.engine.HistoryFile
-	28, // 26: jaw.engine.Reply.bench_result:type_name -> jaw.engine.BenchResult
-	27, // [27:27] is the sub-list for method output_type
-	27, // [27:27] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	4,  // 0: jaw.engine.Frame.hello:type_name -> jaw.engine.Hello
+	5,  // 1: jaw.engine.Frame.event:type_name -> jaw.engine.Event
+	23, // 2: jaw.engine.Frame.ack:type_name -> jaw.engine.Ack
+	24, // 3: jaw.engine.Frame.command:type_name -> jaw.engine.Command
+	37, // 4: jaw.engine.Frame.reply:type_name -> jaw.engine.Reply
+	6,  // 5: jaw.engine.Event.connection:type_name -> jaw.engine.Connection
+	7,  // 6: jaw.engine.Event.link:type_name -> jaw.engine.Link
+	10, // 7: jaw.engine.Event.message:type_name -> jaw.engine.Message
+	12, // 8: jaw.engine.Event.receipt:type_name -> jaw.engine.Receipt
+	13, // 9: jaw.engine.Event.offline_preview:type_name -> jaw.engine.OfflinePreview
+	14, // 10: jaw.engine.Event.offline_done:type_name -> jaw.engine.OfflineDone
+	22, // 11: jaw.engine.Event.bench:type_name -> jaw.engine.Bench
+	15, // 12: jaw.engine.Event.app_state:type_name -> jaw.engine.AppState
+	17, // 13: jaw.engine.Event.push_name:type_name -> jaw.engine.PushName
+	18, // 14: jaw.engine.Event.group:type_name -> jaw.engine.GroupInfo
+	20, // 15: jaw.engine.Event.group_change:type_name -> jaw.engine.GroupChange
+	21, // 16: jaw.engine.Event.picture:type_name -> jaw.engine.Picture
+	16, // 17: jaw.engine.Event.app_state_synced:type_name -> jaw.engine.AppStateSynced
+	1,  // 18: jaw.engine.Connection.state:type_name -> jaw.engine.Connection.State
+	8,  // 19: jaw.engine.Link.qr:type_name -> jaw.engine.QrCode
+	9,  // 20: jaw.engine.Link.done:type_name -> jaw.engine.Linked
+	11, // 21: jaw.engine.Message.info:type_name -> jaw.engine.MessageInfo
+	19, // 22: jaw.engine.GroupInfo.participants:type_name -> jaw.engine.Participant
+	31, // 23: jaw.engine.Command.ping:type_name -> jaw.engine.Ping
+	32, // 24: jaw.engine.Command.link_start:type_name -> jaw.engine.LinkStart
+	33, // 25: jaw.engine.Command.link_cancel:type_name -> jaw.engine.LinkCancel
+	34, // 26: jaw.engine.Command.logout:type_name -> jaw.engine.Logout
+	35, // 27: jaw.engine.Command.history_download:type_name -> jaw.engine.HistoryDownload
+	36, // 28: jaw.engine.Command.bench_run:type_name -> jaw.engine.BenchRun
+	25, // 29: jaw.engine.Command.groups:type_name -> jaw.engine.Groups
+	26, // 30: jaw.engine.Command.contacts:type_name -> jaw.engine.Contacts
+	27, // 31: jaw.engine.Command.lid_lookup:type_name -> jaw.engine.LidLookup
+	28, // 32: jaw.engine.Command.app_state_resync:type_name -> jaw.engine.AppStateResync
+	29, // 33: jaw.engine.Command.avatar:type_name -> jaw.engine.Avatar
+	30, // 34: jaw.engine.Command.history_request:type_name -> jaw.engine.HistoryRequest
+	44, // 35: jaw.engine.Reply.failure:type_name -> jaw.engine.Failure
+	45, // 36: jaw.engine.Reply.done:type_name -> jaw.engine.Done
+	46, // 37: jaw.engine.Reply.pong:type_name -> jaw.engine.Pong
+	47, // 38: jaw.engine.Reply.history_file:type_name -> jaw.engine.HistoryFile
+	48, // 39: jaw.engine.Reply.bench_result:type_name -> jaw.engine.BenchResult
+	38, // 40: jaw.engine.Reply.group_list:type_name -> jaw.engine.GroupList
+	39, // 41: jaw.engine.Reply.contact_list:type_name -> jaw.engine.ContactList
+	41, // 42: jaw.engine.Reply.lid_pairs:type_name -> jaw.engine.LidPairs
+	43, // 43: jaw.engine.Reply.avatar_file:type_name -> jaw.engine.AvatarFile
+	18, // 44: jaw.engine.GroupList.groups:type_name -> jaw.engine.GroupInfo
+	40, // 45: jaw.engine.ContactList.contacts:type_name -> jaw.engine.Contact
+	42, // 46: jaw.engine.LidPairs.pairs:type_name -> jaw.engine.LidPair
+	2,  // 47: jaw.engine.AvatarFile.state:type_name -> jaw.engine.AvatarFile.State
+	48, // [48:48] is the sub-list for method output_type
+	48, // [48:48] is the sub-list for method input_type
+	48, // [48:48] is the sub-list for extension type_name
+	48, // [48:48] is the sub-list for extension extendee
+	0,  // [0:48] is the sub-list for field type_name
 }
 
 func init() { file_engine_proto_init() }
@@ -2558,6 +4333,12 @@ func file_engine_proto_init() {
 		(*Event_OfflinePreview)(nil),
 		(*Event_OfflineDone)(nil),
 		(*Event_Bench)(nil),
+		(*Event_AppState)(nil),
+		(*Event_PushName)(nil),
+		(*Event_Group)(nil),
+		(*Event_GroupChange)(nil),
+		(*Event_Picture)(nil),
+		(*Event_AppStateSynced)(nil),
 	}
 	file_engine_proto_msgTypes[4].OneofWrappers = []any{
 		(*Link_Qr)(nil),
@@ -2565,28 +4346,39 @@ func file_engine_proto_init() {
 		(*Link_Done)(nil),
 		(*Link_Failed)(nil),
 	}
-	file_engine_proto_msgTypes[14].OneofWrappers = []any{
+	file_engine_proto_msgTypes[17].OneofWrappers = []any{}
+	file_engine_proto_msgTypes[21].OneofWrappers = []any{
 		(*Command_Ping)(nil),
 		(*Command_LinkStart)(nil),
 		(*Command_LinkCancel)(nil),
 		(*Command_Logout)(nil),
 		(*Command_HistoryDownload)(nil),
 		(*Command_BenchRun)(nil),
+		(*Command_Groups)(nil),
+		(*Command_Contacts)(nil),
+		(*Command_LidLookup)(nil),
+		(*Command_AppStateResync)(nil),
+		(*Command_Avatar)(nil),
+		(*Command_HistoryRequest)(nil),
 	}
-	file_engine_proto_msgTypes[21].OneofWrappers = []any{
+	file_engine_proto_msgTypes[34].OneofWrappers = []any{
 		(*Reply_Failure)(nil),
 		(*Reply_Done)(nil),
 		(*Reply_Pong)(nil),
 		(*Reply_HistoryFile)(nil),
 		(*Reply_BenchResult)(nil),
+		(*Reply_GroupList)(nil),
+		(*Reply_ContactList)(nil),
+		(*Reply_LidPairs)(nil),
+		(*Reply_AvatarFile)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_engine_proto_rawDesc), len(file_engine_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   27,
+			NumEnums:      3,
+			NumMessages:   46,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use jaw_proto::find::{ChatOpened, Find, Found};
+use jaw_proto::sync::{HistoryMore, Notice};
 use jaw_proto::windows::{
     ChatsPush, ChatsWatch, ChatsWatched, MessagesPush, MessagesWatch, MessagesWatched, Watch, WatchMove,
 };
@@ -68,6 +69,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "messages.watch" => params::<MessagesWatch>(&name, &request.params),
                     "watch.move" => params::<WatchMove>(&name, &request.params),
                     "unwatch" => params::<Watch>(&name, &request.params),
+                    "history.more" => params::<HistoryMore>(&name, &request.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -78,7 +80,9 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "hello" => params::<Welcome>(&name, result),
                     "status" => params::<Status>(&name, result),
                     "find" => params::<Found>(&name, result),
-                    "chat.opened" | "unwatch" => assert_eq!(result, &serde_json::json!({}), "{name} has a result"),
+                    "chat.opened" | "unwatch" | "history.more" => {
+                        assert_eq!(result, &serde_json::json!({}), "{name} has a result")
+                    }
                     "chats.watch" => params::<ChatsWatched>(&name, result),
                     // A move's result is its window's; this fixture moves a messages window.
                     "messages.watch" | "watch.move" => params::<MessagesWatched>(&name, result),
@@ -93,6 +97,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "chats" => params::<ChatsPush>(&name, &push.params),
                     "messages" => params::<MessagesPush>(&name, &push.params),
                     "resync" => params::<Watch>(&name, &push.params),
+                    "notice" => params::<Notice>(&name, &push.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }

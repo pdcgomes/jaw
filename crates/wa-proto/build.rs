@@ -10,6 +10,7 @@ const WHATSAPP: &[&str] = &[
     "waWeb/WAWebProtobufsWeb.proto",
     "waCommon/WACommon.proto",
     "waMmsRetry/WAMmsRetry.proto",
+    "waSyncAction/WAWebProtobufSyncAction.proto",
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

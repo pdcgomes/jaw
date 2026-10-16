@@ -69,6 +69,10 @@ impl State {
         self.feed.as_ref()
     }
 
+    pub fn store(&self) -> Option<&Store> {
+        self.store.as_ref()
+    }
+
     pub fn engine(&self) -> Result<&Supervisor, &str> {
         self.engine.as_ref().map_err(|(_, why)| why.as_str())
     }
@@ -122,7 +126,14 @@ impl State {
             catch_up,
             history,
             stored: self.store.as_ref().and_then(|store| {
-                Some(Stored { inbox: store.count("inbox").ok()?, history: store.count("history_raw").ok()? })
+                Some(Stored {
+                    inbox: store.count("inbox").ok()?,
+                    history: store.count("history_raw").ok()?,
+                    chats: store.count("chats").ok()?,
+                    messages: store.count("messages").ok()?,
+                    people: store.count("people").ok()?,
+                    unindexed: store.count("fts_backlog").ok()?,
+                })
             }),
         }
     }

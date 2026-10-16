@@ -4,7 +4,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
@@ -31,6 +31,10 @@ pub(crate) const DAY_MS: i64 = 24 * 3600 * 1000;
 pub(crate) const SPAN_MS: i64 = 3 * 365 * DAY_MS;
 /// Messages in each batch handed to the writer.
 pub(crate) const BATCH: usize = 2_000;
+
+const BUILDING: u8 = 0;
+const INDEXING: u8 = 1;
+const DONE: u8 = 2;
 
 const WORDS: &[&str] = &[
     "não",
@@ -227,6 +231,9 @@ pub(crate) struct Timings(pub(crate) Vec<Duration>);
 
 impl Timings {
     pub(crate) fn line(&mut self, what: &str) -> String {
+        if self.0.is_empty() {
+            return format!("  {what:<44} none timed");
+        }
         self.0.sort_unstable();
         let at = |q: usize| self.0[(self.0.len() * q / 100).min(self.0.len() - 1)];
         format!(
@@ -274,23 +281,29 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         .collect();
     store.apply(Lane::Background, people).await?;
 
-    // A live message every 5 ms while history goes in, timed from hand-over to commit.
-    let building = Arc::new(AtomicBool::new(true));
+    // A live message every 5 ms while history goes in and then while it's indexed for search,
+    // timed from hand-over to commit.
+    let phase = Arc::new(AtomicU8::new(BUILDING));
     let probe = {
-        let (store, building) = (store.clone(), building.clone());
+        let (store, phase) = (store.clone(), phase.clone());
         tokio::spawn(async move {
             let mut rng = Rng(7);
-            let mut timings = Vec::new();
+            let mut timings = [Vec::new(), Vec::new()];
             let mut count = 1u64 << 40;
-            while building.load(Ordering::Relaxed) {
+            loop {
+                let now_in = phase.load(Ordering::Relaxed);
+                if now_in == DONE {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 count += 1;
                 let live = message(&mut rng, &phone(999_999), false, now + count as i64, count);
                 let started = Instant::now();
                 store.apply(Lane::Live, vec![Change::Message(live)]).await?;
-                timings.push(started.elapsed());
+                timings[usize::from(now_in)].push(started.elapsed());
             }
-            anyhow::Ok(Timings(timings))
+            let [building, indexing] = timings;
+            anyhow::Ok((Timings(building), Timings(indexing)))
         })
     };
 
@@ -317,8 +330,13 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         }
     }
     let built = started.elapsed();
-    building.store(false, Ordering::Relaxed);
-    let mut live = probe.await??;
+    phase.store(INDEXING, Ordering::Relaxed);
+    let indexing = Instant::now();
+    store.indexed().await?;
+    let indexed = indexing.elapsed();
+    phase.store(DONE, Ordering::Relaxed);
+    let (mut live, mut live_indexing) = probe.await??;
+    let writer = crate::work::Report::report(&store);
 
     // The LID map arrives: each member's LID joins the contact with their number.
     let joins: Vec<Change> =
@@ -339,6 +357,12 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         bytes as f64 / total as f64,
     );
     println!("{}, while history went in", live.line(&format!("a live message, {} of them", live.0.len())));
+    println!(
+        "{}, while it was indexed for search in {:.1} s",
+        live_indexing.line(&format!("a live message, {} of them", live_indexing.0.len())),
+        indexed.as_secs_f64()
+    );
+    println!("{}\n", jaw_client::pools(&[writer]));
     println!(
         "  1,000 LIDs joined to the contacts with their numbers in {:.1} ms, {} transactions\n",
         ms(joined.took),

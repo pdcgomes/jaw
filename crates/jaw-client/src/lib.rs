@@ -155,8 +155,22 @@ pub fn describe(status: &Status) -> String {
         ));
     }
     if let Some(stored) = status.stored {
-        lines
-            .push(format!("stored    {} kept as they arrived, {} messages from history", stored.inbox, stored.history));
+        lines.push(format!(
+            "stored    {} messages in {} chats, {} people",
+            stored.messages, stored.chats, stored.people
+        ));
+        let waiting: Vec<String> = [
+            (stored.inbox, "events to convert"),
+            (stored.history, "messages of history to convert"),
+            (stored.unindexed, "messages to index for search"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
+        if !waiting.is_empty() {
+            lines.push(format!("waiting   {}", waiting.join(", ")));
+        }
     }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));

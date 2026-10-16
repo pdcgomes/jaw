@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
 /// A change for the writer to make.
 pub enum Change {
@@ -23,6 +24,97 @@ pub enum Change {
         chat: String,
         id: String,
     },
+    /// Something done to a message: applied if it's there, kept in `pending` until it arrives if not.
+    Amend(Amend),
+    /// An edit, with the message as it now reads, which stands in for the message it edits when
+    /// jaw doesn't have that one, as the phone shows it.
+    Edited {
+        amend: Amend,
+        shown: Box<Message>,
+    },
+    Members(Members),
+    /// A raw row that's been converted, removed in the transaction its conversion's rows go in.
+    Drained(Drained),
+    /// Something sync keeps between runs.
+    Remember {
+        key: String,
+        value: String,
+    },
+    /// An app-state mutation's index and its raw SyncActionValue, kept as the latest for its index.
+    AppState {
+        index: Vec<String>,
+        value: Vec<u8>,
+    },
+}
+
+/// Something a later message or app state does to a message.
+#[derive(Clone, Debug)]
+pub struct Amend {
+    /// The chat's JID.
+    pub chat: String,
+    /// The ID of the message it's done to.
+    pub target: String,
+    /// Who did it, by JID; the account's own JID when `mine`.
+    pub sender: Option<String>,
+    pub mine: bool,
+    /// When, in milliseconds since the epoch.
+    pub at: i64,
+    pub what: Amendment,
+    /// The raw protobuf of what did it, kept while it's pending.
+    pub raw: Option<Packed>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "do", rename_all = "snake_case")]
+pub enum Amendment {
+    /// A reaction, or its removal when `emoji` is empty.
+    React {
+        emoji: String,
+    },
+    Edit {
+        text: Option<String>,
+        spans: Option<String>,
+        summary: String,
+    },
+    /// Deleted for everyone.
+    Revoke,
+    Star {
+        starred: bool,
+    },
+    DeleteForMe,
+    /// Kept in `pending` for a later jawd that knows what to do with it, such as a poll vote.
+    Keep {
+        kind: String,
+    },
+}
+
+impl Amendment {
+    fn kind(&self) -> &str {
+        match self {
+            Amendment::React { .. } => "reaction",
+            Amendment::Edit { .. } => "edit",
+            Amendment::Revoke => "revoke",
+            Amendment::Star { .. } => "star",
+            Amendment::DeleteForMe => "delete",
+            Amendment::Keep { kind } => kind,
+        }
+    }
+}
+
+/// A group's members: every one of them when `all`, or some joining, changing role or leaving.
+#[derive(Clone, Debug, Default)]
+pub struct Members {
+    pub chat: String,
+    pub all: bool,
+    /// Each member's JID and role: `member`, `admin` or `superadmin`.
+    pub set: Vec<(String, &'static str)>,
+    pub remove: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Drained {
+    Inbox(i64),
+    History { chat: String, id: String },
 }
 
 /// You opened a chat yourself, so it ranks higher in the palette; a chat jaw hasn't seen is made.
@@ -69,6 +161,9 @@ pub struct Chat {
     pub ephemeral: Option<u32>,
     /// What's typed in its box, or empty to clear it.
     pub draft: Option<String>,
+    /// Its picture's path in jaw's folder, and WhatsApp's ID for it; empty when it has none.
+    pub avatar: Option<String>,
+    pub avatar_id: Option<String>,
 }
 
 /// Someone, by every JID they're known by. Fields left `None` keep what the person has; JIDs that
@@ -117,6 +212,10 @@ pub struct Message {
     pub expires_at: Option<i64>,
     pub starred: bool,
     pub view_once: bool,
+    /// Whether it arrived live and counts towards its chat's unread messages, if it's someone
+    /// else's and its chat's newest; one of yours clears them.
+    pub counts: bool,
+    pub mentions_me: bool,
     /// WhatsApp's WebMessageInfo, compressed.
     pub raw: Option<Packed>,
 }
@@ -146,6 +245,12 @@ impl Packed {
             }
         })
     }
+}
+
+/// The raw protobuf a `Packed` holds, for tests outside the store.
+#[cfg(test)]
+pub fn unpack_for_tests(packed: &Packed) -> Vec<u8> {
+    unpack(&packed.0).expect("a packed protobuf unpacks")
 }
 
 /// The raw protobuf a `Packed` holds.
@@ -205,14 +310,42 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
-/// Makes one change inside the writer's open transaction, saying whether anything changed.
-pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Result<bool> {
+/// Makes one change inside the writer's open transaction, saying whether anything changed. A
+/// background change's new text waits in fts_backlog to be indexed for search.
+pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, background: bool) -> Result<bool> {
     match change {
         Change::Chat(chat) => upsert_chat(db, stamps, chat),
         Change::Person(person) => upsert_person(db, stamps, person),
-        Change::Message(message) => upsert_message(db, stamps, message),
+        Change::Message(message) => upsert_message(db, stamps, message, background),
         Change::Opened(opened) => open_chat(db, stamps, opened),
         Change::DeleteMessage { chat, id } => delete_message(db, stamps, chat, id),
+        Change::Amend(amend) => amend_message(db, stamps, amend),
+        Change::Edited { amend, shown } => {
+            if target(db, amend)?.is_some() {
+                amend_message(db, stamps, amend)
+            } else {
+                upsert_message(db, stamps, shown, background)
+            }
+        }
+        Change::Members(members) => set_members(db, stamps, members),
+        Change::Drained(Drained::Inbox(seq)) => {
+            db.prepare_cached("DELETE FROM inbox WHERE seq = ?1")?.execute([seq])?;
+            Ok(false)
+        }
+        Change::Drained(Drained::History { chat, id }) => {
+            db.prepare_cached("DELETE FROM history_raw WHERE chat = ?1 AND id = ?2")?.execute(params![chat, id])?;
+            Ok(false)
+        }
+        Change::Remember { key, value } => {
+            db.prepare_cached("INSERT OR REPLACE INTO sync_state (key, value) VALUES (?1, ?2)")?
+                .execute(params![key, value])?;
+            Ok(false)
+        }
+        Change::AppState { index, value } => {
+            db.prepare_cached("INSERT OR REPLACE INTO app_state (key, value) VALUES (?1, ?2)")?
+                .execute(params![serde_json::to_string(index)?, value])?;
+            Ok(false)
+        }
     }
 }
 
@@ -240,7 +373,15 @@ fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) ->
         .query_row(params![chat, id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
     let Some((chat, n)) = found else { return Ok(false) };
-    db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([n])?;
+    delete_row(db, stamps, chat, n)
+}
+
+/// Deletes message `n` from chat `chat`. A chat whose newest it was shows the one before it, and
+/// keeps its place.
+fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
+    if db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([n])? == 0 {
+        return Ok(false);
+    }
     db.prepare_cached("UPDATE chats SET message_count = message_count - 1 WHERE n = ?1")?.execute([chat])?;
     let seq = stamps.seq(MESSAGE, Some(n));
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
@@ -256,6 +397,33 @@ fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) ->
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
     }
     Ok(true)
+}
+
+/// Indexes up to `limit` messages from fts_backlog for search, the latest written first, stopping
+/// early when `enough` says so, given how many it has taken. They go into FTS5 in the order of its
+/// rowid, their time, since FTS5 writes out what it holds whenever a rowid comes lower than the
+/// last. Says how many it took and whether the backlog may have more.
+pub(super) fn index(db: &Connection, limit: usize, mut enough: impl FnMut(usize) -> bool) -> Result<(usize, bool)> {
+    let mut waiting: Vec<(i64, i64)> = db
+        .prepare_cached(
+            "SELECT m.t, b.n FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b JOIN messages m ON m.n = b.n",
+        )?
+        .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    waiting.sort_unstable();
+    let mut taken = 0;
+    for (_, n) in &waiting {
+        db.prepare_cached(
+            "INSERT INTO messages_fts (rowid, text) SELECT t, text FROM messages WHERE n = ?1 AND text IS NOT NULL",
+        )?
+        .execute([n])?;
+        db.prepare_cached("DELETE FROM fts_backlog WHERE n = ?1")?.execute([n])?;
+        taken += 1;
+        if enough(taken) {
+            break;
+        }
+    }
+    Ok((taken, taken < waiting.len() || waiting.len() == limit))
 }
 
 /// A JID without its device: messages from someone's phone and their laptop are from them.
@@ -330,16 +498,17 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
     let changed: Option<i64> = db
         .prepare_cached(
             "INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread, unread, mentions,
-                community, ephemeral, draft, v)
+                community, ephemeral, draft, v, avatar, avatar_id)
             VALUES (?1, coalesce(?2, ?15), ?3, ?4, coalesce(?5, 0), coalesce(?6, 0), coalesce(?7, 0), coalesce(?8, 0), coalesce(?9, 0),
-                coalesce(?10, 0), nullif(?11, ''), coalesce(?12, 0), nullif(?13, ''), ?14)
+                coalesce(?10, 0), nullif(?11, ''), coalesce(?12, 0), nullif(?13, ''), ?14, nullif(?16, ''), nullif(?17, ''))
             ON CONFLICT (id) DO UPDATE SET
                 kind = coalesce(?2, kind), person = coalesce(?3, person), name = coalesce(?4, name),
                 pinned = coalesce(?5, pinned), archived = coalesce(?6, archived),
                 muted_until = coalesce(?7, muted_until), marked_unread = coalesce(?8, marked_unread),
                 unread = coalesce(?9, unread), mentions = coalesce(?10, mentions),
                 community = iif(?11 IS NULL, community, nullif(?11, '')), ephemeral = coalesce(?12, ephemeral),
-                draft = iif(?13 IS NULL, draft, nullif(?13, '')), v = ?14
+                draft = iif(?13 IS NULL, draft, nullif(?13, '')), v = ?14,
+                avatar = iif(?16 IS NULL, avatar, nullif(?16, '')), avatar_id = iif(?17 IS NULL, avatar_id, nullif(?17, ''))
             WHERE coalesce(?2, kind) IS NOT kind OR coalesce(?3, person) IS NOT person
                 OR coalesce(?4, name) IS NOT name OR coalesce(?5, pinned) IS NOT pinned
                 OR coalesce(?6, archived) IS NOT archived OR coalesce(?7, muted_until) IS NOT muted_until
@@ -347,6 +516,8 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
                 OR coalesce(?10, mentions) IS NOT mentions
                 OR iif(?11 IS NULL, community, nullif(?11, '')) IS NOT community
                 OR coalesce(?12, ephemeral) IS NOT ephemeral OR iif(?13 IS NULL, draft, nullif(?13, '')) IS NOT draft
+                OR iif(?16 IS NULL, avatar, nullif(?16, '')) IS NOT avatar
+                OR iif(?17 IS NULL, avatar_id, nullif(?17, '')) IS NOT avatar_id
             RETURNING n",
         )?
         .query_row(
@@ -365,7 +536,9 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
                 chat.ephemeral,
                 chat.draft,
                 seq,
-                kind_of(&chat.id)
+                kind_of(&chat.id),
+                chat.avatar,
+                chat.avatar_id
             ],
             |r| r.get(0),
         )
@@ -491,19 +664,71 @@ fn allocate(db: &Connection, at: i64) -> Result<i64> {
     }
 }
 
-fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Result<bool> {
+/// What a message row already holds that a message arriving again mustn't undo: its deletion, its
+/// edit and its star.
+struct Kept {
+    n: i64,
+    t: i64,
+    deleted: bool,
+    edited_at: Option<i64>,
+    starred: bool,
+    text: Option<String>,
+    spans: Option<String>,
+    summary: Option<String>,
+}
+
+fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, background: bool) -> Result<bool> {
     let chat = ensure_chat(db, stamps, &message.chat)?;
     let sender = message.sender.as_deref().map(|jid| ensure_jid(db, stamps, jid)).transpose()?;
-    let existing: Option<(i64, i64)> = db
-        .prepare_cached("SELECT n, t FROM messages WHERE chat = ?1 AND id = ?2")?
-        .query_row(params![chat, message.id], |r| Ok((r.get(0)?, r.get(1)?)))
+    let existing: Option<Kept> = db
+        .prepare_cached(
+            "SELECT n, t, deleted, edited_at, starred, text, spans, summary FROM messages WHERE chat = ?1 AND id = ?2",
+        )?
+        .query_row(params![chat, message.id], |r| {
+            Ok(Kept {
+                n: r.get(0)?,
+                t: r.get(1)?,
+                deleted: r.get(2)?,
+                edited_at: r.get(3)?,
+                starred: r.get(4)?,
+                text: r.get(5)?,
+                spans: r.get(6)?,
+                summary: r.get(7)?,
+            })
+        })
         .optional()?;
-    let seq = stamps.seq(MESSAGE, existing.map(|(n, _)| n));
+    if existing.as_ref().is_some_and(|kept| kept.deleted) {
+        return Ok(false);
+    }
+    let seq = stamps.seq(MESSAGE, existing.as_ref().map(|kept| kept.n));
     let raw = message.raw.as_ref().map(|packed| packed.0.as_slice());
-    let summary = (message.text.as_ref() != Some(&message.summary)).then_some(&message.summary);
-    let (n, t) = match existing {
-        Some((n, t)) => (Some(n), t),
-        None => (None, allocate(db, message.at)?),
+    let mut text = message.text.clone();
+    let mut spans = message.spans.clone();
+    let mut summary = (message.text.as_ref() != Some(&message.summary)).then(|| message.summary.clone());
+    let mut edited_at = message.edited_at;
+    let mut starred = message.starred;
+    if let Some(kept) = &existing {
+        if kept.edited_at.is_some() && message.edited_at.is_none() {
+            (text, spans, summary, edited_at) =
+                (kept.text.clone(), kept.spans.clone(), kept.summary.clone(), kept.edited_at);
+        }
+        starred |= kept.starred;
+    }
+    let (n, t) = match &existing {
+        Some(kept) => (Some(kept.n), kept.t),
+        None => {
+            let t = allocate(db, message.at)?;
+            // Its n is chosen here so it can wait in fts_backlog before the insert's trigger looks.
+            let n = if background && text.is_some() {
+                let n: i64 =
+                    db.prepare_cached("SELECT coalesce(max(n), 0) + 1 FROM messages")?.query_row([], |r| r.get(0))?;
+                db.prepare_cached("INSERT INTO fts_backlog (n) VALUES (?1)")?.execute([n])?;
+                Some(n)
+            } else {
+                None
+            };
+            (n, t)
+        }
     };
     let fields = params![
         message.at,
@@ -511,16 +736,16 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         message.mine,
         message.kind,
         message.status,
-        message.text,
-        message.spans,
+        text,
+        spans,
         summary,
         message.reply,
         message.detail,
         message.forwarded,
-        message.edited_at,
+        edited_at,
         message.deleted,
         message.expires_at,
-        message.starred,
+        starred,
         message.view_once,
         raw,
         seq,
@@ -559,19 +784,196 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     if existing.is_none() {
         db.prepare_cached("UPDATE chats SET message_count = message_count + 1 WHERE n = ?1")?.execute([chat])?;
     }
-    // The chat's newest message sets its sort; older history never moves it.
+    // The chat's newest message sets its sort; older history never moves it. A new live message
+    // that's someone else's counts as unread, and one of yours means you've read the chat.
+    let counts = message.counts && existing.is_none();
     let seq = stamps.seq(CHAT, Some(chat));
     let moved = db
         .prepare_cached(
-            "UPDATE chats SET last_at = ?2, last_message = ?3, v = ?4
+            "UPDATE chats SET last_at = ?2, last_message = ?3, v = ?4,
+                unread = iif(?6, iif(?7, 0, unread + 1), unread),
+                mentions = iif(?6, iif(?7, 0, mentions + ?8), mentions),
+                marked_unread = iif(?6 AND ?7, 0, marked_unread)
             WHERE n = ?1 AND (last_message IS NULL OR last_message = ?3
                 OR ?5 > (SELECT t FROM messages WHERE n = last_message))",
         )?
-        .execute(params![chat, message.at.max(0), n, seq, t])?;
+        .execute(params![chat, message.at.max(0), n, seq, t, counts, message.mine, message.mentions_me])?;
     if moved > 0 {
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
     }
+    if existing.is_none() {
+        apply_pending(db, stamps, chat, n, &message.chat, &message.id)?;
+    }
     Ok(true)
+}
+
+/// Applies what was waiting in `pending` for a message that has just arrived.
+fn apply_pending(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, chat_jid: &str, id: &str) -> Result<()> {
+    let waiting: Vec<(i64, Option<String>, bool, i64, String)> = db
+        .prepare_cached(
+            "SELECT n, sender, mine, at, effect FROM pending WHERE chat = ?1 AND target = ?2 ORDER BY at, n",
+        )?
+        .query_map(params![chat_jid, id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (pending, sender, mine, at, effect) in waiting {
+        let Ok(what) = serde_json::from_str::<Amendment>(&effect) else { continue };
+        if matches!(what, Amendment::Keep { .. }) {
+            continue;
+        }
+        let gone = matches!(what, Amendment::DeleteForMe);
+        apply_amendment(db, stamps, chat, n, Doing { what: &what, sender: sender.as_deref(), mine, at })?;
+        db.prepare_cached("DELETE FROM pending WHERE n = ?1")?.execute([pending])?;
+        if gone {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The chat and n of the message an amendment names, if jaw has it.
+fn target(db: &Connection, amend: &Amend) -> Result<Option<(i64, i64)>> {
+    Ok(db
+        .prepare_cached(
+            "SELECT m.chat, m.n FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = ?1 AND m.id = ?2",
+        )?
+        .query_row(params![amend.chat, amend.target], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?)
+}
+
+fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<bool> {
+    match target(db, amend)? {
+        Some((chat, n)) if !matches!(amend.what, Amendment::Keep { .. }) => apply_amendment(
+            db,
+            stamps,
+            chat,
+            n,
+            Doing { what: &amend.what, sender: amend.sender.as_deref(), mine: amend.mine, at: amend.at },
+        ),
+        _ => {
+            let raw = amend.raw.as_ref().map_or(&[][..], |packed| packed.0.as_slice());
+            db.prepare_cached(
+                "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?
+            .execute(params![
+                amend.chat,
+                amend.target,
+                amend.what.kind(),
+                amend.at,
+                raw,
+                amend.sender.as_deref().map(user_jid),
+                amend.mine,
+                serde_json::to_string(&amend.what)?
+            ])?;
+            Ok(false)
+        }
+    }
+}
+
+/// An amendment being applied, and who did it when.
+struct Doing<'a> {
+    what: &'a Amendment,
+    sender: Option<&'a str>,
+    mine: bool,
+    at: i64,
+}
+
+/// Does an amendment to message `n` in chat `chat`, saying whether it changed anything.
+fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doing: Doing) -> Result<bool> {
+    let Doing { what, sender, mine, at } = doing;
+    // Someone new who reacts is made first, since making them takes the next seq.
+    let reactor = match (what, sender) {
+        (Amendment::React { .. }, Some(sender)) => Some(ensure_jid(db, stamps, sender)?),
+        (Amendment::React { .. }, None) => return Ok(false),
+        _ => None,
+    };
+    if matches!(what, Amendment::DeleteForMe) {
+        return delete_row(db, stamps, chat, n);
+    }
+    let seq = stamps.seq(MESSAGE, Some(n));
+    let changed = match what {
+        Amendment::React { emoji } => {
+            let sender = reactor.expect("a reaction's sender is made above");
+            let changed = if emoji.is_empty() {
+                db.prepare_cached("DELETE FROM reactions WHERE message = ?1 AND sender = ?2")?.execute([n, sender])?
+            } else {
+                db.prepare_cached(
+                    "INSERT INTO reactions (message, sender, emoji, at, mine) VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT (message, sender) DO UPDATE SET emoji = excluded.emoji, at = excluded.at, mine = excluded.mine
+                    WHERE excluded.at >= reactions.at AND excluded.emoji IS NOT reactions.emoji",
+                )?
+                .execute(params![n, sender, emoji, at, mine])?
+            };
+            if changed > 0 {
+                db.prepare_cached("UPDATE messages SET v = ?2 WHERE n = ?1")?.execute([n, seq])?;
+            }
+            changed
+        }
+        Amendment::Edit { text, spans, summary } => db
+            .prepare_cached(
+                "UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), edited_at = ?5, v = ?6
+                WHERE n = ?1 AND deleted = 0 AND (edited_at IS NULL OR edited_at <= ?5)",
+            )?
+            .execute(params![n, text, spans, summary, at, seq])?,
+        Amendment::Revoke => db
+            .prepare_cached(
+                "UPDATE messages SET deleted = 1, text = NULL, spans = NULL, summary = 'This message was deleted',
+                    reply = NULL, detail = NULL, raw = NULL, v = ?2
+                WHERE n = ?1 AND deleted = 0",
+            )?
+            .execute([n, seq])?,
+        Amendment::Star { starred } => db
+            .prepare_cached("UPDATE messages SET starred = ?2, v = ?3 WHERE n = ?1 AND starred IS NOT ?2")?
+            .execute(params![n, starred, seq])?,
+        Amendment::DeleteForMe | Amendment::Keep { .. } => 0,
+    };
+    if changed == 0 {
+        return Ok(false);
+    }
+    stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+    // The chat list shows its newest message, so the chat changes with it.
+    let seq = stamps.seq(CHAT, Some(chat));
+    if db.prepare_cached("UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2")?.execute([chat, n, seq])? > 0 {
+        stamps.record(db, CHAT, chat, Some(chat), seq)?;
+    }
+    Ok(true)
+}
+
+fn set_members(db: &Connection, stamps: &mut Stamps, members: &Members) -> Result<bool> {
+    let chat = ensure_chat(db, stamps, &members.chat)?;
+    let mut had: HashMap<i64, String> = db
+        .prepare_cached("SELECT member, role FROM group_members WHERE chat = ?1")?
+        .query_map([chat], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut changed = false;
+    let mut kept = Vec::new();
+    for (jid, role) in &members.set {
+        let member = ensure_jid(db, stamps, jid)?;
+        kept.push(member);
+        if had.remove(&member).as_deref() != Some(*role) {
+            db.prepare_cached("INSERT OR REPLACE INTO group_members (chat, member, role) VALUES (?1, ?2, ?3)")?
+                .execute(params![chat, member, role])?;
+            changed = true;
+        }
+    }
+    let mut gone: Vec<i64> = if members.all { had.into_keys().collect() } else { Vec::new() };
+    for jid in &members.remove {
+        let found: Option<i64> = db
+            .prepare_cached("SELECT n FROM person_jids WHERE jid = ?1")?
+            .query_row([user_jid(jid)], |r| r.get(0))
+            .optional()?;
+        gone.extend(found.filter(|member| !kept.contains(member)));
+    }
+    for member in gone {
+        changed |=
+            db.prepare_cached("DELETE FROM group_members WHERE chat = ?1 AND member = ?2")?.execute([chat, member])?
+                > 0;
+    }
+    if changed {
+        let seq = stamps.seq(CHAT, Some(chat));
+        db.prepare_cached("UPDATE chats SET v = ?2 WHERE n = ?1")?.execute([chat, seq])?;
+        stamps.record(db, CHAT, chat, Some(chat), seq)?;
+    }
+    Ok(changed)
 }
 
 /// How long the feed keeps events.

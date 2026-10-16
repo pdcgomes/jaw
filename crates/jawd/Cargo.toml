@@ -11,6 +11,7 @@ publish = false
 anyhow.workspace = true
 clap.workspace = true
 crossbeam-channel.workspace = true
+image.workspace = true
 jaw-client.workspace = true
 jaw-proto.workspace = true
 libc.workspace = true

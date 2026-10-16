@@ -182,6 +182,7 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         })
         .collect();
     store.apply(Lane::Background, opens).await?;
+    store.indexed().await?;
     println!(
         "Built {total} messages in {chats} chats, {people} people and 600 opens through the writer in {:.1} s.",
         started.elapsed().as_secs_f64()

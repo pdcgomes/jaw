@@ -52,6 +52,12 @@ message Event {
     OfflinePreview offline_preview = 6;
     OfflineDone offline_done = 7;
     Bench bench = 8;
+    AppState app_state = 9;
+    PushName push_name = 10;
+    GroupInfo group = 11;
+    GroupChange group_change = 12;
+    Picture picture = 13;
+    AppStateSynced app_state_synced = 14;
   }
 }
 
@@ -170,6 +176,92 @@ message OfflineDone {
   uint32 count = 1;
 }
 
+// One app-state mutation, as whatsmeow decoded it: pin, archive, mute, mark read or unread, star,
+// delete for me, a contact's name, the account's own name and the rest. Sent with a seq, since
+// whatsmeow won't send it again.
+message AppState {
+  // The mutation's index, such as ["pin_v1", "351910000001@s.whatsapp.net"].
+  repeated string index = 1;
+  // WAWebProtobufSyncAction.SyncActionValue.
+  bytes value = 2;
+}
+
+// An app-state collection whatsmeow has synced in full; its mutations came before this.
+message AppStateSynced {
+  string name = 1;
+  uint64 version = 2;
+}
+
+// Someone's push name, which whatsmeow saw change on a message. Sent with a seq.
+message PushName {
+  string jid = 1;
+  // Their other JID, LID or phone number, when whatsmeow knows it.
+  string jid_alt = 2;
+  string push_name = 3;
+}
+
+// A group as whatsmeow's types.GroupInfo describes it: one jaw joined (sent with a seq), or one
+// of GetJoinedGroups' answers.
+message GroupInfo {
+  string jid = 1;
+  string name = 2;
+  string topic = 3;
+  string owner = 4;
+  int64 created_ms = 5;
+  bool announce = 6;
+  bool locked = 7;
+  // The disappearing-message timer, or 0 for off.
+  uint32 ephemeral_seconds = 8;
+  // A community, whose groups name it in linked_parent.
+  bool is_parent = 9;
+  string linked_parent = 10;
+  // A community's announcement group.
+  bool is_default_sub = 11;
+  string addressing_mode = 12;
+  repeated Participant participants = 13;
+}
+
+message Participant {
+  // The JID to message them on: their LID or their phone number's.
+  string jid = 1;
+  string phone = 2;
+  string lid = 3;
+  bool admin = 4;
+  bool super_admin = 5;
+  // An obfuscated number, for anonymous members of announcement groups.
+  string display_name = 6;
+}
+
+// What changed in a group, as whatsmeow's events.GroupInfo says. Sent with a seq.
+message GroupChange {
+  string jid = 1;
+  string sender = 2;
+  string sender_pn = 3;
+  int64 timestamp_ms = 4;
+  optional string name = 5;
+  optional string topic = 6;
+  optional bool announce = 7;
+  optional bool locked = 8;
+  optional uint32 ephemeral_seconds = 9;
+  bool deleted = 10;
+  // A group linked to or unlinked from this community.
+  string linked = 11;
+  string unlinked = 12;
+  repeated string join = 13;
+  repeated string leave = 14;
+  repeated string promote = 15;
+  repeated string demote = 16;
+}
+
+// A user's or group's picture changed. Sent with a seq.
+message Picture {
+  string jid = 1;
+  string author = 2;
+  int64 timestamp_ms = 3;
+  bool removed = 4;
+  string picture_id = 5;
+}
+
 // A made-up message for measuring the link, sent with a seq like a real one.
 message Bench {
   bytes payload = 1;
@@ -190,7 +282,51 @@ message Command {
     Logout logout = 4;
     HistoryDownload history_download = 5;
     BenchRun bench_run = 6;
+    Groups groups = 7;
+    Contacts contacts = 8;
+    LidLookup lid_lookup = 9;
+    AppStateResync app_state_resync = 10;
+    Avatar avatar = 11;
+    HistoryRequest history_request = 12;
   }
+}
+
+// Every group the account is in, from WhatsApp; answered with GroupList.
+message Groups {}
+
+// The contacts and push names whatsmeow keeps, with the LID of each phone number it knows, read
+// from session.db; answered with ContactList.
+message Contacts {}
+
+// The phone number whatsmeow's LID map has for each of these LIDs; answered with LidPairs.
+message LidLookup {
+  repeated string lids = 1;
+}
+
+// Fetches app-state collections again in full from version 0, sending each mutation as an AppState
+// event; Done once they're all sent.
+message AppStateResync {
+  // regular, regular_low, regular_high, critical_block, critical_unblock_low.
+  repeated string names = 1;
+}
+
+// Downloads a user's or group's picture to `path`, unless its ID is still `existing_id`; answered
+// with AvatarFile.
+message Avatar {
+  string jid = 1;
+  string existing_id = 2;
+  string path = 3;
+  bool community = 4;
+}
+
+// Asks the phone for `count` messages from before the oldest jaw has in a chat. They come as a
+// history notification of type ON_DEMAND; Done once the request is sent.
+message HistoryRequest {
+  string chat = 1;
+  string oldest_id = 2;
+  bool oldest_from_me = 3;
+  int64 oldest_ms = 4;
+  uint32 count = 5;
 }
 
 message Ping {}
@@ -226,7 +362,54 @@ message Reply {
     Pong pong = 3;
     HistoryFile history_file = 4;
     BenchResult bench_result = 5;
+    GroupList group_list = 6;
+    ContactList contact_list = 7;
+    LidPairs lid_pairs = 8;
+    AvatarFile avatar_file = 9;
   }
+}
+
+message GroupList {
+  repeated GroupInfo groups = 1;
+}
+
+message ContactList {
+  repeated Contact contacts = 1;
+}
+
+// whatsmeow's types.ContactInfo for a JID.
+message Contact {
+  string jid = 1;
+  string first_name = 2;
+  string full_name = 3;
+  string push_name = 4;
+  string business_name = 5;
+  // Their LID, for a phone number whatsmeow's LID map knows.
+  string lid = 6;
+}
+
+message LidPairs {
+  repeated LidPair pairs = 1;
+}
+
+message LidPair {
+  string lid = 1;
+  string phone = 2;
+}
+
+message AvatarFile {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    // Written to the path asked for.
+    DOWNLOADED = 1;
+    // Its ID is still the one jawd has.
+    UNCHANGED = 2;
+    // There's none, or it's hidden from this account.
+    NONE = 3;
+  }
+  State state = 1;
+  string id = 2;
+  uint64 bytes = 3;
 }
 
 message Failure {
