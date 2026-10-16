@@ -1,0 +1,12 @@
+[package]
+name = "jaw-proto"
+description = "The protocol jaw's interfaces speak to jawd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

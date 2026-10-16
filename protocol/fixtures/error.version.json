@@ -1,0 +1,1 @@
+{"id":1,"error":{"code":6,"message":"jawd speaks protocol 1 and this interface speaks 2: jawd is older, so run make install again","data":{"jawd":1,"client":2}}}

@@ -1,0 +1,17 @@
+[package]
+name = "jaw"
+description = "WhatsApp in a terminal, fast, from the keyboard: chats, photos, voice messages and polls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+jaw-client.workspace = true
+jaw-proto.workspace = true
+serde_json.workspace = true

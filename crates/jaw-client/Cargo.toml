@@ -1,0 +1,13 @@
+[package]
+name = "jaw-client"
+description = "The client side of jaw's protocol, for every Rust interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+jaw-proto.workspace = true
+serde_json.workspace = true

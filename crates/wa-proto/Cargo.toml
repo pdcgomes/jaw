@@ -1,0 +1,15 @@
+[package]
+name = "wa-proto"
+description = "WhatsApp's protobufs, as whatsmeow ships them, and the frames jawd and jaw-engine exchange"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true

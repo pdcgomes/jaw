@@ -1,0 +1,93 @@
+//! Every file in protocol/fixtures/ reads into its type and writes back the same, so the wire
+//! format only changes on purpose. A file is named `<method>.request.json`, `<method>.result.json`,
+//! `<method>.push.json` or `error.<what>.json`; one this test has no type for fails it.
+
+use std::path::{Path, PathBuf};
+
+use jaw_proto::{Connection, FromJawd, Hello, Outcome, Push, Reply, Request, Status, Welcome};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+
+fn fixtures() -> Vec<PathBuf> {
+    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/fixtures");
+    let mut files: Vec<_> = std::fs::read_dir(&folder)
+        .unwrap_or_else(|e| panic!("can't read {}: {e}", folder.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .collect();
+    files.sort();
+    files
+}
+
+/// `value` read as `T` and written back, which must give `value` again.
+fn same_as<T: DeserializeOwned + Serialize>(name: &str, value: &Value) -> T {
+    let typed: T = serde_json::from_value(value.clone()).unwrap_or_else(|e| panic!("{name} doesn't read: {e}"));
+    let back = serde_json::to_value(&typed).unwrap();
+    assert_eq!(&back, value, "{name} doesn't write back the same");
+    typed
+}
+
+fn params<T: DeserializeOwned + Serialize>(name: &str, value: &Value) {
+    same_as::<T>(name, value);
+}
+
+#[test]
+fn every_fixture_reads_and_writes_back_the_same() {
+    let files = fixtures();
+    assert!(!files.is_empty(), "protocol/fixtures/ has no fixtures");
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
+            .unwrap_or_else(|e| panic!("{name} isn't JSON: {e}"));
+        let parts: Vec<&str> = name.trim_end_matches(".json").rsplitn(2, '.').collect();
+        let (kind, method) = match parts.as_slice() {
+            [kind, method] => (*kind, *method),
+            _ => panic!("{name} isn't named <method>.<kind>.json"),
+        };
+        if method == "error" {
+            let reply: Reply = same_as(&name, &value);
+            assert!(matches!(reply.outcome, Outcome::Error(_)), "{name} isn't an error");
+            from_jawd(&name, value, false);
+            continue;
+        }
+        match kind {
+            "request" => {
+                let request: Request = same_as(&name, &value);
+                assert_eq!(request.method, method, "{name} is for {}", request.method);
+                match method {
+                    "hello" => params::<Hello>(&name, &request.params),
+                    "status" => assert!(request.params.is_null(), "{name} has params"),
+                    _ => panic!("no type for {name}'s params"),
+                }
+            }
+            "result" => {
+                let reply: Reply = same_as(&name, &value);
+                let Outcome::Result(result) = &reply.outcome else { panic!("{name} isn't a result") };
+                match method {
+                    "hello" => params::<Welcome>(&name, result),
+                    "status" => params::<Status>(&name, result),
+                    _ => panic!("no type for {name}'s result"),
+                }
+            }
+            "push" => {
+                let push: Push = same_as(&name, &value);
+                assert_eq!(push.method, method, "{name} is for {}", push.method);
+                match method {
+                    "connection" => params::<Connection>(&name, &push.params),
+                    _ => panic!("no type for {name}'s params"),
+                }
+            }
+            _ => panic!("{name}: a fixture is a request, a result, a push or an error"),
+        }
+        if kind != "request" {
+            from_jawd(&name, value, kind == "push");
+        }
+    }
+}
+
+/// A line from jawd tells a reply from a push by its `id`.
+fn from_jawd(name: &str, value: Value, push: bool) {
+    let line: FromJawd = serde_json::from_value(value).unwrap_or_else(|e| panic!("{name} isn't a line from jawd: {e}"));
+    assert_eq!(matches!(line, FromJawd::Push(_)), push, "{name} reads as the wrong kind of line from jawd");
+}

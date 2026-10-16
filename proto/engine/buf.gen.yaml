@@ -1,0 +1,5 @@
+version: v2
+plugins:
+  - local: target/tools/protoc-gen-go
+    out: engine/internal/link/enginepb
+    opt: paths=source_relative
