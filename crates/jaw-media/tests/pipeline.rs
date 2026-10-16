@@ -2,7 +2,7 @@
 //! the test, and two small checked-in fixtures ffmpeg can't make (a HEIC and an animated WebP).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -507,12 +507,20 @@ fn a_full_disk_fails_each_kind_of_job_and_leaves_nothing() {
     let dir = tempfile::tempdir().unwrap();
     jpeg(&dir, "photo.jpg", 2000, 1500, 6, true);
     video(&dir, "film.mp4", "640x360", 2, &[]);
-    let status = Command::new(std::env::current_exe().unwrap())
+    // The child's own output goes to pipes: the file-size limit it sets would also stop its writes to
+    // a log the test runner gave it, once that log is past the limit.
+    let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "writes_onto_a_full_disk", "--ignored", "--nocapture"])
         .env(DISK_FULL, dir.path())
-        .status()
+        .stdin(Stdio::null())
+        .output()
         .unwrap();
-    assert!(status.success(), "the child's jobs didn't fail cleanly");
+    let (stdout, stderr) = (String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+    assert!(
+        child.status.success() && stdout.contains("1 passed"),
+        "the child's jobs didn't fail cleanly ({}):\n{stdout}\n{stderr}",
+        child.status
+    );
     assert_eq!(std::fs::read_dir(dir.path().join("out")).unwrap().count(), 0);
 }
 
