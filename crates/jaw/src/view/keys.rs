@@ -249,7 +249,7 @@ impl View {
             KeyCode::End => self.step_into_messages(),
             KeyCode::Enter => {
                 let folded = !self.unfolded.contains(&m.id)
-                    && self.laid.get(&m.id).is_some_and(|l| l.lines.len() > crate::layout::FOLD);
+                    && self.laid.get(&m.id).is_some_and(|l| l.lines.lines.len() > crate::layout::FOLD);
                 if folded {
                     self.unfolded.insert(m.id.clone());
                 } else {

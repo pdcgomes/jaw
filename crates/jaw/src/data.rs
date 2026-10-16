@@ -133,6 +133,56 @@ pub struct Message {
     /// For `system` and `call`: the sentence to show.
     #[serde(default)]
     pub system: Option<String>,
+    /// For photos, stickers, GIFs, videos and video notes: what jawd knows of the file.
+    #[serde(default)]
+    pub media: Option<Box<Media>>,
+    /// For an album: its photos and videos.
+    #[serde(default)]
+    pub album: Option<Album>,
+}
+
+/// A message's file as an interface draws it: its size in pixels, how long it lasts, and the
+/// previews jawd has written of it, as paths under jawd's folder.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Media {
+    #[serde(default)]
+    pub w: u32,
+    #[serde(default)]
+    pub h: u32,
+    #[serde(default)]
+    pub seconds: Option<f64>,
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub previews: Previews,
+    /// The small picture the message brought with it, there from the start.
+    #[serde(default)]
+    pub thumbnail: Option<String>,
+}
+
+/// Display-ready previews, each there once jawd has written it.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Previews {
+    #[serde(rename = "256", default)]
+    pub small: Option<String>,
+    #[serde(rename = "768", default)]
+    pub large: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Album {
+    #[serde(default)]
+    pub items: Vec<AlbumItem>,
+}
+
+/// One of an album's photos or videos.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct AlbumItem {
+    pub id: String,
+    #[serde(default)]
+    pub kind: Kind,
+    #[serde(default)]
+    pub media: Media,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -185,6 +235,7 @@ pub enum Kind {
     Contact,
     Poll,
     Event,
+    Album,
     System,
     Call,
     #[serde(other)]
@@ -357,6 +408,8 @@ pub type Counts = std::collections::BTreeMap<FoundKind, u32>;
 pub enum Update {
     /// jawd answered hello: whether the account is linked, and the connection.
     Hello {
+        /// jawd's folder, which every path it sends is under.
+        root: String,
         linked: bool,
         /// Every identity of yours: your person ID, and the JID your number makes.
         me: Vec<String>,

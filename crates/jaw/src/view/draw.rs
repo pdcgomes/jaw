@@ -26,7 +26,7 @@ struct Placing {
     top: i32,
     day: Option<String>,
     blank: bool,
-    lines: Rc<Vec<Line<'static>>>,
+    lines: Rc<crate::layout::Laidout>,
     detail: Option<Line<'static>>,
 }
 
@@ -36,7 +36,7 @@ impl Placing {
     }
 
     fn height(&self) -> i32 {
-        self.lead() + self.lines.len() as i32 + i32::from(self.detail.is_some())
+        self.lead() + self.lines.lines.len() as i32 + i32::from(self.detail.is_some())
     }
 
     fn bottom(&self) -> i32 {
@@ -115,6 +115,11 @@ impl View {
         let t = self.theme;
         self.areas = super::Areas { width: area.width, height: area.height, ..Default::default() };
         self.drawn_at = self.now() / 1_000;
+        if self.drawn_size != (area.width, area.height) {
+            self.drawn_size = (area.width, area.height);
+            self.images.forget_drawn();
+        }
+        self.images.begin();
         let ground = Style::new().bg(t.bg).fg(t.fg);
         if area.height < 4 || area.width < 20 {
             f.render_widget(Paragraph::new("jaw needs a bigger window").style(ground), area);
@@ -143,6 +148,7 @@ impl View {
         if self.overlay == Some(Overlay::Keys) {
             self.draw_keys(f);
         }
+        self.images.end();
         if self.no_color {
             let selection = t.selection;
             for cell in f.buffer_mut().content.iter_mut() {
@@ -689,7 +695,7 @@ impl View {
                 y += 1;
             }
             let body_top = y;
-            for line in b.lines.iter() {
+            for line in b.lines.lines.iter() {
                 put(line, y);
                 y += 1;
             }
@@ -706,6 +712,25 @@ impl View {
             }
             if to > from {
                 self.areas.message_rows.push((area.y + from as u16, area.y + to as u16, b.id.clone()));
+            }
+            let look = crate::graphics::Look {
+                bg: if b.detail.is_some() { t.selection } else { t.bg },
+                truecolor: t.truecolor,
+                over: self.overlay.is_some() || self.palette.is_some(),
+            };
+            for p in &b.lines.pictures {
+                let sources: Vec<std::path::PathBuf> = p.sources.iter().map(|s| self.images.path(s)).collect();
+                let place = crate::graphics::Place {
+                    x: area.x + p.col,
+                    top: area.y as i32 + body_top + p.line as i32,
+                    cols: p.cols,
+                    rows: p.rows,
+                };
+                if !self.images.draw(buf, place, area, &sources, look) && self.images.gone(&sources, p.cols, p.rows) {
+                    self.pictureless.insert(b.id.clone());
+                    self.laid.remove(&b.id);
+                    self.dirty = true;
+                }
             }
             placed.insert(b.id.clone(), Placed { top: b.top, height: b.height() });
             if b.bottom() <= h {

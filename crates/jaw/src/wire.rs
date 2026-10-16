@@ -199,6 +199,7 @@ impl Wire {
                     }
                 }
                 out.push(Update::Hello {
+                    root: w.root,
                     linked: w.account.state == AccountState::Linked,
                     me,
                     connection: w.connection,

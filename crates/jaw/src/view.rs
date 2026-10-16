@@ -9,6 +9,7 @@ mod palette;
 use crate::composer::Composer;
 use crate::data::{Chat, Jawd, Message, Place, Typing, Update};
 use crate::fmt::{self, MINUTE};
+use crate::graphics::{Images, Protocol};
 use crate::layout::{self, Shape};
 use crate::theme::Theme;
 use chrono::FixedOffset;
@@ -83,6 +84,8 @@ pub enum Overlay {
 pub enum Effect {
     /// Puts text on the clipboard, through the terminal.
     Copy(String),
+    /// Bytes for the terminal beside the frame: pictures sent, deleted and drawn.
+    Write(Vec<u8>),
 }
 
 /// A message as last drawn: its block's first row on screen and how tall it is.
@@ -95,7 +98,7 @@ pub struct Placed {
 struct Laid {
     v: u64,
     shape: Shape,
-    lines: Rc<Vec<Line<'static>>>,
+    lines: Rc<layout::Laidout>,
 }
 
 /// A chat's rows in the list as last drawn, and what they depended on: its version, whether it
@@ -174,6 +177,12 @@ pub struct View {
     read_due: Option<i64>,
 
     overlay: Option<Overlay>,
+    /// Photos, stickers and posters: what the terminal draws them with, and those ready.
+    pub images: Images,
+    /// Messages none of whose previews could be read, laid out as their summaries.
+    pictureless: HashSet<String>,
+    /// The size the last frame was drawn at, for drawing every picture again after a resize.
+    drawn_size: (u16, u16),
     /// Why the last message wasn't sent, said on the box it went back to until it's typed in.
     unsent: Option<String>,
     /// Ctrl-K's palette, while it's open.
@@ -244,6 +253,9 @@ impl View {
             read_at: 0,
             read_due: None,
             overlay: None,
+            images: Images::here(Protocol::None, (8, 16)),
+            pictureless: HashSet::new(),
+            drawn_size: (0, 0),
             unsent: None,
             palette: None,
             asked: 0,
@@ -271,6 +283,17 @@ impl View {
     fn say(&mut self, text: impl Into<String>) {
         self.notice = Some((text.into(), self.now() + NOTICE));
         self.dirty = true;
+    }
+
+    /// A picture a worker has made ready.
+    pub fn picture(&mut self, done: crate::graphics::Done) {
+        self.images.take(done);
+        self.dirty = true;
+    }
+
+    /// What's to be written to the terminal beside the frame: pictures sent, deleted and drawn.
+    pub fn take_writes(&mut self) -> Vec<u8> {
+        self.images.take_writes()
     }
 
     /// What jawd sent since the last frame.
@@ -315,7 +338,8 @@ impl View {
     pub fn apply(&mut self, update: Update) {
         self.dirty = true;
         match update {
-            Update::Hello { linked, me, connection } => {
+            Update::Hello { root, linked, me, connection } => {
+                self.images.set_root(&root);
                 self.reach = Reach::Up;
                 self.linked = Some(linked);
                 self.me = me;
@@ -671,6 +695,9 @@ impl View {
             self.chomp_until = None;
             self.dirty = true;
         }
+        if self.images.next_wake().is_some_and(|t| t <= std::time::Instant::now()) {
+            self.dirty = true;
+        }
     }
 
     /// When the view next needs to wake with nothing arriving: the clock's next minute, and
@@ -689,6 +716,9 @@ impl View {
         soon(self.notice.as_ref().map(|(_, t)| *t));
         if self.chomp_until.is_some() {
             soon(Some(now + 100));
+        }
+        if let Some(at) = self.images.next_wake() {
+            soon(Some(now + at.saturating_duration_since(std::time::Instant::now()).as_millis() as i64));
         }
         if self.counting() {
             soon(Some((now / 1_000 + 1) * 1_000));
@@ -733,6 +763,7 @@ impl View {
             name: changed || self.gap(m, prev),
             time: changed || prev.is_some_and(|p| !fmt::same_minute(p.at, m.at, self.tz)),
             unfolded: self.unfolded.contains(&m.id),
+            pictured: !self.pictureless.contains(&m.id),
         }
     }
 
@@ -748,15 +779,18 @@ impl View {
     }
 
     /// A message's lines, laid out once per version and shape.
-    fn lines(&mut self, m: &Message, shape: Shape) -> Rc<Vec<Line<'static>>> {
+    fn lines(&mut self, m: &Message, shape: Shape) -> Rc<layout::Laidout> {
         if let Some(l) = self.laid.get(&m.id)
             && l.v == m.v
             && l.shape == shape
         {
             return l.lines.clone();
         }
-        let ctx = layout::Ctx { theme: &self.theme, tz: self.tz, me: &self.me };
-        let lines = Rc::new(layout::message(m, shape, &ctx));
+        let pictures = self.images.protocol != Protocol::None && !self.no_color;
+        let sharp = matches!(self.images.protocol, Protocol::Kitty | Protocol::Iterm | Protocol::Sixel);
+        let ctx =
+            layout::Ctx { theme: &self.theme, tz: self.tz, me: &self.me, pictures, cell: self.images.cell, sharp };
+        let lines = Rc::new(layout::laid(m, shape, &ctx));
         self.laid.insert(m.id.clone(), Laid { v: m.v, shape, lines: lines.clone() });
         lines
     }

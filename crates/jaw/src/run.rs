@@ -29,6 +29,8 @@ pub enum Event {
     Update(Update),
     /// jawd has sent something, which the view drains.
     Jawd,
+    /// A worker has made a picture ready.
+    Picture(Box<crate::graphics::Done>),
     /// A signal to stop, as q would.
     Stop,
 }
@@ -88,6 +90,7 @@ where
             }
             Event::Update(u) => waiting.push_back(u),
             Event::Jawd => waiting.extend(view.drain_jawd()),
+            Event::Picture(done) => view.picture(*done),
             Event::Stop => view.quit = true,
         };
         if let Some(e) = first {
@@ -124,7 +127,15 @@ where
         let due = last_frame.is_none_or(|t| t.elapsed() >= FRAME);
         if view.dirty && (!keys.is_empty() || due) {
             view.dirty = false;
+            let sent = view.take_writes();
+            if !sent.is_empty() {
+                effect(Effect::Write(sent));
+            }
             terminal.draw(|f| view.draw(f))?;
+            let drawn = view.take_writes();
+            if !drawn.is_empty() {
+                effect(Effect::Write(drawn));
+            }
             let drawn = Instant::now();
             last_frame = Some(drawn);
             probe.frames += 1;
@@ -181,7 +192,7 @@ fn copy(text: &str) {
     let _ = out.flush();
 }
 
-fn base64(bytes: &[u8]) -> String {
+pub fn base64(bytes: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -204,6 +215,8 @@ pub fn run(start: impl FnOnce(Sender<Event>) -> View) -> Result<()> {
     catch_signals(tx.clone());
     let mut view = start(tx.clone());
     let mut terminal = ratatui::init();
+    let (protocol, cell) = crate::graphics::detect();
+    view.images = crate::graphics::Images::start(protocol, cell, tx.clone());
     let enhanced = matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
     let mut out = std::io::stdout();
     let _ = crossterm::execute!(out, event::EnableMouseCapture, event::EnableBracketedPaste, event::EnableFocusChange);
@@ -214,6 +227,11 @@ pub fn run(start: impl FnOnce(Sender<Event>) -> View) -> Result<()> {
     spawn_input(tx);
     let result = drive(&mut view, &rx, &mut terminal, &mut Probe::default(), &mut |e| match e {
         Effect::Copy(text) => copy(&text),
+        Effect::Write(bytes) => {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(&bytes);
+            let _ = out.flush();
+        }
     });
     if enhanced {
         let _ = crossterm::execute!(out, event::PopKeyboardEnhancementFlags);
@@ -235,6 +253,7 @@ pub fn settle(view: &mut View, rx: &Receiver<Event>) {
                         view.apply(u);
                     }
                 }
+                Event::Picture(done) => view.picture(*done),
                 _ => {}
             }
         }
@@ -259,6 +278,7 @@ pub fn settle_live(view: &mut View, rx: &Receiver<Event>, most: Duration) {
                     view.apply(u);
                 }
             }
+            Ok(Event::Picture(done)) => view.picture(*done),
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) if view.showing_messages() || view.answered() => break,
             Err(RecvTimeoutError::Timeout) => {}

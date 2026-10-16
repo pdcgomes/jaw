@@ -30,6 +30,8 @@ pub struct Shape {
     /// The minute or the sender changed: the time shows.
     pub time: bool,
     pub unfolded: bool,
+    /// Whether its pictures are drawn: not once none of their previews could be read.
+    pub pictured: bool,
 }
 
 pub struct Ctx<'a> {
@@ -37,6 +39,87 @@ pub struct Ctx<'a> {
     pub tz: FixedOffset,
     /// The account's own person, so a mention of you stands out.
     pub me: &'a [String],
+    /// Whether pictures are drawn, and a cell's size in pixels for their shape.
+    pub pictures: bool,
+    pub cell: (u16, u16),
+    /// Whether the terminal draws a picture's own pixels, which want the larger preview, rather
+    /// than half-blocks, which the smaller has plenty for.
+    pub sharp: bool,
+}
+
+/// The most cells a photo, a GIF or a video's poster fills, and a sticker.
+const PHOTO: (u16, u16) = (40, 16);
+const STICKER: (u16, u16) = (18, 8);
+/// Album pictures shown, two a row; the rest are counted.
+const ALBUM_SHOWN: usize = 4;
+
+/// A picture in a message's lines: the line it starts on, the column, the cells it fills, and
+/// its previews' paths under jawd's folder, the best first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picture {
+    pub line: usize,
+    pub col: u16,
+    pub cols: u16,
+    pub rows: u16,
+    pub sources: Vec<String>,
+}
+
+/// A message's lines and the pictures drawn over them.
+#[derive(Clone, Debug, Default)]
+pub struct Laidout {
+    pub lines: Vec<Line<'static>>,
+    pub pictures: Vec<Picture>,
+}
+
+/// Where a picture is drawn from: the preview its cells need, the other, then the thumbnail.
+fn sources(media: &crate::data::Media, cols: u16, ctx: &Ctx) -> Vec<String> {
+    let big = ctx.sharp && cols as u32 * ctx.cell.0 as u32 > 256;
+    let (first, second) = if big {
+        (&media.previews.large, &media.previews.small)
+    } else {
+        (&media.previews.small, &media.previews.large)
+    };
+    [first, second, &media.thumbnail].into_iter().flatten().cloned().collect()
+}
+
+/// The pictures a message shows, each sized and placed in rows of their own from `col`, at most
+/// `room` columns wide, and how many rows they take.
+fn plan(m: &Message, col: usize, room: usize, ctx: &Ctx) -> (Vec<Picture>, usize) {
+    let room = room.min(u16::MAX as usize) as u16;
+    match (&m.kind, &m.media, &m.album) {
+        (Kind::Album, _, Some(album)) => {
+            let shown: Vec<_> =
+                album.items.iter().filter(|i| !sources(&i.media, 1, ctx).is_empty()).take(ALBUM_SHOWN).collect();
+            if shown.is_empty() {
+                return (vec![], 0);
+            }
+            let tile = (room.saturating_sub(1) / 2).clamp(4, PHOTO.0 / 2);
+            let (_, tile_rows) = crate::graphics::fit(1, 1, tile, PHOTO.1 / 2, ctx.cell);
+            let mut pictures = vec![];
+            for (i, item) in shown.iter().enumerate() {
+                let (r, c) = (i / 2, i % 2);
+                pictures.push(Picture {
+                    line: r * (tile_rows as usize + 1),
+                    col: (col + c * (tile as usize + 1)) as u16,
+                    cols: tile,
+                    rows: tile_rows,
+                    sources: sources(&item.media, tile, ctx),
+                });
+            }
+            let bands = shown.len().div_ceil(2);
+            (pictures, bands * (tile_rows as usize + 1) - 1)
+        }
+        (Kind::Image | Kind::Sticker | Kind::Video | Kind::Gif | Kind::VideoNote, Some(media), _) => {
+            let most = if m.kind == Kind::Sticker { STICKER } else { PHOTO };
+            let (cols, rows) = crate::graphics::fit(media.w, media.h, most.0.min(room), most.1, ctx.cell);
+            let sources = sources(media, cols, ctx);
+            if sources.is_empty() {
+                return (vec![], 0);
+            }
+            (vec![Picture { line: 0, col: col as u16, cols, rows, sources }], rows as usize)
+        }
+        _ => (vec![], 0),
+    }
 }
 
 /// Where your own messages start: a third of the way across.
@@ -139,6 +222,7 @@ pub fn summary(m: &Message) -> String {
         Kind::Contact => "◉ contact",
         Kind::Poll => "☰ poll",
         Kind::Event => "◷ event",
+        Kind::Album => "▣ album",
         Kind::Text | Kind::System | Kind::Call => "",
         Kind::Unknown => "jaw can't show this yet",
     }
@@ -192,8 +276,32 @@ fn body(m: &Message, ctx: &Ctx) -> Vec<(String, Style)> {
     out
 }
 
-/// A message's own lines: its quote, its text, edited, its reactions and whether it's sent.
-pub fn message(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
+/// A message's own lines, its quote, its text, edited, its reactions and whether it's sent, and,
+/// for a photo, a sticker, a video or an album, the pictures over them.
+pub fn laid(m: &Message, shape: Shape, ctx: &Ctx) -> Laidout {
+    let mut out = Laidout { lines: text(m, shape, ctx), pictures: vec![] };
+    if !ctx.pictures || !shape.pictured || m.deleted {
+        return out;
+    }
+    let w = shape.width;
+    let (left, right) = if m.mine { (indent(w), TIME + TICKS) } else { (NAME, TIME) };
+    let (mut pictures, rows) = plan(m, left, w.saturating_sub(left + right).max(8), ctx);
+    if pictures.is_empty() {
+        return out;
+    }
+    // Under the line that says what it is, and the quote's line if it's a reply.
+    let at = (usize::from(m.reply.is_some()) + 1).min(out.lines.len());
+    for p in &mut pictures {
+        p.line += at;
+    }
+    let blank = || Line::from(Span::raw(" ".repeat(left)));
+    out.lines.splice(at..at, std::iter::repeat_with(blank).take(rows));
+    out.pictures = pictures;
+    out
+}
+
+/// A message's text as lines, where its pictures go in under the first.
+fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
     let t = ctx.theme;
     let w = shape.width;
     if matches!(m.kind, Kind::System | Kind::Call) {
@@ -327,6 +435,8 @@ mod tests {
             deleted: false,
             summary: None,
             system: None,
+            media: None,
+            album: None,
         }
     }
 
@@ -340,8 +450,8 @@ mod tests {
     fn lay(m: &Message, width: usize) -> Vec<String> {
         let theme = Theme::with(true);
         let me = ["person:0".to_string()];
-        let ctx = Ctx { theme: &theme, tz: UTC, me: &me };
-        shown(&message(m, Shape { width, name: true, time: true, unfolded: false }, &ctx))
+        let ctx = Ctx { theme: &theme, tz: UTC, me: &me, pictures: false, cell: (8, 16), sharp: false };
+        shown(&laid(m, Shape { width, name: true, time: true, unfolded: false, pictured: true }, &ctx).lines)
     }
 
     #[test]

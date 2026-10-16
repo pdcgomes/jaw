@@ -1,13 +1,15 @@
 //! Frames as text at several sizes, keys driving the view, and anchoring as rows arrive.
 
 use super::*;
-use crate::data::{Chat, Hit, Kind, Sender, Span, SpanKind};
+use crate::data::{Chat, Hit, Kind, Media, Sender, Span, SpanKind};
 use crate::demo::{Clock, Demo, State};
+use crate::graphics::{Images, Protocol};
 use crate::run::{self, Event};
 use ratatui::crossterm::event::{
     Event as Input, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use std::sync::mpsc::Receiver;
+use unicode_width::UnicodeWidthStr;
 
 /// Friday 16 October 2026, 14:02 UTC.
 pub const NOW: i64 = 1_792_159_320_000;
@@ -62,6 +64,8 @@ fn message(id: &str, v: u64, sort: &str) -> Message {
         deleted: false,
         summary: None,
         system: None,
+        media: None,
+        album: None,
     }
 }
 
@@ -619,4 +623,192 @@ fn the_palette_fits_at_140_100_and_80_columns() {
         );
         assert!(screen.lines().all(|l| crate::fmt::width(l) <= w as usize), "{w}:\n{screen}");
     }
+}
+
+fn pictured(protocol: Protocol, width: u16, height: u16) -> (View, Receiver<Event>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let demo = Demo::start(tx, Clock::Fixed(NOW), State::Online, false);
+    let mut v = View::new(Box::new(demo));
+    v.images = Images::here(protocol, (8, 16));
+    v.clock = Some(NOW);
+    v.tz = UTC;
+    v.theme = Theme::with(true);
+    v.no_color = false;
+    v.resize(width, height);
+    run::settle(&mut v, &rx);
+    (v, rx)
+}
+
+/// The runs of half-blocks on a line: where each starts and how wide it is.
+fn blocks_on(line: &str) -> Vec<(usize, usize)> {
+    let mut runs = vec![];
+    let mut start = None;
+    for (i, c) in line.chars().chain([' ']).enumerate() {
+        match (matches!(c, '▀' | '▄'), start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                runs.push((s, i - s));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    runs
+}
+
+/// The rows of half-blocks right under the line containing `text`, and their runs.
+fn picture_under(screen: &str, text: &str) -> Vec<Vec<(usize, usize)>> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(at) = row_of(screen, text) else { panic!("{text} isn't on screen:\n{screen}") };
+    lines[at + 1..].iter().map(|l| blocks_on(l)).take_while(|runs| !runs.is_empty()).collect()
+}
+
+#[test]
+fn a_photo_is_drawn_under_its_line_keeping_its_shape_at_140_100_and_80_columns() {
+    for (width, keys) in [(140, ""), (100, ""), (80, "\n")] {
+        let (mut v, rx) = pictured(Protocol::Blocks, width, 40);
+        press(&mut v, &rx, keys);
+        let screen = frame(&mut v);
+        let rows = picture_under(&screen, "▣ photo · 4032 × 3024");
+        assert_eq!(rows.len(), 15, "a 4:3 photo forty columns wide is fifteen rows at {width}:\n{screen}");
+        let label = screen.lines().find(|l| l.contains("▣ photo · 4032")).unwrap();
+        let col = label.chars().position(|c| c == '▣').unwrap();
+        assert!(rows.iter().all(|r| *r == vec![(col, 40)]), "under its line, forty wide, at {width}:\n{screen}");
+        let after = row_of(&screen, "▣ photo · 4032").unwrap() + 16;
+        assert!(screen.lines().nth(after).unwrap().contains("❤ 2"), "its reactions come after it:\n{screen}");
+    }
+}
+
+#[test]
+fn a_photo_narrows_to_a_narrow_conversation() {
+    let (mut v, rx) = pictured(Protocol::Blocks, 44, 40);
+    press(&mut v, &rx, "\n");
+    let screen = frame(&mut v);
+    let rows = picture_under(&screen, "▣ photo");
+    let (_, wide) = rows[0][0];
+    assert!(wide < 40 && !rows.is_empty(), "{screen}");
+    assert_eq!(rows.len() as u16, crate::graphics::fit(4032, 3024, wide as u16, 16, (8, 16)).1, "{screen}");
+    for line in screen.lines().filter(|l| !blocks_on(l).is_empty()) {
+        assert!(line.ends_with('│'), "the picture stays inside the box:\n{screen}");
+    }
+}
+
+#[test]
+fn an_album_is_tiles_two_across_a_sticker_is_smaller_and_a_poster_comes_under_its_play_line() {
+    let (mut v, rx) = pictured(Protocol::Blocks, 140, 50);
+    press(&mut v, &rx, "<a-down><a-down><a-down><up><pgup><pgup>");
+    let screen = frame(&mut v);
+    let album = picture_under(&screen, "▣ 2 photos");
+    assert_eq!(album.len(), 8, "a tile is half a photo's most rows:\n{screen}");
+    assert!(album.iter().all(|r| r.len() == 2 && r[0].1 == 20 && r[1].1 == 20 && r[1].0 == r[0].0 + 21), "{screen}");
+    let caption = row_of(&screen, "▣ 2 photos").unwrap() + 9;
+    assert!(screen.lines().nth(caption).unwrap().contains("a vista do quarto"), "the caption is under the tiles");
+
+    let sticker = picture_under(&screen, "◇ sticker");
+    assert!(!sticker.is_empty() && sticker.len() <= 8, "{screen}");
+    assert!(sticker.iter().flatten().all(|(_, w)| *w <= 18), "{screen}");
+
+    let poster = picture_under(&screen, "▶ video 0:42 · 18.4 MB");
+    assert_eq!(poster.first().map(|r| r[0].1), Some(40), "{screen}");
+}
+
+#[test]
+fn a_message_whose_previews_cant_be_read_is_its_summary_line() {
+    let (mut v, rx) = pictured(Protocol::Blocks, 100, 30);
+    let mut m = theirs("gone", "9999999999990~000000001", NOW, "");
+    m.kind = Kind::Image;
+    m.spans = vec![];
+    m.summary = Some("▣ photo · long gone".into());
+    m.media = Some(Box::new(Media {
+        w: 800,
+        h: 600,
+        previews: crate::data::Previews {
+            small: Some("nowhere-256.jpg".into()),
+            large: Some("nowhere-768.jpg".into()),
+        },
+        ..Media::default()
+    }));
+    arrive(&mut v, "ana", vec![m, theirs("next", "9999999999990~000000002", NOW, "and then this")]);
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    let at = row_of(&screen, "▣ photo · long gone").unwrap();
+    assert_eq!(row_of(&screen, "and then this"), Some(at + 1), "no room is kept for it:\n{screen}");
+}
+
+#[test]
+fn without_colour_photos_are_their_summary_lines() {
+    let (mut v, rx) = pictured(Protocol::Blocks, 140, 40);
+    v.no_color = true;
+    v.laid.clear();
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    assert!(screen.lines().all(|l| blocks_on(l).is_empty()), "{screen}");
+    assert!(screen.contains("▣ photo · 4032 × 3024"));
+}
+
+#[test]
+fn scrolling_leaves_nothing_of_an_escape_drawn_picture_behind() {
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::CellDiffOption;
+    let (mut v, rx) = pictured(Protocol::Iterm, 140, 50);
+    press(&mut v, &rx, "<a-down><a-down><a-down><up><pgup><pgup>");
+    let mut term = ratatui::Terminal::new(TestBackend::new(140, 50)).unwrap();
+    let mut draw = |v: &mut View| {
+        let buf = term.draw(|f| v.draw(f)).unwrap().buffer.clone();
+        (buf, String::from_utf8_lossy(&v.take_writes()).to_string(), term.backend().buffer().clone())
+    };
+    let (buf, writes, _) = draw(&mut v);
+    assert!(writes.is_empty() && buf.content.iter().all(|c| c.diff_option == CellDiffOption::None));
+    std::thread::sleep(crate::graphics::STILL + std::time::Duration::from_millis(20));
+    let (buf, writes, _) = draw(&mut v);
+    assert_eq!(writes.matches("\x1b]1337;File=").count(), 4, "the tiles, the sticker and the poster, once still");
+    assert!(buf.content.iter().any(|c| c.diff_option == CellDiffOption::Skip));
+    let (_, writes, _) = draw(&mut v);
+    assert!(writes.is_empty(), "standing still, they aren't drawn again");
+
+    v.on_input(Input::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
+    let (buf, writes, shown) = draw(&mut v);
+    assert!(writes.is_empty(), "moving, they're half-blocks");
+    for y in 0..buf.area.height {
+        let mut covered = 0;
+        for x in 0..buf.area.width {
+            if covered > 0 {
+                covered -= 1;
+                continue;
+            }
+            let cell = &buf[(x, y)];
+            covered = cell.symbol().width().saturating_sub(1);
+            assert_eq!(cell, &shown[(x, y)], "the frame's cell at {x}, {y} reached the terminal");
+        }
+    }
+}
+
+#[test]
+fn in_kitty_a_photo_is_placeholders_under_its_line_and_is_sent_once() {
+    let (mut v, rx) = pictured(Protocol::Kitty, 140, 40);
+    let sent = String::from_utf8_lossy(&v.take_writes()).to_string();
+    assert_eq!(sent.matches("\x1b_Ga=T,U=1,").count(), 1, "the lake is sent once");
+    let screen = frame(&mut v);
+    let lines: Vec<&str> = screen.lines().collect();
+    let at = row_of(&screen, "▣ photo · 4032 × 3024").unwrap();
+    let rows: Vec<usize> = (at + 1..lines.len()).take_while(|r| lines[*r].contains('\u{10EEEE}')).collect();
+    assert_eq!(rows.len(), 15);
+    assert_eq!(lines[rows[0]].matches('\u{10EEEE}').count(), 40);
+    press(&mut v, &rx, "<up><up>");
+    frame(&mut v);
+    assert!(!String::from_utf8_lossy(&v.take_writes()).contains("a=T"), "moving it sends nothing");
+}
+
+#[test]
+fn a_picture_that_has_stood_still_wakes_the_loop_to_be_drawn_with_its_escape() {
+    let (mut v, _rx) = pictured(Protocol::Iterm, 140, 40);
+    frame(&mut v);
+    v.dirty = false;
+    let wake = v.next_wake() - v.now();
+    assert!(wake <= crate::graphics::STILL.as_millis() as i64, "it asks to be woken in {wake} ms");
+    std::thread::sleep(crate::graphics::STILL + std::time::Duration::from_millis(20));
+    v.tick();
+    assert!(v.dirty, "and once woken there's a frame to draw");
+    frame(&mut v);
+    assert!(String::from_utf8_lossy(&v.take_writes()).contains("\x1b]1337;File="));
 }

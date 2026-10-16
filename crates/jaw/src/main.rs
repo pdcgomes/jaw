@@ -10,6 +10,7 @@ mod data;
 mod demo;
 mod find;
 mod fmt;
+mod graphics;
 mod layout;
 mod run;
 mod theme;
@@ -86,6 +87,9 @@ enum Command {
         /// Floods a real jawd, `jawd bench feed`'s made-up account on a folder of its own
         #[arg(long)]
         jawd: bool,
+        /// What pictures are drawn with: kitty, iterm, sixel, blocks or none
+        #[arg(long, default_value = "blocks", value_parser = graphics::Protocol::parse)]
+        graphics: graphics::Protocol,
     },
     /// Starts jawd at login, as a LaunchAgent on macOS or a systemd user unit on Linux
     #[command(subcommand)]
@@ -117,6 +121,7 @@ fn main() -> Result<()> {
                 view::View::new(Box::new(wire::Wire::connect(socket, tx)))
             };
             view.clock = Some(now);
+            view.images = graphics::Images::here(graphics::Protocol::Blocks, (8, 16));
             view.resize(width, height);
             if demo {
                 run::settle(&mut view, &rx);
@@ -133,7 +138,7 @@ fn main() -> Result<()> {
             print!("{frame}");
             Ok(())
         }
-        Some(Command::Bench { rate, seconds, width, height, palette, jawd }) => {
+        Some(Command::Bench { rate, seconds, width, height, palette, jawd, graphics }) => {
             let flood = bench::Flood {
                 width,
                 height,
@@ -143,6 +148,7 @@ fn main() -> Result<()> {
                 warm: Duration::from_secs(1),
                 palette,
                 jawd,
+                pictures: graphics,
             };
             println!("{}", bench::flood(&flood)?.describe());
             Ok(())

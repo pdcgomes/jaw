@@ -5,11 +5,12 @@
 //! fast as asked.
 
 mod find;
+pub mod pictures;
 
 use crate::data::Place;
 use crate::data::{
-    Chat, ChatKind, FoundKind, Jawd, Kind, Last, Message, Person, Quote, Reaction, Sender, Span, SpanKind, Tick,
-    Typing, Update,
+    Album, AlbumItem, Chat, ChatKind, FoundKind, Jawd, Kind, Last, Media, Message, Person, Quote, Reaction, Sender,
+    Span, SpanKind, Tick, Typing, Update,
 };
 use crate::fmt::{DAY, MINUTE};
 use crate::run::Event;
@@ -370,7 +371,8 @@ impl Account {
 
     fn hello(&mut self) {
         let linked = self.state != State::Linking;
-        self.send(Update::Hello { linked, me: vec![ME.into()], connection: self.connection.clone() });
+        let root = pictures::folder().display().to_string();
+        self.send(Update::Hello { root, linked, me: vec![ME.into()], connection: self.connection.clone() });
     }
 
     fn unreachable(&mut self) {
@@ -457,6 +459,8 @@ impl Account {
             deleted: false,
             summary: None,
             system: None,
+            media: None,
+            album: None,
         }
     }
 
@@ -549,8 +553,13 @@ impl Account {
         let words: Vec<&str> =
             (0..3 + (*rng >> 40) as usize % 12).map(|k| WORDS[(*rng as usize >> (k % 16)) % WORDS.len()]).collect();
         let at = self.now();
-        let m =
+        let mut m =
             self.message(at, Some(sender), vec![Span { t: SpanKind::Text, s: words.join(" "), person: None }], None);
+        if Some(t) == open && n.is_multiple_of(8) {
+            m.kind = Kind::Image;
+            m.summary = Some("▣ photo".into());
+            m.media = Some(Box::new(pictures::media(HISTORY_PHOTOS[(n / 8) as usize % HISTORY_PHOTOS.len()])));
+        }
         self.arrive(t, m);
     }
 
@@ -862,6 +871,8 @@ impl Writing {
             deleted: false,
             summary: None,
             system: None,
+            media: None,
+            album: None,
         });
         self.thread.messages.last_mut().expect("just added")
     }
@@ -906,6 +917,9 @@ impl Writing {
     }
 }
 
+/// The photos the climbing group shares, and a flood brings into the open chat.
+const HISTORY_PHOTOS: [&str; 5] = ["city", "sunset", "lake", "bars", "beach"];
+
 /// The made-up account: a dozen chats around a Friday lunchtime in Lisbon.
 fn made_up(now: i64) -> Vec<Thread> {
     let h = 60.0;
@@ -925,8 +939,9 @@ fn made_up(now: i64) -> Vec<Thread> {
     w.theirs(4.0 * h + 47.0, &ana, "sim! a fazer café, e tu?");
     w.mine(4.0 * h + 46.0, "reunião às 10, falamos ao almoço");
     w.theirs(4.0, &ana, "did you get the photos from Sunday?");
-    w.other(3.9, Some(&ana), Kind::Image, "▣ photo · 4032 × 3024", "").reactions =
-        vec![Reaction { emoji: "❤".into(), n: 2, mine: true }];
+    let photo = w.other(3.9, Some(&ana), Kind::Image, "▣ photo · 4032 × 3024", "");
+    photo.reactions = vec![Reaction { emoji: "❤".into(), n: 2, mine: true }];
+    photo.media = Some(Box::new(pictures::media("lake")));
     w.mine(3.0, "yes, the one at the lake");
     w.mine(2.9, "a Sofia tirou mais, vou pedir-lhe");
     w.other(1.0, Some(&ana), Kind::Voice, "▶ voice message 0:14", "");
@@ -969,9 +984,16 @@ fn made_up(now: i64) -> Vec<Thread> {
         summary: "@Pedro trazes o vinho? e não te esqueças do pão".into(),
     });
     w.theirs(wed + 4.0 * h + 31.0, &ines, "e para o verão? https://casadapraia.pt/ericeira");
-    w.other(wed + 2.0 * h, Some(&ines), Kind::Image, "▣ 2 photos", "a vista do quarto");
-    w.other(wed + 2.0 * h - 6.0, Some(&sofia), Kind::Sticker, "◇ sticker", "");
-    w.other(wed + 1.0 * h + 42.0, Some(&rui), Kind::Video, "▶ video 0:42 · 18.4 MB", "o Tomás a nadar sozinho!");
+    let album = w.other(wed + 2.0 * h, Some(&ines), Kind::Album, "▣ 2 photos", "a vista do quarto");
+    let items = ["room", "beach"].iter().enumerate();
+    let items =
+        items.map(|(i, p)| AlbumItem { id: format!("{}-{i}", album.id), kind: Kind::Image, media: pictures::media(p) });
+    album.album = Some(Album { items: items.collect() });
+    w.other(wed + 2.0 * h - 6.0, Some(&sofia), Kind::Sticker, "◇ sticker", "").media =
+        Some(Box::new(pictures::media("heart")));
+    let video =
+        w.other(wed + 1.0 * h + 42.0, Some(&rui), Kind::Video, "▶ video 0:42 · 18.4 MB", "o Tomás a nadar sozinho!");
+    video.media = Some(Box::new(Media { seconds: Some(42.0), bytes: Some(18_400_000), ..pictures::media("pool") }));
     w.other(wed + 1.0 * h + 22.0, Some(&mae), Kind::Voice, "▶ voice message 0:31", "");
     w.other(wed + 57.0, Some(&rui), Kind::Document, "▣ orcamento-obras-cozinha.pdf · 2.4 MB · 3 pages", "");
     w.other(wed + 32.0, Some(&mae), Kind::Location, "⌖ Miradouro da Senhora do Monte · Lisbon", "");
@@ -979,7 +1001,8 @@ fn made_up(now: i64) -> Vec<Thread> {
     w.mine(3.0 * h, "eu levo o pão e a sobremesa");
     w.theirs(2.0 * h + 20.0, &mae, "boa! 😘");
     w.theirs(2.0 * h + 15.0, &ines, "@Pedro vens buscar a avó?");
-    w.other(2.0 * h + 10.0, Some(&ines), Kind::Image, "▣ photo", "");
+    w.other(2.0 * h + 10.0, Some(&ines), Kind::Image, "▣ photo", "").media =
+        Some(Box::new(pictures::media("portrait")));
     threads.push(w.done(3, 1));
 
     let mut w = Writing::new("pedro-ana", "Pedro & Ana", ChatKind::Group, now);
@@ -1040,7 +1063,11 @@ fn made_up(now: i64) -> Vec<Thread> {
         let words: Vec<&str> =
             (0..2 + (rng >> 40) as usize % 14).map(|k| WORDS[((rng >> (k % 24)) as usize) % WORDS.len()]).collect();
         let text = words.join(" ");
-        if (rng >> 13).is_multiple_of(5) {
+        if i % 60 == 30 {
+            let p = HISTORY_PHOTOS[(i / 60) % HISTORY_PHOTOS.len()];
+            let m = w.other(ago, Some(&climbers[(rng >> 50) as usize % climbers.len()]), Kind::Image, "▣ photo", "");
+            m.media = Some(Box::new(pictures::media(p)));
+        } else if (rng >> 13).is_multiple_of(5) {
             w.mine(ago, &text);
         } else {
             w.theirs(ago, &climbers[(rng >> 50) as usize % climbers.len()], &text);

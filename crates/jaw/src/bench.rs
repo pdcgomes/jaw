@@ -4,8 +4,9 @@
 //! frame with a conversation comes, and how much memory the process has taken.
 
 use crate::demo::{Clock, Demo, State};
+use crate::graphics::{Images, Protocol};
 use crate::run::{self, Event, Probe};
-use crate::view::View;
+use crate::view::{Effect, View};
 use anyhow::Result;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -27,6 +28,8 @@ pub struct Flood {
     /// Whether the flood comes from a real jawd, `jawd bench feed`'s made-up account on a folder
     /// of its own, rather than from jaw's.
     pub jawd: bool,
+    /// What the terminal draws pictures with; the cells are 8 by 16 pixels.
+    pub pictures: Protocol,
 }
 
 /// `jawd bench feed` writing its flood, for as long as the bench needs it.
@@ -72,6 +75,8 @@ pub struct Report {
     pub first_frame: Duration,
     /// The process's largest resident size, in bytes.
     pub peak_bytes: u64,
+    /// What was written to the terminal beside the frames: pictures sent and drawn.
+    pub written: u64,
 }
 
 impl Report {
@@ -85,7 +90,7 @@ impl Report {
     pub fn describe(&self) -> String {
         let ms = |d: Duration| format!("{:.2} ms", d.as_secs_f64() * 1e3);
         format!(
-            "keys       {} drawn: p50 {}, p99 {}, slowest {}\nmessages   {} in {:.1} s, {:.0} a second\nframes     {}, {:.0} a second\nfirst      the first frame with a conversation in {}\nmemory     {:.1} MB at most",
+            "keys       {} drawn: p50 {}, p99 {}, slowest {}\nmessages   {} in {:.1} s, {:.0} a second\nframes     {}, {:.0} a second\nfirst      the first frame with a conversation in {}\nmemory     {:.1} MB at most\npictures   {:.1} MB written to the terminal",
             self.keys.len(),
             ms(self.at(0.5)),
             ms(self.at(0.99)),
@@ -97,6 +102,7 @@ impl Report {
             self.frames as f64 / self.seconds,
             ms(self.first_frame),
             self.peak_bytes as f64 / 1e6,
+            self.written as f64 / 1e6,
         )
     }
 }
@@ -169,6 +175,8 @@ pub fn flood(f: &Flood) -> Result<Report> {
         (View::new(Box::new(demo)), Some(flooding), None)
     };
     let start = Instant::now();
+    view.images = Images::start(f.pictures, (8, 16), tx.clone());
+    view.no_color = false;
     view.resize(f.width, f.height);
     let mut terminal = Terminal::new(TestBackend::new(f.width, f.height))?;
     let mut probe = Probe::default();
@@ -199,7 +207,12 @@ pub fn flood(f: &Flood) -> Result<Report> {
         std::thread::sleep(end.saturating_duration_since(Instant::now()));
         let _ = tx.send(Event::Stop);
     });
-    run::drive(&mut view, &rx, &mut terminal, &mut probe, &mut |_| {})?;
+    let mut written = 0u64;
+    run::drive(&mut view, &rx, &mut terminal, &mut probe, &mut |e| {
+        if let Effect::Write(bytes) = e {
+            written += bytes.len() as u64;
+        }
+    })?;
     let messages = match flooding {
         Some(flooding) => flooding.join().unwrap_or(0),
         None => (f.rate as f64 * length) as u64,
@@ -215,6 +228,7 @@ pub fn flood(f: &Flood) -> Result<Report> {
         seconds: start.elapsed().as_secs_f64(),
         first_frame: probe.first.map_or(Duration::ZERO, |t| t - start),
         peak_bytes: peak_bytes(),
+        written,
     })
 }
 
@@ -240,11 +254,32 @@ mod tests {
             warm: Duration::from_secs(1),
             palette: false,
             jawd: false,
+            pictures: Protocol::Blocks,
         })
         .unwrap();
         eprintln!("{}", report.describe());
         assert!(report.keys.len() >= 200, "{}", report.describe());
         assert!(report.messages as f64 >= 2_000.0 * 4.5, "{}", report.describe());
+        assert!(report.at(0.99) <= Duration::from_millis(16), "{}", report.describe());
+    }
+
+    #[test]
+    fn with_kittys_pictures_a_keypress_is_drawn_within_16_ms_at_p99_while_2000_messages_a_second_arrive() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let report = flood(&Flood {
+            width: 140,
+            height: 40,
+            rate: 2_000,
+            seconds: 4.0,
+            every: Duration::from_millis(12),
+            warm: Duration::from_secs(1),
+            palette: false,
+            jawd: false,
+            pictures: Protocol::Kitty,
+        })
+        .unwrap();
+        eprintln!("{}", report.describe());
+        assert!(report.written > 0, "the pictures were sent: {}", report.describe());
         assert!(report.at(0.99) <= Duration::from_millis(16), "{}", report.describe());
     }
 
@@ -260,6 +295,7 @@ mod tests {
             warm: Duration::from_secs(1),
             palette: true,
             jawd: false,
+            pictures: Protocol::Blocks,
         };
         let report = super::flood(&flood).unwrap();
         eprintln!("{}", report.describe());
@@ -279,6 +315,7 @@ mod tests {
             warm: Duration::ZERO,
             palette: false,
             jawd: false,
+            pictures: Protocol::Blocks,
         })
         .unwrap();
         assert!(report.keys.is_empty());
