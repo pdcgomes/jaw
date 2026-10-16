@@ -44,6 +44,7 @@ pub use self::write::{
     Amend, Amendment, Change, Chat, Drained, Members, Merging, Message, Opened, Packed, Person, Read, frecency,
     merge_reference,
 };
+pub use self::write::outbox;
 #[cfg(test)]
 pub use self::write::{unpack, unpack_for_tests};
 use crate::engine::Ack;

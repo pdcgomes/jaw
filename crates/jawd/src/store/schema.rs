@@ -559,6 +559,43 @@ pub(super) const MIGRATIONS: &[&str] = &[
         phone_mentions = nullif(mentions, 0)
     WHERE last_message IS NOT NULL;
     ",
+    // 7: sending, a schema step. Both tables are jaw's own: never dropped or rebuilt from raw, and
+    // copied as they are by any rebuild.
+    "
+    -- What's waiting to be sent, each beside its message row, which shows it as pending; a row goes
+    -- once the server has the message. Migration 2's outbox named its chat by JID and nothing ever
+    -- wrote to it; a row that names no message jaw has fails this step rather than being dropped.
+    CREATE TABLE outbox_rebuilt (
+        n INTEGER PRIMARY KEY AUTOINCREMENT,
+        message INTEGER NOT NULL UNIQUE REFERENCES messages (n) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        -- WAWebProtobufsE2E.Message, as it's sent.
+        raw BLOB NOT NULL,
+        -- queued: sent as soon as its chat's earlier sends have gone; failed: waiting for send.retry.
+        state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'failed')),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        next_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        error TEXT
+    ) STRICT;
+    INSERT INTO outbox_rebuilt (message, kind, raw, state, attempts, next_at, created_at, error)
+        SELECT (SELECT m.n FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = o.chat AND m.id = o.id),
+            o.kind, o.raw, o.state, o.attempts, o.next_at, o.created_at, o.error
+        FROM outbox o ORDER BY o.created_at;
+    DROP TABLE outbox;
+    ALTER TABLE outbox_rebuilt RENAME TO outbox;
+
+    -- How far you've read each chat, by `read`, as a message's place (at, n); and how far WhatsApp
+    -- has been told, which the read receipts still owed are between. Both only move forward.
+    CREATE TABLE reads (
+        chat INTEGER PRIMARY KEY REFERENCES chats (n) ON DELETE CASCADE,
+        at INTEGER NOT NULL,
+        n INTEGER NOT NULL,
+        told_at INTEGER NOT NULL,
+        told_n INTEGER NOT NULL,
+        CHECK ((told_at, told_n) <= (at, n))
+    ) STRICT;
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.

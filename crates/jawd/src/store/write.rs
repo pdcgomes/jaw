@@ -3,6 +3,8 @@
 //! it last changed: interfaces converge however updates arrive, and a client that saw seq S needs
 //! only the rows whose `v` is past S.
 
+pub mod outbox;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -63,6 +65,8 @@ pub enum Change {
     /// Moves a few more messages of a chat being merged into the chat it's merged into, and
     /// finishes the merge once none are left: the merge named, or the first waiting.
     MergeStep(Option<Merging>),
+    /// Sending and reading: the outbox and read positions.
+    Outbox(outbox::Step),
 }
 
 /// A merge of one chat into another, as a merge step names it.
@@ -463,6 +467,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<&[u8]>) {
         Some(Change::MergeStep(merging)) => {
             ("merge", merging.as_ref().map(|m| m.reference.clone()).unwrap_or_default(), None)
         }
+        Some(Change::Outbox(step)) => outbox::provenance(step),
         None => ("nothing", String::new(), None),
     }
 }
@@ -557,6 +562,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, backg
             Ok(false)
         }
         Change::MergeStep(merging) => merge_step(db, stamps, merging.as_ref().map(|m| m.gone)),
+        Change::Outbox(step) => outbox::apply(db, stamps, step),
     }
 }
 
@@ -1623,13 +1629,15 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
                 ON CONFLICT (message, recipient) DO UPDATE SET {column} = coalesce({column}, excluded.{column})"
             ))?
             .execute(params![n, recipient, at])?;
-            // In a group a message has got only as far as its slowest recipient, which sending works out.
-            let (kept, direct): (Option<String>, bool) = db
-                .prepare_cached("SELECT m.status, c.kind = 'direct' FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1 AND m.mine")?
-                .query_row([n], |r| Ok((r.get(0)?, r.get(1)?)))
-                .optional()?
-                .unwrap_or((None, false));
-            if direct && advanced(kept.as_deref(), Some(status)) != kept.as_deref() {
+            // In a group, as on the phone, a message is delivered once anyone has it and read once
+            // anyone has read it; each recipient's own times stay in receipts.
+            let kept: Option<Option<String>> = db
+                .prepare_cached("SELECT status FROM messages WHERE n = ?1 AND mine")?
+                .query_row([n], |r| r.get(0))
+                .optional()?;
+            if let Some(kept) = kept
+                && advanced(kept.as_deref(), Some(status)) != kept.as_deref()
+            {
                 db.prepare_cached("UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1")?
                     .execute(params![n, status, seq])?
             } else {
