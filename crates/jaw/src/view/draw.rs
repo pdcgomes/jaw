@@ -443,8 +443,8 @@ impl View {
                 second.push(Span::raw(" "));
             }
             let said = match &last.from {
-                Some(from) => format!("{from}: {}", fmt::one_line(&last.summary)),
-                None => fmt::one_line(&last.summary),
+                Some(from) if chat.group() => format!("{from}: {}", fmt::one_line(&last.summary)),
+                _ => fmt::one_line(&last.summary),
             };
             second.push(Span::styled(fmt::fit(&said, room), Style::new().fg(t.muted)));
         } else {

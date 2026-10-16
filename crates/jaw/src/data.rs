@@ -62,7 +62,7 @@ impl Chat {
 /// A chat's newest message, as its row in the list shows it.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Last {
-    /// Who sent it, in a group; nobody for your own or in a one-to-one chat.
+    /// Who sent it; nobody for your own. The list names them only in a group.
     #[serde(default)]
     pub from: Option<String>,
     pub summary: String,
