@@ -8,7 +8,11 @@
 //! behind a sync.
 
 pub mod bench;
+#[cfg(test)]
+mod plans;
 pub mod read;
+#[cfg(test)]
+mod rules;
 mod schema;
 mod write;
 
@@ -25,9 +29,11 @@ use tokio::sync::{Notify, oneshot, watch};
 
 pub use self::read::Reads;
 use self::write::Stamps;
+pub use self::write::{
+    Amend, Amendment, Change, Chat, Drained, Members, Message, Opened, Packed, Person, Read, frecency,
+};
 #[cfg(test)]
-pub use self::write::unpack_for_tests;
-pub use self::write::{Amend, Amendment, Change, Chat, Drained, Members, Message, Opened, Packed, Person, frecency};
+pub use self::write::{unpack, unpack_for_tests};
 use crate::engine::Ack;
 use crate::work::{Report, Samples};
 
@@ -504,6 +510,7 @@ impl Writer {
                     break;
                 }
             }
+            write::settle(&tx, &mut self.stamps)?;
             let body = began.elapsed();
             tx.commit()?;
             if background {

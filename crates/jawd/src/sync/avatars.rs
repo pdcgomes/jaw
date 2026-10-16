@@ -49,17 +49,23 @@ impl Avatars {
         }
     }
 
-    /// Asks for the avatars of the chats at the top of the list that were never asked for.
+    /// Asks for the avatars of the chats at the top of the list that were never asked for, the
+    /// chat list's first and then the archived list's, each read down its own index.
     pub async fn seed(&self, store: &Store) {
         let chats: anyhow::Result<Vec<String>> = store
             .reads()
             .query(Priority::Background, |db| {
-                let ids = db
-                    .prepare_cached(
-                        "SELECT id FROM chats WHERE avatar_id IS NULL ORDER BY archived, sort DESC LIMIT ?1",
-                    )?
-                    .query_map([SEED as i64], |r| r.get(0))?
-                    .collect::<rusqlite::Result<_>>()?;
+                let mut ids = Vec::new();
+                for archived in [false, true] {
+                    let more = SEED - ids.len();
+                    ids.extend(
+                        db.prepare_cached(
+                            "SELECT id FROM chats WHERE archived = ?1 AND avatar_id IS NULL ORDER BY sort DESC LIMIT ?2",
+                        )?
+                        .query_map(rusqlite::params![archived, more as i64], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?,
+                    );
+                }
                 Ok(ids)
             })
             .await;

@@ -54,6 +54,13 @@ pub struct Commands {
 }
 
 impl Commands {
+    /// Commands whose other end a test engine serves.
+    #[cfg(test)]
+    pub fn for_tests() -> (Commands, mpsc::UnboundedReceiver<Outgoing>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Commands { tx }, rx)
+    }
+
     pub async fn call(&self, kind: pb::command::Kind) -> Result<pb::reply::Kind, EngineError> {
         let (reply, answer) = oneshot::channel();
         self.tx.send(Outgoing::Command { kind, reply }).map_err(|_| EngineError::Gone)?;

@@ -232,6 +232,7 @@ struct Started {
 async fn start(home: &Path, kind: EngineKind, no_notify: bool) -> Result<Started> {
     let store = store::Store::open(home)?;
     std::fs::create_dir_all(home.join("spool"))?;
+    sync::running(&store).await?;
     let (events, incoming) = mpsc::channel(1024);
     let supervisor = engine(kind, home).map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
     let live: sync::Shared = Arc::default();

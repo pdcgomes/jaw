@@ -52,6 +52,32 @@ pub enum Change {
         index: Vec<String>,
         value: Vec<u8>,
     },
+    /// Where a chat was read up to.
+    Read(Read),
+    /// What a history blob carried besides its conversations' messages, kept raw by the ID of the
+    /// message that offered it.
+    HistoryKept {
+        id: String,
+        raw: Packed,
+    },
+    /// Moves a few more messages of a chat being merged into the chat it's merged into, and
+    /// finishes the merge once none are left.
+    MergeStep,
+}
+
+/// Where a chat was read up to: everything at or before `at`, or before the newest of `ids` that
+/// jaw has, which says it more exactly. It only moves forward once WhatsApp or you have said where
+/// it is.
+#[derive(Clone, Debug, Default)]
+pub struct Read {
+    /// The chat's JID.
+    pub chat: String,
+    /// In milliseconds since the epoch.
+    pub at: i64,
+    pub ids: Vec<String>,
+    /// The phone's own unread and mention counts as of `at`, when it couldn't say where the chat
+    /// was read; they stand until the position moves on.
+    pub phone: Option<(u32, u32)>,
 }
 
 /// Something a later message or app state does to a message.
@@ -165,8 +191,6 @@ pub struct Chat {
     /// Until when it's muted, in milliseconds, or 0 to unmute it.
     pub muted_until: Option<i64>,
     pub marked_unread: Option<bool>,
-    pub unread: Option<u32>,
-    pub mentions: Option<u32>,
     /// The JID of the community a group belongs to, or empty for none.
     pub community: Option<String>,
     /// The disappearing-message timer in seconds, or 0 for off.
@@ -224,12 +248,14 @@ pub struct Message {
     pub expires_at: Option<i64>,
     pub starred: bool,
     pub view_once: bool,
-    /// Whether it arrived live and counts towards its chat's unread messages, if it's someone
-    /// else's and its chat's newest; one of yours clears them.
-    pub counts: bool,
+    /// Whether it arrived live rather than in history. History from others before where a chat is
+    /// known to be read counts as read as it comes; one of yours reads the chat up to it.
+    pub live: bool,
     pub mentions_me: bool,
     /// WhatsApp's WebMessageInfo, compressed.
     pub raw: Option<Packed>,
+    /// For a live message, the engine's whole event, compressed, which a history copy never replaces.
+    pub envelope: Option<Packed>,
 }
 
 /// A raw protobuf compressed with zstd, one frame per row. Frames name the dictionary they were
@@ -278,6 +304,21 @@ pub(super) struct Stamps {
     touched: HashMap<(&'static str, i64), i64>,
     /// The rows touched, in order, so a savepoint rolled back can be forgotten.
     order: Vec<(&'static str, i64)>,
+    /// Chats whose read position may move and whose unread and mention counts are counted again
+    /// before the transaction commits.
+    unsettled: Vec<(i64, Unsettled)>,
+}
+
+/// What the transaction's messages said of where a chat was read, applied once before it commits.
+#[derive(Clone, Copy, Default)]
+struct Unsettled {
+    /// The newest of your own messages, which reads the chat up to it.
+    mine: Option<i64>,
+    /// Whether one of those arrived live, which unmarks the chat.
+    mine_live: bool,
+    /// The newest history message from others, read as it comes while nobody has said where the
+    /// chat was read.
+    history: Option<i64>,
 }
 
 /// Where Stamps stood when a savepoint began.
@@ -289,19 +330,39 @@ pub(super) struct Mark {
 impl Stamps {
     pub(super) fn load(db: &Connection) -> Result<Stamps> {
         let last: i64 = db.query_row("SELECT coalesce(max(seq), 0) FROM events", [], |row| row.get(0))?;
-        Ok(Stamps { next: last + 1, began: last + 1, touched: HashMap::new(), order: Vec::new() })
+        Ok(Stamps {
+            next: last + 1,
+            began: last + 1,
+            touched: HashMap::new(),
+            order: Vec::new(),
+            unsettled: Vec::new(),
+        })
     }
 
     pub(super) fn begin(&mut self) {
         self.began = self.next;
         self.touched.clear();
         self.order.clear();
+        self.unsettled.clear();
     }
 
     pub(super) fn rolled_back(&mut self) {
         self.next = self.began;
         self.touched.clear();
         self.order.clear();
+        self.unsettled.clear();
+    }
+
+    /// Notes that chat `n`'s unread messages may have changed.
+    fn unsettle(&mut self, n: i64) -> &mut Unsettled {
+        let at = match self.unsettled.iter().position(|(chat, _)| *chat == n) {
+            Some(at) => at,
+            None => {
+                self.unsettled.push((n, Unsettled::default()));
+                self.unsettled.len() - 1
+            }
+        };
+        &mut self.unsettled[at].1
     }
 
     pub(super) fn mark(&self) -> Mark {
@@ -383,6 +444,9 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<&[u8]>) {
         Some(Change::Quarantined { source, reference, .. }) => (source, reference.clone(), None),
         Some(Change::Opened(o)) => ("opened", o.chat.clone(), None),
         Some(Change::DeleteMessage { chat, id }) => ("delete", format!("{chat} {id}"), None),
+        Some(Change::Read(read)) => ("read", format!("{} {}", read.chat, read.at), None),
+        Some(Change::HistoryKept { id, raw }) => ("history", id.clone(), Some(raw.0.as_slice())),
+        Some(Change::MergeStep) => ("merge", String::new(), None),
         None => ("nothing", String::new(), None),
     }
 }
@@ -462,7 +526,117 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, backg
                 .execute(params![serde_json::to_string(index)?, value])?;
             Ok(false)
         }
+        Change::Read(read) => set_read(db, stamps, read),
+        Change::HistoryKept { id, raw } => {
+            db.prepare_cached(
+                "INSERT INTO history_kept (id, at, raw) VALUES (?1, ?2, ?3)
+                ON CONFLICT (id) DO UPDATE SET at = excluded.at, raw = excluded.raw",
+            )?
+            .execute(params![id, now_ms(), raw.0])?;
+            Ok(false)
+        }
+        Change::MergeStep => merge_step(db, stamps),
     }
+}
+
+/// The most unread messages a chat counts; more show as this many.
+pub const UNREAD_MOST: i64 = 1_000;
+
+/// Where a chat was read up to, as settle reads it.
+struct ChatRead {
+    read_at: Option<i64>,
+    known: bool,
+    phone_unread: Option<i64>,
+    phone_mentions: Option<i64>,
+    marked: bool,
+}
+
+/// Moves where each chat the transaction touched was read up to, as its messages said, and counts
+/// its unread messages and mentions again: messages from others after that position, and the
+/// phone's own counts while they stand. Run once before the transaction commits, so a batch of
+/// history moves and counts each chat once, in one update.
+pub(super) fn settle(db: &Connection, stamps: &mut Stamps) -> Result<()> {
+    for (chat, moved) in std::mem::take(&mut stamps.unsettled) {
+        let Some(ChatRead { mut read_at, known, mut phone_unread, mut phone_mentions, marked }) = db
+            .prepare_cached(
+                "SELECT read_at, read_known, phone_unread, phone_mentions, marked_unread FROM chats WHERE n = ?1",
+            )?
+            .query_row([chat], |r| {
+                Ok(ChatRead {
+                    read_at: r.get(0)?,
+                    known: r.get(1)?,
+                    phone_unread: r.get(2)?,
+                    phone_mentions: r.get(3)?,
+                    marked: r.get(4)?,
+                })
+            })
+            .optional()?
+        else {
+            continue;
+        };
+        let was = read_at;
+        if let Some(at) = moved.mine.filter(|&at| read_at.is_none_or(|read| at > read)) {
+            (read_at, phone_unread, phone_mentions) = (Some(at), None, None);
+        }
+        if let Some(at) = moved.history.filter(|&at| !known && read_at.is_none_or(|read| at > read)) {
+            read_at = Some(at);
+        }
+        let marked = marked && !moved.mine_live;
+        let (unread, mentions): (i64, i64) = db
+            .prepare_cached(
+                "SELECT count(*), coalesce(sum(mentions_me), 0) FROM (SELECT mentions_me FROM messages
+                    WHERE chat = ?1 AND at > ?2 AND mine = 0 AND kind NOT IN ('system', 'call') LIMIT ?3)",
+            )?
+            .query_row(params![chat, read_at.unwrap_or(i64::MIN), UNREAD_MOST], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let unread = (unread + phone_unread.unwrap_or(0)).min(UNREAD_MOST);
+        let mentions = (mentions + phone_mentions.unwrap_or(0)).min(UNREAD_MOST);
+        let seq = stamps.seq(CHAT, Some(chat));
+        // Where it was read isn't shown, so moving it alone makes no new version of the chat.
+        let shown = db
+            .prepare_cached(
+                "UPDATE chats SET unread = ?2, mentions = ?3, marked_unread = ?4, v = ?5
+                WHERE n = ?1 AND (unread IS NOT ?2 OR mentions IS NOT ?3 OR marked_unread IS NOT ?4)",
+            )?
+            .execute(params![chat, unread, mentions, marked, seq])?;
+        if shown > 0 {
+            stamps.record(db, CHAT, chat, Some(chat), seq)?;
+        }
+        if read_at != was {
+            db.prepare_cached("UPDATE chats SET read_at = ?2, phone_unread = ?3, phone_mentions = ?4 WHERE n = ?1")?
+                .execute(params![chat, read_at, phone_unread, phone_mentions])?;
+        }
+    }
+    Ok(())
+}
+
+/// Moves where a chat was read up to. Until WhatsApp or you have said where it is, or while the
+/// phone's own counts stand in for it, the position is taken as said, even if it's earlier;
+/// after that it only moves forward. Reading a chat unmarks it.
+fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
+    let chat = ensure_chat(db, stamps, &chat_jid(db, &read.chat)?)?;
+    let mut at = read.at;
+    if !read.ids.is_empty() {
+        let newest: Option<i64> = db
+            .prepare_cached("SELECT max(at) FROM messages WHERE chat = ?1 AND id IN (SELECT value FROM json_each(?2))")?
+            .query_row(params![chat, serde_json::to_string(&read.ids)?], |r| r.get(0))?;
+        at = newest.unwrap_or(at);
+    }
+    let (phone_unread, phone_mentions) = read.phone.map_or((None, None), |(u, m)| (Some(u), Some(m)));
+    let seq = stamps.seq(CHAT, Some(chat));
+    let changed = db
+        .prepare_cached(
+            "UPDATE chats SET read_at = ?2, read_known = 1, phone_unread = ?3, phone_mentions = ?4, marked_unread = 0,
+                v = ?5
+            WHERE n = ?1 AND (read_known = 0 OR phone_unread IS NOT NULL OR read_at IS NULL OR read_at < ?2)
+                AND (read_at IS NOT ?2 OR read_known = 0 OR phone_unread IS NOT ?3 OR phone_mentions IS NOT ?4
+                    OR marked_unread)",
+        )?
+        .execute(params![chat, at, phone_unread, phone_mentions, seq])?;
+    if changed > 0 {
+        stamps.record(db, CHAT, chat, Some(chat), seq)?;
+        stamps.unsettle(chat);
+    }
+    Ok(changed > 0)
 }
 
 /// Counts an open in the chat's frecency. An open older than the chat's last counts as decayed
@@ -492,9 +666,8 @@ fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) ->
     delete_row(db, stamps, chat, n)
 }
 
-/// Deletes message `n` from chat `chat`. A chat whose newest it was shows the one before it, and
-/// keeps its place.
-/// Deletes a message for me, leaving a tombstone so a copy arriving later doesn't bring it back.
+/// Deletes a message for me, leaving a tombstone so a copy arriving later doesn't bring it back. A
+/// chat whose newest it was shows the one before it, and keeps its place.
 fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
     db.prepare_cached(
         "INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM messages WHERE n = ?1",
@@ -503,7 +676,7 @@ fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result
     if db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([n])? == 0 {
         return Ok(false);
     }
-    db.prepare_cached("UPDATE chats SET message_count = message_count - 1 WHERE n = ?1")?.execute([chat])?;
+    stamps.unsettle(chat);
     let seq = stamps.seq(MESSAGE, Some(n));
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
     let seq = stamps.seq(CHAT, Some(chat));
@@ -575,18 +748,28 @@ fn kind_of(jid: &str) -> &'static str {
     }
 }
 
-/// The chat's n, making the chat if jaw hasn't seen it.
-/// The chat a JID names: its own, or, when jaw has no chat by that JID but has a one-to-one chat
-/// with the same person under another of their JIDs, that one, so a conversation addressed by phone
-/// number and by LID stays one chat.
+/// The chat a JID names: its own, or the chat it's being merged into, or, when jaw has no chat by
+/// that JID but has a one-to-one chat with the same person under another of their JIDs, that one,
+/// so a conversation addressed by phone number and by LID stays one chat.
 fn chat_jid(db: &Connection, jid: &str) -> Result<String> {
-    if !is_person(jid) || db.prepare_cached("SELECT 1 FROM chats WHERE id = ?1")?.exists([jid])? {
+    let own: Option<String> = db
+        .prepare_cached(
+            "SELECT coalesce(k.id, c.id) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n
+                LEFT JOIN chats k ON k.n = m.keep
+            WHERE c.id = ?1",
+        )?
+        .query_row([jid], |r| r.get(0))
+        .optional()?;
+    if let Some(own) = own {
+        return Ok(own);
+    }
+    if !is_person(jid) {
         return Ok(jid.to_string());
     }
     let other: Option<String> = db
         .prepare_cached(
             "SELECT c.id FROM person_jids j JOIN chats c ON c.person = j.person AND c.kind = 'direct'
-            WHERE j.jid = ?1 ORDER BY c.n LIMIT 1",
+            WHERE j.jid = ?1 AND NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = c.n) ORDER BY c.n LIMIT 1",
         )?
         .query_row([user_jid(jid)], |r| r.get(0))
         .optional()?;
@@ -647,27 +830,25 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
     let seq = stamps.seq(CHAT, existing.as_ref().map(|(n, _)| *n));
     let changed: Option<i64> = db
         .prepare_cached(
-            "INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread, unread, mentions,
+            "INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread,
                 community, ephemeral, draft, v, avatar, avatar_id)
-            VALUES (?1, coalesce(?2, ?15), ?3, ?4, coalesce(?5, 0), coalesce(?6, 0), coalesce(?7, 0), coalesce(?8, 0), coalesce(?9, 0),
-                coalesce(?10, 0), nullif(?11, ''), coalesce(?12, 0), nullif(?13, ''), ?14, nullif(?16, ''), nullif(?17, ''))
+            VALUES (?1, coalesce(?2, ?13), ?3, ?4, coalesce(?5, 0), coalesce(?6, 0), coalesce(?7, 0), coalesce(?8, 0),
+                nullif(?9, ''), coalesce(?10, 0), nullif(?11, ''), ?12, nullif(?14, ''), nullif(?15, ''))
             ON CONFLICT (id) DO UPDATE SET
                 kind = coalesce(?2, kind), person = coalesce(?3, person), name = coalesce(?4, name),
                 pinned = coalesce(?5, pinned), archived = coalesce(?6, archived),
                 muted_until = coalesce(?7, muted_until), marked_unread = coalesce(?8, marked_unread),
-                unread = coalesce(?9, unread), mentions = coalesce(?10, mentions),
-                community = iif(?11 IS NULL, community, nullif(?11, '')), ephemeral = coalesce(?12, ephemeral),
-                draft = iif(?13 IS NULL, draft, nullif(?13, '')), v = ?14,
-                avatar = iif(?16 IS NULL, avatar, nullif(?16, '')), avatar_id = iif(?17 IS NULL, avatar_id, nullif(?17, ''))
+                community = iif(?9 IS NULL, community, nullif(?9, '')), ephemeral = coalesce(?10, ephemeral),
+                draft = iif(?11 IS NULL, draft, nullif(?11, '')), v = ?12,
+                avatar = iif(?14 IS NULL, avatar, nullif(?14, '')), avatar_id = iif(?15 IS NULL, avatar_id, nullif(?15, ''))
             WHERE coalesce(?2, kind) IS NOT kind OR coalesce(?3, person) IS NOT person
                 OR coalesce(?4, name) IS NOT name OR coalesce(?5, pinned) IS NOT pinned
                 OR coalesce(?6, archived) IS NOT archived OR coalesce(?7, muted_until) IS NOT muted_until
-                OR coalesce(?8, marked_unread) IS NOT marked_unread OR coalesce(?9, unread) IS NOT unread
-                OR coalesce(?10, mentions) IS NOT mentions
-                OR iif(?11 IS NULL, community, nullif(?11, '')) IS NOT community
-                OR coalesce(?12, ephemeral) IS NOT ephemeral OR iif(?13 IS NULL, draft, nullif(?13, '')) IS NOT draft
-                OR iif(?16 IS NULL, avatar, nullif(?16, '')) IS NOT avatar
-                OR iif(?17 IS NULL, avatar_id, nullif(?17, '')) IS NOT avatar_id
+                OR coalesce(?8, marked_unread) IS NOT marked_unread
+                OR iif(?9 IS NULL, community, nullif(?9, '')) IS NOT community
+                OR coalesce(?10, ephemeral) IS NOT ephemeral OR iif(?11 IS NULL, draft, nullif(?11, '')) IS NOT draft
+                OR iif(?14 IS NULL, avatar, nullif(?14, '')) IS NOT avatar
+                OR iif(?15 IS NULL, avatar_id, nullif(?15, '')) IS NOT avatar_id
             RETURNING n",
         )?
         .query_row(
@@ -680,8 +861,6 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
                 chat.archived,
                 chat.muted_until,
                 chat.marked_unread,
-                chat.unread,
-                chat.mentions,
                 chat.community,
                 chat.ephemeral,
                 chat.draft,
@@ -791,7 +970,158 @@ fn join(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64) -> Result<()
     db.prepare_cached("DELETE FROM folder_items WHERE person = ?1")?.execute([gone])?;
     db.prepare_cached("DELETE FROM people WHERE n = ?1")?.execute([gone])?;
     let seq = stamps.seq(PERSON, Some(gone));
-    stamps.record(db, PERSON, gone, None, seq)
+    stamps.record(db, PERSON, gone, None, seq)?;
+    merge_direct_chats(db, stamps, keep)
+}
+
+/// Starts merging a person's one-to-one chats into one, when joining their JIDs has given them
+/// two: the one under their phone number is kept, or else the oldest.
+fn merge_direct_chats(db: &Connection, stamps: &mut Stamps, person: i64) -> Result<()> {
+    let chats: Vec<(i64, String)> = db
+        .prepare_cached(
+            "SELECT n, id FROM chats WHERE person = ?1 AND kind = 'direct'
+                AND NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = chats.n)
+            ORDER BY n",
+        )?
+        .query_map([person], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if chats.len() < 2 {
+        return Ok(());
+    }
+    let keep = chats.iter().find(|(_, id)| id.ends_with("@s.whatsapp.net")).unwrap_or(&chats[0]).clone();
+    for gone in chats.iter().filter(|(n, _)| *n != keep.0) {
+        start_merge(db, stamps, &keep, gone)?;
+    }
+    Ok(())
+}
+
+/// Starts merging chat `gone` into `keep`, each a chat's n and JID. What's small moves now (its
+/// tombstones, what waits for its messages, its folder places, what's waiting to be sent, its
+/// settings), and writes for it go to `keep` from here on; its messages follow a few at a time.
+fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone: &(i64, String)) -> Result<()> {
+    let ((keep, keep_id), (gone, gone_id)) = (keep, gone);
+    db.prepare_cached("INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)")?.execute([gone, keep])?;
+    db.prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
+    db.prepare_cached("DELETE FROM tombstones WHERE chat = ?1")?.execute([gone])?;
+    db.prepare_cached("UPDATE pending SET chat = ?1 WHERE chat = ?2")?.execute([keep_id, gone_id])?;
+    db.prepare_cached("UPDATE outbox SET chat = ?1 WHERE chat = ?2")?.execute([keep_id, gone_id])?;
+    db.prepare_cached("UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
+    db.prepare_cached("DELETE FROM folder_items WHERE chat = ?1")?.execute([gone])?;
+    let seq = stamps.seq(CHAT, Some(*keep));
+    db.prepare_cached(
+        "UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived),
+            muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread),
+            draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar),
+            avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral),
+            frecency = k.frecency + g.frecency, opened_at = max(coalesce(k.opened_at, 0), coalesce(g.opened_at, 0)),
+            read_at = iif(g.read_known > k.read_known OR coalesce(g.read_at, 0) > coalesce(k.read_at, 0) AND g.read_known = k.read_known,
+                g.read_at, k.read_at),
+            read_known = max(k.read_known, g.read_known), v = ?3
+        FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1",
+    )?
+    .execute(params![keep, gone, seq])?;
+    stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
+    stamps.unsettle(*keep);
+    Ok(())
+}
+
+/// The messages a merge step moves.
+const MERGE_STEP: i64 = 200;
+
+/// Moves up to MERGE_STEP messages of the first chat being merged into the chat it's merged into,
+/// folding a message both have into one by the usual rules. Once none are left, the kept chat shows
+/// its newest message and the other chat is removed. Says whether anything changed.
+fn merge_step(db: &Connection, stamps: &mut Stamps) -> Result<bool> {
+    let Some((gone, keep)): Option<(i64, i64)> = db
+        .prepare_cached("SELECT gone, keep FROM chat_merges ORDER BY gone LIMIT 1")?
+        .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let moving: Vec<(i64, Option<i64>)> = db
+        .prepare_cached(
+            "SELECT g.n, k.n FROM messages g LEFT JOIN messages k ON k.chat = ?2 AND k.id = g.id WHERE g.chat = ?1 LIMIT ?3",
+        )?
+        .query_map(params![gone, keep, MERGE_STEP], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for &(n, both) in &moving {
+        match both {
+            Some(kept) => fold(db, stamps, keep, kept, n)?,
+            None => {
+                let seq = stamps.seq(MESSAGE, Some(n));
+                db.prepare_cached("UPDATE messages SET chat = ?2, v = ?3 WHERE n = ?1")?
+                    .execute(params![n, keep, seq])?;
+                stamps.record(db, MESSAGE, n, Some(keep), seq)?;
+            }
+        }
+    }
+    stamps.unsettle(keep);
+    if moving.len() as i64 == MERGE_STEP {
+        return Ok(true);
+    }
+    let seq = stamps.seq(CHAT, Some(keep));
+    db.prepare_cached(
+        "UPDATE chats SET last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1),
+            last_at = coalesce((SELECT at FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), 0), v = ?2
+        WHERE n = ?1",
+    )?
+    .execute(params![keep, seq])?;
+    stamps.record(db, CHAT, keep, Some(keep), seq)?;
+    db.prepare_cached("DELETE FROM chat_merges WHERE gone = ?1")?.execute([gone])?;
+    db.prepare_cached("DELETE FROM chats WHERE n = ?1")?.execute([gone])?;
+    let seq = stamps.seq(CHAT, Some(gone));
+    stamps.record(db, CHAT, gone, Some(gone), seq)?;
+    Ok(true)
+}
+
+/// Folds message `gone` into `kept`, the same message in the chat being kept: a later edit, a star,
+/// the live envelope, a raw protobuf, its reactions, receipts, votes and media go to the kept one,
+/// a deletion for everyone sticks, and `gone` is removed.
+fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -> Result<()> {
+    let seq = stamps.seq(MESSAGE, Some(kept));
+    db.prepare_cached(
+        "UPDATE messages AS k SET
+            text = iif(g.edited_at > coalesce(k.edited_at, -1), g.text, k.text),
+            spans = iif(g.edited_at > coalesce(k.edited_at, -1), g.spans, k.spans),
+            summary = iif(g.edited_at > coalesce(k.edited_at, -1), g.summary, k.summary),
+            edited_at = max(coalesce(k.edited_at, g.edited_at), coalesce(g.edited_at, k.edited_at)),
+            status = iif(coalesce(?4 ->> g.status, -1) > coalesce(?4 ->> k.status, -1), g.status, k.status),
+            starred = max(k.starred, g.starred), mentions_me = max(k.mentions_me, g.mentions_me),
+            raw = coalesce(k.raw, g.raw), envelope = coalesce(k.envelope, g.envelope), v = ?3
+        FROM (SELECT * FROM messages WHERE n = ?2) AS g WHERE k.n = ?1",
+    )?
+    .execute(params![kept, gone, seq, STATUS_RANKS])?;
+    stamps.record(db, MESSAGE, kept, Some(chat), seq)?;
+    db.prepare_cached(
+        "INSERT INTO reactions (message, sender, emoji, at, mine) SELECT ?1, sender, emoji, at, mine FROM reactions
+            WHERE message = ?2
+        ON CONFLICT (message, sender) DO UPDATE SET emoji = excluded.emoji, at = excluded.at, mine = excluded.mine
+            WHERE excluded.at > reactions.at",
+    )?
+    .execute([kept, gone])?;
+    db.prepare_cached(
+        "INSERT INTO receipts (message, recipient, delivered_at, read_at, played_at)
+            SELECT ?1, recipient, delivered_at, read_at, played_at FROM receipts WHERE message = ?2
+        ON CONFLICT (message, recipient) DO UPDATE SET delivered_at = coalesce(receipts.delivered_at, excluded.delivered_at),
+            read_at = coalesce(receipts.read_at, excluded.read_at), played_at = coalesce(receipts.played_at, excluded.played_at)",
+    )?
+    .execute([kept, gone])?;
+    db.prepare_cached(
+        "INSERT OR IGNORE INTO poll_votes (message, voter, position, at)
+            SELECT ?1, voter, position, at FROM poll_votes WHERE message = ?2",
+    )?
+    .execute([kept, gone])?;
+    db.prepare_cached("UPDATE OR IGNORE media SET message = ?1 WHERE message = ?2")?.execute([kept, gone])?;
+    let revoked: bool =
+        db.prepare_cached("SELECT deleted FROM messages WHERE n = ?1")?.query_row([gone], |r| r.get(0))?;
+    db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([gone])?;
+    let seq = stamps.seq(MESSAGE, Some(gone));
+    stamps.record(db, MESSAGE, gone, Some(chat), seq)?;
+    if revoked {
+        apply_amendment(db, stamps, chat, kept, Doing { what: &Amendment::Revoke, sender: None, mine: false, at: 0 })?;
+    }
+    Ok(())
 }
 
 /// How many bits of a message's t count messages within one millisecond.
@@ -827,6 +1157,9 @@ struct Kept {
     summary: Option<String>,
     status: Option<String>,
 }
+
+/// status_rank as JSON, for SQL to rank statuses by with `->>`; a missing one ranks lowest.
+const STATUS_RANKS: &str = r#"{"pending": 0, "failed": 1, "sent": 2, "delivered": 3, "read": 4, "played": 5}"#;
 
 /// How far a message of yours has got: a status never goes back, and `failed` replaces only
 /// `pending`, as a send that succeeds after failing replaces `failed`.
@@ -887,20 +1220,26 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
     let mut status = message.status.map(str::to_string);
     if let Some(kept) = &existing {
         status = advanced(kept.status.as_deref(), status.as_deref()).map(str::to_string);
-        if kept.edited_at.is_some() && message.edited_at.is_none() {
+        // An edit wins by its time, and a copy without one is older than any.
+        if kept.edited_at > message.edited_at {
             (text, spans, summary, edited_at) =
                 (kept.text.clone(), kept.spans.clone(), kept.summary.clone(), kept.edited_at);
         }
-        starred |= kept.starred;
+        // Stars come and go through app state, which a copy of the message doesn't know about.
+        starred = kept.starred;
     }
     let (n, t) = match &existing {
         Some(kept) => (Some(kept.n), kept.t),
         None => {
             let t = allocate(db, message.at)?;
-            // Its n is chosen here so it can wait in fts_backlog before the insert's trigger looks.
+            // Its n is chosen here so it can wait in fts_backlog before the insert's trigger looks;
+            // AUTOINCREMENT's sequence is past every n ever used, so it's one no event has named.
             let n = if background && text.is_some() {
-                let n: i64 =
-                    db.prepare_cached("SELECT coalesce(max(n), 0) + 1 FROM messages")?.query_row([], |r| r.get(0))?;
+                let n: i64 = db
+                    .prepare_cached(
+                        "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'messages'), 0) + 1",
+                    )?
+                    .query_row([], |r| r.get(0))?;
                 db.prepare_cached("INSERT INTO fts_backlog (n) VALUES (?1)")?.execute([n])?;
                 Some(n)
             } else {
@@ -909,6 +1248,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
             (n, t)
         }
     };
+    let envelope = message.envelope.as_ref().map(|packed| packed.0.as_slice());
     let fields = params![
         message.at,
         sender,
@@ -929,30 +1269,38 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
         raw,
         seq,
         n,
+        message.mentions_me,
+        envelope,
         chat,
         message.id,
         t,
     ];
+    // A live copy keeps the raw protobuf a history copy brought, which may say more, and its
+    // envelope is kept whatever comes after.
     let changed: Option<i64> = if existing.is_some() {
         db.prepare_cached(
             "UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, text = ?6, spans = ?7,
                 summary = ?8, reply = ?9, detail = ?10, forwarded = ?11, edited_at = ?12, deleted = ?13,
-                expires_at = ?14, starred = ?15, view_once = ?16, raw = ?17, v = ?18
+                expires_at = ?14, starred = ?15, view_once = ?16,
+                raw = iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17), v = ?18,
+                mentions_me = ?20, envelope = coalesce(envelope, ?21)
             WHERE n = ?19 AND (at IS NOT ?1 OR sender IS NOT ?2 OR mine IS NOT ?3 OR kind IS NOT ?4
                 OR status IS NOT ?5 OR text IS NOT ?6 OR spans IS NOT ?7 OR summary IS NOT ?8 OR reply IS NOT ?9
                 OR detail IS NOT ?10 OR forwarded IS NOT ?11 OR edited_at IS NOT ?12 OR deleted IS NOT ?13
-                OR expires_at IS NOT ?14 OR starred IS NOT ?15 OR view_once IS NOT ?16 OR raw IS NOT ?17)
+                OR expires_at IS NOT ?14 OR starred IS NOT ?15 OR view_once IS NOT ?16
+                OR iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17) IS NOT raw
+                OR mentions_me IS NOT ?20 OR coalesce(envelope, ?21) IS NOT envelope)
             RETURNING n",
         )?
-        .query_row(&fields[..19], |r| r.get(0))
+        .query_row(&fields[..21], |r| r.get(0))
         .optional()?
     } else {
         Some(
             db.prepare_cached(
                 "INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, reply, detail, forwarded,
-                    edited_at, deleted, expires_at, starred, view_once, raw, v, n, chat, id, t)
+                    edited_at, deleted, expires_at, starred, view_once, raw, v, n, mentions_me, envelope, chat, id, t)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-                    ?22)
+                    ?22, ?23, ?24)
                 RETURNING n",
             )?
             .query_row(fields, |r| r.get(0))?,
@@ -960,25 +1308,24 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
     };
     let Some(n) = changed else { return Ok(false) };
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
-    if existing.is_none() {
-        db.prepare_cached("UPDATE chats SET message_count = message_count + 1 WHERE n = ?1")?.execute([chat])?;
-    }
-    // The chat's newest message sets its sort; older history never moves it. A new live message
-    // that's someone else's counts as unread, and one of yours means you've read the chat.
-    let counts = message.counts && existing.is_none();
+    // The chat's newest message sets its sort; older history never moves it.
     let seq = stamps.seq(CHAT, Some(chat));
     let moved = db
         .prepare_cached(
-            "UPDATE chats SET last_at = ?2, last_message = ?3, v = ?4,
-                unread = iif(?6, iif(?7, 0, unread + 1), unread),
-                mentions = iif(?6, iif(?7, 0, mentions + ?8), mentions),
-                marked_unread = iif(?6 AND ?7, 0, marked_unread)
+            "UPDATE chats SET last_at = ?2, last_message = ?3, v = ?4
             WHERE n = ?1 AND (last_message IS NULL OR last_message = ?3
                 OR ?5 > (SELECT t FROM messages WHERE n = last_message))",
         )?
-        .execute(params![chat, message.at.max(0), n, seq, t, counts, message.mine, message.mentions_me])?;
+        .execute(params![chat, message.at.max(0), n, seq, t])?;
     if moved > 0 {
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
+    }
+    let moved = stamps.unsettle(chat);
+    if message.mine {
+        moved.mine = moved.mine.max(Some(message.at));
+        moved.mine_live |= message.live;
+    } else if !message.live {
+        moved.history = moved.history.max(Some(message.at));
     }
     if existing.is_none() {
         apply_pending(db, stamps, chat, n, &chat_id, &message.id)?;
@@ -1095,7 +1442,8 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
         Amendment::React { emoji } => {
             let sender = someone.expect("a reaction's sender is made above");
             let changed = if emoji.is_empty() {
-                db.prepare_cached("DELETE FROM reactions WHERE message = ?1 AND sender = ?2")?.execute([n, sender])?
+                db.prepare_cached("DELETE FROM reactions WHERE message = ?1 AND sender = ?2 AND at <= ?3")?
+                    .execute([n, sender, at])?
             } else {
                 db.prepare_cached(
                     "INSERT INTO reactions (message, sender, emoji, at, mine) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1118,7 +1466,7 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
         Amendment::Revoke => db
             .prepare_cached(
                 "UPDATE messages SET deleted = 1, text = NULL, spans = NULL, summary = 'This message was deleted',
-                    reply = NULL, detail = NULL, raw = NULL, v = ?2
+                    reply = NULL, detail = NULL, raw = NULL, envelope = NULL, v = ?2
                 WHERE n = ?1 AND deleted = 0",
             )?
             .execute([n, seq])?,

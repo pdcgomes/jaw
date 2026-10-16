@@ -6,10 +6,15 @@ use prost::Message as _;
 use wa_proto::wa_web_protobuf_sync_action::SyncActionValue;
 
 use super::{is_person, user_jid};
-use crate::store::{Amend, Amendment, Change, Chat, Person};
+use crate::store::{Amend, Amendment, Change, Chat, Person, Read};
 
 /// Until when a chat muted for ever is muted: the last millisecond of the year 9999.
 pub const FOREVER: i64 = 253_402_300_799_999;
+
+/// Seconds since the epoch, as app state keeps a message range's times, in milliseconds.
+fn ms(seconds: i64) -> i64 {
+    if seconds.abs() < 100_000_000_000 { seconds.saturating_mul(1000) } else { seconds }
+}
 
 /// What one app-state mutation changes, and the account's own name if it's that.
 #[derive(Default)]
@@ -42,13 +47,18 @@ pub fn mutation(index: &[String], value: &[u8]) -> Applied {
             };
             applied.changes.push(chat(Chat { muted_until: Some(until), ..Chat::default() }));
         }
-        (Some("markChatAsRead"), Some(_)) => {
-            let read = value.mark_chat_as_read_action.and_then(|a| a.read).unwrap_or(false);
-            applied.changes.push(chat(if read {
-                Chat { unread: Some(0), mentions: Some(0), marked_unread: Some(false), ..Chat::default() }
+        (Some("markChatAsRead"), Some(jid)) => {
+            let action = value.mark_chat_as_read_action.unwrap_or_default();
+            if action.read.unwrap_or(false) {
+                // Read up to the newest message the range names, or its last message's time, which
+                // a replay of the mutation can't move back.
+                let range = action.message_range.unwrap_or_default();
+                let last = range.last_message_timestamp.map(ms).unwrap_or(at);
+                let ids = range.messages.iter().filter_map(|m| m.key.as_ref()?.id.clone()).collect();
+                applied.changes.push(Change::Read(Read { chat: user_jid(jid), at: last, ids, phone: None }));
             } else {
-                Chat { marked_unread: Some(true), ..Chat::default() }
-            }));
+                applied.changes.push(chat(Chat { marked_unread: Some(true), ..Chat::default() }));
+            }
         }
         (Some("contact"), Some(jid)) if is_person(jid) => {
             let action = value.contact_action.unwrap_or_default();
@@ -134,16 +144,39 @@ mod tests {
         assert_eq!(only_chat(mutation(&index(&["mute", ANA]), &forever)).muted_until, Some(FOREVER));
         let unmute = value(|v| v.mute_action = Some(action::MuteAction { muted: Some(false), ..Default::default() }));
         assert_eq!(only_chat(mutation(&index(&["mute", ANA]), &unmute)).muted_until, Some(0));
-        let read = value(|v| {
-            v.mark_chat_as_read_action = Some(action::MarkChatAsReadAction { read: Some(true), ..Default::default() })
-        });
-        let chat = only_chat(mutation(&index(&["markChatAsRead", ANA]), &read));
-        assert_eq!((chat.unread, chat.mentions, chat.marked_unread), (Some(0), Some(0), Some(false)));
         let unread = value(|v| {
             v.mark_chat_as_read_action = Some(action::MarkChatAsReadAction { read: Some(false), ..Default::default() })
         });
-        let chat = only_chat(mutation(&index(&["markChatAsRead", ANA]), &unread));
-        assert_eq!((chat.unread, chat.marked_unread), (None, Some(true)));
+        assert_eq!(only_chat(mutation(&index(&["markChatAsRead", ANA]), &unread)).marked_unread, Some(true));
+    }
+
+    #[test]
+    fn marking_a_chat_read_reads_it_up_to_the_newest_message_its_range_names() {
+        let read = value(|v| {
+            v.mark_chat_as_read_action = Some(action::MarkChatAsReadAction {
+                read: Some(true),
+                message_range: Some(action::SyncActionMessageRange {
+                    last_message_timestamp: Some(1_791_999_000),
+                    messages: vec![action::SyncActionMessage {
+                        key: Some(wa_proto::wa_common::MessageKey { id: Some("3EB0AA".into()), ..Default::default() }),
+                        timestamp: Some(1_791_999_000),
+                    }],
+                    ..Default::default()
+                }),
+            })
+        });
+        let applied = mutation(&index(&["markChatAsRead", ANA]), &read);
+        let [Change::Read(read)] = applied.changes.as_slice() else { panic!("expected a read position") };
+        assert_eq!(
+            (read.chat.as_str(), read.at, read.ids.as_slice(), read.phone),
+            (ANA, 1_791_999_000_000, &["3EB0AA".to_string()][..], None)
+        );
+        let bare = value(|v| {
+            v.mark_chat_as_read_action = Some(action::MarkChatAsReadAction { read: Some(true), ..Default::default() })
+        });
+        let applied = mutation(&index(&["markChatAsRead", ANA]), &bare);
+        let [Change::Read(read)] = applied.changes.as_slice() else { panic!("expected a read position") };
+        assert_eq!(read.at, 1_792_000_000_000, "without a range, the mutation's own time");
     }
 
     #[test]

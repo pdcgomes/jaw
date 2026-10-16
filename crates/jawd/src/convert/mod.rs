@@ -115,8 +115,7 @@ struct Envelope<'a> {
 }
 
 /// One message's changes: its row or the amendment it makes, the people it names, and what it
-/// says of its chat. `live` is for messages as they arrive, which count towards their chat's
-/// unread messages; history doesn't.
+/// says of its chat. `live` is for messages as they arrive rather than in history.
 pub fn message(info: &WebMessageInfo, me: &Me, live: bool) -> Vec<Change> {
     let chat = info.key.remote_jid.clone().unwrap_or_default();
     let id = info.key.id.clone().unwrap_or_default();
@@ -310,7 +309,7 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         expires_at,
         starred: info.starred.unwrap_or(false),
         view_once: wrapped.view_once,
-        counts: envelope.live && body.counts,
+        live: envelope.live,
         mentions_me,
         raw: Some(Packed::new(&info.encode_to_vec())),
         ..Message::default()
@@ -436,6 +435,7 @@ fn protocol_message(envelope: &Envelope, protocol: &e2e::ProtocolMessage, me: &M
                 detail: body.detail,
                 edited_at: Some(edited_at),
                 view_once: wrapped.view_once,
+                live: envelope.live,
                 raw: Some(Packed::new(&envelope.info.encode_to_vec())),
                 ..Message::default()
             };
@@ -461,6 +461,7 @@ fn system(envelope: &Envelope, kind: &'static str, sentence: &str) -> Message {
         kind,
         summary: sentence.to_string(),
         detail: Some(json!({ "system": sentence }).to_string()),
+        live: envelope.live,
         raw: Some(Packed::new(&envelope.info.encode_to_vec())),
         ..Message::default()
     }

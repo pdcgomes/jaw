@@ -1,36 +1,21 @@
-//! What jawd brings in once it's connected, each run: the contacts and push names whatsmeow keeps,
-//! every group with its members, app state never synced into this jaw.db (an account linked
-//! before jawd kept app state has it all in whatsmeow and none here), the phone numbers of LIDs
-//! jaw has none for, and avatars for the chats at the top of the list.
+//! What jawd brings in each time an engine connects: the contacts and push names whatsmeow keeps,
+//! every group with its members, every app-state collection again in full, the phone numbers of
+//! LIDs jaw has none for, and avatars for the chats at the top of the list.
 
-use super::Avatars;
+use super::{Avatars, Merges};
 use crate::convert::people;
 use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
 use crate::store::{Change, Lane, Store};
 use crate::work::Priority;
 
-/// Where sync remembers each app-state collection's version once it's synced, after this prefix.
-pub const APP_STATE: &str = "app_state:";
 /// whatsmeow's app-state collections.
-const COLLECTIONS: [&str; 5] = ["critical_block", "critical_unblock_low", "regular_high", "regular", "regular_low"];
+pub const COLLECTIONS: [&str; 5] = ["critical_block", "critical_unblock_low", "regular_high", "regular", "regular_low"];
 /// The most LIDs asked about at once.
 const LIDS: usize = 5_000;
 
-/// Which app-state collections to fetch again in full.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Resync {
-    /// None: the account was linked in this run, so whatsmeow syncs its app state in full by itself.
-    None,
-    /// Those jaw.db has never had in full.
-    Missing,
-    /// All of them: jawd didn't stop cleanly, so whatsmeow may have moved a version on past events
-    /// jawd never stored. Applying them again changes nothing that's already right.
-    All,
-}
-
-/// Brings the account's people, groups and app state in.
-pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, resync: Resync) {
+/// Brings the account's people, groups and, when `resync`, app state in.
+pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, merges: Merges, resync: bool) {
     match engine.call(pb::command::Kind::Contacts(pb::Contacts {})).await {
         Ok(pb::reply::Kind::ContactList(list)) => store_changes(&store, people::contacts(&list), "contacts").await,
         Ok(other) => eprintln!("jawd: the engine answered contacts with {other:?}"),
@@ -44,20 +29,16 @@ pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, resync: Res
         Ok(other) => eprintln!("jawd: the engine answered groups with {other:?}"),
         Err(e) => eprintln!("jawd: can't list the groups: {e}"),
     }
-    if resync != Resync::None {
-        let names: Vec<String> = COLLECTIONS
-            .iter()
-            .filter(|name| resync == Resync::All || matches!(store.remembered(&format!("{APP_STATE}{name}")), Ok(None)))
-            .map(|name| name.to_string())
-            .collect();
-        if !names.is_empty() {
-            eprintln!("jawd: fetching app state again in full ({resync:?}): {}", names.join(", "));
-            if let Err(e) = engine.call(pb::command::Kind::AppStateResync(pb::AppStateResync { names })).await {
-                eprintln!("jawd: can't fetch the app state: {e}");
-            }
+    if resync {
+        let names: Vec<String> = COLLECTIONS.iter().map(|name| name.to_string()).collect();
+        let started = std::time::Instant::now();
+        match engine.call(pb::command::Kind::AppStateResync(pb::AppStateResync { names })).await {
+            Ok(_) => eprintln!("jawd: fetched app state again in full in {:.1} s", started.elapsed().as_secs_f64()),
+            Err(e) => eprintln!("jawd: can't fetch the app state again: {e}"),
         }
     }
     lids(&store, &engine).await;
+    merges.poke();
     avatars.seed(&store).await;
 }
 

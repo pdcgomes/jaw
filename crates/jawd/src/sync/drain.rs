@@ -12,10 +12,10 @@ use tokio::sync::mpsc;
 use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
-use super::{Avatars, Shared, fetch};
+use super::{Avatars, Merges, Shared, fetch};
 use crate::convert::{self, Me, app_state, people};
 use crate::engine::pb;
-use crate::store::{Amend, Amendment, Change, Chat, Drained, Lane, Store};
+use crate::store::{Amend, Amendment, Change, Chat, Drained, Lane, Packed, Read, Store};
 use crate::work::Priority;
 
 /// Inbox rows read and converted at once.
@@ -134,13 +134,7 @@ pub fn receipt_changes(receipt: &pb::Receipt) -> Vec<Change> {
     }
     let status = match receipt.r#type.as_str() {
         "read-self" | "played-self" => {
-            return vec![Change::Chat(Chat {
-                id: chat,
-                unread: Some(0),
-                mentions: Some(0),
-                marked_unread: Some(false),
-                ..Chat::default()
-            })];
+            return vec![Change::Read(Read { chat, at: receipt.timestamp_ms, ids: receipt.ids.clone(), phone: None })];
         }
         "" | "delivered" => "delivered",
         "read" => "read",
@@ -195,13 +189,23 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
     if !info.sender_alt.is_empty() && convert::is_person(&info.sender) {
         out.changes.extend(people_joined(&info.sender, &info.sender_alt));
     }
-    let changes = convert::message(&web, me, true);
+    let mut changes = convert::message(&web, me, true);
     // A poll vote or an encrypted reaction is readable only through what the engine decrypted,
     // which the inbox row holds and a message's raw protobuf doesn't, so the row stays for the
     // jawd that tallies them.
     if changes.iter().any(|c| matches!(c, Change::Amend(Amend { what: Amendment::Keep { kind }, .. }) if kind != "pin"))
     {
         return false;
+    }
+    // The row keeps the engine's whole event, which says more than the WebMessageInfo made from it.
+    let id = web.key.id.as_deref().unwrap_or_default();
+    let envelope = Packed::new(&row.payload);
+    for change in &mut changes {
+        if let Change::Message(m) = change
+            && m.id == id
+        {
+            m.envelope = Some(envelope.clone());
+        }
     }
     out.changes.extend(changes);
     true
@@ -226,7 +230,13 @@ async fn read_inbox(store: &Store, after: i64) -> anyhow::Result<Vec<Row>> {
 }
 
 /// Converts the inbox as rows land, until jawd stops.
-pub async fn inbox(store: Store, live: Shared, offered: mpsc::UnboundedSender<fetch::Work>, avatars: Avatars) {
+pub async fn inbox(
+    store: Store,
+    live: Shared,
+    offered: mpsc::UnboundedSender<fetch::Work>,
+    avatars: Avatars,
+    merges: Merges,
+) {
     let inboxed = store.inboxed();
     let left: i64 = store
         .reads()
@@ -279,6 +289,7 @@ pub async fn inbox(store: Store, live: Shared, offered: mpsc::UnboundedSender<fe
             Ok(quarantined) => {
                 after = last;
                 pause = RETRY_FIRST;
+                merges.poke();
                 if from_before {
                     leftovers += count;
                 }

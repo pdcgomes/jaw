@@ -1,9 +1,10 @@
 //! History blobs, fetched a blob at a time as the phone offers them and converted in the
 //! background lane a conversation at a time. The message that offered a blob stays in the inbox
 //! until the blob's rows are in, and a blob already downloaded to the spool is used again, so a
-//! restart in the middle of history loses nothing and fetches nothing twice.
+//! restart in the middle of history loses nothing and fetches nothing twice. What a blob carries
+//! besides the messages kept as rows is kept raw in `history_kept` before the blob goes.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -12,11 +13,11 @@ use prost::Message as _;
 use tokio::sync::mpsc;
 use wa_proto::wa_web_protobufs_history_sync::{HistorySync, history_sync::HistorySyncType};
 
-use super::Shared;
+use super::{Merges, Shared};
 use crate::convert;
 use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, pb};
-use crate::store::{Change, Drained, Lane, Store};
+use crate::store::{Change, Drained, Lane, Packed, Store};
 
 /// What the converter hands the fetcher.
 pub enum Work {
@@ -42,47 +43,82 @@ const CHUNK: usize = 2_000;
 const RETRY_FIRST: Duration = Duration::from_secs(2);
 const RETRY_MOST: Duration = Duration::from_secs(60);
 
-/// Fetches and stores each blob offered, in order, until jawd stops.
+/// An offer waiting its turn: one that failed waits behind the others until its pause is over.
+struct Waiting {
+    offer: Offer,
+    pause: Duration,
+    until: Instant,
+}
+
+/// Fetches and stores each blob offered, oldest first, until jawd stops. A blob that can't be had
+/// yet goes behind the others and is tried again after a pause that doubles each time, so it never
+/// holds up the blobs after it; one that can never be had has its notification kept in quarantine.
 pub async fn run(
     mut offers: mpsc::UnboundedReceiver<Work>,
     store: Store,
     engine: Supervisor,
     live: Shared,
     spool: PathBuf,
+    merges: Merges,
 ) {
     let mut named = HashSet::new();
     let mut swept = false;
-    while let Some(work) = offers.recv().await {
-        let offer = match work {
-            Work::Offer(offer) => offer,
-            Work::Offered => {
+    let mut queue: VecDeque<Waiting> = VecDeque::new();
+    loop {
+        let now = Instant::now();
+        let ready = queue.iter().position(|waiting| waiting.until <= now);
+        let work = match (ready, queue.iter().map(|waiting| waiting.until).min()) {
+            (Some(_), _) => offers.try_recv().ok(),
+            (None, Some(until)) => tokio::select! {
+                work = offers.recv() => match work {
+                    Some(work) => Some(work),
+                    None => return,
+                },
+                () = tokio::time::sleep_until(until.into()) => None,
+            },
+            (None, None) => match offers.recv().await {
+                Some(work) => Some(work),
+                None => return,
+            },
+        };
+        match work {
+            Some(Work::Offer(offer)) => {
+                if !swept {
+                    named.insert(spool_name(&offer.id));
+                }
+                queue.push_back(Waiting { offer, pause: RETRY_FIRST, until: now });
+                continue;
+            }
+            Some(Work::Offered) => {
                 if !swept {
                     swept = true;
                     sweep(&spool, &named).await;
                 }
                 continue;
             }
-        };
-        if !swept {
-            named.insert(spool_name(&offer.id));
+            None => {}
         }
-        let mut pause = RETRY_FIRST;
-        loop {
-            match one(&offer, &store, &engine, &live, &spool).await {
-                Ok(()) => break,
-                Err(Failed::Later(why)) => {
-                    eprintln!("jawd: history {} waits: {why}; trying again in {pause:?}", offer.id);
-                    tokio::time::sleep(pause).await;
-                    pause = (pause * 2).min(RETRY_MOST);
-                }
-                Err(Failed::Never(why)) => {
-                    eprintln!("jawd: history {} can't be had: {why}; its notification is kept in quarantine", offer.id);
-                    let failed =
-                        vec![Change::Quarantined { source: "inbox", reference: offer.seq.to_string(), error: why }];
-                    if let Err(e) = store.apply(Lane::Background, failed).await {
-                        eprintln!("jawd: can't keep history {}'s notification in quarantine: {e:#}", offer.id);
-                    }
-                    break;
+        let Some(mut waiting) = ready.and_then(|i| queue.remove(i)) else { continue };
+        let offer = &waiting.offer;
+        match one(offer, &store, &engine, &live, &spool).await {
+            Ok(()) => merges.poke(),
+            Err(Failed::Later(why)) => {
+                eprintln!(
+                    "jawd: history {} waits: {why}; the blobs after it go first, and it's tried again in {:?}",
+                    offer.id, waiting.pause
+                );
+                waiting.until = Instant::now() + waiting.pause;
+                waiting.pause = (waiting.pause * 2).min(RETRY_MOST);
+                queue.push_back(waiting);
+            }
+            Err(Failed::Never(why)) => {
+                eprintln!("jawd: history {} can't be had: {why}; its notification is kept in quarantine", offer.id);
+                let failed =
+                    vec![Change::Quarantined { source: "inbox", reference: offer.seq.to_string(), error: why }];
+                if let Err(e) = store.apply(Lane::Background, failed).await {
+                    eprintln!("jawd: can't keep history {}'s notification in quarantine yet: {e:#}", offer.id);
+                    waiting.until = Instant::now() + waiting.pause;
+                    queue.push_back(waiting);
                 }
             }
         }
@@ -139,17 +175,19 @@ async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, s
     let decoded = tokio::task::spawn_blocking(move || {
         let history = HistorySync::decode(data.as_slice())?;
         let parts = convert::history::blob(&history, &me);
+        let rest = Packed::new(&convert::history::remainder(&history, &parts).encode_to_vec());
         Ok::<_, prost::DecodeError>((
             history.sync_type,
             history.chunk_order,
             history.progress,
             history.conversations.len(),
             parts,
+            rest,
         ))
     })
     .await
     .map_err(|e| Failed::Later(format!("converting it stopped: {e}")))?;
-    let (kind, chunk, progress, conversations, parts) = match decoded {
+    let (kind, chunk, progress, conversations, parts, rest) = match decoded {
         Ok(decoded) => decoded,
         Err(e) => {
             let _ = tokio::fs::remove_file(&path).await;
@@ -168,10 +206,14 @@ async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, s
             part = rest;
         }
     }
-    // The blob goes only once the notification's removal is on disk; a power cut before that
-    // brings the notification back, and the blob is still there for it.
+    // The blob goes only once what it carried besides its messages, and the notification's removal,
+    // are on disk; a power cut before that brings the notification back, and the blob is still
+    // there for it.
     store
-        .apply_durable(vec![Change::Drained(Drained::Inbox(offer.seq))])
+        .apply_durable(vec![
+            Change::HistoryKept { id: offer.id.clone(), raw: rest },
+            Change::Drained(Drained::Inbox(offer.seq)),
+        ])
         .await
         .map_err(|e| Failed::Later(format!("{e:#}")))?;
     let stored = storing.elapsed();

@@ -72,7 +72,7 @@ fn text_is_kept_with_its_spans_its_sender_and_its_raw_protobuf() {
         m.spans.as_deref(),
         Some(r#"[{"t":"text","s":"did you get the "},{"t":"bold","s":"photos"},{"t":"text","s":"?"}]"#)
     );
-    assert!(m.counts, "a live message counts towards unread");
+    assert!(m.live, "a live message says it's live");
     let raw = unpack(&m);
     assert_eq!(raw.message.unwrap().conversation.as_deref(), Some("did you get the *photos*?"));
 }
@@ -281,7 +281,7 @@ fn events_invites_calls_and_albums_have_a_line_each() {
         }),
         ..Default::default()
     });
-    assert_eq!((m.kind, m.summary.as_str(), m.counts), ("call", "Missed video call", false));
+    assert_eq!((m.kind, m.summary.as_str()), ("call", "Missed video call"));
     let m = row(e2e::Message {
         album_message: Some(Box::new(e2e::AlbumMessage {
             expected_image_count: Some(3),
@@ -428,11 +428,11 @@ fn a_disappearing_timer_sets_the_chat_and_leaves_a_line() {
     let line = rows(&info(ANA, e2e::Message::default()), true);
     assert!(line.is_empty());
     let m = changes.iter().find_map(|c| if let Change::Message(m) = c { Some(m) } else { None }).unwrap();
-    assert_eq!((m.kind, m.summary.as_str(), m.counts), ("system", "Disappearing messages turned on: 7 days", false));
+    assert_eq!((m.kind, m.summary.as_str()), ("system", "Disappearing messages turned on: 7 days"));
 }
 
 #[test]
-fn history_has_stub_lines_and_reactions_and_never_counts_as_unread() {
+fn history_has_stub_lines_and_reactions_and_says_it_isnt_live() {
     let mut stub = info(GROUP, e2e::Message::default());
     stub.message = None;
     stub.message_stub_type = Some(StubType::GroupParticipantAdd as i32);
@@ -457,7 +457,7 @@ fn history_has_stub_lines_and_reactions_and_never_counts_as_unread() {
     }];
     let changes = message(&text, &me(), false);
     let m = changes.iter().find_map(|c| if let Change::Message(m) = c { Some(m) } else { None }).unwrap();
-    assert!(!m.counts, "history doesn't count towards unread");
+    assert!(!m.live, "history isn't live");
     let amend = changes.iter().find_map(|c| if let Change::Amend(a) = c { Some(a) } else { None }).unwrap();
     assert_eq!((amend.target.as_str(), amend.mine, amend.at), ("3EB0AA", true, AT + 9));
 }

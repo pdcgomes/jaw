@@ -9,6 +9,7 @@ use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
 use super::drain::{self, Row};
 use super::*;
+use crate::engine::EngineError;
 use crate::store::read::{self, Around};
 
 const ANA: &str = "351910000002@s.whatsapp.net";
@@ -135,7 +136,7 @@ fn converting(store: &Store) -> tokio::task::JoinHandle<()> {
     let live: Shared = Arc::default();
     live.lock().unwrap().me = me();
     let (offered, _) = mpsc::unbounded_channel();
-    tokio::spawn(drain::inbox(store.clone(), live, offered, Avatars::new()))
+    tokio::spawn(drain::inbox(store.clone(), live, offered, Avatars::new(), Merges::default()))
 }
 
 fn scalar(home: &Path, sql: &str) -> i64 {
@@ -282,6 +283,7 @@ async fn app_state_pins_archives_and_marks_chats_as_the_phone_has_them() {
         "app_state",
         0,
         app_state(&["markChatAsRead", &chat(2)], |v| {
+            v.timestamp = Some(AT + 10_000);
             v.mark_chat_as_read_action = Some(action::MarkChatAsReadAction { read: Some(true), ..Default::default() })
         }),
         None,
@@ -575,12 +577,11 @@ fn a_history_blob_keeps_each_chat_as_the_phone_has_it() {
     };
     let parts = convert::history::blob(&history, &me());
     let chat = parts[0].iter().find_map(|c| if let Change::Chat(chat) = c { Some(chat) } else { None }).unwrap();
-    assert_eq!(
-        (chat.id.as_str(), chat.pinned, chat.muted_until, chat.unread),
-        (ANA, Some(AT), Some(AT + 3_600_000), Some(4))
-    );
+    assert_eq!((chat.id.as_str(), chat.pinned, chat.muted_until), (ANA, Some(AT), Some(AT + 3_600_000)));
+    let read = parts[0].iter().find_map(|c| if let Change::Read(read) = c { Some(read) } else { None }).unwrap();
+    assert_eq!(read.phone, Some((4, 0)), "the phone counts four unread, more than the blob carries");
     let message = parts[0].iter().find_map(|c| if let Change::Message(m) = c { Some(m) } else { None }).unwrap();
-    assert_eq!((message.chat.as_str(), message.counts), (ANA, false));
+    assert_eq!((message.chat.as_str(), message.live), (ANA, false));
     assert_eq!(parts[1].len(), 2, "the blob's LID map and push names");
 }
 
@@ -668,27 +669,18 @@ async fn receipts_move_your_message_forward_even_when_they_come_first() {
     .await;
     assert_eq!(receipts, (Some(AT + 1), Some(AT + 2)));
     let read_elsewhere = drain::receipt_changes(&receipt("read-self", AT + 3));
-    assert!(matches!(read_elsewhere.as_slice(), [Change::Chat(chat)] if chat.unread == Some(0)));
+    assert!(matches!(read_elsewhere.as_slice(), [Change::Read(read)] if read.at == AT + 3 && read.ids == ["mine"]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_clean_stop_is_noted_and_the_next_start_unnotes_it() {
+async fn a_clean_stop_is_noted_and_the_next_start_notes_it_is_running_before_it_returns() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
     assert_eq!(store.remembered(CLEAN).unwrap(), None, "a database jawd never stopped cleanly");
     stopped(&store, None).await;
     assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("1"));
-    let (_events, incoming) = mpsc::channel(1);
-    let running = tokio::spawn(run(
-        incoming,
-        store.clone(),
-        Arc::default(),
-        broadcast::channel(4).0,
-        None,
-        home.path().to_path_buf(),
-    ));
-    until("the start to be noted", || store.remembered(CLEAN).unwrap().as_deref() == Some("0")).await;
-    running.abort();
+    running(&store).await.unwrap();
+    assert_eq!(store.remembered(CLEAN).unwrap().as_deref(), Some("0"), "noted before the engine can start");
 }
 
 #[test]
@@ -710,4 +702,269 @@ fn a_live_poll_vote_stays_in_the_inbox_with_what_the_engine_decrypted() {
     let converted =
         drain::convert_rows(&[Row { seq: 7, kind: "message".into(), payload: live.encode_to_vec() }], &me());
     assert!(converted.changes.is_empty(), "nothing converted, and the row isn't drained");
+}
+
+/// What a scripted engine answers when asked for a history blob, by its notification's direct path.
+#[derive(Clone)]
+enum Blob {
+    Here(Vec<u8>),
+    /// WhatsApp didn't answer; asking again later may work.
+    NotYet,
+    /// WhatsApp no longer has it.
+    Gone,
+}
+
+/// An engine for tests: each instance says it's connected once it's running, answers what sync
+/// asks with little, writes the history blobs it has, notes what it was asked, and stops when told.
+#[derive(Clone, Default)]
+struct Scripted {
+    asked: Arc<Mutex<Vec<&'static str>>>,
+    blobs: Arc<Mutex<std::collections::HashMap<String, Blob>>>,
+    stop: Arc<tokio::sync::Notify>,
+    events: Arc<Mutex<Option<mpsc::Sender<crate::engine::Incoming>>>>,
+}
+
+fn connected() -> pb::Event {
+    pb::Event {
+        seq: 0,
+        kind: Some(pb::event::Kind::Connection(pb::Connection {
+            state: pb::connection::State::Connected as i32,
+            jid: "351910000001@s.whatsapp.net".into(),
+            ..Default::default()
+        })),
+    }
+}
+
+impl Scripted {
+    fn asked(&self, what: &str) -> usize {
+        self.asked.lock().unwrap().iter().filter(|asked| **asked == what).count()
+    }
+
+    async fn send(&self, event: pb::Event) {
+        let events = self.events.lock().unwrap().clone().expect("an engine is running");
+        events.send(crate::engine::Incoming { event, ack: None }).await.unwrap();
+    }
+
+    fn answer(&self, kind: pb::command::Kind) -> Result<pb::reply::Kind, EngineError> {
+        use pb::command::Kind;
+        let (name, answer) = match kind {
+            Kind::Contacts(_) => ("contacts", Ok(pb::reply::Kind::ContactList(Default::default()))),
+            Kind::Groups(_) => ("groups", Ok(pb::reply::Kind::GroupList(Default::default()))),
+            Kind::LidLookup(_) => ("lids", Ok(pb::reply::Kind::LidPairs(Default::default()))),
+            Kind::AppStateResync(resync) => {
+                assert_eq!(resync.names.len(), refresh::COLLECTIONS.len(), "every collection");
+                ("resync", Ok(pb::reply::Kind::Done(pb::Done {})))
+            }
+            Kind::HistoryDownload(download) => {
+                let notification = e2e::HistorySyncNotification::decode(download.notification.as_slice()).unwrap();
+                let path = notification.direct_path.unwrap_or_default();
+                let answer = match self.blobs.lock().unwrap().get(&path).cloned() {
+                    Some(Blob::Here(blob)) => {
+                        std::fs::create_dir_all(Path::new(&download.path).parent().unwrap()).unwrap();
+                        std::fs::write(&download.path, blob).unwrap();
+                        Ok(pb::reply::Kind::HistoryFile(pb::HistoryFile { path: download.path, ..Default::default() }))
+                    }
+                    Some(Blob::NotYet) => Err(EngineError::Failed { message: "no answer".into(), retry: true }),
+                    Some(Blob::Gone) | None => Err(EngineError::Failed { message: "404".into(), retry: false }),
+                };
+                ("history", answer)
+            }
+            _ => ("other", Err(EngineError::Failed { message: "not scripted".into(), retry: false })),
+        };
+        self.asked.lock().unwrap().push(name);
+        answer
+    }
+}
+
+impl crate::engine::Engine for Scripted {
+    fn kind(&self) -> &'static str {
+        "scripted"
+    }
+
+    fn start(
+        &self,
+        events: mpsc::Sender<crate::engine::Incoming>,
+    ) -> crate::engine::BoxFuture<'_, anyhow::Result<crate::engine::Instance>> {
+        let engine = self.clone();
+        Box::pin(async move {
+            *engine.events.lock().unwrap() = Some(events.clone());
+            let (commands, mut outgoing) = crate::engine::Commands::for_tests();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let _ = events.send(crate::engine::Incoming { event: connected(), ack: None }).await;
+            });
+            let serving = engine.clone();
+            let served = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        out = outgoing.recv() => match out {
+                            Some(crate::engine::Outgoing::Command { kind, reply }) => {
+                                let _ = reply.send(serving.answer(kind));
+                            }
+                            Some(crate::engine::Outgoing::Ack(_)) => {}
+                            None => return,
+                        },
+                        () = serving.stop.notified() => return,
+                    }
+                }
+            });
+            let exited: crate::engine::BoxFuture<'static, String> = Box::pin(async move {
+                let _ = served.await;
+                "told to stop".to_string()
+            });
+            let hello =
+                pb::Hello { protocol: crate::engine::PROTOCOL, program: "scripted".into(), whatsmeow: String::new() };
+            Ok(crate::engine::Instance { hello, commands, exited })
+        })
+    }
+}
+
+fn supervised(engine: &Scripted) -> (Supervisor, mpsc::Receiver<crate::engine::Incoming>) {
+    let (events, incoming) = mpsc::channel(64);
+    let quick = crate::engine::supervisor::Backoff {
+        first: Duration::from_millis(10),
+        most: Duration::from_millis(10),
+        settled: Duration::from_secs(60),
+    };
+    (Supervisor::spawn(Arc::new(engine.clone()), events, quick), incoming)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_engine_that_connects_fetches_app_state_again_and_a_reconnection_of_the_same_one_doesnt() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let engine = Scripted::default();
+    let (supervisor, incoming) = supervised(&engine);
+    let running = tokio::spawn(run(
+        incoming,
+        store.clone(),
+        Arc::default(),
+        broadcast::channel(16).0,
+        Some(supervisor),
+        home.path().to_path_buf(),
+    ));
+    until("the first engine's resync", || engine.asked("resync") == 1).await;
+    engine.send(connected()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!((engine.asked("contacts"), engine.asked("resync")), (1, 1), "the same engine connecting again");
+    engine.stop.notify_one();
+    until("the engine started again to resync", || engine.asked("resync") == 2).await;
+    running.abort();
+}
+
+fn blob(id: &str) -> Vec<u8> {
+    use wa_proto::wa_web_protobufs_history_sync::{Conversation, HistorySync, HistorySyncMsg};
+    HistorySync {
+        sync_type: 2,
+        conversations: vec![Conversation {
+            id: ANA.into(),
+            unread_count: Some(0),
+            messages: vec![HistorySyncMsg {
+                message: Some(WebMessageInfo {
+                    key: MessageKey {
+                        remote_jid: Some(ANA.into()),
+                        from_me: Some(false),
+                        id: Some(id.into()),
+                        participant: None,
+                    },
+                    message: Some(text("from the phone")),
+                    message_timestamp: Some((AT / 1000) as u64),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        global_settings: Some(Default::default()),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn offer(seq: i64, path: &str) -> fetch::Work {
+    let notification = e2e::HistorySyncNotification { direct_path: Some(path.into()), ..Default::default() };
+    fetch::Work::Offer(fetch::Offer { seq, id: format!("offer-{path}"), notification: notification.encode_to_vec() })
+}
+
+/// Puts `n` rows in the inbox for history notifications to name, numbered from 1.
+async fn notifications(store: &Store, n: usize) {
+    for _ in 0..n {
+        store.inbox("message", 0, b"a history notification".to_vec(), None);
+    }
+    store.apply(Lane::Live, Vec::new()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_history_blob_that_cant_be_had_yet_waits_behind_the_ones_after_it_and_one_thats_gone_is_quarantined() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    notifications(&store, 3).await;
+    let engine = Scripted::default();
+    engine.blobs.lock().unwrap().extend([
+        ("late".to_string(), Blob::NotYet),
+        ("here".to_string(), Blob::Here(blob("h1"))),
+        ("gone".to_string(), Blob::Gone),
+    ]);
+    let (supervisor, _incoming) = supervised(&engine);
+    until("the engine to run", || supervisor.status().state.name() == "running").await;
+    let (offered, offers) = mpsc::unbounded_channel();
+    let fetching = tokio::spawn(fetch::run(
+        offers,
+        store.clone(),
+        supervisor,
+        Arc::default(),
+        home.path().join("spool"),
+        Merges::default(),
+    ));
+    for work in [offer(1, "late"), offer(2, "here"), offer(3, "gone")] {
+        offered.send(work).unwrap();
+    }
+    until("the blob after the late one", || store.count("messages").unwrap() == 1).await;
+    until("the gone one's notification in quarantine", || store.count("quarantine").unwrap() == 1).await;
+    fetching.abort();
+    let inbox: Vec<i64> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT seq FROM inbox ORDER BY seq")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    assert_eq!(inbox, [1, 3], "the late one waits to be tried again; the gone one's row is kept with its quarantine");
+    assert_eq!(store.count("history_kept").unwrap(), 1, "what the blob carried besides its message");
+    let kept: Vec<u8> = query(&store, |db| Ok(db.query_row("SELECT raw FROM history_kept", [], |r| r.get(0))?)).await;
+    let kept =
+        wa_proto::wa_web_protobufs_history_sync::HistorySync::decode(crate::store::unpack(&kept).unwrap().as_slice())
+            .unwrap();
+    assert!(
+        kept.global_settings.is_some() && kept.conversations[0].messages.is_empty(),
+        "settings kept, rows' messages taken out"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_before_a_blobs_drain_uses_the_blob_in_the_spool_again_without_storing_anything_twice() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    notifications(&store, 1).await;
+    let spool = home.path().join("spool");
+    std::fs::create_dir_all(&spool).unwrap();
+    let file = spool.join("offer-here.pb");
+    std::fs::write(&file, blob("h1")).unwrap();
+    // The run before stored the blob's rows and stopped before the commit that drains it.
+    let history = wa_proto::wa_web_protobufs_history_sync::HistorySync::decode(blob("h1").as_slice()).unwrap();
+    for part in convert::history::blob(&history, &me()) {
+        store.apply(Lane::Background, part).await.unwrap();
+    }
+    assert!(file.exists(), "the blob stays until its drain is committed");
+    let engine = Scripted::default();
+    let (supervisor, _incoming) = supervised(&engine);
+    let (offered, offers) = mpsc::unbounded_channel();
+    let fetching =
+        tokio::spawn(fetch::run(offers, store.clone(), supervisor, Arc::default(), spool, Merges::default()));
+    offered.send(offer(1, "here")).unwrap();
+    until("the notification's drain", || store.count("inbox").unwrap() == 0).await;
+    fetching.abort();
+    assert_eq!(engine.asked("history"), 0, "the blob came from the spool");
+    assert_eq!(store.count("messages").unwrap(), 1, "nothing twice");
+    assert!(!file.exists());
 }

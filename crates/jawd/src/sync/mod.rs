@@ -9,6 +9,7 @@
 mod avatars;
 mod drain;
 mod fetch;
+mod merge;
 mod refresh;
 
 use std::collections::HashSet;
@@ -22,6 +23,7 @@ use prost::Message as _;
 use tokio::sync::{broadcast, mpsc};
 
 pub use self::avatars::Avatars;
+pub use self::merge::Merges;
 use crate::convert;
 use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, Incoming, pb};
@@ -80,8 +82,18 @@ const PROGRESS_EVERY: u64 = 100;
 /// Where sync keeps the account's JIDs between runs.
 const ME: &str = "me";
 /// Where sync keeps whether jawd last stopped cleanly: "1" from a clean shutdown until the next
-/// start, "0" while it runs.
+/// start, "0" while it runs, written before the engine starts.
 const CLEAN: &str = "clean";
+
+/// Notes durably that jawd is running, before the engine starts, so a stop that isn't clean is
+/// known at the next start; says so when the last one wasn't.
+pub async fn running(store: &Store) -> anyhow::Result<()> {
+    if matches!(store.remembered(CLEAN)?, Some(clean) if clean == "0") {
+        eprintln!("jawd: the last run didn't stop cleanly");
+    }
+    store.apply_durable(vec![Change::Remember { key: CLEAN.into(), value: "0".into() }]).await?;
+    Ok(())
+}
 
 /// Makes changes in the live lane without holding up the caller, saying if they fail.
 fn apply_soon(store: &Store, changes: Vec<Change>, what: &'static str) {
@@ -105,21 +117,28 @@ pub async fn run(
     if let Ok(Some(me)) = store.remembered(ME) {
         live.lock().expect("live state").me = convert::Me::new(me.split(' ').map(str::to_string));
     }
-    // whatsmeow moves an app-state collection's version on in session.db before jawd has stored
-    // what it carried, so after a stop that wasn't clean every collection is fetched again in full.
-    let unclean = !matches!(store.remembered(CLEAN), Ok(Some(clean)) if clean == "1");
-    if let Err(e) = store.apply(Lane::Live, vec![Change::Remember { key: CLEAN.into(), value: "0".into() }]).await {
-        eprintln!("jawd: can't note that jawd is running: {e:#}");
-    }
     let (offered, offers) = mpsc::unbounded_channel();
     let avatars = Avatars::new();
-    tokio::spawn(drain::inbox(store.clone(), live.clone(), offered, avatars.clone()));
+    let merges = Merges::default();
+    tokio::spawn(merge::run(store.clone(), merges.clone()));
+    tokio::spawn(drain::inbox(store.clone(), live.clone(), offered, avatars.clone(), merges.clone()));
     tokio::spawn(drain::history_raw(store.clone(), live.clone()));
     if let Some(engine) = &engine {
-        tokio::spawn(fetch::run(offers, store.clone(), engine.clone(), live.clone(), home.join("spool")));
+        tokio::spawn(fetch::run(
+            offers,
+            store.clone(),
+            engine.clone(),
+            live.clone(),
+            home.join("spool"),
+            merges.clone(),
+        ));
         tokio::spawn(avatars.clone().run(store.clone(), engine.clone(), home.clone()));
     }
-    let mut refreshed = false;
+    // whatsmeow moves an app-state collection's version on in session.db before it hands over what
+    // the version carried, so an engine that stopped in between leaves changes jawd never got. Each
+    // engine that connects (the first, and each one started again) fetches every collection again
+    // in full, which changes nothing that's already right. The restarts count says which engine.
+    let mut refreshed: Option<u32> = None;
     let mut linked_now = false;
     while let Some(Incoming { event, ack }) = incoming.recv().await {
         let kept = |kind: &'static str, payload: Vec<u8>, ack| store.inbox(kind, now_ms(), payload, ack);
@@ -135,14 +154,8 @@ pub async fn run(
             Some(pb::event::Kind::GroupChange(change)) => kept("group_change", change.encode_to_vec(), ack),
             Some(pb::event::Kind::Picture(picture)) => kept("picture", picture.encode_to_vec(), ack),
             Some(pb::event::Kind::Bench(bench)) => kept("bench", bench.payload, ack),
-            Some(pb::event::Kind::AppStateSynced(synced)) => {
-                let key = format!("{}{}", refresh::APP_STATE, synced.name);
-                apply_soon(
-                    &store,
-                    vec![Change::Remember { key, value: synced.version.to_string() }],
-                    "app state's version",
-                );
-            }
+            // Each engine fetches app state again in full, so jawd needn't keep the versions.
+            Some(pb::event::Kind::AppStateSynced(_)) => {}
             Some(pb::event::Kind::Receipt(receipt)) => kept("receipt", receipt.encode_to_vec(), ack),
             Some(pb::event::Kind::Connection(connection)) => {
                 let (pushed, me) = {
@@ -159,16 +172,19 @@ pub async fn run(
                 push(&pushes, "connection", pushed);
                 if let Some(me) = me {
                     apply_soon(&store, vec![Change::Remember { key: ME.into(), value: me }], "the account's JIDs");
-                    if !refreshed && let Some(engine) = &engine {
-                        refreshed = true;
-                        let resync = if linked_now {
-                            refresh::Resync::None
-                        } else if unclean {
-                            refresh::Resync::All
-                        } else {
-                            refresh::Resync::Missing
-                        };
-                        tokio::spawn(refresh::run(store.clone(), engine.clone(), avatars.clone(), resync));
+                    if let Some(engine) = &engine
+                        && refreshed != Some(engine.status().restarts)
+                    {
+                        refreshed = Some(engine.status().restarts);
+                        // An account linked in this run has its app state synced in full by whatsmeow.
+                        let resync = !std::mem::take(&mut linked_now);
+                        tokio::spawn(refresh::run(
+                            store.clone(),
+                            engine.clone(),
+                            avatars.clone(),
+                            merges.clone(),
+                            resync,
+                        ));
                     }
                 }
             }
@@ -209,26 +225,23 @@ pub async fn run(
     }
 }
 
-/// Ends jawd's run cleanly: the engine stops taking events from WhatsApp, what it was handing over
-/// is kept, and then jaw.db says the stop was clean, so the next start needn't fetch app state again.
+/// Ends jawd's run cleanly: the engine stops taking events from WhatsApp, and then jaw.db says the
+/// stop was clean.
 pub async fn stopped(store: &Store, engine: Option<&Supervisor>) {
     if let Some(engine) = engine {
         let stop = engine.call(pb::command::Kind::LinkCancel(pb::LinkCancel {}));
         if tokio::time::timeout(STOPPING, stop).await.is_err() {
-            eprintln!("jawd: the engine didn't stop in time, so the next start fetches app state again");
+            eprintln!("jawd: the engine didn't stop in time");
             return;
         }
-        tokio::time::sleep(SETTLING).await;
     }
     if let Err(e) = store.apply_durable(vec![Change::Remember { key: CLEAN.into(), value: "1".into() }]).await {
         eprintln!("jawd: can't note a clean stop: {e:#}");
     }
 }
 
-/// How long the engine has to disconnect at a clean stop, and how long what it was handing over
-/// has to be kept after.
+/// How long the engine has to disconnect at a clean stop.
 const STOPPING: std::time::Duration = std::time::Duration::from_secs(2);
-const SETTLING: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// Counts a message that arrived while catching up, and says how far it has got now and then.
 fn caught(live: &Shared, pushes: &broadcast::Sender<Push>, chat: &str) {

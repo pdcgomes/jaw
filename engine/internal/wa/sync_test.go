@@ -2,6 +2,8 @@ package wa
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -227,5 +230,25 @@ func TestAHistoryBlobIsWrittenWholeOrNotAtAll(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".part"); !os.IsNotExist(err) {
 		t.Fatalf("the .part file is still there: %v", err)
+	}
+}
+
+func TestAHistoryBlobWhatsAppNoLongerHasIsNotAskedForAgain(t *testing.T) {
+	for _, err := range []error{
+		whatsmeow.ErrMediaDownloadFailedWith403,
+		fmt.Errorf("downloading: %w", whatsmeow.ErrMediaDownloadFailedWith404),
+		fmt.Errorf("downloading: %w", whatsmeow.ErrMediaDownloadFailedWith410),
+	} {
+		if !gone(err) {
+			t.Errorf("%v should mean the blob is gone", err)
+		}
+	}
+	for _, err := range []error{
+		errors.New("connection reset"),
+		whatsmeow.DownloadHTTPError{Response: &http.Response{StatusCode: http.StatusServiceUnavailable}},
+	} {
+		if gone(err) {
+			t.Errorf("%v may pass, so the blob should be asked for again", err)
+		}
 	}
 }

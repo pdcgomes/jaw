@@ -242,7 +242,11 @@ const CHAT_COLUMNS: &str = "
     SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until,
         c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name,
         m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name,
-        mp.verified_name, mj.jid
+        mp.verified_name, mj.jid,
+        iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM (
+            SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g
+                JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person
+            WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL)
     FROM chats c
     LEFT JOIN people p ON p.n = c.person
     LEFT JOIN messages m ON m.n = c.last_message
@@ -251,9 +255,10 @@ const CHAT_COLUMNS: &str = "
 
 fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
     let id: String = r.get(1)?;
-    let name = match r.get::<_, Option<String>>(5)? {
-        Some(name) => name,
-        None => shown(r.get(16)?, r.get(17)?, r.get(18)?, Some(&id)),
+    // A group without a subject goes by its members' names, as the phone shows it.
+    let name = match (r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(29)?) {
+        (Some(name), _) | (None, Some(name)) => name,
+        (None, None) => shown(r.get(16)?, r.get(17)?, r.get(18)?, Some(&id)),
     };
     let last = match r.get::<_, Option<i64>>(19)? {
         Some(_) => {
@@ -317,7 +322,10 @@ pub fn chat(db: &Connection, n: i64) -> Result<Option<ChatRow>> {
 /// What message_row reads, from `messages m` joined with MESSAGE_JOINS.
 const MESSAGE_COLUMNS: &str = "
     SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''),
-        m.reply, m.detail,
+        iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.name', (
+            SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person
+            WHERE rj.jid = m.reply ->> 'from'))),
+        m.detail,
         m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once,
         p.n, p.name, p.push_name, p.verified_name, j.jid,
         (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false'))))
@@ -619,18 +627,31 @@ pub fn message_place(db: &Connection, chat: &str, id: &str) -> Result<Option<Mes
         .optional()?)
 }
 
-/// The chat's first unread message, counted back from its newest among those others sent, with
-/// its ID; none when nothing's unread.
+/// The chat's first unread message, with its ID: the first from others after where the chat was
+/// read, or, while the phone's own count stands in for where, that many of theirs before it; none
+/// when nothing's unread.
 pub fn first_unread(db: &Connection, chat: &str) -> Result<Option<(String, MessageCursor)>> {
-    let unread: Option<i64> =
-        db.prepare_cached("SELECT unread FROM chats WHERE id = ?1")?.query_row([chat], |r| r.get(0)).optional()?;
-    let Some(unread) = unread.filter(|&unread| unread > 0) else { return Ok(None) };
+    let found: Option<(i64, i64, Option<i64>, i64)> = db
+        .prepare_cached("SELECT n, unread, read_at, coalesce(phone_unread, 0) FROM chats WHERE id = ?1")?
+        .query_row([chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .optional()?;
+    let Some((n, _, read_at, phone)) = found.filter(|&(_, unread, _, _)| unread > 0) else { return Ok(None) };
+    let mut after = read_at.unwrap_or(i64::MIN);
+    if phone > 0 {
+        let back: Option<i64> = db
+            .prepare_cached(
+                "SELECT min(at) FROM (SELECT at FROM messages WHERE chat = ?1 AND at <= ?2 AND mine = 0
+                    AND kind NOT IN ('system', 'call') ORDER BY at DESC LIMIT ?3)",
+            )?
+            .query_row(params![n, after, phone], |r| r.get(0))?;
+        after = back.map_or(after, |at| at - 1);
+    }
     Ok(db
         .prepare_cached(
-            "SELECT id, at, n FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1) AND mine = 0
-            ORDER BY at DESC, n DESC LIMIT 1 OFFSET ?2",
+            "SELECT id, at, n FROM messages WHERE chat = ?1 AND at > ?2 AND mine = 0 AND kind NOT IN ('system', 'call')
+            ORDER BY at, n LIMIT 1",
         )?
-        .query_row(params![chat, unread - 1], |r| Ok((r.get(0)?, MessageCursor { at: r.get(1)?, n: r.get(2)? })))
+        .query_row(params![n, after], |r| Ok((r.get(0)?, MessageCursor { at: r.get(1)?, n: r.get(2)? })))
         .optional()?)
 }
 

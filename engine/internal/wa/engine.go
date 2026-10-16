@@ -467,7 +467,7 @@ func (e *Engine) historyDownload(c *enginepb.HistoryDownload) *enginepb.Reply {
 	}
 	history, err := e.client.DownloadHistorySync(e.ctx, notification, true)
 	if err != nil {
-		return failure(fmt.Sprintf("can't download the history: %v", err), true)
+		return failure(fmt.Sprintf("can't download the history: %v", err), !gone(err))
 	}
 	data, err := proto.Marshal(history)
 	if err != nil {
@@ -484,6 +484,14 @@ func (e *Engine) historyDownload(c *enginepb.HistoryDownload) *enginepb.Reply {
 		Bytes:         uint64(len(data)),
 		Conversations: uint32(len(history.GetConversations())),
 	}}}
+}
+
+// gone says whether a download failed because WhatsApp no longer has the file, so asking again
+// can't help.
+func gone(err error) bool {
+	return errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith403) ||
+		errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith404) ||
+		errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith410)
 }
 
 // writeWhole writes data to path through a .part file, synced before it's renamed into place, and

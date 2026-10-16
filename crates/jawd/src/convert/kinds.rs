@@ -20,13 +20,11 @@ pub struct Body {
     pub spans: Vec<Span>,
     pub summary: String,
     pub detail: Option<String>,
-    /// Whether it counts towards its chat's unread messages.
-    pub counts: bool,
 }
 
 impl Body {
     fn new(kind: &'static str, summary: impl Into<String>) -> Body {
-        Body { kind, text: None, spans: Vec::new(), summary: summary.into(), detail: None, counts: true }
+        Body { kind, text: None, spans: Vec::new(), summary: summary.into(), detail: None }
     }
 
     /// A body whose text is `text`, parsed, and whose summary is its first line, or `fallback`
@@ -108,14 +106,14 @@ pub fn body(m: &e2e::Message, mentioned: &[String]) -> Body {
     if let Some(x) = m.keep_in_chat_message.as_ref() {
         let kept = x.keep_type == Some(e2e::KeepType::KeepForAll as i32);
         let sentence = if kept { "A message was kept in the chat" } else { "A message is no longer kept" };
-        return Body { counts: false, ..Body::new("system", sentence) }.detail(json!({ "system": sentence }));
+        return Body::new("system", sentence).detail(json!({ "system": sentence }));
     }
     if m.pin_in_chat_message.is_some() {
         let sentence = "A message was pinned or unpinned";
-        return Body { counts: false, ..Body::new("system", sentence) }.detail(json!({ "system": sentence }));
+        return Body::new("system", sentence).detail(json!({ "system": sentence }));
     }
     if is_only_plumbing(m) {
-        return Body { counts: false, ..Body::new(NOTHING, "") };
+        return Body::new(NOTHING, "");
     }
     Body::new("unknown", UNKNOWN)
 }
@@ -335,7 +333,7 @@ fn call(x: &e2e::CallLogMessage) -> Body {
         Some(CallOutcome::Failed) => format!("Failed {what}"),
         _ => with_length(&capitalised(what), seconds),
     };
-    Body { counts: false, ..Body::new("call", sentence.clone()) }.detail(json!({ "system": sentence, "video": video }))
+    Body::new("call", sentence.clone()).detail(json!({ "system": sentence, "video": video }))
 }
 
 fn album(x: &e2e::AlbumMessage) -> Body {

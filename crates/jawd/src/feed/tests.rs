@@ -12,7 +12,7 @@ use super::window::{chat_row, message_row};
 use super::*;
 use crate::state::State;
 use crate::store::read::{self, Around};
-use crate::store::{Change, Chat, Lane, Message, Person, Store};
+use crate::store::{Change, Chat, Lane, Message, Person, Read, Store};
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
@@ -404,7 +404,8 @@ impl World {
             }
             78..85 => {
                 let chat = self.rng.pick(&self.chats).clone();
-                vec![Change::Chat(Chat { id: chat, unread: Some(self.rng.below(5) as u32), ..Chat::default() })]
+                let unread = self.rng.below(5) as u32;
+                vec![Change::Read(Read { chat, at: self.clock, ids: Vec::new(), phone: Some((unread, 0)) })]
             }
             85..92 => {
                 let who = person(self.rng.below(DIRECT + 4));
@@ -453,7 +454,8 @@ async fn windows_match_fresh_queries_after_random_writes() {
             world.chats.iter().map(|chat| Change::Chat(Chat { id: chat.clone(), ..Chat::default() })).collect();
         seeding.extend((0..60).flat_map(|_| world.new_message_or_two()));
         bed.apply(seeding).await;
-        bed.apply(vec![Change::Chat(Chat { id: GROUP.into(), unread: Some(3), ..Chat::default() })]).await;
+        let read = Read { chat: GROUP.into(), at: world.clock, ids: Vec::new(), phone: Some((3, 0)) };
+        bed.apply(vec![Change::Read(read)]).await;
         let mut watcher = bed.watcher(64);
         let wants = [
             Want::Chats { archived: false, anchor: None, before: 0, after: 5 },
