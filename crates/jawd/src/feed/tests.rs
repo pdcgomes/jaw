@@ -622,13 +622,40 @@ async fn a_burst_of_2000_changes_becomes_at_most_20_batches_a_second_per_window(
     let took = started.elapsed().as_secs_f64();
     for watch in [&chats, &messages] {
         let batches = &times[watch];
-        assert!(busiest(batches) <= 20, "{watch}: {} batches in one second", busiest(batches));
+        // A window's batches go at least 50 ms apart, so 20 a second; they're timed here as this
+        // test's task receives them, and its scheduling can bring two receipts closer, so one more.
+        assert!(busiest(batches) <= 21, "{watch}: {} batches in one second", busiest(batches));
         assert!(batches.len() >= 10, "{watch}: only {} batches in {took:.1} s", batches.len());
     }
     let want = Want::Messages { chat: OPEN.into(), anchor: None, before: 50, after: 0 };
     windows[&messages].assert_matches(&fresh(&bed.store, &want).await, "the messages window after the burst");
     let want = Want::Chats { archived: false, anchor: None, before: 0, after: 20 };
     windows[&chats].assert_matches(&fresh(&bed.store, &want).await, "the chat list after the burst");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_to_the_open_chat_reaches_its_conversation_before_the_chat_list() {
+    let bed = Bed::new(brisk());
+    bed.apply(vec![Change::Message(text(OPEN, "first", 1_000, Some(OPEN), "hi"))]).await;
+    let mut watcher = bed.watcher(64);
+    // Watched first, so it would be read first if the order of watching decided.
+    let chats = watcher.watch("chats.watch", json!({"around": "top", "after": 20})).await;
+    let messages = watcher.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 50})).await;
+    let seq = bed.apply(vec![Change::Message(text(OPEN, "lone", 2_000, Some(OPEN), "on its own"))]).await;
+    while watcher.seen < seq || watcher.client.pending() {
+        let ready =
+            tokio::time::timeout(Duration::from_secs(10), watcher.client.ready()).await.expect("nothing happened");
+        if let Ready::Changes(Ok(changes)) = &ready {
+            watcher.seen = watcher.seen.max(changes.seq);
+        }
+        watcher.client.handle(ready).await;
+    }
+    let mut order = Vec::new();
+    while let Ok(line) = watcher.lines.try_recv() {
+        let FromJawd::Push(push) = serde_json::from_slice(&line).unwrap() else { panic!("a reply among the pushes") };
+        order.push(push.params["watch"].as_str().unwrap().to_string());
+    }
+    assert_eq!(order, [messages, chats]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -697,11 +724,13 @@ async fn a_slow_client_is_bounded_holds_nobody_up_and_is_told_to_watch_again() {
     let mut quick = bed.watcher(64);
     let quick_messages = quick.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 30})).await;
 
-    let writing = tokio::spawn(burst(bed.store.clone(), "b", 10_000));
-    // Both clients run; only the quick one's interface reads.
+    let mut writing = tokio::spawn(burst(bed.store.clone(), "b", 10_000));
+    // Both clients run; only the quick one's interface reads. The writer is watched too, since
+    // two idle clients rightly never wake.
     let mut quick_during = 0;
-    while !writing.is_finished() {
+    let (watched, seq) = loop {
         tokio::select! {
+            written = &mut writing => break written.unwrap(),
             ready = slow.client.ready() => slow.client.handle(ready).await,
             ready = quick.client.ready() => {
                 if let Ready::Changes(Ok(changes)) = &ready {
@@ -716,8 +745,7 @@ async fn a_slow_client_is_bounded_holds_nobody_up_and_is_told_to_watch_again() {
             quick_during += 1;
         }
         assert!(slow.lines.len() <= room);
-    }
-    let (watched, seq) = writing.await.unwrap();
+    };
     assert!(quick_during >= 5, "the quick interface got {quick_during} batches while the slow one held its queue full");
     assert!(
         watched < alone * 3 + ms(250),

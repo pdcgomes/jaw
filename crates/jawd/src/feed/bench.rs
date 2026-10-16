@@ -224,7 +224,7 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         percentile(&delays, 1.0)
     );
     println!(
-        "a lone message   p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms from commit to push, for {} messages {} ms apart after the burst; {:.0} window reads a second",
+        "a lone message   p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms from commit to the open chat's window, for {} messages {} ms apart after the burst; {:.0} window reads a second",
         percentile(&alone_delays, 0.5),
         percentile(&alone_delays, 0.99),
         percentile(&alone_delays, 1.0),
@@ -425,6 +425,7 @@ fn watch(
             "messages" => {
                 let push: MessagesPush = serde_json::from_value(push.params)?;
                 seen.messages.push(read);
+                // Only the messages window's pushes are timed: a lone message shows there first.
                 seen.rows.extend(push.upsert.into_iter().map(|row| (row.id, read)));
             }
             _ => {}

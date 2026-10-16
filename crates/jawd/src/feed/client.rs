@@ -598,16 +598,18 @@ impl Client {
         }
         let holding = (self.catching_up)();
         let now = Instant::now();
-        let due: Vec<String> = self
+        let mut due: Vec<(bool, String)> = self
             .windows
             .iter()
             .filter(|(_, window)| {
                 window.due(&self.timing).is_some_and(|due| due <= now)
                     || (window.reorder && window.may_reorder(now, holding, &self.timing))
             })
-            .map(|(watch, _)| watch.clone())
+            .map(|(watch, window)| (matches!(window.spec, Spec::Chats(_)), watch.clone()))
             .collect();
-        for watch in due {
+        // Conversations first: a lone message shows there, and the chat list can wait a read.
+        due.sort_by_key(|(chats, _)| *chats);
+        for (_, watch) in due {
             if self.out.capacity() == 0 {
                 self.blocked.get_or_insert_with(Instant::now);
                 return;
