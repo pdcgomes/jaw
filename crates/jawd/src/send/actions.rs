@@ -29,7 +29,8 @@ use crate::store::{Amendment, Change};
 
 /// A message as an action finds it, by ID in a chat, or in a chat being merged into it.
 pub(super) const TARGET_IN: &str =
-    "SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status
+    "SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status,
+        m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text
     FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender
     LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep
     WHERE c.id = ?1";
@@ -37,7 +38,7 @@ pub(super) const TARGET_IN: &str =
 /// messages' index for each chat, chats being few next to messages, which CROSS JOIN keeps SQLite
 /// from scanning instead.
 pub(super) const TARGET_ANYWHERE: &str = "SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted,
-        m.status
+        m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text
     FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LEFT JOIN person_jids j ON j.n = m.sender
     LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep
     LIMIT 4";
@@ -64,6 +65,15 @@ pub(super) struct Target {
     pub kind: String,
     pub deleted: bool,
     pub status: Option<String>,
+    /// Its n, and its chat's, as the writer finds it.
+    pub n: i64,
+    pub chat_n: i64,
+    pub view_once: bool,
+    /// How many times it had been forwarded when it came.
+    pub forwarded: u32,
+    /// Its WebMessageInfo, packed.
+    pub raw: Option<Vec<u8>>,
+    pub text: Option<String>,
 }
 
 pub(super) enum Found {
@@ -85,6 +95,12 @@ fn target_row(id: &str, r: &rusqlite::Row) -> rusqlite::Result<Target> {
         kind: r.get(5)?,
         deleted: r.get(6)?,
         status: r.get(7)?,
+        n: r.get(8)?,
+        chat_n: r.get(9)?,
+        view_once: r.get(10)?,
+        forwarded: r.get::<_, i64>(11)?.clamp(0, i64::from(u32::MAX)) as u32,
+        raw: r.get(12)?,
+        text: r.get(13)?,
     })
 }
 
@@ -155,20 +171,25 @@ async fn enqueue(inner: &Arc<Inner>, step: Step, written: Written, what: &str) -
             }
             Ok(Value::Object(Default::default()))
         }
-        Some(Enqueued::Full { waiting, failed }) => {
-            let mut error = Error::new(
-                code::LIMIT,
-                format!(
-                    "{waiting} messages and actions of yours are waiting to send, {failed} of them failed; \
-                    jawd takes more once some have gone or been retried"
-                ),
-            );
-            error.data = Some(serde_json::json!({ "limit": "outbox", "waiting": waiting, "failed": failed }));
-            Err(error)
-        }
+        Some(Enqueued::Full { waiting, failed }) => Err(full(waiting, failed)),
         Some(Enqueued::Gone) => Err(Error::new(code::NOT_FOUND, "the message went before jawd could do that")),
-        None => Err(Error::new(code::INTERNAL, format!("jawd kept nothing, so it couldn't {what}"))),
+        Some(Enqueued::Many(_)) | None => {
+            Err(Error::new(code::INTERNAL, format!("jawd kept nothing, so it couldn't {what}")))
+        }
     }
+}
+
+/// The protocol's error for an outbox holding as many as it may.
+pub(super) fn full(waiting: u64, failed: u64) -> Error {
+    let mut error = Error::new(
+        code::LIMIT,
+        format!(
+            "{waiting} messages and actions of yours are waiting to send, {failed} of them failed; \
+            jawd takes more once some have gone or been retried"
+        ),
+    );
+    error.data = Some(serde_json::json!({ "limit": "outbox", "waiting": waiting, "failed": failed }));
+    error
 }
 
 /// Queues an action on `target` whose effect is `effect` and whose message to WhatsApp is `raw`.

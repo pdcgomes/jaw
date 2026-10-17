@@ -974,6 +974,23 @@ async fn each_sending_call_that_keeps_something_is_one_synced_commit() {
     let before = synced();
     running.call("typing", json!({ "chat": ANA, "state": "composing" })).await.unwrap();
     assert_eq!(synced() - before, 0, "typing keeps nothing");
+    let actions = [
+        ("react", json!({ "message": "m1", "emoji": "👍" })),
+        ("edit", json!({ "message": id, "text": "three" })),
+        ("forward", json!({ "messages": ["m1", id], "to": [ANA, RUI] })),
+        ("delete", json!({ "message": id, "for": "everyone" })),
+        ("delete", json!({ "message": "m1", "for": "me" })),
+    ];
+    for (method, params) in actions {
+        let before = synced();
+        running.call(method, params.clone()).await.unwrap();
+        assert_eq!(synced() - before, 1, "{method} {params}");
+    }
+    for (method, params) in [("message.info", json!({ "message": id })), ("chat.info", json!({ "chat": ANA }))] {
+        let before = synced();
+        running.call(method, params).await.unwrap();
+        assert_eq!(synced() - before, 0, "{method} keeps nothing");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1336,12 +1353,14 @@ async fn chat_info_gives_a_groups_members_once_each_with_their_numbers_and_admin
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn replies_mentions_and_chat_info_go_through_the_socket_as_jaw_asks_for_them() {
+async fn every_message_action_goes_through_the_socket_as_jaw_asks_for_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
     running.members(CLIMBING, &[RUI]).await;
     let rui = named(&running, RUI, "Rui").await;
     running.arrives(CLIMBING, RUI, "g1", now_ms() - 1_000).await;
+    running.arrives(CLIMBING, RUI, "g2", now_ms() - 900).await;
+    running.chats(&[ANA]).await;
     let socket = serve(&running, home.path());
     let replies = ask_socket(
         &socket,
@@ -1352,16 +1371,40 @@ async fn replies_mentions_and_chat_info_go_through_the_socket_as_jaw_asks_for_th
                 json!({ "chat": CLIMBING, "text": "@Rui sim", "key": "jaw-1", "reply": "g1", "mentions": [format!("person:{rui}")] }),
             ),
             ("chat.info", json!({ "chat": "nobody@g.us" })),
+            ("react", json!({ "message": "g1", "emoji": "❤️" })),
+            ("forward", json!({ "messages": ["g1"], "to": [ANA] })),
+            ("delete", json!({ "message": "g2", "for": "me" })),
         ],
     )
     .await;
     let names: Vec<&str> =
         replies[0]["result"]["members"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"Rui"), "{}", replies[0]);
-    let row = &replies[1]["result"]["row"];
-    assert_eq!(row["reply"], json!({ "id": "g1", "from": "Rui", "summary": "message g1" }), "{row}");
-    assert_eq!(row["spans"][0], json!({ "t": "mention", "s": "@Rui", "person": RUI }), "{row}");
+    let reply = &replies[1]["result"]["row"];
+    assert_eq!(reply["reply"], json!({ "id": "g1", "from": "Rui", "summary": "message g1" }), "{reply}");
+    assert_eq!(reply["spans"][0], json!({ "t": "mention", "s": "@Rui", "person": RUI }), "{reply}");
     assert_eq!(replies[2]["error"]["code"], code::NOT_FOUND);
+    assert_eq!((&replies[3]["result"], &replies[5]["result"]), (&json!({}), &json!({})));
+    let forwarded =
+        replies[4]["result"]["messages"][0].as_str().unwrap_or_else(|| panic!("{}", replies[4])).to_string();
+    let mine = replies[1]["result"]["message"].as_str().unwrap().to_string();
+    let more = ask_socket(
+        &socket,
+        vec![
+            ("edit", json!({ "message": mine, "text": "sim, vou" })),
+            ("message.info", json!({ "message": mine })),
+            ("delete", json!({ "message": forwarded, "for": "everyone" })),
+            ("react", json!({ "message": "nope", "emoji": "❤️" })),
+        ],
+    )
+    .await;
+    assert_eq!((&more[0]["result"], &more[2]["result"]), (&json!({}), &json!({})), "{more:?}");
+    let named = more[1]["result"]["recipients"].as_array().unwrap().iter().any(|r| r["name"] == "Rui");
+    assert!(named, "{}", more[1]);
+    assert_eq!(more[3]["error"]["code"], code::NOT_FOUND);
+    until_stored(&running).await;
+    assert!(row(&running, CLIMBING, "g2").await.is_none());
+    assert_eq!(stored_text(&running, &mine).await, "sim, vou");
 }
 
 /// Message `id` in `chat` as a window shows it, if jawd has it.
@@ -1689,6 +1732,184 @@ async fn an_action_shows_in_windows_at_once_and_its_row_holds_it_only_once_whats
     assert!(deleted);
 }
 
+/// A photo from Ana, as WhatsApp sent it, with what downloading it again needs.
+async fn photo_from(running: &Running, chat: &str, id: &str, forwarded: u32) {
+    use wa_proto::wa_web_protobufs_web::WebMessageInfo;
+    let context = (forwarded > 0).then(|| {
+        Box::new(wa_proto::wa_web_protobufs_e2e::ContextInfo {
+            is_forwarded: Some(true),
+            forwarding_score: Some(forwarded),
+            ..Default::default()
+        })
+    });
+    let image = wa_proto::wa_web_protobufs_e2e::ImageMessage {
+        url: Some("https://mmg.whatsapp.net/photo".into()),
+        media_key: Some(vec![7; 32]),
+        caption: Some("o lago".into()),
+        mimetype: Some("image/jpeg".into()),
+        context_info: context,
+        ..Default::default()
+    };
+    let info = WebMessageInfo {
+        key: wa_proto::wa_common::MessageKey {
+            remote_jid: Some(chat.into()),
+            from_me: Some(false),
+            id: Some(id.into()),
+            participant: None,
+        },
+        message: Some(wa_proto::wa_web_protobufs_e2e::Message {
+            image_message: Some(Box::new(image)),
+            ..Default::default()
+        }),
+        message_timestamp: Some((now_ms() / 1000) as u64),
+        ..Default::default()
+    };
+    let changes = crate::convert::message(&info, &crate::convert::Me::default(), true);
+    running.store.apply(Lane::Live, changes).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_sends_each_message_to_each_chat_in_order_as_new_ones_of_yours_marked_forwarded() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.members(CLIMBING, &[RUI]).await;
+    running.chats(&[RUI]).await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    photo_from(&running, ANA, "p1", 4).await;
+    running.call("draft.set", json!({ "chat": RUI, "text": "e tu?" })).await.unwrap();
+    let params = json!({ "messages": ["m1", "p1"], "to": [RUI, CLIMBING], "key": "jaw-fwd-1" });
+    let answer = running.call("forward", params.clone()).await.unwrap();
+    let ids: Vec<String> = serde_json::from_value(answer["messages"].clone()).unwrap();
+    assert_eq!(ids.len(), 4, "each message to each chat: {answer}");
+    let again = running.call("forward", params).await.unwrap();
+    assert_eq!(again, answer, "asked again with its key, the same messages");
+    sent(&running, 4).await;
+    until_stored(&running).await;
+    let sends = running.world.sends();
+    assert_eq!(sends.len(), 4, "and nothing more went");
+    let order: Vec<(&str, &str)> = sends.iter().map(|s| (s.chat.as_str(), s.id.as_str())).collect();
+    assert_eq!(
+        order.iter().filter(|(chat, _)| *chat == RUI).map(|(_, id)| *id).collect::<Vec<_>>(),
+        [ids[0].as_str(), ids[1].as_str()],
+        "chat by chat, in order"
+    );
+    let raws = raws(&running);
+    let text = raws.iter().find_map(|m| m.extended_text_message.as_deref()).expect("the text, as extended text");
+    let context = text.context_info.as_deref().unwrap();
+    assert_eq!(
+        (text.text.as_deref(), context.is_forwarded, context.forwarding_score),
+        (Some("message m1"), Some(true), Some(1))
+    );
+    let image = raws.iter().find_map(|m| m.image_message.as_deref()).expect("the photo, as it came");
+    assert_eq!(
+        (image.url.as_deref(), image.media_key.as_deref()),
+        (Some("https://mmg.whatsapp.net/photo"), Some(&[7u8; 32][..]))
+    );
+    assert_eq!(image.context_info.as_deref().and_then(|c| c.forwarding_score), Some(5), "once more than it had been");
+    let photo = row(&running, RUI, &ids[1]).await.unwrap();
+    assert_eq!((photo.kind.as_str(), photo.mine, photo.forwarded), ("image", true, 5));
+    assert!(matches!(photo.status.as_deref(), Some("sent" | "delivered" | "read")), "with ticks of its own");
+    let chats = running.query(|db| read::chats(db, false, None, 10)).await;
+    let rui = chats.iter().find(|c| c.id == RUI).unwrap();
+    assert_eq!(rui.draft.as_deref(), Some("e tu?"), "what was typed there stays");
+    let refused = |params: Value| running.call("forward", params);
+    let six: Vec<String> = (0..6).map(|n| format!("35193000000{n}@s.whatsapp.net")).collect();
+    assert_eq!(refused(json!({ "messages": ["m1"], "to": six })).await.unwrap_err().code, code::LIMIT);
+    assert_eq!(refused(json!({ "messages": ["m1"], "to": ["nobody@g.us"] })).await.unwrap_err().code, code::NOT_FOUND);
+    assert_eq!(refused(json!({ "messages": ["nope"], "to": [RUI] })).await.unwrap_err().code, code::NOT_FOUND);
+    assert_eq!(refused(json!({ "messages": [], "to": [RUI] })).await.unwrap_err().code, code::INVALID_PARAMS);
+    let revoke = Amend { what: Amendment::Revoke, ..other_of(ANA, "m1") };
+    running.store.apply(Lane::Live, vec![Change::Amend(revoke)]).await.unwrap();
+    assert_eq!(refused(json!({ "messages": ["m1"], "to": [RUI] })).await.unwrap_err().code, code::NOT_ALLOWED);
+    let once = Message { view_once: true, ..message_from(ANA, "once") };
+    let line = Message { kind: "system", ..message_from(ANA, "line") };
+    running.store.apply(Lane::Live, vec![Change::Message(once), Change::Message(line)]).await.unwrap();
+    for id in ["once", "line"] {
+        assert_eq!(
+            refused(json!({ "messages": [id], "to": [RUI] })).await.unwrap_err().code,
+            code::NOT_ALLOWED,
+            "{id}"
+        );
+    }
+    assert_eq!(running.world.sends().len(), 4, "nothing went for what was refused");
+}
+
+/// A text message from someone else in a one-to-one chat with them.
+fn message_from(chat: &str, id: &str) -> Message {
+    Message {
+        chat: chat.into(),
+        id: id.into(),
+        at: now_ms(),
+        sender: Some(chat.into()),
+        kind: "text",
+        text: Some(format!("message {id}")),
+        summary: format!("message {id}"),
+        live: true,
+        ..Message::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn message_info_gives_each_recipients_times_from_their_receipts_and_keeps_them_once_the_message_settles() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_secs(3_600), read: Duration::from_secs(3_600) });
+    let (sofia, sofia_lid) = ("351915555555@s.whatsapp.net", "100000000005@lid");
+    running.members(CLIMBING, &[RUI, sofia]).await;
+    named(&running, RUI, "Rui").await;
+    let both = Person { jids: vec![sofia.into(), sofia_lid.into()], name: Some("Sofia".into()), ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
+    running.world.gate(true);
+    let id = running.send(CLIMBING, "quem vem?").await;
+    let info = |id: String| running.call("message.info", json!({ "message": id }));
+    let pending = info(id.clone()).await.unwrap();
+    assert_eq!(pending["sent"], Value::Null, "not sent yet");
+    let waiting: Vec<(&str, &Value)> = pending["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap(), &r["delivered"]))
+        .collect();
+    assert_eq!(waiting, [("Rui", &Value::Null), ("Sofia", &Value::Null)], "everyone it goes to, you apart");
+    running.world.gate(false);
+    running.until_status(CLIMBING, &id, "sent").await;
+    running.receipt(CLIMBING, &id, RUI, "delivered").await;
+    running.receipt(CLIMBING, &id, sofia_lid, "delivered").await;
+    running.receipt(CLIMBING, &id, sofia, "read").await;
+    let half = info(id.clone()).await.unwrap();
+    let sofia_row = half["recipients"].as_array().unwrap().iter().find(|r| r["name"] == "Sofia").unwrap().clone();
+    assert!(sofia_row["delivered"].is_i64() && sofia_row["read"].is_i64(), "by either of her JIDs: {sofia_row}");
+    assert!(half["sent"].is_i64());
+    running.receipt(CLIMBING, &id, RUI, "read").await;
+    running.until_status(CLIMBING, &id, "read").await;
+    // Read by all, who it went to is let go of; the receipts say the same.
+    loop {
+        let settled = running.query(|db| crate::store::outbox::settled_messages(db, 8)).await;
+        let Some(&message) = settled.first() else { break };
+        running.store.apply(Lane::Background, vec![Change::Outbox(Step::LetGo { message })]).await.unwrap();
+    }
+    assert_eq!(running.store.count("recipients").unwrap(), 0);
+    let settled = info(id.clone()).await.unwrap();
+    let read: Vec<(&str, bool)> = settled["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap(), r["read"].is_i64()))
+        .collect();
+    assert_eq!(read, [("Rui", true), ("Sofia", true)], "{settled}");
+    running.arrives(CLIMBING, RUI, "theirs", 5_000).await;
+    let theirs = info("theirs".into()).await.unwrap();
+    assert_eq!((theirs["sent"].as_i64(), theirs["recipients"].as_array().unwrap().len()), (Some(5_000), 0));
+    running.chats(&[ANA]).await;
+    let direct = running.send(ANA, "olá").await;
+    running.until_status(ANA, &direct, "sent").await;
+    running.receipt(ANA, &direct, ANA, "delivered").await;
+    let one = info(direct).await.unwrap();
+    assert_eq!(one["recipients"].as_array().unwrap().len(), 1, "the other person in a one-to-one chat: {one}");
+    assert!(one["recipients"][0]["delivered"].is_i64());
+    assert_eq!(info("nope".into()).await.unwrap_err().code, code::NOT_FOUND);
+}
+
 #[test]
 fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
     let home = tempfile::tempdir().unwrap();
@@ -1724,6 +1945,17 @@ fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
         (info::PERSON, "SEARCH people USING INTEGER PRIMARY KEY (rowid=?)"),
         (info::PHONE, "SEARCH person_jids USING INDEX person_jids_by_person (person=?)"),
         (info::PERSON_OF, "SEARCH person_jids USING INDEX sqlite_autoindex_person_jids_1 (jid=?)"),
+        (info::RECEIPTS, "SEARCH r USING PRIMARY KEY (message=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?)"),
+        (info::SENT_TO, "SEARCH s USING PRIMARY KEY (message=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?)"),
+        (info::DIRECT_PERSON, "SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)"),
+        (
+            actions::TARGET_IN,
+            "SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)\nSEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+        ),
+        (
+            actions::TARGET_ANYWHERE,
+            "SCAN c\nSEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+        ),
     ];
     for (sql, expected) in statements {
         let mut explain = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();

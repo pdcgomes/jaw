@@ -94,6 +94,9 @@ pub enum Step {
     /// Message `target` in chat `chat` deleted for you, now; `raw`, an AppStatePatch, tells your
     /// other devices, from an outbox row of its own, `id`.
     DeleteForMe { chat: String, target: String, id: String, raw: Vec<u8>, key: Option<String>, written: Written },
+    /// The messages a forward sends, each a message of yours, all in one transaction or none; the
+    /// interface's `key` names them all. What they came to is put in `written`.
+    Forward { sending: Vec<Forwarding>, key: Option<String>, written: Written },
 }
 
 /// The outbox kind of an action with `effect`. An action's row, unlike a message's, is never left
@@ -131,6 +134,16 @@ pub enum Enqueued {
     Full { waiting: u64, failed: u64 },
     /// The message an action names has gone, so nothing was written.
     Gone,
+    /// What each message of a forward came to, in order.
+    Many(Vec<Enqueued>),
+}
+
+/// A message a forward sends: its row, pending, its kind and the WAWebProtobufsE2E.Message to send.
+#[derive(Clone, Debug)]
+pub struct Forwarding {
+    pub message: Message,
+    pub kind: &'static str,
+    pub raw: Vec<u8>,
 }
 
 const KEYED: &str = "SELECT k.message, k.id, coalesce(c.id, k.jid), c.n, o.n FROM send_keys k
@@ -307,6 +320,10 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
         Step::DeleteForMe { chat, target, id, raw, .. } => {
             ("delete for me", format!("{chat} {target} {id}"), Some(raw.as_slice()))
         }
+        Step::Forward { sending, .. } => {
+            let ids: Vec<String> = sending.iter().map(|f| format!("{} {}", f.message.chat, f.message.id)).collect();
+            ("forward", ids.join(" "), None)
+        }
     }
 }
 
@@ -338,6 +355,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
         Step::DeleteForMe { chat, target, id, raw, key, written } => {
             delete_for_me(db, stamps, Forgetting { chat, target, id, raw }, key, written)
         }
+        Step::Forward { sending, key, written } => forward(db, stamps, sending, key, written),
     }
 }
 
@@ -392,6 +410,7 @@ fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String
         |r| r.get(0),
     )?;
     db.prepare_cached(OWN_ID)?.execute(params![chat_n, acting.id, now])?;
+    db.prepare_cached(PRUNE_KEYS)?.execute(params![now - KEY_KEPT_MS, KEYS_PRUNED])?;
     if let Some(key) = key {
         db.prepare_cached(KEEP_KEY)?.execute(params![key, None::<i64>, chat, acting.id, now])?;
     }
@@ -452,6 +471,7 @@ fn delete_for_me(
     };
     let now = now_ms();
     let outbox: i64 = db.prepare_cached(APP_STATE)?.query_row(params![chat, id, raw, now], |r| r.get(0))?;
+    db.prepare_cached(PRUNE_KEYS)?.execute(params![now - KEY_KEPT_MS, KEYS_PRUNED])?;
     if let Some(key) = key {
         db.prepare_cached(KEEP_KEY)?.execute(params![key, None::<i64>, chat, id, now])?;
     }
@@ -530,22 +550,31 @@ fn enqueue(
     key: &Option<String>,
     written: &Written,
 ) -> Result<bool> {
-    if let Some(key) = key {
-        type Keyed = (Option<i64>, String, String, Option<i64>, Option<i64>);
-        let keyed: Option<Keyed> = db
-            .prepare_cached(KEYED)?
-            .query_row([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
-            .optional()?;
-        if let Some((message, id, chat, chat_n, outbox)) = keyed {
-            written.put(Enqueued::Queued { message, id, chat, chat_n, outbox });
-            return Ok(false);
-        }
-    }
-    let (waiting, failed) = waiting(db)?;
-    if waiting >= OUTBOX_MOST {
-        written.put(Enqueued::Full { waiting, failed });
+    if keyed_before(db, key, written)? || full(db, written)? {
         return Ok(false);
     }
+    let (enqueued, changed) = enqueue_one(db, stamps, Outgoing { message, kind, raw }, key.as_deref(), true)?;
+    written.put(enqueued);
+    Ok(changed)
+}
+
+/// A message of yours to send, as `enqueue_one` writes it.
+struct Outgoing<'a> {
+    message: &'a Message,
+    kind: &'a str,
+    raw: &'a [u8],
+}
+
+/// Writes a message of yours to send, pending, with its outbox row and the key that names it, and
+/// clears its chat's draft when `drafted` says the message is what was typed there.
+fn enqueue_one(
+    db: &Connection,
+    stamps: &mut Stamps,
+    outgoing: Outgoing,
+    key: Option<&str>,
+    drafted: bool,
+) -> Result<(Enqueued, bool)> {
+    let Outgoing { message, kind, raw } = outgoing;
     let chat = chat_jid(db, &message.chat)?;
     let message = &Message { chat: chat.clone(), here: true, ..message.clone() };
     let changed = upsert_message(db, stamps, message, false)?;
@@ -560,18 +589,78 @@ fn enqueue(
     if let Some(key) = key {
         db.prepare_cached(KEEP_KEY)?.execute(params![key, n, chat, message.id, now])?;
     }
-    written.put(Enqueued::Queued {
-        message: Some(n),
-        id: message.id.clone(),
-        chat,
-        chat_n: Some(chat_n),
-        outbox: Some(outbox),
-    });
+    let enqueued =
+        Enqueued::Queued { message: Some(n), id: message.id.clone(), chat, chat_n: Some(chat_n), outbox: Some(outbox) };
     let seq = stamps.seq(CHAT, Some(chat_n));
-    if db.prepare_cached(CLEAR_DRAFT)?.execute([chat_n, seq])? > 0 {
+    if drafted && db.prepare_cached(CLEAR_DRAFT)?.execute([chat_n, seq])? > 0 {
         stamps.record(db, CHAT, chat_n, Some(chat_n), seq)?;
-        return Ok(true);
+        return Ok((enqueued, true));
     }
+    Ok((enqueued, changed))
+}
+
+/// The key that names message `nth` (from 0) of a forward an interface named `key`: the key
+/// itself for the first, and for the rest one made from it, hashed when it would be too long.
+fn forward_key(key: &str, nth: usize) -> String {
+    use sha2::{Digest, Sha256};
+    if nth == 0 {
+        return key.to_string();
+    }
+    let made = format!("{key}\u{1f}{nth}");
+    if made.len() <= KEY_MOST {
+        return made;
+    }
+    let hashed: String = Sha256::digest(key.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    format!("\u{1f}{hashed}\u{1f}{nth}")
+}
+
+/// The longest key send_keys takes, as its CHECK says.
+const KEY_MOST: usize = 128;
+
+/// What a forward an interface named `key` wrote, if it wrote anything: each message's, in order.
+fn forwarded_before(db: &Connection, key: &str) -> Result<Option<Vec<Enqueued>>> {
+    let mut all = Vec::new();
+    loop {
+        type Keyed = (Option<i64>, String, String, Option<i64>, Option<i64>);
+        let keyed: Option<Keyed> = db
+            .prepare_cached(KEYED)?
+            .query_row([forward_key(key, all.len())], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .optional()?;
+        let Some((message, id, chat, chat_n, outbox)) = keyed else { break };
+        all.push(Enqueued::Queued { message, id, chat, chat_n, outbox });
+    }
+    Ok((!all.is_empty()).then_some(all))
+}
+
+/// Writes the messages of a forward, each a message of yours to send, all or none; the chats'
+/// drafts stay, since what was typed in them isn't what was sent.
+fn forward(
+    db: &Connection,
+    stamps: &mut Stamps,
+    sending: &[Forwarding],
+    key: &Option<String>,
+    written: &Written,
+) -> Result<bool> {
+    if let Some(key) = key
+        && let Some(before) = forwarded_before(db, key)?
+    {
+        written.put(Enqueued::Many(before));
+        return Ok(false);
+    }
+    let (waiting, failed) = waiting(db)?;
+    if waiting + sending.len() as u64 > OUTBOX_MOST {
+        written.put(Enqueued::Full { waiting, failed });
+        return Ok(false);
+    }
+    let (mut all, mut changed) = (Vec::with_capacity(sending.len()), false);
+    for (nth, forwarding) in sending.iter().enumerate() {
+        let key = key.as_deref().map(|key| forward_key(key, nth));
+        let outgoing = Outgoing { message: &forwarding.message, kind: forwarding.kind, raw: &forwarding.raw };
+        let (enqueued, one) = enqueue_one(db, stamps, outgoing, key.as_deref(), false)?;
+        all.push(enqueued);
+        changed |= one;
+    }
+    written.put(Enqueued::Many(all));
     Ok(changed)
 }
 
@@ -915,6 +1004,19 @@ pub fn outboxed_by_n(db: &Connection, outbox: i64) -> Result<Option<Outboxed>> {
 /// are unique only within a chat.
 pub fn outboxed_by_id(db: &Connection, id: &str) -> Result<Option<Outboxed>> {
     Ok(db.prepare_cached(&format!("{OUTBOXED} WHERE o.id = ?1"))?.query_row([id], outboxed_row).optional()?)
+}
+
+/// The messages a forward an interface named `key` sent, by ID in order, if it was in the last day.
+pub fn forwarded_by_key(db: &Connection, key: &str) -> Result<Option<Vec<String>>> {
+    let ids = forwarded_before(db, key)?.map(|all| {
+        all.into_iter()
+            .filter_map(|enqueued| match enqueued {
+                Enqueued::Queued { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect()
+    });
+    Ok(ids)
 }
 
 /// The message an interface's key names, if it was sent in the last day, with its chat's JID.

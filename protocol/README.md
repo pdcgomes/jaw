@@ -241,17 +241,17 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `send.media` | `chat`, `files` (each a `path`, `kind` and `caption`), `quality` (`sd` or `hd`), `reply` | `messages` |
 | `send.poll` | `chat`, `question`, `options`, `max` | `message` |
 | `poll.vote` | `message`, `options` | |
-| `react` | `message`, `emoji` (empty to remove) | |
-| `edit` | `message`, `text` | |
-| `delete` | `message`, `for` (`me` or `everyone`) | |
-| `forward` | `messages`, `to` (chats) | `messages` |
+| `react` | `message`, `emoji` (empty to remove), and optionally `chat`, `key` | |
+| `edit` | `message`, `text`, and optionally `chat`, `key` | |
+| `delete` | `message`, `for` (`me` or `everyone`), and optionally `chat`, `key` | |
+| `forward` | `messages`, `to` (chats), and optionally `chat`, `key` | `messages` |
 | `star` | `message`, `starred` | |
 | `read` | `chat`, `up_to` (a message) | See Sending |
 | `typing` | `chat`, `state` (`composing`, `recording` or `paused`) | See Sending |
 | `draft.set` | `chat`, `text` | See Sending |
 | `chat.pin`, `chat.archive`, `chat.mute`, `chat.mark_unread`, `chat.clear`, `chat.delete` | `chat`, and `pinned`, `archived`, `until` or `unread` | |
-| `chat.info` | `chat` | Its members and their roles, its community, its disappearing timer, its media count |
-| `message.info` | `message` | Each recipient's delivered, read and played times |
+| `chat.info` | `chat` | Its kind, its members and their roles, its community and its disappearing timer; its media count comes with the library |
+| `message.info` | `message`, and optionally `chat` | When it was sent, and each recipient's delivered, read and played times |
 | `history.more` | `chat` | More arrives as upserts, once the phone answers |
 | `media.fetch` | `message`, `variant` (`sd` or `hd`) | Progress and the path arrive as upserts to the message |
 | `media.save` | `message`, `to` | `path` |
@@ -305,9 +305,9 @@ Proposed with the `jaw-voice` crate in M5, for jawd to wire in; until then the `
 
 ## Message actions (proposed)
 
-Proposed with the terminal's M2 actions, for jawd to build. jawd serves `send.text`'s `reply` and `mentions`, `react`, `edit`, `delete` and `chat.info`; until it serves the rest, the rows above for `forward` and `message.info` are the draft. It keeps their names and fills in what they leave open. Each action's result reaches every interface the same way: the rows it changes, upserted into the windows that show them, so an interface draws what jawd says rather than what it guessed.
+Proposed with the terminal's M2 actions, for jawd to build, and served: `send.text`'s `reply` and `mentions`, `react`, `edit`, `delete`, `forward`, `message.info` and `chat.info`. It keeps their names and fills in what they leave open. Each action's result reaches every interface the same way: the rows it changes, upserted into the windows that show them, so an interface draws what jawd says rather than what it guessed.
 
-`react`, `edit` and `delete` answer with nothing once they're on disk, synced, as `send.text` is, and each takes a `key` as `send.text` does: asking again with it within a day answers the same and does nothing more. Each names its message by `message`, its ID, and optionally `chat`, where it is: with `chat`, jawd finds it at once; without it, jawd looks for the ID in each chat, and an ID it finds in more than one chat is -32602 with `data.param` `chat`. A reaction, an edit or a deletion for everyone goes to WhatsApp as a message of its own, after the chat's earlier messages, waiting while WhatsApp can't be reached and tried again as a message is, and counts toward the outbox's thousand. Windows show it at once, as rows upserted with a new `v`, and the chat list too when it's the chat's newest message; jaw.db keeps it as done only once WhatsApp has it. If WhatsApp refuses it, the rows show as they were, and every interface is sent a `notice` saying so.
+`react`, `edit` and `delete` answer with nothing once they're on disk, synced, as `send.text` is, and `forward` with its messages then; each takes a `key` as `send.text` does: asking again with it within a day answers the same and does nothing more. Each, and `message.info`, names its message by `message`, its ID (`forward` its `messages`), and optionally `chat`, where it is: with `chat`, jawd finds it at once; without it, jawd looks for the ID in each chat, and an ID it finds in more than one chat is -32602 with `data.param` `chat`. A reaction, an edit or a deletion for everyone goes to WhatsApp as a message of its own, after the chat's earlier messages, waiting while WhatsApp can't be reached and tried again as a message is, and counts toward the outbox's thousand. Windows show it at once, as rows upserted with a new `v`, and the chat list too when it's the chat's newest message; jaw.db keeps it as done only once WhatsApp has it. If WhatsApp refuses it, the rows show as they were, and every interface is sent a `notice` saying so.
 
 ```json
 {"id":40,"method":"send.text","params":{"chat":"120363000000000002@g.us","text":"@Inês Gomes vens buscar a avó?","reply":"3EB0A1B2C3D4E5F6","mentions":["person:4"]}}
@@ -329,8 +329,8 @@ Proposed with the terminal's M2 actions, for jawd to build. jawd serves `send.te
 - **`delete`** (`message`, `for`):
   - `me` removes it from jaw only, at once: it goes from every window as a `remove`, and from search, a copy arriving later doesn't bring it back, and jawd tells your other devices, by WhatsApp's app state. Any message.
   - `everyone` deletes your own for everyone within 60 hours of sending, as WhatsApp allows (error 4 after, for someone else's or one that failed to go; a group's admins deleting others' messages comes later; one deleted already answers as done). The row stays with `deleted` true and no spans, and shows as "You deleted this message" in yours and "This message was deleted" in theirs; its media is dropped from the cache.
-- **`forward`** (`messages`, `to`): each message to each chat, in order, as new messages of yours with `forwarded` counting the times the original had been, plus one; WhatsApp marks five or more "forwarded many times". Answers with the new messages' IDs, chat by chat, once each is on disk as `send.text` is; media goes without being sent again where WhatsApp still has it. At most five chats at once, as the phones allow (error 5); a deleted message, a view-once one or one jawd hasn't the media for yet is error 4.
-- **`message.info`** (`message`): when your message was `sent`, and for each recipient (one in a direct chat, every member in a group) their `person`, `name` and the times it was `delivered`, `read` and, for voice, `played`, each null until it is. For someone else's message, `recipients` is empty and `sent` is when it was sent.
+- **`forward`** (`messages`, `to`): each message to each chat, in order, as new messages of yours with `forwarded` counting the times the original had been, plus one; WhatsApp marks five or more "forwarded many times". Answers with the new messages' IDs, chat by chat, once all are on disk as `send.text`'s is; each then goes, with its own outbox row and ticks, as a message of yours does, and the chats' drafts stay. Media goes as it came, without being sent again, so it reaches whoever WhatsApp still has it for; a quote or mentions it carried don't go with it. At most five chats at once, as the phones allow (error 5, `data` `{"limit": "forward", "most": 5}`), past the outbox's thousand error 5 as `send.text`; a chat jawd doesn't have or a message it can't find is error 3; a deleted message, a view-once one, a line about the chat, a kind WhatsApp doesn't forward (a poll, an event, a live location, an album) or one jawd hasn't what it said for is error 4.
+- **`message.info`** (`message`): when your message was `sent` (null while it's still on its way), and for each recipient their `person`, `name` and the times it was `delivered`, `read` and, for voice, `played`, each null until it is, by name. The recipients are everyone a receipt for it came from, whichever of their JIDs it came by, and, while it's still on its way to some, those jawd sent it to (in a group, its members when it was sent, but you; in a direct chat, the other person). For someone else's message, `recipients` is empty and `sent` is when it was sent.
 - **`chat.info`** (`chat`) answers with the chat's `kind`, its `community` if it's in one, its disappearing timer as `ephemeral` (seconds, 0 when off), and `members`: each member's `person`, the `name` to show, `phone` (`+` and the number) where jawd knows it, and `admin`, for completing `@` names, each person once, by name. A direct chat's members are the other person and you. Error 3 for a chat jawd doesn't have.
 
 ## Library (proposed)

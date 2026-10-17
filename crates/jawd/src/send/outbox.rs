@@ -214,7 +214,7 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
             error.data = Some(serde_json::json!({ "limit": "outbox", "waiting": waiting, "failed": failed }));
             Err(error)
         }
-        Some(Enqueued::Gone) | None => {
+        Some(Enqueued::Gone | Enqueued::Many(_)) | None => {
             Err(Error::new(code::INTERNAL, "jawd kept nothing of the message, so it isn't sent"))
         }
     }

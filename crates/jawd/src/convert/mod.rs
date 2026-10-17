@@ -330,6 +330,25 @@ pub fn bare(message: &e2e::Message) -> e2e::Message {
     bare
 }
 
+/// A message sent again as a forward, as WhatsApp's phones send one: what it says, marked forwarded
+/// `score` times, with the chat's disappearing timer when it has one; `None` for a kind that can't
+/// carry that.
+pub fn forwarded(message: &e2e::Message, score: u32, expiration: u32) -> Option<e2e::Message> {
+    let mut forwarded = bare(message);
+    if let Some(text) = forwarded.conversation.take() {
+        let extended = e2e::ExtendedTextMessage { text: Some(text), ..Default::default() };
+        forwarded.extended_text_message = Some(Box::new(extended));
+    }
+    let context = context_mut(&mut forwarded)?;
+    *context = Some(Box::new(e2e::ContextInfo {
+        is_forwarded: Some(true),
+        forwarding_score: Some(score),
+        expiration: (expiration > 0).then_some(expiration),
+        ..Default::default()
+    }));
+    Some(forwarded)
+}
+
 /// The ContextInfo of whichever kind the message is, to change; `None` for a kind that has none,
 /// plain text among them.
 fn context_mut(m: &mut e2e::Message) -> Option<&mut Option<Box<e2e::ContextInfo>>> {

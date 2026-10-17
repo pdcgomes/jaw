@@ -47,7 +47,7 @@ SELECT folder FROM folder_items WHERE person = ?1
     SEARCH folder_items USING INDEX folder_items_by_person (person=?)
 
 -- src/send/actions.rs
-SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep WHERE c.id = ?1
+SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep WHERE c.id = ?1
     SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -55,7 +55,7 @@ SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.s
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
 
 -- src/send/actions.rs
-SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep LIMIT 4
+SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep LIMIT 4
     SCAN c
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -82,6 +82,20 @@ SELECT jid FROM person_jids WHERE person = ?1 AND jid LIKE '%@s.whatsapp.net' OR
 -- src/send/info.rs
 SELECT person FROM person_jids WHERE jid = ?1
     SEARCH person_jids USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+
+-- src/send/info.rs
+SELECT j.person, r.delivered_at, r.read_at, r.played_at FROM receipts r JOIN person_jids j ON j.n = r.recipient WHERE r.message = ?1
+    SEARCH r USING PRIMARY KEY (message=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/send/info.rs
+SELECT j.person FROM recipients s JOIN person_jids j ON j.n = s.member WHERE s.message = ?1
+    SEARCH s USING PRIMARY KEY (message=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/send/info.rs
+SELECT person FROM chats WHERE n = ?1
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/send/outbox.rs
 SELECT c.ephemeral, coalesce(m.keep, c.n), c.kind FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n WHERE c.id = ?1

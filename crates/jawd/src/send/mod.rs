@@ -8,11 +8,13 @@
 //! (`typing`); you're online only while an interface has focus (`presence`); and `chat.start`
 //! finds or makes a chat by number or person (`start`). A reply quotes its message and mentions
 //! name their people as WhatsApp writes them (`quote`); reactions, edits and deletions go as
-//! messages of their own through the outbox (`actions`); `chat.info` gives a chat's members
-//! (`info`).
+//! messages of their own through the outbox (`actions`); `forward` sends messages again as new
+//! ones of yours (`forward`); `message.info` gives each recipient's receipts, and `chat.info` a
+//! chat's members (`info`).
 
 mod actions;
 pub mod bench;
+mod forward;
 mod info;
 mod outbox;
 mod presence;
@@ -28,7 +30,9 @@ mod tests;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jaw_proto::send::{ChatInfo, ChatStart, Delete, DraftSet, Edit, React, Read, SendRetry, SendText, Typing};
+use jaw_proto::send::{
+    ChatInfo, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, React, Read, SendRetry, SendText, Typing,
+};
 use jaw_proto::{Error, Push, code};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -155,6 +159,8 @@ impl Sending {
             "react" => actions::react(inner, params_of::<React>(method, params)?).await,
             "edit" => actions::edit(inner, params_of::<Edit>(method, params)?).await,
             "delete" => actions::delete(inner, params_of::<Delete>(method, params)?).await,
+            "forward" => result(forward::forward(inner, params_of::<Forward>(method, params)?).await?),
+            "message.info" => result(info::message_info(inner, params_of::<MessageInfo>(method, params)?).await?),
             _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
         }
     }
@@ -171,6 +177,8 @@ impl Sending {
         "react",
         "edit",
         "delete",
+        "forward",
+        "message.info",
     ];
 }
 
