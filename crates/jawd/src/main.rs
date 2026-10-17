@@ -200,13 +200,7 @@ fn run(home: &Path, kind: EngineKind, no_notify: bool) -> Result<()> {
         let socket = jaw_proto::local::socket(home);
         let (lock, listener) = open(home, &socket)?;
         let started = tokio::select! {
-            started = start(home, lock, kind, no_notify) => match started {
-                Ok(started) => started,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&socket);
-                    return Err(e);
-                }
-            },
+            started = start_on(home, &socket, lock, kind, no_notify) => started?,
             signal = signals.next() => {
                 eprintln!("jawd: {signal} while starting, so it stops");
                 let _ = std::fs::remove_file(&socket);
@@ -276,6 +270,22 @@ fn lock(home: &Path) -> Result<std::fs::File> {
 fn open(home: &Path, socket: &Path) -> Result<(std::fs::File, tokio::net::UnixListener)> {
     let lock = lock(home)?;
     Ok((lock, sock::listen(socket)?))
+}
+
+/// Starts jawd listening on `socket`, removing the socket if it can't start, so a jawd that fails
+/// leaves nothing an interface would try to reach.
+async fn start_on(
+    home: &Path,
+    socket: &Path,
+    lock: std::fs::File,
+    kind: EngineKind,
+    no_notify: bool,
+) -> Result<Started> {
+    let started = start(home, lock, kind, no_notify).await;
+    if started.is_err() {
+        let _ = std::fs::remove_file(socket);
+    }
+    started
 }
 
 async fn start(home: &Path, lock: std::fs::File, kind: EngineKind, no_notify: bool) -> Result<Started> {
@@ -598,6 +608,18 @@ mod tests {
         drop(other);
         let (_lock, _listener) = open(home.path(), &socket).unwrap();
         assert!(socket.exists());
+    }
+
+    #[tokio::test]
+    async fn a_jawd_that_fails_to_start_leaves_no_socket_behind() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("jaw.db"), b"not a database, so jaw.db can't be opened").unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let (lock, _listener) = open(home.path(), &socket).unwrap();
+        assert!(socket.exists());
+        let failed = start_on(home.path(), &socket, lock, EngineKind::Demo, true).await;
+        assert!(failed.is_err(), "jaw.db isn't one");
+        assert!(!socket.exists(), "the socket went with the start that failed");
     }
 
     #[test]

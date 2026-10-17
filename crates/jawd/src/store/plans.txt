@@ -194,6 +194,11 @@ SELECT read_at, read_known, phone_unread, phone_mentions, marked_unread FROM cha
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
+SELECT k.read_at, k.marked_unread FROM chat_merges m JOIN chats k ON k.n = m.keep WHERE m.gone = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
 SELECT count(*), coalesce(sum(mentions_me), 0) FROM (SELECT mentions_me FROM messages WHERE chat = ?1 AND at > ?2 AND mine = 0 AND kind NOT IN ('system', 'call') LIMIT ?3)
     CO-ROUTINE (subquery-1)
       SEARCH messages USING INDEX messages_by_time (chat=? AND at>?)
@@ -216,6 +221,10 @@ SELECT max(at) FROM messages WHERE chat = ?1 AND id IN (SELECT value FROM json_e
 -- src/store/write.rs
 UPDATE chats SET read_at = ?2, read_known = 1, phone_unread = ?3, phone_mentions = ?4, marked_unread = 0, v = ?5 WHERE n = ?1 AND (read_known = 0 OR phone_unread IS NOT NULL OR read_at IS NULL OR read_at < ?2) AND (read_at IS NOT ?2 OR read_known = 0 OR phone_unread IS NOT ?3 OR phone_mentions IS NOT ?4 OR marked_unread)
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+SELECT gone FROM chat_merges WHERE keep = ?1
+    SEARCH chat_merges USING COVERING INDEX chat_merges_by_keep (keep=?)
 
 -- src/store/write.rs
 SELECT frecency, opened_at FROM chats WHERE n = ?1
@@ -405,14 +414,6 @@ SELECT n FROM messages WHERE chat = ?1 LIMIT ?2
     SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
 
 -- src/store/write.rs
-UPDATE chats SET last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), last_at = coalesce((SELECT at FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), 0), v = ?2 WHERE n = ?1
-    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
-    SCALAR SUBQUERY 2
-      SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
-    SCALAR SUBQUERY 1
-      SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
-
--- src/store/write.rs
 SELECT g.id, k.id FROM chats g, chats k WHERE g.n = ?1 AND k.n = ?2
     SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
@@ -434,6 +435,14 @@ DELETE FROM chats WHERE n = ?1
     SEARCH tombstones USING PRIMARY KEY (chat=?)
     SEARCH folder_items USING COVERING INDEX folder_items_by_chat (chat=?)
     SEARCH group_members USING PRIMARY KEY (chat=?)
+
+-- src/store/write.rs
+UPDATE chats SET last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), last_at = coalesce((SELECT at FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), 0), v = ?2 WHERE n = ?1
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+    SCALAR SUBQUERY 2
+      SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
+    SCALAR SUBQUERY 1
+      SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
 
 -- src/store/write.rs
 SELECT id FROM messages WHERE n = ?1

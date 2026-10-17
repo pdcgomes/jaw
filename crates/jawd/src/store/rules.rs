@@ -322,6 +322,82 @@ async fn during_a_merge_what_names_a_message_shows_at_once_before_any_step_moves
     assert_eq!(store.count("pending").unwrap(), 0, "nothing waits for a message jaw has");
 }
 
+/// A chat's shown values, and what its rows give: (unread, mentions, last message, last at,
+/// message count), each pair to be equal.
+async fn shown_and_derived(store: &Store, id: &'static str) -> [(i64, i64); 5] {
+    query(store, move |db| {
+        Ok(db.query_row(
+            "SELECT c.unread, (SELECT count(*) FROM messages WHERE chat = c.n AND mine = 0),
+                c.mentions, (SELECT coalesce(sum(mentions_me), 0) FROM messages WHERE chat = c.n AND mine = 0),
+                c.last_message, (SELECT n FROM messages WHERE chat = c.n ORDER BY at DESC, n DESC LIMIT 1),
+                c.last_at, (SELECT max(at) FROM messages WHERE chat = c.n),
+                c.message_count, (SELECT count(*) FROM messages WHERE chat = c.n)
+            FROM chats c WHERE c.id = ?1",
+            [id],
+            |r| {
+                Ok([
+                    (r.get(0)?, r.get(1)?),
+                    (r.get(2)?, r.get(3)?),
+                    (r.get(4)?, r.get(5)?),
+                    (r.get(6)?, r.get(7)?),
+                    (r.get(8)?, r.get(9)?),
+                ])
+            },
+        )?)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_left_halfway_shows_each_chat_as_its_rows_are_and_reading_either_clears_both() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let mut changes = vec![Change::Message(message(ANA, "p1", AT - 1, "under the number"))];
+    for i in 0..250 {
+        let words = format!("under the LID {i}");
+        changes.push(Change::Message(Message {
+            mentions_me: i % 10 == 0,
+            ..message(ANA_LID, &format!("l{i}"), AT + i, &words)
+        }));
+    }
+    apply(&store, changes).await;
+    {
+        // The first message of the second step can't move, so the merge stops after one of 200.
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER stays BEFORE UPDATE OF chat ON messages WHEN old.id = 'l200'
+            BEGIN SELECT RAISE(ABORT, 'this one stays'); END;",
+        )
+        .unwrap();
+    }
+    joined(&store).await;
+    store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+    let failed = store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+    assert_eq!(failed.quarantined, 1, "the second step can't move l200");
+    assert!(merging(&store).await);
+    for id in [ANA, ANA_LID] {
+        let shown = shown_and_derived(&store, id).await;
+        assert!(shown.iter().all(|(shown, derived)| shown == derived), "{id}: {shown:?}");
+    }
+    assert_eq!(shown_and_derived(&store, ANA).await[0].0, 201, "p1 and the 200 moved");
+    assert_eq!(shown_and_derived(&store, ANA_LID).await[0].0, 50, "the 50 left");
+    assert_eq!(shown_and_derived(&store, ANA).await[3].0, AT + 199, "sorted by the newest it holds");
+    // An edit of the LID chat's newest moves it at once, and each chat shows its newest after.
+    let edit = Amendment::Edit { text: Some("edited".into()), spans: None, summary: "edited".into() };
+    apply(&store, vec![amend(ANA_LID, "l249", AT + 300, Some(ANA_LID), edit)]).await;
+    for id in [ANA, ANA_LID] {
+        let shown = shown_and_derived(&store, id).await;
+        assert!(shown.iter().all(|(shown, derived)| shown == derived), "{id} after the move: {shown:?}");
+    }
+    assert_eq!(shown_and_derived(&store, ANA_LID).await[3].0, AT + 248);
+    apply(&store, vec![Change::Read(Read { chat: ANA_LID.into(), at: AT + 249, ..Read::default() })]).await;
+    for id in [ANA, ANA_LID] {
+        let shown = shown_and_derived(&store, id).await;
+        assert_eq!((shown[0].0, shown[1].0), (0, 0), "{id}: read up to the LID chat's newest, nothing unread");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_merge_step_applies_what_waited_for_a_message_and_drops_one_deleted_for_me() {
     let home = tempfile::tempdir().unwrap();

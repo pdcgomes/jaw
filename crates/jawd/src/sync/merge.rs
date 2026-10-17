@@ -2,7 +2,8 @@
 //! merged: the writer moves what's small at once and sends new writes to the chat kept, and this
 //! task moves the messages a short background transaction at a time until none are left. A step
 //! that fails is kept in quarantine and tried again later and later; a merge whose steps keep
-//! failing is left until jawd next starts, and `status` counts it.
+//! failing is left, tried again only once an hour and from the start when jawd next starts, and
+//! `status` counts it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,17 +27,23 @@ impl Merges {
 }
 
 /// How a failing merge is tried again: after `first`, doubling to `most`, and left after `tries`
-/// failures in a row.
+/// failures in a row, to be tried once each `left` after that.
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
     pub first: Duration,
     pub most: Duration,
     pub tries: u32,
+    pub left: Duration,
 }
 
 impl Default for Timing {
     fn default() -> Self {
-        Timing { first: Duration::from_secs(1), most: Duration::from_secs(60), tries: 8 }
+        Timing {
+            first: Duration::from_secs(1),
+            most: Duration::from_secs(60),
+            tries: 8,
+            left: Duration::from_secs(3600),
+        }
     }
 }
 
@@ -49,24 +56,25 @@ struct Failing {
 /// Merges chats whenever a merge is waiting, until jawd stops.
 pub async fn run(store: Store, merges: Merges, live: Shared, timing: Timing) {
     let mut failing: HashMap<i64, Failing> = HashMap::new();
+    let mut unreadable = timing.first;
     loop {
         let waiting = match waiting(&store).await {
             Ok(waiting) => waiting,
             Err(e) => {
-                eprintln!("jawd: can't read which chats are being merged: {e:#}");
-                tokio::time::sleep(timing.first).await;
+                eprintln!("jawd: can't read which chats are being merged, so it's read again in {unreadable:?}: {e:#}");
+                tokio::time::sleep(unreadable).await;
+                unreadable = (unreadable * 2).min(timing.most);
                 continue;
             }
         };
+        unreadable = timing.first;
         failing.retain(|gone, _| waiting.iter().any(|m| m.gone == *gone));
         let stuck = failing.values().filter(|f| f.failures >= timing.tries).count();
         live.lock().expect("live state").merges_stuck = stuck as u64;
         let now = Instant::now();
-        let due = waiting
-            .into_iter()
-            .find(|m| failing.get(&m.gone).is_none_or(|f| f.failures < timing.tries && f.next <= now));
+        let due = waiting.into_iter().find(|m| failing.get(&m.gone).is_none_or(|f| f.next <= now));
         let Some(merging) = due else {
-            match failing.values().filter(|f| f.failures < timing.tries).map(|f| f.next).min() {
+            match failing.values().map(|f| f.next).min() {
                 Some(next) => {
                     let _ = tokio::time::timeout_at(next, merges.0.notified()).await;
                 }
@@ -89,9 +97,11 @@ pub async fn run(store: Store, merges: Merges, live: Shared, timing: Timing) {
                 let entry = failing.entry(gone).or_insert(Failing { failures: 0, next: now });
                 entry.failures += 1;
                 if entry.failures >= timing.tries {
+                    entry.next = Instant::now() + timing.left;
                     eprintln!(
-                        "jawd: merging {reference} failed {} times in a row ({why}), so it's left until jawd starts again",
-                        entry.failures
+                        "jawd: merging {reference} failed {} times in a row ({why}), so it's left, tried again in {:?} \
+                         and when jawd starts again",
+                        entry.failures, timing.left
                     );
                 } else {
                     let pause = timing.first.saturating_mul(1 << (entry.failures - 1).min(16)).min(timing.most);

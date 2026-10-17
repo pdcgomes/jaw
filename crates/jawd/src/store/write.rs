@@ -602,15 +602,31 @@ pub(super) fn settle(db: &Connection, stamps: &mut Stamps) -> Result<()> {
         if let Some(at) = moved.history.filter(|&at| !known && read_at.is_none_or(|read| at > read)) {
             read_at = Some(at);
         }
-        let marked = marked && !moved.mine_live;
+        let mut marked = marked && !moved.mine_live;
+        // A chat being merged is the same conversation as the one it goes into, so reading that
+        // one reads this too: it counts from the later of the two positions, and stays marked
+        // unread only while that one is.
+        let (mut counted_from, mut phone) = (read_at, (phone_unread, phone_mentions));
+        let into: Option<(Option<i64>, bool)> = db
+            .prepare_cached(
+                "SELECT k.read_at, k.marked_unread FROM chat_merges m JOIN chats k ON k.n = m.keep WHERE m.gone = ?1",
+            )?
+            .query_row([chat], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        if let Some((kept_at, kept_marked)) = into {
+            marked &= kept_marked;
+            if let Some(kept_at) = kept_at.filter(|&at| read_at.is_none_or(|read| at > read)) {
+                (counted_from, phone) = (Some(kept_at), (None, None));
+            }
+        }
         let (unread, mentions): (i64, i64) = db
             .prepare_cached(
                 "SELECT count(*), coalesce(sum(mentions_me), 0) FROM (SELECT mentions_me FROM messages
                     WHERE chat = ?1 AND at > ?2 AND mine = 0 AND kind NOT IN ('system', 'call') LIMIT ?3)",
             )?
-            .query_row(params![chat, read_at.unwrap_or(i64::MIN), UNREAD_MOST], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        let unread = (unread + phone_unread.unwrap_or(0)).min(UNREAD_MOST);
-        let mentions = (mentions + phone_mentions.unwrap_or(0)).min(UNREAD_MOST);
+            .query_row(params![chat, counted_from.unwrap_or(i64::MIN), UNREAD_MOST], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let unread = (unread + phone.0.unwrap_or(0)).min(UNREAD_MOST);
+        let mentions = (mentions + phone.1.unwrap_or(0)).min(UNREAD_MOST);
         let seq = stamps.seq(CHAT, Some(chat));
         // Where it was read isn't shown, so moving it alone makes no new version of the chat.
         let shown = db
@@ -661,8 +677,21 @@ fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     if changed > 0 {
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
         stamps.unsettle(chat);
+        unsettle_merging(db, stamps, chat)?;
     }
     Ok(changed > 0)
+}
+
+/// Has the chats being merged into `keep` counted again, since they count from its position.
+fn unsettle_merging(db: &Connection, stamps: &mut Stamps, keep: i64) -> Result<()> {
+    let merging: Vec<i64> = db
+        .prepare_cached("SELECT gone FROM chat_merges WHERE keep = ?1")?
+        .query_map([keep], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for gone in merging {
+        stamps.unsettle(gone);
+    }
+    Ok(())
 }
 
 /// Counts an open in the chat's frecency. An open older than the chat's last counts as decayed
@@ -1042,6 +1071,7 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     .execute(params![keep, gone, seq])?;
     stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
     stamps.unsettle(*keep);
+    stamps.unsettle(*gone);
     Ok(())
 }
 
@@ -1070,18 +1100,11 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     for &n in &moving {
         move_merged(db, stamps, gone, keep, n)?;
     }
-    stamps.unsettle(keep);
+    show_newest(db, stamps, keep)?;
     if moving.len() as i64 == MERGE_STEP {
+        show_newest(db, stamps, gone)?;
         return Ok(true);
     }
-    let seq = stamps.seq(CHAT, Some(keep));
-    db.prepare_cached(
-        "UPDATE chats SET last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1),
-            last_at = coalesce((SELECT at FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), 0), v = ?2
-        WHERE n = ?1",
-    )?
-    .execute(params![keep, seq])?;
-    stamps.record(db, CHAT, keep, Some(keep), seq)?;
     let (gone_jid, keep_jid): (String, String) = db
         .prepare_cached("SELECT g.id, k.id FROM chats g, chats k WHERE g.n = ?1 AND k.n = ?2")?
         .query_row([gone, keep], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1092,6 +1115,19 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     let seq = stamps.seq(CHAT, Some(gone));
     stamps.record(db, CHAT, gone, Some(gone), seq)?;
     Ok(true)
+}
+
+/// Has chat `chat` show its newest message, and sort by it, as its rows now are: for the two chats
+/// of a merge, whose messages move between them.
+fn show_newest(db: &Connection, stamps: &mut Stamps, chat: i64) -> Result<()> {
+    let seq = stamps.seq(CHAT, Some(chat));
+    db.prepare_cached(
+        "UPDATE chats SET last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1),
+            last_at = coalesce((SELECT at FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), 0), v = ?2
+        WHERE n = ?1",
+    )?
+    .execute(params![chat, seq])?;
+    stamps.record(db, CHAT, chat, Some(chat), seq)
 }
 
 /// Moves message `n` of chat `gone`, being merged, into `keep`, as what's done to it there says:
@@ -1120,6 +1156,7 @@ fn move_merged(db: &Connection, stamps: &mut Stamps, gone: i64, keep: i64, n: i6
         }
     };
     stamps.unsettle(keep);
+    stamps.unsettle(gone);
     let keep_jid: String = db.prepare_cached("SELECT id FROM chats WHERE n = ?1")?.query_row([keep], |r| r.get(0))?;
     apply_pending(db, stamps, keep, n, &keep_jid, &id)?;
     Ok(db.prepare_cached("SELECT 1 FROM messages WHERE n = ?1")?.exists([n])?.then_some(n))
@@ -1140,10 +1177,11 @@ fn moved_from_merging(db: &Connection, stamps: &mut Stamps, keep: i64, id: &str)
         )?
         .query_row(params![keep, id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
-    match found {
-        Some((gone, n)) => move_merged(db, stamps, gone, keep, n),
-        None => Ok(None),
-    }
+    let Some((gone, n)) = found else { return Ok(None) };
+    let moved = move_merged(db, stamps, gone, keep, n)?;
+    show_newest(db, stamps, gone)?;
+    show_newest(db, stamps, keep)?;
+    Ok(moved)
 }
 
 /// The chat and n of message `id` in the chat `chat_jid` (already resolved by chat_jid), moving it
