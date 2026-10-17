@@ -6,12 +6,18 @@
 //! has had no room for `Timing::behind` they're dropped and the interface is told to watch again.
 //! A window whose read fails stays marked and is read again at its usual pace, and one that has
 //! failed for `Timing::behind` is dropped the same way.
+//!
+//! Connections watching the same window (the same folder or chat, anchor and stretch) share its
+//! reads: a flush takes the window's last read if it has every change that marked the window, or
+//! the read under way if that was asked for since, or else asks for one that the others can take
+//! in turn, and each connection diffs it against its own hashes. So a commit costs a read for each
+//! distinct window, however many interfaces watch it.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use jaw_proto::windows::{
@@ -24,7 +30,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::broadcast::{self, error::RecvError};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::window::{self, ChatAnchor, ChatSpec, MessageAnchor, MessageSpec, Rows, Snapshot, Spec};
 use super::{CatchingUp, Changes, Timing};
@@ -50,8 +56,7 @@ pub struct Client {
     catching_up: CatchingUp,
     timing: Timing,
     out: mpsc::Sender<Vec<u8>>,
-    /// Every connection's window reads.
-    reads: Arc<AtomicU64>,
+    shared: Arc<Shared>,
     /// The seq hello said the interface last saw, for the watches it sends again.
     since: Option<u64>,
     windows: BTreeMap<String, Window>,
@@ -62,12 +67,133 @@ pub struct Client {
     resync: Vec<String>,
 }
 
+/// What every connection shares: its windows' reads, and how many there have been.
+#[derive(Default)]
+pub(super) struct Shared {
+    reads: AtomicU64,
+    slots: Mutex<HashMap<Spec, Weak<Slot>>>,
+    /// Makes every window read fail on its reader, as a broken row would.
+    #[cfg(test)]
+    pub(super) failing: std::sync::atomic::AtomicBool,
+}
+
+/// The reads of one window, shared by every connection watching it, and held by each of their
+/// windows: it goes once none is.
+struct Slot {
+    spec: Spec,
+    state: Mutex<SlotState>,
+}
+
+#[derive(Default)]
+struct SlotState {
+    /// The newest read that succeeded.
+    found: Option<Arc<Found>>,
+    /// The read under way, if any.
+    reading: Option<Reading>,
+    asked: u64,
+}
+
+type Answer = Option<Result<Arc<Found>, Error>>;
+
+struct Reading {
+    /// Which read it is, so an older one ending doesn't clear a newer.
+    asked: u64,
+    /// The feed's last committed seq when it was asked for, so it has every change up to it.
+    from: i64,
+    answer: watch::Receiver<Answer>,
+}
+
+/// A window as one read found it, each row with the hash of it as sent.
+struct Found {
+    /// It has every change up to this seq: the last committed when it was asked for, or the newest
+    /// event it saw if that's later.
+    fresh: i64,
+    seq: i64,
+    total: u64,
+    older: bool,
+    newer: u64,
+    rows: Lines,
+    chat: Option<i64>,
+    senders: HashSet<i64>,
+    /// The window as it was read, its anchor where the read found it.
+    spec: Spec,
+}
+
+struct Line<R> {
+    n: i64,
+    hash: u64,
+    row: R,
+}
+
+enum Lines {
+    Chats(Vec<Line<ChatRow>>),
+    Messages(Vec<Line<MessageRow>>),
+}
+
+impl Shared {
+    pub(super) fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
+    }
+
+    /// The slot for windows showing `spec`, made if none holds one.
+    fn slot(&self, spec: &Spec) -> Arc<Slot> {
+        let mut slots = self.slots.lock().expect("the feed's slots");
+        if let Some(slot) = slots.get(spec).and_then(Weak::upgrade) {
+            return slot;
+        }
+        slots.retain(|_, slot| slot.strong_count() > 0);
+        let slot = Arc::new(Slot { spec: spec.clone(), state: Mutex::default() });
+        slots.insert(spec.clone(), Arc::downgrade(&slot));
+        slot
+    }
+
+    /// The query that reads `spec`, or just the chats `only` names.
+    fn query(
+        &self,
+        spec: Spec,
+        only: Option<Vec<i64>>,
+    ) -> impl FnOnce(&Connection) -> anyhow::Result<(Snapshot, Spec)> + Send + 'static {
+        #[cfg(test)]
+        let failing = self.failing.load(Ordering::Relaxed);
+        move |db| {
+            #[cfg(test)]
+            anyhow::ensure!(!failing, "the test made window reads fail");
+            window::query(db, spec, only)
+        }
+    }
+}
+
+fn lines<R: Row>(rows: Vec<(i64, R)>) -> Vec<Line<R>> {
+    rows.into_iter().map(|(n, row)| Line { n, hash: hash(&row), row }).collect()
+}
+
+/// What a read of the window found, asked for when `from` was the last committed seq.
+fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
+    Found {
+        fresh: from.max(snapshot.seq),
+        seq: snapshot.seq,
+        total: snapshot.total,
+        older: snapshot.older,
+        newer: snapshot.newer,
+        rows: match snapshot.rows {
+            Rows::Chats(rows) => Lines::Chats(lines(rows)),
+            Rows::Messages(rows) => Lines::Messages(lines(rows)),
+        },
+        chat: snapshot.chat,
+        senders: snapshot.senders,
+        spec,
+    }
+}
+
 struct Window {
     spec: Spec,
+    slot: Arc<Slot>,
     state: State,
-    /// When the first and the latest changes waiting to be sent came, if any are.
+    /// When the first and the latest changes waiting to be sent came, if any are, and the newest
+    /// one's seq.
     first: Option<Instant>,
     last: Option<Instant>,
+    owed: Option<i64>,
     /// When it was last read, so the next read waits at least `Timing::burst`, whether or not that
     /// one sent anything.
     read: Option<Instant>,
@@ -82,6 +208,8 @@ struct Window {
 #[derive(Default)]
 struct State {
     held: HashMap<String, Held>,
+    /// The read it was settled from has every change up to this seq.
+    fresh: i64,
     total: u64,
     older: bool,
     newer: u64,
@@ -152,21 +280,20 @@ fn hash(row: &impl Serialize) -> u64 {
 /// The rows of `rows` an interface holding `held` lacks or holds otherwise, leaving out those it
 /// holds that haven't changed since `since`; the ids it holds that aren't in `rows`; and what it
 /// holds afterwards.
-fn changed<R: Row>(
+fn changed<R: Row + Clone>(
     held: &HashMap<String, Held>,
-    rows: Vec<(i64, R)>,
+    rows: &[Line<R>],
     since: Option<i64>,
 ) -> (Vec<R>, Vec<String>, HashMap<String, Held>) {
     let mut now = HashMap::with_capacity(rows.len());
     let mut upsert = Vec::new();
-    for (n, row) in rows {
-        let hash = hash(&row);
+    for &Line { n, hash, ref row } in rows {
         let same = held
             .get(row.id())
             .is_some_and(|held| held.hash == hash || since.is_some_and(|since| row.v() as i64 <= since));
         now.insert(row.id().to_string(), Held { hash, sort: row.sort().to_string(), n });
         if !same {
-            upsert.push(row);
+            upsert.push(row.clone());
         }
     }
     let mut remove: Vec<String> = held.keys().filter(|id| !now.contains_key(*id)).cloned().collect();
@@ -174,33 +301,34 @@ fn changed<R: Row>(
     (upsert, remove, now)
 }
 
-/// What an interface holding `held` needs to hold `snapshot`, and what it holds then.
-fn settle(held: &HashMap<String, Held>, snapshot: Snapshot, since: Option<i64>) -> (Update, State) {
-    let (upsert, remove, held) = match snapshot.rows {
-        Rows::Chats(rows) => {
+/// What an interface holding `held` needs to hold what `found` found, and what it holds then.
+fn settle(held: &HashMap<String, Held>, found: &Found, since: Option<i64>) -> (Update, State) {
+    let (upsert, remove, held) = match &found.rows {
+        Lines::Chats(rows) => {
             let (rows, remove, held) = changed(held, rows, since);
             (Upsert::Chats(rows), remove, held)
         }
-        Rows::Messages(rows) => {
+        Lines::Messages(rows) => {
             let (rows, remove, held) = changed(held, rows, since);
             (Upsert::Messages(rows), remove, held)
         }
     };
     let update = Update {
-        seq: snapshot.seq.max(0) as u64,
-        total: snapshot.total,
-        older: snapshot.older,
-        newer: snapshot.newer,
+        seq: found.seq.max(0) as u64,
+        total: found.total,
+        older: found.older,
+        newer: found.newer,
         upsert,
         remove,
     };
     let state = State {
         held,
-        total: snapshot.total,
-        older: snapshot.older,
-        newer: snapshot.newer,
-        chat: snapshot.chat,
-        senders: snapshot.senders,
+        fresh: found.fresh,
+        total: found.total,
+        older: found.older,
+        newer: found.newer,
+        chat: found.chat,
+        senders: found.senders.clone(),
     };
     (update, state)
 }
@@ -300,14 +428,28 @@ async fn recv(changes: &mut Option<broadcast::Receiver<Arc<Changes>>>) -> Result
     }
 }
 
+/// Runs `query` on a reader, ahead of background reads.
+async fn read_on<T: Send + 'static>(
+    store: &Store,
+    query: impl FnOnce(&Connection) -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, Error> {
+    store
+        .reads()
+        .query(Priority::Interactive, query)
+        .await
+        .map_err(|e| Error::new(code::INTERNAL, format!("jawd couldn't read the window: {e:#}")))
+}
+
 impl Window {
-    fn new(spec: Spec) -> Window {
+    fn new(spec: Spec, slot: Arc<Slot>) -> Window {
         let now = Instant::now();
         Window {
             spec,
+            slot,
             state: State::default(),
             first: None,
             last: None,
+            owed: None,
             read: None,
             failing: None,
             reordered: now,
@@ -315,10 +457,17 @@ impl Window {
         }
     }
 
-    /// Notes a change waiting since `at`.
-    fn wait(&mut self, at: Instant) {
+    /// Notes a change waiting since `at`, which the feed's events reach `seq` with.
+    fn wait(&mut self, at: Instant, seq: i64) {
         self.first = Some(self.first.map_or(at, |first| first.min(at)));
         self.last = Some(self.last.map_or(at, |last| last.max(at)));
+        self.owed = Some(self.owed.map_or(seq, |owed| owed.max(seq)));
+    }
+
+    /// The seq a read must have every change up to for this window to take it: the newest change
+    /// waiting, and never older than what its interface holds.
+    fn owed(&self) -> i64 {
+        self.owed.unwrap_or(self.state.fresh).max(self.state.fresh)
     }
 
     /// When the changes waiting are due: the first after the window has gone unread for `burst` at
@@ -354,20 +503,25 @@ impl Window {
         !holding || !matches!(self.spec, Spec::Chats(_)) || now >= self.reordered + timing.hold
     }
 
-    /// When it owes a reorder it may take.
-    fn reorder_at(&self, holding: bool, timing: &Timing) -> Option<Instant> {
-        match self.reorder {
-            true if holding => Some(self.reordered + timing.hold),
-            true => Some(Instant::now()),
-            false => None,
-        }
+    /// When it owes a reorder it may take, as of `now`: paced by its reads like its changes, so a
+    /// reorder whose read fails waits `burst` before it's tried again.
+    fn reorder_at(&self, now: Instant, holding: bool, timing: &Timing) -> Option<Instant> {
+        let at = match self.reorder {
+            true if holding => self.reordered + timing.hold,
+            true => now,
+            false => return None,
+        };
+        Some(self.read.map_or(at, |read| at.max(read + timing.burst)))
     }
 
-    /// Takes what its interface now holds; `reordered` says when, if it took a new order.
+    /// Takes what its interface now holds, from a read that succeeded; `reordered` says when, if
+    /// it took a new order.
     fn keep(&mut self, state: State, reordered: Option<Instant>) {
         self.state = state;
         self.first = None;
         self.last = None;
+        self.owed = None;
+        self.failing = None;
         match reordered {
             Some(at) => {
                 self.reordered = at;
@@ -385,7 +539,7 @@ impl Client {
         catching_up: CatchingUp,
         timing: Timing,
         out: mpsc::Sender<Vec<u8>>,
-        reads: Arc<AtomicU64>,
+        shared: Arc<Shared>,
     ) -> Client {
         Client {
             store,
@@ -393,7 +547,7 @@ impl Client {
             catching_up,
             timing,
             out,
-            reads,
+            shared,
             since: None,
             windows: BTreeMap::new(),
             next: 1,
@@ -449,11 +603,7 @@ impl Client {
         &self,
         query: impl FnOnce(&Connection) -> anyhow::Result<T> + Send + 'static,
     ) -> Result<T, Error> {
-        self.store
-            .reads()
-            .query(Priority::Interactive, query)
-            .await
-            .map_err(|e| Error::new(code::INTERNAL, format!("jawd couldn't read the window: {e:#}")))
+        read_on(&self.store, query).await
     }
 
     async fn chat_spec(&self, archived: bool, around: Around, before: u32, after: u32) -> Result<ChatSpec, Error> {
@@ -499,32 +649,86 @@ impl Client {
         Ok(MessageSpec { chat, anchor, before, after })
     }
 
-    async fn snapshot(&self, spec: Spec, only: Option<Vec<i64>>) -> Result<(Snapshot, Spec), Error> {
-        self.read(move |db| window::query(db, spec, only)).await
+    /// Reads `spec`, or just the chats `only` names, for this connection alone, with the feed's
+    /// last committed seq when it was asked for.
+    async fn snapshot(&self, spec: Spec, only: Option<Vec<i64>>) -> Result<(Snapshot, Spec, i64), Error> {
+        let from = *self.store.committed().borrow();
+        let (snapshot, spec) = self.read(self.shared.query(spec, only)).await?;
+        Ok((snapshot, spec, from))
+    }
+
+    /// A read of `slot`'s window with every change up to `owed`: its last read if that has them,
+    /// the one under way if it was asked for since, or else a new one, which every connection
+    /// watching the same window can take in turn. A new read runs to its end even if this
+    /// connection goes, since others may be waiting for it.
+    async fn shared(&self, slot: &Arc<Slot>, owed: i64) -> Result<Arc<Found>, Error> {
+        let mut answer = {
+            let mut state = slot.state.lock().expect("a window's reads");
+            if let Some(found) = state.found.as_ref().filter(|found| found.fresh >= owed) {
+                return Ok(found.clone());
+            }
+            match state.reading.as_ref().filter(|reading| reading.from >= owed) {
+                Some(reading) => reading.answer.clone(),
+                None => {
+                    let from = *self.store.committed().borrow();
+                    let (tell, answer) = watch::channel(None);
+                    state.asked += 1;
+                    let asked = state.asked;
+                    state.reading = Some(Reading { asked, from, answer: answer.clone() });
+                    let query = self.shared.query(slot.spec.clone(), None);
+                    let (store, shared, slot) = (self.store.clone(), self.shared.clone(), slot.clone());
+                    tokio::spawn(async move {
+                        let read = read_on(&store, query).await;
+                        shared.reads.fetch_add(1, Ordering::Relaxed);
+                        let read = read.map(|(snapshot, spec)| Arc::new(found(snapshot, spec, from)));
+                        let mut state = slot.state.lock().expect("a window's reads");
+                        if state.reading.as_ref().is_some_and(|reading| reading.asked == asked) {
+                            state.reading = None;
+                        }
+                        if let Ok(read) = &read
+                            && state.found.as_ref().is_none_or(|found| found.fresh <= read.fresh)
+                        {
+                            state.found = Some(read.clone());
+                        }
+                        drop(state);
+                        tell.send_replace(Some(read));
+                    });
+                    answer
+                }
+            }
+        };
+        let answer = answer
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| Error::new(code::INTERNAL, "jawd's read of the window stopped before it answered"))?;
+        answer.clone().expect("it waited for an answer")
     }
 
     async fn watch(&mut self, spec: Spec, since: Option<u64>, have: Vec<String>) -> Result<Value, Error> {
-        let (snapshot, spec) = self.snapshot(spec, None).await?;
+        let (snapshot, spec, from) = self.snapshot(spec, None).await?;
         // Rows' versions are seqs, so a since past the feed's last is from a jaw.db since replaced.
         let since = since
             .or(self.since)
             .and_then(|since| i64::try_from(since).ok())
             .filter(|&since| since >= snapshot.oldest - 1 && since <= snapshot.seq);
         let have = have.into_iter().map(|id| (id, Held { hash: 0, sort: String::new(), n: 0 })).collect();
-        let (update, state) = settle(&have, snapshot, since);
+        let (update, state) = settle(&have, &found(snapshot, spec.clone(), from), since);
         let watch = format!("w{}", self.next);
         self.next += 1;
-        let mut window = Window::new(spec);
+        let slot = self.shared.slot(&spec);
+        let mut window = Window::new(spec, slot);
         window.keep(state, Some(Instant::now()));
         self.windows.insert(watch.clone(), window);
         Ok(result(watch, update))
     }
 
     async fn relocate(&mut self, watch: String, spec: Spec) -> Result<Value, Error> {
-        let (snapshot, spec) = self.snapshot(spec, None).await?;
+        let (snapshot, spec, from) = self.snapshot(spec, None).await?;
+        let slot = self.shared.slot(&spec);
         let window = self.windows.get_mut(&watch).ok_or_else(|| unknown(&watch))?;
+        let (update, state) = settle(&window.state.held, &found(snapshot, spec.clone(), from), None);
         window.spec = spec;
-        let (update, state) = settle(&window.state.held, snapshot, None);
+        window.slot = slot;
         window.keep(state, Some(Instant::now()));
         Ok(result(watch, update))
     }
@@ -552,9 +756,11 @@ impl Client {
         match ready {
             Ready::Changes(Ok(changes)) => self.mark(&changes),
             Ready::Changes(Err(RecvError::Lagged(_))) => {
+                // What was lost may reach past the last committed seq this has heard of, so only
+                // a read asked for from now on will do.
                 let now = Instant::now();
                 for window in self.windows.values_mut() {
-                    window.wait(now);
+                    window.wait(now, i64::MAX);
                 }
             }
             Ready::Changes(Err(RecvError::Closed)) => self.changes = None,
@@ -570,7 +776,7 @@ impl Client {
     fn mark(&mut self, changes: &Changes) {
         for window in self.windows.values_mut() {
             if window.touched_by(changes) {
-                window.wait(changes.at);
+                window.wait(changes.at, changes.seq);
             }
         }
     }
@@ -579,10 +785,10 @@ impl Client {
         if !self.resync.is_empty() {
             return Some(Instant::now());
         }
-        let holding = (self.catching_up)();
+        let (now, holding) = (Instant::now(), (self.catching_up)());
         self.windows
             .values()
-            .flat_map(|window| [window.due(&self.timing), window.reorder_at(holding, &self.timing)])
+            .flat_map(|window| [window.due(&self.timing), window.reorder_at(now, holding, &self.timing)])
             .flatten()
             .min()
     }
@@ -602,8 +808,10 @@ impl Client {
             .windows
             .iter()
             .filter(|(_, window)| {
-                window.due(&self.timing).is_some_and(|due| due <= now)
-                    || (window.reorder && window.may_reorder(now, holding, &self.timing))
+                [window.due(&self.timing), window.reorder_at(now, holding, &self.timing)]
+                    .into_iter()
+                    .flatten()
+                    .any(|due| due <= now)
             })
             .map(|(watch, window)| (matches!(window.spec, Spec::Chats(_)), watch.clone()))
             .collect();
@@ -619,12 +827,28 @@ impl Client {
             let only = (!window.may_reorder(now, holding, &self.timing))
                 .then(|| window.state.held.values().map(|held| held.n).collect());
             let reordered = only.is_none().then_some(now);
-            let snapshot = self.snapshot(window.spec.clone(), only).await;
-            self.reads.fetch_add(1, Ordering::Relaxed);
+            let read = match only {
+                None => self.shared(&window.slot.clone(), window.owed()).await,
+                Some(only) => {
+                    let read = self.snapshot(window.spec.clone(), Some(only)).await;
+                    self.shared.reads.fetch_add(1, Ordering::Relaxed);
+                    read.map(|(mut snapshot, spec, from)| {
+                        // A chat list held while catching up keeps the order its interface has.
+                        if let (Some(window), Rows::Chats(rows)) = (self.windows.get(&watch), &mut snapshot.rows) {
+                            for (_, row) in rows.iter_mut() {
+                                if let Some(held) = window.state.held.get(&row.id) {
+                                    row.sort.clone_from(&held.sort);
+                                }
+                            }
+                        }
+                        Arc::new(found(snapshot, spec, from))
+                    })
+                }
+            };
             let Some(window) = self.windows.get_mut(&watch) else { continue };
             window.read = Some(Instant::now());
-            let (mut snapshot, spec) = match snapshot {
-                Ok(snapshot) => snapshot,
+            let found = match read {
+                Ok(found) => found,
                 // The window stays marked, so it's read again a `burst` later.
                 Err(e) => {
                     let failing = *window.failing.get_or_insert_with(|| {
@@ -640,17 +864,11 @@ impl Client {
                 }
             };
             window.failing = None;
-            window.spec = spec;
-            if reordered.is_none()
-                && let Rows::Chats(rows) = &mut snapshot.rows
-            {
-                for (_, row) in rows.iter_mut() {
-                    if let Some(held) = window.state.held.get(&row.id) {
-                        row.sort.clone_from(&held.sort);
-                    }
-                }
+            if window.spec != found.spec {
+                window.spec = found.spec.clone();
+                window.slot = self.shared.slot(&window.spec);
             }
-            let (update, state) = settle(&window.state.held, snapshot, None);
+            let (update, state) = settle(&window.state.held, &found, None);
             match push(watch, update, &window.state) {
                 None => window.keep(state, reordered),
                 Some(line) => match self.out.try_send(line) {

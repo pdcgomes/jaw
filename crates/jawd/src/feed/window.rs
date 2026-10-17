@@ -12,14 +12,14 @@ use serde_json::{Map, Value};
 
 use crate::store::read::{self, Around, ChatCursor, MessageCursor};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Spec {
     Chats(ChatSpec),
     Messages(MessageSpec),
 }
 
 /// A stretch of the chat list: from the top, or `before` chats above a chat and `after` below it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ChatSpec {
     pub archived: bool,
     /// None for the top.
@@ -30,7 +30,7 @@ pub(super) struct ChatSpec {
 
 /// The chat a window follows as its place changes, and the place it was last seen at, which the
 /// window keeps if the chat goes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ChatAnchor {
     pub id: String,
     pub cursor: ChatCursor,
@@ -38,7 +38,7 @@ pub(super) struct ChatAnchor {
 
 /// A stretch of a chat's messages: its newest `before`, or `before` messages before one and
 /// `after` after it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct MessageSpec {
     pub chat: String,
     /// None to follow the newest.
@@ -47,7 +47,7 @@ pub(super) struct MessageSpec {
     pub after: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct MessageAnchor {
     pub id: String,
     pub cursor: MessageCursor,

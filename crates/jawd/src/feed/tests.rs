@@ -1202,3 +1202,188 @@ async fn windows_match_fresh_queries_while_writes_race_their_reads() {
         writer.await.unwrap();
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identical_windows_on_several_connections_share_each_read() {
+    let bed = Bed::new(brisk());
+    let mut seeding: Vec<Change> =
+        (0..20).map(|n| Change::Message(text(OPEN, &format!("o{n}"), 1_000 + n, Some(OPEN), "hi"))).collect();
+    seeding.extend((0..5).map(|n| {
+        let who = person(n);
+        Change::Message(text(&who, &format!("p{n}"), 500 + n as i64, Some(&who), "hello"))
+    }));
+    bed.apply(seeding).await;
+    let chats = Want::Chats { archived: false, anchor: None, before: 0, after: 10 };
+    let open = Want::Messages { chat: OPEN.into(), anchor: None, before: 10, after: 0 };
+    let shorter = Want::Messages { chat: OPEN.into(), anchor: None, before: 5, after: 0 };
+    // Three connections showing the same windows, and a fourth with the same chat list and a
+    // shorter stretch of the open chat.
+    let mut watchers = Vec::new();
+    for wants in [[&chats, &open], [&chats, &open], [&chats, &open], [&chats, &shorter]] {
+        let mut watcher = bed.watcher(64);
+        let watched = watch_all(&mut watcher, &wants.map(Want::clone)).await;
+        watchers.push((watcher, watched));
+    }
+    let new = |id: &str, at: i64| vec![Change::Message(text(OPEN, id, at, Some(OPEN), "to everyone"))];
+
+    let reads = bed.feed.reads();
+    let seq = bed.apply(new("new1", 5_000)).await;
+    for (watcher, watched) in &mut watchers {
+        watcher.settle(seq).await;
+        check(&bed, watcher, watched, "after one message").await;
+    }
+    assert_eq!(bed.feed.reads() - reads, 3, "one read of the chat list and one of each stretch of the open chat");
+
+    // A connection that has heard of a change the last read doesn't have reads again, and the
+    // others take its read.
+    let reads = bed.feed.reads();
+    let seq = bed.apply(new("new2", 6_000)).await;
+    watchers[1].0.settle(seq).await;
+    let seq = bed.apply(new("new3", 7_000)).await;
+    watchers[2].0.settle(seq).await;
+    assert_eq!(bed.feed.reads() - reads, 4, "the second connection read for new2, the third again for new3");
+    for (watcher, watched) in &mut watchers {
+        watcher.settle(seq).await;
+        check(&bed, watcher, watched, "after two more").await;
+        assert!(watcher.windows.values().any(|model| model.rows.contains_key("new3")));
+    }
+    assert_eq!(bed.feed.reads() - reads, 5, "the rest took the third's reads, but for the shorter stretch");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_list_owed_a_reorder_is_read_at_its_pace_while_its_reads_fail() {
+    let bed = Bed::new(brisk());
+    let seeding = (0..5).map(|n| {
+        let who = person(n);
+        Change::Message(text(&who, &format!("p{n}"), 1_000 + n as i64, Some(&who), "hello"))
+    });
+    bed.apply(seeding.collect()).await;
+    let mut watcher = bed.watcher(64);
+    let watched = watch_all(&mut watcher, &[Want::Chats { archived: false, anchor: None, before: 0, after: 10 }]).await;
+    // While catching up, a chat list takes a new message where its chat was and owes a reorder
+    // once `hold` has passed since it was watched.
+    bed.catching_up.store(true, Ordering::Relaxed);
+    bed.apply(vec![Change::Message(text(&person(0), "p0b", 9_000, Some(&person(0)), "again"))]).await;
+    watcher.run_for(ms(50)).await;
+    assert!(watcher.client.pending(), "it owes a reorder");
+
+    bed.feed.fail_reads(true);
+    let reads = bed.feed.reads();
+    let trying = brisk().hold + brisk().behind / 2 - ms(50);
+    watcher.run_for(trying).await;
+    let tried = bed.feed.reads() - reads;
+    let most = (trying.as_millis() / brisk().burst.as_millis()) as u64 + 2;
+    assert!((2..=most).contains(&tried), "{tried} reads in {trying:?}: at least twice, and no faster than its pace");
+    assert!(watcher.resynced.is_empty(), "it hasn't failed for long");
+
+    bed.feed.fail_reads(false);
+    watcher.run_for(ms(100)).await;
+    assert!(!watcher.client.pending(), "it took its new order once it could be read");
+    check(&bed, &watcher, &watched, "once it could be read").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_moved_while_its_reads_fail_counts_its_failures_from_the_move() {
+    let bed = Bed::new(brisk());
+    let seeding = (0..30).map(|n| Change::Message(text(OPEN, &format!("o{n}"), 1_000 + n, Some(OPEN), "hi")));
+    bed.apply(seeding.collect()).await;
+    let mut watcher = bed.watcher(64);
+    let watch = watcher.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 10})).await;
+
+    bed.feed.fail_reads(true);
+    bed.apply(vec![Change::Message(text(OPEN, "new1", 5_000, Some(OPEN), "while it can't be read"))]).await;
+    watcher.run_for(brisk().behind * 2 / 3).await;
+    assert!(watcher.resynced.is_empty(), "it hasn't failed for long");
+
+    // Moved while it can be read, it holds a fresh window, and fails again only from the next read.
+    bed.feed.fail_reads(false);
+    watcher.call("watch.move", json!({"watch": watch, "around": "o5", "before": 3, "after": 3})).await.unwrap();
+    bed.feed.fail_reads(true);
+    let moved = Instant::now();
+    bed.apply(vec![Change::Message(text(OPEN, "new2", 6_000, Some(OPEN), "still can't be read"))]).await;
+    watcher.run_for(brisk().behind / 2).await;
+    assert!(watcher.resynced.is_empty(), "resynced {:?} after it was moved", moved.elapsed());
+    while watcher.resynced.is_empty() {
+        watcher.turn().await;
+        watcher.drain();
+    }
+    assert!(moved.elapsed() >= brisk().behind, "resynced after {:?}", moved.elapsed());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_on_several_connections_match_fresh_queries_while_writes_race_their_reads() {
+    for seed in 1..=6u64 {
+        let bed = Bed::new(brisk());
+        let mut world = World::new(seed + 2000);
+        let mut seeding: Vec<Change> =
+            world.chats.iter().map(|chat| Change::Chat(Chat { id: chat.clone(), ..Chat::default() })).collect();
+        seeding.extend((0..60).flat_map(|_| world.new_message_or_two()));
+        bed.apply(seeding).await;
+        // Two connections watching the same windows, and a third sharing some of them.
+        let same = vec![
+            Want::Chats { archived: false, anchor: None, before: 0, after: 5 },
+            Want::Chats { archived: false, anchor: Some(person(3)), before: 2, after: 2 },
+            Want::Messages { chat: OPEN.into(), anchor: None, before: 6, after: 0 },
+            Want::Messages { chat: GROUP.into(), anchor: None, before: 4, after: 0 },
+        ];
+        let other = vec![
+            Want::Chats { archived: false, anchor: None, before: 0, after: 5 },
+            Want::Chats { archived: false, anchor: None, before: 0, after: 8 },
+            Want::Messages { chat: OPEN.into(), anchor: None, before: 6, after: 0 },
+            Want::Messages { chat: OPEN.into(), anchor: anchor_on(&bed, OPEN, 8).await, before: 3, after: 3 },
+        ];
+        type Ask = (i64, tokio::sync::oneshot::Sender<HashMap<String, Model>>);
+        let mut connections = Vec::new();
+        for wants in [same.clone(), same, other] {
+            let mut watcher = bed.watcher(64);
+            let watched = watch_all(&mut watcher, &wants).await;
+            let (ask, mut asks) = mpsc::channel::<Ask>(1);
+            let task = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        ready = watcher.client.ready() => {
+                            if let Ready::Changes(Ok(changes)) = &ready {
+                                watcher.seen = watcher.seen.max(changes.seq);
+                            }
+                            watcher.client.handle(ready).await;
+                            watcher.drain();
+                        }
+                        asked = asks.recv() => match asked {
+                            Some((seq, reply)) => {
+                                watcher.settle(seq).await;
+                                let _ = reply.send(watcher.windows.clone());
+                            }
+                            None => break,
+                        },
+                    }
+                }
+            });
+            connections.push((ask, task, watched));
+        }
+        for pause in 0..25 {
+            let mut seq = 0;
+            for _ in 0..1 + world.rng.below(30) {
+                seq = bed.apply(world.change()).await;
+                match world.rng.below(6) {
+                    0 => tokio::time::sleep(ms(12 + world.rng.below(10) as u64)).await,
+                    1 => tokio::time::sleep(ms(world.rng.below(3) as u64)).await,
+                    _ => tokio::task::yield_now().await,
+                }
+            }
+            for (k, (ask, _, watched)) in connections.iter().enumerate() {
+                let (reply, windows) = tokio::sync::oneshot::channel();
+                ask.send((seq, reply)).await.unwrap();
+                let windows = windows.await.unwrap();
+                for (watch, want) in watched {
+                    let expected = fresh(&bed.store, want).await;
+                    let what = format!("seed {seed}, pause {pause}, connection {k}, {watch} {want:?}");
+                    windows[watch].assert_matches(&expected, &what);
+                }
+            }
+        }
+        for (ask, task, _) in connections {
+            drop(ask);
+            task.await.unwrap();
+        }
+    }
+}

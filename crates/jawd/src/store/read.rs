@@ -156,7 +156,7 @@ pub struct Last {
 }
 
 /// Where a page of the chat list starts: after this chat.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ChatCursor {
     sort: String,
     n: i64,
@@ -202,7 +202,7 @@ pub struct From {
 }
 
 /// A message's place in its chat, for paging from it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MessageCursor {
     at: i64,
     n: i64,
