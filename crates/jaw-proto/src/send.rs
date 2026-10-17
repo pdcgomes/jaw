@@ -1,11 +1,11 @@
-//! Sending: `send.text` and `send.retry`, `chat.start`, `draft.set`, `read` and `typing`.
+//! Sending: `send.text` and `send.retry`, `chat.start`, `draft.set`, `read` and `typing`; and the
+//! message actions: `react`, `edit`, `delete`, `forward`, `message.info` and `chat.info`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::windows::{ChatRow, MessageRow};
 
-/// `send.text`'s params. Replies and mentions come with M2, and link previews with them; until
-/// then a reply or mentions are refused with -32602, and `preview` changes nothing.
+/// `send.text`'s params. Link previews come later in M2; until then `preview` changes nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendText {
     pub chat: String,
@@ -15,8 +15,11 @@ pub struct SendText {
     /// sends nothing new.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The ID of the message this one answers, in the same chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<String>,
+    /// The people mentioned, as `person:` and a number, each written in `text` as `@` and the name
+    /// the interface showed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,4 +84,125 @@ pub enum TypingState {
     Composing,
     Recording,
     Paused,
+}
+
+/// `react`'s params: one reaction of yours a message, which another emoji replaces and an empty one
+/// removes. `chat`, when given, is where `message` is, so jawd finds it at once; `key` is as
+/// `send.text`'s, for an interface that can lose an answer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct React {
+    pub message: String,
+    pub emoji: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// `edit`'s params: your own text message's new text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edit {
+    pub message: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// `delete`'s params: a message deleted for you alone, or yours for everyone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delete {
+    pub message: String,
+    #[serde(rename = "for")]
+    pub for_: DeleteFor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteFor {
+    Me,
+    Everyone,
+}
+
+/// `forward`'s params: each of `messages` to each of `to`, in order. `chat`, when given, is where
+/// the messages are.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forward {
+    pub messages: Vec<String>,
+    pub to: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// `forward`'s result: the new messages' IDs, chat by chat, each chat's in the order of `messages`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forwarded {
+    pub messages: Vec<String>,
+}
+
+/// `message.info`'s params.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageInfo {
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+}
+
+/// `message.info`'s result: when the message was sent, and for one of yours, how far it has got
+/// with each recipient.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Info {
+    pub message: String,
+    /// When it was sent, in milliseconds since the epoch; null for one of yours still on its way.
+    pub sent: Option<i64>,
+    pub recipients: Vec<Recipient>,
+}
+
+/// One recipient of a message of yours: when it was delivered to them, read and, for what's
+/// played, played, each null until it was.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recipient {
+    pub person: String,
+    pub name: String,
+    pub delivered: Option<i64>,
+    pub read: Option<i64>,
+    pub played: Option<i64>,
+}
+
+/// `chat.info`'s params.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatInfo {
+    pub chat: String,
+}
+
+/// `chat.info`'s result: the chat's members, for completing `@` names, its community and its
+/// disappearing timer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatInfoResult {
+    pub chat: String,
+    pub kind: String,
+    pub members: Vec<Member>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<String>,
+    /// The disappearing-message timer in seconds, 0 when it's off.
+    #[serde(default)]
+    pub ephemeral: u32,
+}
+
+/// A chat's member: who they are, the name to show, their number where jawd knows it, and whether
+/// they're one of a group's admins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    pub person: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
+    pub admin: bool,
 }

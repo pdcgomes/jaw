@@ -230,7 +230,7 @@ fn snapshot() -> (String, Vec<String>) {
         // A fragment is planned in the statements it's part of, unless it's also used on its own.
         let parts: Vec<String> = fragments(&source)
             .into_iter()
-            .filter(|(name, _)| !source.contains(&format!("({name})")))
+            .filter(|(name, _)| !source.contains(&format!("({name})")) && !source.contains(&format!("(&{name})")))
             .map(|(_, text)| text)
             .collect();
         let file = path.strip_prefix(root).unwrap().display().to_string();

@@ -843,7 +843,8 @@ async fn send_text_refuses_what_it_cant_send_yet_and_chats_it_doesnt_have() {
     assert_eq!(refused(json!({ "chat": ANA, "text": "  \n" })).await.unwrap_err().code, code::INVALID_PARAMS);
     assert_eq!(
         refused(json!({ "chat": ANA, "text": "hi", "reply": "3EB0AA" })).await.unwrap_err().code,
-        code::INVALID_PARAMS
+        code::NOT_FOUND,
+        "a reply to a message jawd doesn't have"
     );
     assert_eq!(refused(json!({ "chat": RUI, "text": "hi" })).await.unwrap_err().code, code::NOT_FOUND);
     assert_eq!(refused(json!({ "chat": ANA, "text": "a".repeat(TEXT_MOST + 1) })).await.unwrap_err().code, code::LIMIT);
@@ -1133,17 +1134,12 @@ async fn you_are_online_only_while_an_interface_has_focus_and_away_once_none_has
     assert_eq!(running.online(), [false, true, false, true, true], "told again when the connection comes back");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn sending_goes_through_the_socket_with_the_pending_row_in_its_answer() {
-    use std::io::{BufRead, BufReader, Write};
-
-    let home = tempfile::tempdir().unwrap();
-    let running = Running::new(home.path()).await;
-    running.chats(&[ANA]).await;
-    let socket = jaw_proto::local::socket(home.path());
+/// jawd's socket in `home`, serving `running`'s sending.
+fn serve(running: &Running, home: &Path) -> std::path::PathBuf {
+    let socket = jaw_proto::local::socket(home);
     let listener = crate::sock::listen(&socket).unwrap();
     let state = crate::state::State::new(
-        home.path(),
+        home,
         Ok(running.supervisor.clone().unwrap()),
         Vec::new(),
         Arc::default(),
@@ -1154,35 +1150,218 @@ async fn sending_goes_through_the_socket_with_the_pending_row_in_its_answer() {
     .with_attention(running.attention.clone())
     .with_sending(running.sending.clone());
     tokio::spawn(crate::sock::serve(Arc::new(state), listener));
-    let replies = tokio::task::spawn_blocking(move || {
+    socket
+}
+
+/// Says hello on `socket`, then asks each of `requests` in turn, each with the next id, and gives
+/// each one's reply, pushes aside.
+async fn ask_socket(socket: &Path, requests: Vec<(&'static str, Value)>) -> Vec<Value> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let socket = socket.to_path_buf();
+    tokio::task::spawn_blocking(move || {
         let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
-        [
-            json!({ "id": 1, "method": "hello", "params": { "protocol": 1, "client": "test", "version": "0", "focus": true } }),
-            json!({ "id": 2, "method": "send.text", "params": { "chat": ANA, "text": "olá" } }),
-            json!({ "id": 3, "method": "typing", "params": { "chat": ANA, "state": "composing" } }),
-            json!({ "id": 4, "method": "chat.start", "params": { "phone": "+351 913 333 333" } }),
-        ]
-        .into_iter()
-        .map(|line| {
-            stream.write_all(format!("{line}\n").as_bytes()).unwrap();
-            loop {
-                let mut reply = String::new();
-                reader.read_line(&mut reply).unwrap();
-                let reply: Value = serde_json::from_str(&reply).unwrap();
-                if reply["id"] == line["id"] {
-                    return reply;
+        let hello = ("hello", json!({ "protocol": 1, "client": "test", "version": "0", "focus": true }));
+        std::iter::once(hello)
+            .chain(requests)
+            .enumerate()
+            .map(|(id, (method, params))| {
+                let line = json!({ "id": id, "method": method, "params": params });
+                stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+                loop {
+                    let mut reply = String::new();
+                    reader.read_line(&mut reply).unwrap();
+                    let reply: Value = serde_json::from_str(&reply).unwrap();
+                    if reply["id"] == line["id"] {
+                        return reply;
+                    }
                 }
-            }
-        })
-        .collect::<Vec<_>>()
+            })
+            .skip(1)
+            .collect::<Vec<_>>()
     })
     .await
-    .unwrap();
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sending_goes_through_the_socket_with_the_pending_row_in_its_answer() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let socket = serve(&running, home.path());
+    let mut replies = vec![Value::Null];
+    replies.extend(
+        ask_socket(
+            &socket,
+            vec![
+                ("send.text", json!({ "chat": ANA, "text": "olá" })),
+                ("typing", json!({ "chat": ANA, "state": "composing" })),
+                ("chat.start", json!({ "phone": "+351 913 333 333" })),
+            ],
+        )
+        .await,
+    );
     assert_eq!(replies[1]["result"]["row"]["status"], "pending", "{}", replies[1]);
     assert_eq!(replies[2]["result"], json!({}));
     assert_eq!(replies[3]["result"]["chat"]["id"], RUI);
     running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Presence(p) if p.available))).await;
+}
+
+/// The raw message the engine was asked to send `nth`, counting from 1, once it has been.
+async fn sent(running: &Running, nth: usize) -> wa_proto::wa_web_protobufs_e2e::Message {
+    let sends = |asked: &[pb::command::Kind]| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count();
+    running.world.until(|asked| sends(asked) >= nth).await;
+    let send = running.world.sends().swap_remove(nth - 1);
+    wa_proto::wa_web_protobufs_e2e::Message::decode(send.raw.as_slice()).unwrap()
+}
+
+/// Someone's name, as their contact has it.
+async fn named(running: &Running, jid: &str, name: &str) -> i64 {
+    let person = Person { jids: vec![jid.into()], name: Some(name.into()), ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(person)]).await.unwrap();
+    let jid = jid.to_string();
+    running
+        .query(move |db| Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [jid], |r| r.get(0))?))
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_quotes_its_message_as_whatsapp_does_and_its_row_names_who_wrote_it() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    named(&running, ANA, "Ana Ribeiro").await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    let answer = running.call("send.text", json!({ "chat": ANA, "text": "sim!", "reply": "m1" })).await.unwrap();
+    assert_eq!(
+        answer["row"]["reply"],
+        json!({ "id": "m1", "from": "Ana Ribeiro", "summary": "message m1" }),
+        "the quote, named"
+    );
+    let raw = sent(&running, 1).await;
+    let text = raw.extended_text_message.expect("a reply is extended text");
+    let context = text.context_info.unwrap();
+    assert_eq!(text.text.as_deref(), Some("sim!"));
+    assert_eq!((context.stanza_id.as_deref(), context.participant.as_deref()), (Some("m1"), Some(ANA)));
+    assert_eq!(context.quoted_message.unwrap().conversation.as_deref(), Some("message m1"));
+    let mine = answer["message"].as_str().unwrap().to_string();
+    let again = running.call("send.text", json!({ "chat": ANA, "text": "isto", "reply": mine })).await.unwrap();
+    assert_eq!(again["row"]["reply"]["from"], "You", "a quote of yours");
+    let context = sent(&running, 2).await.extended_text_message.unwrap().context_info.unwrap();
+    assert_eq!(context.participant.as_deref(), Some(ME));
+    assert_eq!(
+        context.quoted_message.unwrap().extended_text_message.unwrap().context_info,
+        None,
+        "no quote in a quote"
+    );
+    running.chats(&[RUI]).await;
+    let elsewhere = running.call("send.text", json!({ "chat": RUI, "text": "x", "reply": "m1" })).await.unwrap_err();
+    assert_eq!(elsewhere.code, code::NOT_FOUND, "a reply is to a message in the same chat");
+    let revoke = Amend {
+        chat: ANA.into(),
+        target: "m1".into(),
+        sender: Some(ANA.into()),
+        mine: false,
+        at: now_ms(),
+        what: Amendment::Revoke,
+        raw: None,
+    };
+    running.store.apply(Lane::Live, vec![Change::Amend(revoke)]).await.unwrap();
+    let deleted = running.call("send.text", json!({ "chat": ANA, "text": "x", "reply": "m1" })).await.unwrap_err();
+    assert_eq!(deleted.code, code::NOT_ALLOWED);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mentions_go_as_whatsapp_writes_them_and_the_row_shows_each_by_name() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let sofia = "351915555555@s.whatsapp.net";
+    running.members(CLIMBING, &[RUI, sofia]).await;
+    let rui = named(&running, RUI, "Rui Costa").await;
+    let ana = named(&running, ANA, "Ana").await;
+    let params =
+        json!({ "chat": CLIMBING, "text": "@Rui Costa vens? @Rui Costa!", "mentions": [format!("person:{rui}")] });
+    let answer = running.call("send.text", params).await.unwrap();
+    let text = sent(&running, 1).await.extended_text_message.unwrap();
+    assert_eq!(text.text.as_deref(), Some("@351913333333 vens? @351913333333!"), "as WhatsApp writes them");
+    assert_eq!(text.context_info.unwrap().mentioned_jid, [RUI]);
+    let spans = &answer["row"]["spans"];
+    assert_eq!(spans[0], json!({ "t": "mention", "s": "@Rui Costa", "person": RUI }), "{spans}");
+    assert_eq!(spans[1], json!({ "t": "text", "s": " vens? " }));
+    let stranger =
+        json!({ "chat": CLIMBING, "text": "@Ana olá", "mentions": [format!("person:{ana}")], "key": "compose-1" });
+    let refused = running.call("send.text", stranger).await.unwrap_err();
+    assert_eq!((refused.code, refused.data), (code::INVALID_PARAMS, Some(json!({ "param": "mentions" }))));
+    running.chats(&[ANA]).await;
+    let direct = json!({ "chat": ANA, "text": "@Ana olá", "mentions": [format!("person:{ana}")] });
+    running.call("send.text", direct).await.unwrap();
+    assert_eq!(
+        sent(&running, 2).await.conversation.as_deref(),
+        Some("@Ana olá"),
+        "outside a group, mentions are dropped"
+    );
+    let sends = running.world.sends().len();
+    assert_eq!(sends, 2, "nothing went for the refused one");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_info_gives_a_groups_members_once_each_with_their_numbers_and_admins_and_a_direct_chats_two() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let rui_lid = "100000000003@lid";
+    running.members(CLIMBING, &[RUI, rui_lid]).await;
+    let both = Person { jids: vec![RUI.into(), rui_lid.into()], name: Some("Rui".into()), ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
+    let admin = Members { chat: CLIMBING.into(), all: false, set: vec![(rui_lid.into(), "admin")], remove: Vec::new() };
+    running.store.apply(Lane::Live, vec![Change::Members(admin)]).await.unwrap();
+    named(&running, ME, "Pedro").await;
+    let info = running.call("chat.info", json!({ "chat": CLIMBING })).await.unwrap();
+    let members = info["members"].as_array().unwrap();
+    let shown: Vec<(&str, Option<&str>, bool)> = members
+        .iter()
+        .map(|m| (m["name"].as_str().unwrap(), m["phone"].as_str(), m["admin"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(shown, [("Pedro", Some("+351910000001"), false), ("Rui", Some("+351913333333"), true)], "{info}");
+    assert!(members.iter().all(|m| m["person"].as_str().unwrap().starts_with("person:")));
+    assert_eq!((info["kind"].as_str(), info["ephemeral"].as_u64()), (Some("group"), Some(0)));
+    named(&running, ANA, "Ana").await;
+    running.chats(&[ANA]).await;
+    let direct = running.call("chat.info", json!({ "chat": ANA })).await.unwrap();
+    let names: Vec<&str> = direct["members"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Ana", "Pedro"], "the other person and you");
+    let unknown = running.call("chat.info", json!({ "chat": "351999999999@s.whatsapp.net" })).await.unwrap_err();
+    assert_eq!(unknown.code, code::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replies_mentions_and_chat_info_go_through_the_socket_as_jaw_asks_for_them() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.members(CLIMBING, &[RUI]).await;
+    let rui = named(&running, RUI, "Rui").await;
+    running.arrives(CLIMBING, RUI, "g1", now_ms() - 1_000).await;
+    let socket = serve(&running, home.path());
+    let replies = ask_socket(
+        &socket,
+        vec![
+            ("chat.info", json!({ "chat": CLIMBING })),
+            (
+                "send.text",
+                json!({ "chat": CLIMBING, "text": "@Rui sim", "key": "jaw-1", "reply": "g1", "mentions": [format!("person:{rui}")] }),
+            ),
+            ("chat.info", json!({ "chat": "nobody@g.us" })),
+        ],
+    )
+    .await;
+    let names: Vec<&str> =
+        replies[0]["result"]["members"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"Rui"), "{}", replies[0]);
+    let row = &replies[1]["result"]["row"];
+    assert_eq!(row["reply"], json!({ "id": "g1", "from": "Rui", "summary": "message g1" }), "{row}");
+    assert_eq!(row["spans"][0], json!({ "t": "mention", "s": "@Rui", "person": RUI }), "{row}");
+    assert_eq!(replies[2]["error"]["code"], code::NOT_FOUND);
 }
 
 #[test]
@@ -1197,7 +1376,29 @@ fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
         ),
         (start::DIRECT_CHAT_BY_PERSON, "SEARCH chats USING INDEX chats_by_person (person=?)"),
         (start::PERSON_JIDS, "SEARCH person_jids USING INDEX person_jids_by_person (person=?)"),
-        (outbox::CHAT_EPHEMERAL, "SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)"),
+        (
+            outbox::CHAT_TO_SEND,
+            "SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+        ),
+        (outbox::ME, "SEARCH sync_state USING PRIMARY KEY (key=?)"),
+        (
+            quote::QUOTED,
+            "SEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+        ),
+        (
+            quote::QUOTED_MERGING,
+            "SEARCH c USING COVERING INDEX chat_merges_by_keep (keep=?)\nSEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+        ),
+        (
+            quote::MEMBER_JID,
+            "SEARCH j USING INDEX person_jids_by_person (person=?)\nSEARCH g USING COVERING INDEX group_members_by_member (member=? AND chat=?)",
+        ),
+        (quote::NAMES, "SEARCH people USING INTEGER PRIMARY KEY (rowid=?)"),
+        (info::CHAT, "SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)"),
+        (info::GROUP_MEMBERS, "SEARCH g USING PRIMARY KEY (chat=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?)"),
+        (info::PERSON, "SEARCH people USING INTEGER PRIMARY KEY (rowid=?)"),
+        (info::PHONE, "SEARCH person_jids USING INDEX person_jids_by_person (person=?)"),
+        (info::PERSON_OF, "SEARCH person_jids USING INDEX sqlite_autoindex_person_jids_1 (jid=?)"),
     ];
     for (sql, expected) in statements {
         let mut explain = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();

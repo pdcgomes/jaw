@@ -305,7 +305,7 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
             None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so there's nothing to watch")),
         },
         "history.more" => history_more(state, id, request.params).await,
-        "send.text" | "send.retry" | "chat.start" | "draft.set" | "read" | "typing" => match state.sending() {
+        method if crate::send::Sending::METHODS.contains(&method) => match state.sending() {
             Some(sending) => match sending.call(&request.method, request.params).await {
                 Ok(result) => succeeded(id, &result),
                 Err(error) => failed(id, error),

@@ -17,9 +17,9 @@ use prost::Message as _;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 use wa_proto::wa_common::MessageKey;
-use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::{WebMessageInfo, web_message_info};
 
+use super::quote::{self, Mentioned, Quote};
 use super::{Inner, TEXT_MOST, durably, engine, internal, no_chat, now_ms, query, retryable};
 use crate::convert::{self, Me};
 use crate::engine::{EngineError, pb};
@@ -28,7 +28,11 @@ use crate::store::outbox::{self, Enqueued, Outboxed, Step, Written};
 use crate::store::{Change, Lane, Person, read};
 use crate::work::{Next, Priority};
 
-pub(super) const CHAT_EPHEMERAL: &str = "SELECT ephemeral FROM chats WHERE id = ?1";
+/// A chat to send to: its disappearing timer, the chat it is as the writer finds it (itself, or
+/// the one it's being merged into), and its kind.
+pub(super) const CHAT_TO_SEND: &str = "SELECT c.ephemeral, coalesce(m.keep, c.n), c.kind FROM chats c
+    LEFT JOIN chat_merges m ON m.gone = c.n WHERE c.id = ?1";
+pub(super) const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 
 /// The longest key an interface may give a message.
 const KEY_MOST: usize = 128;
@@ -50,19 +54,25 @@ pub(super) fn message_id() -> std::io::Result<String> {
     }))
 }
 
-/// Text as WhatsApp sends it: plain, or with the chat's disappearing timer when it has one, so it
-/// disappears as the chat's other messages do.
-fn text_message(text: &str, ephemeral: u32) -> e2e::Message {
-    if ephemeral == 0 {
-        return e2e::Message { conversation: Some(text.into()), ..Default::default() };
-    }
-    let context = e2e::ContextInfo { expiration: Some(ephemeral), ..Default::default() };
-    let extended = e2e::ExtendedTextMessage {
-        text: Some(text.into()),
-        context_info: Some(Box::new(context)),
-        ..Default::default()
-    };
-    e2e::Message { extended_text_message: Some(Box::new(extended)), ..Default::default() }
+/// The account's own JIDs as sync keeps them.
+pub(super) fn me(db: &rusqlite::Connection) -> anyhow::Result<Me> {
+    let me: Option<String> = db.prepare_cached(ME)?.query_row([], |r| r.get(0)).optional()?;
+    Ok(Me::new(me.unwrap_or_default().split_whitespace().map(str::to_string)))
+}
+
+/// Whether a chat of `kind` has members to mention.
+fn has_members(kind: &str) -> bool {
+    matches!(kind, "group" | "community" | "announcement")
+}
+
+/// What `send.text` reads before it writes: the chat, the interface's key if it named a message
+/// already, who you are, and the message replied to and the people mentioned, as they're sent.
+struct Composed {
+    chat: Option<(u32, i64, String)>,
+    keyed: Option<(String, String)>,
+    me: Me,
+    quote: Option<Quote>,
+    mentioned: Result<Mentioned, String>,
 }
 
 /// The answer for message `id` in `chat`, with its row if it can be read; a message that's committed
@@ -85,37 +95,73 @@ async fn answer(inner: &Inner, chat: String, id: String) -> Sent {
     }
 }
 
-pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent, Error> {
-    if send.reply.is_some() || !send.mentions.is_empty() {
-        let mut error = Error::new(code::INVALID_PARAMS, "replies and mentions come with the next milestone");
-        error.data = Some(serde_json::json!({ "param": if send.reply.is_some() { "reply" } else { "mentions" } }));
-        return Err(error);
+/// The protocol's error for a parameter it can't use, naming it.
+pub(super) fn bad_param(param: &str, message: impl Into<String>) -> Error {
+    let mut error = Error::new(code::INVALID_PARAMS, message);
+    error.data = Some(serde_json::json!({ "param": param }));
+    error
+}
+
+/// Refuses a key that isn't 1 to KEY_MOST bytes.
+pub(super) fn check_key(key: &Option<String>) -> Result<(), Error> {
+    match key {
+        Some(key) if key.is_empty() || key.len() > KEY_MOST => {
+            Err(Error::new(code::INVALID_PARAMS, format!("a key is 1 to {KEY_MOST} bytes")))
+        }
+        _ => Ok(()),
     }
+}
+
+pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent, Error> {
     if send.text.trim().is_empty() {
         return Err(Error::new(code::INVALID_PARAMS, "there's nothing to send"));
     }
     if send.text.chars().count() > TEXT_MOST {
         return Err(Error::new(code::LIMIT, format!("a message can be {TEXT_MOST} characters at most")));
     }
-    if let Some(key) = &send.key
-        && (key.is_empty() || key.len() > KEY_MOST)
-    {
-        return Err(Error::new(code::INVALID_PARAMS, format!("a key is 1 to {KEY_MOST} bytes")));
-    }
-    let (chat, key) = (send.chat.clone(), send.key.clone());
-    let (ephemeral, keyed) = query(inner, move |db| {
-        let ephemeral: Option<u32> = db.prepare_cached(CHAT_EPHEMERAL)?.query_row([&chat], |r| r.get(0)).optional()?;
+    check_key(&send.key)?;
+    let (chat, key, reply, people, text) =
+        (send.chat.clone(), send.key.clone(), send.reply.clone(), send.mentions.clone(), send.text.clone());
+    let composed = query(inner, move |db| {
+        let chat: Option<(u32, i64, String)> = db
+            .prepare_cached(CHAT_TO_SEND)?
+            .query_row([&chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
         let keyed = key.as_deref().map(|key| outbox::keyed(db, key)).transpose()?.flatten();
-        Ok((ephemeral, keyed))
+        let me = me(db)?;
+        let (mut quote, mut mentioned) = (None, Ok(Mentioned { jids: Vec::new(), text: text.clone() }));
+        if let Some((_, n, kind)) = &chat {
+            quote = reply.map(|id| quote::quoted(db, *n, &id, &me)).transpose()?;
+            // As WhatsApp's phones do, mentions outside a group are dropped.
+            if has_members(kind) && !people.is_empty() {
+                mentioned = quote::mentioned(db, *n, &people, &text)?;
+            }
+        }
+        Ok(Composed { chat, keyed, me, quote, mentioned })
     })
     .await?;
-    if let Some((chat, id)) = keyed {
+    if let Some((chat, id)) = composed.keyed {
         return Ok(answer(inner, chat, id).await);
     }
-    let Some(ephemeral) = ephemeral else { return Err(no_chat(&send.chat)) };
+    let Some((ephemeral, _, _)) = composed.chat else { return Err(no_chat(&send.chat)) };
+    let quoted = match composed.quote {
+        None => None,
+        Some(Quote::Found(quoted)) => Some(*quoted),
+        Some(Quote::Missing) => {
+            let reply = send.reply.unwrap_or_default();
+            return Err(Error::new(
+                code::NOT_FOUND,
+                format!("jawd has no message {reply} in {} to reply to", send.chat),
+            ));
+        }
+        Some(Quote::Deleted) => return Err(Error::new(code::NOT_ALLOWED, "a deleted message can't be replied to")),
+    };
+    let mentioned = composed.mentioned.map_err(|person| {
+        bad_param("mentions", format!("{person} isn't in {}, so they can't be mentioned there", send.chat))
+    })?;
     let id = message_id().map_err(|e| internal("make a message ID", e.into()))?;
     let at = now_ms();
-    let raw = text_message(&send.text, ephemeral);
+    let raw = quote::text_message(&mentioned.text, ephemeral, quoted.as_ref(), &mentioned.jids);
     let web = WebMessageInfo {
         key: MessageKey {
             remote_jid: Some(send.chat.clone()),
@@ -129,7 +175,7 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
         ..Default::default()
     };
     let Some(Change::Message(mut message)) =
-        convert::message(&web, &Me::default(), true).into_iter().find(|c| matches!(c, Change::Message(_)))
+        convert::message(&web, &composed.me, true).into_iter().find(|c| matches!(c, Change::Message(_)))
     else {
         return Err(Error::new(code::INTERNAL, "jawd couldn't make a message of that text"));
     };

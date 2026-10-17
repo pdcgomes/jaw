@@ -208,7 +208,7 @@ pub(crate) fn message_row(row: read::MessageRow) -> proto::MessageRow {
         spans: json(&row.spans),
         reply: row.reply.as_deref().map(json),
         forwarded: row.forwarded.clamp(0, i64::from(u32::MAX)) as u32,
-        reactions: Vec::new(),
+        reactions: serde_json::from_str(row.reactions.get()).unwrap_or_default(),
         status: row.status,
         edited: row.edited,
         deleted: row.deleted,

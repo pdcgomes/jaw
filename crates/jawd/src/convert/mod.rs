@@ -38,13 +38,13 @@ impl Me {
         Me { jids }
     }
 
-    fn is(&self, jid: &str) -> bool {
+    pub fn is(&self, jid: &str) -> bool {
         let jid = user_jid(jid);
         self.jids.contains(&jid)
     }
 
     /// The JID to name the account by in rows that need one, such as a reaction's.
-    fn jid(&self) -> Option<&str> {
+    pub fn jid(&self) -> Option<&str> {
         self.jids.iter().find(|jid| jid.ends_with("@s.whatsapp.net")).or(self.jids.first()).map(String::as_str)
     }
 }
@@ -314,6 +314,52 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         raw: Some(Packed::new(&info.encode_to_vec())),
         ..Message::default()
     }));
+}
+
+/// What a message says, out of its wrappers and without the quote, mentions, forwarding and timer
+/// it carried, as a reply quotes it.
+pub fn bare(message: &e2e::Message) -> e2e::Message {
+    let mut bare = unwrap(message).0.clone();
+    if let Some(context) = context_mut(&mut bare) {
+        *context = None;
+    }
+    bare
+}
+
+/// The ContextInfo of whichever kind the message is, to change; `None` for a kind that has none,
+/// plain text among them.
+fn context_mut(m: &mut e2e::Message) -> Option<&mut Option<Box<e2e::ContextInfo>>> {
+    if let Some(x) = m.extended_text_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    if let Some(x) = m.image_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    if let Some(x) = m.video_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    if let Some(x) = m.ptv_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    if let Some(x) = m.audio_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    if let Some(x) = m.document_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    if let Some(x) = m.sticker_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    if let Some(x) = m.location_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    if let Some(x) = m.contact_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    if let Some(x) = m.contacts_array_message.as_deref_mut() {
+        return Some(&mut x.context_info);
+    }
+    None
 }
 
 /// The ContextInfo of whichever kind the message is.

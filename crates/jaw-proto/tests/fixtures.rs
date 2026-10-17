@@ -5,7 +5,10 @@
 use std::path::{Path, PathBuf};
 
 use jaw_proto::find::{ChatOpened, Find, Found};
-use jaw_proto::send::{ChatStart, ChatStarted, DraftSet, Read, SendRetry, SendText, Sent, Typing};
+use jaw_proto::send::{
+    ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
+    React, Read, SendRetry, SendText, Sent, Typing,
+};
 use jaw_proto::sync::{HistoryMore, Notice};
 use jaw_proto::windows::{
     ChatsPush, ChatsWatch, ChatsWatched, MessagesPush, MessagesWatch, MessagesWatched, Watch, WatchMove,
@@ -78,6 +81,12 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "draft.set" => params::<DraftSet>(&name, &request.params),
                     "read" => params::<Read>(&name, &request.params),
                     "typing" => params::<Typing>(&name, &request.params),
+                    "react" => params::<React>(&name, &request.params),
+                    "edit" => params::<Edit>(&name, &request.params),
+                    "delete" => params::<Delete>(&name, &request.params),
+                    "forward" => params::<Forward>(&name, &request.params),
+                    "message.info" => params::<MessageInfo>(&name, &request.params),
+                    "chat.info" => params::<ChatInfo>(&name, &request.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -89,11 +98,14 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "status" => params::<Status>(&name, result),
                     "find" => params::<Found>(&name, result),
                     "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
-                    | "typing" => {
+                    | "typing" | "react" | "edit" | "delete" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
                     "send.text" => params::<Sent>(&name, result),
                     "chat.start" => params::<ChatStarted>(&name, result),
+                    "forward" => params::<Forwarded>(&name, result),
+                    "message.info" => params::<Info>(&name, result),
+                    "chat.info" => params::<ChatInfoResult>(&name, result),
                     "chats.watch" => params::<ChatsWatched>(&name, result),
                     // A move's result is its window's; this fixture moves a messages window.
                     "messages.watch" | "watch.move" => params::<MessagesWatched>(&name, result),

@@ -46,9 +46,55 @@ SELECT jid FROM person_jids WHERE person = ?1 ORDER BY n
 SELECT folder FROM folder_items WHERE person = ?1
     SEARCH folder_items USING INDEX folder_items_by_person (person=?)
 
--- src/send/outbox.rs
-SELECT ephemeral FROM chats WHERE id = ?1
+-- src/send/info.rs
+SELECT n, kind, person, community, ephemeral FROM chats WHERE id = ?1
     SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
+
+-- src/send/info.rs
+SELECT j.person, j.jid, g.role FROM group_members g JOIN person_jids j ON j.n = g.member WHERE g.chat = ?1
+    SEARCH g USING PRIMARY KEY (chat=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/send/info.rs
+SELECT name, push_name, verified_name FROM people WHERE n = ?1
+    SEARCH people USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/send/info.rs
+SELECT jid FROM person_jids WHERE person = ?1 AND jid LIKE '%@s.whatsapp.net' ORDER BY n LIMIT 1
+    SEARCH person_jids USING INDEX person_jids_by_person (person=?)
+
+-- src/send/info.rs
+SELECT person FROM person_jids WHERE jid = ?1
+    SEARCH person_jids USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+
+-- src/send/outbox.rs
+SELECT c.ephemeral, coalesce(m.keep, c.n), c.kind FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n WHERE c.id = ?1
+    SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
+-- src/send/outbox.rs
+SELECT value FROM sync_state WHERE key = 'me'
+    SEARCH sync_state USING PRIMARY KEY (key=?)
+
+-- src/send/quote.rs
+SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, '') FROM messages m LEFT JOIN person_jids j ON j.n = m.sender WHERE m.chat = ?1 AND m.id = ?2
+    SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
+-- src/send/quote.rs
+SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, '') FROM chat_merges c JOIN messages m ON m.chat = c.gone AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender WHERE c.keep = ?1 LIMIT 1
+    SEARCH c USING COVERING INDEX chat_merges_by_keep (keep=?)
+    SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
+-- src/send/quote.rs
+SELECT j.jid FROM person_jids j JOIN group_members g ON g.chat = ?1 AND g.member = j.n WHERE j.person = ?2 ORDER BY j.n LIMIT 1
+    SEARCH j USING INDEX person_jids_by_person (person=?)
+    SEARCH g USING COVERING INDEX group_members_by_member (member=? AND chat=?)
+
+-- src/send/quote.rs
+SELECT name, push_name, verified_name FROM people WHERE n = ?1
+    SEARCH people USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/send/reads.rs
 SELECT coalesce(m.keep, c.n) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n WHERE c.id = ?1
@@ -98,6 +144,134 @@ INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)
 INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)
 
 -- src/store/read.rs
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = c.last_message LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
+    SEARCH c USING INDEX chats_by_sort (archived=? AND sort<?)
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 2
+      CO-ROUTINE (subquery-1)
+        SEARCH g USING PRIMARY KEY (chat=?)
+        SEARCH gj USING INTEGER PRIMARY KEY (rowid=?)
+        SEARCH gp USING INTEGER PRIMARY KEY (rowid=?)
+      SCAN (subquery-1)
+
+-- src/store/read.rs
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = c.last_message LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.n = ?1
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 2
+      CO-ROUTINE (subquery-1)
+        SEARCH g USING PRIMARY KEY (chat=?)
+        SEARCH gj USING INTEGER PRIMARY KEY (rowid=?)
+        SEARCH gp USING INTEGER PRIMARY KEY (rowid=?)
+      SCAN (subquery-1)
+
+-- src/store/read.rs
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) ORDER BY m.at DESC, m.n DESC LIMIT ?2
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    SCALAR SUBQUERY 6
+      SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+    REUSE SUBQUERY 6
+    SEARCH m USING INDEX messages_by_time (chat=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SCALAR SUBQUERY 1
+      SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH rj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH rp USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      CO-ROUTINE (subquery-3)
+        SEARCH reactions USING PRIMARY KEY (message=?)
+        USE TEMP B-TREE FOR GROUP BY
+        USE TEMP B-TREE FOR ORDER BY
+      SCAN (subquery-3)
+    CORRELATED SCALAR SUBQUERY 5
+      SCAN e VIRTUAL TABLE INDEX 1:
+      SEARCH mj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH mp USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/read.rs
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) < (?2, ?3) ORDER BY m.at DESC, m.n DESC LIMIT ?4
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    SCALAR SUBQUERY 6
+      SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+    REUSE SUBQUERY 6
+    SEARCH m USING INDEX messages_by_time (chat=? AND at<?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SCALAR SUBQUERY 1
+      SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH rj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH rp USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      CO-ROUTINE (subquery-3)
+        SEARCH reactions USING PRIMARY KEY (message=?)
+        USE TEMP B-TREE FOR GROUP BY
+        USE TEMP B-TREE FOR ORDER BY
+      SCAN (subquery-3)
+    CORRELATED SCALAR SUBQUERY 5
+      SCAN e VIRTUAL TABLE INDEX 1:
+      SEARCH mj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH mp USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/read.rs
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) > (?2, ?3) ORDER BY m.at, m.n LIMIT ?4
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    SCALAR SUBQUERY 6
+      SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+    REUSE SUBQUERY 6
+    SEARCH m USING INDEX messages_by_time (chat=? AND at>?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SCALAR SUBQUERY 1
+      SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH rj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH rp USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      CO-ROUTINE (subquery-3)
+        SEARCH reactions USING PRIMARY KEY (message=?)
+        USE TEMP B-TREE FOR GROUP BY
+        USE TEMP B-TREE FOR ORDER BY
+      SCAN (subquery-3)
+    CORRELATED SCALAR SUBQUERY 5
+      SCAN e VIRTUAL TABLE INDEX 1:
+      SEARCH mj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH mp USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/read.rs
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND m.id = ?2
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    SCALAR SUBQUERY 6
+      SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+    REUSE SUBQUERY 6
+    SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SCALAR SUBQUERY 1
+      SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH rj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH rp USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      CO-ROUTINE (subquery-3)
+        SEARCH reactions USING PRIMARY KEY (message=?)
+        USE TEMP B-TREE FOR GROUP BY
+        USE TEMP B-TREE FOR ORDER BY
+      SCAN (subquery-3)
+    CORRELATED SCALAR SUBQUERY 5
+      SCAN e VIRTUAL TABLE INDEX 1:
+      SEARCH mj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH mp USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/read.rs
 SELECT raw FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -111,6 +285,28 @@ SELECT messages_fts.rowid FROM messages_fts CROSS JOIN messages m ON m.t = messa
     SEARCH m USING INDEX sqlite_autoindex_messages_1 (t=?)
     SCALAR SUBQUERY 1
       SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+
+-- src/store/read.rs
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.t = ?1
+    SEARCH m USING INDEX sqlite_autoindex_messages_1 (t=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SCALAR SUBQUERY 1
+      SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH rj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH rp USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      CO-ROUTINE (subquery-3)
+        SEARCH reactions USING PRIMARY KEY (message=?)
+        USE TEMP B-TREE FOR GROUP BY
+        USE TEMP B-TREE FOR ORDER BY
+      SCAN (subquery-3)
+    CORRELATED SCALAR SUBQUERY 5
+      SCAN e VIRTUAL TABLE INDEX 1:
+      SEARCH mj USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+      SEARCH mp USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/read.rs
 SELECT seq, at, type, key, chat FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2
@@ -127,6 +323,36 @@ SELECT coalesce((SELECT min(seq) FROM events), 0), coalesce((SELECT max(seq) FRO
 -- src/store/read.rs
 SELECT n, sort, archived FROM chats WHERE id = ?1
     SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
+
+-- src/store/read.rs
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = c.last_message LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) > (?2, ?3) ORDER BY c.sort, c.n LIMIT ?4
+    SEARCH c USING INDEX chats_by_sort (archived=? AND sort>?)
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 2
+      CO-ROUTINE (subquery-1)
+        SEARCH g USING PRIMARY KEY (chat=?)
+        SEARCH gj USING INTEGER PRIMARY KEY (rowid=?)
+        SEARCH gp USING INTEGER PRIMARY KEY (rowid=?)
+      SCAN (subquery-1)
+
+-- src/store/read.rs
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = c.last_message LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.n IN (SELECT value FROM json_each(?1))
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    LIST SUBQUERY 3
+      SCAN json_each VIRTUAL TABLE INDEX 1:
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 2
+      CO-ROUTINE (subquery-1)
+        SEARCH g USING PRIMARY KEY (chat=?)
+        SEARCH gj USING INTEGER PRIMARY KEY (rowid=?)
+        SEARCH gp USING INTEGER PRIMARY KEY (rowid=?)
+      SCAN (subquery-1)
 
 -- src/store/read.rs
 SELECT count(*) FROM chats WHERE archived = ?1

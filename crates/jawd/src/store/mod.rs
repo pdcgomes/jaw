@@ -43,12 +43,13 @@ use tokio::sync::{Notify, oneshot, watch};
 pub use self::read::Reads;
 use self::write::Stamps;
 pub use self::write::outbox;
+pub use self::write::unpack;
+#[cfg(test)]
+pub use self::write::unpack_for_tests;
 pub use self::write::{
     Amend, Amendment, Change, Chat, Drained, Members, Merging, Message, Opened, Packed, Person, Read, frecency,
     merge_reference,
 };
-#[cfg(test)]
-pub use self::write::{unpack, unpack_for_tests};
 use crate::engine::Ack;
 use crate::work::{Report, Samples};
 

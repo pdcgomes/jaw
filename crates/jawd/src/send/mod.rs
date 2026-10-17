@@ -6,11 +6,15 @@
 //! Reading moves the chat's read position and owes WhatsApp read receipts, sent at most every so
 //! often per chat (`reads`); typing is said at most every so often and stopped after a quiet spell
 //! (`typing`); you're online only while an interface has focus (`presence`); and `chat.start`
-//! finds or makes a chat by number or person (`start`).
+//! finds or makes a chat by number or person (`start`). A reply quotes its message and mentions
+//! name their people as WhatsApp writes them (`quote`); `chat.info` gives a chat's members
+//! (`info`).
 
 pub mod bench;
+mod info;
 mod outbox;
 mod presence;
+mod quote;
 mod reads;
 mod regroup;
 mod start;
@@ -22,7 +26,7 @@ mod tests;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jaw_proto::send::{ChatStart, DraftSet, Read, SendRetry, SendText, Typing};
+use jaw_proto::send::{ChatInfo, ChatStart, DraftSet, Read, SendRetry, SendText, Typing};
 use jaw_proto::{Error, Push, code};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -132,7 +136,7 @@ impl Sending {
     }
 
     /// Answers one of the sending methods: `send.text`, `send.retry`, `chat.start`, `draft.set`,
-    /// `read` and `typing`.
+    /// `read`, `typing` and `chat.info`.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         let inner = &self.inner;
         match method {
@@ -142,9 +146,13 @@ impl Sending {
             "draft.set" => draft(inner, params_of::<DraftSet>(method, params)?).await,
             "read" => reads::read(inner, params_of::<Read>(method, params)?).await,
             "typing" => typing::typing(inner, params_of::<Typing>(method, params)?),
+            "chat.info" => result(info::chat_info(inner, params_of::<ChatInfo>(method, params)?).await?),
             _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
         }
     }
+
+    /// The methods `call` answers.
+    pub const METHODS: &[&str] = &["send.text", "send.retry", "chat.start", "draft.set", "read", "typing", "chat.info"];
 }
 
 /// The longest text a message or a draft can have, in characters, as WhatsApp allows.
