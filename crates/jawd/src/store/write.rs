@@ -577,7 +577,20 @@ struct ChatRead {
 /// phone's own counts while they stand. Run once before the transaction commits, so a batch of
 /// history moves and counts each chat once, in one update.
 pub(super) fn settle(db: &Connection, stamps: &mut Stamps) -> Result<()> {
-    for (chat, moved) in std::mem::take(&mut stamps.unsettled) {
+    let unsettled = std::mem::take(&mut stamps.unsettled);
+    let chats: Vec<i64> = unsettled.iter().map(|(chat, _)| *chat).collect();
+    settle_each(db, stamps, unsettled)?;
+    // A chat being merged counts from the later of its position and its kept chat's, and is
+    // marked unread only while that one is; both may just have moved, so it's counted after.
+    let mut merging = Vec::new();
+    for keep in chats {
+        merging.extend(chats_merging_into(db, keep)?.into_iter().map(|gone| (gone, Unsettled::default())));
+    }
+    settle_each(db, stamps, merging)
+}
+
+fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsettled)>) -> Result<()> {
+    for (chat, moved) in unsettled {
         let Some(ChatRead { mut read_at, known, mut phone_unread, mut phone_mentions, marked }) = db
             .prepare_cached(
                 "SELECT read_at, read_known, phone_unread, phone_mentions, marked_unread FROM chats WHERE n = ?1",
@@ -677,21 +690,16 @@ fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     if changed > 0 {
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
         stamps.unsettle(chat);
-        unsettle_merging(db, stamps, chat)?;
     }
     Ok(changed > 0)
 }
 
-/// Has the chats being merged into `keep` counted again, since they count from its position.
-fn unsettle_merging(db: &Connection, stamps: &mut Stamps, keep: i64) -> Result<()> {
-    let merging: Vec<i64> = db
+/// The chats being merged into `keep`.
+fn chats_merging_into(db: &Connection, keep: i64) -> Result<Vec<i64>> {
+    Ok(db
         .prepare_cached("SELECT gone FROM chat_merges WHERE keep = ?1")?
         .query_map([keep], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    for gone in merging {
-        stamps.unsettle(gone);
-    }
-    Ok(())
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// Counts an open in the chat's frecency. An open older than the chat's last counts as decayed
@@ -924,6 +932,10 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
     match changed {
         Some(n) => {
             stamps.record(db, CHAT, n, Some(n), seq)?;
+            // Marked unread or not is part of what settle writes, for it and the chats merging into it.
+            if chat.marked_unread.is_some() {
+                stamps.unsettle(n);
+            }
             Ok(true)
         }
         None => Ok(false),
@@ -1071,7 +1083,6 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     .execute(params![keep, gone, seq])?;
     stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
     stamps.unsettle(*keep);
-    stamps.unsettle(*gone);
     Ok(())
 }
 
@@ -1094,15 +1105,15 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     };
     let Some((gone, keep)) = found else { return Ok(false) };
     let moving: Vec<i64> = db
-        .prepare_cached("SELECT n FROM messages WHERE chat = ?1 LIMIT ?2")?
+        .prepare_cached("SELECT n FROM messages WHERE chat = ?1 ORDER BY at, n LIMIT ?2")?
         .query_map(params![gone, MERGE_STEP], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     for &n in &moving {
         move_merged(db, stamps, gone, keep, n)?;
     }
     show_newest(db, stamps, keep)?;
+    // Oldest first, so the chat being merged keeps its newest until the last step.
     if moving.len() as i64 == MERGE_STEP {
-        show_newest(db, stamps, gone)?;
         return Ok(true);
     }
     let (gone_jid, keep_jid): (String, String) = db

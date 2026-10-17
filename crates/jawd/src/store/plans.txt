@@ -410,7 +410,7 @@ SELECT gone, keep FROM chat_merges ORDER BY gone LIMIT 1
     SCAN chat_merges
 
 -- src/store/write.rs
-SELECT n FROM messages WHERE chat = ?1 LIMIT ?2
+SELECT n FROM messages WHERE chat = ?1 ORDER BY at, n LIMIT ?2
     SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
 
 -- src/store/write.rs

@@ -348,8 +348,10 @@ async fn shown_and_derived(store: &Store, id: &'static str) -> [(i64, i64); 5] {
     .await
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_merge_left_halfway_shows_each_chat_as_its_rows_are_and_reading_either_clears_both() {
+/// Ana's number chat with one message and her LID chat with 250 (every tenth mentioning you),
+/// joined, and their merge stopped after its first step of 200: the half-moved state, with 201
+/// messages in the number chat and 50 left in the LID chat. `before` is applied before the join.
+async fn half_merged(before: Vec<Change>) -> (tempfile::TempDir, Store) {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
     let mut changes = vec![Change::Message(message(ANA, "p1", AT - 1, "under the number"))];
@@ -360,6 +362,7 @@ async fn a_merge_left_halfway_shows_each_chat_as_its_rows_are_and_reading_either
             ..message(ANA_LID, &format!("l{i}"), AT + i, &words)
         }));
     }
+    changes.extend(before);
     apply(&store, changes).await;
     {
         // The first message of the second step can't move, so the merge stops after one of 200.
@@ -375,6 +378,12 @@ async fn a_merge_left_halfway_shows_each_chat_as_its_rows_are_and_reading_either
     store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
     let failed = store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
     assert_eq!(failed.quarantined, 1, "the second step can't move l200");
+    (home, store)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_left_halfway_shows_each_chat_as_its_rows_are_and_reading_either_clears_both() {
+    let (_home, store) = half_merged(Vec::new()).await;
     assert!(merging(&store).await);
     for id in [ANA, ANA_LID] {
         let shown = shown_and_derived(&store, id).await;
@@ -396,6 +405,51 @@ async fn a_merge_left_halfway_shows_each_chat_as_its_rows_are_and_reading_either
         let shown = shown_and_derived(&store, id).await;
         assert_eq!((shown[0].0, shown[1].0), (0, 0), "{id}: read up to the LID chat's newest, nothing unread");
     }
+}
+
+/// Unread messages and mentions in each of Ana's two chats.
+async fn unread(store: &Store) -> [(i64, i64); 2] {
+    let (number, lid) = (shown_and_derived(store, ANA).await, shown_and_derived(store, ANA_LID).await);
+    [(number[0].0, number[1].0), (lid[0].0, lid[1].0)]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn during_a_merge_a_message_of_yours_in_the_kept_chat_reads_the_chat_merging_into_it_too() {
+    let live = mine(ANA, "reply", AT + 400);
+    let from_history = Message { live: false, ..mine(ANA_LID, "reply", AT + 400) };
+    for (how, reply) in [("live, to her number", live), ("from history, to her LID", from_history)] {
+        let (_home, store) = half_merged(Vec::new()).await;
+        assert_eq!(unread(&store).await, [(201, 20), (50, 5)]);
+        apply(&store, vec![Change::Message(reply)]).await;
+        assert_eq!(unread(&store).await, [(0, 0), (0, 0)], "a reply {how} reads everything before it");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn during_a_merge_unmarking_the_kept_chat_by_either_jid_unmarks_the_chat_merging_into_it() {
+    for jid in [ANA, ANA_LID] {
+        let marked = |id: &str| Change::Chat(Chat { id: id.into(), marked_unread: Some(true), ..Chat::default() });
+        let (_home, store) = half_merged(vec![marked(ANA), marked(ANA_LID)]).await;
+        let both = || async { (chat(&store, ANA).await.marked_unread, chat(&store, ANA_LID).await.marked_unread) };
+        assert_eq!(both().await, (true, true));
+        apply(&store, vec![Change::Chat(Chat { id: jid.into(), marked_unread: Some(false), ..Chat::default() })]).await;
+        assert_eq!(both().await, (false, false), "unmarked through app state by {jid}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn when_a_merge_starts_the_chat_merging_counts_from_where_the_kept_chat_was_read() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let mut changes: Vec<Change> =
+        (0..50).map(|i| Change::Message(message(ANA_LID, &format!("l{i}"), AT + i, "under the LID"))).collect();
+    // Answered later under her number, which reads her number chat up to then.
+    changes.push(Change::Message(mine(ANA, "reply", AT + 100)));
+    apply(&store, changes).await;
+    assert_eq!(unread(&store).await, [(0, 0), (50, 0)]);
+    joined(&store).await;
+    assert!(merging(&store).await, "no step has run");
+    assert_eq!(unread(&store).await, [(0, 0), (0, 0)], "the LID chat's messages came before the reply");
 }
 
 #[tokio::test(flavor = "multi_thread")]
