@@ -114,6 +114,8 @@ pub struct Account {
     contacts: Vec<Person>,
     /// How often each chat was opened by hand, which `find` ranks by.
     opens: HashMap<String, u32>,
+    /// The messages sent, by the key each was composed under, as jawd keeps them.
+    keyed: HashMap<String, String>,
     /// What's playing or paused, and what's being recorded.
     player: Option<voice::Player>,
     recorder: Option<voice::Recorder>,
@@ -178,6 +180,7 @@ impl Demo {
             qr: 0,
             contacts: contacts(),
             opens: HashMap::new(),
+            keyed: HashMap::new(),
             player: None,
             recorder: None,
             folders: folders::Folders::made_up(now),
@@ -820,10 +823,10 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_watch_messages(&chat, place));
     }
 
-    fn send_text(&mut self, chat: &str, text: &str, reply: Option<&str>, mentions: &[String]) {
-        let (chat, text, reply, mentions) =
-            (chat.to_string(), text.to_string(), reply.map(String::from), mentions.to_vec());
-        self.defer(move |a| a.on_send_text(&chat, &text, reply.as_deref(), &mentions));
+    fn send_text(&mut self, chat: &str, text: &str, key: &str, reply: Option<&str>, mentions: &[String]) {
+        let (chat, text, key, reply, mentions) =
+            (chat.to_string(), text.to_string(), key.to_string(), reply.map(String::from), mentions.to_vec());
+        self.defer(move |a| a.on_send_text(&chat, &text, &key, reply.as_deref(), &mentions));
     }
 
     fn react(&mut self, message: &str, emoji: &str) {

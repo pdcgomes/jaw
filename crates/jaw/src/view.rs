@@ -30,9 +30,8 @@ pub const NARROW: u16 = 90;
 pub const LIST: u16 = 34;
 /// How long a notice stays in the footer.
 const NOTICE: i64 = 4_000;
-/// How long after jawd is back a message whose answer was lost has to show as a row before
-/// it's taken as not sent.
-const UNSURE: i64 = 8_000;
+/// How many of the messages jawd has taken are remembered by key.
+const SENT_KEPT: usize = 256;
 /// The chat list keeps its order this long after the last move through it.
 const HOLD: i64 = 1_500;
 /// A draft goes to jawd once typing has paused this long.
@@ -49,6 +48,23 @@ const LIST_ROWS: u32 = 100;
 pub const WINDOW: usize = 100;
 /// Ask for the window to move once the screen is this close to its edge.
 const EDGE: usize = 20;
+
+/// A new key for a message being composed: `jaw-` and 32 hex digits from 128 random bits.
+fn key() -> String {
+    let mut bytes = [0u8; 16];
+    // SAFETY: getentropy fills the buffer it's given, which may be up to 256 bytes.
+    if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {
+        static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        bytes[..8].copy_from_slice(&(at.as_nanos() as u64).to_le_bytes());
+        bytes[8..].copy_from_slice(&(made ^ (u64::from(std::process::id()) << 32)).to_le_bytes());
+    }
+    bytes.iter().fold(String::from("jaw-"), |mut key, byte| {
+        key.push_str(&format!("{byte:02x}"));
+        key
+    })
+}
 
 /// Whether jawd answers.
 #[derive(Clone, Debug, PartialEq)]
@@ -204,9 +220,12 @@ pub struct View {
     sidebar: sidebar::Sidebar,
     /// Communities opened in the chat list to show their groups.
     communities_open: HashSet<String>,
-    /// Messages whose sending lost its answer: the chat, the text, and once jawd is back, when to
-    /// stop waiting for its row and say it wasn't sent.
-    unsure: Vec<(String, String, Option<i64>)>,
+    /// Messages whose sending lost its answer, by chat and key, until jawd answers for them again.
+    unsure: Vec<(String, String)>,
+    /// The key of the message being composed in each chat, made once for it and sent with it.
+    keys: HashMap<String, String>,
+    /// The newest messages jawd has taken, by key, with their IDs.
+    sent: std::collections::VecDeque<(String, String)>,
     /// What the box replies to or edits, and the names taken into it from the completion.
     replying: Option<actions::Replying>,
     editing: Option<actions::Editing>,
@@ -309,6 +328,8 @@ impl View {
             sidebar: sidebar::Sidebar::default(),
             communities_open: HashSet::new(),
             unsure: vec![],
+            keys: HashMap::new(),
+            sent: std::collections::VecDeque::new(),
             replying: None,
             editing: None,
             taken: vec![],
@@ -404,10 +425,6 @@ impl View {
         self.dirty = true;
         match update {
             Update::Hello { root, linked, me, connection } => {
-                let due = self.now() + UNSURE;
-                for (_, _, deadline) in self.unsure.iter_mut().filter(|u| u.2.is_none()) {
-                    *deadline = Some(due);
-                }
                 self.images.set_root(&root);
                 self.reach = Reach::Up;
                 self.linked = Some(linked);
@@ -429,6 +446,19 @@ impl View {
                     self.link = None;
                     self.link_asked = false;
                 }
+                // A jawd starting says hello before its engine has said whose account it has, so
+                // a connection coming up says the account was linked all along.
+                let up = matches!(c.state, ConnectionState::Online | ConnectionState::CatchingUp);
+                if up && self.linked == Some(false) {
+                    self.linked = Some(true);
+                    self.link = None;
+                    if !self.watching {
+                        self.watching = true;
+                        self.jawd.watch_chats(&self.folder, Place::top(LIST_ROWS));
+                        self.jawd.watch_folders();
+                        self.jawd.watch_roster(&self.folder);
+                    }
+                }
                 self.connection = c;
             }
             Update::Link(step) => {
@@ -446,13 +476,6 @@ impl View {
                 self.link = Some(step);
             }
             Update::Chats(update) => {
-                let arrived: Vec<(String, String)> = update
-                    .upsert
-                    .iter()
-                    .filter_map(|c| c.last.as_ref().map(|l| (c.id.clone(), l.summary.clone())))
-                    .collect();
-                self.unsure
-                    .retain(|(chat, text, _)| !arrived.iter().any(|(c, s)| c == chat && *s == fmt::one_line(text)));
                 let left = !update.remove.is_empty();
                 if let Some(open) = self.open.as_ref().filter(|o| update.remove.contains(o)) {
                     self.outside = self.chats.get(open).cloned().or(self.outside.take());
@@ -476,13 +499,6 @@ impl View {
                 }
             }
             Update::Messages { chat, update } => {
-                let mine: Vec<String> = update
-                    .upsert
-                    .iter()
-                    .filter(|m| m.mine)
-                    .map(|m| m.spans.iter().map(|s| s.s.as_str()).collect::<String>())
-                    .collect();
-                self.unsure.retain(|(c, text, _)| *c != chat || !mine.contains(text));
                 let Some(window) = self.messages.as_mut().filter(|w| w.chat == chat) else { return };
                 let first = !window.loaded;
                 let was_empty = window.loaded && window.is_empty();
@@ -520,15 +536,25 @@ impl View {
                     self.jawd.opened(&id);
                 }
             }
-            Update::Unsure { chat, text } => {
-                let due = (self.reach == Reach::Up).then(|| self.now() + UNSURE);
-                self.unsure.push((chat, text, due));
-            }
-            Update::Unsent { chat, text, why } => {
-                if self.open.as_deref() == Some(chat.as_str()) && self.composer.is_empty() {
-                    self.composer.set(&text);
+            Update::Unsure { chat, key } => {
+                if !self.unsure.iter().any(|(_, k)| *k == key) {
+                    self.unsure.push((chat, key));
                 }
-                self.unsent = Some(why);
+            }
+            Update::Sent { key, message } => {
+                self.unsure.retain(|(_, k)| *k != key);
+                self.sent.push_back((key, message));
+                if self.sent.len() > SENT_KEPT {
+                    self.sent.pop_front();
+                }
+            }
+            Update::Unsent { chat, key, text, why } => {
+                self.unsure.retain(|(_, k)| *k != key);
+                self.give_back(chat, key, text, why);
+            }
+            Update::NotStarted(why) => {
+                self.starting = None;
+                self.say(why);
             }
             Update::Notice(text) => self.say(text),
             Update::Playback(p) => self.on_playback(p),
@@ -726,8 +752,48 @@ impl View {
         }
         if self.editing.is_none() {
             self.draft_due = Some(now + DRAFT);
+            if !self.composer.is_empty() {
+                self.keys.entry(chat).or_insert_with(key);
+            }
         }
         self.unsent = None;
+    }
+
+    /// A message jawd didn't take goes back where it was composed, with its key, so its text is
+    /// never lost: into the box if its chat is open, or its chat's draft, ahead of anything typed
+    /// since. One jawd has taken stays where it is, in the window.
+    fn give_back(&mut self, chat: String, key: String, text: String, why: String) {
+        if self.sent.iter().any(|(k, _)| *k == key) {
+            return;
+        }
+        let before = |typed: &str| if typed.is_empty() { text.clone() } else { format!("{text}\n{typed}") };
+        if self.open.as_deref() == Some(chat.as_str()) {
+            let was_empty = match self.editing.as_mut() {
+                Some(e) => {
+                    let was_empty = e.draft.is_empty();
+                    e.draft = before(&e.draft);
+                    was_empty
+                }
+                None => {
+                    let was_empty = self.composer.is_empty();
+                    self.composer.set(&before(self.composer.text()));
+                    self.draft_due = Some(self.now() + DRAFT);
+                    was_empty
+                }
+            };
+            if was_empty {
+                self.keys.insert(chat, key);
+            }
+            self.unsent = Some(why);
+        } else {
+            let draft = self.chat_known(&chat).and_then(|c| c.draft.clone()).unwrap_or_default();
+            if draft.is_empty() {
+                self.keys.insert(chat.clone(), key);
+            }
+            self.jawd.draft(&chat, &before(&draft));
+            let name = self.chat_known(&chat).map_or_else(|| chat.clone(), |c| c.name.clone());
+            self.say(format!("not sent to {name}, back in its box: {why}"));
+        }
     }
 
     fn send(&mut self) {
@@ -756,7 +822,8 @@ impl View {
         let mentions = self.mentions_in(&text);
         self.taken.clear();
         self.dismissed = None;
-        self.jawd.send_text(&chat, &text, reply.as_deref(), &mentions);
+        let key = self.keys.remove(&chat).unwrap_or_else(key);
+        self.jawd.send_text(&chat, &text, &key, reply.as_deref(), &mentions);
         self.typing_at = 0;
         self.draft_sent.clear();
         self.draft_due = None;
@@ -791,18 +858,6 @@ impl View {
     /// Whatever has come due: the chat list's order let go, a draft saved, a notice gone.
     pub fn tick(&mut self) {
         let now = self.now();
-        let (lost, waiting): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.unsure).into_iter().partition(|(_, _, due)| due.is_some_and(|d| d <= now));
-        self.unsure = waiting;
-        for (chat, text, _) in lost {
-            let why = "the connection to jawd dropped as it went, and it didn't arrive".to_string();
-            if self.open.as_deref() == Some(chat.as_str()) {
-                self.apply(Update::Unsent { chat, text, why });
-            } else {
-                let name = self.chat_known(&chat).map_or_else(|| chat.clone(), |c| c.name.clone());
-                self.say(format!("a message to {name} didn't arrive: {}", fmt::fit(&text, 30)));
-            }
-        }
         let (second, minute) = (now / 1_000, now / MINUTE);
         if minute != self.drawn_at / 60 || (self.counting() && second != self.drawn_at) {
             self.dirty = true;
@@ -849,7 +904,6 @@ impl View {
         soon(self.draft_due);
         soon(self.read_due);
         soon(self.notice.as_ref().map(|(_, t)| *t));
-        soon(self.unsure.iter().filter_map(|u| u.2).min());
         if self.chomp_until.is_some() {
             soon(Some(now + 100));
         }

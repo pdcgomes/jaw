@@ -631,6 +631,11 @@ impl View {
         if let Some(why) = &self.unsent {
             block =
                 block.title_bottom(Line::from(Span::styled(format!(" not sent: {why} "), Style::new().fg(t.comment))));
+        } else if self.unsure.iter().any(|(chat, _)| self.open.as_deref() == Some(chat.as_str())) {
+            block = block.title_bottom(Line::from(Span::styled(
+                " asking jawd again once it's back ",
+                Style::new().fg(t.comment),
+            )));
         }
         let inner = block.inner(area);
         f.render_widget(block, area);

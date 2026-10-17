@@ -345,6 +345,19 @@ fn linking_shows_the_qr_code_beside_the_mimic_or_a_code_for_the_phone() {
 }
 
 #[test]
+fn a_jawd_that_said_hello_before_its_engine_said_it_was_linked_shows_the_chats_once_it_connects() {
+    let (mut v, rx) = view_in(State::Linking, 100, 30);
+    assert!(frame(&mut v).contains("link jaw to WhatsApp"));
+    v.apply(Update::Connection(Connection::new(ConnectionState::Connecting)));
+    assert!(frame(&mut v).contains("link jaw to WhatsApp"), "connecting says nothing of whose account it is");
+    v.apply(Update::Connection(Connection::new(ConnectionState::Online)));
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    assert!(!screen.contains("link jaw to WhatsApp") && screen.contains("jaw  online"), "{screen}");
+    assert!(screen.contains("chats · All"), "{screen}");
+}
+
+#[test]
 fn logged_out_says_so_above_linking_again() {
     let (mut v, rx) = view_in(State::LoggedOut, 100, 36);
     let screen = frame(&mut v);
@@ -1006,6 +1019,12 @@ fn newest(v: &View) -> Message {
     v.messages.as_ref().unwrap().newest().unwrap().clone()
 }
 
+/// Your messages in the open chat's window that say `text`.
+pub fn mine_saying(v: &View, text: &str) -> Vec<Message> {
+    let Some(w) = v.messages.as_ref() else { return vec![] };
+    w.rows().filter(|m| m.mine && m.spans.iter().map(|s| s.s.as_str()).collect::<String>() == text).cloned().collect()
+}
+
 fn find_message(v: &View, text: &str) -> Message {
     let w = v.messages.as_ref().unwrap();
     let mut at = w.oldest().cloned();
@@ -1278,36 +1297,64 @@ fn the_picker_finds_emoji_as_it_is_typed_and_the_quick_six_come_back_when_it_is_
 }
 
 #[test]
-fn a_send_whose_answer_was_lost_waits_for_its_row_rather_than_saying_not_sent() {
-    let (mut v, _rx) = view(140, 40);
-    v.apply(Update::Unsure { chat: "ana".into(), text: "a caminho".into() });
-    assert!(!frame(&mut v).contains("not sent"));
-    let mut row = message("lost-1", 1, "9999999999990~000000001");
-    row.chat = "ana".into();
-    row.mine = true;
-    row.status = Some(crate::data::Tick::Pending);
-    row.spans = vec![Span { t: SpanKind::Text, s: "a caminho".into(), person: None, url: None }];
-    arrive(&mut v, "ana", vec![row]);
-    v.clock = Some(NOW + 60_000);
-    v.tick();
-    let screen = frame(&mut v);
-    assert!(!screen.contains("not sent") && v.composer.is_empty(), "its row came, so it went:\n{screen}");
+fn a_message_keeps_one_key_from_its_first_letter_through_leaving_its_chat_to_its_send() {
+    let (mut v, rx) = view(140, 40);
+    let open = v.open.clone().unwrap();
+    press(&mut v, &rx, "a cam");
+    let key = v.keys[&open].clone();
+    assert!(key.starts_with("jaw-") && key.len() == 36, "{key}");
+    press(&mut v, &rx, "<a-down><a-up>");
+    assert_eq!((v.open.as_deref(), v.composer.text()), (Some(open.as_str()), "a cam"), "its draft came back");
+    press(&mut v, &rx, "inho");
+    assert_eq!(v.keys[&open], key, "the draft is the same message");
+    press(&mut v, &rx, "\n");
+    assert!(!v.keys.contains_key(&open), "the key went with it");
+    assert!(v.sent.iter().any(|(k, _)| *k == key), "and jawd took it under that key: {:?}", v.sent);
+    press(&mut v, &rx, "outra");
+    assert_ne!(v.keys[&open], key, "the next message is another");
 }
 
 #[test]
-fn a_lost_send_with_no_row_once_jawd_is_back_goes_back_to_the_box_as_not_sent() {
+fn a_send_whose_answer_was_lost_waits_for_jawd_to_answer_for_it_however_long_that_takes() {
     let (mut v, _rx) = view(140, 40);
-    v.apply(Update::Unreachable { why: "gone".into(), retry_in: 1_000 });
-    v.apply(Update::Unsure { chat: "ana".into(), text: "a caminho".into() });
-    v.clock = Some(NOW + 60_000);
-    v.tick();
-    assert!(v.composer.is_empty(), "while jawd is away, it waits");
-    v.apply(Update::Hello { root: String::new(), linked: true, me: vec![], connection: v.connection.clone() });
-    assert!(v.next_wake() <= NOW + 60_000 + 8_000);
-    v.clock = Some(NOW + 70_000);
+    let open = v.open.clone().unwrap();
+    v.apply(Update::Unsure { chat: open.clone(), key: "jaw-1".into() });
+    let screen = frame(&mut v);
+    assert!(screen.contains("asking jawd again once it's back") && v.composer.is_empty(), "{screen}");
+    v.clock = Some(NOW + 3_600_000);
     v.tick();
     let screen = frame(&mut v);
-    assert!(v.composer.text() == "a caminho" && screen.contains("didn't arrive"), "{screen}");
+    assert!(!screen.contains("not sent") && v.composer.is_empty(), "nothing goes back by itself:\n{screen}");
+    v.apply(Update::Sent { key: "jaw-1".into(), message: "3EB0AA".into() });
+    assert!(!frame(&mut v).contains("asking jawd again"));
+    v.apply(Update::Unsent { chat: open, key: "jaw-1".into(), text: "a caminho".into(), why: "gone".into() });
+    let screen = frame(&mut v);
+    assert!(v.composer.is_empty() && !screen.contains("not sent"), "jawd has it, so it isn't given back:\n{screen}");
+}
+
+#[test]
+fn a_message_jawd_turned_down_goes_back_with_its_key_ahead_of_what_was_typed_since_or_to_its_chats_draft() {
+    let (mut v, rx) = view(140, 40);
+    let open = v.open.clone().unwrap();
+    v.apply(Update::Unsent { chat: open.clone(), key: "jaw-a".into(), text: "a caminho".into(), why: "full".into() });
+    assert_eq!((v.composer.text(), v.keys[&open].as_str()), ("a caminho", "jaw-a"));
+    assert!(frame(&mut v).contains("not sent: full"));
+    press(&mut v, &rx, "<c-u>já vou");
+    let typed = v.keys[&open].clone();
+    v.apply(Update::Unsent { chat: open.clone(), key: "jaw-b".into(), text: "chego tarde".into(), why: "full".into() });
+    assert_eq!(v.composer.text(), "chego tarde\njá vou", "nothing typed is lost either");
+    assert_eq!(v.keys[&open], typed);
+
+    press(&mut v, &rx, "<a-down>");
+    let other = v.open.clone().unwrap();
+    press(&mut v, &rx, "<a-up>");
+    v.apply(Update::Unsent { chat: other.clone(), key: "jaw-c".into(), text: "amanhã".into(), why: "full".into() });
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    assert!(screen.contains("back in its box: full") && screen.contains("draft: amanhã"), "{screen}");
+    assert_eq!(v.keys[&other], "jaw-c");
+    press(&mut v, &rx, "<a-down>");
+    assert_eq!(v.composer.text(), "amanhã");
 }
 
 #[test]

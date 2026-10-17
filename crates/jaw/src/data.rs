@@ -770,18 +770,26 @@ pub enum Update {
         chat: String,
         update: Window<Message>,
     },
-    /// A message whose `send.text` lost its answer to a dropped connection: jawd may have it,
-    /// which its row appearing will say.
+    /// A message whose `send.text` lost its answer to a dropped connection: jawd may have it, and
+    /// is asked again with its key once it's back, which answers with the message if it has it.
     Unsure {
         chat: String,
-        text: String,
+        key: String,
     },
-    /// A message jawd didn't take, given back to the box, and why.
+    /// jawd has the message composed under `key`, as `message`, and it's on its way.
+    Sent {
+        key: String,
+        message: String,
+    },
+    /// A message jawd didn't take, given back to the box with its key, and why.
     Unsent {
         chat: String,
+        key: String,
         text: String,
         why: String,
     },
+    /// jawd couldn't start the chat asked for, and why.
+    NotStarted(String),
     /// The answer to the `find` the interface numbered `id`.
     Found {
         id: u64,
@@ -935,8 +943,10 @@ pub trait Jawd {
     fn watch_messages(&mut self, chat: &str, place: Place);
     /// You opened a chat yourself, which the palette ranks by; passing through it doesn't count.
     fn opened(&mut self, chat: &str);
-    /// Sends text to a chat, as a reply to `reply` and mentioning the people in `mentions`.
-    fn send_text(&mut self, chat: &str, text: &str, reply: Option<&str>, mentions: &[String]);
+    /// Sends text to a chat, as a reply to `reply` and mentioning the people in `mentions`. `key`
+    /// is the interface's name for the message, made once when it was composed: asked again with
+    /// it, jawd answers with the message it has rather than sending another.
+    fn send_text(&mut self, chat: &str, text: &str, key: &str, reply: Option<&str>, mentions: &[String]);
     /// Reacts to a message with `emoji`, or takes yours away with an empty one.
     fn react(&mut self, message: &str, emoji: &str);
     fn edit(&mut self, message: &str, text: &str);

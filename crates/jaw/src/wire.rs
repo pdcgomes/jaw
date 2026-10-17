@@ -2,7 +2,9 @@
 //! socket, merging each window's updates as they come, and wake the loop at most once a frame; the
 //! loop drains them here into the interface's `Update`s. What jawd turns down is said where the
 //! user acted, quietly: a message that wasn't sent goes back to the box, an action says why in the
-//! footer, and what goes on in the background (drafts, receipts, typing) says nothing.
+//! footer, and what goes on in the background (drafts, receipts, typing) says nothing. A message
+//! whose answer a dropped connection lost is asked for again with its key once jawd is back, and
+//! so are the drafts and read positions jawd hadn't answered for.
 
 use crate::data::{Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, Place, Typing, Update};
 use crate::run::Event;
@@ -16,17 +18,33 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// How long jaw waits for a jawd it started to answer before it says it can't reach it.
 const PATIENCE: Duration = Duration::from_secs(15);
+/// How long after a message was first asked for jaw asks for it again with its key. jawd keeps a
+/// key for a day, so past that a second ask could make a second message.
+const KEY_KEPT: Duration = Duration::from_secs(20 * 60 * 60);
+
+/// A message asked for with `send.text`, kept until jawd answers for it.
+struct Sending {
+    chat: String,
+    text: String,
+    key: String,
+    params: Value,
+    /// When it was first asked for, by the wall clock, which jawd's day of keys is counted by and
+    /// which goes on while the computer sleeps.
+    first: SystemTime,
+}
 
 /// What a request was, for what to say if jawd turns it down.
 enum Asked {
-    Send {
-        chat: String,
-        text: String,
-    },
+    Send(Box<Sending>),
+    /// `send.retry` for a failed message.
+    Retry,
+    /// A chat's draft or read position: `draft.set` or `read`, asked again once jawd is back if the
+    /// connection dropped first, unless something newer was asked for the chat meanwhile.
+    Owed(&'static str, String, Value),
     /// Something the user did, named as the footer says it: "muting".
     Did(&'static str),
     StartChat,
@@ -71,6 +89,11 @@ pub struct Wire {
     library: Option<(LibraryAsk, Option<String>)>,
     open: Option<(WindowId, String)>,
     asked: HashMap<u64, Asked>,
+    /// Messages whose answer the connection lost, to ask for again with their keys once jawd is
+    /// back.
+    again: Vec<Sending>,
+    /// The newest `draft.set` and `read` asked for each chat that jawd hasn't answered.
+    owed: HashMap<(&'static str, String), Value>,
     /// The client's id for each `find`, to the interface's.
     finds: HashMap<u64, u64>,
     starting: Option<Starting>,
@@ -80,6 +103,24 @@ pub struct Wire {
 fn why_not(failure: &Failure, what: &str) -> String {
     match failure {
         Failure::Jawd(e) if e.code == code::UNKNOWN_METHOD => format!("{what} comes with the next step"),
+        other => other.to_string(),
+    }
+}
+
+/// Why jawd didn't take a message, for its box: the outbox's limit in a few words, or jawd's own.
+fn why_unsent(failure: &Failure) -> String {
+    match failure {
+        Failure::Jawd(e) if e.code == code::LIMIT => {
+            let data = e.data.as_ref();
+            let n = |field: &str| data.and_then(|d| d[field].as_u64());
+            match (data.and_then(|d| d["limit"].as_str()), n("waiting"), n("failed")) {
+                (Some("outbox"), Some(waiting), failed) => {
+                    let failed = failed.filter(|f| *f > 0).map_or(String::new(), |f| format!(", {f} failed"));
+                    format!("{waiting} wait to send{failed}; it can go once some have")
+                }
+                _ => e.message.clone(),
+            }
+        }
         other => other.to_string(),
     }
 }
@@ -166,6 +207,8 @@ impl Wire {
             library: None,
             open: None,
             asked: HashMap::new(),
+            again: vec![],
+            owed: HashMap::new(),
             finds: HashMap::new(),
             starting: None,
         }
@@ -206,13 +249,61 @@ impl Wire {
         }
     }
 
+    /// Asks for a chat's draft or read position, which is owed until jawd answers for it.
+    fn owe(&mut self, method: &'static str, chat: &str, params: Value) {
+        self.owed.insert((method, chat.to_string()), params.clone());
+        self.ask(method, params.clone(), Asked::Owed(method, chat.to_string(), params));
+    }
+
+    /// Settles what was owed for a chat, unless something newer has been asked for it since.
+    fn settle(&mut self, method: &'static str, chat: String, params: &Value) {
+        let key = (method, chat);
+        if self.owed.get(&key) == Some(params) {
+            self.owed.remove(&key);
+        }
+    }
+
+    /// jawd is back: what the connection lost is asked for again, messages with their keys, so
+    /// jawd answers with any it already has rather than making another.
+    fn ask_again(&mut self, out: &mut Vec<Update>) {
+        for sending in std::mem::take(&mut self.again) {
+            if sending.first.elapsed().unwrap_or_default() > KEY_KEPT {
+                let why = "jawd was away too long to tell whether it went, so look in the chat before sending it again";
+                let Sending { chat, text, key, .. } = sending;
+                out.push(Update::Unsent { chat, key, text, why: why.into() });
+            } else {
+                let params = sending.params.clone();
+                self.ask("send.text", params, Asked::Send(Box::new(sending)));
+            }
+        }
+        let owed: Vec<_> = self.owed.iter().map(|((m, c), p)| (*m, c.clone(), p.clone())).collect();
+        for (method, chat, params) in owed {
+            self.ask(method, params.clone(), Asked::Owed(method, chat, params));
+        }
+    }
+
     /// What the interface hears of a request jawd didn't do.
-    fn refused(&self, asked: Asked, failure: &Failure) -> Option<Update> {
+    fn refused(&mut self, asked: Asked, failure: &Failure) -> Option<Update> {
         match asked {
-            Asked::Send { chat, text } if matches!(failure, Failure::Lost) => Some(Update::Unsure { chat, text }),
-            Asked::Send { chat, text } => Some(Update::Unsent { chat, text, why: why_not(failure, "sending") }),
+            Asked::Send(sending) if matches!(failure, Failure::Lost) => {
+                let (chat, key) = (sending.chat.clone(), sending.key.clone());
+                self.again.push(*sending);
+                Some(Update::Unsure { chat, key })
+            }
+            Asked::Send(sending) => {
+                let Sending { chat, text, key, .. } = *sending;
+                Some(Update::Unsent { chat, key, text, why: why_unsent(failure) })
+            }
+            Asked::Retry => Some(Update::Notice(format!("not sent again: {failure}"))),
+            Asked::Owed(method, chat, params) => match failure {
+                Failure::Jawd(e) => {
+                    self.settle(method, chat, &params);
+                    (method == "draft.set").then(|| Update::Notice(format!("the draft wasn't kept: {}", e.message)))
+                }
+                _ => None,
+            },
             Asked::Did(what) => Some(Update::Notice(why_not(failure, what))),
-            Asked::StartChat => Some(Update::Notice(why_not(failure, "starting a chat"))),
+            Asked::StartChat => Some(Update::NotStarted(failure.to_string())),
             Asked::Voice => Some(Update::VoiceRefused(why_not(failure, "voice"))),
             Asked::Info(message) => Some(Update::Info { message, info: Err(why_not(failure, "a message's info")) }),
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
@@ -271,11 +362,17 @@ impl Wire {
                     me,
                     connection: w.connection,
                 });
+                self.ask_again(out);
             }
             From::Disconnected { why, retry_in } => self.unreachable(why, retry_in, out),
             From::Reply { id, outcome } => {
                 let Some(asked) = self.asked.remove(&id) else { return };
                 match (asked, outcome) {
+                    (Asked::Send(sending), Ok(result)) => {
+                        let message = result["message"].as_str().unwrap_or_default().to_string();
+                        out.push(Update::Sent { key: sending.key, message });
+                    }
+                    (Asked::Owed(method, chat, params), Ok(_)) => self.settle(method, chat, &params),
                     (Asked::StartChat, Ok(result)) => {
                         if let Ok(chat) = serde_json::from_value::<Chat>(result["chat"].clone()) {
                             out.push(Update::ChatStarted { chat: Box::new(chat) });
@@ -478,16 +575,22 @@ impl Jawd for Wire {
         self.ask("chat.opened", json!({ "chat": chat }), Asked::Quiet);
     }
 
-    fn send_text(&mut self, chat: &str, text: &str, reply: Option<&str>, mentions: &[String]) {
-        let asked = Asked::Send { chat: chat.to_string(), text: text.to_string() };
-        let mut params = json!({ "chat": chat, "text": text });
+    fn send_text(&mut self, chat: &str, text: &str, key: &str, reply: Option<&str>, mentions: &[String]) {
+        let mut params = json!({ "chat": chat, "text": text, "key": key });
         if let Some(reply) = reply {
             params["reply"] = json!(reply);
         }
         if !mentions.is_empty() {
             params["mentions"] = json!(mentions);
         }
-        self.ask("send.text", params, asked);
+        let sending = Sending {
+            chat: chat.to_string(),
+            text: text.to_string(),
+            key: key.to_string(),
+            params: params.clone(),
+            first: SystemTime::now(),
+        };
+        self.ask("send.text", params, Asked::Send(Box::new(sending)));
     }
 
     fn react(&mut self, message: &str, emoji: &str) {
@@ -516,11 +619,11 @@ impl Jawd for Wire {
     }
 
     fn draft(&mut self, chat: &str, text: &str) {
-        self.ask("draft.set", json!({ "chat": chat, "text": text }), Asked::Quiet);
+        self.owe("draft.set", chat, json!({ "chat": chat, "text": text }));
     }
 
     fn read(&mut self, chat: &str, up_to: &str) {
-        self.ask("read", json!({ "chat": chat, "up_to": up_to }), Asked::Quiet);
+        self.owe("read", chat, json!({ "chat": chat, "up_to": up_to }));
     }
 
     fn typing(&mut self, chat: &str, state: Typing) {
@@ -566,7 +669,7 @@ impl Jawd for Wire {
     }
 
     fn retry(&mut self, message: &str) {
-        self.ask("send.retry", json!({ "message": message }), Asked::Did("sending again"));
+        self.ask("send.retry", json!({ "message": message }), Asked::Retry);
     }
 
     fn mute(&mut self, chat: &str, until: Option<i64>) {

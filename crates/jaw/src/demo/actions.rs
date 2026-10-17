@@ -93,8 +93,12 @@ impl Account {
         self.send(Update::Members { chat: chat.to_string(), members });
     }
 
-    pub(super) fn on_send_text(&mut self, chat: &str, text: &str, reply: Option<&str>, mentions: &[String]) {
+    pub(super) fn on_send_text(&mut self, chat: &str, text: &str, key: &str, reply: Option<&str>, mentions: &[String]) {
         let Some(&t) = self.index.get(chat) else { return };
+        if let Some(message) = self.keyed.get(key).cloned() {
+            self.send(Update::Sent { key: key.to_string(), message });
+            return;
+        }
         let at = self.now();
         let group = self.threads[t].chat.kind == ChatKind::Group;
         let people: Vec<(String, String)> = if group {
@@ -122,6 +126,8 @@ impl Account {
         });
         let (chat, id) = (chat.to_string(), m.id.clone());
         self.arrive(t, m);
+        self.keyed.insert(key.to_string(), id.clone());
+        self.send(Update::Sent { key: key.to_string(), message: id.clone() });
         if self.connection.state == jaw_proto::ConnectionState::Offline {
             self.send(Update::Notice("offline: it goes when WhatsApp is back".into()));
             return;
