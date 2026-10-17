@@ -330,6 +330,19 @@ fn a_scene_of_jawd_to_be_killed() {
                 running.call("read", json!({ "chat": ANA, "up_to": "m1" })).await.unwrap();
                 at("m1");
             }
+            "edit held" => {
+                let running = Running::on(home, world, true).await;
+                running.chats(&[ANA]).await;
+                let id = running.send(ANA, "chego às 20h").await;
+                running.until_status(ANA, &id, "sent").await;
+                running.world.hold(true);
+                running.call("edit", json!({ "message": id, "text": "chego às 21h" })).await.unwrap();
+                let sends = |asked: &[pb::command::Kind]| {
+                    asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count()
+                };
+                running.world.until(|asked| sends(asked) == 2).await;
+                at(&id);
+            }
             other => panic!("there's no scene {other}"),
         }
     });
@@ -512,6 +525,27 @@ async fn a_restart_mid_send_sends_the_same_id_again_and_the_message_arrives_once
     let count = running.query(|db| read::message_count(db, ANA)).await;
     assert_eq!(count, 1);
     assert!(running.outbox().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_action_on_its_way_when_jawd_stops_goes_again_with_its_own_id_once_it_starts() {
+    let home = tempfile::tempdir().unwrap();
+    let id = crash(home.path(), "edit held").await;
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    let (edit, text): (String, String) = db
+        .query_row(
+            "SELECT o.id, m.text FROM outbox o JOIN messages m ON m.n = o.target WHERE o.kind = 'edit'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(text, "chego às 20h", "the edit outlived jawd, not yet done to its message");
+    drop(db);
+    let running = Running::on(home.path(), world(), true).await;
+    until_stored(&running).await;
+    let sends = running.world.sends();
+    assert_eq!(sends.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [edit.as_str()], "only the edit, with its ID");
+    assert_eq!(stored_text(&running, &id).await, "chego às 21h");
 }
 
 #[tokio::test(flavor = "multi_thread")]

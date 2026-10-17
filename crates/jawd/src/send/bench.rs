@@ -1,6 +1,10 @@
 //! `jawd bench send`: `send.text` answered, its synced commit included, and a send's round trip
 //! through the demo engine, whose recipients answer at once: from asking to sent (the engine's
-//! reply committed) and to read (two receipts kept in the inbox and converted).
+//! reply committed) and to read (two receipts kept in the inbox and converted). Then each message
+//! action answered, with the recipients' receipts held back, as they come much later in real use:
+//! a reply with a mention, a reaction, an edit, a deletion for everyone and for you, and a forward
+//! to one chat and to five, each with its synced commit; and `message.info` and `chat.info`, which
+//! only read.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -34,7 +38,8 @@ fn chat(n: u32) -> String {
 pub async fn run(home: &Path, plan: Plan) -> Result<()> {
     let store = Store::open(home)?;
     let engine = DemoEngine::with(vec![demo::connected()]);
-    engine.world().replying(Replies { delivered: Duration::ZERO, read: Duration::ZERO });
+    let world = engine.world();
+    world.replying(Replies { delivered: Duration::ZERO, read: Duration::ZERO });
     let (events, incoming) = mpsc::channel(1024);
     let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
     let live: crate::sync::Shared = Arc::default();
@@ -112,5 +117,98 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         ms(percentile(&mut to_read, 99)),
         plan.trips
     );
+    world.replying(Replies { delivered: Duration::from_secs(3_600), read: Duration::from_secs(3_600) });
+    actions(&store, &sending, plan.count.clamp(1, 150)).await
+}
+
+/// Times each message action, `count` of each, as an interface asks it.
+async fn actions(store: &Store, sending: &Sending, count: u32) -> Result<()> {
+    const GROUP: &str = "120363999999999999@g.us";
+    const ANA: &str = "351929999999@s.whatsapp.net";
+    let members = vec![(ANA.to_string(), "member"), ("351910000001@s.whatsapp.net".to_string(), "member")];
+    let setup = vec![
+        Change::Remember { key: "me".into(), value: "351910000001@s.whatsapp.net".into() },
+        Change::Members(crate::store::Members { chat: GROUP.into(), all: true, set: members, remove: Vec::new() }),
+        Change::Person(crate::store::Person { jids: vec![ANA.into()], name: Some("Ana".into()), ..Default::default() }),
+    ];
+    store.apply(Lane::Live, setup).await?;
+    let theirs: Vec<Change> = (0..count * 2)
+        .map(|n| {
+            Change::Message(crate::store::Message {
+                chat: GROUP.into(),
+                id: format!("theirs{n}"),
+                at: super::now_ms() - 60_000,
+                sender: Some(ANA.into()),
+                kind: "text",
+                text: Some(format!("message {n}")),
+                summary: format!("message {n}"),
+                live: true,
+                ..Default::default()
+            })
+        })
+        .collect();
+    store.apply(Lane::Live, theirs).await?;
+    let ana: i64 = store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [ANA], |r| r.get(0))?)
+        })
+        .await?;
+    let mut mine = Vec::with_capacity(count as usize);
+    let mut timed: Vec<(&str, Vec<Duration>)> = Vec::new();
+    let mut time = async |what: &'static str, method: &str, params: serde_json::Value| -> Result<serde_json::Value> {
+        let asked = Instant::now();
+        let answer = sending.call(method, params).await.map_err(|e| anyhow::anyhow!(e.message)).context(what)?;
+        let took = asked.elapsed();
+        match timed.iter_mut().find(|(name, _)| *name == what) {
+            Some((_, samples)) => samples.push(took),
+            None => timed.push((what, vec![took])),
+        }
+        Ok(answer)
+    };
+    for n in 0..count {
+        let params = json!({ "chat": GROUP, "text": "@Ana vens?", "reply": format!("theirs{n}"), "mentions": [format!("person:{ana}")] });
+        let sent = time("send.text, a reply with a mention", "send.text", params).await?;
+        mine.push(sent["message"].as_str().unwrap_or_default().to_string());
+    }
+    for n in 0..count {
+        time("react", "react", json!({ "message": format!("theirs{n}"), "emoji": "👍", "chat": GROUP })).await?;
+        time("react, found without its chat", "react", json!({ "message": format!("theirs{n}"), "emoji": "❤️" }))
+            .await?;
+        time("edit", "edit", json!({ "message": mine[n as usize], "text": "@Ana vens já?", "chat": GROUP })).await?;
+        time("message.info", "message.info", json!({ "message": mine[n as usize], "chat": GROUP })).await?;
+        time("chat.info", "chat.info", json!({ "chat": GROUP })).await?;
+        time(
+            "forward, to one chat",
+            "forward",
+            json!({ "messages": [format!("theirs{n}")], "to": [chat(0)], "chat": GROUP }),
+        )
+        .await?;
+        let five: Vec<String> = (0..5).map(chat).collect();
+        time(
+            "forward, to five chats",
+            "forward",
+            json!({ "messages": [format!("theirs{n}")], "to": five, "chat": GROUP }),
+        )
+        .await?;
+        time(
+            "delete, for everyone",
+            "delete",
+            json!({ "message": mine[n as usize], "for": "everyone", "chat": GROUP }),
+        )
+        .await?;
+        let theirs = format!("theirs{}", count + n);
+        time("delete, for you", "delete", json!({ "message": theirs, "for": "me", "chat": GROUP })).await?;
+    }
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    for (what, samples) in &mut timed {
+        println!(
+            "{what} answered: p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms ({} asked)",
+            ms(percentile(samples, 50)),
+            ms(percentile(samples, 99)),
+            ms(percentile(samples, 100)),
+            samples.len()
+        );
+    }
     Ok(())
 }
