@@ -134,7 +134,13 @@ pub fn receipt_changes(receipt: &pb::Receipt) -> Vec<Change> {
     }
     let status = match receipt.r#type.as_str() {
         "read-self" | "played-self" => {
-            return vec![Change::Read(Read { chat, at: receipt.timestamp_ms, ids: receipt.ids.clone(), phone: None })];
+            return vec![Change::Read(Read {
+                chat,
+                at: receipt.timestamp_ms,
+                ids: receipt.ids.clone(),
+                phone: None,
+                here: false,
+            })];
         }
         "" | "delivered" => "delivered",
         "read" => "read",

@@ -626,27 +626,33 @@ pub fn message_place(db: &Connection, chat: &str, id: &str) -> Result<Option<Mes
 /// read, or, while the phone's own count stands in for where, that many of theirs before it; none
 /// when nothing's unread.
 pub fn first_unread(db: &Connection, chat: &str) -> Result<Option<(String, MessageCursor)>> {
-    let found: Option<(i64, i64, Option<i64>, i64)> = db
-        .prepare_cached("SELECT n, unread, read_at, coalesce(phone_unread, 0) FROM chats WHERE id = ?1")?
-        .query_row([chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+    type Found = (i64, i64, Option<i64>, Option<i64>, i64);
+    let found: Option<Found> = db
+        .prepare_cached("SELECT n, unread, read_at, read_n, coalesce(phone_unread, 0) FROM chats WHERE id = ?1")?
+        .query_row([chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
         .optional()?;
-    let Some((n, _, read_at, phone)) = found.filter(|&(_, unread, _, _)| unread > 0) else { return Ok(None) };
-    let mut after = read_at.unwrap_or(i64::MIN);
+    let Some((n, _, read_at, read_n, phone)) = found.filter(|&(_, unread, ..)| unread > 0) else { return Ok(None) };
+    let mut after = read_at.map_or((i64::MIN, i64::MIN), |at| (at, read_n.unwrap_or(i64::MAX)));
     if phone > 0 {
-        let back: Option<i64> = db
+        let newest: Vec<(i64, i64)> = db
             .prepare_cached(
-                "SELECT min(at) FROM (SELECT at FROM messages WHERE chat = ?1 AND at <= ?2 AND mine = 0
-                    AND kind NOT IN ('system', 'call') ORDER BY at DESC LIMIT ?3)",
+                "SELECT at, n FROM messages WHERE chat = ?1 AND (at, n) <= (?2, ?3) AND mine = 0
+                    AND kind NOT IN ('system', 'call')
+                ORDER BY at DESC, n DESC LIMIT ?4",
             )?
-            .query_row(params![n, after, phone], |r| r.get(0))?;
-        after = back.map_or(after, |at| at - 1);
+            .query_map(params![n, after.0, after.1, phone], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        if let Some(&(at, n)) = newest.last() {
+            after = (at, n - 1);
+        }
     }
     Ok(db
         .prepare_cached(
-            "SELECT id, at, n FROM messages WHERE chat = ?1 AND at > ?2 AND mine = 0 AND kind NOT IN ('system', 'call')
+            "SELECT id, at, n FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND mine = 0
+                AND kind NOT IN ('system', 'call')
             ORDER BY at, n LIMIT 1",
         )?
-        .query_row(params![n, after], |r| Ok((r.get(0)?, MessageCursor { at: r.get(1)?, n: r.get(2)? })))
+        .query_row(params![n, after.0, after.1], |r| Ok((r.get(0)?, MessageCursor { at: r.get(1)?, n: r.get(2)? })))
         .optional()?)
 }
 

@@ -30,7 +30,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, broadcast, watch};
 
-pub use self::presence::Viewer;
 use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, pb};
 use crate::store::{Applied, Change, Chat, Store, read};
@@ -92,21 +91,20 @@ struct Inner {
     connected: watch::Sender<bool>,
     reads: reads::Reads,
     typing: typing::Typists,
-    presence: presence::Presence,
 }
 
 impl Sending {
     /// Starts sending: what the outbox held is queued again in each chat's order, read receipts still
-    /// owed are sent, and presence follows focus and the connection, which `live` says now and
-    /// `pushes` as it changes.
+    /// owed are sent, and presence follows `focused`, whether any interface is in front, and the
+    /// connection, which `live` says now and `pushes` as it changes.
     pub async fn start(
         store: Store,
         engine: Option<Supervisor>,
         live: Shared,
         pushes: &broadcast::Sender<Push>,
+        focused: watch::Receiver<bool>,
         timing: Timing,
     ) -> anyhow::Result<Sending> {
-        let (presence, focused) = presence::Presence::new();
         let pushes = pushes.subscribe();
         let online = presence::connected(&live.lock().expect("live state").connection);
         let inner = Arc::new(Inner {
@@ -119,7 +117,6 @@ impl Sending {
             connected: watch::channel(online).0,
             reads: reads::Reads::default(),
             typing: typing::Typists::new(),
-            presence,
         });
         typing::start(&inner);
         regroup::start(&inner);
@@ -132,11 +129,6 @@ impl Sending {
     /// The sends' lane, for `status`.
     pub fn lane(&self) -> Arc<dyn Report> {
         self.inner.sends.clone()
-    }
-
-    /// A connection's part in whether you're online, with focus or not to begin with.
-    pub fn viewer(&self, focused: bool) -> Viewer {
-        presence::viewer(&self.inner, focused)
     }
 
     /// Answers one of the sending methods: `send.text`, `send.retry`, `chat.start`, `draft.set`,

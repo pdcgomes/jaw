@@ -559,15 +559,22 @@ pub(super) const MIGRATIONS: &[&str] = &[
         phone_mentions = nullif(mentions, 0)
     WHERE last_message IS NOT NULL;
     ",
-    // 7: sending, a schema step. Both tables are jaw's own: never dropped or rebuilt from raw, and
-    // copied as they are by any rebuild.
+    // 7: sending, a schema step: the outbox rebuilt beside the messages it sends, which nothing
+    // ever wrote to before, and how far WhatsApp has been told each chat is read, as columns of
+    // jaw's own on chats beside where sync keeps the read position. Adding nullable columns costs
+    // the same however many chats there are; their CHECK reads each row once, all NULL.
     "
-    -- What's waiting to be sent, each beside its message row, which shows it as pending; a row goes
-    -- once the server has the message. Migration 2's outbox named its chat by JID and nothing ever
-    -- wrote to it; a row that names no message jaw has fails this step rather than being dropped.
+    -- Class: jaw's own. What's waiting to be sent, each beside its message row, which shows it as
+    -- pending; a row goes once the server has the message. Migration 2's outbox named its chat by
+    -- JID and nothing ever wrote to it; a row of it naming no message jaw has is kept, to send.
     CREATE TABLE outbox_rebuilt (
         n INTEGER PRIMARY KEY AUTOINCREMENT,
-        message INTEGER NOT NULL UNIQUE REFERENCES messages (n) ON DELETE CASCADE,
+        -- The message row that shows it; NULL once it's deleted for you, which, as on the phone,
+        -- doesn't stop it going.
+        message INTEGER UNIQUE REFERENCES messages (n) ON DELETE SET NULL,
+        -- Where it goes and the ID it goes with, kept for when its row is gone.
+        jid TEXT NOT NULL,
+        id TEXT NOT NULL,
         kind TEXT NOT NULL,
         -- WAWebProtobufsE2E.Message, as it's sent.
         raw BLOB NOT NULL,
@@ -580,23 +587,26 @@ pub(super) const MIGRATIONS: &[&str] = &[
         created_at INTEGER NOT NULL,
         error TEXT
     ) STRICT;
-    INSERT INTO outbox_rebuilt (message, kind, raw, state, attempts, next_at, created_at, error)
+    INSERT INTO outbox_rebuilt (message, jid, id, kind, raw, state, attempts, next_at, created_at, error)
         SELECT (SELECT m.n FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = o.chat AND m.id = o.id),
-            o.kind, o.raw, o.state, o.attempts, o.next_at, o.created_at, o.error
+            o.chat, o.id, o.kind, o.raw, o.state, o.attempts, o.next_at, o.created_at, o.error
         FROM outbox o ORDER BY o.created_at;
     DROP TABLE outbox;
     ALTER TABLE outbox_rebuilt RENAME TO outbox;
 
-    -- How far you've read each chat, by `read`, as a message's place (at, n); and how far WhatsApp
-    -- has been told, which the read receipts still owed are between. Both only move forward.
-    CREATE TABLE reads (
-        chat INTEGER PRIMARY KEY REFERENCES chats (n) ON DELETE CASCADE,
-        at INTEGER NOT NULL,
-        n INTEGER NOT NULL,
-        told_at INTEGER NOT NULL,
-        told_n INTEGER NOT NULL,
-        CHECK ((told_at, told_n) <= (at, n))
-    ) STRICT;
+    -- Class: jaw's own columns on chats, which is otherwise fetched from WhatsApp, as draft and
+    -- frecency are; any rebuild of chats copies them.
+    -- `read_n`: with `read_at`, where the chat was read up to as a message's place (at, n). NULL
+    -- when it was said as a time, which reads every message up to `read_at`, however many share
+    -- its millisecond.
+    -- `told_at` and `told_n`: how far WhatsApp has been told the chat is read; the read receipts
+    -- owed are for the messages from others after it, up to the position. NULL while WhatsApp
+    -- knows as much as jaw: up to the position, but for the phone's own unread messages while its
+    -- counts stand.
+    ALTER TABLE chats ADD COLUMN read_n INTEGER;
+    ALTER TABLE chats ADD COLUMN told_at INTEGER;
+    ALTER TABLE chats ADD COLUMN told_n INTEGER CHECK ((told_n IS NULL) = (told_at IS NULL) AND (told_n IS NULL
+        OR read_at IS NOT NULL AND (told_at, told_n) <= (read_at, coalesce(read_n, 9223372036854775807))));
     ",
     // 8: sending's other tables, a schema step. All jaw's own: never dropped or rebuilt from raw,
     // and copied as they are by any rebuild.
@@ -610,10 +620,13 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE TABLE recipients (
         message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
         member INTEGER NOT NULL REFERENCES person_jids (n),
-        chat INTEGER NOT NULL REFERENCES chats (n) ON DELETE CASCADE,
+        -- The message's chat, for finding a member's messages in a group; a chat's rows go with its
+        -- messages, so it names chats without a key of its own.
+        chat INTEGER NOT NULL,
         PRIMARY KEY (message, member)
     ) STRICT, WITHOUT ROWID;
-    CREATE INDEX recipients_by_member ON recipients (chat, member, message);
+    -- By member first, so a foreign key's look from person_jids is a search too.
+    CREATE INDEX recipients_by_member ON recipients (member, chat, message);
 
     -- Messages of yours that have got as far as they can, whose recipients are still to be let go
     -- of, 128 at a time in the background: one message's rows touch a page of
@@ -630,15 +643,20 @@ pub(super) const MIGRATIONS: &[&str] = &[
         after INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (chat, member)
     ) STRICT, WITHOUT ROWID;
+    CREATE INDEX regroup_by_member ON regroup (member);
 
     -- The key an interface gave each message it sent, for a day, so asking again with the same key
-    -- answers with the same message instead of sending a second.
+    -- answers with the same message instead of sending a second; kept with the message's chat and
+    -- ID once it's deleted for you, since the message still goes.
     CREATE TABLE send_keys (
         key TEXT PRIMARY KEY CHECK (length(key) BETWEEN 1 AND 128),
-        message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
+        message INTEGER REFERENCES messages (n) ON DELETE SET NULL,
+        jid TEXT NOT NULL,
+        id TEXT NOT NULL,
         at INTEGER NOT NULL
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX send_keys_by_at ON send_keys (at);
+    CREATE INDEX send_keys_by_message ON send_keys (message);
     ",
 ];
 

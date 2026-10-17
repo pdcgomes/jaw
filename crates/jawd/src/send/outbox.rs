@@ -146,10 +146,14 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
     let _order = inner.enqueue.lock().await;
     durably(inner, vec![Change::Outbox(step)], "keep the message, so it isn't sent").await?;
     match written.take() {
-        Some(Enqueued::Queued { id, chat, outbox, .. }) => {
+        Some(Enqueued::Queued { id, chat, chat_n, outbox, .. }) => {
             let sent = answer(inner, chat.clone(), id).await;
             if let Some(outbox) = outbox {
                 queue(inner, outbox, chat, false);
+            }
+            // Sending here reads the chat, as replying does, so its receipts are owed.
+            if let Some(chat_n) = chat_n {
+                super::reads::want(inner, chat_n);
             }
             Ok(sent)
         }

@@ -322,7 +322,10 @@ async fn start(home: &Path, lock: std::fs::File, kind: EngineKind, no_notify: bo
     tokio::spawn(trouble(store.trouble(), pushes.clone()));
     let engine = supervisor.as_ref().ok().cloned();
     tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine.clone(), home.to_path_buf()));
-    let sending = send::Sending::start(store.clone(), engine, live.clone(), &pushes, send::Timing::default()).await?;
+    let attention = Arc::new(attention::Attention::default());
+    let sending =
+        send::Sending::start(store.clone(), engine, live.clone(), &pushes, attention.focus(), send::Timing::default())
+            .await?;
     let pools: Vec<Arc<dyn work::Report>> =
         vec![Arc::new(store.clone()), Arc::new(store.reads().clone()), sending.lane()];
     let finder = find::Finder::start(store.clone()).await?;
@@ -335,6 +338,7 @@ async fn start(home: &Path, lock: std::fs::File, kind: EngineKind, no_notify: bo
     eprintln!("jawd: notifications {says}");
     let state = state::State::new(home, supervisor, pools, live.clone(), Some(store.clone()), pushes.clone())?
         .with_feed(feed)
+        .with_attention(attention)
         .with_sending(sending)
         .with_notifications(says);
     let state = Arc::new(state);

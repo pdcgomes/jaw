@@ -83,7 +83,7 @@ pub fn merge_reference(gone: &str, keep: &str) -> String {
     format!("{gone} into {keep}")
 }
 
-/// Where a chat was read up to: everything at or before `at`, or before the newest of `ids` that
+/// Where a chat was read up to: everything at or before `at`, or up to the newest of `ids` that
 /// jaw has, which says it more exactly. It only moves forward once WhatsApp or you have said where
 /// it is.
 #[derive(Clone, Debug, Default)]
@@ -96,6 +96,10 @@ pub struct Read {
     /// The phone's own unread and mention counts as of `at`, when it couldn't say where the chat
     /// was read; they stand until the position moves on.
     pub phone: Option<(u32, u32)>,
+    /// You read it here, in jaw: WhatsApp hasn't been told, so read receipts are owed for what it
+    /// reads, and a chat marked unread stays so until the phone says otherwise. Only `ids` say
+    /// where, and one jaw doesn't have moves nothing.
+    pub here: bool,
 }
 
 /// Something a later message or app state does to a message.
@@ -270,6 +274,9 @@ pub struct Message {
     /// known to be read counts as read as it comes; one of yours reads the chat up to it.
     pub live: bool,
     pub mentions_me: bool,
+    /// One of yours sent from this jawd, which reads the chat up to it without WhatsApp being told,
+    /// as replying on the phone does; one from your other devices tells it too.
+    pub here: bool,
     /// WhatsApp's WebMessageInfo, compressed.
     pub raw: Option<Packed>,
     /// For a live message, the engine's whole event, compressed, which a history copy never replaces.
@@ -330,13 +337,16 @@ pub(super) struct Stamps {
 /// What the transaction's messages said of where a chat was read, applied once before it commits.
 #[derive(Clone, Copy, Default)]
 struct Unsettled {
-    /// The newest of your own messages, which reads the chat up to it.
-    mine: Option<i64>,
-    /// Whether one of those arrived live, which unmarks the chat.
+    /// The newest of your own messages from your other devices, which reads the chat up to it, and
+    /// WhatsApp knows it.
+    mine: Option<(i64, i64)>,
+    /// The newest of yours sent from this jawd, which reads the chat up to it, WhatsApp untold.
+    here: Option<(i64, i64)>,
+    /// Whether one of yours arrived live, which unmarks the chat.
     mine_live: bool,
     /// The newest history message from others, read as it comes while nobody has said where the
     /// chat was read.
-    history: Option<i64>,
+    history: Option<(i64, i64)>,
 }
 
 /// Where Stamps stood when a savepoint began.
@@ -569,13 +579,125 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, backg
 /// The most unread messages a chat counts; more show as this many.
 pub const UNREAD_MOST: i64 = 1_000;
 
-/// Where a chat was read up to, as settle reads it.
-struct ChatRead {
-    read_at: Option<i64>,
+/// A position said as a time, T, is (T, THROUGH): every message up to T, however many share its
+/// millisecond. One said by a message is that message's (at, n), which orders it exactly among
+/// others at the same time.
+pub(super) const THROUGH: i64 = i64::MAX;
+
+/// Before every message: where a chat with no position is read up to.
+const START: (i64, i64) = (i64::MIN, i64::MIN);
+
+/// Where a chat was read up to and how far WhatsApp has been told, as settle and set_read read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ChatRead {
+    /// None: nothing read yet.
+    pub(super) at: Option<(i64, i64)>,
     known: bool,
     phone_unread: Option<i64>,
     phone_mentions: Option<i64>,
     marked: bool,
+    /// None while WhatsApp knows as much as jaw (`told_now`).
+    told: Option<(i64, i64)>,
+}
+
+/// Chat `chat`'s read position, if it has a row.
+pub(super) fn chat_read(db: &Connection, chat: i64) -> Result<Option<ChatRead>> {
+    Ok(db
+        .prepare_cached(
+            "SELECT read_at, read_n, read_known, phone_unread, phone_mentions, marked_unread, told_at, told_n
+            FROM chats WHERE n = ?1",
+        )?
+        .query_row([chat], |r| {
+            let at: Option<i64> = r.get(0)?;
+            let told: Option<i64> = r.get(6)?;
+            Ok(ChatRead {
+                at: at
+                    .map(|at| Ok::<_, rusqlite::Error>((at, r.get::<_, Option<i64>>(1)?.unwrap_or(THROUGH))))
+                    .transpose()?,
+                known: r.get(2)?,
+                phone_unread: r.get(3)?,
+                phone_mentions: r.get(4)?,
+                marked: r.get(5)?,
+                told: told.map(|at| Ok::<_, rusqlite::Error>((at, r.get(7)?))).transpose()?,
+            })
+        })
+        .optional()?)
+}
+
+/// Writes what changed of chat `chat`'s read position from `was` to `now`; marked_unread is the
+/// caller's, since it's shown.
+fn write_read(db: &Connection, chat: i64, was: &ChatRead, now: &ChatRead) -> Result<()> {
+    if (&now.at, now.known, now.phone_unread, now.phone_mentions, &now.told)
+        == (&was.at, was.known, was.phone_unread, was.phone_mentions, &was.told)
+    {
+        return Ok(());
+    }
+    db.prepare_cached(
+        "UPDATE chats SET read_at = ?2, read_n = ?3, read_known = ?4, phone_unread = ?5, phone_mentions = ?6,
+            told_at = ?7, told_n = ?8
+        WHERE n = ?1",
+    )?
+    .execute(params![
+        chat,
+        now.at.map(|(at, _)| at),
+        now.at.and_then(|(_, n)| (n != THROUGH).then_some(n)),
+        now.known,
+        now.phone_unread,
+        now.phone_mentions,
+        now.told.map(|(at, _)| at),
+        now.told.map(|(_, n)| n),
+    ])?;
+    Ok(())
+}
+
+/// How far WhatsApp has been told chat `chat`, as `read` holds it, is read: where it was last told,
+/// or, while it knows as much as jaw, the position, but before the phone's own unread messages
+/// from others while its counts stand, so reading those here sends their receipts.
+pub(super) fn told_now(db: &Connection, chat: i64, read: &ChatRead) -> Result<(i64, i64)> {
+    if let Some(told) = read.told {
+        return Ok(told);
+    }
+    let Some(at) = read.at else { return Ok(START) };
+    let unread = read.phone_unread.unwrap_or(0).min(UNREAD_MOST);
+    if unread <= 0 {
+        return Ok(at);
+    }
+    let newest: Vec<(i64, i64)> = db
+        .prepare_cached(
+            "SELECT at, n FROM messages WHERE chat = ?1 AND (at, n) <= (?2, ?3) AND mine = 0
+                AND kind NOT IN ('system', 'call')
+            ORDER BY at DESC, n DESC LIMIT ?4",
+        )?
+        .query_map(params![chat, at.0, at.1, unread + 1], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(newest.get(unread as usize).copied().unwrap_or(START))
+}
+
+/// What's left of "told" once the position is `at`: never past it, and nothing once it's there,
+/// since WhatsApp then knows as much as jaw.
+fn told_within(told: Option<(i64, i64)>, at: Option<(i64, i64)>) -> Option<(i64, i64)> {
+    let (told, at) = (told?, at?);
+    (told < at).then_some(told)
+}
+
+/// "Told" as reading chat `chat` here leaves it, `was` before and `told` after: kept only if a
+/// message from others lies between it and the position `at`, so a chat with nothing to tell
+/// WhatsApp of owes nothing.
+fn told_if_owed(
+    db: &Connection,
+    chat: i64,
+    was: Option<(i64, i64)>,
+    told: Option<(i64, i64)>,
+    at: Option<(i64, i64)>,
+) -> Result<Option<(i64, i64)>> {
+    let (Some(from), Some(to), None) = (told, at, was) else { return Ok(told) };
+    let owed: bool = db
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND (at, n) <= (?4, ?5)
+                AND mine = 0 AND kind NOT IN ('system', 'call'))",
+        )?
+        .query_row(params![chat, from.0, from.1, to.0, to.1], |r| r.get(0))?;
+    Ok(owed.then_some(from))
 }
 
 /// Moves where each chat the transaction touched was read up to, as its messages said, and counts
@@ -597,53 +719,57 @@ pub(super) fn settle(db: &Connection, stamps: &mut Stamps) -> Result<()> {
 
 fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsettled)>) -> Result<()> {
     for (chat, moved) in unsettled {
-        let Some(ChatRead { mut read_at, known, mut phone_unread, mut phone_mentions, marked }) = db
-            .prepare_cached(
-                "SELECT read_at, read_known, phone_unread, phone_mentions, marked_unread FROM chats WHERE n = ?1",
-            )?
-            .query_row([chat], |r| {
-                Ok(ChatRead {
-                    read_at: r.get(0)?,
-                    known: r.get(1)?,
-                    phone_unread: r.get(2)?,
-                    phone_mentions: r.get(3)?,
-                    marked: r.get(4)?,
-                })
-            })
-            .optional()?
-        else {
-            continue;
-        };
-        let was = read_at;
-        if let Some(at) = moved.mine.filter(|&at| read_at.is_none_or(|read| at > read)) {
-            (read_at, phone_unread, phone_mentions) = (Some(at), None, None);
+        let Some(was) = chat_read(db, chat)? else { continue };
+        let mut now = was.clone();
+        let past = |place: Option<(i64, i64)>| place.filter(|&place| was.at.is_none_or(|read| place > read));
+        let (mine, here) = (past(moved.mine), past(moved.here));
+        let history = past(moved.history).filter(|_| !was.known);
+        // WhatsApp knows what your other devices sent and what history brought; what you sent
+        // here reads the chat without telling it, as replying does, so the receipts for what it
+        // reads are owed.
+        let known = mine.max(history);
+        if here > known && now.told.is_none() {
+            now.told = Some(told_now(db, chat, &was)?);
         }
-        if let Some(at) = moved.history.filter(|&at| !known && read_at.is_none_or(|read| at > read)) {
-            read_at = Some(at);
+        if let Some(at) = mine.max(here) {
+            (now.at, now.phone_unread, now.phone_mentions) = (Some(at), None, None);
         }
-        let mut marked = marked && !moved.mine_live;
+        if let Some(at) = history {
+            now.at = now.at.max(Some(at));
+        }
+        let mut marked = was.marked && !moved.mine_live;
         // A chat being merged is the same conversation as the one it goes into, so reading that
         // one reads this too: it counts from the later of the two positions, and stays marked
-        // unread only while that one is.
-        let (mut counted_from, mut phone) = (read_at, (phone_unread, phone_mentions));
-        let into: Option<(Option<i64>, bool)> = db
+        // unread only while that one is. Its own position and how far WhatsApp was told of it
+        // stay as the merge found them (merge_reads), which only receipts sent move.
+        let (mut counted_from, mut phone) = (now.at, (now.phone_unread, now.phone_mentions));
+        let into: Option<(Option<i64>, Option<i64>, bool)> = db
             .prepare_cached(
-                "SELECT k.read_at, k.marked_unread FROM chat_merges m JOIN chats k ON k.n = m.keep WHERE m.gone = ?1",
+                "SELECT k.read_at, k.read_n, k.marked_unread FROM chat_merges m JOIN chats k ON k.n = m.keep
+                WHERE m.gone = ?1",
             )?
-            .query_row([chat], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row([chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?;
-        if let Some((kept_at, kept_marked)) = into {
-            marked &= kept_marked;
-            if let Some(kept_at) = kept_at.filter(|&at| read_at.is_none_or(|read| at > read)) {
-                (counted_from, phone) = (Some(kept_at), (None, None));
+        match into {
+            Some((kept_at, kept_n, kept_marked)) => {
+                marked &= kept_marked;
+                let kept = kept_at.map(|at| (at, kept_n.unwrap_or(THROUGH)));
+                if let Some(kept) = kept.filter(|&kept| now.at.is_none_or(|read| kept > read)) {
+                    (counted_from, phone) = (Some(kept), (None, None));
+                }
+            }
+            None => {
+                now.told = told_within(now.told.map(|told| told.max(known.unwrap_or(START))), now.at);
+                now.told = told_if_owed(db, chat, was.told, now.told, now.at)?;
             }
         }
+        let (from_at, from_n) = counted_from.unwrap_or(START);
         let (unread, mentions): (i64, i64) = db
             .prepare_cached(
                 "SELECT count(*), coalesce(sum(mentions_me), 0) FROM (SELECT mentions_me FROM messages
-                    WHERE chat = ?1 AND at > ?2 AND mine = 0 AND kind NOT IN ('system', 'call') LIMIT ?3)",
+                    WHERE chat = ?1 AND (at, n) > (?2, ?3) AND mine = 0 AND kind NOT IN ('system', 'call') LIMIT ?4)",
             )?
-            .query_row(params![chat, counted_from.unwrap_or(i64::MIN), UNREAD_MOST], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            .query_row(params![chat, from_at, from_n, UNREAD_MOST], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let unread = (unread + phone.0.unwrap_or(0)).min(UNREAD_MOST);
         let mentions = (mentions + phone.1.unwrap_or(0)).min(UNREAD_MOST);
         let seq = stamps.seq(CHAT, Some(chat));
@@ -657,47 +783,103 @@ fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsett
         if shown > 0 {
             stamps.record(db, CHAT, chat, Some(chat), seq)?;
         }
-        if read_at != was {
-            db.prepare_cached("UPDATE chats SET read_at = ?2, phone_unread = ?3, phone_mentions = ?4 WHERE n = ?1")?
-                .execute(params![chat, read_at, phone_unread, phone_mentions])?;
-        }
+        write_read(db, chat, &was, &now)?;
     }
     Ok(())
 }
 
 /// Moves where a chat was read up to. Until WhatsApp or you have said where it is, or while the
 /// phone's own counts stand in for it, the position is taken as said, even if it's earlier;
-/// after that it only moves forward. Reading a chat unmarks it.
+/// after that it only moves forward. WhatsApp saying so means it knows, and unmarks the chat;
+/// your reading it here owes it receipts for what that reads, and leaves the mark to the phone.
 fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     let chat = ensure_chat(db, stamps, &chat_jid(db, &read.chat)?)?;
-    let mut at = read.at;
+    let mut at = (read.at, THROUGH);
     if !read.ids.is_empty() {
         if merging_into(db, chat)? {
             for id in &read.ids {
                 moved_from_merging(db, stamps, chat, id)?;
             }
         }
-        let newest: Option<i64> = db
-            .prepare_cached("SELECT max(at) FROM messages WHERE chat = ?1 AND id IN (SELECT value FROM json_each(?2))")?
-            .query_row(params![chat, serde_json::to_string(&read.ids)?], |r| r.get(0))?;
-        at = newest.unwrap_or(at);
+        let named: Vec<(i64, i64)> = db
+            .prepare_cached("SELECT at, n FROM messages WHERE chat = ?1 AND id IN (SELECT value FROM json_each(?2))")?
+            .query_map(params![chat, serde_json::to_string(&read.ids)?], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        match named.into_iter().max() {
+            Some(newest) => at = newest,
+            None if read.here => return Ok(false),
+            None => {}
+        }
+    } else if read.here {
+        return Ok(false);
     }
-    let (phone_unread, phone_mentions) = read.phone.map_or((None, None), |(u, m)| (Some(u), Some(m)));
-    let seq = stamps.seq(CHAT, Some(chat));
-    let changed = db
-        .prepare_cached(
-            "UPDATE chats SET read_at = ?2, read_known = 1, phone_unread = ?3, phone_mentions = ?4, marked_unread = 0,
-                v = ?5
-            WHERE n = ?1 AND (read_known = 0 OR phone_unread IS NOT NULL OR read_at IS NULL OR read_at < ?2)
-                AND (read_at IS NOT ?2 OR read_known = 0 OR phone_unread IS NOT ?3 OR phone_mentions IS NOT ?4
-                    OR marked_unread)",
-        )?
-        .execute(params![chat, at, phone_unread, phone_mentions, seq])?;
-    if changed > 0 {
+    let Some(was) = chat_read(db, chat)? else { return Ok(false) };
+    let mut now = was.clone();
+    let taken = !was.known || was.phone_unread.is_some() || was.at.is_none_or(|read| read < at);
+    if read.here {
+        if !taken {
+            return Ok(false);
+        }
+        if now.told.is_none() {
+            now.told = Some(told_now(db, chat, &was)?);
+        }
+        (now.at, now.known, now.phone_unread, now.phone_mentions) = (Some(at), true, None, None);
+    } else if taken {
+        let (phone_unread, phone_mentions) = read.phone.map_or((None, None), |(u, m)| (Some(u.into()), Some(m.into())));
+        (now.at, now.known, now.phone_unread, now.phone_mentions) = (Some(at), true, phone_unread, phone_mentions);
+        (now.marked, now.told) = (false, None);
+    } else {
+        // jaw is further on; WhatsApp now knows the chat is read this far.
+        now.told = now.told.map(|told| told.max(at));
+    }
+    now.told = told_if_owed(db, chat, was.told, told_within(now.told, now.at), now.at)?;
+    if now == was {
+        return Ok(false);
+    }
+    write_read(db, chat, &was, &now)?;
+    if now.marked != was.marked {
+        let seq = stamps.seq(CHAT, Some(chat));
+        db.prepare_cached("UPDATE chats SET marked_unread = ?2, v = ?3 WHERE n = ?1")?
+            .execute(params![chat, now.marked, seq])?;
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
-        stamps.unsettle(chat);
     }
-    Ok(changed > 0)
+    stamps.unsettle(chat);
+    Ok(true)
+}
+
+/// Merges chat `gone`'s read position into `keep`'s, as a merge starts and again just before
+/// `gone` is removed: the later position wins, one WhatsApp or you said over a guess, with its
+/// phone counts; and "told" goes back to just before the oldest of `gone`'s messages from others
+/// that WhatsApp hasn't been told of, since a receipt sent twice is harmless and one skipped is
+/// lost. Once `gone`'s messages have all moved, that's none, so merging again changes nothing.
+fn merge_reads(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64) -> Result<()> {
+    let (Some(k), Some(g)) = (chat_read(db, keep)?, chat_read(db, gone)?) else { return Ok(()) };
+    let from = told_now(db, gone, &g)?;
+    let untold: Option<(i64, i64)> = db
+        .prepare_cached(
+            "SELECT at, n FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND mine = 0
+                AND kind NOT IN ('system', 'call')
+            ORDER BY at, n LIMIT 1",
+        )?
+        .query_row(params![gone, from.0, from.1], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let mut told = told_now(db, keep, &k)?;
+    if let Some((at, n)) = untold {
+        told = told.min((at, n - 1));
+    }
+    let winner = if (g.known, g.at) > (k.known, k.at) { &g } else { &k };
+    let mut now = ChatRead {
+        at: winner.at,
+        known: k.known || g.known,
+        phone_unread: winner.phone_unread,
+        phone_mentions: winner.phone_mentions,
+        marked: k.marked,
+        told: Some(told),
+    };
+    now.told = told_within(now.told, now.at);
+    write_read(db, keep, &k, &now)?;
+    stamps.unsettle(keep);
+    Ok(())
 }
 
 /// The chats being merged into `keep`.
@@ -1063,15 +1245,22 @@ fn merge_direct_chats(db: &Connection, stamps: &mut Stamps, person: i64) -> Resu
 }
 
 /// Starts merging chat `gone` into `keep`, each a chat's n and JID. What's small moves now (its
-/// tombstones, what waits for its messages, its folder places, what's waiting to be sent, its
-/// settings), and writes for it go to `keep` from here on; its messages follow a few at a time.
+/// tombstones, what waits for its messages, its folder places, its settings and where it was
+/// read), and writes for it go to `keep` from here on; its messages follow a few at a time, and
+/// what's waiting to be sent follows its message. Only a person's one-to-one chats merge, so
+/// sending's group tables (recipients, settled, regroup) never take part.
 fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone: &(i64, String)) -> Result<()> {
     let ((keep, keep_id), (gone, gone_id)) = (keep, gone);
+    let groups: i64 = db
+        .prepare_cached("SELECT count(*) FROM chats WHERE n IN (?1, ?2) AND kind <> 'direct'")?
+        .query_row([keep, gone], |r| r.get(0))?;
+    if groups > 0 {
+        bail!("only one-to-one chats merge, and {keep_id} or {gone_id} isn't one");
+    }
     db.prepare_cached("INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)")?.execute([gone, keep])?;
     db.prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
     db.prepare_cached("DELETE FROM tombstones WHERE chat = ?1")?.execute([gone])?;
     db.prepare_cached("UPDATE pending SET chat = ?1 WHERE chat = ?2")?.execute([keep_id, gone_id])?;
-    db.prepare_cached("UPDATE outbox SET chat = ?1 WHERE chat = ?2")?.execute([keep_id, gone_id])?;
     db.prepare_cached("UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
     db.prepare_cached("DELETE FROM folder_items WHERE chat = ?1")?.execute([gone])?;
     let seq = stamps.seq(CHAT, Some(*keep));
@@ -1081,15 +1270,12 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
             draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar),
             avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral),
             frecency = k.frecency + g.frecency, opened_at = max(coalesce(k.opened_at, 0), coalesce(g.opened_at, 0)),
-            read_at = iif(g.read_known > k.read_known OR coalesce(g.read_at, 0) > coalesce(k.read_at, 0) AND g.read_known = k.read_known,
-                g.read_at, k.read_at),
-            read_known = max(k.read_known, g.read_known), v = ?3
+            v = ?3
         FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1",
     )?
     .execute(params![keep, gone, seq])?;
     stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
-    stamps.unsettle(*keep);
-    Ok(())
+    merge_reads(db, stamps, *keep, *gone)
 }
 
 /// The messages a merge step moves.
@@ -1127,6 +1313,9 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
         .query_row([gone, keep], |r| Ok((r.get(0)?, r.get(1)?)))?;
     db.prepare_cached("DELETE FROM quarantine WHERE source = 'merge' AND ref = ?1")?
         .execute([merge_reference(&gone_jid, &keep_jid)])?;
+    // Anything written to the gone chat by its n since the merge began, such as how far WhatsApp
+    // has been told, is kept before the chat goes.
+    merge_reads(db, stamps, keep, gone)?;
     db.prepare_cached("DELETE FROM chat_merges WHERE gone = ?1")?.execute([gone])?;
     db.prepare_cached("DELETE FROM chats WHERE n = ?1")?.execute([gone])?;
     let seq = stamps.seq(CHAT, Some(gone));
@@ -1261,6 +1450,7 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
     )?
     .execute([kept, gone])?;
     db.prepare_cached("UPDATE OR IGNORE media SET message = ?1 WHERE message = ?2")?.execute([kept, gone])?;
+    outbox::folded(db, kept, gone)?;
     let revoked: bool =
         db.prepare_cached("SELECT deleted FROM messages WHERE n = ?1")?.query_row([gone], |r| r.get(0))?;
     db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([gone])?;
@@ -1470,11 +1660,14 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
     }
     let moved = stamps.unsettle(chat);
-    if message.mine {
-        moved.mine = moved.mine.max(Some(message.at));
+    let place = Some((message.at, n));
+    if message.mine && message.here {
+        moved.here = moved.here.max(place);
+    } else if message.mine {
+        moved.mine = moved.mine.max(place);
         moved.mine_live |= message.live;
     } else if !message.live {
-        moved.history = moved.history.max(Some(message.at));
+        moved.history = moved.history.max(place);
     }
     if existing.is_none() {
         apply_pending(db, stamps, chat, n, &chat_id, &message.id)?;

@@ -7,9 +7,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::watch;
+
 pub struct Attention {
     connections: Mutex<HashMap<u64, Looking>>,
     next: AtomicU64,
+    /// Whether any interface is in front, for what follows it as it changes.
+    focus: watch::Sender<bool>,
 }
 
 #[derive(Default)]
@@ -29,7 +33,7 @@ impl Looking {
 
 impl Default for Attention {
     fn default() -> Self {
-        Attention { connections: Mutex::default(), next: AtomicU64::new(1) }
+        Attention { connections: Mutex::default(), next: AtomicU64::new(1), focus: watch::channel(false).0 }
     }
 }
 
@@ -51,15 +55,27 @@ impl Attention {
         self.connections.lock().expect("attention").values().any(|looking| looking.focused)
     }
 
+    /// Whether any interface is in front, as it changes.
+    pub fn focus(&self) -> watch::Receiver<bool> {
+        self.focus.subscribe()
+    }
+
     /// Whether an interface in front is reading `chat`, so you're looking at it now.
     pub fn reading(&self, chat: &str) -> bool {
         self.connections.lock().expect("attention").values().any(|looking| looking.focused && looking.reads(chat))
     }
 
     fn change(&self, id: u64, change: impl FnOnce(&mut Looking)) {
-        if let Some(looking) = self.connections.lock().expect("attention").get_mut(&id) {
+        let mut connections = self.connections.lock().expect("attention");
+        if let Some(looking) = connections.get_mut(&id) {
             change(looking);
         }
+        self.refocus(&connections);
+    }
+
+    fn refocus(&self, connections: &HashMap<u64, Looking>) {
+        let any = connections.values().any(|looking| looking.focused);
+        self.focus.send_if_modified(|was| std::mem::replace(was, any) != any);
     }
 }
 
@@ -100,7 +116,9 @@ impl Viewer {
 
 impl Drop for Viewer {
     fn drop(&mut self) {
-        self.attention.connections.lock().expect("attention").remove(&self.id);
+        let mut connections = self.attention.connections.lock().expect("attention");
+        connections.remove(&self.id);
+        self.attention.refocus(&connections);
     }
 }
 
@@ -152,7 +170,10 @@ mod tests {
         terminal.focus(true);
         terminal.opened(ANA.into());
         assert_eq!((attention.connected(), attention.focused()), (1, true));
+        let focus = attention.focus();
+        assert!(*focus.borrow());
         drop(terminal);
+        assert!(!*focus.borrow(), "focus goes with it");
         assert_eq!((attention.connected(), attention.focused(), attention.reading(ANA)), (0, false, false));
     }
 }

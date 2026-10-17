@@ -75,6 +75,12 @@ impl State {
         &self.attention
     }
 
+    /// Keeps what each interface is looking at in `attention`, which others follow too.
+    pub fn with_attention(mut self, attention: Arc<Attention>) -> State {
+        self.attention = attention;
+        self
+    }
+
     /// Whether any interface is in front.
     pub fn focused(&self) -> bool {
         self.attention.focused()

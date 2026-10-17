@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, mpsc};
 use super::*;
 use crate::engine::demo::{self, DemoEngine, Replies, World};
 use crate::engine::supervisor::{Backoff, Supervisor};
+use crate::store::outbox::Step;
 use crate::store::{Amend, Amendment, Lane, Members, Message, Person};
 
 const ANA: &str = "351912345678@s.whatsapp.net";
@@ -38,6 +39,7 @@ struct Running {
     world: Arc<World>,
     pushes: broadcast::Sender<Push>,
     supervisor: Option<Supervisor>,
+    attention: Arc<crate::attention::Attention>,
 }
 
 impl Running {
@@ -64,7 +66,9 @@ impl Running {
         let sync =
             crate::sync::run(incoming, store.clone(), live.clone(), pushes.clone(), supervisor.clone(), home.into());
         tokio::spawn(sync);
-        let sending = Sending::start(store.clone(), supervisor.clone(), live, &pushes, timing).await.unwrap();
+        let attention = Arc::new(crate::attention::Attention::default());
+        let sending =
+            Sending::start(store.clone(), supervisor.clone(), live, &pushes, attention.focus(), timing).await.unwrap();
         if engine && connect {
             let online = async {
                 while let Ok(push) = connected.recv().await {
@@ -75,7 +79,7 @@ impl Running {
             };
             tokio::time::timeout(Duration::from_secs(10), online).await.expect("the demo engine never connected");
         }
-        Running { store, sending, world, pushes, supervisor }
+        Running { store, sending, world, pushes, supervisor, attention }
     }
 
     async fn new(home: &Path) -> Running {
@@ -698,8 +702,9 @@ async fn past_a_thousand_messages_waiting_a_new_one_is_refused_and_none_is_dropp
             )
             .unwrap();
             tx.execute(
-                "INSERT INTO outbox (message, kind, raw, state, next_at, created_at) VALUES (last_insert_rowid(), 'text', x'', ?1, 0, 0)",
-                [if n < 10 { "failed" } else { "queued" }],
+                "INSERT INTO outbox (message, jid, id, kind, raw, state, next_at, created_at)
+                VALUES (last_insert_rowid(), ?2, ?3, 'text', x'', ?1, 0, 0)",
+                rusqlite::params![if n < 10 { "failed" } else { "queued" }, ANA, format!("w{n}")],
             )
             .unwrap();
         }
@@ -893,13 +898,88 @@ async fn reading_moves_the_read_position_and_marks_read_once_a_spell_however_fas
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_message_sent_here_reads_the_chat_and_owes_its_receipts_but_one_from_your_phone_doesnt() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.world.gate(true);
+    running.arrives(ANA, ANA, "m1", now_ms() - 10_000).await;
+    running.send(ANA, "on it").await;
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
+    assert_eq!(running.marked_read()[0].ids, ["m1"], "replying here reads what came before, as on the phone");
+    let chat = running.query(|db| Ok(read::chats(db, false, None, 10)?.remove(0))).await;
+    assert_eq!(chat.unread, 0);
+    running.arrives(ANA, ANA, "m2", now_ms() - 5_000).await;
+    let from_phone = Message {
+        chat: ANA.into(),
+        id: "3EB0FROMPHONE".into(),
+        at: now_ms() - 1_000,
+        mine: true,
+        kind: "text",
+        status: Some("sent"),
+        live: true,
+        ..Message::default()
+    };
+    running.store.apply(Lane::Live, vec![Change::Message(from_phone)]).await.unwrap();
+    tokio::time::sleep(quick().read_every * 3).await;
+    assert_eq!(running.marked_read().len(), 1, "the phone that sent it told WhatsApp itself");
+    let owing = running
+        .query(|db| {
+            Ok(db.query_row("SELECT count(*) FROM chats WHERE told_at IS NOT NULL", [], |r| r.get::<_, i64>(0))?)
+        })
+        .await;
+    assert_eq!(owing, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_sending_call_that_keeps_something_is_one_synced_commit() {
+    let home = tempfile::tempdir().unwrap();
+    // No engine, so nothing else commits synced meanwhile: the inbox would.
+    let running = Running::on(home.path(), Arc::default(), false).await;
+    running.chats(&[ANA]).await;
+    running.arrives(ANA, ANA, "m1", 1_000).await;
+    running
+        .store
+        .apply(Lane::Live, vec![Change::Person(Person { jids: vec![RUI.into()], ..Person::default() })])
+        .await
+        .unwrap();
+    let rui: i64 = running
+        .query(|db| Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [RUI], |r| r.get(0))?))
+        .await;
+    let synced = || running.store.storage().synced_commits;
+    let calls = [
+        ("send.text", json!({ "chat": ANA, "text": "one" })),
+        ("draft.set", json!({ "chat": ANA, "text": "two" })),
+        ("read", json!({ "chat": ANA, "up_to": "m1" })),
+        ("chat.start", json!({ "person": format!("person:{rui}") })),
+    ];
+    for (method, params) in calls {
+        let before = synced();
+        running.call(method, params).await.unwrap();
+        assert_eq!(synced() - before, 1, "{method}");
+    }
+    let id = running.query(|db| Ok(db.query_row("SELECT o.id FROM outbox o", [], |r| r.get::<_, String>(0))?)).await;
+    running
+        .store
+        .apply(Lane::Live, vec![Change::Outbox(Step::Failed { outbox: 1, error: "no".into(), next_at: None })])
+        .await
+        .unwrap();
+    let before = synced();
+    running.call("send.retry", json!({ "message": id })).await.unwrap();
+    assert_eq!(synced() - before, 1, "send.retry");
+    let before = synced();
+    running.call("typing", json!({ "chat": ANA, "state": "composing" })).await.unwrap();
+    assert_eq!(synced() - before, 0, "typing keeps nothing");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_chat_read_here_first_owes_only_what_it_had_unread() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
     for n in 0..5 {
         running.arrives(ANA, ANA, &format!("m{n}"), 1_000 + n).await;
     }
-    let read_on_phone = crate::store::Read { chat: ANA.into(), at: 1_002, ids: vec!["m2".into()], phone: None };
+    let read_on_phone =
+        crate::store::Read { chat: ANA.into(), at: 1_002, ids: vec!["m2".into()], ..Default::default() };
     running.store.apply(Lane::Live, vec![Change::Read(read_on_phone)]).await.unwrap();
     running.call("read", json!({ "chat": ANA, "up_to": "m4" })).await.unwrap();
     running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
@@ -1011,8 +1091,9 @@ async fn you_are_online_only_while_an_interface_has_focus_and_away_once_none_has
     let running = Running::new(home.path()).await;
     running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Presence(_)))).await;
     assert_eq!(running.online(), [false], "away from the start, with nothing in front");
-    let terminal = running.sending.viewer(true);
-    let other = running.sending.viewer(false);
+    let terminal = running.attention.viewer();
+    terminal.focus(true);
+    let other = running.attention.viewer();
     running
         .world
         .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Presence(_))).count() >= 2)
@@ -1066,6 +1147,7 @@ async fn sending_goes_through_the_socket_with_the_pending_row_in_its_answer() {
         running.pushes.clone(),
     )
     .unwrap()
+    .with_attention(running.attention.clone())
     .with_sending(running.sending.clone());
     tokio::spawn(crate::sock::serve(Arc::new(state), listener));
     let replies = tokio::task::spawn_blocking(move || {

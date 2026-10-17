@@ -55,7 +55,13 @@ pub fn mutation(index: &[String], value: &[u8]) -> Applied {
                 let range = action.message_range.unwrap_or_default();
                 let last = range.last_message_timestamp.map(ms).unwrap_or(at);
                 let ids = range.messages.iter().filter_map(|m| m.key.as_ref()?.id.clone()).collect();
-                applied.changes.push(Change::Read(Read { chat: user_jid(jid), at: last, ids, phone: None }));
+                applied.changes.push(Change::Read(Read {
+                    chat: user_jid(jid),
+                    at: last,
+                    ids,
+                    phone: None,
+                    here: false,
+                }));
             } else {
                 applied.changes.push(chat(Chat { marked_unread: Some(true), ..Chat::default() }));
             }

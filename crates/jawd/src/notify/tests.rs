@@ -238,7 +238,8 @@ async fn what_came_while_jawd_was_off_is_one_summary_once_its_first_catch_up_end
     running.write(away(archived, archived, "a1", 2_700_000)).await;
     running.write(Message { sender: None, mine: true, ..away(mum, mum, "y1", 2_600_000) }).await;
     // App state for a chat with old unread messages touches it without bringing any.
-    let read = Read { chat: "351917777777@s.whatsapp.net".into(), at: 0, ids: Vec::new(), phone: Some((4, 0)) };
+    let read =
+        Read { chat: "351917777777@s.whatsapp.net".into(), at: 0, ids: Vec::new(), phone: Some((4, 0)), here: false };
     running.store.apply(Lane::Live, vec![Change::Read(read)]).await.unwrap();
     assert_eq!(running.sent().await, Vec::new(), "nothing goes while catching up");
     running.caught_up();

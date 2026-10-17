@@ -46,6 +46,14 @@ const ALLOWED: &[(&str, &str)] = &[
     ("SELECT folder, chat, person FROM folder_items", "the palette's folders, read once at start"),
     ("SELECT n, parent, name FROM folders", "the palette's folders, read once at start"),
     ("FROM sqlite_schema", "the schema's fingerprint, read at start and after each migration step"),
+    ("FROM outbox WHERE state = 'unconfirmed'", "once at start; the outbox holds at most 1,000 messages"),
+    (
+        "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox",
+        "the outbox's bound, checked in each send's transaction; it holds at most 1,000 messages",
+    ),
+    ("SELECT n FROM chats WHERE told_at IS NOT NULL", "the chats owing read receipts, once at start"),
+    ("SELECT message FROM settled LIMIT", "stops at its limit"),
+    ("SELECT chat, member FROM regroup LIMIT", "stops at its limit"),
 ];
 
 /// Names in format strings that aren't constants, and what to plan them with.

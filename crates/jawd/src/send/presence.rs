@@ -1,12 +1,10 @@
-//! Presence: you're online while some interface has focus, and away otherwise, so the phone keeps
+//! Presence: you're online while some interface has focus, as `Attention` keeps it, and away otherwise, so the phone keeps
 //! its notifications while you're not looking. Focus has to hold for `Timing::online_after` before
 //! WhatsApp hears you're online, and be gone for `Timing::away_after` before it hears you're away,
 //! so switching windows doesn't flicker. Each time the connection comes back, WhatsApp is told
 //! again, since it forgets; and whatever waits to send hears whether WhatsApp can be reached.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use jaw_proto::{Connection, ConnectionState, Push};
@@ -14,55 +12,6 @@ use tokio::sync::{broadcast, watch};
 
 use super::{Inner, engine};
 use crate::engine::pb;
-
-/// Which connections have focus, and whether any does.
-pub(super) struct Presence {
-    focused: std::sync::Mutex<HashMap<u64, bool>>,
-    next: AtomicU64,
-    any: watch::Sender<bool>,
-}
-
-impl Presence {
-    pub(super) fn new() -> (Presence, watch::Receiver<bool>) {
-        let (any, focused) = watch::channel(false);
-        (Presence { focused: Default::default(), next: AtomicU64::new(1), any }, focused)
-    }
-
-    fn set(&self, id: u64, focused: Option<bool>) {
-        let mut all = self.focused.lock().expect("focus");
-        match focused {
-            Some(focused) => all.insert(id, focused),
-            None => all.remove(&id),
-        };
-        let any = all.values().any(|&focused| focused);
-        self.any.send_if_modified(|was| std::mem::replace(was, any) != any);
-    }
-}
-
-/// One connection's focus; it counts for nothing once it's dropped.
-pub struct Viewer {
-    inner: Arc<Inner>,
-    id: u64,
-}
-
-impl Viewer {
-    pub fn focus(&self, focused: bool) {
-        self.inner.presence.set(self.id, Some(focused));
-    }
-}
-
-impl Drop for Viewer {
-    fn drop(&mut self) {
-        self.inner.presence.set(self.id, None);
-    }
-}
-
-pub(super) fn viewer(inner: &Arc<Inner>, focused: bool) -> Viewer {
-    let id = inner.presence.next.fetch_add(1, Ordering::Relaxed);
-    let viewer = Viewer { inner: inner.clone(), id };
-    viewer.focus(focused);
-    viewer
-}
 
 /// Whether WhatsApp can hear from jawd now.
 pub(super) fn connected(connection: &Connection) -> bool {
@@ -78,8 +27,9 @@ pub(super) async fn follow(
     mut online: bool,
 ) {
     let mut told: Option<bool> = None;
+    let mut following = true;
     loop {
-        let want = *focused.borrow_and_update();
+        let want = following && *focused.borrow_and_update();
         let wait = match told {
             _ if !online => None,
             Some(told) if told == want => None,
@@ -98,7 +48,9 @@ pub(super) async fn follow(
                     }
                 }
             }
-            changed = focused.changed() => if changed.is_err() { return },
+            // With nothing left to say whether an interface is in front, none is; the connection
+            // is still followed, since sends wait for it.
+            changed = focused.changed(), if following => following = changed.is_ok(),
             push = pushes.recv() => match push {
                 Ok(push) if push.method == "connection" => {
                     let now = serde_json::from_value::<Connection>(push.params).is_ok_and(|c| connected(&c));

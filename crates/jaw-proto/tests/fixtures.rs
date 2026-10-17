@@ -88,7 +88,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "hello" => params::<Welcome>(&name, result),
                     "status" => params::<Status>(&name, result),
                     "find" => params::<Found>(&name, result),
-                    "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read" | "typing" => {
+                    "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
+                    | "typing" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
                     "send.text" => params::<Sent>(&name, result),

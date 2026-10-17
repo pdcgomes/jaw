@@ -51,7 +51,9 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
     let chats: Vec<Change> =
         (0..plan.chats.max(1)).map(|n| Change::Chat(Chat { id: chat(n), ..Chat::default() })).collect();
     store.apply(Lane::Live, chats).await?;
-    let sending = Sending::start(store.clone(), Some(supervisor), live, &pushes, Timing::default()).await?;
+    let attention = std::sync::Arc::new(crate::attention::Attention::default());
+    let sending =
+        Sending::start(store.clone(), Some(supervisor), live, &pushes, attention.focus(), Timing::default()).await?;
 
     let mut answered = Vec::with_capacity(plan.count as usize);
     let started = Instant::now();

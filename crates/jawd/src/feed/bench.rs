@@ -294,7 +294,7 @@ async fn far_changes(store: Store, chats: usize, writing: Arc<AtomicBool>) -> Re
     while writing.load(Ordering::Relaxed) {
         let to = far(n as usize % chats);
         let change = if n.is_multiple_of(2) {
-            Change::Read(Read { chat: to, at, ids: Vec::new(), phone: Some(((n % 7) as u32, 0)) })
+            Change::Read(Read { chat: to, at, ids: Vec::new(), phone: Some(((n % 7) as u32, 0)), here: false })
         } else {
             Change::Person(Person { jids: vec![to], name: Some(format!("Someone {n}")), ..Person::default() })
         };

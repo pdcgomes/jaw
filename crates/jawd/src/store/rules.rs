@@ -169,14 +169,18 @@ async fn history_counts_as_read_until_someone_says_where_the_chat_was_read_and_t
     let old = |id: &str, at: i64| Change::Message(Message { live: false, ..message(ANA, id, at, id) });
     store.apply(Lane::Background, vec![old("h1", AT), old("h2", AT + 10)]).await.unwrap();
     assert_eq!(chat(&store, ANA).await.unread, 0, "history kept raw, with nothing said of where it was read");
-    let phone = Read { chat: ANA.into(), at: AT + 10, ids: Vec::new(), phone: Some((7, 2)) };
+    let phone = Read { chat: ANA.into(), at: AT + 10, ids: Vec::new(), phone: Some((7, 2)), here: false };
     store.apply(Lane::Background, vec![Change::Read(phone)]).await.unwrap();
     let ana = chat(&store, ANA).await;
     assert_eq!((ana.unread, ana.mentions), (7, 2), "the phone's counts stand in");
     apply(&store, vec![Change::Message(Message { mentions_me: true, ..message(ANA, "new", AT + 20, "@me") })]).await;
     let ana = chat(&store, ANA).await;
     assert_eq!((ana.unread, ana.mentions), (8, 3));
-    apply(&store, vec![Change::Read(Read { chat: ANA.into(), at: 0, ids: vec!["new".into()], phone: None })]).await;
+    apply(
+        &store,
+        vec![Change::Read(Read { chat: ANA.into(), at: 0, ids: vec!["new".into()], phone: None, here: false })],
+    )
+    .await;
     let ana = chat(&store, ANA).await;
     assert_eq!((ana.unread, ana.mentions), (0, 0), "read up to the message a read receipt names");
 }

@@ -418,7 +418,13 @@ impl World {
             78..85 => {
                 let chat = self.rng.pick(&self.chats).clone();
                 let unread = self.rng.below(5) as u32;
-                vec![Change::Read(Read { chat, at: self.clock, ids: Vec::new(), phone: Some((unread, 0)) })]
+                vec![Change::Read(Read {
+                    chat,
+                    at: self.clock,
+                    ids: Vec::new(),
+                    phone: Some((unread, 0)),
+                    here: false,
+                })]
             }
             85..92 => {
                 let who = person(self.rng.below(DIRECT + 4));
@@ -467,7 +473,7 @@ async fn windows_match_fresh_queries_after_random_writes() {
             world.chats.iter().map(|chat| Change::Chat(Chat { id: chat.clone(), ..Chat::default() })).collect();
         seeding.extend((0..60).flat_map(|_| world.new_message_or_two()));
         bed.apply(seeding).await;
-        let read = Read { chat: GROUP.into(), at: world.clock, ids: Vec::new(), phone: Some((3, 0)) };
+        let read = Read { chat: GROUP.into(), at: world.clock, ids: Vec::new(), phone: Some((3, 0)), here: false };
         bed.apply(vec![Change::Read(read)]).await;
         let mut watcher = bed.watcher(64);
         let wants = [
@@ -1051,7 +1057,13 @@ async fn changes_a_window_doesnt_show_cost_it_at_most_one_read_each_burst() {
         // Unread counts and names of chats far down the list: each touches the chat list, and none
         // changes what it shows.
         let change = if n % 2 == 0 {
-            Change::Read(Read { chat: far(n % 250), at: 1, ids: Vec::new(), phone: Some(((n % 7) as u32, 0)) })
+            Change::Read(Read {
+                chat: far(n % 250),
+                at: 1,
+                ids: Vec::new(),
+                phone: Some(((n % 7) as u32, 0)),
+                here: false,
+            })
         } else {
             Change::Person(Person { jids: vec![far(n % 250)], name: Some(format!("Someone {n}")), ..Person::default() })
         };
