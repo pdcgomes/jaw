@@ -56,7 +56,7 @@ The first request on a connection. Anything else first gets error 6.
 ```
 
 - `root`: jaw's folder. Every `path` jawd sends is relative to it, and the files are readable by the same user.
-- `account.state`: `unlinked`, `linking` or `linked`. From the moment jawd starts, an account that was linked when it last connected, and hasn't been logged out since, is `linked`, with `connection.state` `connecting` until the engine connects; if WhatsApp has logged it out meanwhile, a `connection` push says `logged_out` once the engine finds out. A folder never linked says `unlinked`.
+- `account.state`: `unlinked`, `linking` or `linked`. From the moment jawd starts, an account that was linked when it last connected, and hasn't been logged out since, is `linked`, with `connection.state` `connecting` until the engine connects (`offline` when jawd has no engine to run). If the account was logged out meanwhile, a `connection` push says `logged_out` once the engine finds out, with a `reason`: WhatsApp's, or `this device isn't linked any more` when the engine finds no device. A folder never linked says `unlinked`, and so does one from a jawd before this, until its engine connects.
 - `connection.state`: as the `connection` push below.
 
 ## Windows
@@ -225,7 +225,8 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), and `interfaces`: how many are `connected`, whether one is `focused`, and where `notifications` go |
 | `focus` | `focused` | |
 | `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes |
-| `link.cancel`, `link.logout` | | |
+| `link.cancel` | | |
+| `link.logout` | | Answered once the account is logged out and jawd has forgotten it; a `connection` push says `logged_out` (`logged out from jaw`) first |
 | `chats.watch`, `messages.watch`, `roster.watch`, `folders.watch` | See Windows, and `since` and `have` when watching again | `watch`, `seq`, `total`, `rows`, `remove` (with `have`); `older` and `newer` for messages |
 | `watch.move` | `watch`, `around`, `before`, `after` | As its watch's, with only the rows the client lacks and `remove` |
 | `unwatch` | `watch` | |

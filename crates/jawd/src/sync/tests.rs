@@ -1251,18 +1251,30 @@ fn connection_event(state: pb::connection::State) -> crate::engine::Incoming {
     }
 }
 
-/// Runs sync on `store` with the engine's `events`, and returns the live state once it's taken them.
-async fn after(store: &Store, home: &Path, live: Live, events: Vec<crate::engine::Incoming>) -> Shared {
+/// Runs sync on `store` with the engine's `events`, and returns the live state once it's taken
+/// them, with the `connection` pushes interfaces were sent.
+async fn after(
+    store: &Store,
+    home: &Path,
+    live: Live,
+    events: Vec<crate::engine::Incoming>,
+) -> (Shared, Vec<jaw_proto::Connection>) {
     let live: Shared = Arc::new(Mutex::new(live));
     let (tx, incoming) = mpsc::channel(16);
-    let running =
-        tokio::spawn(run(incoming, store.clone(), live.clone(), broadcast::channel(16).0, None, home.to_path_buf()));
+    let (pushes, mut told) = broadcast::channel(64);
+    let running = tokio::spawn(run(incoming, store.clone(), live.clone(), pushes, None, home.to_path_buf()));
     for event in events {
         tx.send(event).await.unwrap();
     }
     drop(tx);
     running.await.unwrap();
-    live
+    let mut connections = Vec::new();
+    while let Ok(push) = told.try_recv() {
+        if push.method == "connection" {
+            connections.push(serde_json::from_value(push.params).unwrap());
+        }
+    }
+    (live, connections)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1286,7 +1298,7 @@ async fn an_account_linked_at_the_last_connection_starts_linked_and_connecting()
     assert_eq!(live.connection.state, ConnectionState::Connecting, "linked, connecting");
     assert_eq!(starting(&store, false).connection.state, ConnectionState::Offline, "with no engine to connect");
     assert!(live.me.jids.contains(&"351910000001@s.whatsapp.net".to_string()), "its own JIDs, for mentions of it");
-    let live = after(&store, home.path(), live, vec![connection_event(State::Connecting)]).await;
+    let (live, _) = after(&store, home.path(), live, vec![connection_event(State::Connecting)]).await;
     let live = live.lock().unwrap();
     assert_eq!(live.account, Account { state: AccountState::Linked, me: Some(pedro) }, "as the engine says too");
 }
@@ -1305,15 +1317,80 @@ async fn an_account_logged_out_while_jawd_was_off_ends_up_logged_out_and_the_nex
         after(&store, home.path(), starting(&store, true), vec![connection_event(State::Connected)]).await;
         let live = starting(&store, true);
         assert_eq!(live.account.state, AccountState::Linked, "{how}: linked as far as jawd knew");
-        let live = after(&store, home.path(), live, events).await;
+        let (live, told) = after(&store, home.path(), live, events).await;
         let ended = {
             let live = live.lock().unwrap();
             (live.account.clone(), live.connection.state)
         };
-        let expected = if how == "on the phone" { ConnectionState::LoggedOut } else { ConnectionState::Offline };
-        assert_eq!(ended, (Account { state: AccountState::Unlinked, me: None }, expected), "{how}");
+        assert_eq!(ended, (Account { state: AccountState::Unlinked, me: None }, ConnectionState::LoggedOut), "{how}");
+        let last = told.last().unwrap();
+        assert_eq!(last.state, ConnectionState::LoggedOut, "{how}: interfaces told it was linked hear it's logged out");
+        if how != "on the phone" {
+            assert_eq!(last.reason.as_deref(), Some(NOT_LINKED), "and why");
+        }
         let next = starting(&store, true);
         assert_eq!(next.account, Account { state: AccountState::Unlinked, me: None }, "{how}: the next start");
         assert_eq!(next.connection.state, ConnectionState::Offline);
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_with_no_device_is_offline_to_an_interface_never_told_the_account_was_linked() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (live, told) =
+        after(&store, home.path(), starting(&store, true), vec![connection_event(pb::connection::State::Unlinked)])
+            .await;
+    assert_eq!(live.lock().unwrap().connection.state, ConnectionState::Offline);
+    assert_eq!(told.iter().map(|c| c.state).collect::<Vec<_>>(), [ConnectionState::Offline], "nothing was logged out");
+    assert_eq!(store.remembered(ACCOUNT).unwrap(), None, "and nothing written");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_account_is_kept_in_the_order_the_engine_said_it() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let mut other = connection_event(State::Connected);
+    if let Some(pb::event::Kind::Connection(c)) = other.event.kind.as_mut() {
+        (c.jid, c.lid, c.push_name) = ("351910000009:3@s.whatsapp.net".into(), String::new(), "Rui".into());
+    }
+    let events = vec![connection_event(State::Connected), connection_event(State::LoggedOut), other];
+    after(&store, home.path(), starting(&store, true), events).await;
+    assert_eq!(starting(&store, true).account.me.unwrap().name, "Rui", "the account linked after the logout");
+    after(&store, home.path(), starting(&store, true), vec![connection_event(State::LoggedOut)]).await;
+    assert_eq!(starting(&store, true).account.state, AccountState::Unlinked);
+}
+
+/// The next `connection` push's state, if one comes within 400 ms.
+async fn next_connection(told: &mut broadcast::Receiver<Push>) -> Option<ConnectionState> {
+    loop {
+        let push = tokio::time::timeout(Duration::from_millis(400), told.recv()).await.ok()?.unwrap();
+        if push.method == "connection" {
+            return Some(serde_json::from_value::<jaw_proto::Connection>(push.params).unwrap().state);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_next_word_waits_until_the_account_it_said_before_is_stored() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let live: Shared = Arc::new(Mutex::new(starting(&store, true)));
+    let (tx, incoming) = mpsc::channel(16);
+    let (pushes, mut told) = broadcast::channel(64);
+    let running = tokio::spawn(run(incoming, store.clone(), live, pushes, None, home.path().to_path_buf()));
+    let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    tx.send(connection_event(State::LoggedOut)).await.unwrap();
+    assert_eq!(next_connection(&mut told).await, Some(ConnectionState::Online));
+    let waiting = next_connection(&mut told).await;
+    assert_eq!(waiting, None, "the logout isn't taken while the connection's account can't be stored");
+    holder.execute_batch("COMMIT").unwrap();
+    assert_eq!(next_connection(&mut told).await, Some(ConnectionState::LoggedOut), "and is once it is");
+    drop(tx);
+    running.await.unwrap();
+    assert_eq!(store.remembered(ACCOUNT).unwrap().as_deref(), Some(""), "the logout last");
 }

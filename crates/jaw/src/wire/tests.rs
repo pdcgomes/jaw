@@ -398,6 +398,8 @@ struct Real {
     bin: PathBuf,
     home: tempfile::TempDir,
     child: Option<Child>,
+    /// The engine it runs: `demo`, or `demo-unlinked` for one whose device has gone.
+    engine: &'static str,
 }
 
 impl Real {
@@ -405,7 +407,7 @@ impl Real {
         let log =
             std::fs::OpenOptions::new().create(true).append(true).open(self.home.path().join("jawd.log")).unwrap();
         let child = Command::new(&self.bin)
-            .args(["--engine", "demo"])
+            .args(["--engine", self.engine])
             .env("JAW_HOME", self.home.path())
             .env("JAW_NOTIFY", "off")
             .stdout(Stdio::null())
@@ -447,7 +449,7 @@ impl Drop for Real {
 /// A real jawd when `JAWD` names its binary; the gate has none built, so these say so and pass.
 fn real() -> Option<Real> {
     let bin = PathBuf::from(std::env::var_os("JAWD")?);
-    let mut real = Real { bin, home: tempfile::tempdir().unwrap(), child: None };
+    let mut real = Real { bin, home: tempfile::tempdir().unwrap(), child: None, engine: "demo" };
     real.start();
     Some(real)
 }
@@ -878,4 +880,29 @@ fn message_actions_before_jawd_serves_them_say_they_come_with_the_next_step() {
     assert!(screen.contains("╭ info "), "on the sheet that asked:\n{screen}");
     let refused = jawd.refused();
     assert!(refused.contains(&"react".to_string()) && refused.contains(&"message.info".to_string()), "{refused:?}");
+}
+
+#[test]
+fn on_a_real_jawd_that_said_linked_and_whose_engine_then_finds_no_device_jaw_offers_to_link_again() {
+    let Some(mut jawd) = real() else {
+        eprintln!("JAWD isn't set to a jawd binary, so this ran on no real jawd");
+        return;
+    };
+    // Linked once, so jawd keeps the account; then its engine finds no device in session.db.
+    jawd.stop();
+    jawd.engine = "demo-unlinked";
+    jawd.start();
+    let relay = Relay::to(&jawd);
+    let (mut v, rx) = view_on(relay.socket.clone(), 100, 30);
+    let screen = until(&mut v, &rx, "link again");
+    assert!(screen.contains("link again") && screen.contains("logged out"), "{screen}");
+    let passed = relay.passed.lock().unwrap().clone();
+    let from_jawd: Vec<&Value> = passed.iter().filter(|p| p.from_jawd).map(|p| &p.line).collect();
+    let hello = from_jawd.iter().find(|line| line["result"]["account"].is_object()).expect("jawd's hello");
+    assert_eq!(hello["result"]["account"]["state"], "linked", "jaw was told the account was linked first");
+    let logged_out = from_jawd
+        .iter()
+        .find(|line| line["method"] == "connection" && line["params"]["state"] == "logged_out")
+        .expect("then that it's logged out");
+    assert_eq!(logged_out["params"]["reason"], "this device isn't linked any more");
 }

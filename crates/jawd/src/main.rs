@@ -52,6 +52,8 @@ enum EngineKind {
     Go,
     /// A made-up account, for trying jaw out and for tests
     Demo,
+    /// The made-up account's engine with no device, as after a logout while jawd was off, for tests
+    DemoUnlinked,
 }
 
 #[derive(Subcommand)]
@@ -230,6 +232,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 fn engine(kind: EngineKind, home: &Path) -> Result<Arc<dyn Engine>, (&'static str, String)> {
     match kind {
         EngineKind::Demo => Ok(Arc::new(DemoEngine::new())),
+        EngineKind::DemoUnlinked => Ok(Arc::new(DemoEngine::unlinked())),
         EngineKind::Go => match GoEngine::find() {
             Some(program) => Ok(Arc::new(GoEngine::new(program, home.to_path_buf()))),
             None => Err(("go", "jaw-engine isn't beside jawd or on PATH; make build builds it".into())),

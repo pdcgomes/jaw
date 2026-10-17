@@ -123,6 +123,11 @@ impl State {
         self.feed.as_ref()
     }
 
+    /// The account's and the connection's state, which sync keeps.
+    pub fn live(&self) -> &Shared {
+        &self.live
+    }
+
     pub fn store(&self) -> Option<&Store> {
         self.store.as_ref()
     }

@@ -24,6 +24,8 @@ const MEMBERS: [&str; 2] = ["351913333333@s.whatsapp.net", "351914444444@s.whats
 pub struct DemoEngine {
     script: Vec<pb::Event>,
     world: Arc<World>,
+    /// How long it takes before its script plays, as an engine reading its session.db does.
+    pause: Duration,
 }
 
 /// How long the made-up recipients take: their phone has a message `delivered` after it's sent,
@@ -172,14 +174,23 @@ impl DemoEngine {
         ])
     }
 
+    /// The made-up account's engine finding no device in its session.db, as after the account was
+    /// logged out while jawd was off: two seconds after it starts, so an interface can connect to a
+    /// jawd that says it's linked first, it says the account isn't linked, and nothing more.
+    pub fn unlinked() -> DemoEngine {
+        let unlinked = pb::Connection { state: pb::connection::State::Unlinked as i32, ..Default::default() };
+        let script = vec![pb::Event { seq: 0, kind: Some(pb::event::Kind::Connection(unlinked)) }];
+        DemoEngine { pause: Duration::from_secs(2), ..DemoEngine::with(script) }
+    }
+
     pub fn with(script: Vec<pb::Event>) -> DemoEngine {
-        DemoEngine { script, world: Arc::default() }
+        DemoEngine { script, world: Arc::default(), pause: Duration::ZERO }
     }
 
     /// An engine on `world`, as an engine started again talks to the same WhatsApp.
     #[cfg(test)]
     pub fn sharing(script: Vec<pb::Event>, world: Arc<World>) -> DemoEngine {
-        DemoEngine { script, world }
+        DemoEngine { script, world, pause: Duration::ZERO }
     }
 
     pub fn world(&self) -> Arc<World> {
@@ -274,6 +285,7 @@ impl Engine for DemoEngine {
     fn start(&self, events: mpsc::Sender<Incoming>) -> BoxFuture<'_, Result<Instance>> {
         let script = self.script.clone();
         let world = self.world.clone();
+        let pause = self.pause;
         Box::pin(async move {
             let (tx, mut outgoing) = mpsc::unbounded_channel();
             let commands = Commands { tx };
@@ -286,6 +298,7 @@ impl Engine for DemoEngine {
             };
             let playing = sender.clone();
             tokio::spawn(async move {
+                tokio::time::sleep(pause).await;
                 for event in script {
                     if !playing.send(event).await {
                         break;

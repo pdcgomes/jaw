@@ -86,8 +86,14 @@ const PROGRESS_EVERY: u64 = 100;
 const ME: &str = "me";
 /// Where sync keeps the linked account as interfaces see it (`Me` as JSON) between runs, so jawd
 /// says it's linked before its engine connects: written when the engine connects, and emptied when
-/// it says the account was logged out or isn't linked.
+/// the account is logged out or the engine says it isn't linked.
+///
+/// `ME` and `ACCOUNT` are caches of what WhatsApp said through the engine, kept in sync_state,
+/// which is jaw's own: a rebuild may copy them and a restore bring an old one back, and the
+/// engine's first word replaces them, so nothing durable is decided from them.
 const ACCOUNT: &str = "account";
+/// Why an account jawd said was linked isn't any more, when its engine finds no device.
+const NOT_LINKED: &str = "this device isn't linked any more";
 /// Where sync keeps whether jawd last stopped cleanly: "1" from a clean shutdown until the next
 /// start, "0" while it runs, written before the engine starts.
 const CLEAN: &str = "clean";
@@ -111,12 +117,40 @@ pub fn starting(store: &Store, engine: bool) -> Live {
     if let Ok(Some(me)) = store.remembered(ME) {
         live.me = convert::Me::new(me.split(' ').map(str::to_string));
     }
-    let account = store.remembered(ACCOUNT).ok().flatten().and_then(|json| serde_json::from_str::<Me>(&json).ok());
+    let kept = store.remembered(ACCOUNT).ok().flatten().filter(|json| !json.is_empty());
+    let account = kept.and_then(|json| match serde_json::from_str::<Me>(&json) {
+        Ok(me) => Some(me),
+        Err(e) => {
+            eprintln!("jawd: the account jaw.db keeps doesn't read ({e}), so it starts unlinked until the engine says");
+            None
+        }
+    });
     if let Some(me) = account {
         live.account = Account { state: AccountState::Linked, me: Some(me) };
         live.connection = Connection::new(if engine { ConnectionState::Connecting } else { ConnectionState::Offline });
     }
     live
+}
+
+/// Ends the account after a logout jawd asked for, as WhatsApp logging it out would, since whatsmeow
+/// says nothing after one: jaw.db forgets the account, synced, and interfaces are told it's logged
+/// out, so they offer to link again.
+pub async fn logged_out(
+    store: &Store,
+    live: &Shared,
+    pushes: &broadcast::Sender<Push>,
+    reason: &str,
+) -> anyhow::Result<()> {
+    store.apply_durable(vec![Change::Remember { key: ACCOUNT.into(), value: String::new() }]).await?;
+    let connection = {
+        let mut live = live.lock().expect("live state");
+        live.account = Account { state: AccountState::Unlinked, me: None };
+        live.connection = Connection::new(ConnectionState::LoggedOut);
+        live.connection.reason = Some(reason.into());
+        live.connection.clone()
+    };
+    push(pushes, "connection", connection);
+    Ok(())
 }
 
 /// Makes changes in the live lane without holding up the caller, saying if they fail.
@@ -181,6 +215,7 @@ pub async fn run(
             Some(pb::event::Kind::Connection(connection)) => {
                 let (pushed, me, account) = {
                     let mut live = live.lock().expect("live state");
+                    let was_linked = live.account.state == AccountState::Linked;
                     apply(&mut live, &connection);
                     let connected =
                         connection.state() == pb::connection::State::Connected && !connection.jid.is_empty();
@@ -189,7 +224,10 @@ pub async fn run(
                         live.me.jids.join(" ")
                     });
                     let account = match connection.state() {
-                        pb::connection::State::Unlinked | pb::connection::State::LoggedOut => Some(String::new()),
+                        // Unlinked before, the account is already empty.
+                        pb::connection::State::Unlinked | pb::connection::State::LoggedOut => {
+                            was_linked.then(String::new)
+                        }
                         _ if connected => {
                             live.account.me.as_ref().map(|me| serde_json::to_string(me).expect("Me serializes"))
                         }
@@ -198,12 +236,25 @@ pub async fn run(
                     (live.connection.clone(), me, account)
                 };
                 push(&pushes, "connection", pushed);
-                // Waited for, so a logout and a later connection are kept in the order they came.
-                if let Some(account) = account
-                    && let Err(e) =
-                        store.apply(Lane::Live, vec![Change::Remember { key: ACCOUNT.into(), value: account }]).await
-                {
-                    eprintln!("jawd: can't store the account: {e:#}");
+                // Waited for, so a logout and a later connection are kept in the order they came. It
+                // holds the loop for one live commit, a synced one for a logout, once a connection.
+                // Follow-up: whatsmeow can dispatch Connected with the removed device's JID after
+                // LoggedOut (it deletes the device while the LoggedOut goroutine runs, and sends
+                // Connected even when the post-connect query fails), which keeps the account here
+                // until the next start's UNLINKED corrects it, as main's live state does; the
+                // engine should drop a Connected after a LoggedOut until a PairSuccess.
+                if let Some(account) = account {
+                    let forget = account.is_empty();
+                    let change = vec![Change::Remember { key: ACCOUNT.into(), value: account }];
+                    let kept =
+                        if forget { store.apply_durable(change).await } else { store.apply(Lane::Live, change).await };
+                    match kept {
+                        Ok(kept) if kept.quarantined > 0 => {
+                            eprintln!("jawd: the account went to quarantine, not stored")
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("jawd: can't store the account: {e:#}"),
+                    }
                 }
                 if let Some(me) = me {
                     apply_soon(&store, vec![Change::Remember { key: ME.into(), value: me }], "the account's JIDs");
@@ -360,10 +411,16 @@ fn caught_up(live: &mut Live, done: &pb::OfflineDone) -> (Connection, Option<Str
 /// The account and connection as a Connection event says they are now.
 fn apply(live: &mut Live, connection: &pb::Connection) {
     use pb::connection::State;
-    let reason = (!connection.reason.is_empty()).then(|| connection.reason.clone());
+    let mut reason = (!connection.reason.is_empty()).then(|| connection.reason.clone());
     let state = match connection.state() {
         State::Unspecified | State::Disconnected | State::StreamReplaced | State::ConnectFailed => {
             ConnectionState::Offline
+        }
+        // Told it was linked, an interface hears an engine with no device as the account logged
+        // out, which it offers to link again.
+        State::Unlinked if live.account.state == AccountState::Linked => {
+            reason.get_or_insert_with(|| NOT_LINKED.into());
+            ConnectionState::LoggedOut
         }
         State::Unlinked => ConnectionState::Offline,
         State::Connecting | State::KeepaliveTimeout => ConnectionState::Connecting,

@@ -278,7 +278,7 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
             }
         },
         "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
-        "link.logout" => engine(state, id, pb::command::Kind::Logout(pb::Logout {})).await,
+        "link.logout" => logout(state, id).await,
         "chats.watch" | "messages.watch" | "watch.move" | "unwatch" => match session.windows.as_mut() {
             Some(windows) => {
                 let chat = match request.method.as_str() {
@@ -333,6 +333,19 @@ async fn history_more(state: &State, id: u64, params: Value) -> Reply {
         }
         Err(Refused::Engine(e)) => failed(id, Error::new(code::ENGINE_UNAVAILABLE, e.to_string())),
     }
+}
+
+/// Logs the account out, and once the engine has, ends it as WhatsApp logging it out would, before
+/// answering: whatsmeow says nothing after a logout it was asked for.
+async fn logout(state: &State, id: u64) -> Reply {
+    let reply = engine(state, id, pb::command::Kind::Logout(pb::Logout {})).await;
+    if let (Outcome::Result(_), Some(store)) = (&reply.outcome, state.store())
+        && let Err(e) = crate::sync::logged_out(store, state.live(), &state.pushes, "logged out from jaw").await
+    {
+        let why = format!("the account is logged out, but jaw.db couldn't forget it: {e:#}");
+        return failed(id, Error::new(code::INTERNAL, why));
+    }
+    reply
 }
 
 /// Carries out a command on the engine, with an empty result once it's done.
@@ -454,6 +467,79 @@ mod tests {
         assert_eq!(welcome.account.state, AccountState::Linked);
         assert_eq!(welcome.account.me, Some(pedro));
         assert_eq!(welcome.connection.state, ConnectionState::Connecting);
+    }
+
+    /// An engine that does whatever it's asked, at once.
+    struct Obliging;
+
+    impl crate::engine::Engine for Obliging {
+        fn kind(&self) -> &'static str {
+            "obliging"
+        }
+
+        fn start(
+            &self,
+            _events: tokio::sync::mpsc::Sender<crate::engine::Incoming>,
+        ) -> crate::engine::BoxFuture<'_, anyhow::Result<crate::engine::Instance>> {
+            Box::pin(async move {
+                let (commands, mut outgoing) = crate::engine::Commands::for_tests();
+                tokio::spawn(async move {
+                    while let Some(out) = outgoing.recv().await {
+                        if let crate::engine::Outgoing::Command { reply, .. } = out {
+                            let _ = reply.send(Ok(pb::reply::Kind::Done(pb::Done {})));
+                        }
+                    }
+                });
+                let hello = pb::Hello {
+                    protocol: crate::engine::PROTOCOL,
+                    program: "obliging".into(),
+                    whatsmeow: String::new(),
+                };
+                Ok(crate::engine::Instance { hello, commands, exited: Box::pin(std::future::pending()) })
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_logout_jawd_asks_for_forgets_the_account_and_says_so_before_it_answers() {
+        use crate::engine::supervisor::{Backoff, Supervisor};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let pedro = jaw_proto::Me {
+            id: "351910000001:12@s.whatsapp.net".into(),
+            name: "Pedro".into(),
+            phone: "+351910000001".into(),
+        };
+        let account = Change::Remember { key: "account".into(), value: serde_json::to_string(&pedro).unwrap() };
+        store.apply(Lane::Live, vec![account]).await.unwrap();
+        let (events, _incoming) = tokio::sync::mpsc::channel(16);
+        let supervisor = Supervisor::spawn(Arc::new(Obliging), events, Backoff::default());
+        while supervisor.status().state.name() != "running" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let live = Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, true)));
+        let state =
+            State::new(home.path(), Ok(supervisor), Vec::new(), live, Some(store.clone()), broadcast::channel(16).0);
+        tokio::spawn(serve(Arc::new(state.unwrap()), listener));
+        // On a thread of its own, so a push that never comes fails the test rather than hanging it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut connection, welcome) = jaw_client::Connection::open(&socket, "test", "0.0.0").unwrap();
+            assert_eq!(welcome.account.state, AccountState::Linked);
+            connection.call("link.logout", Value::Null).unwrap();
+            let _ = tx.send(connection.push().unwrap());
+        });
+        let told = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .expect("interfaces were told");
+        assert_eq!(told.method, "connection", "told before the answer");
+        let told: jaw_proto::Connection = serde_json::from_value(told.params).unwrap();
+        assert_eq!((told.state, told.reason.as_deref()), (ConnectionState::LoggedOut, Some("logged out from jaw")));
+        assert_eq!(store.remembered("account").unwrap().as_deref(), Some(""), "jaw.db forgot the account");
+        assert_eq!(crate::sync::starting(&store, true).account.state, AccountState::Unlinked, "so the next start says");
     }
 
     #[tokio::test(flavor = "multi_thread")]
