@@ -1,7 +1,9 @@
 //! jaw.db, through rusqlite with SQLite compiled in. One writer thread owns the write connection
 //! and takes the inbox first: what the engine hands over is committed and synced to the disk, and
 //! only then acked, before WhatsApp hears it arrived. Live changes (conversions as messages arrive,
-//! and actions) come next, each in a transaction of its own. Background changes and history go in
+//! and actions) come next, each in a transaction of its own, or in the next inbox group's synced
+//! commit while rows keep coming, so a stream of them never holds a live change back. Background
+//! changes and history go in
 //! transactions of at most 1,000 rows or 3 ms with their commit, ending early as soon as an inbox or
 //! live write is waiting, which is taken before the next. Text written in the background is indexed
 //! for search afterwards, in steps as short, while nothing else is waiting. Queries go to the read
@@ -67,7 +69,7 @@ pub struct Applied {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
     /// Messages converted as they arrive, and what someone just did: one transaction, after the
-    /// inbox and ahead of any background batch.
+    /// inbox or in an inbox group's, and ahead of any background batch.
     Live,
     /// History and other bulk work: short transactions, waiting for room behind earlier batches.
     Background,
@@ -94,6 +96,16 @@ enum Live {
     },
     /// Copies the whole WAL into the database and empties it, as at a clean stop.
     Truncate { done: oneshot::Sender<Result<(), String>> },
+}
+
+/// A live write made in an inbox group's transaction, answered once that commits.
+struct Shared {
+    changes: Vec<Change>,
+    done: Done,
+    queued: Instant,
+    durable: bool,
+    began: Instant,
+    made: Made,
 }
 
 /// What one transaction made of its changes.
@@ -218,6 +230,9 @@ const WRITER_CACHE_KIB: i64 = 32 * 1024;
 const BUSY_MS: i64 = 5_000;
 /// The most inbox rows one synced commit takes.
 const INBOX_GROUP: usize = 256;
+/// How long the writer goes on making the live writes waiting between two inbox groups, or taking
+/// them into a group's transaction, after the first, since the inbox rows waiting wait for them.
+const SHARE_TIME: Duration = Duration::from_millis(1);
 /// How long the writer waits before trying a commit that failed again, doubling each time.
 const RETRY_FIRST: Duration = Duration::from_millis(10);
 const RETRY_MOST: Duration = Duration::from_secs(1);
@@ -581,6 +596,55 @@ struct Writer {
     near: Option<Instant>,
 }
 
+/// Makes the groups of `changes` in `tx`, each in a savepoint: one that fails is rolled back and
+/// kept in quarantine with its error, and the rest go on. After each group `stop`, given the
+/// changes taken so far, says whether to stop there.
+fn make_groups(
+    tx: &mut rusqlite::Transaction,
+    stamps: &mut Stamps,
+    changes: &[Change],
+    groups: &[Range<usize>],
+    background: bool,
+    mut stop: impl FnMut(usize) -> bool,
+) -> Result<Made> {
+    let start = groups.first().map_or(0, |g| g.start);
+    let mut made = Made::default();
+    for group in groups {
+        let mark = stamps.mark();
+        let mut savepoint = tx.savepoint()?;
+        let mut failed = None;
+        let mut changed = 0;
+        for change in &changes[group.clone()] {
+            match write::apply(&savepoint, stamps, change, background) {
+                Ok(c) => changed += usize::from(c),
+                Err(e) if write::transient(&e) => return Err(e),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        match failed {
+            None => {
+                savepoint.commit()?;
+                made.changed += changed;
+            }
+            Some(e) => {
+                savepoint.rollback()?;
+                drop(savepoint);
+                stamps.undo(mark);
+                write::quarantine(tx, &changes[group.clone()], &e)?;
+                made.quarantined += 1;
+            }
+        }
+        made.taken = group.end - start;
+        if stop(made.taken) {
+            break;
+        }
+    }
+    Ok(made)
+}
+
 /// What a kind of background transaction's commit has lately cost for each row it took. SQLite
 /// writes every page a transaction dirtied at commit, and history's rows land all over the
 /// indexes, so a commit can cost more than the work before it. The next transaction stops in time
@@ -772,7 +836,7 @@ impl Writer {
                     self.failing(&e);
                     std::thread::sleep(pause);
                     pause = (pause * 2).min(RETRY_MOST);
-                    self.commit_inbox();
+                    self.commit_inbox(false);
                 }
                 Err(e) => return Err(e),
             }
@@ -781,14 +845,47 @@ impl Writer {
 
     fn take_inbox(&mut self, row: Inbox) {
         self.inbox.push(row);
-        self.commit_inbox();
+        self.commit_inbox(true);
     }
 
-    /// Commits the inbox rows waiting, in one synced transaction, then sends their acks. A commit
-    /// that fails, for whatever reason, keeps the rows and is tried again from 10 ms doubling to
-    /// 1 s until it succeeds, and nothing else is written meanwhile: without its ack the engine
-    /// waits, and WhatsApp keeps the message.
-    fn commit_inbox(&mut self) {
+    /// Commits the inbox rows waiting, a group at a time, until none are. With `share`, a stream of
+    /// rows never holds live writes back: after each group, those waiting go, in order, for
+    /// SHARE_TIME or at least one, each in a transaction of its own, until one that must reach the
+    /// disk, which goes in the next group's synced commit, its flush theirs.
+    fn commit_inbox(&mut self, share: bool) {
+        let mut first = None;
+        while self.commit_group(share, &mut first) {
+            if share {
+                first = self.between_groups();
+            }
+        }
+        if let Some(write) = first {
+            self.live_write(write);
+        }
+    }
+
+    /// Between two inbox groups, makes the live writes waiting, in order, for SHARE_TIME or at
+    /// least one, up to the first durable one, which it hands back for the next group's commit.
+    fn between_groups(&mut self) -> Option<Live> {
+        let began = Instant::now();
+        while began.elapsed() < SHARE_TIME {
+            match self.live.try_recv() {
+                Ok(write @ Live::Changes { durable: true, .. }) => return Some(write),
+                Ok(write) => self.live_write(write),
+                Err(_) => break,
+            }
+        }
+        None
+    }
+
+    /// Commits a group of the inbox rows waiting in one synced transaction, then sends their acks,
+    /// and says whether there was one. With `share`, `first` and the live writes waiting after it
+    /// go in the same transaction, after the rows, for SHARE_TIME or at least one, and are
+    /// answered with them. A commit that fails with live writes in it is made again without them,
+    /// which then go one by one as before. One that fails with none, for whatever reason, keeps
+    /// the rows and is tried again from 10 ms doubling to 1 s until it succeeds, and nothing else
+    /// is written meanwhile: without its ack the engine waits, and WhatsApp keeps the message.
+    fn commit_group(&mut self, share: bool, first: &mut Option<Live>) -> bool {
         let mut pause = RETRY_FIRST;
         loop {
             while self.inbox.len() < INBOX_GROUP {
@@ -798,10 +895,11 @@ impl Writer {
                 }
             }
             if self.inbox.is_empty() {
-                return;
+                return false;
             }
             let began = Instant::now();
-            match self.store_inbox() {
+            let (mut shared, mut after) = (Vec::new(), None);
+            match self.store_inbox(share, first, &mut shared, &mut after) {
                 Ok(synced) => {
                     self.recovered();
                     self.committed();
@@ -816,9 +914,42 @@ impl Writer {
                             ack.send();
                         }
                     }
+                    for write in &shared {
+                        stats.waits.add(write.began.saturating_duration_since(write.queued));
+                    }
                     drop(stats);
                     self.inboxed.notify_one();
-                    pause = RETRY_FIRST;
+                    if !shared.is_empty() {
+                        self.unmerged = true;
+                        let last = self.stamps.last();
+                        self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
+                        for write in shared {
+                            let _ = write.done.send(Ok(Applied {
+                                changed: write.made.changed,
+                                quarantined: write.made.quarantined,
+                                transactions: 1,
+                                took: write.began.elapsed(),
+                                seq: last,
+                            }));
+                        }
+                    }
+                    if let Some(truncate) = after {
+                        self.live_write(truncate);
+                    }
+                    return true;
+                }
+                Err(_) if first.is_some() || !shared.is_empty() || after.is_some() => {
+                    self.commit_group(false, &mut None);
+                    if let Some(write) = first.take() {
+                        self.live_write(write);
+                    }
+                    for Shared { changes, done, queued, durable, .. } in shared {
+                        self.live_write(Live::Changes { changes, done, queued, durable });
+                    }
+                    if let Some(truncate) = after {
+                        self.live_write(truncate);
+                    }
+                    return true;
                 }
                 Err(e) => {
                     self.failing(&e);
@@ -829,23 +960,72 @@ impl Writer {
         }
     }
 
-    /// Commits the inbox rows waiting, saying whether the commit ran synced; one that would run
-    /// unsynced is refused.
-    fn store_inbox(&mut self) -> Result<bool> {
+    /// Commits the inbox rows waiting, and with `share`, `first` and the live writes waiting after
+    /// it, taken into `shared` up to a Truncate, which is left in `after`; and says whether the
+    /// commit ran synced. One that would run unsynced is refused.
+    fn store_inbox(
+        &mut self,
+        share: bool,
+        first: &mut Option<Live>,
+        shared: &mut Vec<Shared>,
+        after: &mut Option<Live>,
+    ) -> Result<bool> {
         self.synced(true)?;
-        let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        {
-            let mut insert = tx.prepare_cached("INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)")?;
-            for row in &self.inbox {
-                insert.execute(params![row.kind, row.at_ms, row.payload])?;
+        if share {
+            self.stamps.begin();
+        }
+        let stored = (|| {
+            let mut tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            {
+                let mut insert = tx.prepare_cached("INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)")?;
+                for row in &self.inbox {
+                    insert.execute(params![row.kind, row.at_ms, row.payload])?;
+                }
             }
+            let sharing = Instant::now();
+            loop {
+                let write = match first.take() {
+                    Some(write) => write,
+                    None if !share || (!shared.is_empty() && sharing.elapsed() >= SHARE_TIME) => break,
+                    None => match self.live.try_recv() {
+                        Ok(write) => write,
+                        Err(_) => break,
+                    },
+                };
+                match write {
+                    Live::Changes { changes, done, queued, durable } => {
+                        let groups = write::groups(&changes);
+                        shared.push(Shared {
+                            changes,
+                            done,
+                            queued,
+                            durable,
+                            began: Instant::now(),
+                            made: Made::default(),
+                        });
+                        let write = shared.last_mut().expect("the write just taken");
+                        write.made = make_groups(&mut tx, &mut self.stamps, &write.changes, &groups, false, |_| false)?;
+                    }
+                    truncate => {
+                        *after = Some(truncate);
+                        break;
+                    }
+                }
+            }
+            if !shared.is_empty() {
+                write::settle(&tx, &mut self.stamps)?;
+            }
+            let synced = commits_synced(&tx)?;
+            if !synced {
+                bail!("the inbox's commit would run unsynced, so nothing is acked");
+            }
+            tx.commit()?;
+            Ok(synced)
+        })();
+        if stored.is_err() && share {
+            self.stamps.rolled_back();
         }
-        let synced = commits_synced(&tx)?;
-        if !synced {
-            bail!("the inbox's commit would run unsynced, so nothing is acked");
-        }
-        tx.commit()?;
-        Ok(synced)
+        stored
     }
 
     /// Whether a background transaction may begin, as the WAL stands. Past the soft limit it waits
@@ -1007,48 +1187,16 @@ impl Writer {
     ) -> Result<Made> {
         let began = Instant::now();
         self.stamps.begin();
-        let start = groups.first().map_or(0, |g| g.start);
         let made = (|| {
             let mut tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let mut made = Made::default();
-            for group in groups {
-                let mark = self.stamps.mark();
-                let mut savepoint = tx.savepoint()?;
-                let mut failed = None;
-                let mut changed = 0;
-                for change in &changes[group.clone()] {
-                    match write::apply(&savepoint, &mut self.stamps, change, background) {
-                        Ok(c) => changed += usize::from(c),
-                        Err(e) if write::transient(&e) => return Err(e),
-                        Err(e) => {
-                            failed = Some(e);
-                            break;
-                        }
-                    }
-                }
-                match failed {
-                    None => {
-                        savepoint.commit()?;
-                        made.changed += changed;
-                    }
-                    Some(e) => {
-                        savepoint.rollback()?;
-                        drop(savepoint);
-                        self.stamps.undo(mark);
-                        write::quarantine(&tx, &changes[group.clone()], &e)?;
-                        made.quarantined += 1;
-                    }
-                }
-                made.taken = group.end - start;
-                if background
-                    && (made.taken >= BATCH_ROWS
-                        || !self.realtime.is_empty()
-                        || !self.live.is_empty()
-                        || self.changes_pace.enough(began.elapsed(), made.taken))
-                {
-                    break;
-                }
-            }
+            let (realtime, live, pace) = (&self.realtime, &self.live, self.changes_pace);
+            let made = make_groups(&mut tx, &mut self.stamps, changes, groups, background, |taken| {
+                background
+                    && (taken >= BATCH_ROWS
+                        || !realtime.is_empty()
+                        || !live.is_empty()
+                        || pace.enough(began.elapsed(), taken))
+            })?;
             write::settle(&tx, &mut self.stamps)?;
             let synced = commits_synced(&tx)?;
             if durable && !synced {
@@ -1817,6 +1965,60 @@ mod tests {
         store.truncate().await.unwrap();
         assert_eq!(std::fs::metadata(home.path().join("jaw.db-wal")).unwrap().len(), 0);
         assert_eq!(store.count("messages").unwrap(), 20_000 + live as u64);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_writes_go_in_with_a_stream_of_inbox_rows_and_are_never_held_back_by_it() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let (acks, mut acked) = tokio::sync::mpsc::unbounded_channel();
+        // 500 rows a second for 2 s, each flush shorter than the gap to the next row's commit.
+        let rows = 1_000u64;
+        let feeder = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                for n in 0..rows {
+                    if let Some(wait) = (started + Duration::from_millis(2 * n)).checked_duration_since(Instant::now())
+                    {
+                        std::thread::sleep(wait);
+                    }
+                    store.inbox("message", 0, vec![1], Some(crate::engine::Ack::to(n, acks.clone())));
+                }
+            })
+        };
+        let chat = "351910000001@s.whatsapp.net";
+        let (mut live, mut slowest) = (0, Duration::ZERO);
+        while !feeder.is_finished() {
+            let started = Instant::now();
+            let message = text(chat, &format!("l{live}"), live, "live");
+            let applied = if live % 2 == 0 {
+                store.apply_durable(vec![Change::Message(message), Change::Person(Person::default())]).await.unwrap()
+            } else {
+                store.apply(Lane::Live, messages([message])).await.unwrap()
+            };
+            slowest = slowest.max(started.elapsed());
+            assert_eq!(applied.quarantined, usize::from(live % 2 == 0), "write {live}");
+            live += 1;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(live >= 20, "only {live} live writes while the rows came");
+        assert!(slowest < Duration::from_millis(250), "a live write waited {slowest:?} for the stream of rows");
+        for _ in 0..rows {
+            let ack = tokio::time::timeout(Duration::from_secs(5), acked.recv()).await.unwrap();
+            assert!(matches!(ack, Some(crate::engine::Outgoing::Ack(_))));
+        }
+        assert_eq!(store.count("inbox").unwrap(), rows);
+        assert_eq!(store.count("messages").unwrap(), live as u64, "each live write's message, and nothing twice");
+        let kept: i64 =
+            query(&store, |db| Ok(db.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0))?)).await;
+        assert_eq!(
+            kept, 1,
+            "the durable writes' bad change, kept once however often it came, while their messages went in"
+        );
+        let events: Vec<i64> =
+            query(&store, |db| read::events(db, 0, 1_000)).await.into_iter().map(|e| e.seq).collect();
+        assert!(events.windows(2).all(|w| w[1] == w[0] + 1), "no seq is skipped or given twice: {events:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
