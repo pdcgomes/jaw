@@ -247,7 +247,10 @@ const CHAT_COLUMNS: &str = "
         iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM (
             SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g
                 JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person
-            WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL)
+            WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL),
+        m.edited_at,
+        (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect)))
+            FROM (SELECT created_at, effect FROM outbox WHERE target = c.last_message AND effect IS NOT NULL ORDER BY n))
     FROM chats c
     LEFT JOIN people p ON p.n = c.person
     LEFT JOIN messages m ON m.n = c.last_message
@@ -267,14 +270,9 @@ fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
                 Some(jid) => Some(shown(r.get(25)?, r.get(26)?, r.get(27)?, Some(&jid))),
                 None => None,
             };
-            Some(Last {
-                from,
-                at: r.get(20)?,
-                mine: r.get(21)?,
-                kind: r.get(22)?,
-                status: r.get(23)?,
-                summary: r.get(24)?,
-            })
+            let mut summary: String = r.get(24)?;
+            super::overlay::last(&mut summary, r.get(30)?, r.get::<_, Option<String>>(31)?.as_deref());
+            Some(Last { from, at: r.get(20)?, mine: r.get(21)?, kind: r.get(22)?, status: r.get(23)?, summary })
         }
         None => None,
     };
@@ -340,10 +338,13 @@ const MESSAGE_COLUMNS: &str = "
         iif(instr(m.spans, '\"t\":\"mention\"') > 0, (SELECT json_group_object(e.value ->> 'person',
                 coalesce(mp.name, mp.push_name, mp.verified_name))
             FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person
-            WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL)";
+            WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL),
+        (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect),
+                'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine)))
+            FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL ORDER BY n))";
 
 /// How many columns MESSAGE_COLUMNS has, for queries that select more after them.
-const MESSAGE_COLUMN_COUNT: usize = 26;
+const MESSAGE_COLUMN_COUNT: usize = 27;
 
 const MESSAGE_JOINS: &str = "
     JOIN chats c ON c.n = m.chat
@@ -386,7 +387,7 @@ fn mentions_named(spans: String, names: Option<String>) -> String {
 
 fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
     let text: Option<String> = r.get(8)?;
-    let spans = match r.get::<_, Option<String>>(9)? {
+    let mut spans = match r.get::<_, Option<String>>(9)? {
         Some(spans) => mentions_named(spans, r.get(25)?),
         None => match text.as_deref() {
             Some(text) if !text.is_empty() => serde_json::to_string(&[Span { t: "text", s: text }])
@@ -394,6 +395,20 @@ fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
             _ => "[]".into(),
         },
     };
+    let (mut summary, mut reply, mut detail): (String, Option<String>, Option<String>) =
+        (r.get(10)?, r.get(11)?, r.get(12)?);
+    let (mut edited_at, mut deleted): (Option<i64>, bool) = (r.get(14)?, r.get(15)?);
+    let mut reactions: String = r.get::<_, Option<String>>(24)?.unwrap_or_else(|| "[]".into());
+    let row = super::overlay::Shown {
+        spans: &mut spans,
+        summary: &mut summary,
+        reply: &mut reply,
+        detail: &mut detail,
+        edited_at: &mut edited_at,
+        deleted: &mut deleted,
+        reactions: &mut reactions,
+    };
+    super::overlay::message(row, r.get::<_, Option<String>>(26)?.as_deref());
     let from = match r.get::<_, Option<i64>>(19)? {
         Some(id) => {
             let jid: Option<String> = r.get(23)?;
@@ -411,16 +426,16 @@ fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
         kind: r.get(6)?,
         status: r.get(7)?,
         spans: json(Some(spans))?.expect("spans are always there"),
-        summary: r.get(10)?,
-        reply: json(r.get(11)?)?,
-        detail: json(r.get(12)?)?,
+        summary,
+        reply: json(reply)?,
+        detail: json(detail)?,
         forwarded: r.get(13)?,
-        edited: r.get::<_, Option<i64>>(14)?.is_some(),
-        deleted: r.get(15)?,
+        edited: edited_at.is_some(),
+        deleted,
         expires_at: r.get(16)?,
         starred: r.get(17)?,
         view_once: r.get(18)?,
-        reactions: json(r.get(24)?)?.unwrap_or_else(|| RawValue::from_string("[]".into()).expect("[] is JSON")),
+        reactions: json(Some(reactions))?.expect("reactions are always there"),
         from,
     })
 }

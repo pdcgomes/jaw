@@ -16,6 +16,7 @@
 //! the WAL stays under 64 MiB however fast history comes.
 
 pub mod bench;
+mod overlay;
 #[cfg(test)]
 mod plans;
 pub mod read;
