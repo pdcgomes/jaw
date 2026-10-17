@@ -360,6 +360,12 @@ const FAIL_SHARED: &str = "fail-in-a-shared-commit";
 /// How often it has.
 #[cfg(test)]
 static FAILED_SHARED: AtomicU64 = AtomicU64::new(0);
+/// The kind of a test's inbox row whose insert fails, as a full disk, while a durable live write
+/// waits to go in its commit; and how often it has.
+#[cfg(test)]
+const FAIL_BEFORE_FIRST: &str = "fail-before-a-durable-write";
+#[cfg(test)]
+static FAILED_BEFORE_FIRST: AtomicU64 = AtomicU64::new(0);
 
 fn note_frames(_: &WalFile, frames: c_int) -> rusqlite::Result<()> {
     FRAMES.with(|f| f.set(frames.max(0) as u64));
@@ -1012,6 +1018,14 @@ impl Writer {
             {
                 let mut insert = tx.prepare_cached("INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)")?;
                 for row in &self.inbox {
+                    #[cfg(test)]
+                    if row.kind == FAIL_BEFORE_FIRST && first.is_some() {
+                        FAILED_BEFORE_FIRST.fetch_add(1, Ordering::Relaxed);
+                        let full = rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL);
+                        return Err(
+                            rusqlite::Error::SqliteFailure(full, Some("failed before its live write".into())).into()
+                        );
+                    }
                     insert.execute(params![row.kind, row.at_ms, row.payload])?;
                 }
             }
@@ -2129,9 +2143,8 @@ mod tests {
                     Change::Message(text(chat, &format!("w{i:05}"), 1_000 + i, "live")),
                     Change::Remember { key: "order".into(), value: i.to_string() },
                 ];
-                if kind == 2 || kind == 4 {
-                    changes.push(Change::Remember { key: FAIL_SHARED.into(), value: "x".into() });
-                }
+                // The send goes before the change that fails, so a rolled-back attempt says what it
+                // wrote before the attempt that stands says again.
                 if kind == 2 {
                     let mine = Message {
                         mine: true,
@@ -2148,6 +2161,9 @@ mod tests {
                         written: written.clone(),
                     }));
                     sends.push((i, written));
+                }
+                if kind == 2 || kind == 4 {
+                    changes.push(Change::Remember { key: FAIL_SHARED.into(), value: "x".into() });
                 }
                 let (done, applied) = oneshot::channel();
                 store.live.send(Live::Changes { changes, done, queued: Instant::now(), durable }).unwrap();
@@ -2203,6 +2219,92 @@ mod tests {
             .await;
             assert_eq!(kept, (format!("s{i:05}"), message), "send {i} says what the commit that kept it wrote");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_durable_write_waiting_for_an_inbox_commit_that_fails_before_taking_it_is_made_once_after() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let (acks, mut acked) = tokio::sync::mpsc::unbounded_channel();
+        let rows = 1_000u64;
+        // Rows whose insert fails while a durable write waits for their commit, and goes in alone.
+        let feeder = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                for n in 0..rows {
+                    if let Some(wait) = (started + Duration::from_millis(2 * n)).checked_duration_since(Instant::now())
+                    {
+                        std::thread::sleep(wait);
+                    }
+                    store.inbox(FAIL_BEFORE_FIRST, 0, vec![1; 600], Some(crate::engine::Ack::to(n, acks.clone())));
+                }
+            })
+        };
+        let checker = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let (mut seen, mut early) = (0u64, 0u64);
+                while seen < rows {
+                    let ack = tokio::time::timeout(Duration::from_secs(10), acked.recv()).await.unwrap();
+                    assert!(matches!(ack, Some(crate::engine::Outgoing::Ack(_))));
+                    seen += 1;
+                    if store.count("inbox").unwrap() < seen {
+                        early += 1;
+                    }
+                }
+                early
+            })
+        };
+        let chat = "351910000001@s.whatsapp.net";
+        let failed_before = FAILED_BEFORE_FIRST.load(Ordering::Relaxed);
+        let mut answers = Vec::new();
+        let mut i = 0i64;
+        // A conversion, a durable write and another conversion at a time, so the writer makes the
+        // first between two groups and hands the durable one to the next group's commit.
+        while !feeder.is_finished() {
+            for durable in [false, true, false] {
+                let id = format!("w{i:05}");
+                let changes = vec![Change::Message(text(chat, &id, 1_000 + i, "live"))];
+                let (done, applied) = oneshot::channel();
+                store.live.send(Live::Changes { changes, done, queued: Instant::now(), durable }).unwrap();
+                let store = store.clone();
+                answers.push(tokio::spawn(async move {
+                    let applied = applied.await.expect("a live write was dropped").unwrap();
+                    let kept: i64 = query(&store, move |db| {
+                        Ok(db.query_row("SELECT count(*) FROM messages WHERE id = ?1", [&id], |r| r.get(0))?)
+                    })
+                    .await;
+                    (applied, kept)
+                }));
+                i += 1;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut seqs = Vec::new();
+        for (n, answer) in answers.into_iter().enumerate() {
+            let (applied, kept) = answer.await.unwrap();
+            assert_eq!((applied.quarantined, kept), (0, 1), "write {n} answered before it was kept");
+            seqs.push(applied.seq);
+        }
+        assert_eq!(checker.await.unwrap(), 0, "acks seen before their rows could be read");
+        assert!(FAILED_BEFORE_FIRST.load(Ordering::Relaxed) > failed_before, "no commit failed before its write");
+        assert_eq!(store.count("inbox").unwrap(), rows, "each row once");
+        let made: Vec<(String, i64)> = query(&store, |db| {
+            let mut made = db.prepare(
+                "SELECT m.id, e.seq FROM messages m JOIN events e ON e.type = 'message' AND e.key = m.n ORDER BY m.n",
+            )?;
+            Ok(made.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await;
+        assert_eq!(made.len() as i64, i, "each write's message once");
+        for (n, (id, seq)) in made.iter().enumerate() {
+            assert_eq!(id, &format!("w{n:05}"), "writes made in the order they came");
+            assert!(*seq <= seqs[n], "write {n}'s answer, seq {}, is before its event, {seq}", seqs[n]);
+        }
+        let events: Vec<i64> =
+            query(&store, |db| read::events(db, 0, 100_000)).await.into_iter().map(|e| e.seq).collect();
+        assert!(events.windows(2).all(|w| w[1] == w[0] + 1), "no seq skipped or given twice");
     }
 
     /// Where `chat` was read, its unread count, and whether WhatsApp is owed receipts for it.
