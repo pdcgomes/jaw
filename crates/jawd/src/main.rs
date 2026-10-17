@@ -95,6 +95,17 @@ enum Bench {
         #[arg(long, default_value_t = 300)]
         runs: u32,
     },
+    /// jaw.db's writer: live writes timed while the inbox takes a steady stream of rows, as in a catch-up
+    Inbox {
+        /// Inbox rows a second, each rate on a jaw.db of its own
+        #[arg(long, value_delimiter = ',', default_values_t = [0, 100, 300, 500])]
+        rates: Vec<u32>,
+        #[arg(long, default_value_t = 4)]
+        seconds: u32,
+        /// Milliseconds between two durable live writes, with a conversion halfway between
+        #[arg(long, default_value_t = 50)]
+        every: u32,
+    },
     /// The palette's find: a made-up account with named people and chats, then keystrokes timed
     Find {
         #[arg(long, default_value_t = 1_000_000)]
@@ -150,6 +161,9 @@ fn main() -> Result<()> {
         Some(Command::Bench(Bench::Link { count, size, commit })) => bench_link(cli.engine, count, size, commit),
         Some(Command::Bench(Bench::Lanes { background, interactive })) => bench_lanes(background, interactive),
         Some(Command::Bench(Bench::Store { messages, chats, runs })) => bench_store(messages, chats, runs),
+        Some(Command::Bench(Bench::Inbox { rates, seconds, every })) => {
+            bench_inbox(store::bench::Stream { rates, seconds, every_ms: every })
+        }
         Some(Command::Bench(Bench::Find { messages, chats, people, runs })) => {
             bench_find(find::bench::Plan { messages, chats, people, runs })
         }
@@ -195,6 +209,15 @@ fn bench_store(messages: u32, chats: u32, runs: u32) -> Result<()> {
     let scratch = std::env::temp_dir().join(format!("jaw-bench-store-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;
     let outcome = runtime()?.block_on(store::bench::run(&scratch, store::bench::Plan { messages, chats, runs }));
+    let _ = std::fs::remove_dir_all(&scratch);
+    outcome
+}
+
+/// Streams inbox rows into jaw.dbs in a folder of its own, removed afterwards.
+fn bench_inbox(plan: store::bench::Stream) -> Result<()> {
+    let scratch = std::env::temp_dir().join(format!("jaw-bench-inbox-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let outcome = runtime()?.block_on(store::bench::stream(&scratch, plan));
     let _ = std::fs::remove_dir_all(&scratch);
     outcome
 }

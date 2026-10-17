@@ -1,6 +1,7 @@
 //! `jawd bench store`: a made-up account's jaw.db built through the writer (a few chats with
 //! 100,000 messages and a long tail of small ones), then its pages, chat list and search timed
-//! through the read pool, as an interface would ask for them.
+//! through the read pool, as an interface would ask for them. `jawd bench inbox`: live writes timed
+//! while the inbox takes a steady stream of rows.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -457,5 +458,102 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
     let mut timings = time(&store, plan.runs, move |db| read::events(db, since, 1_000)).await?;
     println!("{}", timings.line("the feed's last 1,000 events"));
     println!("\nThe biggest chat's newest message, as the read pool returns it:\n{}", sample.unwrap_or_default());
+    Ok(())
+}
+
+/// What `jawd bench inbox` streams: each rate in turn, for `seconds`, with a live write every
+/// `every_ms` meanwhile.
+pub struct Stream {
+    pub rates: Vec<u32>,
+    pub seconds: u32,
+    pub every_ms: u32,
+}
+
+/// Inbox rows handed over at each rate in turn, on a jaw.db of its own each time, as a catch-up
+/// after reconnecting delivers them, while live writes are timed from hand-over to answer: every
+/// `every_ms` a durable one (a send, a read, a draft) and, halfway between, a conversion. Each row
+/// is timed from hand-over to its ack.
+pub async fn stream(home: &Path, plan: Stream) -> Result<()> {
+    for &rate in &plan.rates {
+        let folder = home.join(format!("inbox-{rate}"));
+        std::fs::create_dir_all(&folder)?;
+        let store = Store::open(&folder)?;
+        let rows = rate as usize * plan.seconds as usize;
+        let (acks, mut acked) = tokio::sync::mpsc::unbounded_channel();
+        let handed = Arc::new(std::sync::Mutex::new(Vec::with_capacity(rows)));
+        let started = Instant::now();
+        let feeder = {
+            let (store, handed) = (store.clone(), handed.clone());
+            std::thread::spawn(move || {
+                for n in 0..rows {
+                    let due = started + Duration::from_secs_f64(n as f64 / f64::from(rate));
+                    if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                        std::thread::sleep(wait);
+                    }
+                    handed.lock().expect("the hand-over times").push(Instant::now());
+                    store.inbox("bench", 0, vec![0; 600], Some(crate::engine::Ack::to(n as u64, acks.clone())));
+                }
+            })
+        };
+        let collector = {
+            let handed = handed.clone();
+            tokio::spawn(async move {
+                let mut to_ack = vec![Duration::ZERO; rows];
+                for _ in 0..rows {
+                    let Some(crate::engine::Outgoing::Ack(seq)) = acked.recv().await else {
+                        anyhow::bail!("an inbox row was never acked");
+                    };
+                    let at = Instant::now();
+                    to_ack[seq as usize] = at - handed.lock().expect("the hand-over times")[seq as usize];
+                }
+                Ok(to_ack)
+            })
+        };
+        let length = Duration::from_secs(plan.seconds.into());
+        let every = Duration::from_millis(plan.every_ms.max(1).into());
+        let mut writes = Vec::new();
+        let mut rng = Rng(11);
+        let mut n = 0u32;
+        while every * n / 2 < length {
+            let due = started + every * n / 2;
+            tokio::time::sleep_until(due.into()).await;
+            let durable = n.is_multiple_of(2);
+            let count = (1u64 << 40) + u64::from(n);
+            let live =
+                Change::Message(message(&mut rng, &phone(900_000 + n as usize % 50), false, count as i64, count));
+            let store = store.clone();
+            writes.push((
+                durable,
+                tokio::spawn(async move {
+                    let began = Instant::now();
+                    if durable {
+                        store.apply_durable(vec![live]).await?;
+                    } else {
+                        store.apply(Lane::Live, vec![live]).await?;
+                    }
+                    anyhow::Ok(began.elapsed())
+                }),
+            ));
+            n += 1;
+        }
+        let (mut durable, mut converted) = (Vec::new(), Vec::new());
+        for (is_durable, write) in writes {
+            let took = write.await??;
+            if is_durable { durable.push(took) } else { converted.push(took) }
+        }
+        tokio::task::spawn_blocking(move || feeder.join()).await?.map_err(|_| anyhow::anyhow!("the feeder failed"))?;
+        let to_ack = collector.await??;
+        let storage = store.storage();
+        println!(
+            "{rate} inbox rows a second for {} s, {rows} rows in {} synced commits:",
+            plan.seconds, storage.synced_commits
+        );
+        println!("{}", Timings(durable).line("a durable live write, hand-over to answer"));
+        println!("{}", Timings(converted).line("a live conversion, hand-over to answer"));
+        println!("{}", Timings(to_ack).line("an inbox row, hand-over to its ack"));
+        store.truncate().await?;
+        drop(store);
+        std::fs::remove_dir_all(&folder)?;
+    }
     Ok(())
 }

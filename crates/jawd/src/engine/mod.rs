@@ -36,6 +36,11 @@ pub struct Ack {
 }
 
 impl Ack {
+    /// An ack that goes to `tx` as `Outgoing::Ack(seq)`, for benches that time it.
+    pub(crate) fn to(seq: u64, tx: mpsc::UnboundedSender<Outgoing>) -> Ack {
+        Ack { seq, tx }
+    }
+
     pub fn send(self) {
         let _ = self.tx.send(Outgoing::Ack(self.seq));
     }
