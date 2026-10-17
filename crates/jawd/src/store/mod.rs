@@ -139,6 +139,9 @@ struct Stats {
     held: Samples,
     held_times: u64,
     held_for: Duration,
+    /// Live writes made in an inbox group's commit, and such commits made again without them.
+    shared: u64,
+    shared_failed: u64,
 }
 
 /// The WAL as the writer and the checkpointer last saw it, for each other and for `status`.
@@ -346,6 +349,18 @@ thread_local! {
     static FRAMES: Cell<u64> = const { Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Whether this writer is in an inbox group's transaction that may take live writes.
+    static SHARING: Cell<bool> = const { Cell::new(false) };
+}
+/// The key a test's `Remember` fails with, as a full disk, whenever it's in such a transaction.
+#[cfg(test)]
+const FAIL_SHARED: &str = "fail-in-a-shared-commit";
+/// How often it has.
+#[cfg(test)]
+static FAILED_SHARED: AtomicU64 = AtomicU64::new(0);
+
 fn note_frames(_: &WalFile, frames: c_int) -> rusqlite::Result<()> {
     FRAMES.with(|f| f.set(frames.max(0) as u64));
     Ok(())
@@ -404,6 +419,7 @@ impl Store {
             index_after: None,
             index_retry: RETRY_FIRST,
             near: None,
+            shared_failing: None,
         };
         std::thread::Builder::new().name("jawd-writer".into()).spawn(move || writer.run(background_rx))?;
         let checkpointing = wal.clone();
@@ -537,6 +553,8 @@ impl Store {
             backups: self.backups(),
             background_waits: stats.held_times,
             background_waited_ms: stats.held_for.as_millis() as u64,
+            shared_writes: stats.shared,
+            shared_failed: stats.shared_failed,
             trouble: self.trouble.borrow().clone(),
         }
     }
@@ -594,6 +612,9 @@ struct Writer {
     /// Since when the checkpointer has had only a few frames left to copy, while background work
     /// waits for the WAL to start again.
     near: Option<Instant>,
+    /// Why the last inbox commit with live writes in it failed, said once until the reason changes
+    /// or one succeeds.
+    shared_failing: Option<String>,
 }
 
 /// Makes the groups of `changes` in `tx`, each in a savepoint: one that fails is rolled back and
@@ -917,9 +938,11 @@ impl Writer {
                     for write in &shared {
                         stats.waits.add(write.began.saturating_duration_since(write.queued));
                     }
+                    stats.shared += shared.len() as u64;
                     drop(stats);
                     self.inboxed.notify_one();
                     if !shared.is_empty() {
+                        self.shared_failing = None;
                         self.unmerged = true;
                         let last = self.stamps.last();
                         self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
@@ -938,7 +961,15 @@ impl Writer {
                     }
                     return true;
                 }
-                Err(_) if first.is_some() || !shared.is_empty() || after.is_some() => {
+                Err(e) if first.is_some() || !shared.is_empty() || after.is_some() => {
+                    let why = format!("{e:#}");
+                    if self.shared_failing.as_ref() != Some(&why) {
+                        eprintln!(
+                            "jawd: an inbox commit with live writes in it failed, so they go after it alone: {why}"
+                        );
+                        self.shared_failing = Some(why);
+                    }
+                    self.stats.lock().expect("the writer's stats").shared_failed += 1;
                     self.commit_group(false, &mut None);
                     if let Some(write) = first.take() {
                         self.live_write(write);
@@ -974,6 +1005,8 @@ impl Writer {
         if share {
             self.stamps.begin();
         }
+        #[cfg(test)]
+        SHARING.with(|sharing| sharing.set(share));
         let stored = (|| {
             let mut tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             {
@@ -1022,6 +1055,8 @@ impl Writer {
             tx.commit()?;
             Ok(synced)
         })();
+        #[cfg(test)]
+        SHARING.with(|sharing| sharing.set(false));
         if stored.is_err() && share {
             self.stamps.rolled_back();
         }
@@ -2044,6 +2079,201 @@ mod tests {
         let events: Vec<i64> =
             query(&store, |db| read::events(db, 0, 1_000)).await.into_iter().map(|e| e.seq).collect();
         assert!(events.windows(2).all(|w| w[1] == w[0] + 1), "no seq is skipped or given twice: {events:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inbox_commits_that_fail_with_live_writes_in_them_ack_nothing_early_and_make_each_write_once_in_order() {
+        use super::outbox::{Enqueued, Step, Written};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let (acks, mut acked) = tokio::sync::mpsc::unbounded_channel();
+        let rows = 1_500u64;
+        let feeder = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                for n in 0..rows {
+                    if let Some(wait) = (started + Duration::from_millis(2 * n)).checked_duration_since(Instant::now())
+                    {
+                        std::thread::sleep(wait);
+                    }
+                    store.inbox("message", 0, vec![1; 600], Some(crate::engine::Ack::to(n, acks.clone())));
+                }
+            })
+        };
+        let checker = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let (mut seen, mut early) = (0u64, 0u64);
+                while seen < rows {
+                    let ack = tokio::time::timeout(Duration::from_secs(10), acked.recv()).await.unwrap();
+                    assert!(matches!(ack, Some(crate::engine::Outgoing::Ack(_))));
+                    seen += 1;
+                    if store.count("inbox").unwrap() < seen {
+                        early += 1;
+                    }
+                }
+                early
+            })
+        };
+        let (chat, to) = ("351910000001@s.whatsapp.net", "351910000002@s.whatsapp.net");
+        let failed_before = FAILED_SHARED.load(Ordering::Relaxed);
+        let (mut answers, mut sends) = (Vec::new(), Vec::new());
+        let mut i = 0i64;
+        // Six live writes at a time straight into the live queue, three of them durable; two of
+        // them fail any inbox commit they're taken into, and one of those also sends a message.
+        while !feeder.is_finished() {
+            for kind in 0..6 {
+                let durable = matches!(kind, 0 | 2 | 5);
+                let mut changes = vec![
+                    Change::Message(text(chat, &format!("w{i:05}"), 1_000 + i, "live")),
+                    Change::Remember { key: "order".into(), value: i.to_string() },
+                ];
+                if kind == 2 || kind == 4 {
+                    changes.push(Change::Remember { key: FAIL_SHARED.into(), value: "x".into() });
+                }
+                if kind == 2 {
+                    let mine = Message {
+                        mine: true,
+                        sender: None,
+                        status: Some("pending"),
+                        ..text(to, &format!("s{i:05}"), 1_000 + i, "sent")
+                    };
+                    let written = Written::default();
+                    changes.push(Change::Outbox(Step::Enqueue {
+                        message: Box::new(mine),
+                        kind: "text",
+                        raw: vec![1],
+                        key: None,
+                        written: written.clone(),
+                    }));
+                    sends.push((i, written));
+                }
+                let (done, applied) = oneshot::channel();
+                store.live.send(Live::Changes { changes, done, queued: Instant::now(), durable }).unwrap();
+                answers.push((i, applied));
+                i += 1;
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let mut seqs = Vec::new();
+        for (i, applied) in answers {
+            let applied = applied.await.unwrap().unwrap();
+            assert_eq!(applied.quarantined, 0, "write {i}");
+            seqs.push(applied.seq);
+        }
+        assert_eq!(checker.await.unwrap(), 0, "acks seen before their rows could be read");
+        assert!(FAILED_SHARED.load(Ordering::Relaxed) > failed_before, "no shared commit failed");
+        assert!(store.storage().shared_failed > 0 && store.storage().shared_writes > 0);
+        assert_eq!(store.count("inbox").unwrap(), rows, "each row once");
+        let made: Vec<(String, i64)> = query(&store, |db| {
+            let mut made = db.prepare(
+                "SELECT m.id, e.seq FROM messages m JOIN events e ON e.type = 'message' AND e.key = m.n
+                WHERE m.id LIKE 'w%' ORDER BY m.n",
+            )?;
+            Ok(made.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await;
+        assert_eq!(made.len() as i64, i, "each write's message once");
+        for (n, (id, seq)) in made.iter().enumerate() {
+            assert_eq!(id, &format!("w{n:05}"), "writes made in the order they came");
+            assert!(*seq <= seqs[n], "write {n}'s answer, seq {}, is before its event, {seq}", seqs[n]);
+        }
+        assert!(made.windows(2).all(|w| w[0].1 < w[1].1), "events in the writes' order");
+        assert!(seqs.windows(2).all(|w| w[0] <= w[1]), "answers' seqs never go back");
+        let order: String =
+            query(&store, |db| Ok(db.query_row("SELECT value FROM sync_state WHERE key = 'order'", [], |r| r.get(0))?))
+                .await;
+        assert_eq!(order, (i - 1).to_string(), "the last write's value stands");
+        let events: Vec<i64> =
+            query(&store, |db| read::events(db, 0, 100_000)).await.into_iter().map(|e| e.seq).collect();
+        assert!(events.windows(2).all(|w| w[1] == w[0] + 1), "no seq skipped or given twice");
+        assert_eq!(store.count("outbox").unwrap(), sends.len() as u64, "each send queued once");
+        for (i, written) in sends {
+            let Some(Enqueued::Queued { message: Some(message), outbox: Some(outbox), .. }) = written.take() else {
+                panic!("send {i} says nothing was queued");
+            };
+            let kept: (String, i64) = query(&store, move |db| {
+                Ok(db.query_row(
+                    "SELECT m.id, o.message FROM messages m, outbox o WHERE m.n = ?1 AND o.n = ?2",
+                    [message, outbox],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .await;
+            assert_eq!(kept, (format!("s{i:05}"), message), "send {i} says what the commit that kept it wrote");
+        }
+    }
+
+    /// Where `chat` was read, its unread count, and whether WhatsApp is owed receipts for it.
+    async fn read_position(store: &Store, chat: &'static str) -> (Option<i64>, Option<i64>, i64, bool) {
+        query(store, move |db| {
+            Ok(db.query_row(
+                "SELECT read_at, read_n, unread, told_at IS NOT NULL FROM chats WHERE id = ?1",
+                [chat],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?)
+        })
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_group_rolled_back_into_quarantine_leaves_where_its_chat_was_read() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let chat = "351910000009@s.whatsapp.net";
+        let theirs = Message { live: true, ..text(chat, "o1", 1_000, "hello") };
+        store.apply(Lane::Live, messages([theirs])).await.unwrap();
+        let before = read_position(&store, chat).await;
+        assert_eq!(before.2, 1);
+        // Your own message, live from another device, in a group whose last change fails.
+        let mine = Message { mine: true, sender: None, live: true, ..text(chat, "x", 2_000, "mine") };
+        let group =
+            vec![Change::Message(mine), Change::Person(Person::default()), Change::Drained(Drained::Inbox(999_999))];
+        assert_eq!(store.apply(Lane::Live, group.clone()).await.unwrap().quarantined, 1);
+        assert_eq!(
+            read_position(&store, chat).await,
+            before,
+            "a rolled-back message of yours moved where the chat was read"
+        );
+        // And in a transaction where a group before it moved the chat, and stays.
+        let read = Message { mine: true, sender: None, live: true, ..text(chat, "y", 1_500, "read") };
+        let mut changes = vec![Change::Message(read), Change::Drained(Drained::Inbox(999_998))];
+        changes.extend(group);
+        assert_eq!(store.apply(Lane::Live, changes).await.unwrap().quarantined, 1);
+        let after = read_position(&store, chat).await;
+        assert_eq!((after.0, after.2), (Some(1_500), 0), "read up to the message that stayed, and no further");
+        let ids: Vec<String> = query(&store, move |db| read::messages(db, chat, Around::Newest, 10))
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, ["o1", "y"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_send_whose_group_is_rolled_back_owes_no_receipts_and_reads_nothing() {
+        use super::outbox::{Step, Written, owing};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let chat = "351910000008@s.whatsapp.net";
+        let theirs = Message { live: true, ..text(chat, "o1", 1_000, "hello") };
+        store.apply(Lane::Live, messages([theirs])).await.unwrap();
+        let before = read_position(&store, chat).await;
+        let mine = Message { mine: true, sender: None, status: Some("pending"), ..text(chat, "s1", 2_000, "sent") };
+        let send = Step::Enqueue {
+            message: Box::new(mine),
+            kind: "text",
+            raw: vec![1],
+            key: None,
+            written: Written::default(),
+        };
+        let group =
+            vec![Change::Outbox(send), Change::Person(Person::default()), Change::Drained(Drained::Inbox(999_999))];
+        assert_eq!(store.apply_durable(group).await.unwrap().quarantined, 1);
+        assert_eq!(read_position(&store, chat).await, before, "a send rolled back moved where the chat was read");
+        assert_eq!(store.count("outbox").unwrap(), 0);
+        assert!(query(&store, owing).await.is_empty(), "receipts owed for a send that was rolled back");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -220,6 +220,12 @@ pub fn describe(status: &Status) -> String {
                 storage.background_waited_ms as f64 / 1e3
             ));
         }
+        if storage.shared_writes > 0 || storage.shared_failed > 0 {
+            wal.push_str(&format!(
+                "; {} live writes in the inbox's commits, {} of those commits made again without them",
+                storage.shared_writes, storage.shared_failed
+            ));
+        }
         lines.push(wal);
         for backup in &storage.backups {
             let days = (backup.kept_until_ms - now_ms()).max(0) / 86_400_000;

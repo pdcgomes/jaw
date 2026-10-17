@@ -288,6 +288,12 @@ pub struct Storage {
     /// How often background work waited for the checkpointer, and for how long in all.
     pub background_waits: u64,
     pub background_waited_ms: u64,
+    /// Live writes made in an inbox group's synced commit, and those commits that failed and were
+    /// made again without their live writes.
+    #[serde(default)]
+    pub shared_writes: u64,
+    #[serde(default)]
+    pub shared_failed: u64,
     /// Why jaw.db can't be written, while it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trouble: Option<String>,

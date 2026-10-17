@@ -332,6 +332,9 @@ pub(super) struct Stamps {
     /// Chats whose read position may move and whose unread and mention counts are counted again
     /// before the transaction commits.
     unsettled: Vec<(i64, Unsettled)>,
+    /// Each entry of `unsettled` as it was before each change to it, None for one added, so a
+    /// savepoint rolled back moves no chat's read position.
+    unsettling: Vec<(usize, Option<Unsettled>)>,
 }
 
 /// What the transaction's messages said of where a chat was read, applied once before it commits.
@@ -353,6 +356,7 @@ struct Unsettled {
 pub(super) struct Mark {
     next: i64,
     touched: usize,
+    unsettling: usize,
 }
 
 impl Stamps {
@@ -364,6 +368,7 @@ impl Stamps {
             touched: HashMap::new(),
             order: Vec::new(),
             unsettled: Vec::new(),
+            unsettling: Vec::new(),
         })
     }
 
@@ -372,6 +377,7 @@ impl Stamps {
         self.touched.clear();
         self.order.clear();
         self.unsettled.clear();
+        self.unsettling.clear();
     }
 
     pub(super) fn rolled_back(&mut self) {
@@ -379,13 +385,18 @@ impl Stamps {
         self.touched.clear();
         self.order.clear();
         self.unsettled.clear();
+        self.unsettling.clear();
     }
 
     /// Notes that chat `n`'s unread messages may have changed.
     fn unsettle(&mut self, n: i64) -> &mut Unsettled {
         let at = match self.unsettled.iter().position(|(chat, _)| *chat == n) {
-            Some(at) => at,
+            Some(at) => {
+                self.unsettling.push((at, Some(self.unsettled[at].1)));
+                at
+            }
             None => {
+                self.unsettling.push((self.unsettled.len(), None));
                 self.unsettled.push((n, Unsettled::default()));
                 self.unsettled.len() - 1
             }
@@ -394,15 +405,21 @@ impl Stamps {
     }
 
     pub(super) fn mark(&self) -> Mark {
-        Mark { next: self.next, touched: self.order.len() }
+        Mark { next: self.next, touched: self.order.len(), unsettling: self.unsettling.len() }
     }
 
-    /// Forgets what was stamped since `mark`, whose savepoint was rolled back.
+    /// Forgets what was stamped and unsettled since `mark`, whose savepoint was rolled back.
     pub(super) fn undo(&mut self, mark: Mark) {
         for key in self.order.drain(mark.touched..) {
             self.touched.remove(&key);
         }
         self.next = mark.next;
+        for (at, was) in self.unsettling.drain(mark.unsettling..).rev() {
+            match was {
+                Some(was) => self.unsettled[at].1 = was,
+                None => self.unsettled.truncate(at),
+            }
+        }
     }
 
     /// The seq a change to an existing row would take.
@@ -549,6 +566,12 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, backg
             Ok(false)
         }
         Change::Remember { key, value } => {
+            #[cfg(test)]
+            if key == super::FAIL_SHARED && super::SHARING.with(std::cell::Cell::get) {
+                super::FAILED_SHARED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let full = rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL);
+                return Err(rusqlite::Error::SqliteFailure(full, Some("failed in a shared commit".into())).into());
+            }
             db.prepare_cached("INSERT OR REPLACE INTO sync_state (key, value) VALUES (?1, ?2)")?
                 .execute(params![key, value])?;
             Ok(false)
@@ -706,6 +729,7 @@ fn told_if_owed(
 /// history moves and counts each chat once, in one update.
 pub(super) fn settle(db: &Connection, stamps: &mut Stamps) -> Result<()> {
     let unsettled = std::mem::take(&mut stamps.unsettled);
+    stamps.unsettling.clear();
     let chats: Vec<i64> = unsettled.iter().map(|(chat, _)| *chat).collect();
     settle_each(db, stamps, unsettled)?;
     // A chat being merged counts from the later of its position and its kept chat's, and is
