@@ -394,11 +394,16 @@ fn edits_deletes_reactions_and_votes_amend_the_message_they_name() {
     assert_eq!(amend.what, Amendment::React { emoji: "❤".into() });
     let mut mine = info(GROUP, react(""));
     mine.key.from_me = Some(true);
-    let [amend] = amends(&mine).try_into().unwrap();
+    let [amend, own] = amends(&mine).try_into().unwrap();
     assert_eq!(
         (amend.sender.as_deref(), amend.mine),
         (Some("351910000001@s.whatsapp.net"), true),
         "the account reacts as itself"
+    );
+    assert_eq!(
+        (own.target.as_str(), own.what),
+        ("3EB0AA", Amendment::DeleteForMe),
+        "and its reaction's own ID is no row"
     );
 
     let vote = e2e::Message {
@@ -411,6 +416,66 @@ fn edits_deletes_reactions_and_votes_amend_the_message_they_name() {
     let [amend] = amends(&info(GROUP, vote)).try_into().unwrap();
     assert_eq!(amend.what, Amendment::Keep { kind: "vote".into() });
     assert!(rows(&info(GROUP, e2e::Message::default()), true).is_empty());
+}
+
+#[test]
+fn a_reaction_is_timed_by_its_senders_clock_to_the_millisecond() {
+    let react = e2e::Message {
+        reaction_message: Some(e2e::ReactionMessage {
+            key: Some(key("3EB0OLD")),
+            text: Some("❤".into()),
+            sender_timestamp_ms: Some(AT + 750),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(amends(&info(ANA, react))[0].at, AT + 750, "not the second its envelope says");
+}
+
+#[test]
+fn your_reactions_edits_and_deletions_from_your_other_devices_leave_their_own_ids_no_row_to_wait_for() {
+    let edit = e2e::Message {
+        protocol_message: Some(Box::new(e2e::ProtocolMessage {
+            key: Some(key("3EB0OLD")),
+            r#type: Some(e2e::protocol_message::Type::MessageEdit as i32),
+            edited_message: Some(Box::new(e2e::Message { conversation: Some("fixed".into()), ..Default::default() })),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let revoke = e2e::Message {
+        protocol_message: Some(Box::new(e2e::ProtocolMessage {
+            key: Some(key("3EB0OLD")),
+            r#type: Some(e2e::protocol_message::Type::Revoke as i32),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    for (what, message) in [("an edit", edit), ("a deletion", revoke)] {
+        let mut from_phone = info(ANA, message.clone());
+        from_phone.key.from_me = Some(true);
+        let own = amends(&from_phone).into_iter().find(|a| a.target == "3EB0AA");
+        assert_eq!(own.map(|a| a.what), Some(Amendment::DeleteForMe), "{what} of yours");
+        assert!(amends(&info(ANA, message)).iter().all(|a| a.target != "3EB0AA"), "{what} of Ana's");
+    }
+}
+
+#[test]
+fn a_message_history_keeps_as_deleted_for_everyone_is_a_deleted_row_saying_who_deleted_it() {
+    let mut stub = info(ANA, e2e::Message::default());
+    stub.message = None;
+    stub.message_stub_type = Some(StubType::Revoke as i32);
+    let changes = message(&stub, &me(), false);
+    let [Change::Person(_), Change::Amend(revoke), Change::Message(row)] = changes.as_slice() else {
+        panic!("the revoke, then the row: {changes:?}")
+    };
+    assert_eq!((revoke.target.as_str(), &revoke.what), ("3EB0AA", &Amendment::Revoke), "a copy jaw has is revoked");
+    assert_eq!(
+        (row.kind, row.deleted, row.text.as_deref(), row.summary.as_str()),
+        ("text", true, None, "This message was deleted")
+    );
+    stub.key.from_me = Some(true);
+    assert_eq!(rows(&stub, false)[0].summary, "You deleted this message");
 }
 
 #[test]

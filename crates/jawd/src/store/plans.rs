@@ -54,6 +54,11 @@ const ALLOWED: &[(&str, &str)] = &[
     ("SELECT n FROM chats WHERE told_at IS NOT NULL", "the chats owing read receipts, once at start"),
     ("SELECT message FROM settled LIMIT", "stops at its limit"),
     ("SELECT chat, member FROM regroup LIMIT", "stops at its limit"),
+    (
+        "FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1",
+        "an action naming a message by its ID alone looks for it in each chat, a search of messages_by_id each; \
+        chats are few next to messages",
+    ),
 ];
 
 /// Names in format strings that aren't constants, and what to plan them with.

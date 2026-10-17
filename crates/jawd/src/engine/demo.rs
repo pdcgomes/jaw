@@ -3,9 +3,12 @@
 //! whatsmeow would, and answers ping and bench. What it's sent goes to a made-up WhatsApp that
 //! outlives any one engine, as the real one does: it answers with the server's time, the
 //! recipients' phones send delivered and then read, and a message sent again with the same ID is
-//! the same message. Given an `Account`, it answers for its contacts and groups, and writes each
-//! history blob its phone offers to the spool as jaw-engine does; events can also be delivered
-//! from outside its script, several waiting for their acks at once.
+//! the same message. A reaction, an edit or a deletion for everyone is a message too, which the
+//! recipients' phones say they have but never read; the server refuses an edit once WhatsApp's
+//! window for it has passed; and app state sent for your other devices is taken. Given an
+//! `Account`, it answers for its contacts and groups, and writes each history blob its phone offers
+//! to the spool as jaw-engine does; events can also be delivered from outside its script, several
+//! waiting for their acks at once.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -26,6 +29,8 @@ pub const ME: &str = "351910000001@s.whatsapp.net";
 
 /// Two made-up members of every group the demo sends to, besides you.
 const MEMBERS: [&str; 2] = ["351913333333@s.whatsapp.net", "351914444444@s.whatsapp.net"];
+/// How long after sending a message WhatsApp's server takes an edit of it, as whatsmeow says.
+const EDIT_WINDOW_MS: i64 = 20 * 60 * 1000;
 
 pub struct DemoEngine {
     script: Vec<pb::Event>,
@@ -139,6 +144,12 @@ impl World {
     #[cfg(test)]
     pub fn refuse_next(&self, n: u32) {
         *self.refusing.lock().expect("the demo world") = n;
+    }
+
+    /// Has the server keep message `id` as sent at `at`, as one sent long ago.
+    #[cfg(test)]
+    pub fn sent_at(&self, id: &str, at: i64) {
+        self.has.lock().expect("the demo world").insert(id.to_string(), at);
     }
 
     /// Takes sends without answering them, until it's told otherwise.
@@ -307,6 +318,24 @@ fn receipt(send: &pb::Send, recipient: &str, kind: &str) -> pb::Event {
             ..Default::default()
         })),
     }
+}
+
+/// An action on another message, which the recipients' phones say they have but never read.
+enum Action {
+    /// An edit of the message with this ID.
+    Edit(String),
+    Other,
+}
+
+/// What a message to send is, if it's an action rather than a message to show.
+fn action_of(raw: &[u8]) -> Option<Action> {
+    let message = e2e::Message::decode(raw).ok()?;
+    let edited =
+        message.edited_message.as_ref().and_then(|e| e.message.as_ref()).and_then(|m| m.protocol_message.as_ref());
+    if let Some(edit) = edited {
+        return Some(Action::Edit(edit.key.as_ref()?.id.clone()?));
+    }
+    (message.reaction_message.is_some() || message.protocol_message.is_some()).then_some(Action::Other)
 }
 
 /// Every number is on the made-up WhatsApp but those starting 999, each known by a LID as well.
@@ -478,7 +507,8 @@ impl Sender {
             }
             kind @ (pb::command::Kind::MarkRead(_)
             | pb::command::Kind::ChatPresence(_)
-            | pb::command::Kind::Presence(_)) => {
+            | pb::command::Kind::Presence(_)
+            | pb::command::Kind::AppStatePatch(_)) => {
                 self.world.ask(kind);
                 done
             }
@@ -551,6 +581,13 @@ impl Sender {
         if next(&world.failing) || world.failing_chats.lock().expect("the demo world").contains(&send.chat) {
             return Err(EngineError::Failed { message: "websocket not connected".into(), retry: true });
         }
+        let action = action_of(&send.raw);
+        if let Some(Action::Edit(of)) = &action {
+            let edited = world.has.lock().expect("the demo world").get(of).copied();
+            if edited.is_some_and(|at| now_ms() - at > EDIT_WINDOW_MS) {
+                return Err(EngineError::Failed { message: "server returned error 406".into(), retry: false });
+            }
+        }
         let at = *world.has.lock().expect("the demo world").entry(send.id.clone()).or_insert_with(now_ms);
         if world.holding.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
@@ -579,6 +616,9 @@ impl Sender {
                     if !sender.send(receipt(&send, recipient, "")).await {
                         return;
                     }
+                }
+                if action.is_some() {
+                    return;
                 }
                 for recipient in &recipients {
                     tokio::time::sleep(replies.read).await;

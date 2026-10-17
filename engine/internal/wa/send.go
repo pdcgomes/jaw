@@ -34,6 +34,8 @@ func (e *Engine) sending(cmd *enginepb.Command) *enginepb.Reply {
 		return e.presence(c.Presence)
 	case *enginepb.Command_OnWhatsapp:
 		return e.onWhatsApp(c.OnWhatsapp)
+	case *enginepb.Command_AppStatePatch:
+		return e.appStatePatch(c.AppStatePatch)
 	}
 	return nil
 }

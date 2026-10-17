@@ -1737,6 +1737,10 @@ fn tombstoned(db: &Connection, chat: &str, id: &str) -> Result<bool> {
 fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<bool> {
     let chat = chat_jid(db, &amend.chat)?;
     if tombstoned(db, &chat, &amend.target)? {
+        // A receipt for an action of yours, which has an ID of its own and no row, says WhatsApp has it.
+        if matches!(amend.what, Amendment::Status { .. }) {
+            outbox::receipt_for_action(db, stamps, &amend.target)?;
+        }
         return Ok(false);
     }
     let found = target(db, stamps, amend)?;
@@ -1826,7 +1830,8 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
             .execute(params![n, text, spans, summary, at, seq])?,
         Amendment::Revoke => db
             .prepare_cached(
-                "UPDATE messages SET deleted = 1, text = NULL, spans = NULL, summary = 'This message was deleted',
+                "UPDATE messages SET deleted = 1, text = NULL, spans = NULL,
+                    summary = iif(mine, 'You deleted this message', 'This message was deleted'),
                     reply = NULL, detail = NULL, raw = NULL, envelope = NULL, v = ?2
                 WHERE n = ?1 AND deleted = 0",
             )?

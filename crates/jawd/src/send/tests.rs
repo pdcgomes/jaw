@@ -1364,6 +1364,289 @@ async fn replies_mentions_and_chat_info_go_through_the_socket_as_jaw_asks_for_th
     assert_eq!(replies[2]["error"]["code"], code::NOT_FOUND);
 }
 
+/// Message `id` in `chat` as a window shows it, if jawd has it.
+async fn row(running: &Running, chat: &str, id: &str) -> Option<jaw_proto::windows::MessageRow> {
+    let (chat, id) = (chat.to_string(), id.to_string());
+    running.query(move |db| Ok(read::message(db, &chat, &id)?.map(|(row, _)| crate::feed::message_row(row)))).await
+}
+
+/// The commands of `kind` the engine was asked, as `pick` finds them.
+fn asked<T>(running: &Running, pick: impl Fn(pb::command::Kind) -> Option<T>) -> Vec<T> {
+    running.world.asked().into_iter().filter_map(pick).collect()
+}
+
+/// The raw messages the engine was asked to send, decoded.
+fn raws(running: &Running) -> Vec<wa_proto::wa_web_protobufs_e2e::Message> {
+    running
+        .world
+        .sends()
+        .into_iter()
+        .map(|send| wa_proto::wa_web_protobufs_e2e::Message::decode(send.raw.as_slice()).unwrap())
+        .collect()
+}
+
+/// Waits until message `id` in `chat`, as a window shows it, satisfies `done`.
+async fn until_row(
+    running: &Running,
+    chat: &str,
+    id: &str,
+    what: &str,
+    done: impl Fn(&jaw_proto::windows::MessageRow) -> bool + Clone + Send + Sync + 'static,
+) {
+    let (chat, id) = (chat.to_string(), id.to_string());
+    running
+        .until(what, move |db| {
+            Ok(read::message(db, &chat, &id)?
+                .map(|(row, _)| crate::feed::message_row(row))
+                .is_some_and(|row| done(&row)))
+        })
+        .await;
+}
+
+fn reactions(row: &jaw_proto::windows::MessageRow) -> Vec<(String, u32, bool)> {
+    row.reactions.iter().map(|r| (r.emoji.clone(), r.n, r.mine)).collect()
+}
+
+fn text_of(row: &jaw_proto::windows::MessageRow) -> String {
+    row.spans.as_array().unwrap().iter().map(|s| s["s"].as_str().unwrap().to_string()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_goes_as_a_message_of_its_own_and_is_on_the_row_once_whatsapp_has_it() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    let other = Amend {
+        chat: ANA.into(),
+        target: "m1".into(),
+        sender: Some(ANA.into()),
+        mine: false,
+        at: now_ms() - 30_000,
+        what: Amendment::React { emoji: "👍".into() },
+        raw: None,
+    };
+    running.store.apply(Lane::Live, vec![Change::Amend(other)]).await.unwrap();
+    assert_eq!(running.call("react", json!({ "message": "m1", "emoji": "❤️" })).await.unwrap(), json!({}));
+    until_row(&running, ANA, "m1", "the reaction", |row| row.reactions.iter().any(|r| r.mine)).await;
+    let reacted = row(&running, ANA, "m1").await.unwrap();
+    assert_eq!(reactions(&reacted), [("👍".into(), 1, false), ("❤️".into(), 1, true)], "with Ana's");
+    let reaction = raws(&running).remove(0).reaction_message.expect("a reaction of its own");
+    let key = reaction.key.unwrap();
+    assert_eq!((key.id.as_deref(), key.from_me, key.remote_jid.as_deref()), (Some("m1"), Some(false), Some(ANA)));
+    assert_eq!(reaction.text.as_deref(), Some("❤️"));
+    let id = running.world.sends()[0].id.clone();
+    assert!(id.starts_with("3EB0") && id.len() == 22, "with an ID of its own: {id}");
+    running.call("react", json!({ "message": "m1", "emoji": "👍", "chat": ANA })).await.unwrap();
+    until_row(&running, ANA, "m1", "the other emoji", |row| row.reactions.iter().any(|r| r.mine && r.emoji == "👍"))
+        .await;
+    assert_eq!(reactions(&row(&running, ANA, "m1").await.unwrap()), [("👍".into(), 2, true)], "another replaces it");
+    running.call("react", json!({ "message": "m1", "emoji": "" })).await.unwrap();
+    until_row(&running, ANA, "m1", "its removal", |row| !row.reactions.iter().any(|r| r.mine)).await;
+    assert_eq!(reactions(&row(&running, ANA, "m1").await.unwrap()), [("👍".into(), 1, false)], "and none removes it");
+    running
+        .until("the outbox to empty", |db| {
+            Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0)
+        })
+        .await;
+    // Ana's phone says it has each reaction, a receipt for each one's own ID.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    eventually(&running, "the receipts converted", |db| {
+        Ok(db.query_row("SELECT count(*) FROM inbox", [], |r| r.get::<_, i64>(0))? == 0)
+    })
+    .await;
+    let pending =
+        running.query(|db| Ok(db.query_row("SELECT count(*) FROM pending", [], |r| r.get::<_, i64>(0))?)).await;
+    assert_eq!(pending, 0, "the receipts for a reaction's own ID don't wait for a message that won't come");
+    let refused = |params: Value| running.call("react", params);
+    assert_eq!(refused(json!({ "message": "nope", "emoji": "❤️" })).await.unwrap_err().code, code::NOT_FOUND);
+    assert_eq!(refused(json!({ "message": "m1", "emoji": "a b" })).await.unwrap_err().code, code::INVALID_PARAMS);
+    let revoke = Amend { what: Amendment::Revoke, at: now_ms(), ..other_of(ANA, "m1") };
+    running.store.apply(Lane::Live, vec![Change::Amend(revoke)]).await.unwrap();
+    assert_eq!(refused(json!({ "message": "m1", "emoji": "❤️" })).await.unwrap_err().code, code::NOT_ALLOWED);
+}
+
+/// An amendment from the other person in a one-to-one chat with them.
+fn other_of(chat: &str, target: &str) -> Amend {
+    Amend {
+        chat: chat.into(),
+        target: target.into(),
+        sender: Some(chat.into()),
+        mine: false,
+        at: now_ms(),
+        what: Amendment::Status { status: "delivered".into() },
+        raw: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_is_on_the_row_once_whatsapp_has_it_and_one_whatsapp_refuses_leaves_it_as_it_was() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let mut pushes = running.pushes.subscribe();
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &id, "sent").await;
+    running.call("edit", json!({ "message": id, "text": "afinal chego às *21h*" })).await.unwrap();
+    until_row(&running, ANA, &id, "the edit", |row| row.edited).await;
+    let edited = row(&running, ANA, &id).await.unwrap();
+    assert_eq!(text_of(&edited), "afinal chego às 21h");
+    assert_eq!(edited.spans[1], json!({ "t": "bold", "s": "21h" }));
+    let raw = raws(&running).remove(1);
+    let protocol = raw.edited_message.unwrap().message.unwrap().protocol_message.unwrap();
+    assert_eq!(protocol.r#type, Some(wa_proto::wa_web_protobufs_e2e::protocol_message::Type::MessageEdit as i32));
+    assert_eq!(
+        (protocol.key.unwrap().id.as_deref(), protocol.edited_message.unwrap().conversation.as_deref()),
+        (Some(id.as_str()), Some("afinal chego às *21h*"))
+    );
+    // WhatsApp's server has it from 25 minutes ago, past its window, though jaw has it as just now.
+    running.world.sent_at(&id, now_ms() - 25 * 60 * 1000);
+    running.call("edit", json!({ "message": id, "text": "não vou" })).await.unwrap();
+    let notice = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let push = pushes.recv().await.unwrap();
+            if push.method == "notice" {
+                return push.params["text"].as_str().unwrap().to_string();
+            }
+        }
+    })
+    .await
+    .expect("the refusal is said");
+    assert!(notice.starts_with("WhatsApp refused your edit"), "{notice}");
+    running
+        .until("the outbox to empty", |db| {
+            Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0)
+        })
+        .await;
+    assert_eq!(text_of(&row(&running, ANA, &id).await.unwrap()), "afinal chego às 21h", "the refused edit left it");
+    running.arrives(ANA, ANA, "theirs", now_ms()).await;
+    let refused = |params: Value| running.call("edit", params);
+    assert_eq!(refused(json!({ "message": "theirs", "text": "x" })).await.unwrap_err().code, code::NOT_ALLOWED);
+    assert_eq!(refused(json!({ "message": id, "text": "  " })).await.unwrap_err().code, code::INVALID_PARAMS);
+    let old = Message {
+        chat: ANA.into(),
+        live: true,
+        status: Some("read"),
+        ..mine_message("old", now_ms() - 16 * 60 * 1000)
+    };
+    running.store.apply(Lane::Live, vec![Change::Message(old)]).await.unwrap();
+    let late = refused(json!({ "message": "old", "text": "x" })).await.unwrap_err();
+    assert_eq!(
+        (late.code, late.message.as_str()),
+        (code::NOT_ALLOWED, "a message can be edited for 15 minutes after it's sent")
+    );
+}
+
+/// A message of yours as it would come from your phone.
+fn mine_message(id: &str, at: i64) -> Message {
+    Message {
+        id: id.into(),
+        at,
+        mine: true,
+        kind: "text",
+        status: Some("sent"),
+        text: Some(format!("message {id}")),
+        summary: format!("message {id}"),
+        ..Message::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_for_everyone_leaves_you_deleted_this_message_once_whatsapp_has_it() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "ops").await;
+    running.until_status(ANA, &id, "sent").await;
+    running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+    until_row(&running, ANA, &id, "the deletion", |row| row.deleted).await;
+    let deleted = row(&running, ANA, &id).await.unwrap();
+    assert_eq!((deleted.spans.clone(), deleted.reply.clone()), (json!([]), None));
+    let chat = running.query(|db| Ok(read::chats(db, false, None, 10)?.remove(0))).await;
+    assert_eq!(chat.last.unwrap().summary, "You deleted this message");
+    let revoke = raws(&running).remove(1).protocol_message.unwrap();
+    assert_eq!(revoke.r#type, Some(wa_proto::wa_web_protobufs_e2e::protocol_message::Type::Revoke as i32));
+    assert_eq!(revoke.key.unwrap().id.as_deref(), Some(id.as_str()));
+    let again = running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+    assert_eq!(again, json!({}), "deleted already");
+    running.arrives(ANA, ANA, "theirs", now_ms()).await;
+    let theirs = running.call("delete", json!({ "message": "theirs", "for": "everyone" })).await.unwrap_err();
+    assert_eq!(theirs.code, code::NOT_ALLOWED);
+    let old = Message { chat: ANA.into(), live: true, ..mine_message("old", now_ms() - 61 * 3600 * 1000) };
+    running.store.apply(Lane::Live, vec![Change::Message(old)]).await.unwrap();
+    let late = running.call("delete", json!({ "message": "old", "for": "everyone" })).await.unwrap_err();
+    assert_eq!(late.code, code::NOT_ALLOWED);
+    assert_eq!(raws(&running).len(), 2, "nothing went for what was refused");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_for_you_is_done_at_once_and_your_other_devices_are_told() {
+    use wa_proto::wa_web_protobuf_sync_action::SyncActionValue;
+
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.members(CLIMBING, &[RUI]).await;
+    running.arrives(CLIMBING, RUI, "g1", 1_000).await;
+    running.call("delete", json!({ "message": "g1", "for": "me", "key": "jaw-del-1" })).await.unwrap();
+    assert!(row(&running, CLIMBING, "g1").await.is_none(), "gone at once");
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::AppStatePatch(_)))).await;
+    let patches = asked(&running, |k| match k {
+        pb::command::Kind::AppStatePatch(p) => Some(p),
+        _ => None,
+    });
+    assert_eq!(patches.len(), 1);
+    assert_eq!((patches[0].name.as_str(), patches[0].version), ("regular_high", 3));
+    assert_eq!(patches[0].index, ["deleteMessageForMe", CLIMBING, "g1", "0", RUI]);
+    let value = SyncActionValue::decode(patches[0].value.as_slice()).unwrap();
+    assert_eq!(value.delete_message_for_me_action.unwrap().message_timestamp, Some(1));
+    running
+        .until("the outbox to empty", |db| {
+            Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0)
+        })
+        .await;
+    let again = running.call("delete", json!({ "message": "g1", "for": "me", "key": "jaw-del-1" })).await.unwrap();
+    assert_eq!(again, json!({}), "asked again with its key");
+    let gone = running.call("delete", json!({ "message": "g1", "for": "me" })).await.unwrap_err();
+    assert_eq!(gone.code, code::NOT_FOUND);
+    let copy = Message {
+        chat: CLIMBING.into(),
+        id: "g1".into(),
+        at: 1_000,
+        sender: Some(RUI.into()),
+        kind: "text",
+        ..Message::default()
+    };
+    running.store.apply(Lane::Live, vec![Change::Message(copy)]).await.unwrap();
+    assert!(row(&running, CLIMBING, "g1").await.is_none(), "a copy arriving later doesn't bring it back");
+    assert_eq!(running.world.sends().len(), 0, "and no message went to anyone");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn actions_wait_their_turn_behind_their_chats_earlier_sends_and_while_whatsapp_cant_be_reached() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.call("react", json!({ "message": id, "emoji": "🙏" })).await.unwrap();
+    running.call("edit", json!({ "message": id, "text": "chego às 21h" })).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(running.world.sends().is_empty(), "nothing goes while WhatsApp can't be reached");
+    let waiting = row(&running, ANA, &id).await.unwrap();
+    assert_eq!(text_of(&waiting), "chego às 20h", "and the row has nothing WhatsApp hasn't");
+    running.connection(Online);
+    until_row(&running, ANA, &id, "the edit", |row| row.edited && !row.reactions.is_empty()).await;
+    let sent = raws(&running);
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert!(
+        sent[0].conversation.is_some() && sent[1].reaction_message.is_some() && sent[2].edited_message.is_some(),
+        "in order"
+    );
+    assert_eq!(text_of(&row(&running, ANA, &id).await.unwrap()), "chego às 21h");
+}
+
 #[test]
 fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
     let home = tempfile::tempdir().unwrap();

@@ -8,7 +8,7 @@
 
 pub mod app_state;
 pub mod history;
-mod kinds;
+pub(crate) mod kinds;
 pub mod people;
 pub mod spans;
 
@@ -153,6 +153,7 @@ pub fn message(info: &WebMessageInfo, me: &Me, live: bool) -> Vec<Change> {
     match info.message.as_ref() {
         Some(message) => convert(&envelope, message, me, &mut changes),
         None => match info.message_stub_type {
+            Some(stub) if stub == web_message_info::StubType::Revoke as i32 => changes.extend(revoked(&envelope)),
             Some(stub) if stub != 0 => changes.push(Change::Message(stub_line(&envelope, stub))),
             _ => {}
         },
@@ -251,8 +252,11 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         return;
     }
     if let Some(reaction) = message.reaction_message.as_ref() {
-        if let Some(amend) = reaction_amend(envelope, reaction.key.as_ref(), reaction.text.clone(), me) {
+        if let Some(mut amend) = reaction_amend(envelope, reaction.key.as_ref(), reaction.text.clone(), me) {
+            // Its sender's own time, to the millisecond, as history keeps it too.
+            amend.at = reaction.sender_timestamp_ms.filter(|&at| at > 0).unwrap_or(amend.at);
             changes.push(Change::Amend(amend));
+            changes.extend(own_action(envelope));
         }
         return;
     }
@@ -447,6 +451,52 @@ fn history_reaction(
     })
 }
 
+/// An action of yours from another of your devices: its own ID never becomes a row, and noting it
+/// as deleted for you keeps the receipts for it, which reach each of your devices, from waiting in
+/// `pending` for a message that won't come.
+fn own_action(envelope: &Envelope) -> Option<Change> {
+    envelope.from.mine.then(|| {
+        Change::Amend(Amend {
+            chat: envelope.chat.clone(),
+            target: envelope.id.clone(),
+            sender: None,
+            mine: true,
+            at: envelope.at,
+            what: Amendment::DeleteForMe,
+            raw: None,
+        })
+    })
+}
+
+/// A message deleted for everyone, as history keeps it, with nothing of what it said: a copy jaw
+/// has is deleted as a live deletion deletes it, and the row says who deleted it.
+fn revoked(envelope: &Envelope) -> Vec<Change> {
+    let summary = if envelope.from.mine { "You deleted this message" } else { "This message was deleted" };
+    let revoke = Amend {
+        chat: envelope.chat.clone(),
+        target: envelope.id.clone(),
+        sender: envelope.from.jid.clone(),
+        mine: envelope.from.mine,
+        at: envelope.at,
+        what: Amendment::Revoke,
+        raw: None,
+    };
+    let row = Message {
+        chat: envelope.chat.clone(),
+        id: envelope.id.clone(),
+        at: envelope.at,
+        sender: envelope.from.jid.clone(),
+        mine: envelope.from.mine,
+        kind: "text",
+        deleted: true,
+        summary: summary.into(),
+        live: envelope.live,
+        raw: Some(Packed::new(&envelope.info.encode_to_vec())),
+        ..Message::default()
+    };
+    vec![Change::Amend(revoke), Change::Message(row)]
+}
+
 fn protocol_message(envelope: &Envelope, protocol: &e2e::ProtocolMessage, me: &Me, changes: &mut Vec<Change>) {
     use e2e::protocol_message::Type;
     let Some(kind) = protocol.r#type.and_then(|t| Type::try_from(t).ok()) else { return };
@@ -454,6 +504,7 @@ fn protocol_message(envelope: &Envelope, protocol: &e2e::ProtocolMessage, me: &M
         Type::Revoke => {
             if let Some(amend) = protocol.key.as_ref().and_then(|key| amend(envelope, key, Amendment::Revoke, me)) {
                 changes.push(Change::Amend(amend));
+                changes.extend(own_action(envelope));
             }
         }
         Type::MessageEdit => {
@@ -486,6 +537,7 @@ fn protocol_message(envelope: &Envelope, protocol: &e2e::ProtocolMessage, me: &M
                 ..Message::default()
             };
             changes.push(Change::Edited { amend: amended, shown: Box::new(shown) });
+            changes.extend(own_action(envelope));
         }
         Type::EphemeralSetting => {
             let seconds = protocol.ephemeral_expiration.unwrap_or(0);

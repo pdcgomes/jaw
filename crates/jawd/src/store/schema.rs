@@ -658,6 +658,24 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE INDEX send_keys_by_at ON send_keys (at);
     CREATE INDEX send_keys_by_message ON send_keys (message);
     ",
+    // 9: actions of yours on messages, a schema step: two nullable columns on the outbox, which
+    // holds at most a thousand rows, their CHECK reading each once, and indexes on it.
+    "
+    -- Class: jaw's own columns on the outbox. A reaction, an edit or a deletion for everyone goes
+    -- to WhatsApp as a message of its own, with an ID of its own, and is done to the message's row
+    -- only once WhatsApp has it; until then windows show it from here. A deletion for you is done
+    -- at once, and its row here tells your other devices, by app state.
+    -- `target`: the message an action is done to; NULL once that message is deleted for you, which,
+    -- as on the phone, doesn't stop the action going.
+    -- `effect`: what the action does to its message once WhatsApp has it, the writer's amendment
+    -- as JSON; NULL for a message to send and for app state.
+    ALTER TABLE outbox ADD COLUMN target INTEGER REFERENCES messages (n) ON DELETE SET NULL;
+    ALTER TABLE outbox ADD COLUMN effect TEXT CHECK (json_valid(effect));
+    -- Each message's actions, for windows and for the foreign key; and a receipt names an action
+    -- by its ID.
+    CREATE INDEX outbox_by_target ON outbox (target);
+    CREATE INDEX outbox_by_id ON outbox (id);
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.

@@ -610,3 +610,46 @@ async fn a_reaction_is_removed_only_by_a_removal_newer_than_it() {
     apply(&store, vec![react("", AT + 30)]).await;
     assert_eq!(reactions().await, 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_history_keeps_as_deleted_for_everyone_takes_the_copy_jaw_has_with_it_and_waits_for_nothing() {
+    use wa_proto::wa_web_protobufs_web::{WebMessageInfo, web_message_info::StubType};
+
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let live = Message { envelope: Some(Packed::new(b"the engine's event")), ..message(ANA, "m1", AT, "segredo") };
+    apply(&store, vec![Change::Message(live)]).await;
+    let stub = |id: &str, from_me: bool| WebMessageInfo {
+        key: wa_proto::wa_common::MessageKey {
+            remote_jid: Some(ANA.into()),
+            from_me: Some(from_me),
+            id: Some(id.into()),
+            participant: None,
+        },
+        message_timestamp: Some((AT / 1000) as u64),
+        message_stub_type: Some(StubType::Revoke as i32),
+        ..Default::default()
+    };
+    let me = crate::convert::Me::default();
+    for (id, from_me) in [("m1", false), ("m2", true)] {
+        store.apply(Lane::Background, crate::convert::message(&stub(id, from_me), &me, false)).await.unwrap();
+    }
+    let rows: Vec<(String, bool, Option<String>, String, bool, bool)> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT id, deleted, text, summary, envelope IS NULL, raw IS NOT NULL FROM messages ORDER BY id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    assert_eq!(
+        rows,
+        [
+            ("m1".into(), true, None, "This message was deleted".into(), true, false),
+            ("m2".into(), true, None, "You deleted this message".into(), true, true),
+        ],
+        "the copy jaw had, its envelope with it, and one it hadn't"
+    );
+    assert_eq!(store.count("pending").unwrap(), 0);
+    let found = query(&store, |db| read::search(db, "segredo", None, None, 10)).await;
+    assert!(found.hits.is_empty(), "and search no longer finds what it said");
+}

@@ -46,6 +46,22 @@ SELECT jid FROM person_jids WHERE person = ?1 ORDER BY n
 SELECT folder FROM folder_items WHERE person = ?1
     SEARCH folder_items USING INDEX folder_items_by_person (person=?)
 
+-- src/send/actions.rs
+SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep WHERE c.id = ?1
+    SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
+-- src/send/actions.rs
+SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep LIMIT 4
+    SCAN c
+    SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
 -- src/send/info.rs
 SELECT n, kind, person, community, ephemeral FROM chats WHERE id = ?1
     SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
@@ -508,8 +524,38 @@ SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox
     SCAN outbox
 
 -- src/store/write/outbox.rs
-SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status FROM outbox o
-    (a part of a statement, planned with the rest: no such column: k.id in EXPLAIN QUERY PLAN SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status FROM outbox o at offset 40)
+SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind FROM outbox o
+    (a part of a statement, planned with the rest: no such column: k.id in EXPLAIN QUERY PLAN SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind FROM outbox o at offset 40)
+
+-- src/store/write/outbox.rs
+INSERT INTO outbox (target, jid, id, kind, raw, effect, next_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING n
+
+-- src/store/write/outbox.rs
+INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'app_state', ?3, ?4, ?4) RETURNING n
+
+-- src/store/write/outbox.rs
+INSERT OR IGNORE INTO tombstones (chat, id, at) VALUES (?1, ?2, ?3)
+
+-- src/store/write/outbox.rs
+SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2
+    SEARCH tombstones USING PRIMARY KEY (chat=? AND id=?)
+
+-- src/store/write/outbox.rs
+SELECT o.target, o.effect, o.created_at, t.chat FROM outbox o LEFT JOIN messages t ON t.n = o.target WHERE o.n = ?1 AND o.kind IN ('reaction', 'edit', 'revoke', 'app_state')
+    SEARCH o USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
+-- src/store/write/outbox.rs
+SELECT n FROM outbox WHERE id = ?1 AND kind IN ('reaction', 'edit', 'revoke')
+    SEARCH outbox USING INDEX outbox_by_id (id=?)
+
+-- src/store/write/outbox.rs
+UPDATE outbox SET target = ?1 WHERE target = ?2
+    SEARCH outbox USING COVERING INDEX outbox_by_target (target=?)
+
+-- src/store/write/outbox.rs
+UPDATE messages SET v = ?2 WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 SELECT n FROM chats WHERE told_at IS NOT NULL
@@ -613,6 +659,10 @@ SELECT status, kind FROM messages WHERE n = ?1 AND chat = ?2 AND mine
 -- src/store/write/outbox.rs
 UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+SELECT n FROM chats WHERE id = ?1
+    SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
 
 -- src/store/write.rs
 SELECT coalesce(max(seq), 0) FROM events
@@ -718,6 +768,7 @@ DELETE FROM messages WHERE n = ?1
     SEARCH send_keys USING INDEX send_keys_by_message (message=?)
     SEARCH settled USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH recipients USING PRIMARY KEY (message=?)
+    SEARCH outbox USING COVERING INDEX outbox_by_target (target=?)
     SEARCH outbox USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?)
     SEARCH poll_votes USING PRIMARY KEY (message=?)
     SEARCH poll_options USING PRIMARY KEY (message=?)
@@ -1021,6 +1072,7 @@ INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, repl
     SEARCH send_keys USING INDEX send_keys_by_message (message=?)
     SEARCH settled USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH recipients USING PRIMARY KEY (message=?)
+    SEARCH outbox USING COVERING INDEX outbox_by_target (target=?)
     SEARCH outbox USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?)
     SEARCH poll_votes USING PRIMARY KEY (message=?)
     SEARCH poll_options USING PRIMARY KEY (message=?)
@@ -1069,7 +1121,7 @@ UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), ed
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
-UPDATE messages SET deleted = 1, text = NULL, spans = NULL, summary = 'This message was deleted', reply = NULL, detail = NULL, raw = NULL, envelope = NULL, v = ?2 WHERE n = ?1 AND deleted = 0
+UPDATE messages SET deleted = 1, text = NULL, spans = NULL, summary = iif(mine, 'You deleted this message', 'This message was deleted'), reply = NULL, detail = NULL, raw = NULL, envelope = NULL, v = ?2 WHERE n = ?1 AND deleted = 0
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs

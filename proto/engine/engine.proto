@@ -293,6 +293,7 @@ message Command {
     ChatPresence chat_presence = 15;
     Presence presence = 16;
     OnWhatsApp on_whatsapp = 17;
+    AppStatePatch app_state_patch = 18;
   }
 }
 
@@ -330,6 +331,19 @@ message ChatPresence {
 // Online or away for everyone. Done once it's sent.
 message Presence {
   bool available = 1;
+}
+
+// One app-state mutation, which your other devices then apply as if it were made on them, such as
+// a message deleted for you; Done once WhatsApp has it. jawd builds the mutation, and the engine
+// encrypts it with the app-state keys whatsmeow keeps. Sending one again sets the same again.
+message AppStatePatch {
+  // The collection: regular, regular_low, regular_high, critical_block or critical_unblock_low.
+  string name = 1;
+  // The mutation's index, such as ["deleteMessageForMe", chat, id, "1", "0"].
+  repeated string index = 2;
+  int32 version = 3;
+  // WAWebProtobufSyncAction.SyncActionValue.
+  bytes value = 4;
 }
 
 // Which of these phone numbers (digits only) are on WhatsApp; answered with OnWhatsAppList.

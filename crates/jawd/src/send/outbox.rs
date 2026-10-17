@@ -214,14 +214,16 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
             error.data = Some(serde_json::json!({ "limit": "outbox", "waiting": waiting, "failed": failed }));
             Err(error)
         }
-        None => Err(Error::new(code::INTERNAL, "jawd kept nothing of the message, so it isn't sent")),
+        Some(Enqueued::Gone) | None => {
+            Err(Error::new(code::INTERNAL, "jawd kept nothing of the message, so it isn't sent"))
+        }
     }
 }
 
 /// Sends outbox row `outbox` after `chat`'s earlier sends, `chat` being the JID jaw keeps the chat
 /// under, so sends named by a number and by a LID share one queue. `resumed` is for a row left from
 /// before jawd started, which may have gone already.
-fn queue(inner: &Arc<Inner>, outbox: i64, chat: String, resumed: bool) {
+pub(super) fn queue(inner: &Arc<Inner>, outbox: i64, chat: String, resumed: bool) {
     let inner = inner.clone();
     inner.sends.clone().push_again(chat, move || attempt(inner.clone(), outbox, resumed));
 }
@@ -288,11 +290,28 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
         settle(&inner, vec![Change::Outbox(Step::Sent { outbox })]).await;
         return Next::Done;
     }
-    let may_have_gone = resumed || row.attempts > 0;
-    let send = pb::Send { chat: row.chat.clone(), id: row.id.clone(), raw: row.raw.clone() };
-    let failure = match engine(&inner, pb::command::Kind::Send(send)).await {
+    // App state is the same however often it's sent, and no receipt ever says it arrived.
+    let app_state = row.kind == "app_state";
+    let may_have_gone = (resumed || row.attempts > 0) && !app_state;
+    let command = if app_state {
+        match pb::AppStatePatch::decode(row.raw.as_slice()) {
+            Ok(patch) => pb::command::Kind::AppStatePatch(patch),
+            Err(e) => {
+                let error = format!("its app state doesn't decode: {e}");
+                settle(&inner, vec![Change::Outbox(Step::Failed { outbox, error, next_at: None })]).await;
+                return Next::Done;
+            }
+        }
+    } else {
+        pb::command::Kind::Send(pb::Send { chat: row.chat.clone(), id: row.id.clone(), raw: row.raw.clone() })
+    };
+    let failure = match engine(&inner, command).await {
         Ok(pb::reply::Kind::Sent(sent)) => {
             settle(&inner, sent_changes(&row, &sent)).await;
+            return Next::Done;
+        }
+        Ok(pb::reply::Kind::Done(_)) if app_state => {
+            settle(&inner, vec![Change::Outbox(Step::Sent { outbox })]).await;
             return Next::Done;
         }
         Ok(other) => {
@@ -317,12 +336,16 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
         (true, false) => Step::Failed { outbox, error: failure.to_string(), next_at: None },
     };
     let unconfirming = matches!(step, Step::Unconfirmed { .. });
+    let refused = matches!(step, Step::Failed { next_at: None, .. });
     settle(&inner, vec![Change::Outbox(step)]).await;
     if unconfirming {
         unconfirmed(&inner, outbox, inner.timing.unconfirmed_for);
     }
     if gives_up {
         eprintln!("jawd: WhatsApp refused {} in {}: {failure}", row.id, row.chat);
+        if refused {
+            super::actions::refused(&inner, &row.kind, &failure.to_string());
+        }
         return Next::Done;
     }
     let pause = pause(&inner, row.attempts + 1);

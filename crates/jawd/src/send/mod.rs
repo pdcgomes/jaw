@@ -7,9 +7,11 @@
 //! often per chat (`reads`); typing is said at most every so often and stopped after a quiet spell
 //! (`typing`); you're online only while an interface has focus (`presence`); and `chat.start`
 //! finds or makes a chat by number or person (`start`). A reply quotes its message and mentions
-//! name their people as WhatsApp writes them (`quote`); `chat.info` gives a chat's members
+//! name their people as WhatsApp writes them (`quote`); reactions, edits and deletions go as
+//! messages of their own through the outbox (`actions`); `chat.info` gives a chat's members
 //! (`info`).
 
+mod actions;
 pub mod bench;
 mod info;
 mod outbox;
@@ -26,7 +28,7 @@ mod tests;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jaw_proto::send::{ChatInfo, ChatStart, DraftSet, Read, SendRetry, SendText, Typing};
+use jaw_proto::send::{ChatInfo, ChatStart, Delete, DraftSet, Edit, React, Read, SendRetry, SendText, Typing};
 use jaw_proto::{Error, Push, code};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -95,6 +97,8 @@ struct Inner {
     connected: watch::Sender<bool>,
     reads: reads::Reads,
     typing: typing::Typists,
+    /// What every interface is told, for saying WhatsApp refused an action.
+    pushes: broadcast::Sender<Push>,
 }
 
 impl Sending {
@@ -109,7 +113,7 @@ impl Sending {
         focused: watch::Receiver<bool>,
         timing: Timing,
     ) -> anyhow::Result<Sending> {
-        let pushes = pushes.subscribe();
+        let (notices, pushes) = (pushes.clone(), pushes.subscribe());
         let online = presence::connected(&live.lock().expect("live state").connection);
         let inner = Arc::new(Inner {
             store,
@@ -121,6 +125,7 @@ impl Sending {
             connected: watch::channel(online).0,
             reads: reads::Reads::default(),
             typing: typing::Typists::new(),
+            pushes: notices,
         });
         typing::start(&inner);
         regroup::start(&inner);
@@ -136,7 +141,7 @@ impl Sending {
     }
 
     /// Answers one of the sending methods: `send.text`, `send.retry`, `chat.start`, `draft.set`,
-    /// `read`, `typing` and `chat.info`.
+    /// `read`, `typing`, `chat.info` and the actions on a message.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         let inner = &self.inner;
         match method {
@@ -147,12 +152,26 @@ impl Sending {
             "read" => reads::read(inner, params_of::<Read>(method, params)?).await,
             "typing" => typing::typing(inner, params_of::<Typing>(method, params)?),
             "chat.info" => result(info::chat_info(inner, params_of::<ChatInfo>(method, params)?).await?),
+            "react" => actions::react(inner, params_of::<React>(method, params)?).await,
+            "edit" => actions::edit(inner, params_of::<Edit>(method, params)?).await,
+            "delete" => actions::delete(inner, params_of::<Delete>(method, params)?).await,
             _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
         }
     }
 
     /// The methods `call` answers.
-    pub const METHODS: &[&str] = &["send.text", "send.retry", "chat.start", "draft.set", "read", "typing", "chat.info"];
+    pub const METHODS: &[&str] = &[
+        "send.text",
+        "send.retry",
+        "chat.start",
+        "draft.set",
+        "read",
+        "typing",
+        "chat.info",
+        "react",
+        "edit",
+        "delete",
+    ];
 }
 
 /// The longest text a message or a draft can have, in characters, as WhatsApp allows.

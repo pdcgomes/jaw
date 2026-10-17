@@ -22,6 +22,9 @@ func TestSendingCommandsWithoutASessionSaySoAndAreNotToBeTriedAsTheyAre(t *testi
 		{Kind: &enginepb.Command_ChatPresence{ChatPresence: &enginepb.ChatPresence{Chat: "351910000002@s.whatsapp.net", State: enginepb.ChatPresence_COMPOSING}}},
 		{Kind: &enginepb.Command_Presence{Presence: &enginepb.Presence{Available: true}}},
 		{Kind: &enginepb.Command_OnWhatsapp{OnWhatsapp: &enginepb.OnWhatsApp{Phones: []string{"351910000002"}}}},
+		{Kind: &enginepb.Command_AppStatePatch{AppStatePatch: &enginepb.AppStatePatch{
+			Name: "regular_high", Index: []string{"deleteMessageForMe", "351910000002@s.whatsapp.net", "3EB0AA", "1", "0"}, Version: 3,
+		}}},
 	} {
 		command(t, jawd, uint64(n+1), cmd)
 		reply, err := jawd.Recv()
@@ -85,6 +88,21 @@ func TestASendThatMightWorkLaterIsTriedAgainAndOneThatCantIsNot(t *testing.T) {
 	} {
 		if retryable(err) {
 			t.Errorf("%v is tried again", err)
+		}
+	}
+}
+
+func TestAnAppStatePatchThatCantBeRightIsRefusedForGoodBeforeItGoes(t *testing.T) {
+	e := newEngine(context.Background(), nil, NewLogger("test", "error"))
+	index := []string{"deleteMessageForMe", "351910000002@s.whatsapp.net", "3EB0AA", "1", "0"}
+	for name, patch := range map[string]*enginepb.AppStatePatch{
+		"no such collection": {Name: "regular_medium", Index: index, Version: 3},
+		"no index":           {Name: "regular_high", Version: 3},
+		"a value that isn't": {Name: "regular_high", Index: index, Version: 3, Value: []byte{0xff, 0xff}},
+	} {
+		failure := e.appStatePatch(patch).GetFailure()
+		if failure == nil || failure.Retry {
+			t.Errorf("%s: %v", name, failure)
 		}
 	}
 }
