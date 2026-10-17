@@ -56,7 +56,7 @@ The first request on a connection. Anything else first gets error 6.
 ```
 
 - `root`: jaw's folder. Every `path` jawd sends is relative to it, and the files are readable by the same user.
-- `account.state`: `unlinked`, `linking` or `linked`.
+- `account.state`: `unlinked`, `linking` or `linked`. From the moment jawd starts, an account that was linked when it last connected, and hasn't been logged out since, is `linked`, with `connection.state` `connecting` until the engine connects; if WhatsApp has logged it out meanwhile, a `connection` push says `logged_out` once the engine finds out. A folder never linked says `unlinked`.
 - `connection.state`: as the `connection` push below.
 
 ## Windows

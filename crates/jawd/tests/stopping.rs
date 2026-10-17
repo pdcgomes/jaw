@@ -73,8 +73,11 @@ fn jawd_whose_engine_never_answers_stops_on_sigterm_and_takes_its_engine_with_it
     std::fs::write(&engine, format!("#!/bin/sh\nexec sleep {marker}\n")).unwrap();
     std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut child = jawd(home.path(), &engine);
-    std::thread::sleep(Duration::from_millis(500));
     let running = || Command::new("pgrep").args(["-f", &format!("sleep {marker}")]).output().unwrap().status.success();
+    let started = Instant::now() + Duration::from_secs(10);
+    while !running() && Instant::now() < started {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(running(), "the engine started and is waiting to say hello");
     let (status, took) = terminate(&mut child);
     let log = log(home.path());

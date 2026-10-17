@@ -84,6 +84,10 @@ const PROGRESS_EVERY: u64 = 100;
 
 /// Where sync keeps the account's JIDs between runs.
 const ME: &str = "me";
+/// Where sync keeps the linked account as interfaces see it (`Me` as JSON) between runs, so jawd
+/// says it's linked before its engine connects: written when the engine connects, and emptied when
+/// it says the account was logged out or isn't linked.
+const ACCOUNT: &str = "account";
 /// Where sync keeps whether jawd last stopped cleanly: "1" from a clean shutdown until the next
 /// start, "0" while it runs, written before the engine starts.
 const CLEAN: &str = "clean";
@@ -96,6 +100,23 @@ pub async fn running(store: &Store) -> anyhow::Result<()> {
     }
     store.apply_durable(vec![Change::Remember { key: CLEAN.into(), value: "0".into() }]).await?;
     Ok(())
+}
+
+/// The account and connection as jawd knows them at start, before the engine says anything: linked
+/// and connecting (offline with no engine to connect) when an account was linked at the last
+/// connection and not logged out since, and unlinked otherwise. The engine's first word corrects
+/// it: unlinked when session.db has no device, logged out when WhatsApp says so.
+pub fn starting(store: &Store, engine: bool) -> Live {
+    let mut live = Live::default();
+    if let Ok(Some(me)) = store.remembered(ME) {
+        live.me = convert::Me::new(me.split(' ').map(str::to_string));
+    }
+    let account = store.remembered(ACCOUNT).ok().flatten().and_then(|json| serde_json::from_str::<Me>(&json).ok());
+    if let Some(me) = account {
+        live.account = Account { state: AccountState::Linked, me: Some(me) };
+        live.connection = Connection::new(if engine { ConnectionState::Connecting } else { ConnectionState::Offline });
+    }
+    live
 }
 
 /// Makes changes in the live lane without holding up the caller, saying if they fail.
@@ -117,9 +138,6 @@ pub async fn run(
     engine: Option<Supervisor>,
     home: PathBuf,
 ) {
-    if let Ok(Some(me)) = store.remembered(ME) {
-        live.lock().expect("live state").me = convert::Me::new(me.split(' ').map(str::to_string));
-    }
     let (offered, offers) = mpsc::unbounded_channel();
     let avatars = Avatars::new();
     let merges = Merges::default();
@@ -161,7 +179,7 @@ pub async fn run(
             Some(pb::event::Kind::AppStateSynced(_)) => {}
             Some(pb::event::Kind::Receipt(receipt)) => kept("receipt", receipt.encode_to_vec(), ack),
             Some(pb::event::Kind::Connection(connection)) => {
-                let (pushed, me) = {
+                let (pushed, me, account) = {
                     let mut live = live.lock().expect("live state");
                     apply(&mut live, &connection);
                     let connected =
@@ -170,9 +188,23 @@ pub async fn run(
                         live.me = convert::Me::new([connection.jid.clone(), connection.lid.clone()]);
                         live.me.jids.join(" ")
                     });
-                    (live.connection.clone(), me)
+                    let account = match connection.state() {
+                        pb::connection::State::Unlinked | pb::connection::State::LoggedOut => Some(String::new()),
+                        _ if connected => {
+                            live.account.me.as_ref().map(|me| serde_json::to_string(me).expect("Me serializes"))
+                        }
+                        _ => None,
+                    };
+                    (live.connection.clone(), me, account)
                 };
                 push(&pushes, "connection", pushed);
+                // Waited for, so a logout and a later connection are kept in the order they came.
+                if let Some(account) = account
+                    && let Err(e) =
+                        store.apply(Lane::Live, vec![Change::Remember { key: ACCOUNT.into(), value: account }]).await
+                {
+                    eprintln!("jawd: can't store the account: {e:#}");
+                }
                 if let Some(me) = me {
                     apply_soon(&store, vec![Change::Remember { key: ME.into(), value: me }], "the account's JIDs");
                     if let Some(engine) = &engine

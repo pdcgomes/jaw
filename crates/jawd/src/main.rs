@@ -340,7 +340,7 @@ async fn start(home: &Path, lock: std::fs::File, kind: EngineKind, no_notify: bo
     sync::running(&store).await?;
     let (events, incoming) = mpsc::channel(1024);
     let supervisor = engine(kind, home).map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
-    let live: sync::Shared = Arc::default();
+    let live: sync::Shared = Arc::new(std::sync::Mutex::new(sync::starting(&store, supervisor.is_ok())));
     let (pushes, _) = tokio::sync::broadcast::channel(256);
     tokio::spawn(trouble(store.trouble(), pushes.clone()));
     let engine = supervisor.as_ref().ok().cloned();

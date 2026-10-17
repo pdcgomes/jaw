@@ -1234,3 +1234,86 @@ async fn a_restart_before_a_blobs_drain_uses_the_blob_in_the_spool_again_without
     assert_eq!(store.count("messages").unwrap(), 1, "nothing twice");
     assert!(!file.exists());
 }
+
+/// A connection event as the engine sends it, for the account 351910000001 (Pedro).
+fn connection_event(state: pb::connection::State) -> crate::engine::Incoming {
+    let linked = !matches!(state, pb::connection::State::Unlinked);
+    let connection = pb::Connection {
+        state: state as i32,
+        jid: if linked { "351910000001:12@s.whatsapp.net".into() } else { String::new() },
+        lid: if linked { "100000000001:12@lid".into() } else { String::new() },
+        push_name: if linked { "Pedro".into() } else { String::new() },
+        ..Default::default()
+    };
+    crate::engine::Incoming {
+        event: pb::Event { seq: 0, kind: Some(pb::event::Kind::Connection(connection)) },
+        ack: None,
+    }
+}
+
+/// Runs sync on `store` with the engine's `events`, and returns the live state once it's taken them.
+async fn after(store: &Store, home: &Path, live: Live, events: Vec<crate::engine::Incoming>) -> Shared {
+    let live: Shared = Arc::new(Mutex::new(live));
+    let (tx, incoming) = mpsc::channel(16);
+    let running =
+        tokio::spawn(run(incoming, store.clone(), live.clone(), broadcast::channel(16).0, None, home.to_path_buf()));
+    for event in events {
+        tx.send(event).await.unwrap();
+    }
+    drop(tx);
+    running.await.unwrap();
+    live
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_folder_starts_unlinked() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let live = starting(&store, true);
+    assert_eq!(live.account, Account { state: AccountState::Unlinked, me: None });
+    assert_eq!(live.connection.state, ConnectionState::Offline);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_linked_at_the_last_connection_starts_linked_and_connecting() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    use pb::connection::State;
+    after(&store, home.path(), starting(&store, true), vec![connection_event(State::Connected)]).await;
+    let pedro = Me { id: "351910000001:12@s.whatsapp.net".into(), name: "Pedro".into(), phone: "+351910000001".into() };
+    let live = starting(&store, true);
+    assert_eq!(live.account, Account { state: AccountState::Linked, me: Some(pedro.clone()) });
+    assert_eq!(live.connection.state, ConnectionState::Connecting, "linked, connecting");
+    assert_eq!(starting(&store, false).connection.state, ConnectionState::Offline, "with no engine to connect");
+    assert!(live.me.jids.contains(&"351910000001@s.whatsapp.net".to_string()), "its own JIDs, for mentions of it");
+    let live = after(&store, home.path(), live, vec![connection_event(State::Connecting)]).await;
+    let live = live.lock().unwrap();
+    assert_eq!(live.account, Account { state: AccountState::Linked, me: Some(pedro) }, "as the engine says too");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_logged_out_while_jawd_was_off_ends_up_logged_out_and_the_next_start_unlinked() {
+    use pb::connection::State;
+    // Logged out on the phone: session.db still has the device, so the engine connects, and
+    // WhatsApp says so. Or the device went from session.db, and the engine says unlinked at once.
+    for (how, events) in [
+        ("on the phone", vec![connection_event(State::Connecting), connection_event(State::LoggedOut)]),
+        ("with session.db's device gone", vec![connection_event(State::Unlinked)]),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        after(&store, home.path(), starting(&store, true), vec![connection_event(State::Connected)]).await;
+        let live = starting(&store, true);
+        assert_eq!(live.account.state, AccountState::Linked, "{how}: linked as far as jawd knew");
+        let live = after(&store, home.path(), live, events).await;
+        let ended = {
+            let live = live.lock().unwrap();
+            (live.account.clone(), live.connection.state)
+        };
+        let expected = if how == "on the phone" { ConnectionState::LoggedOut } else { ConnectionState::Offline };
+        assert_eq!(ended, (Account { state: AccountState::Unlinked, me: None }, expected), "{how}");
+        let next = starting(&store, true);
+        assert_eq!(next.account, Account { state: AccountState::Unlinked, me: None }, "{how}: the next start");
+        assert_eq!(next.connection.state, ConnectionState::Offline);
+    }
+}

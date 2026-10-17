@@ -424,6 +424,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn hello_says_linked_and_connecting_before_the_engine_has_said_anything() {
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(home.path()).unwrap();
+        let pedro = jaw_proto::Me {
+            id: "351910000001:12@s.whatsapp.net".into(),
+            name: "Pedro".into(),
+            phone: "+351910000001".into(),
+        };
+        let account =
+            crate::store::Change::Remember { key: "account".into(), value: serde_json::to_string(&pedro).unwrap() };
+        store.apply(crate::store::Lane::Live, vec![account]).await.unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let live = Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, true)));
+        let state = State::new(
+            home.path(),
+            Err(("go", "no engine in this test".into())),
+            Vec::new(),
+            live,
+            Some(store),
+            broadcast::channel(16).0,
+        );
+        tokio::spawn(serve(Arc::new(state.unwrap()), listener));
+        let welcome =
+            tokio::task::spawn_blocking(move || jaw_client::Connection::open(&socket, "test", "0.0.0").unwrap().1)
+                .await
+                .unwrap();
+        assert_eq!(welcome.account.state, AccountState::Linked);
+        assert_eq!(welcome.account.me, Some(pedro));
+        assert_eq!(welcome.connection.state, ConnectionState::Connecting);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn hello_comes_first_and_must_match() {
         let (_home, socket) = serving().await;
         tokio::task::spawn_blocking(move || {
