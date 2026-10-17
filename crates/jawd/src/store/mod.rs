@@ -1073,6 +1073,8 @@ impl Writer {
         }
         let began = Instant::now();
         self.wal.held.store(true, Ordering::Relaxed);
+        // It may have looked at the last commit before anything waited, and left its few frames.
+        let _ = self.kick.try_send(());
         let (realtime, live) = (self.realtime.clone(), self.live.clone());
         while !self.room() {
             select_biased! {
@@ -1965,6 +1967,29 @@ mod tests {
         store.truncate().await.unwrap();
         assert_eq!(std::fs::metadata(home.path().join("jaw.db-wal")).unwrap().len(), 0);
         assert_eq!(store.count("messages").unwrap(), 20_000 + live as u64);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_work_waiting_for_the_wal_gets_room_with_nothing_else_committing() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open_with(home.path(), Limits { wal_soft: 256, wal_hard: 512, ..LIMITS }).unwrap();
+        // Batches apart, so the checkpointer has looked at each commit before the next batch waits.
+        for batch in 0..50 {
+            let history = (0..100).map(|n| {
+                let n = batch * 100 + n;
+                text("351910000001@s.whatsapp.net", &format!("h{n}"), n, "history")
+            });
+            assert_eq!(store.apply(Lane::Background, messages(history)).await.unwrap().changed, 100);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let storage = store.storage();
+        assert!(storage.background_waits > 0, "background work never waited for the checkpointer");
+        assert!(
+            u128::from(storage.background_waited_ms) < (IDLE / 2).as_millis(),
+            "background work waited {} ms in {} waits, as if for the checkpointer's idle timeout",
+            storage.background_waited_ms,
+            storage.background_waits
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
