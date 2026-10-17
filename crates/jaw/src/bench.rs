@@ -8,6 +8,7 @@ use crate::graphics::{Images, Protocol};
 use crate::run::{self, Event, Probe};
 use crate::view::{Effect, View};
 use anyhow::Result;
+use jaw_proto::{Connection, ConnectionState};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event as Input, KeyCode, KeyEvent, KeyModifiers};
@@ -193,6 +194,23 @@ pub fn flood(f: &Flood) -> Result<Report> {
         view.open_library(None, Some(crate::data::LibraryKind::Photo), "");
     }
     view.resize(f.width, f.height);
+    if f.jawd {
+        // `jawd bench feed` has no engine, so no account: once it has said hello, the screen is
+        // taken past linking as an account's is once its connection is up.
+        while !view.answered() {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Event::Jawd) => {
+                    for u in view.drain_jawd() {
+                        view.apply(u);
+                    }
+                }
+                Ok(Event::Update(u)) => view.apply(u),
+                Ok(_) => {}
+                Err(_) => anyhow::bail!("jawd bench feed didn't say hello"),
+            }
+        }
+        view.apply(crate::data::Update::Connection(Connection::new(ConnectionState::Online)));
+    }
     let mut terminal = Terminal::new(TestBackend::new(f.width, f.height))?;
     let mut probe = Probe::default();
     let (every, seconds, warm, palette) = (f.every, f.seconds, f.warm, f.palette);
