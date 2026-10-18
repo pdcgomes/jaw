@@ -43,6 +43,10 @@ pub(super) const TARGET_ANYWHERE: &str = "SELECT coalesce(k.id, c.id), c.kind, m
     LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep
     LIMIT 4";
 
+/// A chat by its JID as the writer finds it: the chat it's being merged into, or itself.
+pub(super) const CHAT_KEPT: &str = "SELECT coalesce(k.id, c.id) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n
+    LEFT JOIN chats k ON k.n = m.keep WHERE c.id = ?1";
+
 /// How long after sending it WhatsApp lets you edit your message, and delete it for everyone.
 pub(super) const EDITABLE: Duration = Duration::from_secs(15 * 60);
 pub(super) const DELETABLE: Duration = Duration::from_secs(60 * 3600);
@@ -107,18 +111,23 @@ fn target_row(id: &str, r: &rusqlite::Row) -> rusqlite::Result<Target> {
 /// Message `id`, in `chat` if it's given, or in whichever chat has it; a chat being merged and the
 /// one it goes into are one chat.
 pub(super) fn target(db: &Connection, chat: Option<&str>, id: &str) -> anyhow::Result<Found> {
-    if let Some(chat) = chat
-        && let Some(found) = db.prepare_cached(TARGET_IN)?.query_row([chat, id], |r| target_row(id, r)).optional()?
-    {
-        return Ok(Found::One(Box::new(found)));
+    let mut resolved = None;
+    if let Some(chat) = chat {
+        if let Some(found) = db.prepare_cached(TARGET_IN)?.query_row([chat, id], |r| target_row(id, r)).optional()? {
+            return Ok(Found::One(Box::new(found)));
+        }
+        let kept: Option<String> = db.prepare_cached(CHAT_KEPT)?.query_row([chat], |r| r.get(0)).optional()?;
+        resolved = Some(kept.unwrap_or_else(|| chat.to_string()));
     }
     let mut found: Vec<Target> =
         db.prepare_cached(TARGET_ANYWHERE)?.query_map([id], |r| target_row(id, r))?.collect::<rusqlite::Result<_>>()?;
+    if let Some(resolved) = &resolved {
+        found.retain(|target| &target.chat == resolved);
+    }
     found.dedup_by(|a, b| a.chat == b.chat);
     Ok(match found.len() {
         0 => Found::Missing,
         1 => Found::One(Box::new(found.remove(0))),
-        _ if chat.is_some() => Found::Missing,
         _ => Found::Ambiguous,
     })
 }

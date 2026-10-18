@@ -1523,6 +1523,25 @@ async fn a_reaction_goes_as_a_message_of_its_own_and_is_on_the_row_once_whatsapp
     assert_eq!(refused(json!({ "message": "m1", "emoji": "❤️" })).await.unwrap_err().code, code::NOT_ALLOWED);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_action_finds_its_message_in_the_chat_named_or_in_the_one_chat_that_has_its_id() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.arrives(ANA, ANA, "only", now_ms()).await;
+    running.arrives(ANA, ANA, "twice", now_ms()).await;
+    running.arrives(RUI, RUI, "twice", now_ms()).await;
+    let react = |params: Value| running.call("react", params);
+    assert_eq!(react(json!({ "message": "only", "emoji": "👍" })).await.unwrap(), json!({}), "found in its one chat");
+    let ambiguous = react(json!({ "message": "twice", "emoji": "👍" })).await.unwrap_err();
+    assert_eq!((ambiguous.code, ambiguous.data), (code::INVALID_PARAMS, Some(json!({ "param": "chat" }))));
+    assert_eq!(react(json!({ "message": "twice", "emoji": "👍", "chat": RUI })).await.unwrap(), json!({}));
+    let elsewhere = react(json!({ "message": "only", "emoji": "👍", "chat": RUI })).await.unwrap_err();
+    assert_eq!(elsewhere.code, code::NOT_FOUND, "not in the chat named, though another has it");
+    sent(&running, 2).await;
+    let chats: Vec<String> = running.world.sends().into_iter().map(|s| s.chat).collect();
+    assert_eq!(chats, [ANA, RUI]);
+}
+
 /// An amendment from the other person in a one-to-one chat with them.
 fn other_of(chat: &str, target: &str) -> Amend {
     Amend {
@@ -1985,6 +2004,10 @@ fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
         (
             actions::TARGET_IN,
             "SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)\nSEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+        ),
+        (
+            actions::CHAT_KEPT,
+            "SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
         ),
         (
             actions::TARGET_ANYWHERE,

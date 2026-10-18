@@ -510,6 +510,11 @@ fn action(db: &Connection, outbox: i64) -> Result<Option<Action>> {
 fn acted(db: &Connection, stamps: &mut Stamps, outbox: i64, action: Action, went: bool) -> Result<bool> {
     if let (true, Some((chat, n)), Some(effect)) = (went, action.target, &action.effect) {
         let me = if matches!(effect, Amendment::React { .. }) { my_jid(db)? } else { None };
+        // A reaction is kept under your JID, which sync keeps once the engine has connected; until
+        // it does, the row stays, for a receipt or the next start to settle once it has.
+        if matches!(effect, Amendment::React { .. }) && me.is_none() {
+            return Ok(false);
+        }
         apply_amendment(db, stamps, chat, n, Doing { what: effect, sender: me.as_deref(), mine: true, at: action.at })?;
     }
     db.prepare_cached(DROP_ROW)?.execute([outbox])?;
@@ -2147,6 +2152,32 @@ mod tests {
         assert_eq!(store.count("outbox").unwrap(), 0);
         apply(vec![Change::Amend(receipt)]).await.unwrap();
         assert_eq!(store.count("pending").unwrap(), 0, "receipts for an action's ID never wait for a message");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reaction_whatsapp_has_before_jawd_knows_your_jid_waits_to_be_kept_under_it() {
+        use crate::store::{Amend, Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        apply(vec![Change::Message(from_ana(ANA, "m1", 1_000))]).await.unwrap();
+        apply(vec![acting(ANA, "m1", "r1", Amendment::React { emoji: "❤️".into() }, 2_000)]).await.unwrap();
+        apply(vec![Change::Outbox(Step::Sent { outbox: 1 })]).await.unwrap();
+        assert!(reactions_on(&store, "m1").await.is_empty());
+        assert_eq!(store.count("outbox").unwrap(), 1, "it's kept, not dropped");
+        apply(vec![Change::Remember { key: "me".into(), value: ME_JID.into() }]).await.unwrap();
+        let receipt = Amend {
+            chat: ANA.into(),
+            target: "r1".into(),
+            sender: Some(ANA.into()),
+            mine: false,
+            at: 3_000,
+            what: Amendment::Status { status: "delivered".into() },
+            raw: None,
+        };
+        apply(vec![Change::Amend(receipt)]).await.unwrap();
+        assert_eq!(reactions_on(&store, "m1").await, [(ME_JID.to_string(), "❤️".to_string(), 2_000)]);
+        assert_eq!(store.count("outbox").unwrap(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
