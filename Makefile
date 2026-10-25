@@ -4,7 +4,7 @@ GO ?= go
 CARGO ?= cargo
 BUF := github.com/bufbuild/buf/cmd/buf@v1.74.0
 
-.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit hooks clean
+.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit hooks perf clean
 
 build: engine rust
 
@@ -27,6 +27,12 @@ lint:
 fmt:
 	gofmt -w engine
 	$(CARGO) fmt --all
+
+# Every budget in the design, measured on release builds against a made-up million-message
+# account, as one table in target/perf/ (scripts/perf.py says how; --quick leaves out the slowest).
+perf: engine
+	$(CARGO) build --release -p jawd -p jaw
+	python3 scripts/perf.py
 
 # protoc-gen-go at the version engine/go.mod pins, and buf, which compiles the .proto itself.
 target/tools/protoc-gen-go: engine/go.mod
