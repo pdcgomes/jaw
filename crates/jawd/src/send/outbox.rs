@@ -25,7 +25,7 @@ use crate::convert::{self, Me};
 use crate::engine::{EngineError, pb};
 use crate::feed;
 use crate::store::outbox::{self, Enqueued, Outboxed, Step, Written};
-use crate::store::{Change, Lane, Person, read};
+use crate::store::{Applied, Change, Lane, Person, read};
 use crate::work::{Next, Priority};
 
 /// A chat to send to: its disappearing timer, the chat it is as the writer finds it (itself, or
@@ -243,13 +243,27 @@ pub(super) async fn resume(inner: &Arc<Inner>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fails outbox row `outbox` after `left`, if it's still waiting for a receipt by then.
+/// Fails outbox row `outbox` after `left`, if it's still waiting for a receipt by then; an action
+/// failed so is said to every interface, as one refused at once is.
 fn unconfirmed(inner: &Arc<Inner>, outbox: i64, left: Duration) {
     let inner = inner.clone();
     tokio::spawn(async move {
         tokio::time::sleep(left).await;
+        let row = loop {
+            match inner.store.reads().query(Priority::Interactive, move |db| outbox::outboxed_by_n(db, outbox)).await {
+                Ok(row) => break row,
+                Err(e) => {
+                    eprintln!("jawd: can't read outbox row {outbox}, so it's read again: {e:#}");
+                    tokio::time::sleep(inner.timing.retry_most).await;
+                }
+            }
+        };
+        let Some(row) = row.filter(|row| row.state == "unconfirmed") else { return };
         let error = "WhatsApp refused it when it may already have gone, and no receipt came".to_string();
-        settle(&inner, vec![Change::Outbox(Step::NoReceipt { outbox, error })]).await;
+        let applied = settle(&inner, vec![Change::Outbox(Step::NoReceipt { outbox, error })]).await;
+        if applied.changed > 0 {
+            super::actions::refused(&inner, &row.kind, "no receipt came to say it had gone the first time");
+        }
     });
 }
 
@@ -372,11 +386,11 @@ fn sent_changes(row: &Outboxed, sent: &pb::Sent) -> Vec<Change> {
 /// Keeps what a send came to, trying again until it's kept: a message the server has mustn't be
 /// sent again for want of a commit, and one that failed must be counted as tried, or a later
 /// refusal of what may have gone would fail it outright.
-async fn settle(inner: &Inner, changes: Vec<Change>) {
+async fn settle(inner: &Inner, changes: Vec<Change>) -> Applied {
     let mut pause = inner.timing.retry_first;
     loop {
         match inner.store.apply(Lane::Live, changes.clone()).await {
-            Ok(_) => return,
+            Ok(applied) => return applied,
             Err(e) => {
                 eprintln!("jawd: can't keep what became of a send, so it's tried again in {pause:?}: {e:#}");
                 tokio::time::sleep(pause).await;

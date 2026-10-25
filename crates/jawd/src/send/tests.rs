@@ -549,6 +549,38 @@ async fn an_action_on_its_way_when_jawd_stops_goes_again_with_its_own_id_once_it
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_action_refused_once_it_may_have_gone_and_no_receipt_comes_leaves_its_message_and_says_so() {
+    let home = tempfile::tempdir().unwrap();
+    let id = crash(home.path(), "edit held").await;
+    let world = world();
+    world.refuse_next(1);
+    let timing = Timing { unconfirmed_for: Duration::from_secs(3), ..quick() };
+    let running = Running::timed(home.path(), world, true, true, timing).await;
+    let mut pushes = running.pushes.subscribe();
+    let unconfirmed = |db: &Connection| {
+        Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'edit' AND state = 'unconfirmed'", [], |r| {
+            r.get::<_, i64>(0)
+        })? == 1)
+    };
+    eventually(&running, "the resent edit's refusal", unconfirmed).await;
+    assert_eq!(text_of(&row(&running, ANA, &id).await.unwrap()), "chego às 21h", "shown while it may have gone");
+    let notice = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let push = pushes.recv().await.unwrap();
+            if push.method == "notice" {
+                return push.params["text"].as_str().unwrap().to_string();
+            }
+        }
+    })
+    .await
+    .expect("no receipt in its time is said");
+    assert!(notice.starts_with("WhatsApp refused your edit"), "{notice}");
+    until_stored(&running).await;
+    assert_eq!(stored_text(&running, &id).await, "chego às 20h");
+    assert_eq!(text_of(&row(&running, ANA, &id).await.unwrap()), "chego às 20h", "and the row is as it was");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_message_the_server_had_before_a_restart_is_not_sent_again() {
     let home = tempfile::tempdir().unwrap();
     let id = crash(home.path(), "sent").await;
