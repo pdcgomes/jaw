@@ -1196,7 +1196,11 @@ fn on_a_real_jawd_that_said_linked_and_whose_engine_then_finds_no_device_jaw_off
     let relay = Relay::to(&jawd);
     let (mut v, rx) = view_on(relay.socket.clone(), 100, 30);
     let screen = until(&mut v, &rx, "link again");
+    eprintln!("{screen}");
     assert!(screen.contains("link again") && screen.contains("logged out"), "{screen}");
+    let header = screen.lines().next().unwrap();
+    assert!(header.contains("logged out: this device isn't linked any more"), "jawd's reason:\n{screen}");
+    assert!(screen.contains("Logged out: this device isn't linked any more.") && !screen.contains("Your phone"));
     let passed = relay.passed.lock().unwrap().clone();
     let from_jawd: Vec<&Value> = passed.iter().filter(|p| p.from_jawd).map(|p| &p.line).collect();
     let hello = from_jawd.iter().find(|line| line["result"]["account"].is_object()).expect("jawd's hello");

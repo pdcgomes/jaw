@@ -166,6 +166,7 @@ impl View {
     /// Whether the header should be orange: something needs you, or will soon.
     fn troubled(&self) -> bool {
         matches!(self.reach, Reach::Unreachable { .. })
+            || self.logged_out.is_some()
             || matches!(
                 self.connection.state,
                 ConnectionState::PhoneOffline
@@ -192,8 +193,8 @@ impl View {
             }
             Reach::Up => {}
         }
-        if c.state == ConnectionState::LoggedOut {
-            return vec![warn("logged out from the phone".into())];
+        if let Some(reason) = &self.logged_out {
+            return vec![warn(jaw_client::logged_out(reason.as_deref()))];
         }
         if self.linked == Some(false) {
             return vec![dim("not linked".into())];
@@ -279,10 +280,10 @@ impl View {
             return self.sidebar_hints();
         }
         if self.linking() {
-            return match (&self.phone, &self.link, self.connection.state) {
+            return match (&self.phone, &self.link, self.logged_out.is_some()) {
                 (Some(_), _, _) => vec![("⏎", "get a code", true), ("esc", "back to the QR code", true)],
                 (None, Some(LinkStep::Code { .. }), _) => vec![("esc", "back to the QR code", true)],
-                (None, _, ConnectionState::LoggedOut) if !self.link_asked => {
+                (None, _, true) if !self.link_asked => {
                     vec![("⏎", "link again", true), ("x", "delete the messages", false), ("q", "quit", true)]
                 }
                 _ => vec![("p", "link with a phone number", true), ("q", "quit", true)],
@@ -942,13 +943,23 @@ impl View {
     fn draw_linking(&mut self, f: &mut Frame, area: Rect) {
         let t = self.theme;
         let mut area = area;
-        if self.connection.state == ConnectionState::LoggedOut {
-            let h = 7.min(area.height);
+        if let Some(reason) = &self.logged_out {
+            let h = 8.min(area.height);
             let [notice, rest] = Layout::vertical([Constraint::Length(h), Constraint::Min(0)]).areas(area);
             let block = self.panel(t.warn).title(Line::from(Span::styled(" logged out ", Style::new().fg(t.warn))));
+            let why = match reason.as_deref() {
+                None => "Your phone logged jaw out.".to_string(),
+                Some(reason) => {
+                    let said = jaw_client::logged_out(Some(reason));
+                    let mut letters = said.chars();
+                    let first: String = letters.next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                    format!("{first}{}.", letters.as_str())
+                }
+            };
             let lines = vec![
                 Line::default(),
-                Line::from("    Your phone logged jaw out. jawd has deleted the session and kept your messages."),
+                Line::from(format!("    {why}")),
+                Line::from("    jawd has deleted the session and kept your messages."),
                 Line::from("    Link again to carry on where you were, or delete the messages jaw keeps."),
                 Line::default(),
                 Line::from(vec![

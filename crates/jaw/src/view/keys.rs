@@ -393,7 +393,7 @@ impl View {
             }
             return;
         }
-        let logged_out = self.connection.state == jaw_proto::ConnectionState::LoggedOut && !self.link_asked;
+        let logged_out = self.logged_out.is_some() && !self.link_asked;
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Enter if logged_out => self.start_linking(),

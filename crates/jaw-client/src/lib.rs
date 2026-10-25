@@ -90,6 +90,16 @@ impl Connection {
     }
 }
 
+/// How the account came to be logged out, in a few words: jawd's reason, which may be WhatsApp's,
+/// or the phone's doing when it gave none.
+pub fn logged_out(reason: Option<&str>) -> String {
+    match reason {
+        None => "logged out from the phone".to_string(),
+        Some(reason) if reason.to_lowercase().starts_with("logged out") => reason.to_string(),
+        Some(reason) => format!("logged out: {reason}"),
+    }
+}
+
 /// `status` as `jawd status` and `jaw status` print it.
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -116,7 +126,7 @@ pub fn describe(status: &Status) -> String {
         },
         ConnectionState::PhoneOffline => "online, but the phone is offline".to_string(),
         ConnectionState::Offline => "offline".to_string(),
-        ConnectionState::LoggedOut => "logged out from the phone".to_string(),
+        ConnectionState::LoggedOut => logged_out(status.connection.reason.as_deref()),
         ConnectionState::UpdateNeeded => "WhatsApp wants a newer version of jaw".to_string(),
         ConnectionState::Banned => "temporarily banned".to_string(),
         ConnectionState::EngineRestarting => "reconnecting while the engine restarts".to_string(),
@@ -292,5 +302,17 @@ fn duration(us: u64) -> String {
         0..1_000 => format!("{us} µs"),
         1_000..1_000_000 => format!("{:.1} ms", us as f64 / 1e3),
         _ => format!("{:.1} s", us as f64 / 1e6),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_logout_is_said_with_jawds_reason_and_as_the_phones_without_one() {
+        assert_eq!(super::logged_out(None), "logged out from the phone");
+        assert_eq!(super::logged_out(Some("logged out from jaw")), "logged out from jaw");
+        assert_eq!(super::logged_out(Some("logged out from another device")), "logged out from another device");
+        let gone = super::logged_out(Some("this device isn't linked any more"));
+        assert_eq!(gone, "logged out: this device isn't linked any more");
     }
 }

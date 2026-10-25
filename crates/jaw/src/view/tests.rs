@@ -362,10 +362,72 @@ fn logged_out_says_so_above_linking_again() {
     let (mut v, rx) = view_in(State::LoggedOut, 100, 36);
     let screen = frame(&mut v);
     assert!(screen.contains("jaw  logged out from the phone") && screen.contains("kept your messages"), "{screen}");
+    assert!(screen.contains("Your phone logged jaw out."), "{screen}");
     assert!(!screen.contains("It changes in"), "{screen}");
     press(&mut v, &rx, "\n");
     let screen = frame(&mut v);
     assert!(screen.contains("logged out") && screen.contains("It changes in 20 s."), "{screen}");
+}
+
+fn logged_out(reason: &str) -> Connection {
+    Connection { reason: Some(reason.into()), ..Connection::new(ConnectionState::LoggedOut) }
+}
+
+#[test]
+fn logged_out_says_why_when_jawd_says() {
+    for (reason, header, said) in [
+        (
+            "this device isn't linked any more",
+            "logged out: this device isn't linked any more",
+            "Logged out: this device isn't linked any more.",
+        ),
+        ("logged out from jaw", "logged out from jaw", "Logged out from jaw."),
+        ("logged out from another device", "logged out from another device", "Logged out from another device."),
+    ] {
+        let (mut v, _rx) = view(100, 36);
+        v.apply(Update::Connection(logged_out(reason)));
+        let screen = frame(&mut v);
+        assert!(screen.lines().next().unwrap().contains(&format!("jaw  {header} ")), "{screen}");
+        assert!(screen.contains(said) && screen.contains("kept your messages"), "{screen}");
+        assert!(!screen.contains("Your phone") && !screen.contains("from the phone"), "{screen}");
+    }
+}
+
+#[test]
+fn once_logged_out_jaw_stays_there_whatever_the_connection_says_until_it_is_linked_again() {
+    let (mut v, rx) = view(100, 36);
+    v.apply(Update::Connection(logged_out("logged out from another device")));
+    for state in [ConnectionState::Offline, ConnectionState::Connecting] {
+        v.apply(Update::Connection(Connection::new(state)));
+        let screen = frame(&mut v);
+        assert!(screen.lines().next().unwrap().contains("jaw  logged out from another device"), "{state:?}:\n{screen}");
+        assert!(screen.contains("⏎ link again") && !screen.contains("chats · All"), "{state:?}:\n{screen}");
+    }
+    let hello = |connection| Update::Hello { root: String::new(), linked: false, me: vec![], connection };
+    v.apply(hello(Connection::new(ConnectionState::Offline)));
+    let screen = frame(&mut v);
+    assert!(screen.contains("⏎ link again") && !screen.contains("It changes in"), "linking waits for Enter:\n{screen}");
+    v.apply(hello(logged_out("logged out from jaw")));
+    let screen = frame(&mut v);
+    assert!(screen.lines().next().unwrap().contains("jaw  logged out from jaw"), "a hello says why too:\n{screen}");
+    assert!(screen.contains("⏎ link again") && !screen.contains("It changes in"), "{screen}");
+    v.apply(Update::Connection(Connection::new(ConnectionState::Online)));
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    assert!(screen.lines().next().unwrap().contains("jaw  online") && screen.contains("chats · All"), "{screen}");
+}
+
+#[test]
+fn logged_out_and_linked_again_from_the_qr_code_goes_back_to_the_chats() {
+    let (mut v, rx) = view(100, 36);
+    v.apply(Update::Connection(logged_out("logged out from another device")));
+    v.apply(Update::Connection(Connection::new(ConnectionState::Offline)));
+    press(&mut v, &rx, "\n");
+    assert!(frame(&mut v).contains("It changes in"), "Enter links again");
+    v.apply(Update::Link(LinkStep::Done { phone: "+351912000000".into() }));
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    assert!(screen.contains("chats · All") && !screen.contains("logged out"), "{screen}");
 }
 
 #[test]

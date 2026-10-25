@@ -147,6 +147,9 @@ pub struct View {
     connection: Connection,
     link: Option<LinkStep>,
     link_asked: bool,
+    /// Once jawd has said the account was logged out, why, if it said: kept until a connection
+    /// says the account is linked again, whatever the connection does meanwhile.
+    logged_out: Option<Option<String>>,
     /// The number being typed for a phone code.
     phone: Option<String>,
 
@@ -275,6 +278,7 @@ impl View {
             connection: Connection::new(ConnectionState::Connecting),
             link: None,
             link_asked: false,
+            logged_out: None,
             phone: None,
             chats: Chats::new("all", Place::top(LIST_ROWS)),
             messages: None,
@@ -413,6 +417,11 @@ impl View {
                 self.reach = Reach::Up;
                 self.linked = Some(linked);
                 self.me = me;
+                if connection.state == ConnectionState::LoggedOut {
+                    self.told_logged_out(connection.reason.clone());
+                } else if linked {
+                    self.logged_out = None;
+                }
                 self.connection = connection;
                 // Connecting again, jawd's client watches every window again itself, where it was,
                 // so nothing moves.
@@ -421,20 +430,21 @@ impl View {
                     self.jawd.watch_chats(&self.folder, Place::top(LIST_ROWS));
                     self.jawd.watch_folders();
                     self.jawd.watch_roster(&self.folder);
-                } else if !linked {
+                } else if !linked && self.logged_out.is_none() {
                     self.start_linking();
                 }
             }
             Update::Connection(c) => {
                 if c.state == ConnectionState::LoggedOut {
-                    self.link = None;
-                    self.link_asked = false;
+                    self.told_logged_out(c.reason.clone());
                 }
                 // A jawd starting says hello before its engine has said whose account it has, so
-                // a connection coming up says the account was linked all along.
+                // a connection coming up says the account was linked all along, or is again after
+                // a logout.
                 let up = matches!(c.state, ConnectionState::Online | ConnectionState::CatchingUp);
-                if up && self.linked == Some(false) {
+                if up && (self.linked == Some(false) || self.logged_out.is_some()) {
                     self.linked = Some(true);
+                    self.logged_out = None;
                     self.link = None;
                     if !self.watching {
                         self.watching = true;
@@ -449,6 +459,7 @@ impl View {
                 if let LinkStep::Done { phone } = &step {
                     self.say(format!("Linked {phone}. jawd is fetching your history."));
                     self.linked = Some(true);
+                    self.logged_out = None;
                     self.connection = Connection::new(ConnectionState::CatchingUp);
                     if !self.watching {
                         self.watching = true;
@@ -617,6 +628,14 @@ impl View {
             self.link_asked = true;
             self.jawd.link_start(None);
         }
+    }
+
+    /// jawd says the account is logged out: the screen says why and offers to link again, without
+    /// linking until asked.
+    fn told_logged_out(&mut self, reason: Option<String>) {
+        self.link = None;
+        self.link_asked = false;
+        self.logged_out = Some(reason);
     }
 
     /// Opens a chat: its draft into the box, its window from the newest, typing in the box.
@@ -907,7 +926,7 @@ impl View {
     }
 
     fn linking(&self) -> bool {
-        self.reach == Reach::Up && (self.linked == Some(false) || self.connection.state == ConnectionState::LoggedOut)
+        self.reach == Reach::Up && (self.linked == Some(false) || self.logged_out.is_some())
     }
 
     /// Who's typing in a chat, as its row and title say it: in a group, their names where jaw
