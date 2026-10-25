@@ -1,10 +1,16 @@
-//! `DemoEngine`: a made-up account inside jawd, for `jawd --engine demo`, tests and the load
-//! harness. It sends the same events a real engine does, waits for each message's ack as whatsmeow
-//! would, and answers ping and bench. What it's sent goes to a made-up WhatsApp that outlives any
-//! one engine, as the real one does: it answers with the server's time, the recipients' phones
-//! send delivered and then read, and a message sent again with the same ID is the same message.
+//! `DemoEngine`: a made-up account inside jawd, for `jawd --engine demo`, `jawd demo`, tests and the
+//! load harness. It sends the same events a real engine does, waits for each message's ack as
+//! whatsmeow would, and answers ping and bench. What it's sent goes to a made-up WhatsApp that
+//! outlives any one engine, as the real one does: it answers with the server's time, the
+//! recipients' phones send delivered and then read, and a message sent again with the same ID is
+//! the same message. Given an `Account`, it answers for its contacts and groups, and writes each
+//! history blob its phone offers to the spool as jaw-engine does; events can also be delivered
+//! from outside its script, several waiting for their acks at once.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,7 +22,7 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 
 use super::{Ack, BoxFuture, Commands, Engine, EngineError, Incoming, Instance, Outgoing, PROTOCOL, pb};
 
-const ME: &str = "351910000001@s.whatsapp.net";
+pub const ME: &str = "351910000001@s.whatsapp.net";
 
 /// Two made-up members of every group the demo sends to, besides you.
 const MEMBERS: [&str; 2] = ["351913333333@s.whatsapp.net", "351914444444@s.whatsapp.net"];
@@ -26,6 +32,29 @@ pub struct DemoEngine {
     world: Arc<World>,
     /// How long it takes before its script plays, as an engine reading its session.db does.
     pause: Duration,
+}
+
+/// A made-up account the demo engine answers for: who's in its contacts and groups, the phone
+/// numbers of their LIDs, and the history blobs its phone offers, each made when it's asked for.
+pub trait Account: Send + Sync + 'static {
+    fn contacts(&self) -> pb::ContactList;
+    fn groups(&self) -> pb::GroupList;
+    /// The members of a group but you, whose phones answer what you send there.
+    fn members(&self, group: &str) -> Vec<String>;
+    fn lid_pairs(&self, lids: &[String]) -> pb::LidPairs;
+    /// The blob a history notification names, or None if the phone never offered one by that name.
+    fn history(&self, notification: &e2e::HistorySyncNotification) -> Option<Blob>;
+}
+
+/// A blob of history: a HistorySync encoded as the phone sends it, and what jaw-engine says of one
+/// it has written.
+pub struct Blob {
+    pub data: Vec<u8>,
+    /// WAWebProtobufsHistorySync.HistorySync.HistorySyncType.
+    pub kind: i32,
+    pub chunk_order: u32,
+    pub progress: u32,
+    pub conversations: u32,
 }
 
 /// How long the made-up recipients take: their phone has a message `delivered` after it's sent,
@@ -67,9 +96,29 @@ pub struct World {
     gated: AtomicBool,
     opened: Notify,
     asked_now: Notify,
+    /// The account the engine answers for, besides its script.
+    account: Option<Arc<dyn Account>>,
+    /// The running engine's half of the link, for events delivered from outside its script.
+    link: Mutex<Option<WeakLink>>,
 }
 
 impl World {
+    /// Hands `event` to jawd through the engine running now, as WhatsApp would send it, and says how
+    /// long jawd took to ack it, or to take it if it needs no ack; None if no engine is running or
+    /// jawd has gone. Several can wait for their acks at once.
+    pub async fn deliver(self: &Arc<World>, event: pb::Event) -> Option<Duration> {
+        let link = self.link.lock().expect("the demo world").clone()?;
+        let sender = Sender {
+            events: link.events.upgrade()?,
+            weak: link.weak,
+            seq: link.seq,
+            waiting: link.waiting,
+            world: self.clone(),
+        };
+        let began = Instant::now();
+        sender.send(event).await.then(|| began.elapsed())
+    }
+
     pub fn replying(&self, replies: Replies) {
         *self.replies.lock().expect("the demo world") = replies;
     }
@@ -187,6 +236,12 @@ impl DemoEngine {
         DemoEngine { script, world: Arc::default(), pause: Duration::ZERO }
     }
 
+    /// The made-up `account`, which plays `script` and answers what jawd asks about it.
+    pub fn for_account(script: Vec<pb::Event>, account: Arc<dyn Account>) -> DemoEngine {
+        let world = Arc::new(World { account: Some(account), ..World::default() });
+        DemoEngine { script, world, pause: Duration::ZERO }
+    }
+
     /// An engine on `world`, as an engine started again talks to the same WhatsApp.
     #[cfg(test)]
     pub fn sharing(script: Vec<pb::Event>, world: Arc<World>) -> DemoEngine {
@@ -277,6 +332,29 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
+/// Writes `data` to `path` as jaw-engine writes a history blob: through a .part file synced to the
+/// disk before it's renamed into place, and the folder synced after, so after a power cut the file
+/// is either whole or not there.
+fn write_whole(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let folder = path.parent().filter(|f| !f.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(folder)?;
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&part)?;
+        file.write_all(data)?;
+        // F_FULLFSYNC on macOS, where fsync stops at the drive's cache.
+        file.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    std::fs::rename(&part, path)?;
+    std::fs::File::open(folder)?.sync_all()
+}
+
 impl Engine for DemoEngine {
     fn kind(&self) -> &'static str {
         "demo"
@@ -294,8 +372,14 @@ impl Engine for DemoEngine {
                 weak: commands.tx.downgrade(),
                 seq: Arc::new(AtomicU64::new(0)),
                 waiting: Arc::default(),
-                world,
+                world: world.clone(),
             };
+            *world.link.lock().expect("the demo world") = Some(WeakLink {
+                events: sender.events.downgrade(),
+                weak: sender.weak.clone(),
+                seq: sender.seq.clone(),
+                waiting: sender.waiting.clone(),
+            });
             let playing = sender.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(pause).await;
@@ -337,6 +421,16 @@ struct Sender {
     seq: Arc<AtomicU64>,
     waiting: Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>>,
     world: Arc<World>,
+}
+
+/// A running engine's half of the link as its world keeps it, holding neither jawd's end open nor
+/// the world itself.
+#[derive(Clone)]
+struct WeakLink {
+    events: mpsc::WeakSender<Incoming>,
+    weak: mpsc::WeakUnboundedSender<Outgoing>,
+    seq: Arc<AtomicU64>,
+    waiting: Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>>,
 }
 
 impl Sender {
@@ -388,8 +482,54 @@ impl Sender {
                 self.world.ask(kind);
                 done
             }
+            pb::command::Kind::Contacts(_) => Ok(pb::reply::Kind::ContactList(self.account()?.contacts())),
+            pb::command::Kind::Groups(_) => Ok(pb::reply::Kind::GroupList(self.account()?.groups())),
+            pb::command::Kind::LidLookup(asked) => {
+                Ok(pb::reply::Kind::LidPairs(self.account()?.lid_pairs(&asked.lids)))
+            }
+            // The made-up phone has no app state, nobody in it has a picture, and its history has
+            // all been offered.
+            pb::command::Kind::AppStateResync(_) | pb::command::Kind::HistoryRequest(_) => self.account().and(done),
+            pb::command::Kind::Avatar(_) => self.account().map(|_| {
+                let none = pb::AvatarFile { state: pb::avatar_file::State::None as i32, ..Default::default() };
+                pb::reply::Kind::AvatarFile(none)
+            }),
+            pb::command::Kind::HistoryDownload(download) => self.history(download).await,
             _ => Err(EngineError::Failed { message: "the demo engine doesn't do that".into(), retry: false }),
         }
+    }
+
+    fn account(&self) -> Result<Arc<dyn Account>, EngineError> {
+        self.world
+            .account
+            .clone()
+            .ok_or_else(|| EngineError::Failed { message: "the demo engine doesn't do that".into(), retry: false })
+    }
+
+    /// Makes the blob a history notification names and writes it to the path jawd chose, whole or
+    /// not at all, as jaw-engine does once it has downloaded one.
+    async fn history(&self, download: pb::HistoryDownload) -> Result<pb::reply::Kind, EngineError> {
+        let account = self.account()?;
+        let notification = e2e::HistorySyncNotification::decode(download.notification.as_slice()).map_err(|e| {
+            EngineError::Failed { message: format!("that isn't a history notification: {e}"), retry: false }
+        })?;
+        let made = tokio::task::spawn_blocking(move || {
+            let Some(blob) = account.history(&notification) else {
+                return Err(EngineError::Failed { message: "the phone has no such history".into(), retry: false });
+            };
+            write_whole(Path::new(&download.path), &blob.data)
+                .map_err(|e| EngineError::Failed { message: format!("can't write the history: {e}"), retry: true })?;
+            Ok(pb::reply::Kind::HistoryFile(pb::HistoryFile {
+                path: download.path,
+                r#type: blob.kind,
+                chunk_order: blob.chunk_order,
+                progress: blob.progress,
+                bytes: blob.data.len() as u64,
+                conversations: blob.conversations,
+            }))
+        });
+        made.await
+            .map_err(|e| EngineError::Failed { message: format!("making the history stopped: {e}"), retry: true })?
     }
 
     /// The server takes a message, once whatever its ID; the recipients' phones then say they have
@@ -428,9 +568,12 @@ impl Sender {
         if world.given.lock().expect("the demo world").insert(send.id.clone()) {
             let (sender, replies) = (self.clone(), *world.replies.lock().expect("the demo world"));
             let send = send.clone();
+            let recipients: Vec<String> = match (send.chat.ends_with("@g.us"), &world.account) {
+                (true, Some(account)) => account.members(&send.chat),
+                (true, None) => MEMBERS.iter().map(|member| member.to_string()).collect(),
+                (false, _) => vec![send.chat.clone()],
+            };
             tokio::spawn(async move {
-                let group = send.chat.ends_with("@g.us");
-                let recipients: Vec<&str> = if group { MEMBERS.to_vec() } else { vec![send.chat.as_str()] };
                 tokio::time::sleep(replies.delivered).await;
                 for recipient in &recipients {
                     if !sender.send(receipt(&send, recipient, "")).await {
@@ -475,6 +618,8 @@ impl Sender {
 
 #[cfg(test)]
 mod tests {
+    use wa_proto::wa_web_protobufs_history_sync::HistorySync;
+
     use super::*;
 
     #[tokio::test]
@@ -517,5 +662,146 @@ mod tests {
         drop(instance.commands);
         assert_eq!(instance.exited.await, "the demo engine stopped");
         acking.abort();
+    }
+
+    const ANA: &str = "351912345678@s.whatsapp.net";
+    const CLIMBING: &str = "120363012345678901@g.us";
+
+    /// An account with one contact, one group and one blob of history, the second the phone offers.
+    struct Tiny;
+
+    impl Account for Tiny {
+        fn contacts(&self) -> pb::ContactList {
+            let ana = pb::Contact { jid: ANA.into(), full_name: "Ana Ribeiro".into(), ..Default::default() };
+            pb::ContactList { contacts: vec![ana] }
+        }
+
+        fn groups(&self) -> pb::GroupList {
+            let climbing = pb::GroupInfo { jid: CLIMBING.into(), name: "Lisbon Climbing".into(), ..Default::default() };
+            pb::GroupList { groups: vec![climbing] }
+        }
+
+        fn members(&self, _: &str) -> Vec<String> {
+            vec![ANA.into()]
+        }
+
+        fn lid_pairs(&self, lids: &[String]) -> pb::LidPairs {
+            pb::LidPairs { pairs: lids.iter().map(|lid| pb::LidPair { lid: lid.clone(), phone: ANA.into() }).collect() }
+        }
+
+        fn history(&self, notification: &e2e::HistorySyncNotification) -> Option<Blob> {
+            use wa_proto::wa_web_protobufs_history_sync::{Conversation, history_sync::HistorySyncType};
+            (notification.chunk_order == Some(1)).then(|| {
+                let history = HistorySync {
+                    sync_type: HistorySyncType::Full as i32,
+                    conversations: vec![Conversation { id: ANA.into(), ..Default::default() }],
+                    ..Default::default()
+                };
+                Blob {
+                    data: history.encode_to_vec(),
+                    kind: history.sync_type,
+                    chunk_order: 1,
+                    progress: 100,
+                    conversations: 1,
+                }
+            })
+        }
+    }
+
+    fn download(notification: e2e::HistorySyncNotification, path: &Path) -> pb::command::Kind {
+        let path = path.display().to_string();
+        pb::command::Kind::HistoryDownload(pb::HistoryDownload { notification: notification.encode_to_vec(), path })
+    }
+
+    #[tokio::test]
+    async fn an_account_answers_for_its_people_and_writes_each_history_blob_whole_where_jawd_asks() {
+        let (tx, _rx) = mpsc::channel(8);
+        let instance = DemoEngine::for_account(Vec::new(), Arc::new(Tiny)).start(tx).await.unwrap();
+        let call = |kind| instance.commands.call(kind);
+        let Ok(pb::reply::Kind::ContactList(contacts)) = call(pb::command::Kind::Contacts(pb::Contacts {})).await
+        else {
+            panic!("no contacts")
+        };
+        assert_eq!(contacts.contacts[0].full_name, "Ana Ribeiro");
+        let Ok(pb::reply::Kind::GroupList(groups)) = call(pb::command::Kind::Groups(pb::Groups {})).await else {
+            panic!("no groups")
+        };
+        assert_eq!(groups.groups[0].name, "Lisbon Climbing");
+        let asked = pb::LidLookup { lids: vec!["100000000001@lid".into()] };
+        let Ok(pb::reply::Kind::LidPairs(pairs)) = call(pb::command::Kind::LidLookup(asked)).await else {
+            panic!("no LIDs")
+        };
+        assert_eq!(pairs.pairs[0].phone, ANA);
+
+        let spool = tempfile::tempdir().unwrap();
+        let path = spool.path().join("spool").join("3EB0HISTORY.pb");
+        let offered = e2e::HistorySyncNotification { chunk_order: Some(1), ..Default::default() };
+        let Ok(pb::reply::Kind::HistoryFile(file)) = call(download(offered, &path)).await else {
+            panic!("no history file")
+        };
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!((file.bytes, file.conversations, file.progress), (written.len() as u64, 1, 100));
+        assert_eq!(HistorySync::decode(written.as_slice()).unwrap().conversations[0].id, ANA);
+        let names: Vec<_> =
+            std::fs::read_dir(path.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["3EB0HISTORY.pb"], "no .part file is left beside it");
+
+        let never = e2e::HistorySyncNotification { chunk_order: Some(2), ..Default::default() };
+        let gone = call(download(never, &spool.path().join("never.pb"))).await;
+        assert!(matches!(gone, Err(EngineError::Failed { retry: false, .. })), "{gone:?}");
+        assert!(!spool.path().join("never.pb").exists());
+
+        let (tx, _rx) = mpsc::channel(8);
+        let plain = DemoEngine::with(Vec::new()).start(tx).await.unwrap();
+        let offered = e2e::HistorySyncNotification { chunk_order: Some(1), ..Default::default() };
+        let refused = plain.commands.call(download(offered, &spool.path().join("plain.pb"))).await;
+        assert!(matches!(refused, Err(EngineError::Failed { retry: false, .. })), "without an account: {refused:?}");
+    }
+
+    #[tokio::test]
+    async fn events_delivered_from_outside_the_script_each_wait_for_their_own_ack_several_at_once() {
+        let engine = DemoEngine::with(Vec::new());
+        let world = engine.world();
+        assert!(world.deliver(text(ANA, ANA, "early", 0, "hi")).await.is_none(), "no engine is running yet");
+        let (tx, mut rx) = mpsc::channel(64);
+        let _instance = engine.start(tx).await.unwrap();
+        let delivering: Vec<_> = (0..8)
+            .map(|n| {
+                let world = world.clone();
+                tokio::spawn(async move { world.deliver(text(ANA, ANA, &format!("m{n}"), 0, "hi")).await })
+            })
+            .collect();
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            held.push(rx.recv().await.unwrap());
+        }
+        let mut seqs: Vec<u64> = held.iter().map(|incoming| incoming.event.seq).collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), 8, "each has a seq of its own");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(delivering.iter().all(|d| !d.is_finished()), "none is answered before its ack");
+
+        let last = held.pop().unwrap();
+        let Some(pb::event::Kind::Message(message)) = &last.event.kind else { panic!("{:?}", last.event) };
+        let id = message.info.as_ref().unwrap().id.clone();
+        last.ack.expect("a message needs an ack").send();
+        let n: usize = id.trim_start_matches('m').parse().unwrap();
+        let mut delivering: Vec<_> = delivering.into_iter().map(Some).collect();
+        let answered = tokio::time::timeout(Duration::from_secs(5), delivering[n].take().unwrap()).await;
+        assert!(answered.unwrap().unwrap().is_some(), "the one acked is answered");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(delivering.iter().flatten().all(|d| !d.is_finished()), "the rest still wait for theirs");
+        for incoming in held {
+            incoming.ack.expect("a message needs an ack").send();
+        }
+        for d in delivering.into_iter().flatten() {
+            assert!(d.await.unwrap().is_some());
+        }
+
+        assert!(world.deliver(connected()).await.is_some(), "a connection needs no ack");
+        assert!(rx.recv().await.unwrap().ack.is_none());
+        drop(rx);
+        assert!(world.deliver(text(ANA, ANA, "late", 0, "hi")).await.is_none(), "jawd has gone");
     }
 }

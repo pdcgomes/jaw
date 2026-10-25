@@ -1,7 +1,8 @@
 //! `jawd bench store`: a made-up account's jaw.db built through the writer (a few chats with
 //! 100,000 messages and a long tail of small ones), then its pages, chat list and search timed
 //! through the read pool, as an interface would ask for them. `jawd bench inbox`: live writes timed
-//! while the inbox takes a steady stream of rows.
+//! while the inbox takes a steady stream of rows. And for `jawd bench link`, the drive's flush and
+//! an inbox transaction without it, each timed alone.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -134,7 +135,7 @@ impl Rng {
 }
 
 /// A message's words: mostly a few, sometimes a paragraph, as people write.
-fn text(rng: &mut Rng) -> String {
+pub(crate) fn text(rng: &mut Rng) -> String {
     let words = match rng.below(100) {
         0..60 => 1 + rng.below(6),
         60..90 => 7 + rng.below(14),
@@ -556,4 +557,55 @@ pub async fn stream(home: &Path, plan: Stream) -> Result<()> {
         std::fs::remove_dir_all(&folder)?;
     }
     Ok(())
+}
+
+/// The drive's flush alone, as a synced commit pays it: 4 KiB appended to a file in `folder` and
+/// made durable, which is F_FULLFSYNC on macOS and fdatasync elsewhere, as SQLite does; fastest
+/// first.
+pub fn flushes(folder: &Path, runs: usize) -> Result<Vec<Duration>> {
+    use std::io::Write;
+    let path = folder.join("flush");
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    let page = [7u8; 4096];
+    let mut took = Vec::with_capacity(runs);
+    for _ in 0..runs.max(1) {
+        let began = Instant::now();
+        file.write_all(&page)?;
+        if cfg!(target_os = "macos") {
+            file.sync_all()?;
+        } else {
+            file.sync_data()?;
+        }
+        took.push(began.elapsed());
+    }
+    drop(file);
+    std::fs::remove_file(&path)?;
+    took.sort_unstable();
+    Ok(took)
+}
+
+/// What a transaction like the inbox's costs without its flush, on a copy of the inbox's table from
+/// the jaw.db in `folder`, in a file of its own whose commits don't sync: a row of `size` bytes
+/// inserted and committed `runs` times, with the two PRAGMAs the writer reads before each commit;
+/// fastest first.
+pub fn unflushed(folder: &Path, size: usize, runs: usize) -> Result<Vec<Duration>> {
+    use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+    let table: String = Connection::open_with_flags(folder.join("jaw.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)?
+        .query_row("SELECT sql FROM sqlite_master WHERE name = 'inbox'", [], |r| r.get(0))?;
+    let mut db = Connection::open(folder.join("unflushed.db"))?;
+    db.execute_batch(&format!("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF; {table};"))?;
+    let payload = vec![0u8; size];
+    let mut took = Vec::with_capacity(runs);
+    for _ in 0..runs.max(1) {
+        let began = Instant::now();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.prepare_cached("INSERT INTO inbox (kind, at, payload) VALUES ('bench', 0, ?1)")?.execute([&payload])?;
+        for pragma in ["PRAGMA synchronous", "PRAGMA fullfsync"] {
+            tx.prepare_cached(pragma)?.query_row([], |r| r.get::<_, i64>(0))?;
+        }
+        tx.commit()?;
+        took.push(began.elapsed());
+    }
+    took.sort_unstable();
+    Ok(took)
 }

@@ -21,7 +21,7 @@ pub struct Plan {
     pub runs: u32,
 }
 
-const FIRST: &[&str] = &[
+pub(crate) const FIRST: &[&str] = &[
     "Ana",
     "Rui",
     "Sofia",
@@ -64,7 +64,7 @@ const FIRST: &[&str] = &[
     "Sebastião",
 ];
 
-const LAST: &[&str] = &[
+pub(crate) const LAST: &[&str] = &[
     "Ribeiro",
     "Costa",
     "Gomes",
@@ -107,7 +107,7 @@ const LAST: &[&str] = &[
     "Hughes",
 ];
 
-const GROUPS: &[&str] = &[
+pub(crate) const GROUPS: &[&str] = &[
     "Lisbon Climbing",
     "Família Gomes",
     "Jantar de sexta",

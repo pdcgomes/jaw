@@ -3,6 +3,7 @@
 
 mod attention;
 mod convert;
+mod demo;
 mod engine;
 mod feed;
 mod find;
@@ -61,6 +62,55 @@ enum EngineKind {
 enum Command {
     /// What jawd is connected to, how its engine is, and what's missing
     Status,
+    /// jawd on a made-up account in a folder of its own, to try jaw without WhatsApp and to measure
+    /// jawd: thousands of chats, a million messages of history, and messages pouring in when asked
+    Demo {
+        /// The folder the account is kept in, which JAW_HOME points jaw at; a temporary one by default
+        #[arg(long)]
+        folder: Option<std::path::PathBuf>,
+        /// The account's chats, 3,000 for a new one; the folder's account's otherwise
+        #[arg(long)]
+        chats: Option<u32>,
+        /// The people in its contacts, 5,000 for a new one
+        #[arg(long)]
+        people: Option<u32>,
+        /// The messages in the history the phone offers the first time, a million for a new one
+        #[arg(long)]
+        messages: Option<u32>,
+        /// Messages in each blob of history, 20,000 for a new one
+        #[arg(long)]
+        blob: Option<u32>,
+        /// Times lone messages, opening chats, pages at any depth and finds, with nothing else going on
+        #[arg(long)]
+        steady: bool,
+        /// Messages a second to pour in, a quarter of them into the newest chat
+        #[arg(long)]
+        flood: Option<u32>,
+        /// How long the flood lasts, timed; it goes on untimed until Ctrl-C without
+        #[arg(long)]
+        seconds: Option<f64>,
+        /// Messages waiting after time offline, arriving as the account connects
+        #[arg(long)]
+        catch_up: Option<u32>,
+        /// Messages the engine hands over before their acks come; whatsmeow waits for each, as 1 does
+        #[arg(long, default_value_t = 256)]
+        in_flight: u32,
+        /// Seconds to wait before a catch-up, the steady timings or a flood, for interfaces to attach
+        #[arg(long, default_value_t = 0.0)]
+        after: f64,
+        /// Seconds of nothing at the end, counting how often jawd wakes
+        #[arg(long)]
+        idle: Option<f64>,
+        /// Writes what each phase measured to this file, as JSON
+        #[arg(long)]
+        report: Option<std::path::PathBuf>,
+        /// Stops once what was asked for is done, rather than serving until Ctrl-C
+        #[arg(long)]
+        exit: bool,
+        /// Sends notifications, which a demo doesn't otherwise
+        #[arg(long)]
+        notify: bool,
+    },
     /// Measures a part of jawd on made-up work
     #[command(subcommand)]
     Bench(Bench),
@@ -161,6 +211,41 @@ fn main() -> Result<()> {
     let home = jaw_proto::local::home();
     match cli.command {
         Some(Command::Status) => status(&home),
+        Some(Command::Demo {
+            folder,
+            chats,
+            people,
+            messages,
+            blob,
+            steady,
+            flood,
+            seconds,
+            catch_up,
+            in_flight,
+            after,
+            idle,
+            report,
+            exit,
+            notify,
+        }) => demo::run(demo::Plan {
+            folder: folder.unwrap_or_else(demo::folder),
+            shape: demo::Asked {
+                chats: chats.map(|n| n as usize),
+                people: people.map(|n| n as usize),
+                messages: messages.map(|n| n as usize),
+                chunk: blob.map(|n| n as usize),
+            },
+            steady,
+            flood,
+            seconds,
+            catch_up,
+            in_flight,
+            after,
+            idle,
+            report,
+            exit,
+            notify,
+        }),
         Some(Command::Bench(Bench::Link { count, size, commit })) => bench_link(cli.engine, count, size, commit),
         Some(Command::Bench(Bench::Lanes { background, interactive })) => bench_lanes(background, interactive),
         Some(Command::Bench(Bench::Store { messages, chats, runs })) => bench_store(messages, chats, runs),
@@ -230,7 +315,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 /// The engine to run, or its kind and why it can't run.
-fn engine(kind: EngineKind, home: &Path) -> Result<Arc<dyn Engine>, (&'static str, String)> {
+fn engine(kind: EngineKind, home: &Path) -> Chosen {
     match kind {
         EngineKind::Demo => Ok(Arc::new(DemoEngine::new())),
         EngineKind::DemoUnlinked => Ok(Arc::new(DemoEngine::unlinked())),
@@ -250,7 +335,7 @@ fn run(home: &Path, kind: EngineKind, no_notify: bool) -> Result<()> {
         let socket = jaw_proto::local::socket(home);
         let (lock, listener) = open(home, &socket)?;
         let started = tokio::select! {
-            started = start_on(home, &socket, lock, kind, no_notify) => started?,
+            started = start_on(home, &socket, lock, engine(kind, home), no_notify) => started?,
             signal = signals.next() => {
                 eprintln!("jawd: {signal} while starting, so it stops");
                 let _ = std::fs::remove_file(&socket);
@@ -322,28 +407,25 @@ fn open(home: &Path, socket: &Path) -> Result<(std::fs::File, tokio::net::UnixLi
     Ok((lock, sock::listen(socket)?))
 }
 
+/// The engine jawd runs, or its kind and why it can't run.
+type Chosen = Result<Arc<dyn Engine>, (&'static str, String)>;
+
 /// Starts jawd listening on `socket`, removing the socket if it can't start, so a jawd that fails
 /// leaves nothing an interface would try to reach.
-async fn start_on(
-    home: &Path,
-    socket: &Path,
-    lock: std::fs::File,
-    kind: EngineKind,
-    no_notify: bool,
-) -> Result<Started> {
-    let started = start(home, lock, kind, no_notify).await;
+async fn start_on(home: &Path, socket: &Path, lock: std::fs::File, engine: Chosen, no_notify: bool) -> Result<Started> {
+    let started = start(home, lock, engine, no_notify).await;
     if started.is_err() {
         let _ = std::fs::remove_file(socket);
     }
     started
 }
 
-async fn start(home: &Path, lock: std::fs::File, kind: EngineKind, no_notify: bool) -> Result<Started> {
+async fn start(home: &Path, lock: std::fs::File, engine: Chosen, no_notify: bool) -> Result<Started> {
     let store = store::Store::open(home)?;
     std::fs::create_dir_all(home.join("spool"))?;
     sync::running(&store).await?;
     let (events, incoming) = mpsc::channel(1024);
-    let supervisor = engine(kind, home).map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
+    let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
     let live: sync::Shared = Arc::new(std::sync::Mutex::new(sync::starting(&store, supervisor.is_ok())));
     let (pushes, _) = tokio::sync::broadcast::channel(256);
     tokio::spawn(trouble(store.trouble(), pushes.clone()));
@@ -472,9 +554,10 @@ fn bench_link(kind: EngineKind, count: u32, size: u32, commit: bool) -> Result<(
         let store = if commit { Some(store::Store::open(&scratch)?) } else { None };
         let (events, mut incoming) = mpsc::channel(1024);
         let instance = engine.start(events).await?;
+        let keeping = store.clone();
         tokio::spawn(async move {
             while let Some(Incoming { event, ack }) = incoming.recv().await {
-                match (&store, event.kind) {
+                match (&keeping, event.kind) {
                     (Some(store), Some(pb::event::Kind::Bench(bench))) => store.inbox("bench", 0, bench.payload, ack),
                     _ => {
                         if let Some(ack) = ack {
@@ -497,11 +580,34 @@ fn bench_link(kind: EngineKind, count: u32, size: u32, commit: bool) -> Result<(
             engine.kind(),
             if commit { "each committed to jaw.db's inbox before its ack" } else { "acked as they arrived" },
         );
+        if let Some(store) = &store {
+            let runs = work::Report::report(store).run.map_or((0, 0), |run| (run.p50_us, run.p99_us));
+            let flush = store::bench::flushes(&scratch, FLUSHES)?;
+            let bare = store::bench::unflushed(&scratch, size as usize, FLUSHES)?;
+            let at = |times: &[Duration], q: usize| times[(times.len() * q / 100).min(times.len() - 1)].as_micros() as u64;
+            let outside = result.p50_us.saturating_sub(runs.0);
+            println!(
+                "  the inbox's transactions p50 {} µs, p99 {} µs, their flush included; one like them without its flush p50 {} µs; the drive's flush alone, {FLUSHES} times 4 KiB written and synced as a commit syncs it: p50 {} µs, p99 {} µs",
+                runs.0,
+                runs.1,
+                at(&bare, 50),
+                at(&flush, 50),
+                at(&flush, 99),
+            );
+            println!(
+                "  so jawd's own work in a round trip is about {} µs at p50: {outside} µs outside the inbox's transaction, and {} µs of the transaction's own",
+                outside + at(&bare, 50),
+                at(&bare, 50),
+            );
+        }
         Ok(())
     });
     let _ = std::fs::remove_dir_all(&scratch);
     outcome
 }
+
+/// How many times the drive's flush, and a transaction without it, are timed alone.
+const FLUSHES: usize = 500;
 
 /// A day's worth of work at once: a backlog of made-up downloads (1 to 5 ms each), interactive ones
 /// arriving every 3 ms while it runs, transcodes, and sends across 50 chats; then the pools' table.
@@ -595,7 +701,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
-        let started = start(home.path(), lock, EngineKind::Demo, true).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path()), true).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let store = started.state.store().unwrap().clone();
         let chat = "120363012345678901@g.us";
@@ -674,7 +780,7 @@ mod tests {
         let socket = jaw_proto::local::socket(home.path());
         let (lock, _listener) = open(home.path(), &socket).unwrap();
         assert!(socket.exists());
-        let failed = start_on(home.path(), &socket, lock, EngineKind::Demo, true).await;
+        let failed = start_on(home.path(), &socket, lock, engine(EngineKind::Demo, home.path()), true).await;
         assert!(failed.is_err(), "jaw.db isn't one");
         assert!(!socket.exists(), "the socket went with the start that failed");
     }
