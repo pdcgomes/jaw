@@ -1,9 +1,10 @@
 //! The client side of jaw's protocol, for every Rust interface: `Client`, a connection with threads
 //! of its own that never makes its caller wait and reconnects by itself; the window models it
-//! feeds, `Chats` and `Messages`; and `Connection`, which asks and waits, for commands such as
-//! `jaw status`.
+//! feeds, `Chats` and `Messages`; `Connection`, which asks and waits, for commands such as
+//! `jaw status`; and `usage`, what a process costs, for the benches.
 
 mod client;
+pub mod usage;
 mod window;
 
 pub use client::{Client, Config, Event, Failure, Frame, Stats, WindowId};

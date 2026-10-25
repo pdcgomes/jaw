@@ -8,6 +8,11 @@ pub fn home() -> PathBuf {
     if let Some(home) = std::env::var_os("JAW_HOME") {
         return PathBuf::from(home);
     }
+    platform()
+}
+
+/// Where jaw keeps its files when `JAW_HOME` doesn't say: the folder that holds your account.
+pub fn platform() -> PathBuf {
     let user = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
     if cfg!(target_os = "macos") {
         return user.join("Library/Application Support/jaw");
