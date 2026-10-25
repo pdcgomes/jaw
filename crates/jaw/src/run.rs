@@ -43,6 +43,13 @@ pub struct Probe {
     /// When the first frame with the open chat's messages was drawn.
     pub first: Option<Instant>,
     pub last: Option<Instant>,
+    /// How long each chat a key opened took to show its messages, from the key.
+    pub opens: Vec<Duration>,
+    /// Whether the loop ends once the first frame with messages is drawn.
+    pub until_first: bool,
+    /// The frames drawn from this moment on.
+    pub from: Option<Instant>,
+    pub frames_from: u64,
 }
 
 /// Runs the view until it quits or the channel closes.
@@ -59,6 +66,8 @@ where
     let mut waiting: VecDeque<Update> = VecDeque::new();
     let mut keys: Vec<Instant> = vec![];
     let mut last_frame: Option<Instant> = None;
+    // The chat the last key opened, and when, until its messages are drawn.
+    let mut opening: Option<(String, Instant)> = None;
     loop {
         let now = Instant::now();
         let deadline = if !waiting.is_empty() {
@@ -80,12 +89,20 @@ where
             },
             None => rx.recv().ok(),
         };
-        let take = |e: Event, view: &mut View, waiting: &mut VecDeque<Update>, keys: &mut Vec<Instant>| match e {
+        let take = |e: Event,
+                    view: &mut View,
+                    waiting: &mut VecDeque<Update>,
+                    keys: &mut Vec<Instant>,
+                    opening: &mut Option<(String, Instant)>| match e {
             Event::Input(input, at) => {
                 let key = matches!(input, Input::Key(_) | Input::Paste(_));
+                let was = view.opened().map(str::to_string);
                 view.on_input(input);
                 if key {
                     keys.push(at);
+                    if let Some(now) = view.opened().filter(|now| was.as_deref() != Some(*now)) {
+                        *opening = Some((now.to_string(), at));
+                    }
                 }
             }
             Event::Update(u) => waiting.push_back(u),
@@ -94,11 +111,11 @@ where
             Event::Stop => view.quit = true,
         };
         if let Some(e) = first {
-            take(e, view, &mut waiting, &mut keys);
+            take(e, view, &mut waiting, &mut keys, &mut opening);
         }
         for _ in 0..10_000 {
             match rx.try_recv() {
-                Ok(e) => take(e, view, &mut waiting, &mut keys),
+                Ok(e) => take(e, view, &mut waiting, &mut keys, &mut opening),
                 Err(_) => break,
             }
         }
@@ -114,7 +131,7 @@ where
             view.apply(batch);
             // Input first: a key that came meanwhile is handled now and drawn next.
             while let Ok(e) = rx.try_recv() {
-                take(e, view, &mut waiting, &mut keys);
+                take(e, view, &mut waiting, &mut keys, &mut opening);
             }
         }
         for e in view.take_effects() {
@@ -139,11 +156,22 @@ where
             let drawn = Instant::now();
             last_frame = Some(drawn);
             probe.frames += 1;
+            probe.frames_from += u64::from(probe.from.is_some_and(|from| drawn >= from));
             probe.last = Some(drawn);
             if probe.first.is_none() && view.showing_messages() {
                 probe.first = Some(drawn);
             }
             probe.keys.extend(keys.drain(..).map(|at| drawn - at));
+            if let Some((chat, at)) = opening.take() {
+                if view.opened() == Some(chat.as_str()) && view.showing_messages() {
+                    probe.opens.push(drawn - at);
+                } else {
+                    opening = Some((chat, at));
+                }
+            }
+            if probe.until_first && probe.first.is_some() {
+                return Ok(());
+            }
         }
     }
 }

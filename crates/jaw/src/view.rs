@@ -394,6 +394,11 @@ impl View {
             && (self.reach != Reach::Up || self.linked == Some(false) || self.chats.loaded)
     }
 
+    /// The chat open in the conversation.
+    pub fn opened(&self) -> Option<&str> {
+        self.open.as_deref()
+    }
+
     /// Whether the open chat's messages are on screen, which is when the first frame is done.
     pub fn showing_messages(&self) -> bool {
         self.messages.as_ref().is_some_and(|w| w.loaded) || (self.reach == Reach::Up && self.chats.is_empty())

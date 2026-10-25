@@ -81,12 +81,27 @@ enum Command {
         width: u16,
         #[arg(long, default_value_t = 40)]
         height: u16,
-        /// Presses the keys in the palette, which searches at each one
-        #[arg(long)]
-        palette: bool,
+        /// What the keys do: type and act, find in the palette, walk the chat list, or nothing
+        #[arg(long, value_enum, default_value_t = bench::Keys::Typing)]
+        keys: bench::Keys,
+        /// Milliseconds between two keys
+        #[arg(long, default_value_t = 12)]
+        every: u64,
+        /// Seconds before the keys begin, so they're measured once things are steady
+        #[arg(long, default_value_t = 1.0)]
+        warm: f64,
         /// Floods a real jawd, `jawd bench feed`'s made-up account on a folder of its own
         #[arg(long)]
         jawd: bool,
+        /// Draws the jawd on this socket as it is, such as `jawd demo`'s, rather than flooding one
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+        /// Stops at the first frame with a conversation, timing jaw's start
+        #[arg(long)]
+        first: bool,
+        /// Writes the report to this file as JSON as well
+        #[arg(long)]
+        json: Option<std::path::PathBuf>,
         /// What pictures are drawn with: kitty, iterm, sixel, blocks or none
         #[arg(long, default_value = "blocks", value_parser = graphics::Protocol::parse)]
         graphics: graphics::Protocol,
@@ -144,21 +159,42 @@ fn main() -> Result<()> {
             print!("{frame}");
             Ok(())
         }
-        Some(Command::Bench { rate, seconds, width, height, palette, jawd, graphics, voice, library }) => {
+        Some(Command::Bench {
+            rate,
+            seconds,
+            width,
+            height,
+            keys,
+            every,
+            warm,
+            jawd,
+            socket,
+            first,
+            json,
+            graphics,
+            voice,
+            library,
+        }) => {
             let flood = bench::Flood {
                 width,
                 height,
                 rate,
                 seconds,
-                every: Duration::from_millis(12),
-                warm: Duration::from_secs(1),
-                palette,
-                jawd,
+                every: Duration::from_millis(every.max(1)),
+                warm: Duration::from_secs_f64(warm),
+                keys,
+                jawd: jawd || socket.is_some(),
+                socket,
+                until_first: first,
                 pictures: graphics,
                 voice,
                 library,
             };
-            println!("{}", bench::flood(&flood)?.describe());
+            let report = bench::flood(&flood)?;
+            println!("{}", report.describe());
+            if let Some(path) = json {
+                std::fs::write(&path, serde_json::to_vec_pretty(&report.json())?)?;
+            }
             Ok(())
         }
         Some(Command::Agent(action)) => agent::run(action),
