@@ -40,7 +40,7 @@ For a release build, use `cargo build --release` and `target/release/…`; jawd 
 3. **Converts what the spike kept raw:** 84,394 history rows become about 84,540 messages in 450 chats. What isn't a message (997 edits, 21 live-location positions, 7 receipt-only shells) is kept whole, not dropped.
 4. **Fetches app state again in full** (pins, archives, mutes, read marks), since the last stop wasn't a clean one by this jawd's standards. Watch for the log line "fetched app state again in full in N s"; its cost on a real account hasn't been measured.
 5. **Catches up** on what arrived while nothing was running, then notifies once with a summary, such as "12 new messages in 4 chats".
-6. jaw may show "not linked" for a moment until the engine reports, if `linked-at-hello` hasn't landed yet; it moves on by itself.
+6. jaw may show "not linked" for a moment until the engine reports, since your `jaw.db` doesn't know the account yet; it moves on by itself, and later starts say linked before the engine reports.
 
 Reading every chat afterwards owes about 69 read receipts, one per unread message, and none for the history.
 

@@ -53,6 +53,7 @@ enum EngineKind {
     /// A made-up account, for trying jaw out and for tests
     Demo,
     /// The made-up account's engine with no device, as after a logout while jawd was off, for tests
+    #[value(hide = true)]
     DemoUnlinked,
 }
 

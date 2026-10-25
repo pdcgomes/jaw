@@ -226,7 +226,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `focus` | `focused` | |
 | `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes |
 | `link.cancel` | | |
-| `link.logout` | | Answered once the account is logged out and jawd has forgotten it; a `connection` push says `logged_out` (`logged out from jaw`) first |
+| `link.logout` | | Answered once the account is logged out and jawd has forgotten it; a `connection` push says `logged_out` (`logged out from jaw`), on the connection that asked just after the answer |
 | `chats.watch`, `messages.watch`, `roster.watch`, `folders.watch` | See Windows, and `since` and `have` when watching again | `watch`, `seq`, `total`, `rows`, `remove` (with `have`); `older` and `newer` for messages |
 | `watch.move` | `watch`, `around`, `before`, `after` | As its watch's, with only the rows the client lacks and `remove` |
 | `unwatch` | `watch` | |

@@ -378,6 +378,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::engine::supervisor::{Backoff, Supervisor};
     use crate::find::Finder;
     use crate::store::{Change, Lane, Message, Store};
     use crate::work::Priority;
@@ -501,8 +502,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_logout_jawd_asks_for_forgets_the_account_and_says_so_before_it_answers() {
-        use crate::engine::supervisor::{Backoff, Supervisor};
+    async fn a_logout_jawd_asks_for_is_answered_only_once_the_account_is_forgotten_with_a_synced_commit() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         let pedro = jaw_proto::Me {
@@ -523,23 +523,37 @@ mod tests {
         let state =
             State::new(home.path(), Ok(supervisor), Vec::new(), live, Some(store.clone()), broadcast::channel(16).0);
         tokio::spawn(serve(Arc::new(state.unwrap()), listener));
-        // On a thread of its own, so a push that never comes fails the test rather than hanging it.
-        let (tx, rx) = std::sync::mpsc::channel();
+        let hello = |socket: std::path::PathBuf| {
+            tokio::task::spawn_blocking(move || jaw_client::Connection::open(&socket, "test", "0.0.0").unwrap())
+        };
+        let (mut connection, welcome) = hello(socket.clone()).await.unwrap();
+        assert_eq!(welcome.account.state, AccountState::Linked);
+        // jaw.db's write lock, held from outside, so the account can't be forgotten until it's let go.
+        let holder = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let synced = store.storage().synced_commits;
+        // On a thread of its own, so an answer or a push that never comes fails the test rather than
+        // hanging it.
+        let (answered, mut answer) = tokio::sync::oneshot::channel();
+        let (told, tell) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
-            let (mut connection, welcome) = jaw_client::Connection::open(&socket, "test", "0.0.0").unwrap();
-            assert_eq!(welcome.account.state, AccountState::Linked);
-            connection.call("link.logout", Value::Null).unwrap();
-            let _ = tx.send(connection.push().unwrap());
+            let _ = answered.send(connection.call("link.logout", Value::Null).map_err(|e| e.to_string()));
+            let _ = told.send(connection.push().unwrap());
         });
-        let told = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(5)))
-            .await
-            .unwrap()
-            .expect("interfaces were told");
-        assert_eq!(told.method, "connection", "told before the answer");
+        let early = tokio::time::timeout(Duration::from_millis(400), &mut answer).await;
+        assert!(early.is_err(), "answered while jaw.db couldn't forget the account: {early:?}");
+        holder.execute_batch("COMMIT").unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(5), answer).await.expect("answered once it could");
+        assert_eq!(answer.unwrap(), Ok(json!({})));
+        assert_eq!(store.storage().synced_commits - synced, 1, "the account forgotten with a synced commit");
+        let told = tokio::time::timeout(Duration::from_secs(5), tell).await.expect("interfaces were told").unwrap();
+        assert_eq!(told.method, "connection");
         let told: jaw_proto::Connection = serde_json::from_value(told.params).unwrap();
         assert_eq!((told.state, told.reason.as_deref()), (ConnectionState::LoggedOut, Some("logged out from jaw")));
         assert_eq!(store.remembered("account").unwrap().as_deref(), Some(""), "jaw.db forgot the account");
         assert_eq!(crate::sync::starting(&store, true).account.state, AccountState::Unlinked, "so the next start says");
+        let (_, welcome) = hello(socket).await.unwrap();
+        assert_eq!(welcome.account, jaw_proto::Account { state: AccountState::Unlinked, me: None }, "and a hello now");
     }
 
     #[tokio::test(flavor = "multi_thread")]
