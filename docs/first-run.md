@@ -37,7 +37,7 @@ For a release build, use `cargo build --release` and `target/release/…`; jawd 
 
 1. **Backs up `jaw.db`** whole and synced, to `jaw.db.before-v…` beside it, before the first data step. The backup is kept for 30 days (the newest only), and `jaw status` shows it.
 2. **Upgrades from version 1** through every migration, each checked by its schema fingerprint and foreign keys; on a copy of your database this took about 5.5 s.
-3. **Converts what the spike kept raw:** 84,394 history rows become about 84,540 messages in 450 chats. What isn't a message (997 edits, 21 live-location positions, 7 receipt-only shells) is kept whole, not dropped.
+3. **Converts what the spike kept raw,** once the engine has connected and said which account is linked: your own reactions, mentions of you and your messages' ticks in groups need your JIDs, which the spike's `jaw.db` doesn't have, so until then it all waits where it is (the log says so, and `jaw status` counts it). 84,394 history rows become about 84,540 messages in 450 chats. What isn't a message (997 edits, 21 live-location positions, 7 receipt-only shells) is kept whole, not dropped.
 4. **Fetches app state again in full** (pins, archives, mutes, read marks), since the last stop wasn't a clean one by this jawd's standards. Watch for the log line "fetched app state again in full in N s"; its cost on a real account hasn't been measured.
 5. **Catches up** on what arrived while nothing was running, then notifies once with a summary, such as "12 new messages in 4 chats".
 6. jaw may show "not linked" for a moment until the engine reports, since your `jaw.db` doesn't know the account yet; it moves on by itself, and later starts say linked before the engine reports.
