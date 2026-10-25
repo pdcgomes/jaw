@@ -1251,6 +1251,38 @@ async fn identical_windows_on_several_connections_share_each_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_connection_takes_another_ones_read_only_if_it_has_every_change_heard_of() {
+    // Reads 400 ms apart, so one connection's window waits for its next read while another's reads.
+    let timing = Timing { quiet: ms(1), burst: ms(400), ..brisk() };
+    let bed = Bed::new(timing);
+    let (known, new) = (person(DIRECT), person(DIRECT + 2));
+    bed.apply(vec![Change::Message(text(GROUP, "g1", 1_000, Some(&known), "hi"))]).await;
+    let want = Want::Messages { chat: GROUP.into(), anchor: None, before: 10, after: 0 };
+    let (mut waiting, mut reading) = (bed.watcher(64), bed.watcher(64));
+    let waiting_watched = watch_all(&mut waiting, std::slice::from_ref(&want)).await;
+    let reading_watched = watch_all(&mut reading, &[want]).await;
+
+    // One connection reads the group, and a burst later the other takes that read, which keeps it
+    // from reading again for a burst.
+    let seq = bed.apply(vec![Change::Message(text(GROUP, "g2", 2_000, Some(&known), "again"))]).await;
+    reading.settle(seq).await;
+    tokio::time::sleep(timing.burst + ms(50)).await;
+    waiting.settle(seq).await;
+
+    // Someone new writes, and the connection free to read reads their message; their name comes a
+    // moment later, which doesn't touch the group as the waiting connection holds it, since they
+    // hadn't written there. Its window has to come with the name all the same.
+    let seq = bed.apply(vec![Change::Message(text(GROUP, "g3", 3_000, Some(&new), "I'm new here"))]).await;
+    reading.settle(seq).await;
+    let named = Person { jids: vec![new.clone()], name: Some("Rita Sousa".into()), ..Person::default() };
+    let seq = bed.apply(vec![Change::Person(named)]).await;
+    waiting.settle(seq).await;
+    check(&bed, &waiting, &waiting_watched, "the connection that waited for its read").await;
+    reading.settle(seq).await;
+    check(&bed, &reading, &reading_watched, "the connection that read first").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_chat_list_owed_a_reorder_is_read_at_its_pace_while_its_reads_fail() {
     let bed = Bed::new(brisk());
     let seeding = (0..5).map(|n| {

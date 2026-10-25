@@ -8,10 +8,10 @@
 //! failed for `Timing::behind` is dropped the same way.
 //!
 //! Connections watching the same window (the same folder or chat, anchor and stretch) share its
-//! reads: a flush takes the window's last read if it has every change that marked the window, or
-//! the read under way if that was asked for since, or else asks for one that the others can take
-//! in turn, and each connection diffs it against its own hashes. So a commit costs a read for each
-//! distinct window, however many interfaces watch it.
+//! reads: a flush takes the window's last read if it has every change the connection has heard
+//! of, or the read under way if that was asked for since, or else asks for one that the others can
+//! take in turn, and each connection diffs it against its own hashes. So a commit costs a read for
+//! each distinct window, however many interfaces watch it.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -59,6 +59,8 @@ pub struct Client {
     shared: Arc<Shared>,
     /// The seq hello said the interface last saw, for the watches it sends again.
     since: Option<u64>,
+    /// The newest change it has heard of from the feed.
+    heard: i64,
     windows: BTreeMap<String, Window>,
     next: u64,
     /// Since when a flush has waited for room in the queue.
@@ -464,10 +466,11 @@ impl Window {
         self.owed = Some(self.owed.map_or(seq, |owed| owed.max(seq)));
     }
 
-    /// The seq a read must have every change up to for this window to take it: the newest change
-    /// waiting, and never older than what its interface holds.
-    fn owed(&self) -> i64 {
-        self.owed.unwrap_or(self.state.fresh).max(self.state.fresh)
+    /// The seq a read must have every change up to for this window to take it: every change its
+    /// connection has `heard` of, since those that didn't mark it were judged by the rows it held
+    /// and may touch the rows a newer read brings, and never older than what its interface holds.
+    fn owed(&self, heard: i64) -> i64 {
+        self.owed.unwrap_or(heard).max(heard).max(self.state.fresh)
     }
 
     /// When the changes waiting are due: the first after the window has gone unread for `burst` at
@@ -549,6 +552,7 @@ impl Client {
             out,
             shared,
             since: None,
+            heard: 0,
             windows: BTreeMap::new(),
             next: 1,
             blocked: None,
@@ -774,6 +778,7 @@ impl Client {
     }
 
     fn mark(&mut self, changes: &Changes) {
+        self.heard = self.heard.max(changes.seq);
         for window in self.windows.values_mut() {
             if window.touched_by(changes) {
                 window.wait(changes.at, changes.seq);
@@ -828,7 +833,7 @@ impl Client {
                 .then(|| window.state.held.values().map(|held| held.n).collect());
             let reordered = only.is_none().then_some(now);
             let read = match only {
-                None => self.shared(&window.slot.clone(), window.owed()).await,
+                None => self.shared(&window.slot.clone(), window.owed(self.heard)).await,
                 Some(only) => {
                     let read = self.snapshot(window.spec.clone(), Some(only)).await;
                     self.shared.reads.fetch_add(1, Ordering::Relaxed);
