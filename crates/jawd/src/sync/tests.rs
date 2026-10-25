@@ -131,12 +131,17 @@ async fn drained(store: &Store) {
     until("the inbox to empty", || store.count("inbox").unwrap() == 0).await;
 }
 
+/// Live state as jawd has it once jaw.db keeps the account's JIDs.
+fn knowing() -> Shared {
+    let live: Shared = Arc::default();
+    live.lock().unwrap().me.send_replace(me());
+    live
+}
+
 /// The converter running on `store` as jawd runs it.
 fn converting(store: &Store) -> tokio::task::JoinHandle<()> {
-    let live: Shared = Arc::default();
-    live.lock().unwrap().me = me();
     let (offered, _) = mpsc::unbounded_channel();
-    tokio::spawn(drain::inbox(store.clone(), live, offered, Avatars::new(), Merges::default()))
+    tokio::spawn(drain::inbox(store.clone(), knowing(), offered, Avatars::new(), Merges::default()))
 }
 
 fn scalar(home: &Path, sql: &str) -> i64 {
@@ -233,8 +238,7 @@ async fn history_kept_raw_by_an_earlier_jawd_is_converted_and_removed() {
         }
         db.execute("INSERT INTO history_raw (chat, id, at, raw) VALUES (?1, 'broken', 0, x'ffff')", [ANA]).unwrap();
     }
-    let live: Shared = Arc::default();
-    drain::history_raw(store.clone(), live).await;
+    drain::history_raw(store.clone(), knowing()).await;
     assert_eq!(store.count("messages").unwrap(), 2_500);
     assert_eq!(store.count("history_raw").unwrap(), 1, "what doesn't decode stays raw");
     let chats = query(&store, |db| read::chats(db, false, None, 10)).await;
@@ -295,7 +299,7 @@ async fn history_kept_raw_that_doesnt_become_a_message_is_kept_whole() {
             .unwrap();
         }
     }
-    drain::history_raw(store.clone(), Arc::default()).await;
+    drain::history_raw(store.clone(), knowing()).await;
     assert_eq!(store.count("history_raw").unwrap(), 0);
     let kept: Vec<(String, Vec<u8>)> = query(&store, |db| {
         Ok(db
@@ -316,6 +320,198 @@ async fn history_kept_raw_that_doesnt_become_a_message_is_kept_whole() {
     assert_eq!(kept, expected, "each kept as it was, and the message that became a row isn't kept twice");
     let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
     assert_eq!(rows.iter().map(|r| r.summary.as_str()).collect::<Vec<_>>(), ["said better"]);
+}
+
+/// Migration 1, as the spike ran it on 16 October: the engine's events kept raw, and history as it
+/// came. A jaw.db at version 1 holds nothing else, the account's JIDs included.
+const VERSION_1: &str = "
+    CREATE TABLE inbox (
+        seq INTEGER PRIMARY KEY,
+        kind TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        payload BLOB NOT NULL
+    );
+    CREATE TABLE history_raw (
+        chat TEXT NOT NULL,
+        id TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        raw BLOB NOT NULL,
+        PRIMARY KEY (chat, id)
+    ) WITHOUT ROWID;
+    ";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_version_1_jaw_db_holds_waits_for_the_accounts_jids_and_is_converted_with_them() {
+    const RUI: &str = "351910000003@s.whatsapp.net";
+    let connected = crate::engine::demo::connected();
+    let account = match &connected.kind {
+        Some(pb::event::Kind::Connection(said)) => said.jid.clone(),
+        _ => unreachable!("the demo engine says it's connected"),
+    };
+    let mentioning = |words: &str| e2e::Message {
+        extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
+            text: Some(words.into()),
+            context_info: Some(Box::new(e2e::ContextInfo {
+                mentioned_jid: vec![account.clone()],
+                ..Default::default()
+            })),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let reaction = |chat: &str, id: &str, participant: Option<&str>, emoji: &str| e2e::Message {
+        reaction_message: Some(e2e::ReactionMessage {
+            key: Some(MessageKey {
+                remote_jid: Some(chat.into()),
+                from_me: Some(false),
+                id: Some(id.into()),
+                participant: participant.map(str::to_string),
+            }),
+            text: Some(emoji.into()),
+            sender_timestamp_ms: Some(AT),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let read_by = |reader: &str, at: i64| pb::Receipt {
+        chat: GROUP.into(),
+        sender: reader.into(),
+        group: true,
+        ids: vec!["mine".into()],
+        timestamp_ms: at,
+        r#type: "read".into(),
+        ..Default::default()
+    };
+    let members = [account.as_str(), ANA, RUI].map(|jid| pb::Participant { jid: jid.into(), ..Default::default() });
+    let group = pb::GroupInfo {
+        jid: GROUP.into(),
+        name: "Climbing".into(),
+        participants: members.into(),
+        ..Default::default()
+    };
+    // What the spike's engine handed over: your reactions, from your phone, to a message of Ana's,
+    // to Rui's in the group, and to one of Ana's that comes after it; Rui mentioning you; and a
+    // message of yours in the group, which both the others read.
+    let inbox: Vec<(&str, Vec<u8>)> = vec![
+        ("group", group.encode_to_vec()),
+        ("message", live_message(ANA, ANA, "a1", AT + 20_000, text("did you get the photos?")).encode_to_vec()),
+        ("message", live_message(ANA, "", "ra1", AT + 21_000, reaction(ANA, "a1", None, "❤")).encode_to_vec()),
+        ("message", live_message(GROUP, RUI, "g1", AT + 10_000, mentioning("are you in?")).encode_to_vec()),
+        (
+            "message",
+            live_message(GROUP, "", "rg1", AT + 11_000, reaction(GROUP, "g1", Some(RUI), "👍")).encode_to_vec(),
+        ),
+        ("message", live_message(GROUP, "", "mine", AT, text("on my way")).encode_to_vec()),
+        ("receipt", read_by(ANA, AT + 30_000).encode_to_vec()),
+        ("receipt", read_by(RUI, AT + 31_000).encode_to_vec()),
+        ("message", live_message(ANA, "", "rlater", AT + 41_000, reaction(ANA, "later", None, "🙏")).encode_to_vec()),
+        ("message", live_message(ANA, ANA, "later", AT + 40_000, text("and the lake")).encode_to_vec()),
+    ];
+    // And the history it kept raw: a message of Ana's you reacted to, and Rui mentioning you.
+    let h1 = WebMessageInfo {
+        key: MessageKey {
+            remote_jid: Some(ANA.into()),
+            from_me: Some(false),
+            id: Some("h1".into()),
+            participant: None,
+        },
+        message: Some(text("from before")),
+        message_timestamp: Some(((AT - 200_000) / 1000) as u64),
+        reactions: vec![wa_proto::wa_web_protobufs_web::Reaction {
+            key: Some(MessageKey {
+                remote_jid: Some(ANA.into()),
+                from_me: Some(true),
+                id: Some("rh1".into()),
+                participant: None,
+            }),
+            text: Some("😂".into()),
+            sender_timestamp_ms: Some(AT - 199_000),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let h2 = WebMessageInfo {
+        key: MessageKey {
+            remote_jid: Some(GROUP.into()),
+            from_me: Some(false),
+            id: Some("h2".into()),
+            participant: Some(RUI.into()),
+        },
+        message: Some(mentioning("you said Saturday?")),
+        message_timestamp: Some(((AT - 100_000) / 1000) as u64),
+        ..Default::default()
+    };
+    let history = [(ANA, "h1", h1), (GROUP, "h2", h2)];
+    let home = tempfile::tempdir().unwrap();
+    {
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.execute_batch(VERSION_1).unwrap();
+        db.pragma_update(None, "user_version", 1).unwrap();
+        for (kind, payload) in &inbox {
+            db.execute("INSERT INTO inbox (kind, at, payload) VALUES (?1, 0, ?2)", rusqlite::params![kind, payload])
+                .unwrap();
+        }
+        for (chat, id, info) in &history {
+            db.execute(
+                "INSERT INTO history_raw (chat, id, at, raw) VALUES (?1, ?2, 0, ?3)",
+                rusqlite::params![chat, id, info.encode_to_vec()],
+            )
+            .unwrap();
+        }
+    }
+    let store = Store::open(home.path()).unwrap();
+    let (events, incoming) = mpsc::channel(8);
+    let home_path = home.path().to_path_buf();
+    let running = tokio::spawn(run(incoming, store.clone(), Arc::default(), broadcast::channel(16).0, None, home_path));
+    // An engine says which account is linked once it has connected, a while after jawd starts.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        (store.count("inbox").unwrap(), store.count("history_raw").unwrap()),
+        (inbox.len() as u64, history.len() as u64),
+        "nothing is converted before jaw.db keeps the account's JIDs"
+    );
+    events.send(crate::engine::Incoming { event: connected, ack: None }).await.unwrap();
+    until("what the spike left to be converted", || {
+        store.count("inbox").unwrap() == 0 && store.count("history_raw").unwrap() == 0
+    })
+    .await;
+    running.abort();
+    assert_eq!(store.remembered(ME).unwrap().as_deref(), Some(account.as_str()));
+    let reactions: Vec<(String, String, bool, String)> = query(&store, |db| {
+        Ok(db
+            .prepare(
+                "SELECT m.id, r.emoji, r.mine, j.jid FROM reactions r JOIN messages m ON m.n = r.message
+                JOIN person_jids j ON j.n = r.sender ORDER BY m.id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    let yours = |id: &str, emoji: &str| (id.to_string(), emoji.to_string(), true, account.clone());
+    assert_eq!(
+        reactions,
+        [yours("a1", "❤"), yours("g1", "👍"), yours("h1", "😂"), yours("later", "🙏")],
+        "every reaction of yours is kept, as yours"
+    );
+    let mentioning_you: Vec<String> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT id FROM messages WHERE mentions_me ORDER BY id")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    assert_eq!(mentioning_you, ["g1", "h2"]);
+    let chats = query(&store, |db| read::chats(db, false, None, 10)).await;
+    let climbing = chats.iter().find(|c| c.id == GROUP).unwrap();
+    assert_eq!(
+        (climbing.unread, climbing.mentions),
+        (1, 1),
+        "Rui's mention came after your message; history's is read"
+    );
+    let rows = query(&store, |db| read::messages(db, GROUP, Around::Newest, 10)).await;
+    let mine = rows.iter().find(|r| r.id == "mine").unwrap();
+    assert_eq!(mine.status.as_deref(), Some("read"), "read by everyone in the group but you");
+    assert_eq!((store.count("pending").unwrap(), store.count("quarantine").unwrap()), (0, 0));
 }
 
 fn app_state(index: &[&str], f: impl FnOnce(&mut action::SyncActionValue)) -> Vec<u8> {
@@ -1146,7 +1342,7 @@ async fn a_history_blob_that_cant_be_had_yet_waits_behind_the_ones_after_it_and_
         offers,
         store.clone(),
         supervisor,
-        Arc::default(),
+        knowing(),
         home.path().join("spool"),
         Merges::default(),
     ));
@@ -1193,7 +1389,7 @@ async fn a_history_blob_the_engine_couldnt_ask_for_is_never_quarantined() {
         offers,
         store.clone(),
         supervisor,
-        Arc::default(),
+        knowing(),
         home.path().join("spool"),
         Merges::default(),
     ));
@@ -1225,8 +1421,7 @@ async fn a_restart_before_a_blobs_drain_uses_the_blob_in_the_spool_again_without
     let engine = Scripted::default();
     let (supervisor, _incoming) = supervised(&engine);
     let (offered, offers) = mpsc::unbounded_channel();
-    let fetching =
-        tokio::spawn(fetch::run(offers, store.clone(), supervisor, Arc::default(), spool, Merges::default()));
+    let fetching = tokio::spawn(fetch::run(offers, store.clone(), supervisor, knowing(), spool, Merges::default()));
     offered.send(offer(1, "here")).unwrap();
     until("the notification's drain", || store.count("inbox").unwrap() == 0).await;
     fetching.abort();
@@ -1297,7 +1492,10 @@ async fn an_account_linked_at_the_last_connection_starts_linked_and_connecting()
     assert_eq!(live.account, Account { state: AccountState::Linked, me: Some(pedro.clone()) });
     assert_eq!(live.connection.state, ConnectionState::Connecting, "linked, connecting");
     assert_eq!(starting(&store, false).connection.state, ConnectionState::Offline, "with no engine to connect");
-    assert!(live.me.jids.contains(&"351910000001@s.whatsapp.net".to_string()), "its own JIDs, for mentions of it");
+    assert!(
+        live.me.borrow().jids.contains(&"351910000001@s.whatsapp.net".to_string()),
+        "its own JIDs, for mentions of it"
+    );
     let (live, _) = after(&store, home.path(), live, vec![connection_event(State::Connecting)]).await;
     let live = live.lock().unwrap();
     assert_eq!(live.account, Account { state: AccountState::Linked, me: Some(pedro) }, "as the engine says too");

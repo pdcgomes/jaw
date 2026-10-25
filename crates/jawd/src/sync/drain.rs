@@ -3,7 +3,8 @@
 //! converts it again and nothing twice. What was left from before jawd started goes in the
 //! background lane; what arrives live goes in the live lane, a few dozen at a time so the inbox's
 //! own commits are never held up for long. History kept raw by an earlier jawd is converted
-//! the same way, in the background lane, alongside.
+//! the same way, in the background lane, alongside. Neither converts anything until jaw.db keeps
+//! the account's own JIDs, which the engine says when it connects; until then the rows wait.
 
 use std::time::Instant;
 
@@ -252,7 +253,7 @@ pub async fn inbox(
         .await
         .unwrap_or_default();
     let mut after = 0;
-    let started = Instant::now();
+    let mut started = None;
     let mut leftovers = 0usize;
     let mut swept = false;
     let mut pause = RETRY_FIRST;
@@ -273,7 +274,7 @@ pub async fn inbox(
             if leftovers > 0 {
                 eprintln!(
                     "jawd: converted {leftovers} inbox rows left from before in {:.1} s",
-                    started.elapsed().as_secs_f64()
+                    started.map_or(0.0, |started: Instant| started.elapsed().as_secs_f64())
                 );
                 leftovers = 0;
             }
@@ -282,7 +283,10 @@ pub async fn inbox(
         };
         let from_before = last <= left;
         let count = rows.len();
-        let me = live.lock().expect("live state").me.clone();
+        let me = super::stored_me(&live, "the inbox").await;
+        if from_before {
+            started.get_or_insert_with(Instant::now);
+        }
         let Ok(converted) = tokio::task::spawn_blocking(move || convert_rows(&rows, &me)).await else { continue };
         let applied = if from_before {
             store.apply(Lane::Background, converted.changes).await.map(|applied| applied.quarantined)
@@ -348,7 +352,7 @@ async fn apply_live(store: &Store, mut changes: Vec<Change>) -> anyhow::Result<u
 /// Converts the history an earlier jawd kept raw, HISTORY_READ rows at a time, deleting each row
 /// in the transaction its message goes in.
 pub async fn history_raw(store: Store, live: Shared) {
-    let started = Instant::now();
+    let mut started = None;
     let mut converted = 0usize;
     let mut after = (String::new(), String::new());
     loop {
@@ -377,7 +381,8 @@ pub async fn history_raw(store: Store, live: Shared) {
         };
         let count = rows.len();
         let last = rows.last().map(|(chat, id, _)| (chat.clone(), id.clone()));
-        let me = live.lock().expect("live state").me.clone();
+        let me = super::stored_me(&live, "the history kept raw").await;
+        started.get_or_insert_with(Instant::now);
         let Ok(changes) = tokio::task::spawn_blocking(move || history_rows(rows, &me)).await else { return };
         match store.apply(Lane::Background, changes).await {
             Ok(applied) => {
@@ -396,7 +401,7 @@ pub async fn history_raw(store: Store, live: Shared) {
             }
         }
     }
-    if converted > 0 {
+    if let Some(started) = started.filter(|_| converted > 0) {
         let seconds = started.elapsed().as_secs_f64();
         eprintln!(
             "jawd: converted {converted} messages of history kept raw in {seconds:.1} s, {:.0} a second",

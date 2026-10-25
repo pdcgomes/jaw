@@ -47,14 +47,18 @@ impl Running {
         Running::timed(home, world, engine, true, quick()).await
     }
 
-    /// With the demo engine running but never connected to WhatsApp, until the test says so.
+    /// With the demo engine running but never connected to WhatsApp, until the test says so, for
+    /// an account linked in an earlier run, whose JIDs jaw.db keeps.
     async fn unconnected(home: &Path) -> Running {
         Running::timed(home, Arc::default(), true, false, quick()).await
     }
 
     async fn timed(home: &Path, world: Arc<World>, engine: bool, connect: bool, timing: Timing) -> Running {
         let store = Store::open(home).unwrap();
-        let live: crate::sync::Shared = Arc::default();
+        if engine && !connect {
+            store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+        }
+        let live: crate::sync::Shared = Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, engine)));
         let (pushes, _) = broadcast::channel(256);
         let (events, incoming) = mpsc::channel(1024);
         let supervisor = engine.then(|| {

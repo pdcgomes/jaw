@@ -171,7 +171,7 @@ async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, s
     let data =
         tokio::fs::read(&path).await.map_err(|e| Failed::Later(format!("can't read {}: {e}", path.display())))?;
     let bytes = data.len() as u64;
-    let me = live.lock().expect("live state").me.clone();
+    let me = super::stored_me(live, "history from the phone").await;
     let decoded = tokio::task::spawn_blocking(move || {
         let history = HistorySync::decode(data.as_slice())?;
         let parts = convert::history::blob(&history, &me);

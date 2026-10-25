@@ -20,7 +20,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use jaw_proto::sync::{Notice, Tone};
 use jaw_proto::{Account, AccountState, CatchUp, Connection, ConnectionState, HistoryProgress, LinkStep, Me, Push};
 use prost::Message as _;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 pub use self::avatars::Avatars;
 pub use self::merge::Merges;
@@ -37,8 +37,9 @@ pub struct Live {
     pub catch_up: Option<CatchUp>,
     catching_up: Option<Instant>,
     pub history: Option<HistoryProgress>,
-    /// The account's own JIDs, for mentions of it and its own reactions.
-    me: convert::Me,
+    /// The account's own JIDs, for mentions of it and its own reactions, once jaw.db keeps them;
+    /// nothing is converted until then (`stored_me`).
+    me: watch::Sender<convert::Me>,
     /// The chats messages arrived in while catching up, for the summary at the end.
     caught_chats: HashSet<String>,
     /// Merges whose steps kept failing, left until jawd starts again.
@@ -53,7 +54,7 @@ impl Default for Live {
             catch_up: None,
             catching_up: None,
             history: None,
-            me: convert::Me::default(),
+            me: watch::Sender::new(convert::Me::default()),
             caught_chats: HashSet::new(),
             merges_stuck: 0,
         }
@@ -115,7 +116,7 @@ pub async fn running(store: &Store) -> anyhow::Result<()> {
 pub fn starting(store: &Store, engine: bool) -> Live {
     let mut live = Live::default();
     if let Ok(Some(me)) = store.remembered(ME) {
-        live.me = convert::Me::new(me.split(' ').map(str::to_string));
+        live.me.send_replace(convert::Me::new(me.split(' ').map(str::to_string)));
     }
     let kept = store.remembered(ACCOUNT).ok().flatten().filter(|json| !json.is_empty());
     let account = kept.and_then(|json| match serde_json::from_str::<Me>(&json) {
@@ -153,14 +154,45 @@ pub async fn logged_out(
     Ok(())
 }
 
-/// Makes changes in the live lane without holding up the caller, saying if they fail.
-fn apply_soon(store: &Store, changes: Vec<Change>, what: &'static str) {
-    let store = store.clone();
+/// Keeps the account's JIDs in jaw.db without holding up the caller, trying again until they're
+/// in, and only then gives them to what converts: the store reads them there for a group
+/// message's ticks, so nothing may be converted with them before they're committed.
+fn remember(store: &Store, live: &Shared, me: convert::Me) {
+    let (store, live) = (store.clone(), live.clone());
     tokio::spawn(async move {
-        if let Err(e) = store.apply(Lane::Live, changes).await {
-            eprintln!("jawd: can't store {what}: {e:#}");
+        let mut pause = REMEMBERING_FIRST;
+        loop {
+            let kept = vec![Change::Remember { key: ME.into(), value: me.jids.join(" ") }];
+            let why = match store.apply(Lane::Live, kept).await {
+                Ok(applied) if applied.quarantined == 0 => break,
+                Ok(_) => "it was kept in quarantine".to_string(),
+                Err(e) => format!("{e:#}"),
+            };
+            eprintln!("jawd: can't store the account's JIDs, so they're tried again in {pause:?}: {why}");
+            tokio::time::sleep(pause).await;
+            pause = (pause * 2).min(REMEMBERING_MOST);
         }
+        live.lock().expect("live state").me.send_replace(me);
     });
+}
+
+/// How long storing the account's JIDs waits before trying again, at first and at most.
+const REMEMBERING_FIRST: std::time::Duration = std::time::Duration::from_millis(10);
+const REMEMBERING_MOST: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The account's own JIDs once jaw.db keeps them, waiting until it does. Nothing is converted
+/// without them: the account's own reactions are kept under its JID, mentions of it are found by
+/// them, and the store reads them for a group message's ticks. So `what` stays where it is, whole
+/// and in order, until the engine has said which account is linked.
+async fn stored_me(live: &Shared, what: &str) -> convert::Me {
+    let mut stored = live.lock().expect("live state").me.subscribe();
+    if stored.borrow().jids.is_empty() {
+        eprintln!(
+            "jawd: {what} waits until the engine says which account is linked: converting it needs the account's JIDs"
+        );
+    }
+    let me = stored.wait_for(|me| !me.jids.is_empty()).await.expect("live state keeps the account's JIDs");
+    me.clone()
 }
 
 /// Handles the engine's events until it stops sending them.
@@ -219,10 +251,7 @@ pub async fn run(
                     apply(&mut live, &connection);
                     let connected =
                         connection.state() == pb::connection::State::Connected && !connection.jid.is_empty();
-                    let me = connected.then(|| {
-                        live.me = convert::Me::new([connection.jid.clone(), connection.lid.clone()]);
-                        live.me.jids.join(" ")
-                    });
+                    let me = connected.then(|| convert::Me::new([connection.jid.clone(), connection.lid.clone()]));
                     let account = match connection.state() {
                         // Unlinked before, the account is already empty.
                         pb::connection::State::Unlinked | pb::connection::State::LoggedOut => {
@@ -257,7 +286,7 @@ pub async fn run(
                     }
                 }
                 if let Some(me) = me {
-                    apply_soon(&store, vec![Change::Remember { key: ME.into(), value: me }], "the account's JIDs");
+                    remember(&store, &live, me);
                     if let Some(engine) = &engine
                         && refreshed != Some(engine.status().restarts)
                     {
