@@ -829,27 +829,29 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_send_text(&chat, &text, &key, reply.as_deref(), &mentions));
     }
 
-    fn react(&mut self, message: &str, emoji: &str) {
+    // The made-up account's message IDs are its own and never shared, so it finds a message without
+    // its chat.
+    fn react(&mut self, _chat: &str, message: &str, emoji: &str) {
         let (message, emoji) = (message.to_string(), emoji.to_string());
         self.defer(move |a| a.on_react(&message, &emoji));
     }
 
-    fn edit(&mut self, message: &str, text: &str) {
+    fn edit(&mut self, _chat: &str, message: &str, text: &str) {
         let (message, text) = (message.to_string(), text.to_string());
         self.defer(move |a| a.on_edit(&message, &text));
     }
 
-    fn delete(&mut self, message: &str, everyone: bool) {
+    fn delete(&mut self, _chat: &str, message: &str, everyone: bool) {
         let message = message.to_string();
         self.defer(move |a| a.on_delete(&message, everyone));
     }
 
-    fn forward(&mut self, messages: &[String], to: &[String]) {
+    fn forward(&mut self, _chat: &str, messages: &[String], to: &[String]) {
         let (messages, to) = (messages.to_vec(), to.to_vec());
         self.defer(move |a| a.on_forward(&messages, &to));
     }
 
-    fn message_info(&mut self, message: &str) {
+    fn message_info(&mut self, _chat: &str, message: &str) {
         let message = message.to_string();
         self.defer(move |a| a.on_message_info(&message));
     }

@@ -2,9 +2,9 @@
 //! socket, merging each window's updates as they come, and wake the loop at most once a frame; the
 //! loop drains them here into the interface's `Update`s. What jawd turns down is said where the
 //! user acted, quietly: a message that wasn't sent goes back to the box, an action says why in the
-//! footer, and what goes on in the background (drafts, receipts, typing) says nothing. A message
-//! whose answer a dropped connection lost is asked for again with its key once jawd is back, and
-//! so are the drafts and read positions jawd hadn't answered for.
+//! footer, and what goes on in the background (drafts, receipts, typing) says nothing. A message or
+//! an action whose answer a dropped connection lost is asked for again with its key once jawd is
+//! back, and so are the drafts and read positions jawd hadn't answered for.
 
 use crate::data::{Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, Place, Typing, Update};
 use crate::run::Event;
@@ -22,8 +22,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 /// How long jaw waits for a jawd it started to answer before it says it can't reach it.
 const PATIENCE: Duration = Duration::from_secs(15);
-/// How long after a message was first asked for jaw asks for it again with its key. jawd keeps a
-/// key for a day, so past that a second ask could make a second message.
+/// How long after a message or an action was first asked for jaw asks for it again with its key.
+/// jawd keeps a key for a day, so past that a second ask could do it twice.
 const KEY_KEPT: Duration = Duration::from_secs(20 * 60 * 60);
 
 /// A message asked for with `send.text`, kept until jawd answers for it.
@@ -37,9 +37,33 @@ struct Sending {
     first: SystemTime,
 }
 
+/// An action on messages, `react`, `edit`, `delete` or `forward`, asked with a key made for it
+/// alone and kept until jawd answers for it, as a message is.
+struct Acting {
+    method: &'static str,
+    /// The chat its messages are in.
+    chat: String,
+    key: String,
+    params: Value,
+    /// What it is, as the footer names it: "reacting".
+    what: &'static str,
+    /// What the footer says once jawd has done it, if anything.
+    done: Option<String>,
+    /// When it was first asked for, by the wall clock, as a message's is.
+    first: SystemTime,
+}
+
+/// What a dropped connection lost the answer to, asked for again with its key once jawd is back,
+/// in the order it was first asked, so two edits of a message end as the second.
+enum Again {
+    Send(Sending),
+    Act(Acting),
+}
+
 /// What a request was, for what to say if jawd turns it down.
 enum Asked {
     Send(Box<Sending>),
+    Act(Box<Acting>),
     /// `send.retry` for a failed message.
     Retry,
     /// A chat's draft or read position: `draft.set` or `read`, asked again once jawd is back if the
@@ -54,8 +78,6 @@ enum Asked {
     Info(String),
     /// A chat's members, for completing `@` names; refused, the interface uses who it's seen.
     Members(String),
-    /// Forwarding to this many chats.
-    Forward(usize),
     /// The folder tree's window.
     Folders,
     /// A folder's roster window.
@@ -89,9 +111,9 @@ pub struct Wire {
     library: Option<(LibraryAsk, Option<String>)>,
     open: Option<(WindowId, String)>,
     asked: HashMap<u64, Asked>,
-    /// Messages whose answer the connection lost, to ask for again with their keys once jawd is
-    /// back.
-    again: Vec<Sending>,
+    /// Messages and actions whose answer the connection lost, to ask for again with their keys
+    /// once jawd is back.
+    again: Vec<Again>,
     /// The newest `draft.set` and `read` asked for each chat that jawd hasn't answered.
     owed: HashMap<(&'static str, String), Value>,
     /// The client's id for each `find`, to the interface's.
@@ -249,6 +271,24 @@ impl Wire {
         }
     }
 
+    /// Asks for an action on messages in `chat`, with a key of its own, so asking again after a
+    /// lost answer does it once.
+    fn act(&mut self, method: &'static str, chat: &str, mut params: Value, what: &'static str, done: Option<String>) {
+        let key = crate::data::key();
+        params["chat"] = json!(chat);
+        params["key"] = json!(key);
+        let acting = Acting {
+            method,
+            chat: chat.to_string(),
+            key,
+            params: params.clone(),
+            what,
+            done,
+            first: SystemTime::now(),
+        };
+        self.ask(method, params, Asked::Act(Box::new(acting)));
+    }
+
     /// Asks for a chat's draft or read position, which is owed until jawd answers for it.
     fn owe(&mut self, method: &'static str, chat: &str, params: Value) {
         self.owed.insert((method, chat.to_string()), params.clone());
@@ -263,17 +303,33 @@ impl Wire {
         }
     }
 
-    /// jawd is back: what the connection lost is asked for again, messages with their keys, so
-    /// jawd answers with any it already has rather than making another.
+    /// jawd is back: what the connection lost is asked for again, messages and actions with their
+    /// keys, so jawd answers for any it already has rather than doing it again.
     fn ask_again(&mut self, out: &mut Vec<Update>) {
-        for sending in std::mem::take(&mut self.again) {
-            if sending.first.elapsed().unwrap_or_default() > KEY_KEPT {
-                let why = "jawd was away too long to tell whether it went, so look in the chat before sending it again";
-                let Sending { chat, text, key, .. } = sending;
-                out.push(Update::Unsent { chat, key, text, why: why.into() });
-            } else {
-                let params = sending.params.clone();
-                self.ask("send.text", params, Asked::Send(Box::new(sending)));
+        let away = |first: SystemTime| first.elapsed().unwrap_or_default() > KEY_KEPT;
+        for again in std::mem::take(&mut self.again) {
+            match again {
+                Again::Send(sending) if away(sending.first) => {
+                    let why =
+                        "jawd was away too long to tell whether it went, so look in the chat before sending it again";
+                    let Sending { chat, text, key, .. } = sending;
+                    out.push(Update::Unsent { chat, key, text, why: why.into() });
+                }
+                Again::Send(sending) => {
+                    let params = sending.params.clone();
+                    self.ask("send.text", params, Asked::Send(Box::new(sending)));
+                }
+                Again::Act(acting) if away(acting.first) => {
+                    let said = format!(
+                        "jawd was away too long to tell whether it was done, so look in the chat before {} again",
+                        acting.what
+                    );
+                    out.push(Update::Acted { key: acting.key, said: Some(said) });
+                }
+                Again::Act(acting) => {
+                    let (method, params) = (acting.method, acting.params.clone());
+                    self.ask(method, params, Asked::Act(Box::new(acting)));
+                }
             }
         }
         let owed: Vec<_> = self.owed.iter().map(|((m, c), p)| (*m, c.clone(), p.clone())).collect();
@@ -287,13 +343,19 @@ impl Wire {
         match asked {
             Asked::Send(sending) if matches!(failure, Failure::Lost) => {
                 let (chat, key) = (sending.chat.clone(), sending.key.clone());
-                self.again.push(*sending);
+                self.again.push(Again::Send(*sending));
                 Some(Update::Unsure { chat, key })
             }
             Asked::Send(sending) => {
                 let Sending { chat, text, key, .. } = *sending;
                 Some(Update::Unsent { chat, key, text, why: why_unsent(failure) })
             }
+            Asked::Act(acting) if matches!(failure, Failure::Lost) => {
+                let (chat, key) = (acting.chat.clone(), acting.key.clone());
+                self.again.push(Again::Act(*acting));
+                Some(Update::Unsure { chat, key })
+            }
+            Asked::Act(acting) => Some(Update::Acted { key: acting.key, said: Some(why_not(failure, acting.what)) }),
             Asked::Retry => Some(Update::Notice(format!("not sent again: {failure}"))),
             Asked::Owed(method, chat, params) => match failure {
                 Failure::Jawd(e) => {
@@ -307,7 +369,6 @@ impl Wire {
             Asked::Voice => Some(Update::VoiceRefused(why_not(failure, "voice"))),
             Asked::Info(message) => Some(Update::Info { message, info: Err(why_not(failure, "a message's info")) }),
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
-            Asked::Forward(_) => Some(Update::Notice(why_not(failure, "forwarding"))),
             Asked::Folders | Asked::Roster(_) => None,
             Asked::Library(_) => Some(Update::LibraryRefused(why_not(failure, "the library"))),
             Asked::FolderMade => Some(Update::Notice(why_not(failure, "making folders"))),
@@ -372,6 +433,7 @@ impl Wire {
                         let message = result["message"].as_str().unwrap_or_default().to_string();
                         out.push(Update::Sent { key: sending.key, message });
                     }
+                    (Asked::Act(acting), Ok(_)) => out.push(Update::Acted { key: acting.key, said: acting.done }),
                     (Asked::Owed(method, chat, params), Ok(_)) => self.settle(method, chat, &params),
                     (Asked::StartChat, Ok(result)) => {
                         if let Ok(chat) = serde_json::from_value::<Chat>(result["chat"].clone()) {
@@ -409,11 +471,6 @@ impl Wire {
                             out.push(Update::FolderMade(Box::new(folder)));
                         }
                     }
-                    (Asked::Forward(n), Ok(_)) => out.push(Update::Notice(if n == 1 {
-                        "forwarded".into()
-                    } else {
-                        format!("forwarded to {n} chats")
-                    })),
                     (asked, Err(failure)) => out.extend(self.refused(asked, &failure)),
                     _ => {}
                 }
@@ -593,25 +650,26 @@ impl Jawd for Wire {
         self.ask("send.text", params, Asked::Send(Box::new(sending)));
     }
 
-    fn react(&mut self, message: &str, emoji: &str) {
-        self.ask("react", json!({ "message": message, "emoji": emoji }), Asked::Did("reacting"));
+    fn react(&mut self, chat: &str, message: &str, emoji: &str) {
+        self.act("react", chat, json!({ "message": message, "emoji": emoji }), "reacting", None);
     }
 
-    fn edit(&mut self, message: &str, text: &str) {
-        self.ask("edit", json!({ "message": message, "text": text }), Asked::Did("editing"));
+    fn edit(&mut self, chat: &str, message: &str, text: &str) {
+        self.act("edit", chat, json!({ "message": message, "text": text }), "editing", None);
     }
 
-    fn delete(&mut self, message: &str, everyone: bool) {
+    fn delete(&mut self, chat: &str, message: &str, everyone: bool) {
         let to = if everyone { "everyone" } else { "me" };
-        self.ask("delete", json!({ "message": message, "for": to }), Asked::Did("deleting"));
+        self.act("delete", chat, json!({ "message": message, "for": to }), "deleting", None);
     }
 
-    fn forward(&mut self, messages: &[String], to: &[String]) {
-        self.ask("forward", json!({ "messages": messages, "to": to }), Asked::Forward(to.len()));
+    fn forward(&mut self, chat: &str, messages: &[String], to: &[String]) {
+        let done = if to.len() == 1 { "forwarded".into() } else { format!("forwarded to {} chats", to.len()) };
+        self.act("forward", chat, json!({ "messages": messages, "to": to }), "forwarding", Some(done));
     }
 
-    fn message_info(&mut self, message: &str) {
-        self.ask("message.info", json!({ "message": message }), Asked::Info(message.to_string()));
+    fn message_info(&mut self, chat: &str, message: &str) {
+        self.ask("message.info", json!({ "message": message, "chat": chat }), Asked::Info(message.to_string()));
     }
 
     fn chat_info(&mut self, chat: &str) {

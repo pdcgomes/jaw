@@ -966,11 +966,12 @@ impl View {
         };
         let Some(Palette { mode: Mode::Forward { messages, picked }, .. }) = self.palette.take() else { return };
         let to: Vec<(String, String)> = if picked.is_empty() { selected.into_iter().collect() } else { picked };
+        let Some(chat) = self.open.clone() else { return };
         if to.is_empty() {
             return;
         }
         let ids: Vec<String> = to.iter().map(|(id, _)| id.clone()).collect();
-        self.jawd.forward(&messages, &ids);
+        self.jawd.forward(&chat, &messages, &ids);
         let said = match to.as_slice() {
             [(_, name)] => format!("forwarding to {name}"),
             more => format!("forwarding to {} chats", more.len()),
@@ -1173,7 +1174,9 @@ impl View {
             }
             Does::DeleteFor(id, everyone) => {
                 close(self);
-                self.jawd.delete(&id, everyone);
+                if let Some(chat) = self.open.clone() {
+                    self.jawd.delete(&chat, &id, everyone);
+                }
                 self.focus = super::Focus::Typing;
             }
         }

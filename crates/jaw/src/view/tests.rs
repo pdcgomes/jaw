@@ -1025,6 +1025,11 @@ pub fn mine_saying(v: &View, text: &str) -> Vec<Message> {
     w.rows().filter(|m| m.mine && m.spans.iter().map(|s| s.s.as_str()).collect::<String>() == text).cloned().collect()
 }
 
+/// The open chat's message `id`, as its window holds it.
+pub fn shown(v: &View, id: &str) -> Option<Message> {
+    v.messages.as_ref()?.get(id).cloned()
+}
+
 fn find_message(v: &View, text: &str) -> Message {
     let w = v.messages.as_ref().unwrap();
     let mut at = w.oldest().cloned();
@@ -1330,6 +1335,20 @@ fn a_send_whose_answer_was_lost_waits_for_jawd_to_answer_for_it_however_long_tha
     v.apply(Update::Unsent { chat: open, key: "jaw-1".into(), text: "a caminho".into(), why: "gone".into() });
     let screen = frame(&mut v);
     assert!(v.composer.is_empty() && !screen.contains("not sent"), "jawd has it, so it isn't given back:\n{screen}");
+}
+
+#[test]
+fn an_action_whose_answer_was_lost_says_so_on_the_box_until_jawd_answers_for_it() {
+    let (mut v, _rx) = view(140, 40);
+    let open = v.open.clone().unwrap();
+    v.apply(Update::Unsure { chat: open.clone(), key: "jaw-react".into() });
+    v.apply(Update::Unsure { chat: open, key: "jaw-forward".into() });
+    assert!(frame(&mut v).contains("asking jawd again once it's back"));
+    v.apply(Update::Acted { key: "jaw-react".into(), said: None });
+    assert!(frame(&mut v).contains("asking jawd again once it's back"), "the forward is still unsure");
+    v.apply(Update::Acted { key: "jaw-forward".into(), said: Some("forwarded".into()) });
+    let screen = frame(&mut v);
+    assert!(!screen.contains("asking jawd again") && screen.contains("forwarded"), "{screen}");
 }
 
 #[test]

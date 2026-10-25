@@ -6,6 +6,7 @@ use crate::data::Tick;
 use crate::run;
 use crate::theme::Theme;
 use crate::view::View;
+use crate::view::tests::shown;
 use chrono::FixedOffset;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
@@ -35,14 +36,16 @@ struct Kept {
     asked: Vec<Value>,
     /// Each message it took, by key.
     keyed: HashMap<String, String>,
-    /// Whether to take the next message and drop the connection before answering, as a jawd
-    /// killed between its commit and its answer does.
+    /// Each action it did, by key, with its answer.
+    acted: HashMap<String, Value>,
+    /// Whether to take the next message or action and drop the connection before answering, as a
+    /// jawd killed between its commit and its answer does.
     swallow: bool,
 }
 
 /// A jawd that answers hello, the windows and find with the protocol's fixtures, takes messages
-/// as jawd does, with their keys, turns down what jawd doesn't serve yet, and can go away and come
-/// back on the same socket.
+/// and actions as jawd does, with their keys, turns down what jawd doesn't serve yet, and can go
+/// away and come back on the same socket.
 struct Scripted {
     socket: PathBuf,
     tell: std::sync::mpsc::Sender<Told>,
@@ -95,6 +98,24 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Value> {
             sent["row"]["spans"] = json!([{ "t": "text", "s": params["text"] }]);
             sent
         }
+        "edit" if params["text"] == "too late" => {
+            return error(code::NOT_ALLOWED, "a message can be edited for 15 minutes after it's sent", Value::Null);
+        }
+        "react" | "edit" | "delete" | "forward" => {
+            let key = params["key"].as_str().unwrap_or_default().to_string();
+            let n = kept.acted.len();
+            let done = if method == "forward" { json!({ "messages": [format!("3EB0F{n:017X}")] }) } else { json!({}) };
+            let answer = kept.acted.entry(key).or_insert(done).clone();
+            if std::mem::take(&mut kept.swallow) {
+                return None;
+            }
+            answer
+        }
+        "message.info" => json!({
+            "message": params["message"],
+            "sent": 1_792_145_077_000_i64,
+            "recipients": [{ "person": "person:12", "name": "Ana", "delivered": 1_792_145_076_000_i64, "read": null, "played": null }],
+        }),
         "send.retry" if params["message"] == "3EB0GONE" => {
             return error(code::NOT_FOUND, "jawd has nothing of yours waiting to send as 3EB0GONE", Value::Null);
         }
@@ -221,6 +242,7 @@ fn until_true(v: &mut View, rx: &Receiver<crate::run::Event>, mut enough: impl F
 }
 
 const ANA: &str = "351912345678@s.whatsapp.net";
+const CLIMBING: &str = "120363012345678901@g.us";
 
 #[test]
 fn each_message_goes_with_a_key_of_its_own_and_what_jawd_does_not_serve_yet_is_said_quietly() {
@@ -274,7 +296,7 @@ fn a_message_lost_longer_ago_than_jawd_keeps_keys_goes_back_to_its_box_rather_th
         params["key"] = json!(key);
         let first = SystemTime::now() - ago;
         let (chat, text, key) = (ANA.to_string(), "a caminho".to_string(), key.to_string());
-        wire.again.push(Sending { chat, text, key, params, first });
+        wire.again.push(Again::Send(Sending { chat, text, key, params, first }));
     }
     jawd.tell.send(Told::Go).unwrap();
     drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Unreachable { .. })));
@@ -462,13 +484,15 @@ struct Passed {
 }
 
 /// A relay between jaw and a real jawd that keeps every line that passes, and can swallow
-/// jawd's answer to the next `send.text`: it says so on `swallowed`, and once the test has killed
-/// jawd and says so on `cut`, drops jaw's connection, as a jawd killed between its commit and its
-/// answer does. jaw reconnecting is relayed to whichever jawd is on the socket then.
+/// jawd's answer to the next request for a method, `send.text` or an action: it says so on
+/// `swallowed`, and once the test has killed jawd and says so on `cut`, drops jaw's connection, as
+/// a jawd killed between its commit and its answer does. jaw reconnecting is relayed to whichever
+/// jawd is on the socket then.
 struct Relay {
     socket: PathBuf,
     passed: Arc<Mutex<Vec<Passed>>>,
-    swallow: Arc<std::sync::atomic::AtomicBool>,
+    /// The method whose next answer it swallows.
+    swallow: Arc<Mutex<Option<&'static str>>>,
     /// While set, jaw's connections are turned away, as while jawd isn't there.
     hold: Arc<std::sync::atomic::AtomicBool>,
     swallowed: Receiver<()>,
@@ -483,7 +507,7 @@ impl Relay {
         let upstream = jaw_proto::local::socket(jawd.home.path());
         let listener = UnixListener::bind(&socket).unwrap();
         let passed = Arc::new(Mutex::new(vec![]));
-        let swallow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let swallow = Arc::new(Mutex::new(None));
         let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (swallowed_tx, swallowed) = channel();
         let (cut, cutting) = channel::<()>();
@@ -496,16 +520,16 @@ impl Relay {
                     continue;
                 }
                 let Ok(jawd) = UnixStream::connect(&upstream) else { continue };
-                let sends = Arc::new(Mutex::new(std::collections::HashSet::new()));
-                let (up, keeping, asked) = (jawd.try_clone().unwrap(), keep.clone(), sends.clone());
+                let methods = Arc::new(Mutex::new(HashMap::new()));
+                let (up, keeping, asked) = (jawd.try_clone().unwrap(), keep.clone(), methods.clone());
                 let reading = jaw.try_clone().unwrap();
                 std::thread::spawn(move || {
                     let mut up = up;
                     for line in BufReader::new(reading).lines() {
                         let Ok(line) = line else { break };
                         let v: Value = serde_json::from_str(&line).unwrap();
-                        if v["method"] == "send.text" {
-                            asked.lock().unwrap().insert(v["id"].as_u64().unwrap());
+                        if let (Some(id), Some(method)) = (v["id"].as_u64(), v["method"].as_str()) {
+                            asked.lock().unwrap().insert(id, method.to_string());
                         }
                         keeping.lock().unwrap().push(Passed { from_jawd: false, line: v });
                         if up.write_all(format!("{line}\n").as_bytes()).is_err() {
@@ -521,9 +545,17 @@ impl Relay {
                     for line in BufReader::new(jawd.try_clone().unwrap()).lines() {
                         let Ok(line) = line else { break };
                         let v: Value = serde_json::from_str(&line).unwrap();
-                        let answers_a_send = v["id"].as_u64().is_some_and(|id| sends.lock().unwrap().contains(&id));
+                        let method = v["id"].as_u64().and_then(|id| methods.lock().unwrap().get(&id).cloned());
                         keeping.lock().unwrap().push(Passed { from_jawd: true, line: v });
-                        if answers_a_send && swallowing.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        let swallowed = method.is_some_and(|method| {
+                            let mut swallow = swallowing.lock().unwrap();
+                            let this = *swallow == Some(method.as_str());
+                            if this {
+                                *swallow = None;
+                            }
+                            this
+                        });
+                        if swallowed {
                             let _ = told.send(());
                             let _ = cutting.lock().unwrap().recv();
                             break;
@@ -538,6 +570,11 @@ impl Relay {
             }
         });
         Relay { socket, passed, swallow, hold, swallowed, cut, _dir: dir }
+    }
+
+    /// Swallows jawd's answer to the next request for `method`.
+    fn swallow(&self, method: &'static str) {
+        *self.swallow.lock().unwrap() = Some(method);
     }
 
     /// Starts `jawd` again, turning jaw away until it's linked and has its chats.
@@ -645,7 +682,7 @@ fn on_a_real_jawd_killed_between_sending_and_answering_jaw_asks_again_with_its_k
     };
     let relay = Relay::to(&jawd);
     let (mut v, rx) = view_on(relay.socket.clone(), 140, 30);
-    relay.swallow.store(true, std::sync::atomic::Ordering::SeqCst);
+    relay.swallow("send.text");
     run::press_live(&mut v, &rx, "chego às nove\n").unwrap();
     relay.swallowed.recv_timeout(Duration::from_secs(10)).expect("jawd answered the send");
     jawd.stop();
@@ -711,7 +748,6 @@ fn on_a_real_jawd_a_chat_starts_by_number_and_reading_marks_it_read() {
             .map(|r| r["unread"].as_u64().unwrap())
             .next_back()
     };
-    const CLIMBING: &str = "120363012345678901@g.us";
     assert!(until_true(&mut v, &rx, |_| unread(&relay, ANA) == Some(0)), "Ana's chat, open, is read");
     let reads = relay.asked("read");
     assert_eq!(reads[0].0, json!({ "chat": ANA, "up_to": "3EB0DEMO00000003" }), "{reads:?}");
@@ -869,17 +905,282 @@ fn recording_before_jawd_serves_voice_says_it_comes_with_the_next_step_and_the_b
     assert!(jawd.refused().contains(&"voice.record".to_string()));
 }
 
+/// The fixtures' messages in Ana's chat: hers, and a voice message of yours.
+const HERS: &str = "3EB0A1B2C3D4E5F6";
+const VOICE: &str = "3EB0D2E3F4A5B6C7";
+
+/// Whether `key` is one jaw made: `jaw-` and 32 hex digits.
+fn made(key: &Value) -> bool {
+    key.as_str()
+        .and_then(|k| k.strip_prefix("jaw-"))
+        .is_some_and(|hex| hex.len() == 32 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 #[test]
-fn message_actions_before_jawd_serves_them_say_they_come_with_the_next_step() {
+fn each_action_names_its_chat_with_a_key_of_its_own_and_message_info_names_its_chat() {
     let jawd = scripted();
     let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
-    run::press_live(&mut v, &rx, "<up>2").unwrap();
-    until(&mut v, &rx, "reacting comes with the next step");
+    run::press_live(&mut v, &rx, "<up>2<up>1d\n").unwrap();
+    run::press_live(&mut v, &rx, "<up>far").unwrap();
+    until(&mut v, &rx, "Ana Ribeiro");
+    run::press_live(&mut v, &rx, "\n").unwrap();
+    until(&mut v, &rx, "forwarded");
     run::press_live(&mut v, &rx, "i").unwrap();
-    let screen = until(&mut v, &rx, "a message's info comes with the next step");
-    assert!(screen.contains("╭ info "), "on the sheet that asked:\n{screen}");
-    let refused = jawd.refused();
-    assert!(refused.contains(&"react".to_string()) && refused.contains(&"message.info".to_string()), "{refused:?}");
+    let screen = until(&mut v, &rx, "10:04:37");
+    assert!(screen.contains("╭ info ") && screen.contains("10:04:37"), "jawd's answer, on the sheet:\n{screen}");
+
+    let reacted = jawd.asked("react");
+    let what: Vec<(&str, &str)> =
+        reacted.iter().map(|p| (p["message"].as_str().unwrap(), p["emoji"].as_str().unwrap())).collect();
+    assert_eq!(what, [(VOICE, "❤️"), (HERS, "👍")], "{reacted:?}");
+    let deleted = jawd.asked("delete");
+    assert_eq!((&deleted[0]["message"], &deleted[0]["for"]), (&json!(HERS), &json!("me")), "{deleted:?}");
+    let forwarded = jawd.asked("forward");
+    assert_eq!((&forwarded[0]["messages"], &forwarded[0]["to"]), (&json!([VOICE]), &json!([ANA])), "{forwarded:?}");
+    let acts: Vec<Value> = [reacted, deleted, forwarded].concat();
+    assert!(acts.iter().all(|p| p["chat"] == ANA && made(&p["key"])), "each names its chat, with a key: {acts:?}");
+    let keys: std::collections::HashSet<&str> = acts.iter().filter_map(|p| p["key"].as_str()).collect();
+    assert_eq!(keys.len(), 4, "a key for each action: {acts:?}");
+    assert_eq!(jawd.asked("message.info"), [json!({ "message": VOICE, "chat": ANA })], "info has its chat, and no key");
+    let actions = ["react", "edit", "delete", "forward", "message.info"];
+    assert!(!jawd.refused().iter().any(|m| actions.contains(&m.as_str())), "{:?}", jawd.refused());
+}
+
+#[test]
+fn an_action_whose_answer_the_connection_lost_is_asked_for_again_with_its_key_and_done_once() {
+    let jawd = scripted();
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    jawd.kept.lock().unwrap().swallow = true;
+    run::press_live(&mut v, &rx, "<up>2").unwrap();
+    assert!(until_true(&mut v, &rx, |_| jawd.asked("react").len() == 2), "{:?}", jawd.asked("react"));
+    let screen = until(&mut v, &rx, "jaw  online");
+    let reacted = jawd.asked("react");
+    assert_eq!(reacted[0], reacted[1], "asked again as it was, with its key");
+    assert_eq!(jawd.kept.lock().unwrap().acted.len(), 1, "done once");
+    assert!(!screen.contains("asking jawd again") && !screen.contains("may not have been done"), "{screen}");
+    run::press_live(&mut v, &rx, "1").unwrap();
+    assert!(until_true(&mut v, &rx, |_| jawd.asked("react").len() == 3));
+    assert_ne!(jawd.asked("react")[2]["key"], reacted[0]["key"], "the next action has a key of its own");
+}
+
+#[test]
+fn actions_lost_longer_ago_than_jawd_keeps_keys_say_to_look_in_the_chat_and_the_rest_go_again_in_order() {
+    let jawd = scripted();
+    let (tx, rx) = channel();
+    let mut wire = Wire::connect(jawd.socket.clone(), tx);
+    let mut said = vec![];
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+    let lost = |method: &'static str, key: &str, mut params: Value, what: &'static str, ago: Duration| {
+        params["chat"] = json!(ANA);
+        params["key"] = json!(key);
+        let first = SystemTime::now() - ago;
+        Again::Act(Acting { method, chat: ANA.into(), key: key.into(), params, what, done: None, first })
+    };
+    let (old, recent) = (KEY_KEPT + Duration::from_secs(60), Duration::from_secs(60));
+    let forward = json!({ "messages": [HERS], "to": [CLIMBING] });
+    wire.again.push(lost("forward", "jaw-old", forward, "forwarding", old));
+    wire.again.push(lost("edit", "jaw-first", json!({ "message": VOICE, "text": "chego às 9" }), "editing", recent));
+    wire.again.push(lost("edit", "jaw-then", json!({ "message": VOICE, "text": "chego às 10" }), "editing", recent));
+    jawd.tell.send(Told::Go).unwrap();
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Unreachable { .. })));
+    jawd.tell.send(Told::Come).unwrap();
+    let answered = |s: &[Update]| s.iter().filter(|u| matches!(u, Update::Acted { said: None, .. })).count() == 2;
+    drive(&mut wire, &rx, &mut said, answered);
+    let edits: Vec<Value> = jawd.asked("edit").iter().map(|p| p["text"].clone()).collect();
+    assert_eq!(edits, [json!("chego às 9"), json!("chego às 10")], "asked again in the order first asked");
+    assert!(jawd.asked("forward").is_empty(), "the one jawd no longer knows the key of isn't asked again");
+    let back = said.iter().find_map(|u| match u {
+        Update::Acted { key, said: Some(said) } if key == "jaw-old" => Some(said.as_str()),
+        _ => None,
+    });
+    assert!(back.is_some_and(|why| why.contains("look in the chat before forwarding again")), "{said:?}");
+}
+
+#[test]
+fn an_action_jawd_turns_down_says_jawds_reason_and_a_forward_says_where_it_went() {
+    let jawd = scripted();
+    let (tx, rx) = channel();
+    let mut wire = Wire::connect(jawd.socket.clone(), tx);
+    let mut said = vec![];
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+    wire.edit(ANA, VOICE, "too late");
+    wire.forward(ANA, &[HERS.into()], &[ANA.into(), CLIMBING.into()]);
+    drive(&mut wire, &rx, &mut said, |s| s.iter().filter(|u| matches!(u, Update::Acted { .. })).count() == 2);
+    let acted: Vec<Option<&str>> = said
+        .iter()
+        .filter_map(|u| match u {
+            Update::Acted { said, .. } => Some(said.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(acted, [Some("a message can be edited for 15 minutes after it's sent"), Some("forwarded to 2 chats")]);
+}
+
+/// The demo engine's message in its group, from a member jawd has no name for.
+const RUIS: &str = "3EB0DEMO00000002";
+
+fn text(m: &crate::data::Message) -> String {
+    m.spans.iter().map(|s| s.s.as_str()).collect()
+}
+
+/// Whether jawd's answer to the latest `find` has chat `chat` among its results.
+fn found(relay: &Relay, chat: &str) -> bool {
+    relay.asked("find").last().and_then(|(_, answer)| answer.clone()).is_some_and(|a| {
+        a["result"]["results"]
+            .as_array()
+            .is_some_and(|hits| hits.iter().any(|h| h["kind"] == "chat" && h["row"]["id"] == chat))
+    })
+}
+
+/// Whether jawd has answered the `n`th request for `method`.
+fn answered(relay: &Relay, method: &str, n: usize) -> bool {
+    relay.asked(method).get(n).is_some_and(|(_, answer)| answer.is_some())
+}
+
+#[test]
+fn on_a_real_jawd_each_message_action_goes_with_its_chat_and_a_key_of_its_own_and_is_done() {
+    let Some(jawd) = real() else {
+        eprintln!("JAWD isn't set to a jawd binary, so this ran on no real jawd");
+        return;
+    };
+    let relay = Relay::to(&jawd);
+    let (mut v, rx) = view_on(relay.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<a-down>").unwrap();
+    assert!(until_true(&mut v, &rx, |v| shown(v, RUIS).is_some()), "{}", frame(&mut v));
+
+    // A reply to Rui's message, mentioning who the @ offers.
+    run::press_live(&mut v, &rx, "<up>r@+351").unwrap();
+    run::press_live(&mut v, &rx, "<tab>sim, às 9\n").unwrap();
+    assert!(until_true(&mut v, &rx, |_| answered(&relay, "send.text", 0)), "{:?}", relay.asked("send.text"));
+    let (asked, answer) = relay.asked("send.text").remove(0);
+    let answer = answer.unwrap();
+    let person = asked["mentions"][0].as_str().unwrap_or_else(|| panic!("a mention: {asked}")).to_string();
+    assert_eq!((&asked["chat"], &asked["reply"]), (&json!(CLIMBING), &json!(RUIS)), "{asked}");
+    let members: Vec<Value> = relay
+        .asked("chat.info")
+        .into_iter()
+        .filter_map(|(_, answer)| answer?["result"]["members"].as_array().cloned())
+        .flatten()
+        .collect();
+    let mine = if members.iter().any(|m| m["person"] == person.as_str()) {
+        let row = &answer["result"]["row"];
+        assert_eq!(row["reply"]["id"], RUIS, "{answer}");
+        let mention = row["spans"].as_array().unwrap().iter().any(|s| s["t"] == "mention");
+        assert!(mention, "the mention is marked: {answer}");
+        answer["result"]["message"].as_str().unwrap().to_string()
+    } else {
+        // jawd knows a group's members from WhatsApp's group info, which the demo engine doesn't
+        // send, so it refuses the mention, and the reply goes back to its box with jawd's reason.
+        assert_eq!(answer["error"]["data"]["param"], "mentions", "{answer}");
+        let screen = until(&mut v, &rx, "not sent");
+        eprintln!("{screen}");
+        assert!(screen.contains("not sent") && screen.contains(" sim, às 9"), "back in its box:\n{screen}");
+        run::press_live(&mut v, &rx, "<c-u><up>rsim, às 9\n").unwrap();
+        assert!(until_true(&mut v, &rx, |_| answered(&relay, "send.text", 1)), "{:?}", relay.asked("send.text"));
+        let answer = relay.asked("send.text").remove(1).1.unwrap();
+        assert_eq!(answer["result"]["row"]["reply"]["id"], RUIS, "{answer}");
+        answer["result"]["message"].as_str().unwrap().to_string()
+    };
+    // Edited and deleted only once it has gone, as jawd may require of an action on yours.
+    let went = |v: &mut View| {
+        shown(v, &mine).is_some_and(|m| matches!(m.status, Some(Tick::Sent | Tick::Delivered | Tick::Read)))
+    };
+    assert!(until_true(&mut v, &rx, went), "{}", frame(&mut v));
+
+    run::press_live(&mut v, &rx, "<up><up>2").unwrap();
+    let reacted = |v: &mut View| {
+        shown(v, RUIS).is_some_and(|m| m.reactions.iter().any(|r| r.mine && r.emoji.replace('\u{fe0f}', "") == "❤"))
+    };
+    assert!(until_true(&mut v, &rx, reacted), "{}", frame(&mut v));
+
+    run::press_live(&mut v, &rx, "<esc><up>e<c-u>sim, às 9h30\n").unwrap();
+    let edited = |v: &mut View| shown(v, &mine).is_some_and(|m| m.edited && text(&m) == "sim, às 9h30");
+    assert!(until_true(&mut v, &rx, edited), "{}", frame(&mut v));
+
+    run::press_live(&mut v, &rx, "<up>i").unwrap();
+    assert!(until_true(&mut v, &rx, |_| answered(&relay, "message.info", 0)), "{:?}", relay.asked("message.info"));
+    let (asked, answer) = relay.asked("message.info").remove(0);
+    assert_eq!(asked, json!({ "message": mine, "chat": CLIMBING }));
+    let info = &answer.unwrap()["result"];
+    assert!(info["sent"].is_i64() && !info["recipients"].as_array().unwrap().is_empty(), "{info}");
+    let screen = until(&mut v, &rx, "delivered");
+    eprintln!("{screen}");
+    assert!(screen.contains("╭ info ") && screen.contains("delivered"), "{screen}");
+
+    run::press_live(&mut v, &rx, "<esc><up><up>f912345678").unwrap();
+    assert!(until_true(&mut v, &rx, |_| found(&relay, ANA)), "{:?}", relay.asked("find"));
+    run::settle_live(&mut v, &rx, Duration::from_secs(1));
+    run::press_live(&mut v, &rx, "\n").unwrap();
+    assert!(until_true(&mut v, &rx, |_| answered(&relay, "forward", 0)), "{:?}", relay.asked("forward"));
+    let (asked, answer) = relay.asked("forward").remove(0);
+    assert_eq!((&asked["messages"], &asked["to"]), (&json!([RUIS]), &json!([ANA])), "{asked}");
+    let copy = answer.unwrap()["result"]["messages"][0].as_str().expect("the forward's message").to_string();
+
+    run::press_live(&mut v, &rx, "<esc><up>d<down>\n").unwrap();
+    let gone = |v: &mut View| shown(v, &mine).is_some_and(|m| m.deleted);
+    assert!(until_true(&mut v, &rx, gone), "deleted for everyone:\n{}", frame(&mut v));
+    assert!(frame(&mut v).contains("You deleted this message"));
+    run::press_live(&mut v, &rx, "<up><up>d\n").unwrap();
+    assert!(until_true(&mut v, &rx, |v| shown(v, RUIS).is_none()), "deleted for you:\n{}", frame(&mut v));
+
+    let acts: Vec<(Value, Option<Value>)> =
+        ["react", "edit", "forward", "delete"].into_iter().flat_map(|method| relay.asked(method)).collect();
+    assert_eq!(acts.len(), 5, "{acts:?}");
+    for (params, answer) in &acts {
+        assert!(params["chat"] == CLIMBING && made(&params["key"]), "each names its chat, with a key: {params}");
+        assert!(answer.as_ref().is_some_and(|a| a.get("result").is_some()), "{params}: {answer:?}");
+    }
+    let keys: std::collections::HashSet<&str> = acts.iter().filter_map(|(p, _)| p["key"].as_str()).collect();
+    assert_eq!(keys.len(), acts.len(), "a key for each action: {acts:?}");
+    let deleted: Vec<(&Value, &Value)> = acts[3..].iter().map(|(p, _)| (&p["message"], &p["for"])).collect();
+    assert_eq!(deleted, [(&json!(mine), &json!("everyone")), (&json!(RUIS), &json!("me"))]);
+
+    run::press_live(&mut v, &rx, "<a-up>").unwrap();
+    let forwarded =
+        |v: &mut View| shown(v, &copy).is_some_and(|m| m.mine && m.forwarded == 1 && text(&m) == "Saturday at 9?");
+    assert!(until_true(&mut v, &rx, forwarded), "the forward, in Ana's chat:\n{}", frame(&mut v));
+    eprintln!("{}", frame(&mut v));
+}
+
+#[test]
+fn on_a_real_jawd_killed_between_forwarding_and_answering_jaw_asks_again_with_its_key_and_there_is_one_copy() {
+    let Some(mut jawd) = real() else {
+        eprintln!("JAWD isn't set to a jawd binary, so this ran on no real jawd");
+        return;
+    };
+    let relay = Relay::to(&jawd);
+    let (mut v, rx) = view_on(relay.socket.clone(), 140, 30);
+    run::press_live(&mut v, &rx, "<a-down>").unwrap();
+    assert!(until_true(&mut v, &rx, |v| shown(v, RUIS).is_some()), "{}", frame(&mut v));
+    run::press_live(&mut v, &rx, "<up>f912345678").unwrap();
+    assert!(until_true(&mut v, &rx, |_| found(&relay, ANA)), "{:?}", relay.asked("find"));
+    run::settle_live(&mut v, &rx, Duration::from_secs(1));
+    relay.swallow("forward");
+    run::press_live(&mut v, &rx, "\n").unwrap();
+    relay.swallowed.recv_timeout(Duration::from_secs(10)).expect("jawd answered the forward");
+    jawd.stop();
+    relay.cut.send(()).unwrap();
+    let gone = until(&mut v, &rx, "can't reach jawd");
+    assert!(gone.contains("asking jawd again once it's back"), "{gone}");
+    relay.restart(&mut jawd);
+    assert!(until_true(&mut v, &rx, |_| answered(&relay, "forward", 1)), "{:?}", relay.asked("forward"));
+    let forwards = relay.asked("forward");
+    assert_eq!(forwards.len(), 2, "asked again once jawd was back: {forwards:?}");
+    assert_eq!(forwards[0].0, forwards[1].0, "with the same key");
+    let copies = |answer: &Option<Value>| answer.as_ref().unwrap()["result"]["messages"].clone();
+    assert_eq!(copies(&forwards[0].1), copies(&forwards[1].1), "and jawd answered with the forward it had");
+    let screen = until(&mut v, &rx, "forwarded");
+    assert!(!screen.contains("asking jawd again"), "{screen}");
+
+    run::press_live(&mut v, &rx, "<a-up>").unwrap();
+    let mine = |v: &View| crate::view::tests::mine_saying(v, "Saturday at 9?");
+    assert!(until_true(&mut v, &rx, |v| !mine(v).is_empty()), "{}", frame(&mut v));
+    std::thread::sleep(Duration::from_secs(2));
+    run::settle_live(&mut v, &rx, Duration::from_secs(1));
+    let screen = frame(&mut v);
+    eprintln!("{screen}");
+    let ids: Vec<Value> = mine(&v).iter().map(|m| json!(m.id)).collect();
+    assert_eq!(json!(ids), copies(&forwards[0].1), "one copy, not two:\n{screen}");
 }
 
 #[test]

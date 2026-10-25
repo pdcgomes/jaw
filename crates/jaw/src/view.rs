@@ -11,7 +11,7 @@ mod sidebar;
 mod voice;
 
 use crate::composer::Composer;
-use crate::data::{Chat, Jawd, Message, Place, Typing, Update};
+use crate::data::{Chat, Jawd, Message, Place, Typing, Update, key};
 use crate::fmt::{self, MINUTE};
 use crate::graphics::{Images, Protocol};
 use crate::layout::{self, Shape};
@@ -48,23 +48,6 @@ const LIST_ROWS: u32 = 100;
 pub const WINDOW: usize = 100;
 /// Ask for the window to move once the screen is this close to its edge.
 const EDGE: usize = 20;
-
-/// A new key for a message being composed: `jaw-` and 32 hex digits from 128 random bits.
-fn key() -> String {
-    let mut bytes = [0u8; 16];
-    // SAFETY: getentropy fills the buffer it's given, which may be up to 256 bytes.
-    if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {
-        static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-        let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        bytes[..8].copy_from_slice(&(at.as_nanos() as u64).to_le_bytes());
-        bytes[8..].copy_from_slice(&(made ^ (u64::from(std::process::id()) << 32)).to_le_bytes());
-    }
-    bytes.iter().fold(String::from("jaw-"), |mut key, byte| {
-        key.push_str(&format!("{byte:02x}"));
-        key
-    })
-}
 
 /// Whether jawd answers.
 #[derive(Clone, Debug, PartialEq)]
@@ -220,7 +203,8 @@ pub struct View {
     sidebar: sidebar::Sidebar,
     /// Communities opened in the chat list to show their groups.
     communities_open: HashSet<String>,
-    /// Messages whose sending lost its answer, by chat and key, until jawd answers for them again.
+    /// Messages and actions whose answer a dropped connection lost, by chat and key, until jawd
+    /// answers for them again.
     unsure: Vec<(String, String)>,
     /// The key of the message being composed in each chat, made once for it and sent with it.
     keys: HashMap<String, String>,
@@ -552,6 +536,12 @@ impl View {
                 self.unsure.retain(|(_, k)| *k != key);
                 self.give_back(chat, key, text, why);
             }
+            Update::Acted { key, said } => {
+                self.unsure.retain(|(_, k)| *k != key);
+                if let Some(said) = said {
+                    self.say(said);
+                }
+            }
             Update::NotStarted(why) => {
                 self.starting = None;
                 self.say(why);
@@ -814,7 +804,7 @@ impl View {
         }
         self.composer.take();
         if let Some(e) = self.editing.take() {
-            self.jawd.edit(&e.id, &text);
+            self.jawd.edit(&chat, &e.id, &text);
             self.composer.set(&e.draft);
             return;
         }

@@ -145,16 +145,18 @@ impl View {
             self.say("there's nothing to react to in this one");
             return;
         }
+        let Some(chat) = self.open.clone() else { return };
         let bare = |e: &str| e.replace('\u{fe0f}', "");
         let mine = m.reactions.iter().any(|r| r.mine && bare(&r.emoji) == bare(emoji));
-        self.jawd.react(&m.id, if mine { "" } else { emoji });
+        self.jawd.react(&chat, &m.id, if mine { "" } else { emoji });
     }
 
     /// i: the sheet of who has it and who's read it, asked of jawd.
     pub(super) fn info(&mut self, m: &Message) {
+        let Some(chat) = self.open.clone() else { return };
         self.info = Some((m.id.clone(), None));
         self.overlay = Some(Overlay::Info);
-        self.jawd.message_info(&m.id);
+        self.jawd.message_info(&chat, &m.id);
     }
 
     pub(super) fn on_info(&mut self, message: String, info: Result<MessageInfo, String>) {

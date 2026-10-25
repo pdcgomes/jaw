@@ -10,6 +10,24 @@ use jaw_proto::{Connection, LinkStep};
 use serde::Deserialize;
 use std::collections::HashMap;
 
+/// A new key for what jawd must do once however often it's asked, a message being composed or an
+/// action on messages: `jaw-` and 32 hex digits from 128 random bits.
+pub fn key() -> String {
+    let mut bytes = [0u8; 16];
+    // SAFETY: getentropy fills the buffer it's given, which may be up to 256 bytes.
+    if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {
+        static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        bytes[..8].copy_from_slice(&(at.as_nanos() as u64).to_le_bytes());
+        bytes[8..].copy_from_slice(&(made ^ (u64::from(std::process::id()) << 32)).to_le_bytes());
+    }
+    bytes.iter().fold(String::from("jaw-"), |mut key, byte| {
+        key.push_str(&format!("{byte:02x}"));
+        key
+    })
+}
+
 /// A chat-list row: the protocol's chat row, as much of it as the interface draws.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Chat {
@@ -770,11 +788,18 @@ pub enum Update {
         chat: String,
         update: Window<Message>,
     },
-    /// A message whose `send.text` lost its answer to a dropped connection: jawd may have it, and
-    /// is asked again with its key once it's back, which answers with the message if it has it.
+    /// A message or an action in `chat` whose answer a dropped connection lost: jawd may have it,
+    /// and is asked again with its key once it's back, which answers for what it has rather than
+    /// doing it twice.
     Unsure {
         chat: String,
         key: String,
+    },
+    /// jawd answered for the action asked under `key`, done or turned down; `said` is what the
+    /// footer says of it, if anything.
+    Acted {
+        key: String,
+        said: Option<String>,
     },
     /// jawd has the message composed under `key`, as `message`, and it's on its way.
     Sent {
@@ -947,14 +972,17 @@ pub trait Jawd {
     /// is the interface's name for the message, made once when it was composed: asked again with
     /// it, jawd answers with the message it has rather than sending another.
     fn send_text(&mut self, chat: &str, text: &str, key: &str, reply: Option<&str>, mentions: &[String]);
-    /// Reacts to a message with `emoji`, or takes yours away with an empty one.
-    fn react(&mut self, message: &str, emoji: &str);
-    fn edit(&mut self, message: &str, text: &str);
+    /// Reacts to a message with `emoji`, or takes yours away with an empty one. Each action names
+    /// the chat its messages are in, where jawd finds them at once, so an ID two chats share is
+    /// never in doubt.
+    fn react(&mut self, chat: &str, message: &str, emoji: &str);
+    fn edit(&mut self, chat: &str, message: &str, text: &str);
     /// Deletes a message for you, or for everyone.
-    fn delete(&mut self, message: &str, everyone: bool);
-    fn forward(&mut self, messages: &[String], to: &[String]);
-    /// Asks for a message's receipts; they come as `Update::Info`.
-    fn message_info(&mut self, message: &str);
+    fn delete(&mut self, chat: &str, message: &str, everyone: bool);
+    /// Forwards messages from `chat` to each chat in `to`.
+    fn forward(&mut self, chat: &str, messages: &[String], to: &[String]);
+    /// Asks for the receipts of a message in `chat`; they come as `Update::Info`.
+    fn message_info(&mut self, chat: &str, message: &str);
     /// Asks for a chat's members; they come as `Update::Members`.
     fn chat_info(&mut self, chat: &str);
     fn draft(&mut self, chat: &str, text: &str);
