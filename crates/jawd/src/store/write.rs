@@ -274,13 +274,26 @@ pub struct Message {
     /// known to be read counts as read as it comes; one of yours reads the chat up to it.
     pub live: bool,
     pub mentions_me: bool,
-    /// One of yours sent from this jawd, which reads the chat up to it without WhatsApp being told,
-    /// as replying on the phone does; one from your other devices tells it too.
-    pub here: bool,
+    /// For one of yours, where it was sent from, which says how it reads its chat.
+    pub sent: Sent,
     /// WhatsApp's WebMessageInfo, compressed.
     pub raw: Option<Packed>,
     /// For a live message, the engine's whole event, compressed, which a history copy never replaces.
     pub envelope: Option<Packed>,
+}
+
+/// Where a message of yours was sent from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sent {
+    /// Another of your devices, live or in history: it reads the chat up to it, and WhatsApp knows.
+    #[default]
+    Elsewhere,
+    /// This jawd, in its chat, as replying on the phone is: it reads the chat up to it without
+    /// WhatsApp being told, so receipts are owed for what it reads.
+    Here,
+    /// This jawd, as a forward, chosen from a list of chats rather than sent in one: where the chat
+    /// was read stays as it was.
+    Forwarded,
 }
 
 /// A raw protobuf compressed with zstd, one frame per row. Frames name the dictionary they were
@@ -1685,13 +1698,15 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
     }
     let moved = stamps.unsettle(chat);
     let place = Some((message.at, n));
-    if message.mine && message.here {
-        moved.here = moved.here.max(place);
-    } else if message.mine {
-        moved.mine = moved.mine.max(place);
-        moved.mine_live |= message.live;
-    } else if !message.live {
-        moved.history = moved.history.max(place);
+    match (message.mine, message.sent) {
+        (true, Sent::Here) => moved.here = moved.here.max(place),
+        (true, Sent::Elsewhere) => {
+            moved.mine = moved.mine.max(place);
+            moved.mine_live |= message.live;
+        }
+        (true, Sent::Forwarded) => {}
+        (false, _) if !message.live => moved.history = moved.history.max(place),
+        (false, _) => {}
     }
     if existing.is_none() {
         apply_pending(db, stamps, chat, n, &chat_id, &message.id)?;

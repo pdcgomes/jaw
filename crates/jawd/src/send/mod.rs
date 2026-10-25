@@ -99,6 +99,8 @@ struct Inner {
     online: Notify,
     /// Whether WhatsApp can be reached now; sends wait for it.
     connected: watch::Sender<bool>,
+    /// Actions waiting for their message to reach WhatsApp.
+    held: outbox::Held,
     reads: reads::Reads,
     typing: typing::Typists,
     /// What every interface is told, for saying WhatsApp refused an action.
@@ -127,12 +129,14 @@ impl Sending {
             enqueue: Mutex::new(()),
             online: Notify::new(),
             connected: watch::channel(online).0,
+            held: outbox::Held::default(),
             reads: reads::Reads::default(),
             typing: typing::Typists::new(),
             pushes: notices,
         });
         typing::start(&inner);
         regroup::start(&inner);
+        outbox::release(&inner);
         tokio::spawn(presence::follow(inner.clone(), pushes, focused, online));
         outbox::resume(&inner).await?;
         reads::resume(&inner).await?;

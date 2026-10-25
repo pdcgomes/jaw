@@ -6,9 +6,11 @@
 //! could send in. A refusal (a number not on WhatsApp, a group you've left, a message the server
 //! won't take) fails it until `send.retry`, unless an earlier attempt may have got through: then it
 //! waits, unconfirmed, for a receipt, and fails only if none comes within a day. A restart queues
-//! what's left again, in order.
+//! what's left again, in order. An action on a message of yours that hasn't reached WhatsApp waits
+//! for it, out of its chat's queue, and is queued again once it has (`release`).
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use jaw_proto::send::{SendRetry, SendText, Sent};
@@ -16,6 +18,7 @@ use jaw_proto::{Error, code};
 use prost::Message as _;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
+use tokio::sync::Notify;
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_web::{WebMessageInfo, web_message_info};
 
@@ -39,6 +42,90 @@ const KEY_MOST: usize = 128;
 /// How many attempts while WhatsApp can be reached, about a day's worth at the longest pause,
 /// before a failure that might pass is taken as one that won't.
 const ATTEMPTS_MOST: i64 = 1_500;
+/// How long after a commit the held actions are looked at again, so a burst of commits is looked
+/// at once.
+const HELD_SETTLE: Duration = Duration::from_millis(50);
+
+/// The actions waiting for their message to reach WhatsApp, by outbox row, each out of its chat's
+/// queue until `release` queues it again; and what wakes `release` to look at them.
+#[derive(Default)]
+pub(super) struct Held {
+    rows: Mutex<BTreeSet<i64>>,
+    look: Arc<Notify>,
+}
+
+impl Held {
+    fn hold(&self, outbox: i64) {
+        self.rows.lock().expect("held actions").insert(outbox);
+        self.look.notify_one();
+    }
+
+    pub(super) fn rows(&self) -> Vec<i64> {
+        self.rows.lock().expect("held actions").iter().copied().collect()
+    }
+
+    fn let_go(&self, outbox: i64) {
+        self.rows.lock().expect("held actions").remove(&outbox);
+    }
+}
+
+/// Queues each held action again, oldest first, once its message has reached WhatsApp, or can't be
+/// sent again. A message's outbox row goes by its answer, a receipt, a merge folding it or a
+/// deletion for everyone cancelling it, each a commit, so it looks after each commit while any
+/// action is held, and when sending says a send's outcome is kept, which may not write an event.
+pub(super) fn release(inner: &Arc<Inner>) {
+    let weak = Arc::downgrade(inner);
+    let (mut committed, look) = (inner.store.committed(), inner.held.look.clone());
+    tokio::spawn(async move {
+        loop {
+            let Some(inner) = weak.upgrade() else { return };
+            let held = inner.held.rows();
+            if !held.is_empty() {
+                let rows = inner
+                    .store
+                    .reads()
+                    .query(Priority::Background, move |db| {
+                        held.into_iter()
+                            .map(|outbox| Ok((outbox, outbox::outboxed_by_n(db, outbox)?)))
+                            .collect::<anyhow::Result<Vec<_>>>()
+                    })
+                    .await;
+                match rows {
+                    Ok(rows) => {
+                        for (outbox, row) in rows {
+                            match row.filter(|row| row.state == "queued") {
+                                Some(row) if row.held() => {}
+                                Some(row) => {
+                                    inner.held.let_go(outbox);
+                                    queue(&inner, outbox, row.chat, false);
+                                }
+                                None => inner.held.let_go(outbox),
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("jawd: can't read the actions waiting for their messages, so it's tried again: {e:#}")
+                    }
+                }
+            }
+            let holding = !inner.held.rows().is_empty();
+            drop(inner);
+            if !holding {
+                look.notified().await;
+                continue;
+            }
+            tokio::select! {
+                changed = committed.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(HELD_SETTLE).await;
+                }
+                () = look.notified() => {}
+            }
+        }
+    });
+}
 
 /// A new message ID in whatsmeow's format for messages from this kind of device: `3EB0` and 18
 /// upper-case hex digits, from 72 random bits.
@@ -300,6 +387,10 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
     if row.state != "queued" {
         return Next::Done;
     }
+    if row.held() {
+        inner.held.hold(outbox);
+        return Next::Done;
+    }
     if reached_server(row.status.as_deref()) {
         settle(&inner, vec![Change::Outbox(Step::Sent { outbox })]).await;
         return Next::Done;
@@ -385,12 +476,16 @@ fn sent_changes(row: &Outboxed, sent: &pb::Sent) -> Vec<Change> {
 
 /// Keeps what a send came to, trying again until it's kept: a message the server has mustn't be
 /// sent again for want of a commit, and one that failed must be counted as tried, or a later
-/// refusal of what may have gone would fail it outright.
+/// refusal of what may have gone would fail it outright. The actions held for it are looked at
+/// again.
 async fn settle(inner: &Inner, changes: Vec<Change>) -> Applied {
     let mut pause = inner.timing.retry_first;
     loop {
         match inner.store.apply(Lane::Live, changes.clone()).await {
-            Ok(applied) => return applied,
+            Ok(applied) => {
+                inner.held.look.notify_one();
+                return applied;
+            }
             Err(e) => {
                 eprintln!("jawd: can't keep what became of a send, so it's tried again in {pause:?}: {e:#}");
                 tokio::time::sleep(pause).await;
@@ -401,10 +496,16 @@ async fn settle(inner: &Inner, changes: Vec<Change>) -> Applied {
 }
 
 /// Queues a failed message of yours again; one still on its way or waiting for a receipt has
-/// nothing to retry.
+/// nothing to retry, and one deleted for everyone, or being, isn't sent again.
 pub(super) async fn retry(inner: &Arc<Inner>, retry: SendRetry) -> Result<Value, Error> {
     let id = retry.message.clone();
-    let Some(row) = query(inner, move |db| outbox::outboxed_by_id(db, &id)).await? else {
+    let found = query(inner, move |db| {
+        let Some(row) = outbox::outboxed_by_id(db, &id)? else { return Ok(None) };
+        let retryable = outbox::retryable(db, row.outbox)?;
+        Ok(Some((row, retryable)))
+    })
+    .await?;
+    let Some((row, retryable)) = found.filter(|(row, _)| !outbox::is_action(&row.kind)) else {
         return Err(Error::new(
             code::NOT_FOUND,
             format!("jawd has nothing of yours waiting to send as {}", retry.message),
@@ -418,7 +519,13 @@ pub(super) async fn retry(inner: &Arc<Inner>, retry: SendRetry) -> Result<Value,
         durably(inner, vec![Change::Outbox(Step::Sent { outbox: row.outbox })], "keep that it was sent").await?;
         return Ok(done);
     }
-    durably(inner, vec![Change::Outbox(Step::Retry { outbox: row.outbox })], "queue the message again").await?;
-    queue(inner, row.outbox, row.chat, false);
+    if retryable == Some(false) {
+        return Err(Error::new(code::NOT_ALLOWED, "it was deleted for everyone, so it isn't sent again"));
+    }
+    let applied =
+        durably(inner, vec![Change::Outbox(Step::Retry { outbox: row.outbox })], "queue the message again").await?;
+    if applied.changed > 0 {
+        queue(inner, row.outbox, row.chat, false);
+    }
     Ok(done)
 }

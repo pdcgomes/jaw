@@ -30,7 +30,7 @@ use crate::store::{Amendment, Change};
 /// A message as an action finds it, by ID in a chat, or in a chat being merged into it.
 pub(super) const TARGET_IN: &str =
     "SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status,
-        m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text
+        m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL
     FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender
     LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep
     WHERE c.id = ?1";
@@ -38,7 +38,7 @@ pub(super) const TARGET_IN: &str =
 /// messages' index for each chat, chats being few next to messages, which CROSS JOIN keeps SQLite
 /// from scanning instead.
 pub(super) const TARGET_ANYWHERE: &str = "SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted,
-        m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text
+        m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL
     FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LEFT JOIN person_jids j ON j.n = m.sender
     LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep
     LIMIT 4";
@@ -75,9 +75,10 @@ pub(super) struct Target {
     pub view_once: bool,
     /// How many times it had been forwarded when it came.
     pub forwarded: u32,
-    /// Its WebMessageInfo, packed.
+    /// Its WebMessageInfo, packed, as it came: an edit changes the row's text, not this.
     pub raw: Option<Vec<u8>>,
     pub text: Option<String>,
+    pub edited: bool,
 }
 
 pub(super) enum Found {
@@ -105,6 +106,7 @@ fn target_row(id: &str, r: &rusqlite::Row) -> rusqlite::Result<Target> {
         forwarded: r.get::<_, i64>(11)?.clamp(0, i64::from(u32::MAX)) as u32,
         raw: r.get(12)?,
         text: r.get(13)?,
+        edited: r.get(14)?,
     })
 }
 

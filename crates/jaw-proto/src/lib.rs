@@ -337,12 +337,21 @@ pub struct Stored {
     /// Of those, merges whose steps kept failing, left until jawd starts again.
     #[serde(default)]
     pub merges_stuck: u64,
-    /// Messages of yours waiting to send, or failed and waiting for a retry.
+    /// Messages and actions of yours waiting to send, failed and waiting for a retry, or kept for a
+    /// late receipt.
     #[serde(default)]
     pub outbox: u64,
     /// Of those, the ones WhatsApp refused when they may already have gone, waiting for a receipt.
     #[serde(default)]
     pub unconfirmed: u64,
+    /// Of those, actions that had no receipt in their day, kept 30 days, a thousand at most, so a
+    /// receipt that comes later still does them.
+    #[serde(default)]
+    pub actions_kept: u64,
+    /// Messages deleted for you and the IDs of your actions, about 40 bytes each, kept for as long
+    /// as the account is linked so nothing brings them back.
+    #[serde(default)]
+    pub tombstones: u64,
     /// Who your group messages were sent to, kept until each has been read by all.
     #[serde(default)]
     pub recipients: u64,

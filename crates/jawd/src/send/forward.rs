@@ -1,8 +1,9 @@
 //! `forward`: messages sent again, each to each chat, as new messages of yours, in order, marked
 //! forwarded once more than the original had been, as WhatsApp's phones send them. Media goes as
-//! it came, its file left where WhatsApp keeps it. All of them are on disk, synced, before it
-//! answers, as `send.text`'s one is, and each then goes as a message of yours does, after its
-//! chat's earlier sends, with its own outbox row and ticks.
+//! it came, its file left where WhatsApp keeps it, and a message edited says what it says now. All
+//! of them are on disk, synced, before it answers, as `send.text`'s one is, and each then goes as a
+//! message of yours does, after its chat's earlier sends, with its own outbox row and ticks. A
+//! forward is chosen from a list of chats rather than sent in one, so it reads none of them.
 
 use std::sync::Arc;
 
@@ -42,7 +43,8 @@ fn forwardable(kind: &str) -> bool {
     )
 }
 
-/// What `target` says, as it's sent again, or why it can't be.
+/// What `target` says, as it's sent again, or why it can't be: an edited one says what its row
+/// says now.
 fn content(target: &Target) -> Result<e2e::Message, Error> {
     let refused = |why: &str| Error::new(code::NOT_ALLOWED, format!("{} can't be forwarded: {why}", target.id));
     if target.deleted {
@@ -56,10 +58,14 @@ fn content(target: &Target) -> Result<e2e::Message, Error> {
         .as_deref()
         .and_then(|packed| unpack(packed).ok())
         .and_then(|raw| WebMessageInfo::decode(raw.as_slice()).ok())
-        .and_then(|info| info.message);
-    let message = match (said, target.kind.as_str(), &target.text) {
-        (Some(message), _, _) => convert::bare(&message),
-        (None, "text", Some(text)) => e2e::Message { conversation: Some(text.clone()), ..Default::default() },
+        .and_then(|info| info.message)
+        .map(|message| convert::bare(&message));
+    let text = |text: &str| e2e::Message { conversation: Some(text.into()), ..Default::default() };
+    let message = match (said, target.kind.as_str(), target.text.as_deref()) {
+        (_, "text", Some(said)) if target.edited => text(said),
+        (Some(message), _, Some(caption)) if target.edited => convert::captioned(&message, caption),
+        (Some(message), _, _) => message,
+        (None, "text", Some(said)) => text(said),
         (None, ..) => return Err(refused("jawd hasn't what it said")),
     };
     if !forwardable(convert::kinds::body(&message, &[]).kind) {
@@ -124,13 +130,9 @@ pub(super) async fn forward(inner: &Arc<Inner>, forward: Forward) -> Result<Forw
         Some(Enqueued::Many(all)) => {
             let mut ids = Vec::with_capacity(all.len());
             for enqueued in all {
-                let Enqueued::Queued { id, chat, chat_n, outbox, .. } = enqueued else { continue };
+                let Enqueued::Queued { id, chat, outbox, .. } = enqueued else { continue };
                 if let Some(outbox) = outbox {
                     queue(inner, outbox, chat, false);
-                }
-                // Sending here reads the chat, as replying does, so its receipts are owed.
-                if let Some(chat_n) = chat_n {
-                    super::reads::want(inner, chat_n);
                 }
                 ids.push(id);
             }

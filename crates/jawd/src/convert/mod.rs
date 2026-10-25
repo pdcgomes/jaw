@@ -330,6 +330,20 @@ pub fn bare(message: &e2e::Message) -> e2e::Message {
     bare
 }
 
+/// `message` with its caption, a photo's, a video's or a document's, as `caption`, for one whose
+/// caption an edit changed: the row keeps the edit, and the raw protobuf what came first.
+pub fn captioned(message: &e2e::Message, caption: &str) -> e2e::Message {
+    let mut captioned = message.clone();
+    if let Some(x) = captioned.image_message.as_deref_mut() {
+        x.caption = Some(caption.into());
+    } else if let Some(x) = captioned.video_message.as_deref_mut() {
+        x.caption = Some(caption.into());
+    } else if let Some(x) = captioned.document_message.as_deref_mut() {
+        x.caption = Some(caption.into());
+    }
+    captioned
+}
+
 /// A message sent again as a forward, as WhatsApp's phones send one: what it says, marked forwarded
 /// `score` times, with the chat's disappearing timer when it has one; `None` for a kind that can't
 /// carry that.

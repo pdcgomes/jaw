@@ -10,9 +10,11 @@
 //! way, as a message of its own with an ID of its own and its outbox row, and is done to the
 //! message's row, by the rules every amendment follows, only once WhatsApp has it: its answer or a
 //! receipt for the action. Until then windows show it from the outbox, and if WhatsApp refuses it,
-//! the row is as it was, with nothing to undo. Its own ID gets a tombstone, so receipts for it,
-//! which come from every device it reached, never wait in `pending` for a message that won't come.
-//! A deletion for you is done at once, and its outbox row tells your other devices by app state.
+//! the row is as it was, with nothing to undo; one that had no receipt in its day is kept a while
+//! for a late one. Its own ID gets a tombstone, so receipts for it, which come from every device it
+//! reached, never wait in `pending` for a message that won't come. One on a message of yours waits
+//! until that message has reached WhatsApp (`Outboxed::held`). A deletion for you is done at once,
+//! and its outbox row tells your other devices by app state.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,8 +23,8 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::{
-    Amendment, CHAT, Doing, MESSAGE, Message, Stamps, advanced, apply_amendment, chat_jid, delete_row, located, now_ms,
-    upsert_message,
+    Amendment, CHAT, Doing, MESSAGE, Message, Sent, Stamps, advanced, apply_amendment, chat_jid, delete_row, located,
+    now_ms, upsert_message,
 };
 
 /// The most messages one read receipt names; more go in more receipts, oldest first.
@@ -48,6 +50,10 @@ const REGROUP_FOR: Duration = Duration::from_millis(2);
 const LET_GO_AT_ONCE: i64 = 128;
 /// How many keys past their day one enqueue removes.
 const KEYS_PRUNED: i64 = 64;
+/// How long after it was made, and how many, actions that had no receipt in their day are kept,
+/// outside OUTBOX_MOST, for a receipt that comes later still to do them.
+pub const ACTION_KEPT_MS: i64 = 30 * 24 * 3600 * 1000;
+pub const ACTIONS_KEPT: i64 = 1_000;
 
 /// A step for the writer.
 #[derive(Clone, Debug)]
@@ -196,9 +202,14 @@ const QUEUED: &str = concat!(
     " WHERE o.state = 'queued' ORDER BY o.n"
 );
 const UNCONFIRMED_ROWS: &str = "SELECT n, next_at FROM outbox WHERE state = 'unconfirmed'";
-const WAITING: &str = "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox";
+/// What counts toward OUTBOX_MOST: every row but the actions kept for a late receipt.
+const WAITING: &str = "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox
+    WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke'))";
+/// An outbox row as the sender takes it, with, for an action, the state of its message's own outbox
+/// row while that message is still to reach WhatsApp.
 const OUTBOXED: &str = concat!(
-    "SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind FROM outbox o ",
+    "SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind,
+        (SELECT w.state FROM outbox w WHERE w.message = o.target) FROM outbox o ",
     sent_where!()
 );
 const ACT: &str = "INSERT INTO outbox (target, jid, id, kind, raw, effect, next_at, created_at)
@@ -212,6 +223,20 @@ const ACTION: &str =
     "SELECT o.target, o.effect, o.created_at, t.chat FROM outbox o LEFT JOIN messages t ON t.n = o.target
     WHERE o.n = ?1 AND o.kind IN ('reaction', 'edit', 'revoke', 'app_state')";
 const ACTIONS_BY_ID: &str = "SELECT n FROM outbox WHERE id = ?1 AND kind IN ('reaction', 'edit', 'revoke')";
+/// A message of yours deleted for everyone once WhatsApp refused it, or had no receipt for it, is
+/// never sent again.
+const CANCELLED: &str = "DELETE FROM outbox WHERE message = ?1 AND state IN ('unconfirmed', 'failed')";
+/// Whether message ?1 can be sent again by hand: not deleted for everyone, nor being.
+const RETRYABLE: &str =
+    "SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke')
+    FROM messages m WHERE m.n = ?1";
+/// The actions kept for a late receipt that are past ACTION_KEPT_MS, and how many are kept.
+const PRUNE_KEPT: &str =
+    "DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke') AND created_at < ?1";
+const KEPT: &str = "SELECT count(*) FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke')";
+/// The oldest ?1 of the actions kept for a late receipt.
+const PRUNE_OLDEST_KEPT: &str = "DELETE FROM outbox WHERE n IN (SELECT n FROM outbox
+    WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke') ORDER BY n LIMIT ?1)";
 const FOLD_TARGETS: &str = "UPDATE outbox SET target = ?1 WHERE target = ?2";
 const BUMPED: &str = "UPDATE messages SET v = ?2 WHERE n = ?1";
 const OWING: &str = "SELECT n FROM chats WHERE told_at IS NOT NULL";
@@ -506,7 +531,8 @@ fn action(db: &Connection, outbox: i64) -> Result<Option<Action>> {
 }
 
 /// An action has gone, and is done to its message, or WhatsApp refused it, and isn't: either way
-/// its row goes, and its message, which windows showed it on, changes.
+/// its row goes, and its message, which windows showed it on, changes. A deletion for everyone of
+/// a message of yours that WhatsApp refused, or had no receipt for, leaves nothing of it to send.
 fn acted(db: &Connection, stamps: &mut Stamps, outbox: i64, action: Action, went: bool) -> Result<bool> {
     if let (true, Some((chat, n)), Some(effect)) = (went, action.target, &action.effect) {
         let me = if matches!(effect, Amendment::React { .. }) { my_jid(db)? } else { None };
@@ -516,6 +542,9 @@ fn acted(db: &Connection, stamps: &mut Stamps, outbox: i64, action: Action, went
             return Ok(false);
         }
         apply_amendment(db, stamps, chat, n, Doing { what: effect, sender: me.as_deref(), mine: true, at: action.at })?;
+        if matches!(effect, Amendment::Revoke) {
+            db.prepare_cached(CANCELLED)?.execute([n])?;
+        }
     }
     db.prepare_cached(DROP_ROW)?.execute([outbox])?;
     if let Some((chat, n)) = action.target {
@@ -558,7 +587,7 @@ fn enqueue(
     if keyed_before(db, key, written)? || full(db, written)? {
         return Ok(false);
     }
-    let (enqueued, changed) = enqueue_one(db, stamps, Outgoing { message, kind, raw }, key.as_deref(), true)?;
+    let (enqueued, changed) = enqueue_one(db, stamps, Outgoing { message, kind, raw }, key.as_deref(), Sent::Here)?;
     written.put(enqueued);
     Ok(changed)
 }
@@ -570,18 +599,19 @@ struct Outgoing<'a> {
     raw: &'a [u8],
 }
 
-/// Writes a message of yours to send, pending, with its outbox row and the key that names it, and
-/// clears its chat's draft when `drafted` says the message is what was typed there.
+/// Writes a message of yours to send, pending, with its outbox row and the key that names it. One
+/// sent in its chat reads the chat, as replying does, and clears its draft, since it's what was
+/// typed there; a forward does neither (`Sent`).
 fn enqueue_one(
     db: &Connection,
     stamps: &mut Stamps,
     outgoing: Outgoing,
     key: Option<&str>,
-    drafted: bool,
+    sent: Sent,
 ) -> Result<(Enqueued, bool)> {
     let Outgoing { message, kind, raw } = outgoing;
     let chat = chat_jid(db, &message.chat)?;
-    let message = &Message { chat: chat.clone(), here: true, ..message.clone() };
+    let message = &Message { chat: chat.clone(), sent, ..message.clone() };
     let changed = upsert_message(db, stamps, message, false)?;
     let (n, chat_n): (i64, i64) = db
         .prepare_cached(MESSAGE_BY_ID)?
@@ -597,7 +627,7 @@ fn enqueue_one(
     let enqueued =
         Enqueued::Queued { message: Some(n), id: message.id.clone(), chat, chat_n: Some(chat_n), outbox: Some(outbox) };
     let seq = stamps.seq(CHAT, Some(chat_n));
-    if drafted && db.prepare_cached(CLEAR_DRAFT)?.execute([chat_n, seq])? > 0 {
+    if sent == Sent::Here && db.prepare_cached(CLEAR_DRAFT)?.execute([chat_n, seq])? > 0 {
         stamps.record(db, CHAT, chat_n, Some(chat_n), seq)?;
         return Ok((enqueued, true));
     }
@@ -661,7 +691,7 @@ fn forward(
     for (nth, forwarding) in sending.iter().enumerate() {
         let key = key.as_deref().map(|key| forward_key(key, nth));
         let outgoing = Outgoing { message: &forwarding.message, kind: forwarding.kind, raw: &forwarding.raw };
-        let (enqueued, one) = enqueue_one(db, stamps, outgoing, key.as_deref(), false)?;
+        let (enqueued, one) = enqueue_one(db, stamps, outgoing, key.as_deref(), Sent::Forwarded)?;
         all.push(enqueued);
         changed |= one;
     }
@@ -769,14 +799,28 @@ fn failed(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, next_a
 }
 
 /// A message waiting for a receipt had none in time; one that had is no longer in the outbox, or
-/// no longer waiting.
+/// no longer waiting. An action that had none is shown as not done, but WhatsApp may have it all
+/// the same, so its row is kept, failed, for a receipt that comes later still to do it
+/// (`receipt_for_action`): outside OUTBOX_MOST, sent by nothing, and kept ACTIONS_KEPT at most and
+/// for ACTION_KEPT_MS.
 fn no_receipt(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str) -> Result<bool> {
     let Some(row) = outboxed(db, outbox)? else { return Ok(false) };
     if db.prepare_cached(NO_RECEIPT)?.execute(params![outbox, error])? == 0 {
         return Ok(false);
     }
     if let Some(action) = action(db, outbox)? {
-        return acted(db, stamps, outbox, action, false);
+        if action.effect.is_none() {
+            return acted(db, stamps, outbox, action, false);
+        }
+        if let Some((chat, n)) = action.target {
+            bumped(db, stamps, chat, n)?;
+        }
+        db.prepare_cached(PRUNE_KEPT)?.execute([now_ms() - ACTION_KEPT_MS])?;
+        let kept: i64 = db.prepare_cached(KEPT)?.query_row([], |r| r.get(0))?;
+        if kept > ACTIONS_KEPT {
+            db.prepare_cached(PRUNE_OLDEST_KEPT)?.execute([kept - ACTIONS_KEPT])?;
+        }
+        return Ok(true);
     }
     match row {
         Some((n, chat, status)) => shown_failed(db, stamps, chat, n, status.as_deref()),
@@ -796,9 +840,13 @@ fn shown_failed(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, status:
 }
 
 /// A manual retry is the one way a status goes back: from failed, which the server never had, to
-/// pending.
+/// pending. A message deleted for everyone, or being, isn't sent again, or its recipients would be
+/// left with it after the deletion.
 fn retry(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     let Some(Some((n, chat, _))) = outboxed(db, outbox)? else { return Ok(false) };
+    if !db.prepare_cached(RETRYABLE)?.query_row([n], |r| r.get::<_, bool>(0))? {
+        return Ok(false);
+    }
     let queued = db.prepare_cached(REQUEUE)?.execute(params![outbox, now_ms()])?;
     let seq = stamps.seq(MESSAGE, Some(n));
     let pending = db.prepare_cached(PENDING_AGAIN)?.execute([n, seq])?;
@@ -966,6 +1014,24 @@ pub struct Outboxed {
     pub status: Option<String>,
     /// `text` for a message, or an action's: `reaction`, `edit`, `revoke` or `app_state`.
     pub kind: String,
+    /// For an action on a message of yours that's still to reach WhatsApp, the state of that
+    /// message's own outbox row.
+    pub behind: Option<String>,
+}
+
+impl Outboxed {
+    /// Whether it's an action that has to wait for its message to reach WhatsApp, so it never goes
+    /// ahead of it: sent first and refused, the message would be sent again after it by
+    /// `send.retry`, and its recipients left with what the action changed. A deletion for everyone
+    /// waits only while its message may still be sent; once that's refused, or waiting for a
+    /// receipt, the deletion leaves nothing of it to send again.
+    pub fn held(&self) -> bool {
+        match (self.kind.as_str(), self.behind.as_deref()) {
+            (_, None) => false,
+            ("revoke", Some(state)) => state == "queued",
+            (_, Some(_)) => true,
+        }
+    }
 }
 
 /// The rows waiting to be sent, oldest first, as `(outbox, chat)`.
@@ -981,7 +1047,8 @@ pub fn unconfirmed(db: &Connection) -> Result<Vec<(i64, i64)>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// How many messages the outbox holds, and how many of them failed and wait for `send.retry`.
+/// How many messages and actions the outbox holds toward OUTBOX_MOST, and how many of them failed
+/// and wait for `send.retry`.
 pub fn waiting(db: &Connection) -> Result<(u64, u64)> {
     let (all, failed): (i64, i64) = db.prepare_cached(WAITING)?.query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok((all.max(0) as u64, failed.max(0) as u64))
@@ -997,7 +1064,20 @@ fn outboxed_row(r: &rusqlite::Row) -> rusqlite::Result<Outboxed> {
         attempts: r.get(5)?,
         status: r.get(6)?,
         kind: r.get(7)?,
+        behind: r.get(8)?,
     })
+}
+
+/// Whether an outbox row of `kind` is an action, rather than a message of yours.
+pub fn is_action(kind: &str) -> bool {
+    matches!(kind, "reaction" | "edit" | "revoke" | "app_state")
+}
+
+/// Whether outbox row `outbox`'s message may be sent again by hand: not if it was deleted for
+/// everyone, or is being; `None` when it has no row, deleted for you.
+pub fn retryable(db: &Connection, outbox: i64) -> Result<Option<bool>> {
+    let Some(Some((n, _, _))) = outboxed(db, outbox)? else { return Ok(None) };
+    Ok(Some(db.prepare_cached(RETRYABLE)?.query_row([n], |r| r.get(0))?))
 }
 
 /// Outbox row `outbox`, if it's still there.
@@ -1157,12 +1237,12 @@ mod tests {
             (
                 "outboxed by id",
                 &by_id,
-                "SEARCH o USING INDEX outbox_by_id (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+                "SEARCH o USING INDEX outbox_by_id (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)",
             ),
             (
                 "outboxed by n",
                 &by_n,
-                "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+                "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)",
             ),
             ("an action", ACT, ""),
             ("app state", APP_STATE, ""),
@@ -1174,6 +1254,19 @@ mod tests {
                 "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
             ),
             ("actions by ID", ACTIONS_BY_ID, "SEARCH outbox USING INDEX outbox_by_id (id=?)"),
+            ("cancelled", CANCELLED, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
+            (
+                "retryable",
+                RETRYABLE,
+                "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)",
+            ),
+            ("prune kept actions", PRUNE_KEPT, "SCAN outbox"),
+            ("kept actions", KEPT, "SCAN outbox"),
+            (
+                "prune the oldest kept",
+                PRUNE_OLDEST_KEPT,
+                "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN outbox",
+            ),
             ("fold targets", FOLD_TARGETS, "SEARCH outbox USING COVERING INDEX outbox_by_target (target=?)"),
             ("bumped", BUMPED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
             ("owing", OWING, "SCAN chats"),
@@ -2181,8 +2274,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_action_whatsapp_refuses_leaves_its_message_as_it_was() {
-        use crate::store::{Change, Lane, Store};
+    async fn an_action_whatsapp_refuses_leaves_its_message_as_it_was_and_one_that_may_have_gone_waits_for_a_late_receipt()
+     {
+        use crate::store::{Amend, Change, Lane, Store};
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
@@ -2193,7 +2287,7 @@ mod tests {
         .await
         .unwrap();
         apply(vec![acting(ANA, "m1", "e1", edit_to("hello"), 2_000)]).await.unwrap();
-        apply(vec![acting(ANA, "m1", "x1", Amendment::Revoke, 2_100)]).await.unwrap();
+        apply(vec![acting(ANA, "m1", "x1", Amendment::Revoke, now_ms())]).await.unwrap();
         let rows: Vec<i64> = store
             .reads()
             .query(crate::work::Priority::Interactive, |db| {
@@ -2216,6 +2310,63 @@ mod tests {
             .unwrap();
         apply(vec![Change::Outbox(Step::NoReceipt { outbox: rows[1], error: "no receipt".into() })]).await.unwrap();
         assert_eq!(text_of(&store, "m1").await, (Some("hi".into()), None), "neither the edit nor the deletion");
+        let deleted = || {
+            store.reads().query(crate::work::Priority::Interactive, |db| {
+                Ok(db.query_row("SELECT deleted FROM messages WHERE id = 'm1'", [], |r| r.get::<_, bool>(0))?)
+            })
+        };
+        assert!(!deleted().await.unwrap());
+        let left = store
+            .reads()
+            .query(crate::work::Priority::Interactive, |db| {
+                let row = db.query_row("SELECT id, state FROM outbox", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                Ok((row, waiting(db)?))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            left,
+            (("x1".to_string(), "failed".to_string()), (0, 0)),
+            "the refused edit leaves; the deletion that may have gone is kept for a late receipt, outside the thousand"
+        );
+        // Ana's phone was off for days: its receipt for the deletion's own ID says WhatsApp had it.
+        let receipt = Amend {
+            chat: ANA.into(),
+            target: "x1".into(),
+            sender: Some(ANA.into()),
+            mine: false,
+            at: 9_000,
+            what: Amendment::Status { status: "delivered".into() },
+            raw: None,
+        };
+        apply(vec![Change::Amend(receipt)]).await.unwrap();
+        assert!(deleted().await.unwrap(), "so it's done");
+        assert_eq!(store.count("outbox").unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deletion_for_everyone_of_a_message_whatsapp_refused_leaves_nothing_of_it_to_send_again() {
+        use crate::store::{Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        apply(vec![Change::Remember { key: "me".into(), value: ME_JID.into() }, sending(ANA, "m1", 1_000, None)])
+            .await
+            .unwrap();
+        apply(vec![acting(ANA, "m1", "x1", Amendment::Revoke, 2_000)]).await.unwrap();
+        apply(vec![Change::Outbox(Step::Failed { outbox: 1, error: "406".into(), next_at: None })]).await.unwrap();
+        let state = |outbox: i64| {
+            store.reads().query(crate::work::Priority::Interactive, move |db| {
+                Ok(db
+                    .query_row("SELECT state FROM outbox WHERE n = ?1", [outbox], |r| r.get::<_, String>(0))
+                    .optional()?)
+            })
+        };
+        let retryable_now = || store.reads().query(crate::work::Priority::Interactive, |db| retryable(db, 1));
+        assert_eq!(retryable_now().await.unwrap(), Some(false), "being deleted for everyone");
+        apply(vec![Change::Outbox(Step::Retry { outbox: 1 })]).await.unwrap();
+        assert_eq!(state(1).await.unwrap().as_deref(), Some("failed"), "so a retry by hand doesn't queue it");
+        apply(vec![Change::Outbox(Step::Sent { outbox: 2 })]).await.unwrap();
         let deleted: bool = store
             .reads()
             .query(crate::work::Priority::Interactive, |db| {
@@ -2223,8 +2374,141 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(!deleted);
-        assert_eq!(store.count("outbox").unwrap(), 0, "and nothing is left failed with no row to show it");
+        assert!(deleted, "once WhatsApp has the deletion");
+        assert_eq!(store.count("outbox").unwrap(), 0, "nothing of it is left to send");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_action_or_a_forward_asked_again_with_its_key_writes_nothing_more_in_the_writer_too() {
+        use crate::store::{Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        apply(vec![Change::Message(from_ana(ANA, "m1", 1_000))]).await.unwrap();
+        let react = |id: &str, written: &Written| {
+            Change::Outbox(Step::Act {
+                chat: ANA.into(),
+                target: "m1".into(),
+                id: id.into(),
+                effect: Amendment::React { emoji: "👍".into() },
+                at: 2_000,
+                raw: vec![1],
+                key: Some("jaw-react-1".into()),
+                written: written.clone(),
+            })
+        };
+        let (first, again) = (Written::default(), Written::default());
+        apply(vec![react("r1", &first), react("r2", &again)]).await.unwrap();
+        assert_eq!(
+            first.take(),
+            Some(Enqueued::Queued {
+                message: None,
+                id: "r1".into(),
+                chat: ANA.into(),
+                chat_n: Some(1),
+                outbox: Some(1)
+            })
+        );
+        assert!(
+            matches!(again.take(), Some(Enqueued::Queued { id, outbox: None, .. }) if id == "r1"),
+            "the same action, read in the transaction that would have written another"
+        );
+        assert_eq!(store.count("outbox").unwrap(), 1);
+        let forward = |id: &str, written: &Written| {
+            let message = Message { chat: ANA.into(), ..mine(id, 3_000) };
+            Change::Outbox(Step::Forward {
+                sending: vec![Forwarding { message, kind: "text", raw: vec![2] }],
+                key: Some("jaw-fwd-1".into()),
+                written: written.clone(),
+            })
+        };
+        let (first, again) = (Written::default(), Written::default());
+        apply(vec![forward("f1", &first), forward("f2", &again)]).await.unwrap();
+        let ids = |written: &Written| match written.take() {
+            Some(Enqueued::Many(all)) => all
+                .into_iter()
+                .map(|one| match one {
+                    Enqueued::Queued { id, .. } => id,
+                    other => panic!("{other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!((ids(&first), ids(&again)), (vec!["f1".to_string()], vec!["f1".to_string()]));
+        assert_eq!((store.count("outbox").unwrap(), store.count("messages").unwrap()), (2, 2), "one forward");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_actions_kept_for_a_late_receipt_are_a_thousand_at_most_each_for_thirty_days() {
+        use crate::store::{Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        apply(vec![Change::Message(from_ana(ANA, "m1", 1_000))]).await.unwrap();
+        {
+            let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
+            db.busy_timeout(Duration::from_secs(5)).unwrap();
+            let tx = db.transaction().unwrap();
+            let now = now_ms();
+            for n in 0..ACTIONS_KEPT {
+                // The first from 31 days ago, the rest from yesterday.
+                let at = if n == 0 { now - 31 * 24 * 3600 * 1000 } else { now - 24 * 3600 * 1000 };
+                tx.execute(
+                    "INSERT INTO outbox (jid, id, kind, raw, effect, state, next_at, created_at)
+                    VALUES (?1, ?2, 'reaction', x'', '{\"do\":\"react\",\"emoji\":\"👍\"}', 'failed', 0, ?3)",
+                    rusqlite::params![ANA, format!("k{n}"), at],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        /// A reaction of yours on m1 that had no receipt in its day, as `id`.
+        async fn kept_without_receipt(store: &Store, id: &'static str) {
+            let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+            apply(vec![acting(ANA, "m1", id, Amendment::React { emoji: "❤️".into() }, now_ms())]).await.unwrap();
+            let outbox =
+                on(store, move |db| Ok(db.query_row("SELECT n FROM outbox WHERE id = ?1", [id], |r| r.get(0))?)).await;
+            apply(vec![Change::Outbox(Step::Unconfirmed { outbox, error: "406".into(), until: 9 })]).await.unwrap();
+            apply(vec![Change::Outbox(Step::NoReceipt { outbox, error: "no receipt".into() })]).await.unwrap();
+        }
+        let kept = || on(&store, |db| Ok(db.query_row(KEPT, [], |r| r.get(0))?));
+        let has = |id: &'static str| {
+            on(&store, move |db| Ok(db.query_row("SELECT count(*) FROM outbox WHERE id = ?1", [id], |r| r.get(0))?))
+        };
+        kept_without_receipt(&store, "new1").await;
+        assert_eq!((kept().await, has("k0").await, has("new1").await), (ACTIONS_KEPT, 0, 1), "past 30 days, it goes");
+        kept_without_receipt(&store, "new2").await;
+        assert_eq!(
+            (kept().await, has("k1").await, has("new2").await),
+            (ACTIONS_KEPT, 0, 1),
+            "and past a thousand, the oldest"
+        );
+        let waiting = store.reads().query(crate::work::Priority::Interactive, waiting).await.unwrap();
+        assert_eq!(waiting, (0, 0), "none of them counts toward the outbox's thousand");
+    }
+
+    #[test]
+    fn an_amendments_json_as_jaw_db_keeps_it_stays_the_same() {
+        let pinned = [
+            (Amendment::React { emoji: "👍".into() }, r#"{"do":"react","emoji":"👍"}"#),
+            (
+                Amendment::Edit { text: Some("*sim*".into()), spans: Some("[]".into()), summary: "sim".into() },
+                r#"{"do":"edit","text":"*sim*","spans":"[]","summary":"sim"}"#,
+            ),
+            (
+                Amendment::Edit { text: None, spans: None, summary: "Photo".into() },
+                r#"{"do":"edit","text":null,"spans":null,"summary":"Photo"}"#,
+            ),
+            (Amendment::Revoke, r#"{"do":"revoke"}"#),
+            (Amendment::Star { starred: true }, r#"{"do":"star","starred":true}"#),
+            (Amendment::DeleteForMe, r#"{"do":"delete_for_me"}"#),
+            (Amendment::Status { status: "read".into() }, r#"{"do":"status","status":"read"}"#),
+            (Amendment::Keep { kind: "vote".into() }, r#"{"do":"keep","kind":"vote"}"#),
+        ];
+        for (amendment, json) in pinned {
+            assert_eq!(serde_json::to_string(&amendment).unwrap(), json, "{amendment:?} as an older jawd wrote it");
+            assert_eq!(serde_json::from_str::<Amendment>(json).unwrap(), amendment, "and read back");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

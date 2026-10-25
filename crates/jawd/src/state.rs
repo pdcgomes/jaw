@@ -197,6 +197,10 @@ impl State {
                     merges_stuck: self.live.lock().expect("live state").merges_stuck,
                     outbox: store.count("outbox").ok()?,
                     unconfirmed: store.count("outbox WHERE state = 'unconfirmed'").ok()?,
+                    actions_kept: store
+                        .count("outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke')")
+                        .ok()?,
+                    tombstones: store.count("tombstones").ok()?,
                     recipients: store.count("recipients").ok()?,
                     regroup: store.count("regroup").ok()?,
                     settled: store.count("settled").ok()?,

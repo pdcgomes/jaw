@@ -12,9 +12,11 @@ use super::start::PERSON_JIDS;
 use crate::convert::{self, Me};
 use crate::store::unpack;
 
-pub(super) const QUOTED: &str = "SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, '')
+pub(super) const QUOTED: &str = "SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, ''),
+        m.kind, m.text, m.edited_at IS NOT NULL
     FROM messages m LEFT JOIN person_jids j ON j.n = m.sender WHERE m.chat = ?1 AND m.id = ?2";
-pub(super) const QUOTED_MERGING: &str = "SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, '')
+pub(super) const QUOTED_MERGING: &str = "SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, ''),
+        m.kind, m.text, m.edited_at IS NOT NULL
     FROM chat_merges c JOIN messages m ON m.chat = c.gone AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender
     WHERE c.keep = ?1 LIMIT 1";
 pub(super) const MEMBER_JID: &str =
@@ -38,28 +40,59 @@ pub(super) enum Quote {
     Deleted,
 }
 
+/// A message as a reply quotes it: who wrote it, whether it was deleted, its raw protobuf, a line
+/// of what it says, its kind and text, and whether it was edited.
+struct Found {
+    mine: bool,
+    sender: Option<String>,
+    deleted: bool,
+    raw: Option<Vec<u8>>,
+    line: String,
+    kind: String,
+    text: Option<String>,
+    edited: bool,
+}
+
 /// Message `id` in chat `chat` (by n, as the writer finds it), or in a chat being merged into it,
-/// as a reply to it quotes it.
+/// as a reply to it quotes it: an edited one as its row says it now, since an edit changes the
+/// row's text and not the raw protobuf it came as.
 pub(super) fn quoted(db: &Connection, chat: i64, id: &str, me: &Me) -> anyhow::Result<Quote> {
-    type Row = (bool, Option<String>, bool, Option<Vec<u8>>, String);
-    let read = |sql: &str| -> rusqlite::Result<Option<Row>> {
+    let read = |sql: &str| -> rusqlite::Result<Option<Found>> {
         db.prepare_cached(sql)?
-            .query_row(params![chat, id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .query_row(params![chat, id], |r| {
+                Ok(Found {
+                    mine: r.get(0)?,
+                    sender: r.get(1)?,
+                    deleted: r.get(2)?,
+                    raw: r.get(3)?,
+                    line: r.get(4)?,
+                    kind: r.get(5)?,
+                    text: r.get(6)?,
+                    edited: r.get(7)?,
+                })
+            })
             .optional()
     };
-    let Some((mine, sender, deleted, raw, text)) = read(QUOTED)?.or(read(QUOTED_MERGING)?) else {
+    let Some(found) = read(QUOTED)?.or(read(QUOTED_MERGING)?) else {
         return Ok(Quote::Missing);
     };
-    if deleted {
+    if found.deleted {
         return Ok(Quote::Deleted);
     }
-    let participant = if mine { me.jid().map(str::to_string) } else { sender };
-    let said = raw
+    let participant = if found.mine { me.jid().map(str::to_string) } else { found.sender };
+    let said = found
+        .raw
         .and_then(|packed| unpack(&packed).ok())
         .and_then(|raw| WebMessageInfo::decode(raw.as_slice()).ok())
         .and_then(|info| info.message)
         .map(|message| convert::bare(&message));
-    let message = said.unwrap_or_else(|| e2e::Message { conversation: Some(text), ..Default::default() });
+    let text = |text: &str| e2e::Message { conversation: Some(text.into()), ..Default::default() };
+    let message = match (said, found.kind.as_str(), found.text.as_deref()) {
+        (_, "text", Some(said)) if found.edited => text(said),
+        (Some(message), _, Some(caption)) if found.edited => convert::captioned(&message, caption),
+        (Some(message), ..) => message,
+        (None, ..) => text(&found.line),
+    };
     Ok(Quote::Found(Box::new(Quoted { id: id.to_string(), participant: participant.unwrap_or_default(), message })))
 }
 

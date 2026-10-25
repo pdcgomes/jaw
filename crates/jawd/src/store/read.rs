@@ -250,7 +250,8 @@ const CHAT_COLUMNS: &str = "
             WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL),
         m.edited_at,
         (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect)))
-            FROM (SELECT created_at, effect FROM outbox WHERE target = c.last_message AND effect IS NOT NULL ORDER BY n))
+            FROM (SELECT created_at, effect FROM outbox
+                WHERE target = c.last_message AND effect IS NOT NULL AND state <> 'failed' ORDER BY n))
     FROM chats c
     LEFT JOIN people p ON p.n = c.person
     LEFT JOIN messages m ON m.n = c.last_message
@@ -341,7 +342,8 @@ const MESSAGE_COLUMNS: &str = "
             WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL),
         (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect),
                 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine)))
-            FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL ORDER BY n))";
+            FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed'
+                ORDER BY n))";
 
 /// How many columns MESSAGE_COLUMNS has, for queries that select more after them.
 const MESSAGE_COLUMN_COUNT: usize = 27;

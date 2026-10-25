@@ -2,7 +2,8 @@
 //! everyone is done to its message's row only once WhatsApp has it (write::outbox), so the row only
 //! ever holds what WhatsApp has; until then a window shows it as done, from its outbox row, by the
 //! rules the row will follow once it is: an edit newer than the row's, a reaction newer than yours
-//! on it. A refused action leaves the outbox, and the row shows as it always was.
+//! on it. A refused action leaves the outbox, or, kept failed for a late receipt, isn't read here,
+//! and the row shows as it always was.
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -33,10 +34,16 @@ pub(super) struct Shown<'a> {
 /// What a message you deleted for everyone shows.
 const YOU_DELETED: &str = "You deleted this message";
 
+/// The actions in `actions`, each read on its own, so one a later jawd wrote, which this one can't
+/// read, hides only itself.
 fn pending(actions: Option<&str>) -> Vec<Pending> {
     match actions {
         None | Some("[]") => Vec::new(),
-        Some(actions) => serde_json::from_str(actions).unwrap_or_default(),
+        Some(actions) => serde_json::from_str::<Vec<Value>>(actions)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|action| serde_json::from_value(action).ok())
+            .collect(),
     }
 }
 
@@ -129,5 +136,13 @@ mod tests {
         assert_eq!(reacted("[]", "😂"), r#"[{"emoji":"😂","mine":true,"n":1}]"#);
         let only_mine = r#"[{"emoji":"👍","n":1,"mine":true}]"#;
         assert_eq!(reacted(only_mine, ""), "[]");
+    }
+
+    #[test]
+    fn an_action_this_jawd_cant_read_hides_only_itself() {
+        let actions = r#"[{"at":1,"effect":{"do":"something_later"}},{"at":2,"effect":{"do":"react","emoji":"👍"}}]"#;
+        let read = pending(Some(actions));
+        assert_eq!(read.len(), 1, "the reaction still shows");
+        assert!(matches!(&read[0].effect, Amendment::React { emoji } if emoji == "👍"));
     }
 }

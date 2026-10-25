@@ -46,10 +46,19 @@ const ALLOWED: &[(&str, &str)] = &[
     ("SELECT folder, chat, person FROM folder_items", "the palette's folders, read once at start"),
     ("SELECT n, parent, name FROM folders", "the palette's folders, read once at start"),
     ("FROM sqlite_schema", "the schema's fingerprint, read at start and after each migration step"),
-    ("FROM outbox WHERE state = 'unconfirmed'", "once at start; the outbox holds at most 1,000 messages"),
+    (
+        "FROM outbox WHERE state = 'unconfirmed'",
+        "once at start; the outbox holds at most 1,000 waiting, and 1,000 actions kept for a late receipt",
+    ),
     (
         "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox",
-        "the outbox's bound, checked in each send's transaction; it holds at most 1,000 messages",
+        "the outbox's bound, checked in each send's transaction; it holds at most 1,000 waiting, and 1,000 \
+        actions kept for a late receipt",
+    ),
+    (
+        "FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke')",
+        "the actions kept for a late receipt, pruned as one more is kept; the outbox holds at most 1,000 waiting, \
+        and 1,000 of these",
     ),
     ("SELECT n FROM chats WHERE told_at IS NOT NULL", "the chats owing read receipts, once at start"),
     ("SELECT message FROM settled LIMIT", "stops at its limit"),

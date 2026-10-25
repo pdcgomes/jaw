@@ -549,7 +549,7 @@ async fn an_action_on_its_way_when_jawd_stops_goes_again_with_its_own_id_once_it
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_action_refused_once_it_may_have_gone_and_no_receipt_comes_leaves_its_message_and_says_so() {
+async fn an_action_refused_once_it_may_have_gone_and_no_receipt_comes_leaves_its_message_and_says_so_till_one_comes() {
     let home = tempfile::tempdir().unwrap();
     let id = crash(home.path(), "edit held").await;
     let world = world();
@@ -575,9 +575,27 @@ async fn an_action_refused_once_it_may_have_gone_and_no_receipt_comes_leaves_its
     .await
     .expect("no receipt in its time is said");
     assert!(notice.starts_with("WhatsApp refused your edit"), "{notice}");
-    until_stored(&running).await;
+    let kept = |db: &Connection| {
+        Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'edit' AND state = 'failed'", [], |r| {
+            r.get::<_, i64>(0)
+        })? == 1)
+    };
+    eventually(&running, "the edit kept for a late receipt", kept).await;
     assert_eq!(stored_text(&running, &id).await, "chego às 20h");
-    assert_eq!(text_of(&row(&running, ANA, &id).await.unwrap()), "chego às 20h", "and the row is as it was");
+    let back = row(&running, ANA, &id).await.unwrap();
+    assert_eq!(text_of(&back), "chego às 20h", "and the row is as it was");
+    // Ana's phone was off, and says now that it had the edit after all.
+    let edit: String =
+        running.query(|db| Ok(db.query_row("SELECT id FROM outbox WHERE kind = 'edit'", [], |r| r.get(0))?)).await;
+    running.receipt(ANA, &edit, ANA, "delivered").await;
+    let done = row(&running, ANA, &id).await.unwrap();
+    assert_eq!(
+        (text_of(&done), stored_text(&running, &id).await),
+        ("chego às 21h".to_string(), "chego às 21h".to_string()),
+        "a late receipt does it"
+    );
+    assert!(done.v > back.v, "and every window is sent it");
+    assert_eq!(running.store.count("outbox").unwrap(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1219,9 +1237,18 @@ async fn you_are_online_only_while_an_interface_has_focus_and_away_once_none_has
 
 /// jawd's socket in `home`, serving `running`'s sending.
 fn serve(running: &Running, home: &Path) -> std::path::PathBuf {
+    serving(running, home, false)
+}
+
+/// As `serve`, with windows too.
+fn serve_watched(running: &Running, home: &Path) -> std::path::PathBuf {
+    serving(running, home, true)
+}
+
+fn serving(running: &Running, home: &Path, watched: bool) -> std::path::PathBuf {
     let socket = jaw_proto::local::socket(home);
     let listener = crate::sock::listen(&socket).unwrap();
-    let state = crate::state::State::new(
+    let mut state = crate::state::State::new(
         home,
         Ok(running.supervisor.clone().unwrap()),
         Vec::new(),
@@ -1232,13 +1259,78 @@ fn serve(running: &Running, home: &Path) -> std::path::PathBuf {
     .unwrap()
     .with_attention(running.attention.clone())
     .with_sending(running.sending.clone());
+    if watched {
+        state = state.with_feed(crate::feed::Feed::start(
+            running.store.clone(),
+            Arc::new(|| false),
+            crate::feed::Timing::default(),
+        ));
+    }
     tokio::spawn(crate::sock::serve(Arc::new(state), listener));
     socket
+}
+
+/// The rows a window on `chat`'s newest messages is sent through `socket`, as an interface
+/// watching it gets them: the window's own first, then each row upserted into it.
+fn window(socket: &Path, chat: &str) -> mpsc::UnboundedReceiver<Value> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let (rows, sent) = mpsc::unbounded_channel();
+    let (socket, chat) = (socket.to_path_buf(), chat.to_string());
+    std::thread::spawn(move || {
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        let reader = BufReader::new(stream.try_clone().unwrap());
+        let hello =
+            json!({ "id": 1, "method": "hello", "params": { "protocol": 1, "client": "test", "version": "0" } });
+        let watch = json!({ "id": 2, "method": "messages.watch", "params": { "chat": chat, "around": "newest", "before": 50 } });
+        stream.write_all(format!("{hello}\n{watch}\n").as_bytes()).unwrap();
+        for line in reader.lines() {
+            let Ok(line) = line else { return };
+            let line: Value = serde_json::from_str(&line).unwrap();
+            let fresh = match (line["id"].as_i64(), line["method"].as_str()) {
+                (Some(2), _) => line["result"]["rows"].clone(),
+                (None, Some("messages")) => line["params"]["upsert"].clone(),
+                _ => continue,
+            };
+            for row in fresh.as_array().cloned().unwrap_or_default() {
+                if rows.send(row).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    sent
+}
+
+/// Waits for `window` to be sent message `id` showing as `shows` says.
+async fn shown(
+    window: &mut mpsc::UnboundedReceiver<Value>,
+    id: &str,
+    what: &str,
+    shows: impl Fn(&Value) -> bool,
+) -> Value {
+    let found = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let row = window.recv().await.expect("the window closed");
+            if row["id"] == id && shows(&row) {
+                return row;
+            }
+        }
+    });
+    found.await.unwrap_or_else(|_| panic!("the window wasn't sent {id} {what}"))
 }
 
 /// Says hello on `socket`, then asks each of `requests` in turn, each with the next id, and gives
 /// each one's reply, pushes aside.
 async fn ask_socket(socket: &Path, requests: Vec<(&'static str, Value)>) -> Vec<Value> {
+    ask_socket_open(socket, requests).await.0
+}
+
+/// As `ask_socket`, with the connection, still focused, open until what it gives back is dropped.
+async fn ask_socket_open(
+    socket: &Path,
+    requests: Vec<(&'static str, Value)>,
+) -> (Vec<Value>, std::os::unix::net::UnixStream) {
     use std::io::{BufRead, BufReader, Write};
 
     let socket = socket.to_path_buf();
@@ -1246,7 +1338,7 @@ async fn ask_socket(socket: &Path, requests: Vec<(&'static str, Value)>) -> Vec<
         let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let hello = ("hello", json!({ "protocol": 1, "client": "test", "version": "0", "focus": true }));
-        std::iter::once(hello)
+        let replies = std::iter::once(hello)
             .chain(requests)
             .enumerate()
             .map(|(id, (method, params))| {
@@ -1262,7 +1354,8 @@ async fn ask_socket(socket: &Path, requests: Vec<(&'static str, Value)>) -> Vec<
                 }
             })
             .skip(1)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (replies, stream)
     })
     .await
     .unwrap()
@@ -1274,22 +1367,20 @@ async fn sending_goes_through_the_socket_with_the_pending_row_in_its_answer() {
     let running = Running::new(home.path()).await;
     running.chats(&[ANA]).await;
     let socket = serve(&running, home.path());
+    let requests = vec![
+        ("send.text", json!({ "chat": ANA, "text": "olá" })),
+        ("typing", json!({ "chat": ANA, "state": "composing" })),
+        ("chat.start", json!({ "phone": "+351 913 333 333" })),
+    ];
+    let (answers, connection) = ask_socket_open(&socket, requests).await;
     let mut replies = vec![Value::Null];
-    replies.extend(
-        ask_socket(
-            &socket,
-            vec![
-                ("send.text", json!({ "chat": ANA, "text": "olá" })),
-                ("typing", json!({ "chat": ANA, "state": "composing" })),
-                ("chat.start", json!({ "phone": "+351 913 333 333" })),
-            ],
-        )
-        .await,
-    );
+    replies.extend(answers);
     assert_eq!(replies[1]["result"]["row"]["status"], "pending", "{}", replies[1]);
     assert_eq!(replies[2]["result"], json!({}));
     assert_eq!(replies[3]["result"]["chat"]["id"], RUI);
+    // You're online once an interface has had focus for a moment, which it has while it's connected.
     running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Presence(p) if p.available))).await;
+    drop(connection);
 }
 
 /// The raw message the engine was asked to send `nth`, counting from 1, once it has been.
@@ -1756,13 +1847,364 @@ async fn actions_wait_their_turn_behind_their_chats_earlier_sends_and_while_what
     assert_eq!(stored_reactions(&running).await, 1);
 }
 
-/// Waits until the outbox is empty: everything sent has been answered and kept.
-async fn until_stored(running: &Running) {
-    running
-        .until("the outbox to empty", |db| {
-            Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0)
+/// What each message the engine was asked to send is, in order: its text, or what kind of action.
+fn kinds_sent(running: &Running) -> Vec<String> {
+    raws(running)
+        .iter()
+        .map(|m| match (&m.conversation, &m.edited_message, &m.protocol_message, &m.reaction_message) {
+            (Some(text), ..) => text.clone(),
+            (_, Some(_), ..) => "an edit".into(),
+            (_, _, Some(_), _) => "a deletion".into(),
+            (.., Some(_)) => "a reaction".into(),
+            _ => "something else".into(),
         })
-        .await;
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_of_a_message_whatsapp_refuses_waits_for_it_and_goes_after_it_once_it_is_sent_again() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_secs(3_600), read: Duration::from_secs(3_600) });
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "hi").await;
+    running.call("edit", json!({ "message": id, "text": "hello" })).await.unwrap();
+    running.world.refuse_next(1);
+    running.connection(Online);
+    running.until_status(ANA, &id, "failed").await;
+    until_held(&running).await;
+    assert_eq!(kinds_sent(&running), ["hi"], "the edit doesn't go ahead of its message");
+    let waiting = row(&running, ANA, &id).await.unwrap();
+    assert_eq!((text_of(&waiting), waiting.status.as_deref()), ("hello".into(), Some("failed")), "but it's shown");
+    assert_eq!(stored_text(&running, &id).await, "hi");
+    running.call("send.retry", json!({ "message": id })).await.unwrap();
+    until_stored(&running).await;
+    assert_eq!(kinds_sent(&running), ["hi", "hi", "an edit"], "it goes once its message has");
+    assert_eq!(stored_text(&running, &id).await, "hello", "so jaw and the recipients both have hello");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deletion_for_everyone_of_a_message_whatsapp_refuses_leaves_nothing_of_it_to_send_again() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_secs(3_600), read: Duration::from_secs(3_600) });
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "hi").await;
+    running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+    running.world.refuse_next(1);
+    running.connection(Online);
+    until_stored(&running).await;
+    assert_eq!(kinds_sent(&running), ["hi", "a deletion"]);
+    let deleted = row(&running, ANA, &id).await.unwrap();
+    assert!(deleted.deleted, "deleted, as nobody has it");
+    let retried = running.call("send.retry", json!({ "message": id })).await.unwrap_err();
+    assert_eq!(retried.code, code::NOT_FOUND, "nothing of it is left to send again: {}", retried.message);
+    // Refused too, and deleted for everyone from another of your devices: not sent again by hand.
+    running.world.refuse_next(1);
+    let other = running.send(ANA, "and this").await;
+    running.until_status(ANA, &other, "failed").await;
+    let revoke = Amend {
+        chat: ANA.into(),
+        target: other.clone(),
+        sender: Some(ME.into()),
+        mine: true,
+        at: now_ms(),
+        what: Amendment::Revoke,
+        raw: None,
+    };
+    running.store.apply(Lane::Live, vec![Change::Amend(revoke)]).await.unwrap();
+    let retried = running.call("send.retry", json!({ "message": other })).await.unwrap_err();
+    assert_eq!(retried.code, code::NOT_ALLOWED, "{}", retried.message);
+    assert_eq!(kinds_sent(&running), ["hi", "a deletion", "and this"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_action_on_a_message_still_to_go_from_a_chat_being_merged_goes_after_it() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let lid = "100000000001@lid";
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.chats(&[ANA, lid]).await;
+    running.world.gate(true);
+    running.send(lid, "um").await;
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Send(_)))).await;
+    // Unanswered, "um" holds its chat's queue, and "dois" waits behind it.
+    let dois = running.send(lid, "dois").await;
+    // Ana's LID and number turn out to be one person: her LID's chat starts merging into her number's,
+    // where the edit is queued, apart from "dois".
+    let both = Person { jids: vec![ANA.into(), lid.into()], ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
+    running.call("edit", json!({ "message": dois, "text": "dois!" })).await.unwrap();
+    until_held(&running).await;
+    running.world.gate(false);
+    until_stored(&running).await;
+    assert_eq!(kinds_sent(&running), ["um", "dois", "an edit"], "the edit goes after its message");
+    assert_eq!(stored_text(&running, &dois).await, "dois!");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_of_a_message_waiting_for_a_receipt_goes_once_one_says_it_went() {
+    let home = tempfile::tempdir().unwrap();
+    let id = crash(home.path(), "held").await;
+    let world = world();
+    world.refuse_next(1);
+    let running = Running::on(home.path(), world, true).await;
+    let unconfirmed = |db: &Connection| {
+        Ok(db.query_row("SELECT count(*) FROM outbox WHERE state = 'unconfirmed'", [], |r| r.get::<_, i64>(0))? == 1)
+    };
+    eventually(&running, "the resend's refusal", unconfirmed).await;
+    running.call("edit", json!({ "message": id, "text": "did it go??" })).await.unwrap();
+    until_held(&running).await;
+    assert_eq!(kinds_sent(&running), ["did it go?"], "the edit waits while its message may not have gone");
+    running.receipt(ANA, &id, ANA, "delivered").await;
+    until_stored(&running).await;
+    assert_eq!(kinds_sent(&running), ["did it go?", "an edit"], "and goes once a receipt says it did");
+    assert_eq!(stored_text(&running, &id).await, "did it go??");
+}
+
+/// The chat's unread, read position and how far WhatsApp was told, as jaw.db holds them.
+async fn read_state(running: &Running, chat: &'static str) -> (i64, Option<i64>, Option<i64>, Option<i64>) {
+    running
+        .query(move |db| {
+            Ok(db.query_row("SELECT unread, read_at, read_n, told_at FROM chats WHERE id = ?1", [chat], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?)
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_reads_none_of_the_chats_it_goes_to() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA, RUI]).await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    running.arrives(RUI, RUI, "r1", now_ms() - 50_000).await;
+    running.arrives(RUI, RUI, "r2", now_ms() - 40_000).await;
+    let before = read_state(&running, RUI).await;
+    assert_eq!(before.0, 2);
+    let forwarded = running.call("forward", json!({ "messages": ["m1"], "to": [RUI] })).await.unwrap();
+    assert_eq!(read_state(&running, RUI).await, before, "its unread, its read position and what WhatsApp was told");
+    let id = forwarded["messages"][0].as_str().unwrap().to_string();
+    running.until_status(RUI, &id, "sent").await;
+    running.call("read", json!({ "chat": RUI, "up_to": "r1" })).await.unwrap();
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
+    assert_eq!(running.marked_read()[0].ids, ["r1"], "WhatsApp is told only of what you read");
+    assert_eq!(read_state(&running, RUI).await.0, 1);
+}
+
+/// A text message from someone, as WhatsApp sent it, with its raw protobuf.
+async fn text_from(running: &Running, chat: &str, id: &str, text: &str) {
+    use wa_proto::wa_web_protobufs_web::WebMessageInfo;
+    let info = WebMessageInfo {
+        key: wa_proto::wa_common::MessageKey {
+            remote_jid: Some(chat.into()),
+            from_me: Some(false),
+            id: Some(id.into()),
+            participant: None,
+        },
+        message: Some(wa_proto::wa_web_protobufs_e2e::Message {
+            conversation: Some(text.into()),
+            ..Default::default()
+        }),
+        message_timestamp: Some((now_ms() / 1000 - 120) as u64),
+        ..Default::default()
+    };
+    let changes = crate::convert::message(&info, &crate::convert::Me::default(), true);
+    running.store.apply(Lane::Live, changes).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_and_a_reply_of_an_edited_message_say_what_it_says_now() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.chats(&[ANA, RUI]).await;
+    text_from(&running, ANA, "m1", "chego às 20h").await;
+    photo_from(&running, ANA, "p1", 0).await;
+    let edited = |target: &str, text: &str| {
+        let edit = Amendment::Edit { text: Some(text.into()), spans: None, summary: text.into() };
+        Change::Amend(Amend { what: edit, ..other_of(ANA, target) })
+    };
+    let edits = vec![edited("m1", "chego às 21h"), edited("p1", "o lago ao fim da tarde")];
+    running.store.apply(Lane::Live, edits).await.unwrap();
+    let forwarded = running.call("forward", json!({ "messages": ["m1", "p1"], "to": [RUI] })).await.unwrap();
+    let reply = running.call("send.text", json!({ "chat": ANA, "text": "ok", "reply": "m1" })).await.unwrap();
+    sent(&running, 3).await;
+    let raws = raws(&running);
+    let forwarded_text = raws.iter().find_map(|m| {
+        m.extended_text_message.as_ref().filter(|e| e.context_info.as_ref().is_some_and(|c| c.quoted_message.is_none()))
+    });
+    assert_eq!(
+        forwarded_text.and_then(|e| e.text.as_deref()),
+        Some("chego às 21h"),
+        "the forward says what it says now"
+    );
+    let photo = raws.iter().find_map(|m| m.image_message.as_deref()).expect("the photo");
+    assert_eq!(
+        (photo.caption.as_deref(), photo.url.as_deref()),
+        (Some("o lago ao fim da tarde"), Some("https://mmg.whatsapp.net/photo")),
+        "with its caption as edited and its media as it came"
+    );
+    let quoted = raws.iter().find_map(|m| {
+        m.extended_text_message.as_ref()?.context_info.as_ref()?.quoted_message.as_ref()?.conversation.clone()
+    });
+    assert_eq!(quoted.as_deref(), Some("chego às 21h"), "and the reply quotes what it says now");
+    let ids: Vec<String> = serde_json::from_value(forwarded["messages"].clone()).unwrap();
+    assert_eq!(text_of(&row(&running, RUI, &ids[0]).await.unwrap()), "chego às 21h", "as jaw's own rows say");
+    assert_eq!(reply["row"]["reply"]["summary"], "chego às 21h");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_is_sent_the_message_again_as_an_action_on_it_is_queued_done_and_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    // No receipts come, so nothing else changes the message meanwhile.
+    running.world.replying(Replies { delivered: Duration::from_secs(3_600), read: Duration::from_secs(3_600) });
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    let socket = serve_watched(&running, home.path());
+    let mut window = window(&socket, ANA);
+    let first = shown(&mut window, "m1", "as it is", |_| true).await;
+    let version = |row: &Value| row["v"].as_i64().unwrap();
+    let thumbs = json!([{ "emoji": "👍", "n": 1, "mine": true }]);
+    running.world.gate(true);
+    running.call("react", json!({ "message": "m1", "emoji": "👍" })).await.unwrap();
+    let queued = shown(&mut window, "m1", "with the reaction on its way", |row| row["reactions"] == thumbs).await;
+    assert!(version(&queued) > version(&first));
+    running.world.gate(false);
+    let done = shown(&mut window, "m1", "once it's done", |row| version(row) > version(&queued)).await;
+    assert_eq!(done["reactions"], thumbs);
+    until_stored(&running).await;
+    // WhatsApp can't be reached, so the next waits until it's seen on its way, and is refused then.
+    running.connection(jaw_proto::ConnectionState::Offline);
+    for _ in 0..500 {
+        if !*running.sending.inner.connected.borrow() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    running.call("react", json!({ "message": "m1", "emoji": "😂" })).await.unwrap();
+    let laughing = json!([{ "emoji": "😂", "n": 1, "mine": true }]);
+    let second = shown(&mut window, "m1", "with the next on its way", |row| row["reactions"] == laughing).await;
+    running.world.refuse_next(1);
+    running.connection(jaw_proto::ConnectionState::Online);
+    let refused = shown(&mut window, "m1", "as it was once that's refused", |row| row["reactions"] == thumbs).await;
+    assert!(version(&refused) > version(&second));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn past_a_thousand_waiting_an_action_or_a_forward_is_refused_and_nothing_is_written() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.chats(&[ANA]).await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    let mine = Message { chat: ANA.into(), live: true, ..mine_message("mine", now_ms() - 60_000) };
+    running.store.apply(Lane::Live, vec![Change::Message(mine)]).await.unwrap();
+    {
+        let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        let tx = db.transaction().unwrap();
+        for n in 0..1_000i64 {
+            tx.execute(
+                "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'reaction', x'', 0, 0)",
+                rusqlite::params![ANA, format!("w{n}")],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let counts = || {
+        running.query(|db| {
+            let count =
+                |table: &str| db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0));
+            Ok((count("outbox")?, count("messages")?, count("tombstones")?))
+        })
+    };
+    let before = counts().await;
+    let actions = [
+        ("react", json!({ "message": "m1", "emoji": "👍" })),
+        ("edit", json!({ "message": "mine", "text": "outra coisa" })),
+        ("delete", json!({ "message": "mine", "for": "everyone" })),
+        ("delete", json!({ "message": "m1", "for": "me" })),
+        ("forward", json!({ "messages": ["m1"], "to": [ANA] })),
+    ];
+    for (method, params) in actions {
+        let refused = running.call(method, params.clone()).await.unwrap_err();
+        assert_eq!(
+            (refused.code, refused.data.clone()),
+            (code::LIMIT, Some(json!({ "limit": "outbox", "waiting": 1_000, "failed": 0 }))),
+            "{method} {params}"
+        );
+        assert_eq!(counts().await, before, "{method} {params} wrote nothing");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_or_an_edit_asked_again_with_its_key_goes_once_even_asked_twice_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.chats(&[ANA]).await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &id, "sent").await;
+    let react = |emoji: &str, key: &str| json!({ "message": "m1", "emoji": emoji, "key": key });
+    let edit = |text: &str, key: &str| json!({ "message": id, "text": text, "key": key });
+    for _ in 0..2 {
+        assert_eq!(running.call("react", react("👍", "jaw-react-1")).await.unwrap(), json!({}));
+        assert_eq!(running.call("edit", edit("chego às 21h", "jaw-edit-1")).await.unwrap(), json!({}));
+    }
+    // Asked twice at once while jaw.db can't be written, so each finds its key names nothing yet,
+    // and only the writer, taking them one at a time, sees the first.
+    let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.busy_timeout(Duration::from_secs(5)).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let release = tokio::task::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        holder.execute_batch("COMMIT").unwrap();
+    });
+    let (one, two, three, four) = tokio::join!(
+        running.call("react", react("😂", "jaw-react-2")),
+        running.call("react", react("😂", "jaw-react-2")),
+        running.call("edit", edit("chego às 22h", "jaw-edit-2")),
+        running.call("edit", edit("chego às 22h", "jaw-edit-2")),
+    );
+    release.await.unwrap();
+    for answer in [one, two, three, four] {
+        assert_eq!(answer.unwrap(), json!({}));
+    }
+    until_stored(&running).await;
+    let sent = kinds_sent(&running);
+    let each = |kind: &str| sent.iter().filter(|sent| *sent == kind).count();
+    assert_eq!((sent.len(), each("a reaction"), each("an edit")), (5, 2, 2), "one of each for each key: {sent:?}");
+    assert_eq!(stored_text(&running, &id).await, "chego às 22h");
+}
+
+/// Waits until the outbox is empty: everything sent has been answered and kept. It looks again
+/// and again rather than at each commit, since what empties it may write no event, as an app
+/// state patch's answer doesn't.
+async fn until_stored(running: &Running) {
+    eventually(running, "the outbox to empty", |db| {
+        Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0)
+    })
+    .await;
+}
+
+/// Waits until an action is held for its message to reach WhatsApp.
+async fn until_held(running: &Running) {
+    for _ in 0..1_500 {
+        if !running.sending.inner.held.rows().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("no action was held for its message");
 }
 
 /// Message `id`'s text as its row holds it, whatever windows show over it.
