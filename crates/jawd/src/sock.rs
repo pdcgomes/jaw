@@ -5,6 +5,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use jaw_proto::find::{ChatOpened, Find};
@@ -27,13 +28,105 @@ use crate::sync::Refused;
 /// one at most.
 const WAITING_LINES: usize = 64;
 /// Requests a connection's lane holds, waiting or being answered, before it reads no more.
-const LANE_MOST: usize = 64;
+pub const LANE_MOST: usize = 64;
 
 /// What a connection has said, its windows, and what it's looking at.
 struct Session {
     greeted: bool,
     windows: Option<feed::Client>,
     viewer: Viewer,
+}
+
+/// Every connection's lane and waiting reply, summed for `jawd status`.
+#[derive(Default)]
+pub struct Lanes {
+    requests: AtomicI64,
+    full: AtomicI64,
+    waiting: AtomicI64,
+}
+
+impl Lanes {
+    /// The requests in every connection's lane, read and not yet answered.
+    pub fn requests(&self) -> u64 {
+        Lanes::count(&self.requests)
+    }
+
+    /// The connections whose lane holds `LANE_MOST`, which jawd reads no more from meanwhile.
+    pub fn full(&self) -> u64 {
+        Lanes::count(&self.full)
+    }
+
+    /// The connections whose reply waits for room in the queue to their interface.
+    pub fn waiting(&self) -> u64 {
+        Lanes::count(&self.waiting)
+    }
+
+    fn count(count: &AtomicI64) -> u64 {
+        u64::try_from(count.load(Ordering::Relaxed)).unwrap_or(0)
+    }
+
+    fn add(&self, before: [i64; 3], after: [i64; 3]) {
+        for ((count, before), after) in [&self.requests, &self.full, &self.waiting].into_iter().zip(before).zip(after) {
+            count.fetch_add(after - before, Ordering::Relaxed);
+        }
+    }
+}
+
+/// What a connection owes its interface: the requests it has sent down its lane and not had back,
+/// and the reply waiting for room in the queue, one at most. It's counted in `Lanes` for as long as
+/// the connection lasts, each change as it's made.
+struct Owed<'a> {
+    lanes: &'a Lanes,
+    in_lane: usize,
+    waiting: Option<Vec<u8>>,
+}
+
+impl<'a> Owed<'a> {
+    fn new(lanes: &'a Lanes) -> Owed<'a> {
+        Owed { lanes, in_lane: 0, waiting: None }
+    }
+
+    fn full(&self) -> bool {
+        self.in_lane >= LANE_MOST
+    }
+
+    /// A request sent down the lane.
+    fn took(&mut self) {
+        self.change(|owed| owed.in_lane += 1);
+    }
+
+    /// A request's reply back from the lane.
+    fn answered(&mut self) {
+        self.change(|owed| owed.in_lane -= 1);
+    }
+
+    /// Keeps `line` until there's room for it.
+    fn wait(&mut self, line: Vec<u8>) {
+        self.change(|owed| owed.waiting = Some(line));
+    }
+
+    /// The reply that waited, now there's room for it.
+    fn sent(&mut self) -> Vec<u8> {
+        self.change(|owed| owed.waiting.take().expect("a reply waits"))
+    }
+
+    /// Its part in `Lanes`.
+    fn counts(&self) -> [i64; 3] {
+        [self.in_lane as i64, i64::from(self.full()), i64::from(self.waiting.is_some())]
+    }
+
+    fn change<T>(&mut self, change: impl FnOnce(&mut Self) -> T) -> T {
+        let before = self.counts();
+        let changed = change(self);
+        self.lanes.add(before, self.counts());
+        changed
+    }
+}
+
+impl Drop for Owed<'_> {
+    fn drop(&mut self) {
+        self.lanes.add(self.counts(), [0; 3]);
+    }
 }
 
 pub fn listen(path: &Path) -> Result<UnixListener> {
@@ -94,37 +187,36 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
     let mut finding = Finding::default();
     let (answered, mut answers) = mpsc::unbounded_channel();
     let lane = lane(state.clone(), answered);
-    let mut in_lane = 0;
-    let mut waiting: Option<Vec<u8>> = None;
+    let mut owed = Owed::new(&state.lanes);
     loop {
-        if session.greeted && pushes.is_none() && waiting.is_none() {
+        if session.greeted && pushes.is_none() && owed.waiting.is_none() {
             pushes = Some(state.pushes.subscribe());
         }
-        let open = waiting.is_none();
+        let open = owed.waiting.is_none();
         tokio::select! {
             biased;
             permit = out.reserve(), if !open => {
-                permit.context("the interface stopped reading")?.send(waiting.take().expect("a reply waits"));
+                permit.context("the interface stopped reading")?.send(owed.sent());
                 if let Some(windows) = session.windows.as_mut() {
                     windows.hold(false);
                 }
             }
             _ = state.stopping() => return Ok(()),
             Some(reply) = answers.recv(), if open => {
-                in_lane -= 1;
-                send(&out, &reply, &mut waiting, &mut session)?;
+                owed.answered();
+                send(&out, &reply, &mut owed, &mut session)?;
             }
-            Some(reply) = finished.recv(), if open => send(&out, &reply, &mut waiting, &mut session)?,
-            line = lines.next_line(), if open && in_lane < LANE_MOST => {
+            Some(reply) = finished.recv(), if open => send(&out, &reply, &mut owed, &mut session)?,
+            line = lines.next_line(), if open && !owed.full() => {
                 let Some(line) = line? else { return Ok(()) };
                 if line.trim().is_empty() {
                     continue;
                 }
                 match take(state, &line, &mut session).await {
-                    Taken::Answer(reply) => send(&out, &reply, &mut waiting, &mut session)?,
+                    Taken::Answer(reply) => send(&out, &reply, &mut owed, &mut session)?,
                     Taken::Find(request) => finding.start(state, request, found.clone()),
                     Taken::Lane(request) => {
-                        in_lane += 1;
+                        owed.took();
                         lane.send(request).context("the connection's lane stopped")?;
                     }
                 }
@@ -146,16 +238,11 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
 
 /// Puts `reply` in the queue to the interface, or, with no room there, keeps it waiting and holds
 /// the windows.
-fn send(
-    out: &mpsc::Sender<Vec<u8>>,
-    reply: &Reply,
-    waiting: &mut Option<Vec<u8>>,
-    session: &mut Session,
-) -> Result<()> {
+fn send(out: &mpsc::Sender<Vec<u8>>, reply: &Reply, owed: &mut Owed<'_>, session: &mut Session) -> Result<()> {
     match out.try_send(encode(reply)) {
         Ok(()) => Ok(()),
         Err(mpsc::error::TrySendError::Full(line)) => {
-            *waiting = Some(line);
+            owed.wait(line);
             if let Some(windows) = session.windows.as_mut() {
                 windows.hold(true);
             }

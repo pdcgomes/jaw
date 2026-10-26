@@ -152,6 +152,15 @@ impl Feed {
     pub(super) fn keep_at_most(&self, bytes: u64) {
         self.shared.keep_at_most(bytes);
     }
+
+    /// Stops the next flush that isn't held, once it has a window due and before it looks for room
+    /// in its queue: it notifies the first when it stops, and goes on once the second is notified.
+    #[cfg(test)]
+    pub(super) fn pause_next_flush(&self) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let pause = (Arc::default(), Arc::default());
+        *self.shared.pausing.lock().expect("the test's pause") = Some(pause.clone());
+        pause
+    }
 }
 
 /// Reads the events each commit wrote and sends which rows they touched. It never waits on a

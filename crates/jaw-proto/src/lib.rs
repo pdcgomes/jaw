@@ -275,6 +275,19 @@ pub struct Interfaces {
     pub focused: bool,
     /// Where notifications go (`Notification Center`, `notify-send`), or why they don't.
     pub notifications: String,
+    /// The requests in every connection's lane, read and not yet answered, this `status` among
+    /// them; the most a connection's lane holds, past which jawd reads nothing more from it until
+    /// one is answered; and the connections whose lane is that full.
+    #[serde(default)]
+    pub in_lanes: u64,
+    #[serde(default)]
+    pub lane_most: u64,
+    #[serde(default)]
+    pub lanes_full: u64,
+    /// The connections whose reply waits for room in the queue to their interface, one each at
+    /// most, which jawd reads nothing from and sends nothing else meanwhile.
+    #[serde(default)]
+    pub replies_waiting: u64,
 }
 
 /// The windows interfaces watch, and the reads jawd keeps for them.

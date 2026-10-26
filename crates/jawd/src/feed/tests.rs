@@ -864,20 +864,37 @@ async fn watches_say_what_they_cant_do() {
 
 /// jawd on a socket in `bed`'s folder, serving its feed.
 fn serve(bed: &Bed) -> std::path::PathBuf {
+    serve_pushing(bed).0
+}
+
+/// `serve`, with the pushes it sends every connection in the test's hands.
+fn serve_pushing(bed: &Bed) -> (std::path::PathBuf, broadcast::Sender<jaw_proto::Push>) {
     let socket = jaw_proto::local::socket(bed.home.path());
     let listener = crate::sock::listen(&socket).unwrap();
+    let (pushes, _) = broadcast::channel(1_024);
     let state = State::new(
         bed.home.path(),
         Err(("demo", "no engine in this test".into())),
         Vec::new(),
         Arc::default(),
         Some(bed.store.clone()),
-        broadcast::channel(16).0,
+        pushes.clone(),
     )
     .unwrap()
     .with_feed(bed.feed.clone());
     tokio::spawn(crate::sock::serve(Arc::new(state), listener));
-    socket
+    (socket, pushes)
+}
+
+/// Pushes that aren't for windows, enough to fill jawd's queue to an interface that has stopped
+/// reading, and the socket behind it.
+async fn fill(pushes: &broadcast::Sender<jaw_proto::Push>) {
+    let words = "x".repeat(4_000);
+    for _ in 0..200 {
+        let _ =
+            pushes.send(jaw_proto::Push { method: "notice".into(), params: json!({"text": words, "tone": "info"}) });
+        tokio::time::sleep(ms(2)).await;
+    }
 }
 
 /// A raw connection: requests go out as lines, and the reply to each comes back, with any pushes
@@ -948,9 +965,14 @@ impl Line {
 /// jawd on a socket in `bed`'s folder, serving its feed, and sending and finding as jawd does, its
 /// engine never there.
 async fn serve_all(bed: &Bed) -> std::path::PathBuf {
+    serve_all_pushing(bed).await.0
+}
+
+/// `serve_all`, with the pushes it sends every connection in the test's hands.
+async fn serve_all_pushing(bed: &Bed) -> (std::path::PathBuf, broadcast::Sender<jaw_proto::Push>) {
     let socket = jaw_proto::local::socket(bed.home.path());
     let listener = crate::sock::listen(&socket).unwrap();
-    let (pushes, _) = broadcast::channel(16);
+    let (pushes, _) = broadcast::channel(1_024);
     let live: crate::sync::Shared = Arc::default();
     let attention = Arc::new(crate::attention::Attention::default());
     let timing = crate::send::Timing::default();
@@ -962,7 +984,7 @@ async fn serve_all(bed: &Bed) -> std::path::PathBuf {
         Vec::new(),
         live,
         Some(bed.store.clone()),
-        pushes,
+        pushes.clone(),
     )
     .unwrap()
     .with_feed(bed.feed.clone())
@@ -970,7 +992,7 @@ async fn serve_all(bed: &Bed) -> std::path::PathBuf {
     .with_sending(sending.unwrap());
     let _ = state.finder.set(crate::find::Finder::start(bed.store.clone()).await.unwrap());
     tokio::spawn(crate::sock::serve(Arc::new(state), listener));
-    socket
+    (socket, pushes)
 }
 
 /// Holds jaw.db's write lock from outside until dropped, so jawd's writer waits meanwhile.
@@ -989,6 +1011,17 @@ impl Drop for Locked {
     fn drop(&mut self) {
         let _ = self.0.execute_batch("ROLLBACK");
     }
+}
+
+/// The open chat's draft, as jaw.db has it.
+async fn draft(bed: &Bed) -> Option<String> {
+    bed.store
+        .reads()
+        .query(crate::work::Priority::Interactive, |db| {
+            Ok(read::chats(db, false, None, 10)?.into_iter().find(|chat| chat.id == OPEN).and_then(|chat| chat.draft))
+        })
+        .await
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2249,7 +2282,8 @@ fn about(came: &[Value], watch: &str) -> Vec<(usize, u64)> {
 async fn an_interface_owed_a_reply_it_has_no_room_for_is_still_told_to_watch_again() {
     let bed = Bed::new(Timing { behind: Duration::from_secs(2), ..brisk() });
     bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
-    let socket = serve(&bed);
+    let (socket, pushes) = serve_pushing(&bed);
+    let other = socket.clone();
     let mut line = tokio::task::spawn_blocking(move || {
         let (mut line, _) = Line::open(&socket, None);
         line.call("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 30}));
@@ -2258,26 +2292,27 @@ async fn an_interface_owed_a_reply_it_has_no_room_for_is_still_told_to_watch_aga
     .await
     .unwrap();
 
-    // It stops reading while messages pour into the chat it watches, and once jawd's queue to it
-    // has filled, and before `behind` has passed, asks for jawd's status.
+    // It stops reading while pushes that aren't for windows fill jawd's queue to it, so its window
+    // has had nothing to send, and asks for jawd's status, whose reply waits.
+    fill(&pushes).await;
+    line.ask(99, "status", Value::Null);
+    let waiting = tokio::task::spawn_blocking(move || lanes(&mut Line::open(&other, None).0, [1, 0, 1])).await.unwrap();
+    assert_eq!(waiting, [1, 64, 0, 1], "its reply waits: in the lanes, the most, lanes full, replies waiting");
+    // Messages then pour into the chat it watches, and its window, held behind the reply, can't
+    // send them.
     let started = Instant::now();
-    let (mut asked, mut n) = (false, 0);
+    let mut n = 0;
     while started.elapsed() < Duration::from_secs(8) {
         n += 1;
-        let words = "words to fill the queue with, words to fill the queue with";
-        bed.apply(vec![Change::Message(text(OPEN, &format!("p{n}"), 2_000 + n, Some(OPEN), words))]).await;
+        bed.apply(vec![Change::Message(text(OPEN, &format!("p{n}"), 2_000 + n, Some(OPEN), "more"))]).await;
         tokio::time::sleep(ms(12)).await;
-        if !asked && started.elapsed() > ms(1_800) {
-            line.ask(99, "status", Value::Null);
-            asked = true;
-        }
     }
-    // Its reply waits, and its window is dropped all the same once it has left the queue full for
-    // `behind`; once it reads again, it gets the reply and is told to watch again.
+    // Held for `behind`, its window is dropped as when its queue stays full; once it reads again,
+    // it gets the reply and is then told to watch again.
     assert_eq!(bed.feed.windows().watched, 0, "its window was still watched after four times `behind`");
     let came = tokio::task::spawn_blocking(move || line.came(ms(700))).await.unwrap();
-    assert!(came.iter().any(|value| value["id"] == 99), "the reply came");
-    assert!(came.iter().any(|value| value["method"] == "resync"), "it was told to watch again");
+    let reply = came.iter().position(|value| value["id"] == 99).expect("the reply");
+    assert!(came[reply..].iter().any(|value| value["method"] == "resync"), "it was told to watch again");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2370,25 +2405,13 @@ async fn requests_down_the_lane_take_effect_in_the_order_they_were_sent() {
     let replies: Vec<&Value> = came.iter().filter(|value| value.get("id").is_some()).collect();
     assert_eq!(replies.iter().map(|value| value["id"].as_u64()).collect::<Vec<_>>(), [Some(20), Some(21)]);
     assert!(replies.iter().all(|value| value.get("result").is_some()), "{replies:?}");
-    let draft = bed
-        .store
-        .reads()
-        .query(crate::work::Priority::Interactive, |db| {
-            Ok(read::chats(db, false, None, 10)?.into_iter().find(|chat| chat.id == OPEN).and_then(|chat| chat.draft))
-        })
-        .await
-        .unwrap();
-    assert_eq!(draft.as_deref(), Some("and then"), "the draft set after the message stays");
+    assert_eq!(draft(&bed).await.as_deref(), Some("and then"), "the draft set after the message stays");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_request_waits_for_one_windows_read_at_most_rather_than_the_whole_flush() {
+async fn requests_sent_during_a_windows_read_all_go_ahead_of_the_windows_still_due() {
     let bed = Bed::new(brisk());
-    let others = [GROUP.to_string(), person(0), person(1)];
-    let mut seeding = vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))];
-    seeding
-        .extend(others.iter().map(|chat| Change::Message(text(chat, &format!("{chat}-0"), 1_000, Some(chat), "hi"))));
-    bed.apply(seeding).await;
+    bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
     let socket = serve(&bed);
     let mut line = tokio::task::spawn_blocking(move || {
         let (mut line, _) = Line::open(&socket, None);
@@ -2399,30 +2422,253 @@ async fn a_request_waits_for_one_windows_read_at_most_rather_than_the_whole_flus
     .await
     .unwrap();
 
-    // Each read answers 300 ms after its snapshot, and a message marks both windows: each time,
-    // the request comes while the conversation's read is under way, the chat list due after it.
+    // Each read answers 300 ms after its snapshot, and a message marks both windows: each time, 40
+    // requests come while the conversation's read is under way, the chat list due after it. Each
+    // waits for that one read at most, rather than the whole flush, and none for the chat list's.
     bed.feed.slow_reads(300);
-    for (n, chat) in others.into_iter().enumerate() {
+    for round in 0..2u64 {
         let reads = bed.feed.reads();
-        let message = text(OPEN, &format!("o{}", n + 1), 2_000 + n as i64, Some(OPEN), "to both windows");
+        let message = text(OPEN, &format!("o{}", round + 1), 2_000 + round as i64, Some(OPEN), "to both windows");
         bed.apply(vec![Change::Message(message)]).await;
         let deadline = Instant::now() + Duration::from_secs(10);
         while bed.feed.reads() == reads {
             assert!(Instant::now() < deadline, "the conversation's read was never asked for");
             tokio::time::sleep(ms(5)).await;
         }
-        let id = 40 + n as u64;
-        line.ask(id, "messages.watch", json!({"chat": chat, "around": "newest", "before": 10}));
+        let burst: String = (0..40u64)
+            .map(|n| {
+                format!("{}\n", json!({"id": 1_000 * (round + 1) + n, "method": "focus", "params": {"focused": true}}))
+            })
+            .collect();
+        line.stream.write_all(burst.as_bytes()).unwrap();
         let came;
         (line, came) = tokio::task::spawn_blocking(move || {
-            let came = line.came(ms(1_500));
+            let came = line.came(ms(1_200));
             (line, came)
         })
         .await
         .unwrap();
-        let reply = came.iter().position(|value| value["id"] == id).expect("the watch's result");
         let chats = came.iter().position(|value| value["method"] == "chats").expect("the chat list's push");
-        assert!(reply < chats, "the request waited for the chat list's read too: {came:?}");
+        let before = came[..chats].iter().filter(|value| value["id"].as_u64().is_some()).count();
+        assert_eq!(before, 40, "only {before} of the 40 requests went before the chat list's read: {came:?}");
     }
     bed.feed.slow_reads(0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_64_requests_in_its_lane_a_connection_reads_no_more_and_drops_none() {
+    let bed = Bed::new(brisk());
+    bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
+    let socket = serve_all(&bed).await;
+    let (mut line, _) = tokio::task::spawn_blocking(move || Line::open(&socket, None)).await.unwrap();
+
+    // 64 drafts wait on jaw.db's writer, held meanwhile, and a watch and a focus come after them:
+    // with its lane full, jawd reads neither.
+    let locked = Locked::on(&bed);
+    let (mut line, early) = tokio::task::spawn_blocking(move || {
+        for n in 0..64u64 {
+            line.ask(100 + n, "draft.set", json!({"chat": OPEN, "text": format!("d{n}")}));
+        }
+        line.ask(200, "messages.watch", json!({"chat": OPEN, "around": "newest", "before": 10}));
+        line.ask(201, "focus", json!({"focused": false}));
+        let came = line.came(ms(800));
+        (line, came)
+    })
+    .await
+    .unwrap();
+    let read: Vec<&Value> = early.iter().filter(|value| value["id"] == 200 || value["id"] == 201).collect();
+    assert!(read.is_empty(), "a line was read while 64 requests were in the lane: {read:?}");
+
+    // Once the writer can write, every draft is answered, in order and each a success, and so are
+    // the watch and the focus: none was dropped.
+    drop(locked);
+    let later = tokio::task::spawn_blocking(move || line.came(ms(3_000))).await.unwrap();
+    let ids: Vec<u64> = later.iter().filter_map(|value| value["id"].as_u64()).collect();
+    let drafts: Vec<u64> = ids.iter().copied().filter(|id| (100..164).contains(id)).collect();
+    assert_eq!(drafts, (100..164).collect::<Vec<_>>(), "every request in the lane answered, in order");
+    let succeeded = |id: u64| later.iter().any(|value| value["id"] == id && value.get("result").is_some());
+    assert!((100..164).chain([200, 201]).all(succeeded), "each a success: {later:?}");
+    assert_eq!(draft(&bed).await.as_deref(), Some("d63"));
+}
+
+/// What `status`, asked on `asking`, says of every connection's lane: the requests in the lanes,
+/// the most one holds, the lanes full and the replies waiting. It asks until the three counts are
+/// `want`, or for 10 s.
+fn lanes(asking: &mut Line, want: [u64; 3]) -> [u64; 4] {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let interfaces = asking.call("status", Value::Null)["interfaces"].clone();
+        let count = |name: &str| interfaces[name].as_u64().unwrap_or_else(|| panic!("no {name}: {interfaces}"));
+        let said = [count("in_lanes"), count("lane_most"), count("lanes_full"), count("replies_waiting")];
+        if [said[0], said[2], said[3]] == want || Instant::now() > deadline {
+            return said;
+        }
+        std::thread::sleep(ms(20));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_says_how_many_requests_are_in_the_lanes_and_whose_lane_is_full_or_reply_waits() {
+    let bed = Bed::new(Timing { behind: Duration::from_secs(60), ..brisk() });
+    bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
+    let (socket, pushes) = serve_all_pushing(&bed).await;
+    let (mut line, mut asking) =
+        tokio::task::spawn_blocking(move || (Line::open(&socket, None).0, Line::open(&socket, None).0)).await.unwrap();
+
+    // 64 drafts wait on jaw.db's writer, held meanwhile, so a lane is full. Status, asked on a
+    // connection of its own, counts itself among the requests in the lanes.
+    let locked = Locked::on(&bed);
+    let (line, mut asking, full) = tokio::task::spawn_blocking(move || {
+        for n in 0..64u64 {
+            line.ask(100 + n, "draft.set", json!({"chat": OPEN, "text": format!("d{n}")}));
+        }
+        let full = lanes(&mut asking, [65, 1, 0]);
+        (line, asking, full)
+    })
+    .await
+    .unwrap();
+    assert_eq!(full, [65, 64, 1, 0], "in the lanes, the most a lane holds, lanes full, replies waiting");
+
+    // It stops reading while pushes fill jawd's queue to it. Let go, the writer answers its lane:
+    // the first reply finds no room and waits, and the others wait behind it.
+    fill(&pushes).await;
+    drop(locked);
+    let (mut asking, waiting) = tokio::task::spawn_blocking(move || {
+        let waiting = lanes(&mut asking, [64, 0, 1]);
+        (asking, waiting)
+    })
+    .await
+    .unwrap();
+    assert_eq!(waiting, [64, 64, 0, 1], "in the lanes, the most a lane holds, lanes full, replies waiting");
+
+    // Once it has gone, nothing of it is counted.
+    drop(line);
+    let gone = tokio::task::spawn_blocking(move || lanes(&mut asking, [1, 0, 0])).await.unwrap();
+    assert_eq!(gone, [1, 64, 0, 0], "in the lanes, the most a lane holds, lanes full, replies waiting");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_never_overtakes_a_waiting_watch_result_even_with_room_made_mid_flush() {
+    // Never dropped for falling behind, so the window watched while the queue is full lives on.
+    let bed = Bed::new(Timing { behind: Duration::from_secs(60), ..brisk() });
+    bed.apply(vec![Change::Message(text(GROUP, "g0", 1_000, Some(&person(DIRECT)), "hi"))]).await;
+    let (socket, pushes) = serve_pushing(&bed);
+    let (mut line, _) = tokio::task::spawn_blocking(move || Line::open(&socket, None)).await.unwrap();
+
+    // It watches nothing yet and stops reading while pushes that aren't for windows fill jawd's
+    // queue to it, so no window of its is blocked; then its watch's result finds no room and waits.
+    fill(&pushes).await;
+    line.ask(50, "messages.watch", json!({"chat": GROUP, "around": "newest", "before": 10}));
+    tokio::time::sleep(ms(300)).await;
+
+    // A message makes the window due. A flush that ran for it now would stop before it looked for
+    // room while the interface reads, so there would be room by the time it looked.
+    let (stopped, go) = bed.feed.pause_next_flush();
+    bed.apply(vec![Change::Message(text(GROUP, "g1", 2_000, Some(&person(DIRECT)), "more"))]).await;
+    let _ = tokio::time::timeout(ms(1_500), stopped.notified()).await;
+    let (mut line, mut came) = tokio::task::spawn_blocking(move || {
+        let came = line.came(ms(300));
+        (line, came)
+    })
+    .await
+    .unwrap();
+    go.notify_one();
+    came.extend(tokio::task::spawn_blocking(move || line.came(ms(1_000))).await.unwrap());
+
+    // The result comes first all the same, and the window's push of g1 after it.
+    let result = came.iter().position(|value| value["id"] == 50).expect("the watch's result");
+    let watch = came[result]["result"]["watch"].as_str().unwrap();
+    let lines = about(&came, watch);
+    assert_eq!(lines.first().map(|(k, _)| *k), Some(result), "something of {watch} came before its result: {lines:?}");
+    assert!(lines.len() > 1, "the window's push of g1 came after it: {lines:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_window_starves_while_the_others_keep_falling_due() {
+    let bed = Bed::new(Timing { quiet: ms(1), burst: ms(20), hold: ms(300), behind: Duration::from_secs(60) });
+    let chats: Vec<String> = (0..6).map(person).collect();
+    let seeding = chats.iter().map(|chat| Change::Message(text(chat, &format!("{chat}-0"), 1_000, Some(chat), "hi")));
+    bed.apply(seeding.collect()).await;
+    let mut watcher = bed.watcher(100_000);
+    let mut watches = vec![watcher.watch("chats.watch", json!({"around": "top", "after": 10})).await];
+    for chat in &chats {
+        watches.push(watcher.watch("messages.watch", json!({"chat": chat, "around": "newest", "before": 10})).await);
+    }
+
+    // Each read takes 6 ms and every chat changes every 3 ms for 2 s, so a window flushed is
+    // marked again long before the seven are flushed; one window a flush, each still gets its turn.
+    bed.feed.slow_reads(6);
+    let (store, flooding) = (bed.store.clone(), chats.clone());
+    let flood = tokio::spawn(async move {
+        let started = Instant::now();
+        let mut n = 0;
+        while started.elapsed() < Duration::from_secs(2) {
+            n += 1;
+            let batch = flooding
+                .iter()
+                .map(|chat| Change::Message(text(chat, &format!("{chat}-{n}"), 2_000 + n, Some(chat), "more")))
+                .collect();
+            store.apply(Lane::Live, batch).await.unwrap();
+            tokio::time::sleep(ms(3)).await;
+        }
+    });
+    let started = Instant::now();
+    let until = started + Duration::from_secs(2);
+    let mut last: HashMap<String, Instant> = watches.iter().map(|watch| (watch.clone(), started)).collect();
+    let mut longest: HashMap<String, Duration> = HashMap::new();
+    while Instant::now() < until
+        && let Ok(ready) = tokio::time::timeout_at(until.into(), watcher.client.ready()).await
+    {
+        watcher.client.handle(ready).await;
+        let before = watcher.batches.clone();
+        watcher.drain();
+        let now = Instant::now();
+        for watch in &watches {
+            if watcher.batches.get(watch) != before.get(watch) {
+                let most = longest.entry(watch.clone()).or_default();
+                *most = (*most).max(now - last[watch]);
+                last.insert(watch.clone(), now);
+            }
+        }
+    }
+    let end = Instant::now();
+    for watch in &watches {
+        let most = longest.entry(watch.clone()).or_default();
+        *most = (*most).max(end - last[watch]);
+    }
+    flood.await.unwrap();
+    bed.feed.slow_reads(0);
+    let report: Vec<(&String, usize, u128)> = watches
+        .iter()
+        .map(|watch| (watch, watcher.batches.get(watch).copied().unwrap_or(0), longest[watch].as_millis()))
+        .collect();
+    for (watch, _, gap) in &report {
+        assert!(*gap < 500, "{watch} went {gap} ms without a batch while its chats kept changing: {report:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replies_coming_down_the_lane_while_one_waits_for_room_each_come_once_in_order() {
+    let bed = Bed::new(Timing { behind: Duration::from_secs(60), ..brisk() });
+    bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
+    let (socket, pushes) = serve_all_pushing(&bed).await;
+    let (mut line, _) = tokio::task::spawn_blocking(move || Line::open(&socket, None)).await.unwrap();
+
+    // Twenty drafts wait on the writer, and the interface stops reading while pushes fill jawd's
+    // queue to it.
+    let locked = Locked::on(&bed);
+    for n in 0..20u64 {
+        line.ask(100 + n, "draft.set", json!({"chat": OPEN, "text": format!("d{n}")}));
+    }
+    tokio::time::sleep(ms(200)).await;
+    fill(&pushes).await;
+
+    // Let go, the writer answers them all: the first reply finds no room and waits, and the others
+    // come back down the lane meanwhile. None takes its place, so each comes once, in order.
+    drop(locked);
+    tokio::time::sleep(ms(500)).await;
+    let came = tokio::task::spawn_blocking(move || line.came(ms(1_500))).await.unwrap();
+    let ids: Vec<u64> = came.iter().filter_map(|value| value["id"].as_u64()).collect();
+    assert_eq!(ids, (100..120).collect::<Vec<_>>(), "every reply, once and in order");
+    assert_eq!(draft(&bed).await.as_deref(), Some("d19"));
 }

@@ -15,6 +15,7 @@ use crate::engine::supervisor::Supervisor;
 use crate::feed::Feed;
 use crate::find::Finder;
 use crate::send::Sending;
+use crate::sock::{LANE_MOST, Lanes};
 use crate::store::Store;
 use crate::sync::Shared;
 use crate::work::Report;
@@ -35,6 +36,8 @@ pub struct State {
     feed: Option<Feed>,
     attention: Arc<Attention>,
     notifications: String,
+    /// Every connection's lane and waiting reply, for `status`.
+    pub lanes: Lanes,
     /// Whether jawd is stopping, so connections end and take no more work.
     stopping: watch::Sender<bool>,
     sending: Option<Sending>,
@@ -65,6 +68,7 @@ impl State {
             feed: None,
             attention: Arc::default(),
             notifications: "off".into(),
+            lanes: Lanes::default(),
             stopping: watch::channel(false).0,
             sending: None,
         })
@@ -211,6 +215,10 @@ impl State {
                 connected: self.attention.connected() as u32,
                 focused: self.focused(),
                 notifications: self.notifications.clone(),
+                in_lanes: self.lanes.requests(),
+                lane_most: LANE_MOST as u64,
+                lanes_full: self.lanes.full(),
+                replies_waiting: self.lanes.waiting(),
             }),
             windows: self.feed.as_ref().map(Feed::windows),
             storage: self.store.as_ref().map(Store::storage),

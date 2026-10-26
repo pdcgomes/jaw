@@ -109,6 +109,10 @@ pub(super) struct Shared {
     /// Makes the next shared read's task panic once its read has answered.
     #[cfg(test)]
     pub(super) panicking: std::sync::atomic::AtomicBool,
+    /// Stops the next flush that isn't held, once it has a window due and before it looks for room
+    /// in the queue: it notifies the first and waits for the second.
+    #[cfg(test)]
+    pub(super) pausing: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 impl Default for Shared {
@@ -129,6 +133,8 @@ impl Default for Shared {
             slow: AtomicU64::default(),
             #[cfg(test)]
             panicking: Default::default(),
+            #[cfg(test)]
+            pausing: Mutex::default(),
         }
     }
 }
@@ -256,6 +262,15 @@ impl Shared {
     #[cfg(test)]
     pub(super) fn keep_at_most(&self, bytes: u64) {
         self.kept_most.store(bytes, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    async fn pause(&self) {
+        let pausing = self.pausing.lock().expect("the test's pause").take();
+        if let Some((stopped, go)) = pausing {
+            stopped.notify_one();
+            go.notified().await;
+        }
     }
 
     /// The slot for windows showing `spec`, made if none holds one.
@@ -1028,6 +1043,10 @@ impl Client {
             .collect();
         // Conversations first: a lone message shows there, and the chat list can wait a read.
         due.sort_by_key(|(chats, _)| *chats);
+        #[cfg(test)]
+        if !due.is_empty() {
+            self.shared.pause().await;
+        }
         if let Some((_, watch)) = due.into_iter().next()
             && (self.out.capacity() == 0 || !self.flush_one(watch, now, holding).await)
         {
