@@ -608,6 +608,7 @@ mod tests {
             ..Message::default()
         };
         store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+        store.indexed().await.unwrap();
         // Every reader waits at a gate, so the first find is still waiting when the second comes.
         let (gate, waiting) = crossbeam_channel::bounded::<()>(0);
         for _ in 0..4 {

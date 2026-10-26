@@ -5,9 +5,10 @@
 //! commit while rows keep coming, so a stream of them never holds a live change back. Background
 //! changes and history go in
 //! transactions of at most 1,000 rows or 3 ms with their commit, ending early as soon as an inbox or
-//! live write is waiting, which is taken before the next. Text written in the background is indexed
-//! for search afterwards, in steps as short, while nothing else is waiting. Queries go to the read
-//! pool, so a page never waits behind a sync.
+//! live write is waiting, which is taken before the next. Every message's text, live or history, is
+//! indexed for search afterwards, in steps as short, while nothing else is waiting, so FTS5's work
+//! at commit never lands in one an ack or a live write waits on. Queries go to the read pool, so a
+//! page never waits behind a sync.
 //!
 //! Every write transaction begins IMMEDIATE. One that fails for a reason that passes (a full disk,
 //! an I/O error, a lock) is tried again with back-off, never dropped, and while the inbox can't
@@ -233,6 +234,15 @@ const BATCH_TIME: Duration = Duration::from_millis(3);
 /// The pause between two steps of indexing for search. A writer that never pauses looks like a
 /// batch job to the OS, which then lets other threads ahead of it when a live write comes.
 const INDEX_PAUSE: Duration = Duration::from_millis(1);
+/// How long the writer goes without an inbox group, or a live write converting several inbox rows,
+/// before it indexes for search: a catch-up's or a flood's writes come closer together than this,
+/// and a step between two of them would put FTS5's work back where they wait. A lone message is
+/// found this long after its commit.
+const LIVE_PAUSE: Duration = Duration::from_millis(10);
+/// While those keep coming closer than LIVE_PAUSE, a step of indexing still goes this often, in a
+/// gap between two of them, so search keeps up with a long stream; in a flood, the inbox rows
+/// waiting end it after a row.
+const STREAM_STEP: Duration = Duration::from_millis(100);
 /// The pages of FTS5 merging a step does, about a millisecond's worth.
 const MERGE_PAGES: i64 = 64;
 const WRITER_CACHE_KIB: i64 = 32 * 1024;
@@ -273,17 +283,26 @@ const IDLE: Duration = Duration::from_secs(10);
 /// While background work waits for the checkpointer, how often the writer looks again.
 const HOLD_POLL: Duration = Duration::from_millis(1);
 
-/// The WAL's limits, the writer's busy timeout and how long jaw.db goes without a commit before
-/// the WAL is emptied, which tests make smaller.
+/// The WAL's limits, the writer's busy timeout and how long jaw.db goes without a commit before the
+/// WAL is emptied, which tests make smaller, and when indexing goes on among live writes.
 #[derive(Clone, Copy)]
 struct Limits {
     wal_soft: u64,
     wal_hard: u64,
     busy_ms: i64,
     idle: Duration,
+    live_pause: Duration,
+    stream_step: Duration,
 }
 
-const LIMITS: Limits = Limits { wal_soft: WAL_SOFT, wal_hard: WAL_HARD, busy_ms: BUSY_MS, idle: IDLE };
+const LIMITS: Limits = Limits {
+    wal_soft: WAL_SOFT,
+    wal_hard: WAL_HARD,
+    busy_ms: BUSY_MS,
+    idle: IDLE,
+    live_pause: LIVE_PAUSE,
+    stream_step: STREAM_STEP,
+};
 
 /// What a connection to jaw.db is for, which decides how it's set up.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -435,6 +454,10 @@ impl Store {
             index_retry: RETRY_FIRST,
             near: None,
             holding: None,
+            live_at: None,
+            stepped_at: Instant::now(),
+            live_pause: limits.live_pause,
+            stream_step: limits.stream_step,
             shared_failing: None,
         };
         std::thread::Builder::new().name("jawd-writer".into()).spawn(move || writer.run(background_rx))?;
@@ -631,6 +654,13 @@ struct Writer {
     /// Since when background work, a batch or a step of indexing, has waited for the WAL to start
     /// again.
     holding: Option<Instant>,
+    /// When the last inbox group, or live write converting several inbox rows, was made and the last
+    /// step of indexing ran, and how long indexing waits after the one and, while they keep coming,
+    /// after the other.
+    live_at: Option<Instant>,
+    stepped_at: Instant,
+    live_pause: Duration,
+    stream_step: Duration,
     /// Why the last inbox commit with live writes in it failed, said once until the reason changes
     /// or one succeeds.
     shared_failing: Option<String>,
@@ -644,7 +674,6 @@ fn make_groups(
     stamps: &mut Stamps,
     changes: &[Change],
     groups: &[Range<usize>],
-    background: bool,
     mut stop: impl FnMut(usize) -> bool,
 ) -> Result<Made> {
     let start = groups.first().map_or(0, |g| g.start);
@@ -655,7 +684,7 @@ fn make_groups(
         let mut failed = None;
         let mut changed = 0;
         for change in &changes[group.clone()] {
-            match write::apply(&savepoint, stamps, change, background) {
+            match write::apply(&savepoint, stamps, change) {
                 Ok(c) => changed += usize::from(c),
                 Err(e) if write::transient(&e) => return Err(e),
                 Err(e) => {
@@ -760,17 +789,22 @@ impl Writer {
         if !self.backlog && !self.unmerged {
             return Duration::from_secs(3600);
         }
-        match self.index_after {
-            Some(at) => at.saturating_duration_since(Instant::now()).max(INDEX_PAUSE),
-            None => INDEX_PAUSE,
-        }
+        self.index_due().map_or(INDEX_PAUSE, |due| due.saturating_duration_since(Instant::now()).max(INDEX_PAUSE))
+    }
+
+    /// When indexing may go on, if not now: after a step that failed has waited, and LIVE_PAUSE
+    /// after the last inbox group or conversion of several inbox rows, so a catch-up's or a flood's
+    /// writes don't wait behind steps, or STREAM_STEP after the last step, whichever is sooner.
+    fn index_due(&self) -> Option<Instant> {
+        let live = self.live_at.map(|at| (at + self.live_pause).min(self.stepped_at + self.stream_step));
+        [self.index_after, live].into_iter().flatten().max()
     }
 
     /// Merges FTS5's segments or indexes some of fts_backlog, if the WAL has room; while it hasn't,
     /// indexing waits for the checkpointer as background batches do. A step that fails is tried
     /// again later, waiting longer each time.
     fn index_step(&mut self) {
-        if self.index_after.is_some_and(|at| Instant::now() < at) {
+        if self.index_due().is_some_and(|due| Instant::now() < due) {
             return;
         }
         if !self.room() {
@@ -786,6 +820,7 @@ impl Writer {
         } else {
             Ok(())
         };
+        self.stepped_at = Instant::now();
         match &step {
             Ok(()) => (self.index_after, self.index_retry) = (None, RETRY_FIRST),
             Err(e) => {
@@ -949,6 +984,7 @@ impl Writer {
                 Ok(synced) => {
                     self.recovered();
                     self.committed();
+                    self.live_at = Some(Instant::now());
                     let ran = began.elapsed();
                     let mut stats = self.stats.lock().expect("the writer's stats");
                     stats.transactions += 1;
@@ -968,7 +1004,8 @@ impl Writer {
                     self.inboxed.notify_one();
                     if !shared.is_empty() {
                         self.shared_failing = None;
-                        self.unmerged = true;
+                        self.unmerged |= shared.iter().any(|write| write::touches_fts(&write.changes));
+                        self.backlog = true;
                         let last = self.stamps.last();
                         self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
                         for write in shared {
@@ -1070,7 +1107,7 @@ impl Writer {
                             made: Made::default(),
                         });
                         let write = shared.last_mut().expect("the write just taken");
-                        write.made = make_groups(&mut tx, &mut self.stamps, &write.changes, &groups, false, |_| false)?;
+                        write.made = make_groups(&mut tx, &mut self.stamps, &write.changes, &groups, |_| false)?;
                     }
                     truncate => {
                         *after = Some(truncate);
@@ -1222,7 +1259,7 @@ impl Writer {
             }
         };
         let started = Instant::now();
-        self.unmerged = true;
+        self.unmerged |= write::touches_fts(&changes);
         let waited = started - queued;
         let groups = write::groups(&changes);
         let applied = self
@@ -1238,6 +1275,11 @@ impl Writer {
                 seq: self.stamps.last(),
             });
         self.count(Some(waited), started.elapsed());
+        // A conversion of several inbox rows at once is a catch-up's or a flood's; a lone message's,
+        // or what someone just did, leaves indexing to go on between writes.
+        if changes.iter().filter(|c| matches!(c, Change::Drained(Drained::Inbox(_)))).nth(1).is_some() {
+            self.live_at = Some(Instant::now());
+        }
         let _ = done.send(applied.map_err(|e| format!("{e:#}")));
     }
 
@@ -1273,7 +1315,7 @@ impl Writer {
         let made = (|| {
             let mut tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let (realtime, live, pace) = (&self.realtime, &self.live, self.changes_pace);
-            let made = make_groups(&mut tx, &mut self.stamps, changes, groups, background, |taken| {
+            let made = make_groups(&mut tx, &mut self.stamps, changes, groups, |taken| {
                 background
                     && (taken >= BATCH_ROWS
                         || !realtime.is_empty()
@@ -1301,7 +1343,7 @@ impl Writer {
                 self.committed();
                 let last = self.stamps.last();
                 self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
-                self.backlog |= background;
+                self.backlog = true;
             }
             Err(_) => self.stamps.rolled_back(),
         }
@@ -1595,6 +1637,151 @@ mod tests {
         assert_eq!(typing.hits.len(), 25, "a word's start finds it as it's typed");
         let quoted = query(&store, |db| read::search(db, "\"não OR", None, None, 50)).await;
         assert!(quoted.hits.is_empty(), "FTS5's syntax in what's typed is only words");
+    }
+
+    #[test]
+    fn a_live_messages_text_waits_to_be_indexed_so_its_commit_does_none_of_fts5s_work() {
+        let mut db = Connection::open_in_memory().unwrap();
+        schema::migrate(&mut db).unwrap();
+        let mut stamps = Stamps::load(&db).unwrap();
+        stamps.begin();
+        let live = Message { live: true, ..text("351910000002@s.whatsapp.net", "m1", 1_000, "jantar amanhã") };
+        write::apply(&db, &mut stamps, &Change::Message(live)).unwrap();
+        let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        let matching = "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'jantar'";
+        assert_eq!((count("SELECT count(*) FROM fts_backlog"), count(matching)), (1, 0), "waiting, not in FTS5");
+        assert_eq!(write::index(&db, 10, |_| false).unwrap(), (1, false));
+        assert_eq!((count("SELECT count(*) FROM fts_backlog"), count(matching)), (0, 1), "indexed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_messages_are_found_once_indexed_as_they_last_read_whatever_happened_to_them_before() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let ana = "351910000002@s.whatsapp.net";
+        let edit =
+            Amendment::Edit { text: Some("almoço amanhã".into()), spans: None, summary: "almoço amanhã".into() };
+        let edited = Amend {
+            chat: ana.into(),
+            target: "edited".into(),
+            sender: Some(ana.into()),
+            mine: false,
+            at: 9_000,
+            what: edit,
+            raw: None,
+        };
+        // Written, edited and deleted in one live transaction, while their text waits to be indexed.
+        let applied = store
+            .apply(
+                Lane::Live,
+                vec![
+                    Change::Message(text(ana, "kept", 1_000, "jantar hoje")),
+                    Change::Message(text(ana, "edited", 2_000, "jantar ontem")),
+                    Change::Message(text(ana, "gone", 3_000, "jantar secreto")),
+                    Change::Amend(edited),
+                    Change::DeleteMessage { chat: ana.into(), id: "gone".into() },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!((applied.changed, applied.quarantined), (5, 0));
+        store.indexed().await.unwrap();
+        let found = |words: &'static str| {
+            let store = store.clone();
+            async move {
+                let found = query(&store, move |db| read::search(db, words, None, None, 10)).await;
+                found.hits.into_iter().map(|hit| hit.message.id).collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(found("jantar").await, ["kept"], "the edited one says otherwise now, and the deleted one is gone");
+        assert_eq!(found("almoco").await, ["edited"]);
+        assert_eq!(store.count("fts_backlog").unwrap(), 0);
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('integrity-check', 0)", []).unwrap();
+    }
+
+    /// Messages `n` and `n + 1` converted from their inbox rows in one live write, as a catch-up's
+    /// conversions are.
+    fn converted(n: i64) -> Vec<Change> {
+        (n..n + 2)
+            .flat_map(|n| {
+                let message = text("351910000002@s.whatsapp.net", &format!("m{n}"), n, "jantar amanhã");
+                [Change::Message(message), Change::Drained(Drained::Inbox(n))]
+            })
+            .collect()
+    }
+
+    /// A lone message in a live write of its own, which drains no inbox row.
+    fn lone(n: i64) -> Vec<Change> {
+        messages([text("351910000002@s.whatsapp.net", &format!("m{n}"), n, "jantar amanhã")])
+    }
+
+    /// How many messages search finds while live writes made by `write`, further apart than the
+    /// writer's idle pause, keep coming, once it finds 100 or after 30 s, and how many were written.
+    async fn found_while_writing(store: &Store, write: fn(i64) -> Vec<Change>) -> (usize, i64) {
+        let streaming = Arc::new(AtomicBool::new(true));
+        let stream = {
+            let (store, streaming) = (store.clone(), streaming.clone());
+            tokio::spawn(async move {
+                let mut n = 0;
+                while streaming.load(Ordering::Relaxed) {
+                    let changes = write(n);
+                    n += changes.iter().filter(|c| matches!(c, Change::Message(_))).count() as i64;
+                    store.apply(Lane::Live, changes).await.unwrap();
+                    tokio::time::sleep(INDEX_PAUSE * 3).await;
+                }
+                n
+            })
+        };
+        let began = Instant::now();
+        let mut found = 0;
+        while found < 100 && began.elapsed() < Duration::from_secs(30) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            found = query(store, |db| read::search(db, "jantar", None, None, 200)).await.hits.len();
+        }
+        streaming.store(false, Ordering::Relaxed);
+        (found, stream.await.unwrap())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn indexing_for_search_waits_for_a_pause_in_a_catch_ups_writes_and_goes_on_once_they_stop() {
+        let home = tempfile::tempdir().unwrap();
+        let live_pause = Duration::from_secs(5);
+        let store = Store::open_with(home.path(), Limits { live_pause, stream_step: live_pause, ..LIMITS }).unwrap();
+        // A catch-up's writes further apart than the writer's idle pause, closer than the live one.
+        let (mut written, mut widest) = (None::<Instant>, Duration::ZERO);
+        for n in 0..50 {
+            widest = widest.max(written.map_or(Duration::ZERO, |at| at.elapsed()));
+            store.apply(Lane::Live, converted(2 * n)).await.unwrap();
+            written = Some(Instant::now());
+            tokio::time::sleep(INDEX_PAUSE * 3).await;
+        }
+        assert!(widest < live_pause, "two writes were {widest:?} apart, past the live pause");
+        assert_eq!(store.count("fts_backlog").unwrap(), 100, "no step of indexing between a catch-up's writes");
+        let stopped = Instant::now();
+        store.indexed().await.unwrap();
+        assert!(stopped.elapsed() >= live_pause / 2, "indexed only after the pause");
+        let found = query(&store, |db| read::search(db, "jantar", None, None, 200)).await;
+        assert_eq!((found.hits.len(), store.count("fts_backlog").unwrap()), (100, 0));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_long_catch_up_has_its_text_indexed_as_it_goes() {
+        let home = tempfile::tempdir().unwrap();
+        let limits = Limits { live_pause: Duration::from_secs(60), stream_step: Duration::from_millis(50), ..LIMITS };
+        let store = Store::open_with(home.path(), limits).unwrap();
+        let (found, written) = found_while_writing(&store, converted).await;
+        assert!(found >= 100, "{found} of {written} found while a catch-up's writes kept coming");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_writes_of_lone_messages_leave_indexing_to_go_on_between_them() {
+        let home = tempfile::tempdir().unwrap();
+        let limits = Limits { live_pause: Duration::from_secs(60), stream_step: Duration::from_secs(60), ..LIMITS };
+        let store = Store::open_with(home.path(), limits).unwrap();
+        let (found, written) = found_while_writing(&store, lone).await;
+        assert!(found >= 100, "{found} of {written} found while lone messages kept coming");
     }
 
     #[tokio::test(flavor = "multi_thread")]

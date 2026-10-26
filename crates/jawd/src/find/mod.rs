@@ -503,6 +503,7 @@ mod tests {
             ],
         )
         .await;
+        store.indexed().await.unwrap();
         let ja = find(&finder, "ja", &[Kind::Message]).await;
         assert_eq!(found(&ja), [(Kind::Message, "já vou".into())], "two letters find the word, not jantar");
         let jantar = find(&finder, "jantar", &[]).await;

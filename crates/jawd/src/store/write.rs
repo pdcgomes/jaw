@@ -547,13 +547,25 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
-/// Makes one change inside the writer's open transaction, saying whether anything changed. A
-/// background change's new text waits in fts_backlog to be indexed for search.
-pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, background: bool) -> Result<bool> {
+/// Whether making `changes` may write to FTS5 itself, where a new message's text waits in
+/// fts_backlog: an edit, a deletion, a send or a merge may change a message that's indexed.
+pub(super) fn touches_fts(changes: &[Change]) -> bool {
+    changes.iter().any(|change| match change {
+        Change::Amend(amend) => {
+            matches!(amend.what, Amendment::Edit { .. } | Amendment::Revoke | Amendment::DeleteForMe)
+        }
+        Change::Edited { .. } | Change::DeleteMessage { .. } | Change::MergeStep(_) | Change::Outbox(_) => true,
+        _ => false,
+    })
+}
+
+/// Makes one change inside the writer's open transaction, saying whether anything changed. A new
+/// message's text waits in fts_backlog to be indexed for search.
+pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Result<bool> {
     match change {
         Change::Chat(chat) => upsert_chat(db, stamps, chat),
         Change::Person(person) => upsert_person(db, stamps, person),
-        Change::Message(message) => upsert_message(db, stamps, message, background),
+        Change::Message(message) => upsert_message(db, stamps, message),
         Change::Opened(opened) => open_chat(db, stamps, opened),
         Change::DeleteMessage { chat, id } => delete_message(db, stamps, chat, id),
         Change::Amend(amend) => amend_message(db, stamps, amend),
@@ -561,7 +573,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change, backg
             if target(db, stamps, amend)?.is_some() {
                 amend_message(db, stamps, amend)
             } else {
-                upsert_message(db, stamps, shown, background)
+                upsert_message(db, stamps, shown)
             }
         }
         Change::Members(members) => set_members(db, stamps, members),
@@ -1558,7 +1570,7 @@ fn advanced<'a>(kept: Option<&'a str>, incoming: Option<&'a str>) -> Option<&'a 
     if status_rank(incoming) > status_rank(kept) { incoming } else { kept }
 }
 
-fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, background: bool) -> Result<bool> {
+fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Result<bool> {
     let chat_id = chat_jid(db, &message.chat)?;
     let chat = ensure_chat(db, stamps, &chat_id)?;
     if db.prepare_cached("SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2")?.exists(params![chat, message.id])? {
@@ -1610,9 +1622,12 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message, backg
         Some(kept) => (Some(kept.n), kept.t),
         None => {
             let t = allocate(db, message.at)?;
-            // Its n is chosen here so it can wait in fts_backlog before the insert's trigger looks;
-            // AUTOINCREMENT's sequence is past every n ever used, so it's one no event has named.
-            let n = if background && text.is_some() {
+            // Its text is indexed for search in the writer's idle moments, live or history, since
+            // FTS5 does most of its work at commit and an ack or a live write may be waiting on
+            // this one. Its n is chosen here so it can wait in fts_backlog before the insert's
+            // trigger looks; AUTOINCREMENT's sequence is past every n ever used, so it's one no
+            // event has named.
+            let n = if text.is_some() {
                 let n: i64 = db
                     .prepare_cached(
                         "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'messages'), 0) + 1",

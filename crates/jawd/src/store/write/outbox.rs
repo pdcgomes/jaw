@@ -646,7 +646,7 @@ fn enqueue_one(
     let Outgoing { message, kind, raw } = outgoing;
     let chat = chat_jid(db, &message.chat)?;
     let message = &Message { chat: chat.clone(), sent, ..message.clone() };
-    let changed = upsert_message(db, stamps, message, false)?;
+    let changed = upsert_message(db, stamps, message)?;
     let (n, chat_n): (i64, i64) = db
         .prepare_cached(MESSAGE_BY_ID)?
         .query_row(params![message.chat, message.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1515,7 +1515,7 @@ mod tests {
         let mut stamps = Stamps::load(db).unwrap();
         stamps.begin();
         for change in changes {
-            super::super::apply(db, &mut stamps, change, false).unwrap();
+            super::super::apply(db, &mut stamps, change).unwrap();
         }
         super::super::settle(db, &mut stamps).unwrap();
     }
