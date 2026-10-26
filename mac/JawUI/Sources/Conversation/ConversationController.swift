@@ -177,9 +177,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         view.layer?.backgroundColor = roles.ground.cgColor
         header.roles = roles
         newPill.roles = roles
-        hover.layer?.backgroundColor = roles.surface.cgColor
-        hover.layer?.borderColor = roles.separator.cgColor
-        hover.layer?.borderWidth = 1
+        hover.roles = roles
         composer.roles = roles
     }
 
@@ -849,7 +847,7 @@ final class PillButton: NSButton {
             contentTintColor = roles.map { $0.isDark ? $0.ground.nsColor : .white }
             attributedTitle = NSAttributedString(string: title, attributes: [
                 .foregroundColor: roles.map { $0.isDark ? $0.ground.nsColor : NSColor.white } ?? .white,
-                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                .font: TextStyle.callout.emphasised,
             ])
         }
     }
@@ -858,7 +856,7 @@ final class PillButton: NSButton {
         didSet {
             attributedTitle = NSAttributedString(string: title, attributes: [
                 .foregroundColor: roles.map { $0.isDark ? $0.ground.nsColor : NSColor.white } ?? .white,
-                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                .font: TextStyle.callout.emphasised,
             ])
         }
     }
@@ -867,8 +865,8 @@ final class PillButton: NSButton {
         super.init(frame: .zero)
         isBordered = false
         wantsLayer = true
-        layer?.cornerRadius = 13
-        heightAnchor.constraint(equalToConstant: 26).isActive = true
+        layer?.cornerRadius = Self.height / 2
+        heightAnchor.constraint(equalToConstant: Self.height).isActive = true
         title = "new ↓"
     }
 
@@ -879,22 +877,22 @@ final class PillButton: NSButton {
 
     override var intrinsicContentSize: NSSize {
         let size = super.intrinsicContentSize
-        return NSSize(width: size.width + 24, height: 26)
+        return NSSize(width: size.width + Space.xxl, height: Self.height)
     }
+
+    static let height: CGFloat = 26
 }
 
 /// The conversation's header: the chat's name, and how it is.
 final class HeaderView: NSView {
-    let name = NSTextField(labelWithString: "")
-    let detail = NSTextField(labelWithString: "")
+    let name = Labels.make("", .heading)
+    let detail = Labels.make("", .caption)
     var roles: Roles? {
         didSet { colour() }
     }
 
     init() {
         super.init(frame: .zero)
-        name.font = .systemFont(ofSize: 14, weight: .semibold)
-        detail.font = .systemFont(ofSize: 11)
         let stack = NSStackView(views: [name, detail])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -902,12 +900,10 @@ final class HeaderView: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.xl),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Space.xl),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-        name.lineBreakMode = .byTruncatingTail
-        detail.lineBreakMode = .byTruncatingTail
     }
 
     @available(*, unavailable)

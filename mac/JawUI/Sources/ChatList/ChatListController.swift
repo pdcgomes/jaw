@@ -314,7 +314,7 @@ final class ChatCell: NSView {
         var name = chat.name
         if chat.kind == .community { name = (open ? "▾ " : "▸ ") + name }
         NSAttributedString(string: name, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: bold ? .semibold : .regular),
+            .font: bold ? TextStyle.body.emphasised : TextStyle.body.nsFont,
             .foregroundColor: (chat.muted ? roles.secondary : roles.text).nsColor,
             .paragraphStyle: truncating,
         ]).draw(in: NSRect(x: x, y: 9, width: max(nameRight - x, 10), height: 18))
@@ -339,7 +339,7 @@ final class ChatCell: NSView {
 
     /// The second line: who's typing, the draft, or the newest message with your ticks.
     func line(_ chat: ChatRow, _ roles: Roles) -> NSAttributedString {
-        let quiet: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: roles.secondary.nsColor,
+        let quiet: [NSAttributedString.Key: Any] = [.font: TextStyle.callout.nsFont, .foregroundColor: roles.secondary.nsColor,
                                                     .paragraphStyle: truncating]
         let out = NSMutableAttributedString()
         if !chat.typing.isEmpty {
@@ -375,7 +375,7 @@ final class ChatCell: NSView {
     @discardableResult
     func badge(_ text: String, right: CGFloat, fill: RGBA, _ roles: Roles) -> CGFloat {
         let s = NSAttributedString(string: text, attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .font: TextStyle.caption.emphasised,
             .foregroundColor: (roles.isDark ? roles.ground : RGBA(0xFFFFFF)).nsColor,
         ])
         let w = max(s.size().width + 10, 18)
@@ -406,7 +406,7 @@ final class ChatCell: NSView {
             rect.fill()
             let initials = Self.initials(chat.name)
             let s = NSAttributedString(string: initials, attributes: [
-                .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
+                .font: TextStyle.heading.nsFont,
                 .foregroundColor: (roles.isDark ? roles.ground : RGBA(0xFFFFFF)).nsColor,
             ])
             let size = s.size()

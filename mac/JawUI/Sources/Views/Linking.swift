@@ -34,9 +34,9 @@ public struct LinkingView: View {
             if let loggedOut, !asked {
                 VStack(spacing: 10) {
                     MimicImage(look: .awake, scale: 4)
-                    Text("Logged out").font(.system(size: 17, weight: .semibold))
+                    Text("Logged out").textStyle(.title)
                     Text("\(loggedOut.prefix(1).uppercased() + loggedOut.dropFirst()). jawd has deleted the session and kept your messages. Link again to carry on where you were.")
-                        .multilineTextAlignment(.center).frame(maxWidth: 420).foregroundStyle(colour(roles.secondary))
+                        .multilineTextAlignment(.center).frame(maxWidth: 420).foregroundStyle(roles.secondary.color)
                     Button("Link Again") { begin(nil) }.keyboardShortcut(.defaultAction)
                 }
             } else {
@@ -44,14 +44,14 @@ public struct LinkingView: View {
                     code
                     VStack(alignment: .leading, spacing: 12) {
                         MimicImage(look: .awake, scale: 3)
-                        Text("Link Jaw to WhatsApp").font(.system(size: 17, weight: .semibold))
-                        Text(instructions).foregroundStyle(colour(roles.secondary)).fixedSize(horizontal: false, vertical: true)
+                        Text("Link Jaw to WhatsApp").textStyle(.title)
+                        Text(instructions).foregroundStyle(roles.secondary.color).fixedSize(horizontal: false, vertical: true)
                         if case let .qr(_, expires) = step {
                             let left = max(0, Int((Double(expires) / 1000 - now.timeIntervalSince1970).rounded()))
-                            Text("It changes in \(left) s.").font(.system(size: 11)).foregroundStyle(colour(roles.tertiary))
+                            Text("It changes in \(left) s.").textStyle(.caption).foregroundStyle(roles.tertiary.color)
                         }
                         if case let .failed(reason) = step {
-                            Text("Linking failed: \(reason)").foregroundStyle(colour(roles.failed))
+                            Text("Linking failed: \(reason)").foregroundStyle(roles.failed.color)
                             Button("Try Again") { begin(byPhone ? phone : nil) }
                         }
                         Button(byPhone ? "Use a QR Code Instead" : "Use a Phone Number Instead") {
@@ -63,12 +63,12 @@ public struct LinkingView: View {
                     .frame(maxWidth: 340, alignment: .leading)
                 }
             }
-            Text("Jaw isn't affiliated with WhatsApp or Meta.").font(.system(size: 11)).foregroundStyle(colour(roles.tertiary))
+            Text("Jaw isn't affiliated with WhatsApp or Meta.").textStyle(.caption).foregroundStyle(roles.tertiary.color)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(colour(roles.ground))
-        .foregroundStyle(colour(roles.text))
+        .background(roles.ground.color)
+        .foregroundStyle(roles.text.color)
         .onAppear { if loggedOut == nil { begin(nil) } }
         .onDisappear { cancel() }
         .onReceive(tick) { now = $0 }
@@ -94,7 +94,7 @@ public struct LinkingView: View {
         if byPhone {
             VStack(spacing: 12) {
                 if case let .code(code) = step {
-                    Text(code).font(.system(size: 34, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+                    Text(code).textStyle(.display).textSelection(.enabled)
                 } else {
                     TextField("+351 912 345 678", text: $phone)
                         .textFieldStyle(.roundedBorder).frame(width: 240)
@@ -106,7 +106,7 @@ public struct LinkingView: View {
         } else if case let .qr(text, _) = step, let image = Self.qr(text) {
             Image(decorative: image, scale: 1)
                 .interpolation(.none).resizable().frame(width: 260, height: 260)
-                .padding(14).background(RoundedRectangle(cornerRadius: 14).fill(.white))
+                .padding(14).background(RoundedRectangle(cornerRadius: Radius.panel).fill(.white))
                 .accessibilityLabel("The code to scan with your phone")
         } else {
             ProgressView().frame(width: 288, height: 288)
@@ -122,9 +122,6 @@ public struct LinkingView: View {
         return CIContext().createCGImage(output, from: output.extent)
     }
 
-    func colour(_ c: RGBA) -> Color {
-        Color(nsColor: c.nsColor)
-    }
 }
 
 /// The keys, every command with its own, as the terminal's `?` shows them.
@@ -167,11 +164,11 @@ public struct KeysView: View {
             ScrollView {
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 5) {
                     ForEach(Self.sections, id: \.0) { title, keys in
-                        GridRow { Text(title).font(.system(size: 12, weight: .semibold)).padding(.top, 8).gridCellColumns(2) }
+                        GridRow { Text(title).textStyle(.callout).fontWeight(.semibold).padding(.top, 8).gridCellColumns(2) }
                         ForEach(keys, id: \.0) { key, what in
                             GridRow {
-                                Text(key).font(.system(size: 12, design: .monospaced))
-                                Text(what).font(.system(size: 12)).foregroundStyle(.secondary)
+                                Text(key).textStyle(.mono)
+                                Text(what).textStyle(.callout).foregroundStyle(.secondary)
                             }
                         }
                     }

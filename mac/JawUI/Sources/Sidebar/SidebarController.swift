@@ -44,16 +44,15 @@ public final class SidebarController: NSViewController, NSTableViewDataSource, N
         let folder = Self.folders[row]
         let cell = NSTableCellView()
         let image = NSImageView(image: NSImage(systemSymbolName: folder.symbol, accessibilityDescription: nil)!)
-        let text = NSTextField(labelWithString: folder.name)
-        text.font = .systemFont(ofSize: 13)
+        let text = Labels.make(folder.name, .body)
         cell.imageView = image
         cell.textField = text
         let stack = NSStackView(views: [image, text])
-        stack.spacing = 6
+        stack.spacing = Space.s
         stack.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: Space.xs),
             stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         _ = tableView

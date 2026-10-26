@@ -58,7 +58,7 @@ public struct EmptyChatView: View {
         VStack(spacing: 16) {
             MimicImage(look: .awake, scale: 4, chomps: chomped)
             Text(Self.words(chat))
-                .font(.system(size: 13))
+                .textStyle(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 320)
@@ -99,11 +99,11 @@ public struct StateView: View {
         VStack(spacing: 18) {
             MimicImage(look: look, scale: 4)
             VStack(spacing: 6) {
-                Text(title).font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color(nsColor: roles.text.nsColor))
+                Text(title).textStyle(.heading)
+                    .foregroundStyle(roles.text.color)
                 if let detail {
-                    Text(detail).font(.system(size: 13))
-                        .foregroundStyle(Color(nsColor: roles.secondary.nsColor))
+                    Text(detail).textStyle(.body)
+                        .foregroundStyle(roles.secondary.color)
                         .multilineTextAlignment(.center)
                         .textSelection(.enabled)
                 }
@@ -113,14 +113,14 @@ public struct StateView: View {
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: roles.ground.nsColor))
+        .background(roles.ground.color)
         .focusEffectDisabled()
         .accessibilityElement(children: .combine)
     }
 
     var notAffiliated: some View {
         Text("Jaw isn't affiliated with WhatsApp or Meta.")
-            .font(.system(size: 11)).foregroundStyle(Color(nsColor: roles.tertiary.nsColor))
+            .textStyle(.caption).foregroundStyle(roles.tertiary.color)
     }
 
     var look: Mimic.Look {
@@ -183,10 +183,10 @@ public struct StatusLine: View {
     public var body: some View {
         HStack(spacing: 10) {
             if let state {
-                Text(state).foregroundStyle(colour(warn ? roles.mention : roles.accent))
+                Text(state).foregroundStyle((warn ? roles.mention : roles.accent).color)
             }
             if let chat {
-                Text(chat).foregroundStyle(colour(roles.secondary))
+                Text(chat).foregroundStyle(roles.secondary.color)
             }
             Spacer(minLength: 12)
             ViewThatFits(in: .horizontal) {
@@ -198,12 +198,12 @@ public struct StatusLine: View {
                 EmptyView()
             }
         }
-        .font(.system(size: 11, design: .monospaced))
+        .textStyle(.mono)
         .lineLimit(1)
         .padding(.horizontal, 12)
         .frame(height: 24)
-        .background(colour(roles.surface))
-        .overlay(alignment: .top) { Rectangle().fill(colour(roles.separator)).frame(height: 1) }
+        .background(roles.surface.color)
+        .overlay(alignment: .top) { Rectangle().fill(roles.separator.color).frame(height: 1) }
         .focusEffectDisabled()
     }
 
@@ -217,11 +217,11 @@ public struct StatusLine: View {
             ForEach(named, id: \.id) { c in
                 Button { open(c) } label: {
                     if c.mentions > 0 {
-                        Text("@ \(c.name)").foregroundStyle(colour(roles.mention)).bold()
+                        Text("@ \(c.name)").foregroundStyle(roles.mention.color).bold()
                     } else {
                         HStack(spacing: 4) {
-                            if !c.typing.isEmpty { Circle().fill(colour(roles.online)).frame(width: 6, height: 6) }
-                            Text("\(c.name) · \(c.unread)").foregroundStyle(colour(roles.text))
+                            if !c.typing.isEmpty { Circle().fill(roles.online.color).frame(width: 6, height: 6) }
+                            Text("\(c.name) · \(c.unread)").foregroundStyle(roles.text.color)
                         }
                     }
                 }
@@ -235,18 +235,15 @@ public struct StatusLine: View {
                 case .short: "\(rest.count) more chat\(s)"
                 case .tiny: "+\(rest.count)"
                 }
-                Button(action: glance) { Text(text).foregroundStyle(colour(roles.secondary)) }.buttonStyle(.plain)
+                Button(action: glance) { Text(text).foregroundStyle(roles.secondary.color) }.buttonStyle(.plain)
             }
             if !needs.isEmpty {
-                Button(action: glance) { Text("⌘J glance").foregroundStyle(colour(roles.tertiary)) }.buttonStyle(.plain)
+                Button(action: glance) { Text("⌘J glance").foregroundStyle(roles.tertiary.color) }.buttonStyle(.plain)
             }
         }
         .fixedSize()
     }
 
-    func colour(_ c: RGBA) -> Color {
-        Color(nsColor: c.nsColor)
-    }
 }
 
 /// A message's receipts: when it was sent, and each recipient's delivered, read and played times.
@@ -291,7 +288,7 @@ public struct InfoView: View {
                             }
                         }
                     }
-                    .font(.system(size: 12))
+                    .textStyle(.callout)
                 }
             } else {
                 ProgressView().controlSize(.small)

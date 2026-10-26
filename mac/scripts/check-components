@@ -1,0 +1,12 @@
+#!/bin/sh
+# Fails when a font, a corner radius or a line width is set by hand outside the component library:
+# every surface takes them from JawUI/Sources/Components (the messages' own fonts are the layout's).
+cd "$(dirname "$0")/.."
+found=$(grep -rnE 'systemFont\(ofSize|\.font\(\.system\(|cornerRadius(:| =) [0-9]|borderWidth = [0-9]' \
+    JawUI/Sources JawApp/Sources JawHarness/Sources \
+    | grep -vE 'JawUI/Sources/(Components|Layout/MessageLayout\.swift|Layout/Fonts\.swift)')
+if [ -n "$found" ]; then
+    echo "$found"
+    echo "check-components: take fonts, radii and lines from JawUI/Sources/Components" >&2
+    exit 1
+fi

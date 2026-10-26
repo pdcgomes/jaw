@@ -99,16 +99,16 @@ struct GlanceView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if state.chats.isEmpty {
-                Text("Nothing needs you.").foregroundStyle(colour(roles.secondary))
+                Text("Nothing needs you.").foregroundStyle(roles.secondary.color)
             }
             ForEach(Array(state.chats.enumerated()), id: \.element.id) { i, chat in
                 card(chat, selected: i == state.index)
             }
-            Text("↩ goes to it · ⌘↩ in a new pane · nothing is marked read").font(.system(size: 10)).foregroundStyle(colour(roles.tertiary))
+            Text("↩ goes to it · ⌘↩ in a new pane · nothing is marked read").textStyle(.micro).foregroundStyle(roles.tertiary.color)
         }
         .padding(14)
         .frame(width: 460)
-        .background(colour(roles.ground))
+        .background(roles.ground.color)
         .focusable()
         .focused($focused)
         .onAppear { focused = true }
@@ -125,17 +125,17 @@ struct GlanceView: View {
     func card(_ chat: ChatRow, selected: Bool) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
-                Text(chat.name).font(.system(size: 13, weight: .semibold))
-                if chat.mentions > 0 { Text("@").foregroundStyle(colour(roles.mention)).bold() }
+                Text(chat.name).textStyle(.body).fontWeight(.semibold)
+                if chat.mentions > 0 { Text("@").foregroundStyle(roles.mention.color).bold() }
                 Spacer()
-                Text("\(chat.unread) unread").font(.system(size: 11)).foregroundStyle(colour(roles.secondary))
+                Text("\(chat.unread) unread").textStyle(.caption).foregroundStyle(roles.secondary.color)
             }
             ForEach(state.rows[chat.id]?.list ?? [], id: \.id) { m in
                 line(m, in: chat)
             }
         }
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(colour(selected ? roles.selection : roles.surface)))
+        .background(RoundedRectangle(cornerRadius: Radius.control).fill((selected ? roles.selection : roles.surface).color))
         .contentShape(Rectangle())
         .onTapGesture { go(chat, false) }
     }
@@ -145,13 +145,10 @@ struct GlanceView: View {
         let tint: RGBA = m.mine ? roles.accent : roles.sender(m.from?.colour ?? 0)
         let what = m.deleted ? "This message was deleted" : (m.plain.isEmpty ? (m.system ?? m.kind.rawValue) : m.plain)
         return HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(who).foregroundStyle(colour(tint)).frame(width: 90, alignment: .leading).lineLimit(1)
-            Text(what).lineLimit(1).foregroundStyle(colour(roles.text))
+            Text(who).foregroundStyle(tint.color).frame(width: 90, alignment: .leading).lineLimit(1)
+            Text(what).lineLimit(1).foregroundStyle(roles.text.color)
         }
-        .font(.system(size: 12))
+        .textStyle(.callout)
     }
 
-    func colour(_ c: RGBA) -> Color {
-        Color(nsColor: c.nsColor)
-    }
 }

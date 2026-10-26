@@ -409,12 +409,12 @@ public struct PaletteView: View {
     public var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: icon).foregroundStyle(colour(roles.secondary))
+                Image(systemName: icon).foregroundStyle(roles.secondary.color)
                 if let scope = model.scope { chip("in \(scope.name)") }
                 if let kind = model.kind, model.mode == .find { chip(Self.plural(kind)) }
                 TextField(placeholder, text: $model.query)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 16))
+                    .textStyle(.heading)
                     .focused($focused)
                     .onKeyPress(.downArrow) { model.move(1); return .handled }
                     .onKeyPress(.upArrow) { model.move(-1); return .handled }
@@ -436,14 +436,14 @@ public struct PaletteView: View {
             .padding(.horizontal, 14)
             .frame(height: 46)
             strip
-            Divider().overlay(colour(roles.separator))
+            Divider().overlay(roles.separator.color)
             results
             hints
         }
         .frame(width: 620)
-        .background(colour(roles.surface))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(colour(roles.separator)))
+        .background(roles.surface.color)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.panel))
+        .overlay(RoundedRectangle(cornerRadius: Radius.panel).stroke(roles.separator.color))
         .onAppear { focused = true }
         .focusEffectDisabled()
     }
@@ -457,10 +457,10 @@ public struct PaletteView: View {
     }
 
     func chip(_ text: String) -> some View {
-        Text(text).font(.system(size: 11, weight: .medium))
+        Text(text).textStyle(.caption).fontWeight(.medium)
             .padding(.horizontal, 7).padding(.vertical, 2)
-            .background(Capsule().fill(colour(roles.selection)))
-            .foregroundStyle(colour(roles.text))
+            .background(Capsule().fill(roles.selection.color))
+            .foregroundStyle(roles.text.color)
     }
 
     /// The counts of each kind, the one narrowed to marked, for Tab.
@@ -468,15 +468,15 @@ public struct PaletteView: View {
         let shown = FindKind.allCases.compactMap { k in model.counts[k].map { (k, $0) } }.filter { $0.1 > 0 }
         if model.mode == .find, !shown.isEmpty {
             HStack(spacing: 12) {
-                Text("all").foregroundStyle(colour(model.kind == nil ? roles.accent : roles.secondary))
+                Text("all").foregroundStyle((model.kind == nil ? roles.accent : roles.secondary).color)
                 ForEach(shown, id: \.0) { kind, n in
                     Text("\(Self.plural(kind)) \(n >= 1000 ? "1,000+" : Format.num(n))")
-                        .foregroundStyle(colour(model.kind == kind ? roles.accent : roles.secondary))
+                        .foregroundStyle((model.kind == kind ? roles.accent : roles.secondary).color)
                 }
                 Spacer()
-                Text("Tab narrows").foregroundStyle(colour(roles.tertiary))
+                Text("Tab narrows").foregroundStyle(roles.tertiary.color)
             }
-            .font(.system(size: 11, design: .monospaced))
+            .textStyle(.mono)
             .padding(.horizontal, 14)
             .padding(.bottom, 6)
         }
@@ -490,8 +490,8 @@ public struct PaletteView: View {
                     ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
                         if i == 0 || items[i - 1].group != item.group {
                             Text(item.group.title)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(colour(roles.tertiary))
+                                .textStyle(.caption).fontWeight(.semibold)
+                                .foregroundStyle(roles.tertiary.color)
                                 .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 2)
                         }
                         row(item, selected: i == model.index).id(i)
@@ -499,7 +499,7 @@ public struct PaletteView: View {
                     }
                     if items.isEmpty, !model.finding {
                         Text(model.failed ?? (model.query.isEmpty ? "Type to find chats, people and messages." : "Nothing found."))
-                            .foregroundStyle(colour(roles.secondary)).padding(14)
+                            .foregroundStyle(roles.secondary.color).padding(14)
                     }
                 }
                 .padding(.vertical, 4)
@@ -516,29 +516,29 @@ public struct PaletteView: View {
         case .forward: "Tab picks · ⏎ forwards to \(model.picked.isEmpty ? "the chat" : "\(model.picked.count) chat\(model.picked.count == 1 ? "" : "s")") · Esc closes"
         }
         return HStack {
-            Text(text).font(.system(size: 11)).foregroundStyle(colour(roles.tertiary))
+            Text(text).textStyle(.caption).foregroundStyle(roles.tertiary.color)
             Spacer()
         }
         .padding(.horizontal, 14).frame(height: 26)
-        .background(colour(roles.ground.opacity(0.4)))
+        .background(roles.ground.opacity(0.4).color)
     }
 
     func row(_ item: PaletteModel.Item, selected: Bool) -> some View {
         HStack(spacing: 8) {
-            if case .action = item.pick { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(colour(roles.tertiary)) }
+            if case .action = item.pick { Image(systemName: "chevron.right").textStyle(.micro).foregroundStyle(roles.tertiary.color) }
             if model.picked.contains(where: { "picked\($0.id)" == item.id }) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(colour(roles.accent))
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(roles.accent.color)
             }
             Self.marked(item.title, roles).lineLimit(1)
             Spacer(minLength: 8)
-            Text(item.detail).font(.system(size: 11)).foregroundStyle(colour(roles.secondary)).lineLimit(1)
+            Text(item.detail).textStyle(.caption).foregroundStyle(roles.secondary.color).lineLimit(1)
             if let key = item.key {
-                Text(key).font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(colour(roles.accent))
+                Text(key).textStyle(.key).foregroundStyle(roles.accent.color)
             }
         }
         .padding(.horizontal, 14)
         .frame(height: 32)
-        .background(selected ? colour(roles.selection) : .clear)
+        .background(selected ? roles.selection.color : .clear)
         .contentShape(Rectangle())
     }
 
@@ -546,11 +546,11 @@ public struct PaletteView: View {
         var out = AttributedString()
         for span in spans {
             var part = AttributedString(span.s)
-            part.foregroundColor = Color(nsColor: (span.t == .mark ? roles.accent : roles.text).nsColor)
+            part.foregroundColor = (span.t == .mark ? roles.accent : roles.text).color
             if span.t == .mark { part.font = .system(size: 13, weight: .bold) }
             out += part
         }
-        return Text(out).font(.system(size: 13))
+        return Text(out).textStyle(.body)
     }
 
     nonisolated static func plural(_ kind: FindKind) -> String {
@@ -565,9 +565,6 @@ public struct PaletteView: View {
         }
     }
 
-    func colour(_ c: RGBA) -> Color {
-        Color(nsColor: c.nsColor)
-    }
 }
 
 /// The palette's panel, at the top of the window, its field taking keys in the frame after ⌘K.

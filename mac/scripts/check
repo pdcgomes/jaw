@@ -2,6 +2,7 @@
 # Builds a scheme (or tests it, with `test`) and prints only jaw's own diagnostics and the result.
 set -u
 cd "$(dirname "$0")/.."
+scripts/check-components || exit 1
 action=build
 case "${1:-}" in test|build) action="$1"; shift ;; esac
 scheme="${1:-jaw}"; shift 2>/dev/null || true

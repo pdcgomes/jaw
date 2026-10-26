@@ -274,7 +274,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     func showStatus(_ status: Status) {
         let text = (try? String(data: JSONEncoder.pretty.encode(status.raw), encoding: .utf8)) ?? ""
-        let view = ScrollView { Text(text).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).padding() }
+        let view = ScrollView { Text(text).textStyle(.mono).textSelection(.enabled).padding() }
             .frame(minWidth: 520, minHeight: 420)
         let w = statusWindow ?? NSWindow(contentViewController: NSHostingController(rootView: AnyView(view)))
         (w.contentViewController as? NSHostingController<AnyView>)?.rootView = AnyView(view)

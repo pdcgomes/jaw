@@ -23,9 +23,12 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     var chat: ChatRow
     let textView = BoxTextView(usingTextLayoutManager: true)
     let scroll = NSScrollView()
-    let bar = NSTextField(labelWithString: "")
-    let barClose = NSButton()
-    let placeholder = NSTextField(labelWithString: "")
+    let bar = Labels.make("", .caption)
+    lazy var barClose = IconButton(symbol: "xmark.circle.fill", label: "Drop it", shortcut: Shortcut("⎋", []), size: .small) { [weak self] in
+        self?.dropMode()
+    }
+
+    let placeholder = Labels.make("", .body)
     let completions = CompletionView()
     var heightConstraint: NSLayoutConstraint!
 
@@ -83,7 +86,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isContinuousSpellCheckingEnabled = true
-        textView.font = .systemFont(ofSize: 13)
+        textView.font = TextStyle.body.nsFont
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -93,17 +96,6 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
-        scroll.wantsLayer = true
-        scroll.layer?.cornerRadius = 10
-        scroll.layer?.borderWidth = 1
-
-        placeholder.font = .systemFont(ofSize: 13)
-        bar.font = .systemFont(ofSize: 11)
-        bar.lineBreakMode = .byTruncatingTail
-        barClose.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Drop it")
-        barClose.isBordered = false
-        barClose.target = self
-        barClose.action = #selector(dropMode)
         completions.isHidden = true
         completions.picked = { [weak self] in self?.take($0) }
 
@@ -140,13 +132,12 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     func colour() {
         guard let roles else { return }
         view.layer?.backgroundColor = roles.ground.cgColor
-        scroll.layer?.backgroundColor = roles.surface.cgColor
-        scroll.layer?.borderColor = roles.separator.cgColor
+        Surface.dress(scroll, .field, roles: roles)
         textView.textColor = roles.text.nsColor
         textView.insertionPointColor = roles.accent.nsColor
         placeholder.textColor = roles.tertiary.nsColor
         bar.textColor = unsentWhy == nil ? roles.secondary.nsColor : roles.failed.nsColor
-        barClose.contentTintColor = roles.tertiary.nsColor
+        barClose.roles = roles
         completions.roles = roles
     }
 
@@ -474,13 +465,10 @@ final class CompletionView: NSView {
 
     init() {
         super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 8
-        layer?.borderWidth = 1
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+        stack.edgeInsets = NSEdgeInsets(top: Space.xs, left: 0, bottom: Space.xs, right: 0)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -519,17 +507,12 @@ final class CompletionView: NSView {
             v.removeFromSuperview()
         }
         guard let roles else { return }
-        layer?.backgroundColor = roles.surface.cgColor
-        layer?.borderColor = roles.separator.cgColor
+        Surface.dress(self, .popover, radius: Radius.control, roles: roles)
         for (i, item) in items.enumerated() {
-            let title = NSTextField(labelWithString: item.title)
-            title.font = .systemFont(ofSize: 13)
-            title.textColor = roles.text.nsColor
-            let detail = NSTextField(labelWithString: item.detail ?? "")
-            detail.font = .systemFont(ofSize: 11)
-            detail.textColor = roles.secondary.nsColor
+            let title = Labels.make(item.title, .body, .primary, roles: roles)
+            let detail = Labels.make(item.detail ?? "", .caption, .secondary, roles: roles)
             let row = NSStackView(views: [title, detail])
-            row.edgeInsets = NSEdgeInsets(top: 3, left: 10, bottom: 3, right: 10)
+            row.edgeInsets = NSEdgeInsets(top: Space.xxs + 1, left: Space.l - 2, bottom: Space.xxs + 1, right: Space.l - 2)
             row.wantsLayer = true
             row.layer?.backgroundColor = i == index ? roles.selection.cgColor : nil
             row.widthAnchor.constraint(equalToConstant: 280).isActive = true

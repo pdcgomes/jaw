@@ -189,7 +189,7 @@ struct States: View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 360), spacing: 12)], spacing: 12) {
                 ForEach(Array(kinds.enumerated()), id: \.offset) { _, kind in
-                    StateView(kind: kind, roles: roles).frame(height: 360).clipShape(RoundedRectangle(cornerRadius: 10))
+                    StateView(kind: kind, roles: roles).frame(height: 360).clipShape(RoundedRectangle(cornerRadius: Radius.field))
                 }
                 VStack {
                     EmptyChatView(chat: Samples.group).frame(height: 300)
@@ -247,10 +247,10 @@ struct RolesView: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 140))], spacing: 10) {
                 ForEach(named, id: \.0) { name, colour in
                     VStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: colour.nsColor)).frame(height: 50)
+                        RoundedRectangle(cornerRadius: Radius.control).fill(colour.color).frame(height: 50)
                             .overlay(Text("Aa").foregroundStyle(Color(nsColor: roles.text.nsColor)))
-                        Text(name).font(.system(size: 11))
-                        Text(String(format: "%.1f:1 with text", roles.text.contrast(with: colour))).font(.system(size: 10)).foregroundStyle(.secondary)
+                        Text(name).textStyle(.caption)
+                        Text(String(format: "%.1f:1 with text", roles.text.contrast(with: colour))).textStyle(.micro).foregroundStyle(.secondary)
                     }
                 }
             }

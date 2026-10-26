@@ -104,32 +104,35 @@ final class MessageView: NSView {
     }
 }
 
-/// The buttons a hovered message shows beside it: react, reply, and the rest.
+/// The buttons a hovered message shows beside it: react, reply, and the rest, each saying the key
+/// that does the same once the message is selected.
 final class HoverBar: NSStackView {
     var react: (() -> Void)?
     var reply: (() -> Void)?
     var more: ((NSView) -> Void)?
+    var buttons: [IconButton] = []
+    var roles: Roles? {
+        didSet { colour() }
+    }
 
     init() {
         super.init(frame: .zero)
         orientation = .horizontal
-        spacing = 2
-        edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
+        spacing = Space.xxs
+        edgeInsets = NSEdgeInsets(top: Space.xxs, left: Space.xs, bottom: Space.xxs, right: Space.xs)
         wantsLayer = true
-        layer?.cornerRadius = 12
-        for (symbol, label, action) in [
-            ("face.smiling", "React", #selector(tapReact)),
-            ("arrowshape.turn.up.left", "Reply", #selector(tapReply)),
-            ("ellipsis", "More", #selector(tapMore(_:))),
-        ] {
-            let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label)!,
-                                  target: self, action: action)
-            button.isBordered = false
-            button.toolTip = label
-            button.contentTintColor = .secondaryLabelColor
-            button.widthAnchor.constraint(equalToConstant: 22).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
-            addArrangedSubview(button)
+        layer?.cornerRadius = Radius.field + 2
+        layer?.borderWidth = Stroke.hairline
+        buttons = [
+            IconButton(symbol: "face.smiling", label: "React", shortcut: Shortcut("+", []), size: .small) { [weak self] in self?.react?() },
+            IconButton(symbol: "arrowshape.turn.up.left", label: "Reply", shortcut: Shortcut("r", []), size: .small) { [weak self] in self?.reply?() },
+        ]
+        let more = IconButton(symbol: "ellipsis", label: "More", size: .small) {}
+        more.target = self
+        more.action = #selector(tapMore(_:))
+        buttons.append(more)
+        for b in buttons {
+            addArrangedSubview(b)
         }
     }
 
@@ -138,15 +141,16 @@ final class HoverBar: NSStackView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    @objc func tapReact() {
-        react?()
-    }
-
-    @objc func tapReply() {
-        reply?()
-    }
-
     @objc func tapMore(_ sender: NSView) {
         more?(sender)
+    }
+
+    func colour() {
+        guard let roles else { return }
+        layer?.backgroundColor = roles.surface.cgColor
+        layer?.borderColor = roles.separator.cgColor
+        for b in buttons {
+            b.roles = roles
+        }
     }
 }
