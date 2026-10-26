@@ -747,10 +747,11 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // preview's title and description, and the message's chat, time and sender, by triggers on
     // messages that read what the converter made of the message, so every write that changes a
     // message (a copy arriving, an edit, a deletion, a merge moving it) changes its links in the
-    // same statement; and a links index for search keeps one document per message. The messages
-    // jaw.db already holds are linked by a backfill, a short background transaction at a time from
-    // the row it leaves in `backfills`. It makes new tables, views, triggers and one row, so it
-    // costs the same however many messages there are.
+    // same statement; and a links index for search keeps one document per message, a new
+    // message's waiting with its text in fts_backlog to be indexed in the writer's steps of its own.
+    // The messages jaw.db already holds are linked by a backfill, a short background transaction at
+    // a time from the row it leaves in `backfills`. It makes new tables, views, triggers and one
+    // row, so it costs the same however many messages there are.
     "
     -- Class: derived from raw. Each URL a message's spans mark, once, in the order it first comes,
     -- then its link preview's when the spans don't mark it, each made absolute as the spans make
@@ -822,30 +823,36 @@ pub(super) const MIGRATIONS: &[&str] = &[
 
     -- Class: derived from raw. The words of each message's links, their hosts, titles, descriptions
     -- and URLs, as one document by the message's t, so search reads them newest first and stops at
-    -- a page; contentless, each document is written and deleted by the triggers that write the
-    -- message's links, and only there, so a message has one at most.
+    -- a page. It's contentless, and a message has one document at most: one waiting in fts_backlog
+    -- has none, and is indexed with its text, its links' words and all, by the writer's steps; the
+    -- triggers below write and delete the documents of the rest, and the links backfill those of
+    -- the messages it links. Its segments are merged as messages_fts's are, in the writer's idle
+    -- moments rather than at the commit of whichever transaction fills a level.
     CREATE VIRTUAL TABLE links_fts USING fts5 (
         text,
         content = '',
         contentless_delete = 1,
         tokenize = 'unicode61 remove_diacritics 2'
     );
+    INSERT INTO links_fts (links_fts, rank) VALUES ('automerge', 0);
+    INSERT INTO links_fts (links_fts, rank) VALUES ('crisismerge', 64);
     CREATE VIEW message_link_text (message, t, text) AS
     SELECT m.n, m.t, (SELECT group_concat(concat_ws(' ', l.host, l.title, l.description, l.url), ' ')
         FROM links l WHERE l.message = m.n)
     FROM messages m;
 
-    -- Writing a message's n here writes its links and its document, which an INSTEAD OF trigger
-    -- does, so the program reading the views runs only for a message that may have links: a
-    -- trigger's whole program is set up each time it fires, before its WHEN is looked at, and the
-    -- triggers on messages fire for every message.
+    -- Writing a message's n here writes its links and, unless it waits in fts_backlog, its
+    -- document, which an INSTEAD OF trigger does, so the program reading the views runs only for a
+    -- message that may have links: a trigger's whole program is set up each time it fires, before
+    -- its WHEN is looked at, and the triggers on messages fire for every message.
     CREATE VIEW links_derived (message) AS SELECT NULL WHERE 0;
     CREATE TRIGGER links_derived_insert INSTEAD OF INSERT ON links_derived BEGIN
         INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description)
             SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links
             WHERE message = new.message;
         INSERT INTO links_fts (rowid, text)
-            SELECT t, text FROM message_link_text WHERE message = new.message AND text IS NOT NULL;
+            SELECT t, text FROM message_link_text WHERE message = new.message AND text IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = new.message);
     END;
     CREATE TRIGGER messages_links_insert AFTER INSERT ON messages
     WHEN instr(new.spans, '\"t\":\"link\"') > 0 OR instr(new.detail, '\"link\":{') > 0 BEGIN
@@ -858,13 +865,16 @@ pub(super) const MIGRATIONS: &[&str] = &[
         AND (instr(old.spans, '\"t\":\"link\"') > 0 OR instr(old.detail, '\"link\":{') > 0
             OR instr(new.spans, '\"t\":\"link\"') > 0 OR instr(new.detail, '\"link\":{') > 0) BEGIN
         DELETE FROM links WHERE message = old.n;
-        DELETE FROM links_fts WHERE rowid = old.t;
+        DELETE FROM links_fts WHERE rowid = old.t AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = old.n);
         INSERT INTO links_derived (message) VALUES (new.n);
     END;
+    -- A message deleted while it waits in fts_backlog has no document, whichever of this and
+    -- messages_fts_delete, which takes it out of the backlog, goes first: deleting a rowid a
+    -- contentless index doesn't hold changes nothing it holds.
     CREATE TRIGGER messages_links_delete AFTER DELETE ON messages
     WHEN instr(old.spans, '\"t\":\"link\"') > 0 OR instr(old.detail, '\"link\":{') > 0 BEGIN
         DELETE FROM links WHERE message = old.n;
-        DELETE FROM links_fts WHERE rowid = old.t;
+        DELETE FROM links_fts WHERE rowid = old.t AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = old.n);
     END;
 
     -- Class: jaw's own. Work a migration leaves to the background, a short transaction at a time,

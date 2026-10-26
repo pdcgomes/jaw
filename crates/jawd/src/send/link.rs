@@ -118,11 +118,16 @@ impl Previews {
         if meta.title.is_none() && meta.description.is_none() {
             return None;
         }
+        // The image is decoded within the same deadline: one as large as the caps let through takes
+        // a few hundred milliseconds, which the text would otherwise wait for past it.
         let thumbnail = match meta.image.as_deref().and_then(|image| page.url.join(image).ok()) {
-            Some(image) => match tokio::time::timeout_at(deadline, fetcher.get(image, Wanted::Image)).await {
-                Ok(Ok(image)) => tokio::task::spawn_blocking(move || thumbnail(&image.body)).await.ok().flatten(),
-                _ => None,
-            },
+            Some(image) => tokio::time::timeout_at(deadline, async {
+                let image = fetcher.get(image, Wanted::Image).await.ok()?;
+                tokio::task::spawn_blocking(move || thumbnail(&image.body)).await.ok().flatten()
+            })
+            .await
+            .ok()
+            .flatten(),
             None => None,
         };
         Some(Preview { matched: link.s, title: meta.title, description: meta.description, thumbnail })

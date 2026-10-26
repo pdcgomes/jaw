@@ -37,8 +37,9 @@ async fn links(store: &Store) -> Vec<Link> {
     .await
 }
 
-/// The messages whose links match `words`, newest first, by ID.
+/// The messages whose links match `words`, newest first, by ID, once what was written is indexed.
 async fn found(store: &Store, words: &'static str) -> Vec<String> {
+    store.indexed().await.unwrap();
     query(store, move |db| {
         let ts = read::linked(db, words, None, 100)?;
         let mut ids = Vec::new();
@@ -439,4 +440,362 @@ async fn measure_the_links_backfill_and_what_links_cost_a_write() {
             20_000.0 / took.as_secs_f64()
         );
     }
+}
+
+/// `links` is exactly what the views derive from every message, and links_fts holds exactly one
+/// document for each message with links that isn't waiting in fts_backlog, its postings those of a
+/// fresh index of their text, and none for one that is; `at` says where, if not.
+fn links_exact(home: &std::path::Path, at: &str) {
+    let db = Connection::open(home.join("jaw.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    db.execute_batch("BEGIN").unwrap();
+    let rows = |sql: &str| -> Vec<String> {
+        db.prepare(sql)
+            .unwrap()
+            .query_map([], |r| {
+                Ok((0..r.as_ref().column_count()).map(|i| format!("{:?}|", r.get_ref(i).unwrap())).collect::<String>())
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let columns = "message, place, chat, at, sender, mine, url, host, title, description";
+    let kept = rows(&format!("SELECT {columns} FROM links ORDER BY message, place"));
+    assert_eq!(kept, rows(&format!("SELECT {columns} FROM message_links ORDER BY message, place")), "links at {at}");
+    db.execute_batch(
+        "DROP TABLE IF EXISTS temp.postings; DROP TABLE IF EXISTS temp.fresh_postings; DROP TABLE IF EXISTS temp.fresh;
+        CREATE VIRTUAL TABLE temp.postings USING fts5vocab (main, links_fts, 'instance');
+        CREATE VIRTUAL TABLE temp.fresh USING fts5 (text, content = '', contentless_delete = 1,
+            tokenize = 'unicode61 remove_diacritics 2');
+        INSERT INTO temp.fresh (rowid, text) SELECT t, text FROM message_link_text
+            WHERE text IS NOT NULL AND message NOT IN (SELECT n FROM main.fts_backlog);
+        CREATE VIRTUAL TABLE temp.fresh_postings USING fts5vocab (temp, fresh, 'instance');",
+    )
+    .unwrap();
+    let postings = "term, doc, col, offset";
+    assert_eq!(
+        rows(&format!("SELECT {postings} FROM temp.postings ORDER BY {postings}")),
+        rows(&format!("SELECT {postings} FROM temp.fresh_postings ORDER BY {postings}")),
+        "links_fts's postings at {at}"
+    );
+    let documents = rows("SELECT rowid FROM links_fts ORDER BY rowid");
+    let linked = rows(
+        "SELECT m.t FROM messages m WHERE EXISTS (SELECT 1 FROM links l WHERE l.message = m.n)
+            AND m.n NOT IN (SELECT n FROM fts_backlog) ORDER BY m.t",
+    );
+    assert_eq!(documents, linked, "links_fts's documents at {at}");
+    db.execute_batch("COMMIT").unwrap();
+    db.execute("INSERT INTO links_fts (links_fts) VALUES ('integrity-check')", []).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_messages_links_wait_with_its_text_to_be_indexed_and_are_found_as_they_last_read() {
+    let home = tempfile::tempdir().unwrap();
+    let quiet = std::time::Duration::from_secs(5);
+    let limits = crate::store::Limits { live_pause: quiet, stream_step: quiet, ..crate::store::LIMITS };
+    let store = Store::open_with(home.path(), limits).unwrap();
+    // A catch-up's conversions, several inbox rows each, keep indexing waiting meanwhile.
+    let converting = |changes: Vec<Change>| {
+        let mut changes = changes;
+        changes.extend([
+            Change::Drained(crate::store::Drained::Inbox(1)),
+            Change::Drained(crate::store::Drained::Inbox(2)),
+        ]);
+        changes
+    };
+    apply(&store, converting(vec![Change::Message(message("m1", AT, json!([text("vê "), link("jaw.dev/um")]), None))]))
+        .await;
+    assert_eq!(links(&store).await.len(), 1, "its links are kept as it commits");
+    let waiting = |store: &Store| {
+        let store = store.clone();
+        async move {
+            query(&store, |db| {
+                Ok(db.query_row(
+                    "SELECT (SELECT count(*) FROM fts_backlog), (SELECT count(*) FROM links_fts)",
+                    [],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                )?)
+            })
+            .await
+        }
+    };
+    assert_eq!(waiting(&store).await, (1, 0), "its document waits with its text, not in the commit");
+    links_exact(home.path(), "m1 waiting");
+    // Written, edited and deleted before they're indexed, in one transaction and in several.
+    let edit = |id: &str, spans: serde_json::Value, at: i64| {
+        let words: String = spans.as_array().unwrap().iter().map(|span| span["s"].as_str().unwrap()).collect();
+        Change::Amend(Amend {
+            chat: ANA.into(),
+            target: id.into(),
+            sender: Some(ANA.into()),
+            mine: false,
+            at,
+            what: Amendment::Edit { text: Some(words.clone()), spans: Some(spans.to_string()), summary: words },
+            raw: None,
+        })
+    };
+    apply(
+        &store,
+        converting(vec![
+            Change::Message(message("m2", AT + 1, json!([link("https://antes.pt")]), None)),
+            edit("m2", json!([text("depois "), link("https://depois.pt")]), AT + 2),
+            Change::Message(message("m3", AT + 3, json!([link("https://apagado.pt")]), None)),
+        ]),
+    )
+    .await;
+    apply(&store, converting(vec![Change::DeleteMessage { chat: ANA.into(), id: "m3".into() }])).await;
+    let preview = json!({ "url": "https://previsto.pt", "title": "Só o título" });
+    apply(&store, converting(vec![Change::Message(message("m4", AT + 4, json!([text("olá")]), Some(preview)))])).await;
+    assert_eq!(waiting(&store).await, (3, 0));
+    links_exact(home.path(), "all waiting");
+    store.indexed().await.unwrap();
+    assert_eq!(waiting(&store).await, (0, 3), "indexed by the writer's own steps");
+    links_exact(home.path(), "indexed");
+    assert_eq!(found(&store, "\"depois\"").await, ["m2"], "as it last read");
+    assert!(found(&store, "\"antes\"").await.is_empty());
+    assert!(found(&store, "\"apagado\"").await.is_empty());
+    assert_eq!(found(&store, "\"titulo\"").await, ["m4"], "a preview's title, accent-blind");
+    // An edit once it's indexed rewrites its document in its own commit, as an edit of its text does.
+    apply(&store, vec![edit("m1", json!([text("vê "), link("jaw.dev/dois")]), AT + 10)]).await;
+    links_exact(home.path(), "m1 edited");
+    assert_eq!(found(&store, "\"dois\"").await, ["m1"]);
+    assert!(found(&store, "\"um\"").await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_still_waiting_to_be_indexed_when_the_backfill_links_it_gets_one_document() {
+    let home = tempfile::tempdir().unwrap();
+    before_links(home.path(), 300);
+    let store = Store::open(home.path()).unwrap();
+    // History converted before links, the first step's messages not indexed yet: they wait in
+    // fts_backlog, which the writer, finding it empty as it started, doesn't look at before a commit.
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    db.execute_batch(&format!(
+        "INSERT INTO messages_fts (messages_fts, rowid, text) SELECT 'delete', t, text FROM messages WHERE n <= {STEP};
+        INSERT INTO fts_backlog (n) SELECT n FROM messages WHERE n <= {STEP};"
+    ))
+    .unwrap();
+    store.apply(Lane::Background, vec![Change::Backfill(LINKS)]).await.unwrap();
+    let (linked, documents): (i64, i64) = db
+        .query_row("SELECT (SELECT count(DISTINCT message) FROM links), (SELECT count(*) FROM links_fts)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((linked, documents), (STEP / 3 + 1, 0), "the first step's links are in, their words wait");
+    while backfill_left(&store).await.is_some() {
+        store.apply(Lane::Background, vec![Change::Backfill(LINKS)]).await.unwrap();
+    }
+    store.indexed().await.unwrap();
+    links_exact(home.path(), "backfilled and indexed");
+    assert_eq!(found(&store, "\"site63\"").await, ["m63"], "once, from the index step");
+}
+
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n
+    }
+}
+
+const URLS: &[&str] = &[
+    "https://jaw.dev",
+    "jaw.dev",
+    "www.jaw.dev/sobre",
+    "https://www.jaw.dev/sobre",
+    "http://exemplo.pt:8080/a?b=1#c",
+    "HTTPS://Maiusculas.PT/X",
+    "https://ana:segredo@anfitriao.pt/x",
+    "https://[2001:db8::1]:8443/v6",
+    "outro.pt/caminho",
+];
+
+fn random_spans(rng: &mut Rng) -> (serde_json::Value, Vec<&'static str>) {
+    let mut spans = vec![text("olha ")];
+    let mut used = Vec::new();
+    for _ in 0..rng.below(4) {
+        let url = URLS[rng.below(URLS.len() as u64) as usize];
+        spans.extend([link(url), text(" e ")]);
+        used.push(url);
+    }
+    (serde_json::Value::Array(spans), used)
+}
+
+fn random_message(rng: &mut Rng, chat: &str, sender: &str, id: &str, at: i64) -> Message {
+    let (spans, used) = random_spans(rng);
+    let preview = match rng.below(4) {
+        0 if !used.is_empty() => Some(json!({ "url": used[rng.below(used.len() as u64) as usize],
+            "title": format!("Titulo {}", rng.below(5)), "description": null })),
+        1 => Some(json!({ "url": URLS[rng.below(URLS.len() as u64) as usize], "title": null,
+            "description": format!("Descricao {}", rng.below(5)) })),
+        _ => None,
+    };
+    Message { chat: chat.into(), sender: Some(sender.into()), ..message(id, at, spans, preview) }
+}
+
+fn random_edit(rng: &mut Rng, chat: &str, sender: &str, id: &str, at: i64) -> Change {
+    let (spans, _) = random_spans(rng);
+    let words: String = spans.as_array().unwrap().iter().map(|span| span["s"].as_str().unwrap()).collect();
+    Change::Amend(Amend {
+        chat: chat.into(),
+        target: id.into(),
+        sender: Some(sender.into()),
+        mine: false,
+        at,
+        what: Amendment::Edit { text: Some(words.clone()), spans: Some(spans.to_string()), summary: words },
+        raw: None,
+    })
+}
+
+/// The database expert's scene: random copies, edits, deletions for everyone and for you, replays
+/// and merges of Ana's two chats, with indexing as the writer does it between them, and links and
+/// their index checked exactly after each.
+#[tokio::test(flavor = "multi_thread")]
+async fn links_and_their_index_stay_exact_through_random_copies_edits_deletions_replays_merges_and_indexing() {
+    const GROUP: &str = "120363000000000001@g.us";
+    const RUI: &str = "351910000003@s.whatsapp.net";
+    for seed in [0x5eed, 2] {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let mut rng = Rng(seed);
+        let (mut done, mut at, mut joined) = (Vec::<Change>::new(), AT, false);
+        for step in 0..100 {
+            at += 1 + rng.below(50) as i64;
+            let (chat, sender) = [(ANA, ANA), (ANA_LID, ANA_LID), (GROUP, RUI)][rng.below(3) as usize];
+            let id = format!("m{}", rng.below(12));
+            let change = match rng.below(100) {
+                0..=34 => {
+                    let sent = at - rng.below(3000) as i64;
+                    let mut m = random_message(&mut rng, chat, sender, &id, sent);
+                    m.live = rng.below(2) == 0;
+                    Change::Message(m)
+                }
+                35..=54 => random_edit(&mut rng, chat, sender, &id, at),
+                55..=64 => Change::Amend(Amend {
+                    chat: chat.into(),
+                    target: id,
+                    sender: Some(sender.into()),
+                    mine: false,
+                    at,
+                    what: Amendment::Revoke,
+                    raw: None,
+                }),
+                65..=72 => Change::DeleteMessage { chat: chat.into(), id },
+                73..=84 if !done.is_empty() => done[rng.below(done.len() as u64) as usize].clone(),
+                85..=89 => {
+                    store.indexed().await.unwrap();
+                    links_exact(home.path(), &format!("seed {seed} step {step}, indexed"));
+                    continue;
+                }
+                90..=94 if !joined => {
+                    joined = true;
+                    Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })
+                }
+                _ => Change::MergeStep(None),
+            };
+            let applied = store.apply(Lane::Live, vec![change.clone()]).await.unwrap();
+            assert_eq!(applied.quarantined, 0, "seed {seed} step {step}: {change:?}");
+            done.push(change);
+            links_exact(home.path(), &format!("seed {seed} step {step}"));
+        }
+        while query(&store, |db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get::<_, i64>(0))?))
+            .await
+            > 0
+        {
+            store.apply(Lane::Live, vec![Change::MergeStep(None)]).await.unwrap();
+        }
+        store.indexed().await.unwrap();
+        links_exact(home.path(), &format!("seed {seed}, merged and indexed"));
+    }
+}
+
+/// The database expert's scene: the backfill, taken with live writes meanwhile, jawd stopped
+/// between steps and a step taken again, links every message once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_backfill_among_writes_restarts_and_repeats_leaves_links_and_their_index_exact() {
+    let home = tempfile::tempdir().unwrap();
+    before_links(home.path(), 700);
+    let mut rng = Rng(7);
+    let mut store = Store::open(home.path()).unwrap();
+    let mut step = 0;
+    while store.backfill_left(LINKS).unwrap() > 0 {
+        step += 1;
+        for _ in 0..3 {
+            let n = 1 + rng.below(700) as i64;
+            let id = format!("m{n}");
+            let change = match rng.below(3) {
+                0 => random_edit(&mut rng, ANA, ANA, &id, AT + 10_000 + step),
+                1 => Change::Message(random_message(&mut rng, ANA, ANA, &id, AT + n)),
+                _ => Change::DeleteMessage { chat: ANA.into(), id },
+            };
+            store.apply(Lane::Live, vec![change]).await.unwrap();
+        }
+        let applied = store.apply(Lane::Background, vec![Change::Backfill(LINKS)]).await.unwrap();
+        assert_eq!(applied.quarantined, 0);
+        if step % 4 == 0 {
+            drop(store);
+            store = Store::open(home.path()).unwrap();
+        }
+        if step % 5 == 0 {
+            let raw = Connection::open(home.path().join("jaw.db")).unwrap();
+            raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+            raw.execute("UPDATE backfills SET after = max(0, after - 64) WHERE name = 'links'", []).unwrap();
+        }
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let after: i64 = db
+            .query_row("SELECT coalesce((SELECT after FROM backfills WHERE name = 'links'), 1 << 62)", [], |r| r.get(0))
+            .unwrap();
+        let wrong: i64 = db
+            .query_row(
+                "SELECT (SELECT count(*) FROM (SELECT message, place, url FROM links WHERE message <= ?1
+                    EXCEPT SELECT message, place, url FROM message_links WHERE message <= ?1))
+                + (SELECT count(*) FROM (SELECT message, place, url FROM message_links WHERE message <= ?1
+                    EXCEPT SELECT message, place, url FROM links WHERE message <= ?1))",
+                [after],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(wrong, 0, "step {step}: links up to {after} aren't what the views derive");
+    }
+    store.indexed().await.unwrap();
+    links_exact(home.path(), "after the backfill");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_links_index_is_merged_in_the_writers_own_steps_as_the_messages_index_is() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // Each indexed in a step of its own, so each step writes a segment of each index.
+    for k in 0..20 {
+        let spans = json!([text("vê "), link(&format!("https://site{k}.pt/a"))]);
+        apply(&store, vec![Change::Message(message(&format!("m{k}"), AT + k, spans, None))]).await;
+        store.indexed().await.unwrap();
+    }
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let settings = |table: &str| -> Vec<(String, i64)> {
+        db.prepare(&format!("SELECT k, v FROM {table} WHERE k IN ('automerge', 'crisismerge') ORDER BY k"))
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let merging = settings("messages_fts_config");
+    assert_eq!(merging, [("automerge".into(), 0), ("crisismerge".into(), 64)], "nothing merged at commit");
+    assert_eq!(settings("links_fts_config"), merging, "the links' index merges as the messages' does");
+    for merge in [
+        "INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', 64)",
+        "INSERT INTO links_fts (links_fts, rank) VALUES ('merge', 64)",
+    ] {
+        let before = db.total_changes();
+        db.execute(merge, []).unwrap();
+        assert_eq!(db.total_changes(), before + 1, "segments were left to merge: {merge}");
+    }
+    assert_eq!(found(&store, "\"site7\"").await, ["m7"]);
 }

@@ -44,6 +44,13 @@ const BACK: &str = "INSERT INTO pending (chat, target, kind, at, raw, sender, mi
         raw ->> '$.mine', raw ->> '$.effect'
     FROM quarantine WHERE source = 'vote' AND ref >= ?1 AND ref < ?2";
 const BACK_DONE: &str = "DELETE FROM quarantine WHERE source = 'vote' AND ref >= ?1 AND ref < ?2";
+// The votes set aside for chat ?3, named from ?1 to ?2, named and kept for chat ?4 instead; one
+// whose new name a vote set aside for ?4 has already keeps its own row, its n after the name.
+const SET_ASIDE_MOVED: &str = "UPDATE quarantine SET
+        ref = ?4 || substr(ref, length(?3) + 1) || iif(EXISTS (SELECT 1 FROM quarantine q
+            WHERE q.source = 'vote' AND q.ref = ?4 || substr(quarantine.ref, length(?3) + 1)), ' ' || n, ''),
+        raw = jsonb_set(raw, '$.chat', ?4)
+    WHERE source = 'vote' AND ref >= ?1 AND ref < ?2";
 const POLL_ROW: &str = "SELECT chat, raw, detail FROM messages WHERE n = ?1";
 const POLL_MAX: &str = "UPDATE messages SET detail = json_set(detail, '$.poll.max', ?2), v = ?3
     WHERE n = ?1 AND detail ->> '$.poll.max' IS NOT ?2";
@@ -134,13 +141,21 @@ pub(super) fn backfilled(db: &Connection, stamps: &mut Stamps, n: i64) -> Result
     Ok(true)
 }
 
-/// Puts the votes set aside for poll `id` in `chat`, which has just come, back in `pending`, to be
-/// applied with the rest waiting for it.
+/// Puts the votes set aside for poll `id` in `chat`, which has just come or moved there with a
+/// merge, back in `pending`, to be applied with the rest waiting for it.
 pub(super) fn set_aside_back(db: &Connection, chat: &str, id: &str) -> Result<()> {
     let (from, to) = (format!("{chat} {id} "), format!("{chat} {id}!"));
     if db.prepare_cached(BACK)?.execute([&from, &to])? > 0 {
         db.prepare_cached(BACK_DONE)?.execute([&from, &to])?;
     }
+    Ok(())
+}
+
+/// Has the votes set aside for polls in chat `gone`, which is being merged into `keep`, wait for
+/// them in `keep`, as what waits in `pending` does, so they come back with their poll there.
+pub(super) fn set_aside_moved(db: &Connection, keep: &str, gone: &str) -> Result<()> {
+    let (from, to) = (format!("{gone} "), format!("{gone}!"));
+    db.prepare_cached(SET_ASIDE_MOVED)?.execute([&from, &to, gone, keep])?;
     Ok(())
 }
 

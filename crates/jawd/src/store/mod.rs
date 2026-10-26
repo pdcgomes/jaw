@@ -26,6 +26,8 @@ pub mod read;
 #[cfg(test)]
 mod rules;
 mod schema;
+#[cfg(test)]
+mod syncs;
 pub mod thumbnails;
 mod write;
 
@@ -382,7 +384,14 @@ fn connect(path: &Path, role: Role) -> Result<Connection> {
         Role::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
         Role::Writer | Role::Checkpointer => OpenFlags::default(),
     };
-    let db = Connection::open_with_flags(path, flags).with_context(|| format!("can't open {}", path.display()))?;
+    #[cfg(test)]
+    let opened = match VFS.with(Cell::get) {
+        Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+        None => Connection::open_with_flags(path, flags),
+    };
+    #[cfg(not(test))]
+    let opened = Connection::open_with_flags(path, flags);
+    let db = opened.with_context(|| format!("can't open {}", path.display()))?;
     pragma(&db, "busy_timeout", BUSY_MS)?;
     // Whichever connection closes last checkpoints, and on macOS a checkpoint whose syncs stop at
     // the drive's cache can leave jaw.db malformed after a power cut.
@@ -392,10 +401,14 @@ fn connect(path: &Path, role: Role) -> Result<Connection> {
     match role {
         Role::Reader => check(&db, "journal_mode", "wal")?,
         Role::Writer => {
+            // On for good, from before a new jaw.db is made a WAL, which syncs it: setting a flag
+            // PRAGMA expires every statement prepared on the connection, so the writer switches
+            // commits between synced and not with synchronous alone. In WAL mode a NORMAL commit
+            // doesn't sync, so fullfsync decides only how a FULL one does.
+            pragma(&db, "fullfsync", 1)?;
             pragma(&db, "journal_mode", "wal")?;
             pragma(&db, "journal_size_limit", WAL_LIMIT)?;
             pragma(&db, "synchronous", 1)?;
-            pragma(&db, "fullfsync", 0)?;
             pragma(&db, "foreign_keys", 1)?;
             // No commit pays for a checkpoint; the checkpointer does them on a connection of its own.
             pragma(&db, "wal_autocheckpoint", 0)?;
@@ -409,6 +422,12 @@ fn connect(path: &Path, role: Role) -> Result<Connection> {
         }
     }
     Ok(db)
+}
+
+/// Has the writer's commits on `db` reach the disk before they return, or not; it never expires a
+/// statement, as a flag PRAGMA would.
+fn sync_commits(db: &Connection, synced: bool) -> Result<()> {
+    pragma(db, "synchronous", if synced { 2 } else { 1 })
 }
 
 /// Sets a PRAGMA and reads it back.
@@ -444,6 +463,8 @@ thread_local! {
 thread_local! {
     /// Whether this writer is in an inbox group's transaction that may take live writes.
     static SHARING: Cell<bool> = const { Cell::new(false) };
+    /// The VFS the connections a test opens on this thread go through, if not SQLite's own.
+    static VFS: Cell<Option<&'static str>> = const { Cell::new(None) };
 }
 /// The key a test's `Remember` fails with, as a full disk, whenever it's in such a transaction.
 #[cfg(test)]
@@ -1069,12 +1090,12 @@ impl Writer {
 
     /// Makes the writer's commits reach the disk before they return, or go back to letting a later
     /// synced commit or the checkpointer's syncs do it. On macOS only F_FULLFSYNC gets past the
-    /// drive's cache. Both are read back, so a commit is never said to be synced when it isn't.
+    /// drive's cache, which fullfsync, on since the writer connected, has a FULL commit use. Each
+    /// is read back before a commit, so one is never said to be synced when it isn't.
     fn synced(&mut self, synced: bool) -> Result<()> {
         if self.synced != Some(synced) {
             self.synced = None;
-            pragma(&self.db, "synchronous", if synced { 2 } else { 1 })?;
-            pragma(&self.db, "fullfsync", i32::from(synced))?;
+            sync_commits(&self.db, synced)?;
             self.synced = Some(synced);
         }
         Ok(())
@@ -1428,14 +1449,24 @@ impl Writer {
         stats.held_for += held;
     }
 
-    /// Merges MERGE_PAGES of FTS5's segments, if any level has enough to merge.
+    /// Merges MERGE_PAGES of FTS5's segments, messages' or links', if any level has enough to merge.
     fn merge(&mut self) -> Result<()> {
         let began = Instant::now();
         self.synced(false)?;
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let before = tx.total_changes();
-        tx.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)", [MERGE_PAGES])?;
-        let merged = tx.total_changes() > before + 1;
+        // The messages' index first, and the links' once it has nothing to merge, a step's worth.
+        let mut merged = false;
+        for merge in [
+            "INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)",
+            "INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)",
+        ] {
+            let before = tx.total_changes();
+            tx.execute(merge, [MERGE_PAGES])?;
+            merged = tx.total_changes() > before + 1;
+            if merged {
+                break;
+            }
+        }
         tx.commit()?;
         self.unmerged = merged;
         self.committed();
@@ -2606,7 +2637,9 @@ mod tests {
             check(db, "busy_timeout", "5000").unwrap();
             check(db, "journal_mode", "wal").unwrap();
         }
-        for (name, value) in [("synchronous", "1"), ("wal_autocheckpoint", "0"), ("journal_size_limit", "67108864")] {
+        for (name, value) in
+            [("synchronous", "1"), ("fullfsync", "1"), ("wal_autocheckpoint", "0"), ("journal_size_limit", "67108864")]
+        {
             check(&writer, name, value).unwrap();
         }
         check(&checkpointer, "synchronous", "2").unwrap();
@@ -2635,6 +2668,111 @@ mod tests {
         store.inbox("message", 0, vec![2], None);
         landed(notified).await;
         assert_eq!(store.storage().synced_commits, 3, "after a NORMAL commit, the next inbox row is synced again");
+    }
+
+    #[test]
+    fn switching_the_writers_commits_between_synced_and_not_keeps_its_statements_prepared() {
+        let home = tempfile::tempdir().unwrap();
+        let db = connect(&home.path().join("jaw.db"), Role::Writer).unwrap();
+        db.execute_batch("CREATE TABLE t (x INTEGER)").unwrap();
+        for synced in [true, false, true, false] {
+            sync_commits(&db, synced).unwrap();
+            assert_eq!(commits_synced(&db).unwrap(), synced, "FULL with F_FULLFSYNC, or NORMAL");
+            let mut insert = db.prepare_cached("INSERT INTO t (x) VALUES (?1)").unwrap();
+            insert.execute([1]).unwrap();
+            assert_eq!(
+                insert.get_status(rusqlite::StatementStatus::RePrepare),
+                0,
+                "a statement made again after a switch costs a live write what preparing its triggers does"
+            );
+        }
+    }
+
+    /// Every sync asked of the files in `home` since `mark` of the syncs noted, by `thread`.
+    fn syncs_since(home: &Path, mark: usize, thread: &str) -> Vec<syncs::Synced> {
+        let folder = home.file_name().unwrap().to_string_lossy().to_string();
+        syncs::synced()[mark..].iter().filter(|s| s.path.contains(&folder) && s.thread == thread).cloned().collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_commit_before_an_ack_is_flushed_past_the_drives_cache_and_so_is_every_checkpoint() {
+        syncs::register();
+        let home = tempfile::tempdir().unwrap();
+        VFS.with(|vfs| vfs.set(Some(syncs::NAME)));
+        let store = Store::open(home.path());
+        VFS.with(|vfs| vfs.set(None));
+        let store = store.unwrap();
+        let wal = |s: &syncs::Synced| s.path.ends_with("jaw.db-wal");
+        let file = |s: &syncs::Synced| s.path.ends_with("jaw.db");
+        let inboxed = store.inboxed();
+        let chat = "351910000001@s.whatsapp.net";
+        let mut n = 0;
+        let mut write = |what: &'static str| {
+            n += 1;
+            let store = store.clone();
+            let inboxed = inboxed.clone();
+            async move {
+                let mark = syncs::synced().len();
+                match what {
+                    "inbox" => {
+                        let notified = inboxed.notified();
+                        store.inbox("message", n, vec![1], None);
+                        tokio::time::timeout(Duration::from_secs(10), notified).await.expect("the inbox row landed");
+                    }
+                    "durable" => {
+                        store.apply_durable(messages([text(chat, &format!("d{n}"), n, "done")])).await.unwrap();
+                    }
+                    "live" => {
+                        store
+                            .apply(Lane::Live, messages([text(chat, &format!("l{n}"), n, "converted")]))
+                            .await
+                            .unwrap();
+                    }
+                    _ => {
+                        store
+                            .apply(Lane::Background, messages([text(chat, &format!("h{n}"), n, "history")]))
+                            .await
+                            .unwrap();
+                    }
+                }
+                mark
+            }
+        };
+        // Each commit that precedes an answer or an ack syncs the WAL past the drive's cache before
+        // it returns, after normal commits as before them, and the rest don't sync at all.
+        for what in ["inbox", "live", "durable", "background", "live", "inbox", "durable", "durable", "live"] {
+            let mark = write(what).await;
+            let synced = syncs_since(home.path(), mark, "jawd-writer");
+            if matches!(what, "inbox" | "durable") {
+                assert!(synced.iter().any(|s| wal(s) && s.full()), "{what}: the WAL wasn't flushed: {synced:?}");
+            } else {
+                assert!(synced.is_empty(), "{what}: a normal commit synced {synced:?}");
+            }
+        }
+        // The writer's own checkpoint flushes the WAL before copying it and jaw.db after.
+        let mark = syncs::synced().len();
+        store.truncate().await.unwrap();
+        let synced = syncs_since(home.path(), mark, "jawd-writer");
+        assert!(synced.iter().any(wal) && synced.iter().any(file), "the writer's checkpoint: {synced:?}");
+        // So does the checkpointer's, once enough frames wait for it.
+        let mark = syncs::synced().len();
+        let words = "palavras ".repeat(400);
+        let history = (0..2_000).map(|k| text(chat, &format!("p{k}"), 10_000 + k, &words));
+        store.apply(Lane::Background, messages(history)).await.unwrap();
+        let began = Instant::now();
+        while !syncs_since(home.path(), mark, "jawd-checkpoint").iter().any(file) {
+            assert!(began.elapsed() < Duration::from_secs(60), "the checkpointer never copied the WAL");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let checkpointed = syncs_since(home.path(), mark, "jawd-checkpoint");
+        assert!(checkpointed.iter().any(wal), "the checkpointer copies only what it has flushed: {checkpointed:?}");
+        // Neither jaw.db nor its WAL is ever synced only as far as the drive's cache, by any connection.
+        let folder = home.path().file_name().unwrap().to_string_lossy().to_string();
+        let plain: Vec<_> = syncs::synced()
+            .into_iter()
+            .filter(|s| s.path.contains(&folder) && (wal(s) || file(s)) && !s.full())
+            .collect();
+        assert!(plain.is_empty(), "synced without F_FULLFSYNC: {plain:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

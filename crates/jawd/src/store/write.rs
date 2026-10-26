@@ -590,14 +590,19 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
-/// Whether making `changes` may write to FTS5 itself, where a new message's text waits in
-/// fts_backlog: an edit, a deletion, a send or a merge may change a message that's indexed.
+/// Whether making `changes` may write to FTS5 itself, where a new message's text and links wait in
+/// fts_backlog: an edit, a deletion, a send or a merge may change a message that's indexed, and the
+/// links backfill indexes the links of messages that are.
 pub(super) fn touches_fts(changes: &[Change]) -> bool {
     changes.iter().any(|change| match change {
         Change::Amend(amend) => {
             matches!(amend.what, Amendment::Edit { .. } | Amendment::Revoke | Amendment::DeleteForMe)
         }
-        Change::Edited { .. } | Change::DeleteMessage { .. } | Change::MergeStep(_) | Change::Outbox(_) => true,
+        Change::Edited { .. }
+        | Change::DeleteMessage { .. }
+        | Change::MergeStep(_)
+        | Change::Outbox(_)
+        | Change::Backfill(_) => true,
         _ => false,
     })
 }
@@ -1045,10 +1050,11 @@ fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result
     Ok(true)
 }
 
-/// Indexes up to `limit` messages from fts_backlog for search, the latest written first, stopping
-/// early when `enough` says so, given how many it has taken. They go into FTS5 in the order of its
-/// rowid, their time, since FTS5 writes out what it holds whenever a rowid comes lower than the
-/// last. Says how many it took and whether the backlog may have more.
+/// Indexes up to `limit` messages from fts_backlog for search, their text and their links' words,
+/// the latest written first, stopping early when `enough` says so, given how many it has taken.
+/// They go into FTS5 in the order of its rowid, their time, since FTS5 writes out what it holds
+/// whenever a rowid comes lower than the last. Says how many it took and whether the backlog may
+/// have more.
 pub(super) fn index(db: &Connection, limit: usize, mut enough: impl FnMut(usize) -> bool) -> Result<(usize, bool)> {
     let mut waiting: Vec<(i64, i64)> = db
         .prepare_cached(
@@ -1064,6 +1070,7 @@ pub(super) fn index(db: &Connection, limit: usize, mut enough: impl FnMut(usize)
         )?
         .execute([n])?;
         db.prepare_cached("DELETE FROM fts_backlog WHERE n = ?1")?.execute([n])?;
+        db.prepare_cached(links::INDEX_LINKS)?.execute([n])?;
         taken += 1;
         if enough(taken) {
             break;
@@ -1368,6 +1375,7 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     db.prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
     db.prepare_cached("DELETE FROM tombstones WHERE chat = ?1")?.execute([gone])?;
     db.prepare_cached("UPDATE pending SET chat = ?1 WHERE chat = ?2")?.execute([keep_id, gone_id])?;
+    polls::set_aside_moved(db, keep_id, gone_id)?;
     db.prepare_cached("UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
     db.prepare_cached("DELETE FROM folder_items WHERE chat = ?1")?.execute([gone])?;
     let seq = stamps.seq(CHAT, Some(*keep));
@@ -1447,7 +1455,9 @@ fn show_newest(db: &Connection, stamps: &mut Stamps, chat: i64) -> Result<()> {
 /// one deleted for me there is deleted, one the kept chat has too is folded into that, and any
 /// other moves; then what waited there for it is applied. Says where it is now, if anywhere.
 fn move_merged(db: &Connection, stamps: &mut Stamps, gone: i64, keep: i64, n: i64) -> Result<Option<i64>> {
-    let id: String = db.prepare_cached("SELECT id FROM messages WHERE n = ?1")?.query_row([n], |r| r.get(0))?;
+    let (id, kind): (String, String) = db
+        .prepare_cached("SELECT id, kind FROM messages WHERE n = ?1")?
+        .query_row([n], |r| Ok((r.get(0)?, r.get(1)?)))?;
     if db.prepare_cached("SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2")?.exists(params![keep, id])? {
         delete_row(db, stamps, gone, n)?;
         return Ok(None);
@@ -1471,7 +1481,7 @@ fn move_merged(db: &Connection, stamps: &mut Stamps, gone: i64, keep: i64, n: i6
     stamps.unsettle(keep);
     stamps.unsettle(gone);
     let keep_jid: String = db.prepare_cached("SELECT id FROM chats WHERE n = ?1")?.query_row([keep], |r| r.get(0))?;
-    apply_pending(db, stamps, keep, n, &keep_jid, &id)?;
+    apply_pending(db, stamps, keep, n, &keep_jid, &id, kind == "poll")?;
     Ok(db.prepare_cached("SELECT 1 FROM messages WHERE n = ?1")?.exists([n])?.then_some(n))
 }
 
@@ -1700,12 +1710,13 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         Some(kept) => (Some(kept.n), kept.t),
         None => {
             let t = allocate(db, message.at)?;
-            // Its text is indexed for search in the writer's idle moments, live or history, since
-            // FTS5 does most of its work at commit and an ack or a live write may be waiting on
-            // this one. Its n is chosen here so it can wait in fts_backlog before the insert's
-            // trigger looks; AUTOINCREMENT's sequence is past every n ever used, so it's one no
-            // event has named.
-            let n = if text.is_some() {
+            // Its text, and its links' words, are indexed for search in the writer's idle
+            // moments, live or history, since FTS5 does most of its work at commit and an ack or a
+            // live write may be waiting on this one. Its n is chosen here so it can wait in
+            // fts_backlog before the insert's triggers look; AUTOINCREMENT's sequence is past every
+            // n ever used, so it's one no event has named.
+            let linked = message.detail.as_deref().is_some_and(|detail| detail.contains("\"link\":{"));
+            let n = if text.is_some() || linked {
                 let n: i64 = db
                     .prepare_cached(
                         "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'messages'), 0) + 1",
@@ -1807,16 +1818,25 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         (false, _) => {}
     }
     if existing.is_none() {
-        if !message.poll.is_empty() {
-            polls::set_aside_back(db, &chat_id, &message.id)?;
-        }
-        apply_pending(db, stamps, chat, n, &chat_id, &message.id)?;
+        apply_pending(db, stamps, chat, n, &chat_id, &message.id, message.kind == "poll")?;
     }
     Ok(true)
 }
 
-/// Applies what was waiting in `pending` for a message that has just arrived.
-fn apply_pending(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, chat_jid: &str, id: &str) -> Result<()> {
+/// Applies what was waiting in `pending` for a message that has just arrived, or has just moved
+/// into `chat` with a merge; for a poll, the votes set aside for it come back to wait there first.
+fn apply_pending(
+    db: &Connection,
+    stamps: &mut Stamps,
+    chat: i64,
+    n: i64,
+    chat_jid: &str,
+    id: &str,
+    poll: bool,
+) -> Result<()> {
+    if poll {
+        polls::set_aside_back(db, chat_jid, id)?;
+    }
     let waiting: Vec<(i64, Option<String>, bool, i64, String)> = db
         .prepare_cached(
             "SELECT n, sender, mine, at, effect FROM pending WHERE chat = ?1 AND target = ?2 ORDER BY at, n",

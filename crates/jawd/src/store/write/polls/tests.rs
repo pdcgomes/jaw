@@ -341,6 +341,183 @@ async fn a_merged_polls_votes_are_each_voters_newest_of_both_copies() {
     assert_eq!(options, tally([0, 1, 1], Some(1)));
 }
 
+/// The JID of the chat message `id` is in now.
+async fn chat_of(store: &Store, id: &'static str) -> String {
+    query(store, move |db| {
+        Ok(db.query_row("SELECT c.id FROM messages m JOIN chats c ON c.n = m.chat WHERE m.id = ?1", [id], |r| {
+            r.get::<_, String>(0)
+        })?)
+    })
+    .await
+}
+
+fn hello(chat: &str, id: &str, at: i64) -> Change {
+    Change::Message(Message {
+        chat: chat.into(),
+        id: id.into(),
+        at,
+        sender: Some(chat.into()),
+        kind: "text",
+        text: Some("olá".into()),
+        summary: "olá".into(),
+        live: true,
+        ..Message::default()
+    })
+}
+
+fn joined(jids: &[&str]) -> Change {
+    Change::Person(Person { jids: jids.iter().map(|jid| jid.to_string()).collect(), ..Person::default() })
+}
+
+async fn merged(store: &Store) {
+    while count(store, "chat_merges").await > 0 {
+        apply(store, vec![Change::MergeStep(None)]).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_persons_votes_from_her_number_and_her_lid_count_as_her_newest_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    apply(&store, vec![poll("p1"), joined(&[ANA, ANA_LID])]).await;
+    apply(&store, vec![vote("p1", ANA, AT + 10, "a1", &["Ramen"])]).await;
+    apply(&store, vec![vote("p1", ANA_LID, AT + 20, "a2", &["Pizza"])]).await;
+    let (options, voters, _) = shown(&store, "p1").await;
+    assert_eq!((options, voters), (tally([0, 0, 1], None), 1), "her Pizza replaced her Ramen, as on the phones");
+    // Her older vote from her number, arriving again, changes nothing; one choosing nothing takes hers back.
+    apply(&store, vec![vote("p1", ANA, AT + 10, "a1", &["Ramen"])]).await;
+    assert_eq!(shown(&store, "p1").await.0, tally([0, 0, 1], None));
+    apply(&store, vec![vote("p1", ANA, AT + 30, "a3", &[])]).await;
+    let (options, voters, _) = shown(&store, "p1").await;
+    assert_eq!((options, voters), (tally([0, 0, 0], None), 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn your_votes_from_each_of_your_jids_are_yours_once() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    let me_lid = "100000000001@lid";
+    apply(&store, vec![Change::Remember { key: "me".into(), value: format!("{ME} {me_lid}") }, poll("p1")]).await;
+    apply(&store, vec![vote("p1", me_lid, AT + 10, "m1", &["Ramen"]), vote("p1", ME, AT + 20, "m2", &["Pizza"])]).await;
+    let (options, voters, _) = shown(&store, "p1").await;
+    assert_eq!((options, voters), (tally([0, 0, 1], Some(2)), 1), "your newest, from whichever JID");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merged_one_to_one_poll_counts_her_newest_vote_once_when_each_copy_has_it_from_its_own_jid() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    // As WhatsApp addresses them: her chat under her LID has the poll and her vote from her LID.
+    apply(
+        &store,
+        vec![
+            Change::Message(poll_in(ANA, "p1", DINNER, 1)),
+            Change::Message(Message { sender: Some(ANA_LID.into()), ..poll_in(ANA_LID, "p1", DINNER, 1) }),
+        ],
+    )
+    .await;
+    apply(
+        &store,
+        vec![
+            vote_in(ANA, "p1", ANA, AT + 10, "a1", &["Ramen"]),
+            vote_in(ANA_LID, "p1", ANA_LID, AT + 20, "a2", &["Pizza"]),
+        ],
+    )
+    .await;
+    apply(&store, vec![joined(&[ANA, ANA_LID])]).await;
+    merged(&store).await;
+    let (options, voters, _) = shown_in(&store, chat_of(&store, "p1").await, "p1").await;
+    assert_eq!((options, voters), (tally([0, 0, 1], None), 1), "her newest of both copies, Pizza, alone");
+}
+
+/// Fills `pending` to its bound with votes for polls that never come, the first of them `from`.
+fn fill_pending(home: &std::path::Path, from: i64) {
+    let raw = Connection::open(home.join("jaw.db")).unwrap();
+    raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    raw.execute(
+        "WITH RECURSIVE k (i) AS (SELECT ?5 UNION ALL SELECT i + 1 FROM k WHERE i < ?1)
+        INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect)
+        SELECT ?2, 'x' || i, 'vote', ?3, x'00', ?4, 0, json_object('do', 'vote', 'options', json_array(), 'id', 'w' || i)
+        FROM k",
+        rusqlite::params![VOTES_WAITING, GROUP, AT, RUI, from],
+    )
+    .unwrap();
+}
+
+/// Sets aside the oldest vote waiting, Ana's, by filling `pending` past its bound.
+async fn set_aside(store: &Store, home: &std::path::Path) {
+    fill_pending(home, 2);
+    assert_eq!(count(store, "pending WHERE kind = 'vote'").await, VOTES_WAITING as u64);
+    apply(store, vec![vote("p9", RUI, AT + 50, "v9", &["Pizza"])]).await;
+    assert_eq!(count(store, "quarantine WHERE source = 'vote'").await, 1, "hers is set aside");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_set_aside_in_a_chat_merged_since_comes_back_with_its_poll() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    apply(&store, vec![hello(ANA, "t1", AT), hello(ANA_LID, "t2", AT + 1)]).await;
+    // Her vote in her poll, which jaw hasn't seen, in her chat under her LID.
+    apply(&store, vec![vote_in(ANA_LID, "p1", ANA_LID, AT + 10, "a1", &["Ramen"])]).await;
+    set_aside(&store, home.path()).await;
+    apply(&store, vec![joined(&[ANA, ANA_LID])]).await;
+    merged(&store).await;
+    let kept: String = query(&store, |db| {
+        Ok(db.query_row("SELECT ref FROM quarantine WHERE source = 'vote'", [], |r| r.get::<_, String>(0))?)
+    })
+    .await;
+    assert_eq!(kept, format!("{ANA} p1 {ANA_LID} a1"), "it waits in the chat kept, as pending's do");
+    apply(&store, vec![Change::Message(Message { sender: Some(ANA_LID.into()), ..poll_in(ANA_LID, "p1", DINNER, 1) })])
+        .await;
+    let (options, voters, _) = shown_in(&store, chat_of(&store, "p1").await, "p1").await;
+    let left = count(&store, "quarantine WHERE source = 'vote'").await;
+    assert_eq!((options, voters, left), (tally([1, 0, 0], None), 1, 0), "it came back with its poll and counts");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_set_aside_for_a_poll_in_the_chat_being_merged_comes_back_as_the_poll_moves() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    // Her poll in her chat under her LID, and her vote in it addressed to her chat under her number,
+    // where jaw doesn't have it before it knows they're one person's.
+    apply(
+        &store,
+        vec![
+            hello(ANA, "t1", AT),
+            Change::Message(Message { sender: Some(ANA_LID.into()), ..poll_in(ANA_LID, "p1", DINNER, 1) }),
+        ],
+    )
+    .await;
+    apply(&store, vec![vote_in(ANA, "p1", ANA, AT + 10, "a1", &["Pizza"])]).await;
+    set_aside(&store, home.path()).await;
+    apply(&store, vec![joined(&[ANA, ANA_LID])]).await;
+    merged(&store).await;
+    let (options, voters, _) = shown_in(&store, chat_of(&store, "p1").await, "p1").await;
+    let left = count(&store, "quarantine WHERE source = 'vote'").await;
+    assert_eq!((options, voters, left), (tally([0, 0, 1], None), 1, 0), "it came back as the merge moved its poll");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_set_aside_under_both_chats_of_a_merge_keeps_both_rows_and_counts_once() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    apply(&store, vec![hello(ANA, "t1", AT), hello(ANA_LID, "t2", AT + 1)]).await;
+    // The same vote of Rui's, addressed to each of her chats, set aside under each.
+    apply(&store, vec![vote_in(ANA, "p1", RUI, AT + 10, "r1", &["Ramen"])]).await;
+    apply(&store, vec![vote_in(ANA_LID, "p1", RUI, AT + 10, "r1", &["Ramen"])]).await;
+    fill_pending(home.path(), 3);
+    apply(&store, vec![vote("p8", RUI, AT + 50, "v8", &["Pizza"]), vote("p9", RUI, AT + 51, "v9", &["Pizza"])]).await;
+    assert_eq!(count(&store, "quarantine WHERE source = 'vote'").await, 2);
+    apply(&store, vec![joined(&[ANA, ANA_LID])]).await;
+    merged(&store).await;
+    let moved = store.count(&format!("quarantine WHERE source = 'vote' AND ref LIKE '{ANA} %'")).unwrap();
+    assert_eq!(moved, 2, "both wait in the chat kept, each its own row");
+    apply(&store, vec![Change::Message(poll_in(ANA, "p1", DINNER, 1))]).await;
+    let (options, voters, _) = shown_in(&store, ANA.into(), "p1").await;
+    let left = count(&store, "quarantine WHERE source = 'vote'").await;
+    assert_eq!((options, voters, left), (tally([1, 0, 0], None), 1, 0), "both came back, the same vote once");
+}
+
 #[test]
 fn an_options_hash_is_the_sha_256_of_its_name_and_reads_back_from_hex() {
     let hash = option_hash("abc");
@@ -470,4 +647,127 @@ async fn measure_the_polls_backfill_and_what_votes_cost() {
         reads[25].as_secs_f64() * 1e3,
         reads[49].as_secs_f64() * 1e3,
     );
+}
+
+/// The window of a big group's polls as `read::messages` read it before votes were counted as each
+/// person's newest, with mine, your newest vote and the voters counted in SQL, for the measurement.
+const COUNTED_IN_SQL: &str = "
+    SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''),
+        iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce(
+            iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ',
+                ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL),
+            (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person
+                WHERE rj.jid = m.reply ->> 'from'),
+            m.reply ->> 'from'))),
+        m.detail,
+        m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once,
+        p.n, p.name, p.push_name, p.verified_name, j.jid,
+        (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false'))))
+            FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions
+                WHERE message = m.n GROUP BY emoji ORDER BY first)),
+        iif(instr(m.spans, '\"t\":\"mention\"') > 0, (SELECT json_group_object(e.value ->> 'person',
+                coalesce(mp.name, mp.push_name, mp.verified_name))
+            FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person
+            WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL),
+        (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect),
+                'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine)))
+            FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed'
+                ORDER BY n)),
+        iif(instr(m.detail, '\"thumbnail\":\"') > 0, (SELECT h.sha256 FROM thumbnails h
+            WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL),
+        iif(m.kind = 'poll' AND NOT m.deleted, (SELECT json_group_array(json_object('name', o.name,
+                'votes', (SELECT count(*) FROM poll_votes v WHERE v.message = o.message AND v.position = o.position),
+                'mine', json(iif(EXISTS (SELECT 1 FROM poll_votes v JOIN person_jids vj ON vj.n = v.voter
+                    WHERE v.message = o.message AND v.position = o.position
+                        AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ',
+                            ' ' || vj.jid || ' ') > 0), 'true', 'false'))))
+            FROM (SELECT message, position, name FROM poll_options WHERE message = m.n ORDER BY position) o), NULL),
+        iif(m.kind = 'poll' AND NOT m.deleted, (SELECT count(*) FROM poll_voters pv WHERE pv.message = m.n
+            AND EXISTS (SELECT 1 FROM poll_votes v WHERE v.message = pv.message AND v.voter = pv.voter)), NULL),
+        iif(m.kind = 'poll' AND NOT m.deleted, (SELECT max(pv.at) FROM poll_voters pv JOIN person_jids pj ON pj.n = pv.voter
+            WHERE pv.message = m.n AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ',
+                ' ' || pj.jid || ' ') > 0), NULL)";
+
+/// Measures a window over a big group's polls, the database expert's scene: `JAW_MEASURE_POLLS`
+/// polls (20) of 12 options, each with `JAW_MEASURE_VOTERS` voters (1,000) choosing two, among the
+/// chat's newest 100 messages, read as windows read it, and as it was read with its tallies in SQL.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement: cargo test --release -p jawd measure_a_window -- --ignored --nocapture"]
+async fn measure_a_window_of_big_polls() {
+    let polls: i64 = std::env::var("JAW_MEASURE_POLLS").ok().and_then(|n| n.parse().ok()).unwrap_or(20);
+    let voters: i64 = std::env::var("JAW_MEASURE_VOTERS").ok().and_then(|n| n.parse().ok()).unwrap_or(1000);
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    let options: Vec<String> = (0..12).map(|k| format!("Opção {k}")).collect();
+    let names: Vec<&str> = options.iter().map(String::as_str).collect();
+    let mut changes: Vec<Change> = (0..100 - polls)
+        .map(|k| {
+            Change::Message(Message {
+                chat: GROUP.into(),
+                id: format!("t{k}"),
+                at: AT + k * 10,
+                sender: Some(ANA.into()),
+                kind: "text",
+                text: Some("olá".into()),
+                summary: "olá".into(),
+                live: true,
+                ..Message::default()
+            })
+        })
+        .collect();
+    changes.extend(
+        (0..polls)
+            .map(|k| Change::Message(Message { at: AT + k * 10 + 5, ..poll_in(GROUP, &format!("p{k}"), &names, 12) })),
+    );
+    apply(&store, changes).await;
+    for k in 0..polls {
+        let votes: Vec<Change> = (0..voters)
+            .map(|v| {
+                let voter = if v == 0 { ME.to_string() } else { format!("35192{v:07}@s.whatsapp.net") };
+                let chose = [names[(v % 12) as usize], names[((v * 7 + 1) % 12) as usize]];
+                vote(&format!("p{k}"), &voter, AT + 1000 + v, &format!("v{k}-{v}"), &chose)
+            })
+            .collect();
+        store.apply(Lane::Background, votes).await.unwrap();
+    }
+    let time = |sql: bool| {
+        let store = store.clone();
+        async move {
+            let mut reads = Vec::new();
+            for _ in 0..40 {
+                let began = std::time::Instant::now();
+                let rows = query(&store, move |db| {
+                    if !sql {
+                        return Ok(read::messages(db, GROUP, Around::Newest, 100)?.len());
+                    }
+                    let window = format!(
+                        "{COUNTED_IN_SQL} FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender
+                        LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1)
+                        ORDER BY m.at DESC, m.n DESC LIMIT ?2"
+                    );
+                    let mut statement = db.prepare_cached(&window)?;
+                    let mut rows = statement.query(rusqlite::params![GROUP, 100])?;
+                    let mut read = 0;
+                    while let Some(row) = rows.next()? {
+                        let _: (Option<String>, Option<i64>) = (row.get(28)?, row.get(29)?);
+                        read += 1;
+                    }
+                    Ok(read)
+                })
+                .await;
+                reads.push(began.elapsed());
+                assert_eq!(rows, 100);
+            }
+            reads.sort();
+            (reads[20].as_secs_f64() * 1e3, reads[39].as_secs_f64() * 1e3)
+        }
+    };
+    for round in 0..2 {
+        let (now_p50, now_worst) = time(false).await;
+        let (sql_p50, sql_worst) = time(true).await;
+        eprintln!(
+            "round {round}: {polls} polls of 12 options, {voters} voters each, in a window of 100: read in {now_p50:.2} ms p50, \
+             {now_worst:.2} ms worst of 40; with the tallies in SQL as before, {sql_p50:.2} ms p50, {sql_worst:.2} ms worst"
+        );
+    }
 }

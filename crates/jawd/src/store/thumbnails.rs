@@ -38,6 +38,9 @@ pub struct Thumbnails {
     /// How many were refused past THUMBNAILS_MOST since jawd started, and whether that's been said.
     refused: AtomicU64,
     said: AtomicBool,
+    /// How long a test has keeping thumbnails take, in milliseconds, as a slow disk's syncs do.
+    #[cfg(test)]
+    slow_ms: AtomicU64,
 }
 
 impl Thumbnails {
@@ -53,7 +56,15 @@ impl Thumbnails {
             bytes: AtomicU64::new(kept),
             refused: AtomicU64::new(0),
             said: AtomicBool::new(false),
+            #[cfg(test)]
+            slow_ms: AtomicU64::new(0),
         }
+    }
+
+    /// Has keeping thumbnails take `by` longer, as a slow disk's syncs do.
+    #[cfg(test)]
+    pub fn slow(&self, by: std::time::Duration) {
+        self.slow_ms.store(by.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// How many thumbnails were refused for want of room since jawd started.
@@ -66,6 +77,8 @@ impl Thumbnails {
     /// bytes aren't what its name says, that's too large, or that there's no room for, isn't. It
     /// blocks, on writes and syncs, so it runs where that's allowed.
     pub fn keep(&self, thumbnails: &[(String, Vec<u8>)]) -> Vec<String> {
+        #[cfg(test)]
+        std::thread::sleep(std::time::Duration::from_millis(self.slow_ms.load(Ordering::Relaxed)));
         let folder = self.home.join(FOLDER);
         let mut kept: Vec<String> = Vec::new();
         for (name, jpeg) in thumbnails {

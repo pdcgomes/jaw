@@ -36,7 +36,7 @@ pub struct Converted {
     /// Chats and people whose pictures changed.
     pub pictures: Vec<String>,
     /// The thumbnails link previews came with, by SHA-256, each named by a `Change::Thumbnail` in
-    /// its row's changes, which stays only if the thumbnail is kept before they're applied.
+    /// its row's changes, which goes in only once the thumbnail is kept, after the rest are applied.
     pub thumbnails: Vec<(String, Vec<u8>)>,
 }
 
@@ -222,7 +222,7 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
             shown = Some(m.chat.clone());
         }
     }
-    // Its link preview's thumbnail shows once its file is kept, which it is before these are applied.
+    // Its link preview's thumbnail shows once its file is kept, which it is after these are applied.
     if let (Some(chat), Some(jpeg)) = (shown, web.message.as_ref().and_then(convert::link_thumbnail)) {
         let sha256 = thumbnails::sha256(jpeg);
         changes.push(Change::Thumbnail { sha256: sha256.clone(), bytes: jpeg.len() as u64, chat, id: id.to_string() });
@@ -232,18 +232,46 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
     true
 }
 
-/// Keeps the thumbnails `converted` names, and leaves out the `Change::Thumbnail` of each that
-/// couldn't be, so a preview never shows one whose file isn't whole.
-async fn keep_thumbnails(store: &Store, converted: &mut Converted) {
+/// A converted batch's link previews' thumbnails, and their rows, to keep once the batch is in.
+struct Thumbnailing {
+    lane: Lane,
+    thumbnails: Vec<(String, Vec<u8>)>,
+    rows: Vec<Change>,
+}
+
+/// How many batches' thumbnails wait to be kept, past which the converter waits for them: each
+/// holds READ previews' JPEGs at most.
+const THUMBNAILS_WAITING: usize = 1;
+
+/// Takes the `Change::Thumbnail`s out of `converted`, with the thumbnails they name, so its batch
+/// is applied without waiting for their files to be written and synced.
+fn thumbnailing(converted: &mut Converted, lane: Lane) -> Option<Thumbnailing> {
     if converted.thumbnails.is_empty() {
-        return;
+        return None;
     }
-    let (thumbnails, wanted) = (store.thumbnails().clone(), std::mem::take(&mut converted.thumbnails));
-    let kept = tokio::task::spawn_blocking(move || thumbnails.keep(&wanted)).await.unwrap_or_default();
-    converted.changes.retain(|change| match change {
-        Change::Thumbnail { sha256, .. } => kept.contains(sha256),
-        _ => true,
-    });
+    let (rows, rest) = std::mem::take(&mut converted.changes)
+        .into_iter()
+        .partition(|change| matches!(change, Change::Thumbnail { .. }));
+    converted.changes = rest;
+    Some(Thumbnailing { lane, thumbnails: std::mem::take(&mut converted.thumbnails), rows })
+}
+
+/// Keeps the thumbnails of each batch that's in, then puts in the rows of those that were kept, so
+/// a preview shows its thumbnail only once its file is whole; one that couldn't be shows without.
+async fn keep_thumbnails(store: Store, mut batches: mpsc::Receiver<Thumbnailing>) {
+    while let Some(Thumbnailing { lane, thumbnails, rows }) = batches.recv().await {
+        let kept = store.thumbnails().clone();
+        let kept = tokio::task::spawn_blocking(move || kept.keep(&thumbnails)).await.unwrap_or_default();
+        let rows: Vec<Change> = rows
+            .into_iter()
+            .filter(|row| matches!(row, Change::Thumbnail { sha256, .. } if kept.contains(sha256)))
+            .collect();
+        if !rows.is_empty()
+            && let Err(e) = store.apply(lane, rows).await
+        {
+            eprintln!("jawd: link previews' thumbnails are kept, but can't be shown: {e:#}");
+        }
+    }
 }
 
 /// A sender's LID and phone number, joined.
@@ -273,6 +301,8 @@ pub async fn inbox(
     merges: Merges,
 ) {
     let inboxed = store.inboxed();
+    let (thumbnails, batches) = mpsc::channel(THUMBNAILS_WAITING);
+    tokio::spawn(keep_thumbnails(store.clone(), batches));
     let left: i64 = store
         .reads()
         .query(Priority::Interactive, |db| {
@@ -316,7 +346,8 @@ pub async fn inbox(
             started.get_or_insert_with(Instant::now);
         }
         let Ok(mut converted) = tokio::task::spawn_blocking(move || convert_rows(&rows, &me)).await else { continue };
-        keep_thumbnails(&store, &mut converted).await;
+        let lane = if from_before { Lane::Background } else { Lane::Live };
+        let thumbnailing = thumbnailing(&mut converted, lane);
         let applied = if from_before {
             store.apply(Lane::Background, converted.changes).await.map(|applied| applied.quarantined)
         } else {
@@ -334,6 +365,9 @@ pub async fn inbox(
                 }
                 if quarantined > 0 {
                     eprintln!("jawd: {quarantined} inbox rows didn't convert and are kept in quarantine");
+                }
+                if let Some(thumbnailing) = thumbnailing {
+                    let _ = thumbnails.send(thumbnailing).await;
                 }
             }
             Err(e) => {

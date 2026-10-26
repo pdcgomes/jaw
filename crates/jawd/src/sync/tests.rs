@@ -1690,6 +1690,7 @@ async fn a_link_preview_that_arrives_shows_its_title_and_its_thumbnail_once_its_
     }
     let converter = converting(&store);
     drained(&store).await;
+    until("its thumbnail to be kept", || store.thumbnails_kept().unwrap().0 == 1).await;
     converter.abort();
     let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
     let link = |n: usize| {
@@ -1713,6 +1714,38 @@ async fn a_link_preview_that_arrives_shows_its_title_and_its_thumbnail_once_its_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_live_message_and_its_batch_are_in_before_its_previews_thumbnail_is_written_and_synced() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let slow = Duration::from_secs(2);
+    store.thumbnails().slow(slow);
+    let thumbnail = jpeg(40, 30);
+    let events = [
+        live_message(ANA, ANA, "p1", AT, previewed("vê www.8a.nu/sintra", "www.8a.nu/sintra", Some(thumbnail.clone()))),
+        live_message(ANA, ANA, "p2", AT + 1, previewed("e https://8a.nu/peneda", "https://8a.nu/peneda", None)),
+    ];
+    for event in &events {
+        store.inbox("message", 0, event.encode_to_vec(), None);
+    }
+    let began = Instant::now();
+    let converter = converting(&store);
+    drained(&store).await;
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    assert!(began.elapsed() < slow, "the batch waited {:?} for its thumbnail's file", began.elapsed());
+    let preview = |row: &read::MessageRow| {
+        let detail: serde_json::Value = serde_json::from_str(row.detail.as_ref().unwrap().get()).unwrap();
+        detail["link"].get("preview").cloned()
+    };
+    assert_eq!((rows.len(), preview(&rows[0])), (2, None), "both are in, p1 without its thumbnail yet");
+    until("its thumbnail to be kept", || store.thumbnails_kept().unwrap().0 == 1).await;
+    converter.abort();
+    let shown = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    let sha = crate::store::thumbnails::sha256(&thumbnail);
+    assert_eq!(preview(&shown[0]), Some(serde_json::json!(format!("media/links/{sha}.jpg"))));
+    assert!(shown[0].v > rows[0].v, "it takes a new version as its thumbnail shows, so windows show it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_link_preview_whose_thumbnail_cant_be_kept_shows_without_it() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
@@ -1729,4 +1762,60 @@ async fn a_link_preview_whose_thumbnail_cant_be_kept_shows_without_it() {
     assert_eq!(detail["link"]["title"], "Escalada em Sintra", "the message is in, with its preview");
     assert!(detail["link"].get("preview").is_none(), "but not its thumbnail");
     assert_eq!(store.thumbnails_kept().unwrap(), (0, 0));
+}
+
+/// Measures live messages with link previews, alternately with a thumbnail of their own and
+/// without, each from its inbox row's hand-over to its row being in jaw.db, the converter running
+/// as jawd runs it; each thumbnail is kept before the next message comes, so each is timed alone.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement: cargo test --release -p jawd measure_live_previews -- --ignored --nocapture"]
+async fn measure_live_previews_with_and_without_a_thumbnail() {
+    let runs: i64 = std::env::var("JAW_MEASURE_RUNS").ok().and_then(|n| n.parse().ok()).unwrap_or(120);
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let converter = converting(&store);
+    let (mut with, mut without) = (Vec::new(), Vec::new());
+    for k in 0..runs {
+        let thumbnail = (k % 2 == 0).then(|| {
+            let mut out = Vec::new();
+            image::RgbImage::from_fn(40, 30, |x, y| image::Rgb([(x * 6) as u8, (y * 8) as u8, k as u8]))
+                .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 60))
+                .unwrap();
+            out
+        });
+        let id = format!("p{k}");
+        let event =
+            live_message(ANA, ANA, &id, AT + k, previewed("vê www.8a.nu/sintra", "www.8a.nu/sintra", thumbnail));
+        let began = Instant::now();
+        store.inbox("message", 0, event.encode_to_vec(), None);
+        loop {
+            let id = id.clone();
+            let found =
+                query(&store, move |db| Ok(db.prepare_cached("SELECT 1 FROM messages WHERE id = ?1")?.exists([id])?))
+                    .await;
+            if found {
+                break;
+            }
+            tokio::time::sleep(Duration::from_micros(100)).await;
+        }
+        if k % 2 == 0 {
+            with.push(began.elapsed())
+        } else {
+            without.push(began.elapsed())
+        }
+        let kept = (k / 2 + 1) as u64;
+        until("its thumbnail to be kept", || store.thumbnails_kept().unwrap().0 == kept).await;
+    }
+    converter.abort();
+    for (what, mut took) in [("with a thumbnail", with), ("without", without)] {
+        took.sort();
+        let at = |q: f64| took[((took.len() - 1) as f64 * q).round() as usize].as_secs_f64() * 1e3;
+        eprintln!(
+            "a live preview {what}, hand-over to its row: p50 {:.2} ms, p99 {:.2} ms, worst {:.2} ms, of {}",
+            at(0.5),
+            at(0.99),
+            at(1.0),
+            took.len()
+        );
+    }
 }

@@ -245,6 +245,26 @@ async fn only_html_answering_in_time_and_within_its_redirects_makes_a_preview() 
     assert_eq!(of("no link at all").await, None);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_preview_whose_image_is_the_largest_the_caps_decode_still_comes_within_its_deadline() {
+    let big = png(5_600, 5_600);
+    assert!(big.len() <= IMAGE_MOST);
+    let server = Server::start(move |_, path| match path {
+        "/article" => page("text/html", ARTICLE),
+        _ => page("image/png", big.clone()),
+    })
+    .await;
+    let url = format!("{}/article", server.base);
+    let began = Instant::now();
+    let roomy = Previews::local(WITHIN).of(&url).await.expect("a preview");
+    assert!(roomy.thumbnail.is_some(), "the image decodes, in {:?}", began.elapsed());
+    let within = Duration::from_millis(100);
+    let began = Instant::now();
+    Previews::local(within).of(&url).await;
+    let took = began.elapsed();
+    assert!(took < within + Duration::from_millis(150), "the preview took {took:?}, its deadline {within:?}");
+}
+
 #[tokio::test]
 async fn a_page_on_loopback_a_private_range_or_reached_through_one_is_never_fetched() {
     let server = Server::start(|_, path| match path {
@@ -267,12 +287,22 @@ async fn a_page_on_loopback_a_private_range_or_reached_through_one_is_never_fetc
     assert_eq!(server.connections.load(Ordering::SeqCst), 0, "nothing on loopback was connected to");
 
     // Allowed to reach the test server, a redirect from it to a private address is refused all the
-    // same, before anything connects there.
+    // same, by the policy, before anything connects there: a machine whose network refuses such a
+    // connection at once would refuse it too, so only the reason tells the two apart.
     let local = Previews::local(WITHIN);
-    for path in ["/private", "/metadata", "/mapped"] {
+    let fetcher = Fetcher::new(Policy { loopback: true });
+    for (path, to) in [
+        ("/private", "http://10.0.0.1/"),
+        ("/metadata", "http://169.254.169.254/"),
+        ("/mapped", "http://[::ffff:192.168.1.1]/"),
+    ] {
         let began = Instant::now();
         assert_eq!(local.of(&format!("{}{path}", server.base)).await, None, "{path}");
         assert!(began.elapsed() < Duration::from_millis(500), "{path} waited on a connection: {:?}", began.elapsed());
+        let url = Url::parse(&format!("{}{path}", server.base)).unwrap();
+        let refused = fetcher.get(url, Wanted::Page).await.err().expect("refused");
+        let host = Url::parse(to).unwrap().host().unwrap().to_string();
+        assert_eq!(refused.0, format!("{host} is on loopback, link-local or a private range"), "{path}");
     }
 }
 

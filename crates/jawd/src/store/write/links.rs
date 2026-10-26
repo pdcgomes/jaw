@@ -28,8 +28,10 @@ const LINKED: &str = "SELECT 1 FROM links WHERE message = ?1";
 const LINK: &str = "INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description)
     SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links
     WHERE message = ?1";
-const INDEX_LINKS: &str =
-    "INSERT INTO links_fts (rowid, text) SELECT t, text FROM message_link_text WHERE message = ?1 AND text IS NOT NULL";
+/// A message's links' words, as one document, unless it waits in fts_backlog, whose steps index them
+/// with its text.
+pub(super) const INDEX_LINKS: &str = "INSERT INTO links_fts (rowid, text) SELECT t, text FROM message_link_text
+    WHERE message = ?1 AND text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = ?1)";
 const BACKFILLED: &str = "UPDATE backfills SET after = ?2 WHERE name = ?1";
 const BACKFILL_DONE: &str = "DELETE FROM backfills WHERE name = ?1";
 const BACKFILL_KEPT: &str = "DELETE FROM quarantine WHERE source = 'backfill' AND ref = ?1";

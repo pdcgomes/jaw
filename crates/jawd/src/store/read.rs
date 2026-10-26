@@ -3,12 +3,14 @@
 //! awaits its answer, so it never blocks on SQLite, and in WAL mode a reader never waits for the
 //! writer. The queries are keyset queries: a page costs the same at any depth.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, select_biased, unbounded};
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use serde_json::Value;
@@ -345,22 +347,96 @@ const MESSAGE_COLUMNS: &str = "
             FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed'
                 ORDER BY n)),
         iif(instr(m.detail, '\"thumbnail\":\"') > 0, (SELECT h.sha256 FROM thumbnails h
-            WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL),
-        iif(m.kind = 'poll' AND NOT m.deleted, (SELECT json_group_array(json_object('name', o.name,
-                'votes', (SELECT count(*) FROM poll_votes v WHERE v.message = o.message AND v.position = o.position),
-                'mine', json(iif(EXISTS (SELECT 1 FROM poll_votes v JOIN person_jids vj ON vj.n = v.voter
-                    WHERE v.message = o.message AND v.position = o.position
-                        AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ',
-                            ' ' || vj.jid || ' ') > 0), 'true', 'false'))))
-            FROM (SELECT message, position, name FROM poll_options WHERE message = m.n ORDER BY position) o), NULL),
-        iif(m.kind = 'poll' AND NOT m.deleted, (SELECT count(*) FROM poll_voters pv WHERE pv.message = m.n
-            AND EXISTS (SELECT 1 FROM poll_votes v WHERE v.message = pv.message AND v.voter = pv.voter)), NULL),
-        iif(m.kind = 'poll' AND NOT m.deleted, (SELECT max(pv.at) FROM poll_voters pv JOIN person_jids pj ON pj.n = pv.voter
-            WHERE pv.message = m.n AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ',
-                ' ' || pj.jid || ' ') > 0), NULL)";
+            WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL)";
 
 /// How many columns MESSAGE_COLUMNS has, for queries that select more after them.
-const MESSAGE_COLUMN_COUNT: usize = 31;
+const MESSAGE_COLUMN_COUNT: usize = 28;
+
+/// What a poll's tallies are counted from as a window reads it, each a range of the poll's own
+/// rows: its options, each voter's latest vote with the person their JID is, and what each chose.
+const POLL_OPTIONS: &str = "SELECT position, name FROM poll_options WHERE message = ?1 ORDER BY position";
+const POLL_VOTERS: &str = "SELECT pv.voter, pj.person, pj.jid, pv.at, pv.id FROM poll_voters pv
+    JOIN person_jids pj ON pj.n = pv.voter WHERE pv.message = ?1";
+const POLL_CHOICES: &str = "SELECT voter, position FROM poll_votes WHERE message = ?1";
+const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
+
+/// A poll as a window shows it: each option's name, votes and whether you chose it; how many people
+/// chose any; and when your newest vote was, which a vote of yours waiting to go has to be newer
+/// than to show.
+struct Tally {
+    options: Vec<Value>,
+    voters: usize,
+    voted_at: Option<i64>,
+}
+
+/// What the rows a query reads need to show their polls: the connection, and the account's JIDs,
+/// read once the first poll among them is.
+struct Polls<'a> {
+    db: &'a Connection,
+    me: Option<Vec<String>>,
+}
+
+impl<'a> Polls<'a> {
+    fn new(db: &'a Connection) -> Polls<'a> {
+        Polls { db, me: None }
+    }
+
+    /// Poll `n` as each person's newest vote has it, by its time and then its ID, whichever of
+    /// their JIDs it came from, as the phones count one person's votes: the JIDs WhatsApp gave
+    /// are found as people through person_jids, and the account's JIDs, and anyone they're found
+    /// as, are you. Only that vote's choices count, and only those who chose something voted.
+    fn tally(&mut self, n: i64) -> rusqlite::Result<Tally> {
+        let db = self.db;
+        let me: &[String] = match &mut self.me {
+            Some(me) => me,
+            none => {
+                let me: Option<String> = db.prepare_cached(ME)?.query_row([], |r| r.get(0)).optional()?;
+                none.insert(me.unwrap_or_default().split_whitespace().map(str::to_string).collect())
+            }
+        };
+        let voters: Vec<(i64, i64, String, i64, String)> = db
+            .prepare_cached(POLL_VOTERS)?
+            .query_map([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let yours: HashSet<i64> =
+            voters.iter().filter(|(_, _, jid, ..)| me.contains(jid)).map(|(_, person, ..)| *person).collect();
+        // Each person's newest vote, None being yours: (at, id, voter).
+        let mut newest: HashMap<Option<i64>, (i64, &str, i64)> = HashMap::new();
+        for (voter, person, jid, at, id) in &voters {
+            let who = (!me.contains(jid) && !yours.contains(person)).then_some(*person);
+            let vote = (*at, id.as_str(), *voter);
+            newest.entry(who).and_modify(|kept| *kept = (*kept).max(vote)).or_insert(vote);
+        }
+        let counted: HashSet<i64> = newest.values().map(|&(_, _, voter)| voter).collect();
+        let mine = newest.get(&None).map(|&(at, _, voter)| (at, voter));
+        let mut options: Vec<(i64, String, i64, bool)> = db
+            .prepare_cached(POLL_OPTIONS)?
+            .query_map([n], |r| Ok((r.get(0)?, r.get(1)?, 0, false)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut chose = HashSet::new();
+        let mut choices = db.prepare_cached(POLL_CHOICES)?;
+        let mut rows = choices.query([n])?;
+        while let Some(r) = rows.next()? {
+            let (voter, position): (i64, i64) = (r.get(0)?, r.get(1)?);
+            if !counted.contains(&voter) {
+                continue;
+            }
+            chose.insert(voter);
+            if let Some(option) = options.iter_mut().find(|option| option.0 == position) {
+                option.2 += 1;
+                option.3 |= mine.is_some_and(|(_, yours)| yours == voter);
+            }
+        }
+        Ok(Tally {
+            options: options
+                .into_iter()
+                .map(|(_, name, votes, mine)| serde_json::json!({ "name": name, "votes": votes, "mine": mine }))
+                .collect(),
+            voters: chose.len(),
+            voted_at: mine.map(|(at, _)| at),
+        })
+    }
+}
 
 const MESSAGE_JOINS: &str = "
     JOIN chats c ON c.n = m.chat
@@ -416,26 +492,23 @@ fn previewed(detail: &str, kept: Option<&str>) -> String {
     serde_json::to_string(&parsed).unwrap_or_else(|_| detail.to_string())
 }
 
-/// A poll's `detail` with its options as their votes are now, `options` (each its name, how many
-/// chose it and whether you did) and `voters`, the people who chose any.
-fn tallied(detail: &str, options: &str, voters: i64) -> String {
-    let (Ok(mut parsed), Ok(options)) =
-        (serde_json::from_str::<serde_json::Map<String, Value>>(detail), serde_json::from_str::<Value>(options))
-    else {
+/// A poll's `detail` with its options as their votes are now and the people who chose any.
+fn tallied(detail: &str, tally: Tally) -> String {
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Map<String, Value>>(detail) else {
         return detail.to_string();
     };
     if let Some(Value::Object(poll)) = parsed.get_mut("poll") {
         // A poll converted before votes were kept has its options once the backfill gives them it;
         // until then it shows them as it was converted, with no votes.
-        if options.as_array().is_some_and(|options| !options.is_empty()) {
-            poll.insert("options".into(), options);
+        if !tally.options.is_empty() {
+            poll.insert("options".into(), Value::Array(tally.options));
         }
-        poll.insert("voters".into(), voters.into());
+        poll.insert("voters".into(), tally.voters.into());
     }
     serde_json::to_string(&parsed).unwrap_or_else(|_| detail.to_string())
 }
 
-fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
+fn message_row(r: &Row, polls: &mut Polls) -> rusqlite::Result<MessageRow> {
     let text: Option<String> = r.get(8)?;
     let mut spans = match r.get::<_, Option<String>>(9)? {
         Some(spans) => mentions_named(spans, r.get(25)?),
@@ -450,10 +523,13 @@ fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
     if let Some(shown) = detail.as_deref().filter(|detail| detail.contains("\"thumbnail\":\"")) {
         detail = Some(previewed(shown, r.get::<_, Option<String>>(27)?.as_deref()));
     }
-    if let (Some(shown), Some(options)) = (detail.as_deref(), r.get::<_, Option<String>>(28)?) {
-        detail = Some(tallied(shown, &options, r.get::<_, Option<i64>>(29)?.unwrap_or(0)));
-    }
     let (mut edited_at, mut deleted): (Option<i64>, bool) = (r.get(14)?, r.get(15)?);
+    let mut voted_at = None;
+    if r.get_ref(6)? == ValueRef::Text(b"poll") && !deleted {
+        let tally = polls.tally(r.get(0)?)?;
+        voted_at = tally.voted_at;
+        detail = detail.map(|shown| tallied(&shown, tally));
+    }
     let mut reactions: String = r.get::<_, Option<String>>(24)?.unwrap_or_else(|| "[]".into());
     let row = super::overlay::Shown {
         spans: &mut spans,
@@ -463,7 +539,7 @@ fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
         edited_at: &mut edited_at,
         deleted: &mut deleted,
         reactions: &mut reactions,
-        voted_at: r.get(30)?,
+        voted_at,
     };
     super::overlay::message(row, r.get::<_, Option<String>>(26)?.as_deref());
     let from = match r.get::<_, Option<i64>>(19)? {
@@ -503,22 +579,25 @@ pub fn messages(db: &Connection, chat: &str, around: Around, limit: usize) -> Re
     let from =
         format!("{MESSAGE_COLUMNS} FROM messages m {MESSAGE_JOINS} WHERE m.chat = (SELECT n FROM chats WHERE id = ?1)");
     let limit = limit as i64;
+    let mut polls = Polls::new(db);
     let mut rows: Vec<MessageRow> = match around {
         Around::Newest => {
             let sql = format!("{from} ORDER BY m.at DESC, m.n DESC LIMIT ?2");
-            db.prepare_cached(&sql)?.query_map(params![chat, limit], message_row)?.collect::<rusqlite::Result<_>>()?
+            db.prepare_cached(&sql)?
+                .query_map(params![chat, limit], |r| message_row(r, &mut polls))?
+                .collect::<rusqlite::Result<_>>()?
         }
         Around::Before(cursor) => {
             let sql = format!("{from} AND (m.at, m.n) < (?2, ?3) ORDER BY m.at DESC, m.n DESC LIMIT ?4");
             db.prepare_cached(&sql)?
-                .query_map(params![chat, cursor.at, cursor.n, limit], message_row)?
+                .query_map(params![chat, cursor.at, cursor.n, limit], |r| message_row(r, &mut polls))?
                 .collect::<rusqlite::Result<_>>()?
         }
         Around::After(cursor) => {
             let sql = format!("{from} AND (m.at, m.n) > (?2, ?3) ORDER BY m.at, m.n LIMIT ?4");
             return Ok(db
                 .prepare_cached(&sql)?
-                .query_map(params![chat, cursor.at, cursor.n, limit], message_row)?
+                .query_map(params![chat, cursor.at, cursor.n, limit], |r| message_row(r, &mut polls))?
                 .collect::<rusqlite::Result<_>>()?);
         }
     };
@@ -531,7 +610,9 @@ pub fn message(db: &Connection, chat: &str, id: &str) -> Result<Option<(MessageR
     let sql = format!(
         "{MESSAGE_COLUMNS} FROM messages m {MESSAGE_JOINS} WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND m.id = ?2"
     );
-    let Some(row) = db.prepare_cached(&sql)?.query_row(params![chat, id], message_row).optional()? else {
+    let mut polls = Polls::new(db);
+    let Some(row) = db.prepare_cached(&sql)?.query_row(params![chat, id], |r| message_row(r, &mut polls)).optional()?
+    else {
         return Ok(None);
     };
     let packed: Option<Vec<u8>> =
@@ -596,12 +677,13 @@ pub fn search(db: &Connection, typed: &str, chat: Option<&str>, before: Option<i
         WHERE messages_fts MATCH ?1 AND messages_fts.rowid < ?2 AND (?3 IS NULL OR c.id = ?3)
         ORDER BY messages_fts.rowid DESC LIMIT ?4"
     );
+    let mut polls = Polls::new(db);
     let hits: Vec<Hit> = db
         .prepare_cached(&sql)?
         .query_map(params![query, before.unwrap_or(i64::MAX), chat, limit as i64], |r| {
             let marked: String = r.get(MESSAGE_COLUMN_COUNT + 1)?;
             let (text, marks) = unmark(&marked);
-            Ok(Hit { message: message_row(r)?, text, marks, t: r.get(MESSAGE_COLUMN_COUNT)? })
+            Ok(Hit { message: message_row(r, &mut polls)?, text, marks, t: r.get(MESSAGE_COLUMN_COUNT)? })
         })?
         .collect::<rusqlite::Result<_>>()?;
     let cursor = (hits.len() == limit).then(|| hits.last().map(|hit| hit.t)).flatten();
@@ -705,10 +787,11 @@ pub fn links_of(db: &Connection, t: i64) -> Result<Vec<LinkRow>> {
 pub fn messages_by_t(db: &Connection, ts: &[i64]) -> Result<Vec<(MessageRow, String)>> {
     let sql = format!("{MESSAGE_COLUMNS} FROM messages m {MESSAGE_JOINS} WHERE m.t = ?1");
     let mut select = db.prepare_cached(&sql)?;
+    let mut polls = Polls::new(db);
     let mut rows = Vec::with_capacity(ts.len());
     for &t in ts {
         let row = select
-            .query_row([t], |r| Ok((message_row(r)?, r.get::<_, Option<String>>(8)?.unwrap_or_default())))
+            .query_row([t], |r| Ok((message_row(r, &mut polls)?, r.get::<_, Option<String>>(8)?.unwrap_or_default())))
             .optional()?;
         rows.extend(row);
     }
