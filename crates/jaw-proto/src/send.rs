@@ -1,5 +1,6 @@
-//! Sending: `send.text` and `send.retry`, `chat.start`, `draft.set`, `read` and `typing`; and the
-//! message actions: `react`, `edit`, `delete`, `forward`, `message.info` and `chat.info`.
+//! Sending: `send.text`, `send.poll` and `send.retry`, `chat.start`, `draft.set`, `read` and
+//! `typing`; and the message actions: `react`, `edit`, `delete`, `forward`, `poll.vote`,
+//! `message.info` and `chat.info`.
 
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +35,31 @@ pub struct Sent {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<MessageRow>,
+}
+
+/// `send.poll`'s params: a poll's question, its options, each named once, and how many of them one
+/// vote may choose, one when it's left out; answered as `send.text` is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendPoll {
+    pub chat: String,
+    pub question: String,
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// `poll.vote`'s params: your vote in poll `message`, the options chosen by name, none to take your
+/// vote back; `chat` and `key` as the actions on a message have them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PollVote {
+    pub message: String,
+    pub options: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// `send.retry`'s params: a message of yours that failed, to send again.

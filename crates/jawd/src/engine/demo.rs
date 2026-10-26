@@ -21,9 +21,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use prost::Message as _;
 use tokio::sync::{Notify, mpsc, oneshot};
+use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
 
 use super::{Ack, BoxFuture, Commands, Engine, EngineError, Incoming, Instance, Outgoing, PROTOCOL, pb};
+use crate::store::polls::option_hash;
 
 pub const ME: &str = "351910000001@s.whatsapp.net";
 
@@ -217,6 +219,18 @@ impl World {
             .collect()
     }
 
+    /// The votes it was asked to send, in order, each time it was asked.
+    #[cfg(test)]
+    pub fn votes(&self) -> Vec<pb::PollVote> {
+        self.asked()
+            .into_iter()
+            .filter_map(|kind| match kind {
+                pb::command::Kind::PollVote(vote) => Some(vote),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// How many messages the recipients have been given.
     #[cfg(test)]
     pub fn given(&self) -> usize {
@@ -252,10 +266,11 @@ impl DemoEngine {
         let now = now_ms();
         let ana = "351912345678@s.whatsapp.net";
         let climbing = "120363012345678901@g.us";
+        let rui = "351913333333@s.whatsapp.net";
         DemoEngine::with(vec![
             connected(),
             text(ana, ana, "3EB0DEMO00000001", now - 120_000, "did you get the photos from Sunday?"),
-            text(climbing, "351913333333@s.whatsapp.net", "3EB0DEMO00000002", now - 60_000, "Saturday at 9?"),
+            text(climbing, rui, "3EB0DEMO00000002", now - 60_000, "Saturday at 9?"),
             text(ana, ana, "3EB0DEMO00000003", now - 5_000, "the one at the lake"),
             // You and the two whose phones answer what you send there, so a mention of one lands;
             // told once the messages are in, so storing them holds none of the messages back.
@@ -273,6 +288,24 @@ impl DemoEngine {
                     description: "Céu pouco nublado, vento fraco. Máxima de 22 °C.",
                 },
             ),
+            poll(
+                climbing,
+                rui,
+                "3EB0DEMO00000005",
+                now - 300_000,
+                "Onde jantamos sexta?",
+                &["Ramen", "Tasca do Chico", "Pizza"],
+                1,
+            ),
+            vote(
+                climbing,
+                "351914444444@s.whatsapp.net",
+                "3EB0DEMO00000006",
+                now - 280_000,
+                ("3EB0DEMO00000005", rui),
+                &["Ramen"],
+            ),
+            vote(climbing, rui, "3EB0DEMO00000007", now - 270_000, ("3EB0DEMO00000005", rui), &["Tasca do Chico"]),
         ])
     }
 
@@ -391,6 +424,59 @@ pub fn link(chat: &str, sender: &str, id: &str, at_ms: i64, preview: &Preview) -
     event
 }
 
+/// A poll from `sender` in `chat`, asking `question` with `options`, of which a vote may choose
+/// `max`, with a secret of its own, as the phones send one.
+pub fn poll(chat: &str, sender: &str, id: &str, at_ms: i64, question: &str, options: &[&str], max: u32) -> pb::Event {
+    let creation = e2e::PollCreationMessage {
+        name: Some(question.into()),
+        options: options
+            .iter()
+            .map(|name| e2e::poll_creation_message::Option {
+                option_name: Some(name.to_string()),
+                ..Default::default()
+            })
+            .collect(),
+        selectable_options_count: Some(if max as usize >= options.len() { 0 } else { max }),
+        ..Default::default()
+    };
+    let raw = e2e::Message {
+        poll_creation_message_v3: Some(Box::new(creation)),
+        message_context_info: Some(e2e::MessageContextInfo { message_secret: Some(vec![7; 32]), ..Default::default() }),
+        ..Default::default()
+    };
+    let mut event = text(chat, sender, id, at_ms, "");
+    if let Some(pb::event::Kind::Message(message)) = &mut event.kind {
+        message.raw = raw.encode_to_vec();
+    }
+    event
+}
+
+/// `voter`'s vote, as message `id`, in the poll `poll` (its ID and who sent it), choosing `options`
+/// by name: encrypted, as WhatsApp brings it, with what the engine decrypted beside it.
+pub fn vote(chat: &str, voter: &str, id: &str, at_ms: i64, poll: (&str, &str), options: &[&str]) -> pb::Event {
+    let raw = e2e::Message {
+        poll_update_message: Some(e2e::PollUpdateMessage {
+            poll_creation_message_key: Some(MessageKey {
+                remote_jid: Some(chat.into()),
+                from_me: Some(false),
+                id: Some(poll.0.into()),
+                participant: chat.ends_with("@g.us").then(|| poll.1.into()),
+            }),
+            vote: Some(e2e::PollEncValue { enc_payload: Some(vec![0; 16]), enc_iv: Some(vec![0; 12]) }),
+            sender_timestamp_ms: Some(at_ms),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let chosen = e2e::PollVoteMessage { selected_options: options.iter().map(|name| option_hash(name)).collect() };
+    let mut event = text(chat, voter, id, at_ms, "");
+    if let Some(pb::event::Kind::Message(message)) = &mut event.kind {
+        message.raw = raw.encode_to_vec();
+        message.decrypted = chosen.encode_to_vec();
+    }
+    event
+}
+
 /// `recipient`'s phone saying it has, or has read, a message sent to `send.chat`.
 fn receipt(send: &pb::Send, recipient: &str, kind: &str) -> pb::Event {
     pb::Event {
@@ -422,7 +508,8 @@ fn action_of(raw: &[u8]) -> Option<Action> {
     if let Some(edit) = edited {
         return Some(Action::Edit(edit.key.as_ref()?.id.clone()?));
     }
-    (message.reaction_message.is_some() || message.protocol_message.is_some()).then_some(Action::Other)
+    (message.reaction_message.is_some() || message.protocol_message.is_some() || message.poll_update_message.is_some())
+        .then_some(Action::Other)
 }
 
 /// Every number is on the made-up WhatsApp but those starting 999, each known by a LID as well.
@@ -592,6 +679,25 @@ impl Sender {
             pb::command::Kind::Send(send) => {
                 self.world.ask(pb::command::Kind::Send(send.clone()));
                 self.sent(send).await
+            }
+            // The made-up WhatsApp takes a vote as a message of its own, as the real one does once
+            // jaw-engine has encrypted it.
+            pb::command::Kind::PollVote(vote) => {
+                self.world.ask(pb::command::Kind::PollVote(vote.clone()));
+                let update = e2e::Message {
+                    poll_update_message: Some(e2e::PollUpdateMessage {
+                        poll_creation_message_key: Some(MessageKey {
+                            remote_jid: Some(vote.chat.clone()),
+                            from_me: Some(vote.poll_from_me),
+                            id: Some(vote.poll_id.clone()),
+                            participant: (!vote.poll_sender.is_empty()).then(|| vote.poll_sender.clone()),
+                        }),
+                        sender_timestamp_ms: Some(vote.at_ms),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                self.sent(pb::Send { chat: vote.chat, id: vote.id, raw: update.encode_to_vec() }).await
             }
             pb::command::Kind::OnWhatsapp(asked) => {
                 self.world.ask(pb::command::Kind::OnWhatsapp(asked.clone()));

@@ -1096,7 +1096,7 @@ async fn an_engine_that_doesnt_disconnect_in_time_is_ended_and_the_stop_stays_un
 }
 
 #[test]
-fn a_live_poll_vote_stays_in_the_inbox_with_what_the_engine_decrypted() {
+fn a_live_poll_vote_whose_decrypted_vote_cant_be_read_stays_in_the_inbox() {
     let vote = e2e::Message {
         poll_update_message: Some(e2e::PollUpdateMessage {
             poll_creation_message_key: Some(MessageKey {
@@ -1109,11 +1109,52 @@ fn a_live_poll_vote_stays_in_the_inbox_with_what_the_engine_decrypted() {
         }),
         ..Default::default()
     };
-    let mut live = live_message(GROUP, "100000000001@lid", "v1", AT, vote);
+    let mut live = live_message(GROUP, "100000000001@lid", "v1", AT, vote.clone());
     live.decrypted = vec![1, 2, 3];
     let converted =
         drain::convert_rows(&[Row { seq: 7, kind: "message".into(), payload: live.encode_to_vec() }], &me());
     assert!(converted.changes.is_empty(), "nothing converted, and the row isn't drained");
+    live.decrypted = Vec::new();
+    let converted =
+        drain::convert_rows(&[Row { seq: 8, kind: "message".into(), payload: live.encode_to_vec() }], &me());
+    assert!(converted.changes.is_empty(), "nor one the engine couldn't decrypt");
+}
+
+#[test]
+fn a_live_poll_vote_is_what_the_engine_decrypted_timed_by_its_voters_clock() {
+    let vote = e2e::Message {
+        poll_update_message: Some(e2e::PollUpdateMessage {
+            poll_creation_message_key: Some(MessageKey {
+                remote_jid: Some(GROUP.into()),
+                from_me: Some(true),
+                id: Some("poll".into()),
+                participant: None,
+            }),
+            sender_timestamp_ms: Some(AT + 750),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut live = live_message(GROUP, "100000000001@lid", "v1", AT, vote);
+    live.decrypted = e2e::PollVoteMessage { selected_options: vec![vec![0xca, 0xfe]] }.encode_to_vec();
+    let converted =
+        drain::convert_rows(&[Row { seq: 7, kind: "message".into(), payload: live.encode_to_vec() }], &me());
+    let amends: Vec<&crate::store::Amend> = converted
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Amend(amend) => Some(amend),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(amends.len(), 1, "{:?}", converted.changes);
+    assert_eq!((amends[0].target.as_str(), amends[0].sender.as_deref()), ("poll", Some("100000000001@lid")));
+    assert_eq!(amends[0].at, AT + 750, "by the voter's clock, which orders two votes of theirs");
+    assert_eq!(amends[0].what, crate::store::Amendment::Vote { options: vec!["cafe".into()], id: "v1".into() });
+    assert!(
+        converted.changes.iter().any(|change| matches!(change, Change::Drained(crate::store::Drained::Inbox(7)))),
+        "and its row is drained"
+    );
 }
 
 /// What a scripted engine answers when asked for a history blob, by its notification's direct path.

@@ -719,7 +719,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
-    use crate::store::{Change, Lane, Message};
+    use crate::store::{Amend, Amendment, Change, Lane, Message};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_demo_engines_account_shows_a_link_preview_with_its_thumbnail_through_the_socket() {
@@ -754,6 +754,81 @@ mod tests {
         assert_eq!(link["url"], "https://www.ipma.pt/pt/otempo/prev.localidade.hora/");
         let thumbnail = home.path().join(link["preview"].as_str().unwrap());
         assert!(image::open(&thumbnail).is_ok(), "{} is the thumbnail", thumbnail.display());
+        stop(started, &socket).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_demo_engines_account_shows_a_poll_with_its_votes_and_takes_yours_through_the_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path()), true).await.unwrap();
+        tokio::spawn(sock::serve(started.state.clone(), listener));
+        let path = socket.clone();
+        let polls = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&path, "test", "0").unwrap();
+            let watch = serde_json::json!({ "chat": "120363012345678901@g.us", "around": "newest", "before": 20 });
+            let watched = connection.call("messages.watch", watch).unwrap();
+            // The poll as it shows once `voters` people voted, the votes of each option and whether
+            // you chose it.
+            let poll = |rows: &serde_json::Value, voters: u64| {
+                let row = rows.as_array()?.iter().find(|row| row["id"] == "3EB0DEMO00000005")?;
+                (row["poll"]["voters"] == voters).then(|| row["poll"].clone())
+            };
+            let mut rows = watched["rows"].clone();
+            let before = loop {
+                if let Some(poll) = poll(&rows, 2) {
+                    break poll;
+                }
+                rows = connection.push().unwrap().params["upsert"].clone();
+            };
+            let vote = serde_json::json!({ "message": "3EB0DEMO00000005", "options": ["Pizza"] });
+            assert_eq!(connection.call("poll.vote", vote).unwrap(), serde_json::json!({}));
+            let after = loop {
+                rows = connection.push().unwrap().params["upsert"].clone();
+                if let Some(poll) = poll(&rows, 3) {
+                    break poll;
+                }
+            };
+            (before, after, connection)
+        });
+        let (before, after, mut connection) =
+            tokio::time::timeout(Duration::from_secs(20), polls).await.expect("the poll showed").unwrap();
+        let options = |poll: &serde_json::Value| -> Vec<(String, u64, bool)> {
+            poll["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| (o["name"].as_str().unwrap().into(), o["votes"].as_u64().unwrap(), o["mine"] == true))
+                .collect()
+        };
+        assert_eq!(before["question"], "Onde jantamos sexta?");
+        assert_eq!(
+            options(&before),
+            [("Ramen".into(), 1, false), ("Tasca do Chico".into(), 1, false), ("Pizza".into(), 0, false)]
+        );
+        assert_eq!(
+            options(&after),
+            [("Ramen".into(), 1, false), ("Tasca do Chico".into(), 1, false), ("Pizza".into(), 1, true)],
+            "yours, shown at once and kept once WhatsApp has it"
+        );
+        // A vote for a poll jawd hasn't seen waits for it, as status says.
+        let waiting = Amend {
+            chat: "120363012345678901@g.us".into(),
+            target: "3EB0NOTYET".into(),
+            sender: Some("351914444444@s.whatsapp.net".into()),
+            mine: false,
+            at: 1_792_000_000_000,
+            what: Amendment::Vote { options: Vec::new(), id: "3EB0VOTE".into() },
+            raw: None,
+        };
+        started.state.store().unwrap().apply(Lane::Live, vec![Change::Amend(waiting)]).await.unwrap();
+        let stored = tokio::task::spawn_blocking(move || connection.call("status", serde_json::Value::Null).unwrap())
+            .await
+            .unwrap()["stored"]
+            .clone();
+        assert_eq!((&stored["votes_waiting"], &stored["votes_set_aside"]), (&1.into(), &0.into()));
+        assert_eq!(stored["polls_backfill"], 0);
         stop(started, &socket).await;
     }
 

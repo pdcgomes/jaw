@@ -166,7 +166,7 @@ struct Composed {
 
 /// The answer for message `id` in `chat`, with its row if it can be read; a message that's committed
 /// is answered as sent on its way whatever the read does.
-async fn answer(inner: &Inner, chat: String, id: String) -> Sent {
+pub(super) async fn answer(inner: &Inner, chat: String, id: String) -> Sent {
     let message = id.clone();
     let row = inner
         .store
@@ -298,6 +298,13 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
     }
     let _order = inner.enqueue.lock().await;
     durably(inner, changes, "keep the message, so it isn't sent").await?;
+    enqueued(inner, written).await
+}
+
+/// What a message of yours, just committed with its outbox row, came to, as `send.text` and
+/// `send.poll` answer: the message on its way, queued after its chat's earlier sends, or why
+/// nothing was written.
+pub(super) async fn enqueued(inner: &Arc<Inner>, written: Written) -> Result<Sent, Error> {
     match written.take() {
         Some(Enqueued::Queued { id, chat, chat_n, outbox, .. }) => {
             let sent = answer(inner, chat.clone(), id).await;
@@ -430,6 +437,16 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
             Ok(patch) => pb::command::Kind::AppStatePatch(patch),
             Err(e) => {
                 let error = format!("its app state doesn't decode: {e}");
+                settle(&inner, vec![Change::Outbox(Step::Failed { outbox, error, next_at: None })]).await;
+                return Next::Done;
+            }
+        }
+    } else if row.kind == "vote" {
+        // A vote goes through the engine, which encrypts it with the poll's secret.
+        match pb::PollVote::decode(row.raw.as_slice()) {
+            Ok(vote) => pb::command::Kind::PollVote(vote),
+            Err(e) => {
+                let error = format!("its vote doesn't decode: {e}");
                 settle(&inner, vec![Change::Outbox(Step::Failed { outbox, error, next_at: None })]).await;
                 return Next::Done;
             }

@@ -21,11 +21,13 @@ pub struct Body {
     pub spans: Vec<Span>,
     pub summary: String,
     pub detail: Option<String>,
+    /// A poll's options, by name, in their order.
+    pub poll: Vec<String>,
 }
 
 impl Body {
     fn new(kind: &'static str, summary: impl Into<String>) -> Body {
-        Body { kind, text: None, spans: Vec::new(), summary: summary.into(), detail: None }
+        Body { kind, text: None, spans: Vec::new(), summary: summary.into(), detail: None, poll: Vec::new() }
     }
 
     /// A body whose text is `text`, parsed, and whose summary is its first line, or `fallback`
@@ -297,19 +299,35 @@ pub fn poll(m: &e2e::Message) -> Option<&e2e::PollCreationMessage> {
         .or_else(|| m.poll_creation_message_v4.as_deref()?.message.as_deref().and_then(poll))
 }
 
+/// How many of a poll's options one vote may choose: what it says, or every one when it says none,
+/// as WhatsApp's "allow multiple answers" sends it.
+pub fn poll_max(x: &e2e::PollCreationMessage) -> u32 {
+    let options = (x.options.len() as u32).max(1);
+    match x.selectable_options_count {
+        Some(n) if (1..=options).contains(&n) => n,
+        _ => options,
+    }
+}
+
+/// A poll: its question, its options with their votes, which windows count as they read it, and
+/// how many one vote may choose.
 fn poll_body(x: &e2e::PollCreationMessage) -> Body {
     let question = x.name.as_deref().unwrap_or_default();
-    let options: Vec<&str> = x.options.iter().filter_map(|o| o.option_name.as_deref()).collect();
+    let options: Vec<String> = x.options.iter().map(|o| o.option_name.clone().unwrap_or_default()).collect();
     let mut body = Body::new("poll", spans::one_line(&format!("Poll: {question}"), SUMMARY));
-    body.text = Some(std::iter::once(question).chain(options.iter().copied()).collect::<Vec<_>>().join("\n"));
+    body.text =
+        Some(std::iter::once(question).chain(options.iter().map(String::as_str)).collect::<Vec<_>>().join("\n"));
     body.spans = vec![Span { t: "text", s: question.to_string(), url: None, person: None }];
-    body.detail(json!({
+    let mut body = body.detail(json!({
         "poll": {
             "question": question,
             "options": options.iter().map(|name| json!({ "name": name, "votes": 0, "mine": false })).collect::<Vec<_>>(),
-            "max": x.selectable_options_count.filter(|&n| n > 0).unwrap_or(1),
+            "max": poll_max(x),
+            "voters": 0,
         }
-    }))
+    }));
+    body.poll = options;
+    body
 }
 
 fn event(x: &e2e::EventMessage) -> Body {

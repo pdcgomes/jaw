@@ -230,7 +230,7 @@ impl State {
                     outbox: store.count("outbox").ok()?,
                     unconfirmed: store.count("outbox WHERE state = 'unconfirmed'").ok()?,
                     actions_kept: store
-                        .count("outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke')")
+                        .count("outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote')")
                         .ok()?,
                     tombstones: store.count("tombstones").ok()?,
                     recipients: store.count("recipients").ok()?,
@@ -242,6 +242,9 @@ impl State {
                     link_thumbnails,
                     link_thumbnail_bytes,
                     link_thumbnails_refused: store.thumbnails().refused(),
+                    votes_waiting: store.count("pending WHERE kind = 'vote'").ok()?,
+                    votes_set_aside: store.count("quarantine WHERE source = 'vote'").ok()?,
+                    polls_backfill: store.backfill_left(links::POLLS).ok()?,
                 })
             }),
             interfaces: Some(Interfaces {

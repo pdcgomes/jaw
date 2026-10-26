@@ -36,6 +36,8 @@ func (e *Engine) sending(cmd *enginepb.Command) *enginepb.Reply {
 		return e.onWhatsApp(c.OnWhatsapp)
 	case *enginepb.Command_AppStatePatch:
 		return e.appStatePatch(c.AppStatePatch)
+	case *enginepb.Command_PollVote:
+		return e.pollVote(c.PollVote)
 	}
 	return nil
 }
@@ -64,15 +66,55 @@ func (e *Engine) sendMessage(c *enginepb.Send) *enginepb.Reply {
 	if err := proto.Unmarshal(c.Raw, message); err != nil {
 		return failure(fmt.Sprintf("that isn't a message to send: %v", err), false)
 	}
-	resp, err := e.client.SendMessage(e.ctx, to, message, whatsmeow.SendRequestExtra{ID: c.Id})
+	return e.sendWithID(to, c.Id, message)
+}
+
+// sendWithID sends message to `to` with the ID jawd made for it, and says what the server answered.
+func (e *Engine) sendWithID(to types.JID, id string, message *waE2E.Message) *enginepb.Reply {
+	resp, err := e.client.SendMessage(e.ctx, to, message, whatsmeow.SendRequestExtra{ID: id})
 	if err != nil {
-		return failure(fmt.Sprintf("can't send %s: %v", c.Id, err), retryable(err))
+		return failure(fmt.Sprintf("can't send %s: %v", id, err), retryable(err))
 	}
-	sent := &enginepb.Sent{Id: c.Id, Chat: jid(resp.Chat)}
+	sent := &enginepb.Sent{Id: id, Chat: jid(resp.Chat)}
 	if !resp.Timestamp.IsZero() {
 		sent.AtMs = resp.Timestamp.UnixMilli()
 	}
 	return &enginepb.Reply{Kind: &enginepb.Reply_Sent{Sent: sent}}
+}
+
+// pollVote votes in a poll: whatsmeow encrypts the vote with the poll's secret, which it kept when
+// the poll came or went, and it goes as a message with the ID jawd made for it, stamped with the
+// time jawd gave, so a vote sent again is the same vote.
+func (e *Engine) pollVote(c *enginepb.PollVote) *enginepb.Reply {
+	chat, err := chatJID(c.Chat)
+	if err != nil {
+		return failure(err.Error(), false)
+	}
+	if c.Id == "" || c.PollId == "" {
+		return failure("a vote needs the ID jawd made for it and its poll's", false)
+	}
+	var sender types.JID
+	if c.PollFromMe {
+		sender = e.client.Store.ID.ToNonAD()
+	} else if sender, err = types.ParseJID(c.PollSender); err != nil || sender.User == "" {
+		return failure(fmt.Sprintf("%q isn't who sent the poll", c.PollSender), false)
+	}
+	// The poll's sender as whatsmeow kept its secret, by their number or their LID, says which of
+	// yours the vote is encrypted for, as the chat's other members will decrypt it.
+	if _, kept, err := e.client.Store.MsgSecrets.GetMessageSecret(e.ctx, chat, sender, c.PollId); err == nil && !kept.IsEmpty() {
+		sender = kept
+	}
+	poll := &types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsFromMe: c.PollFromMe, IsGroup: chat.Server == types.GroupServer},
+		ID:            c.PollId,
+	}
+	update, err := e.client.EncryptPollVote(e.ctx, poll, &waE2E.PollVoteMessage{SelectedOptions: c.Options})
+	if err != nil {
+		known := !errors.Is(err, whatsmeow.ErrOriginalMessageSecretNotFound)
+		return failure(fmt.Sprintf("can't vote in %s: %v", c.PollId, err), known && retryable(err))
+	}
+	update.SenderTimestampMS = proto.Int64(c.AtMs)
+	return e.sendWithID(chat, c.Id, &waE2E.Message{PollUpdateMessage: update})
 }
 
 // retryable says whether a send that failed with err might work later: a connection that's down

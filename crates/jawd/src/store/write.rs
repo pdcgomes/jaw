@@ -6,6 +6,7 @@
 pub mod layout;
 pub mod links;
 pub mod outbox;
+pub mod polls;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -164,9 +165,17 @@ pub enum Amendment {
     Status {
         status: String,
     },
-    /// Kept in `pending` for a later jawd that knows what to do with it, such as a poll vote.
+    /// Kept in `pending` for a later jawd that knows what to do with it, such as a poll vote the
+    /// engine couldn't decrypt.
     Keep {
         kind: String,
+    },
+    /// A vote in a poll, all its voter chose there now: each option by the SHA-256 of its name, in
+    /// hex, none taking their vote back; `id` is the vote's own message's, which orders two votes
+    /// sent in the same millisecond.
+    Vote {
+        options: Vec<String>,
+        id: String,
     },
 }
 
@@ -180,6 +189,7 @@ impl Amendment {
             Amendment::DeleteForMe => "delete",
             Amendment::Status { .. } => "receipt",
             Amendment::Keep { kind } => kind,
+            Amendment::Vote { .. } => "vote",
         }
     }
 }
@@ -303,6 +313,8 @@ pub struct Message {
     pub raw: Option<Packed>,
     /// For a live message, the engine's whole event, compressed, which a history copy never replaces.
     pub envelope: Option<Packed>,
+    /// A poll's options, by name, in their order: a vote names each by the SHA-256 of its name.
+    pub poll: Vec<String>,
 }
 
 /// Where a message of yours was sent from.
@@ -664,7 +676,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         Change::MergeStep(merging) => merge_step(db, stamps, merging.as_ref().map(|m| m.gone)),
         Change::Outbox(step) => outbox::apply(db, stamps, step),
         Change::Layout(keep) => layout::apply(db, keep),
-        Change::Backfill(name) => links::backfill(db, name),
+        Change::Backfill(name) => links::backfill(db, stamps, name),
         Change::Thumbnail { sha256, bytes, chat, id } => links::thumbnail(db, stamps, sha256, *bytes, chat, id),
     }
 }
@@ -1533,9 +1545,30 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
             read_at = coalesce(receipts.read_at, excluded.read_at), played_at = coalesce(receipts.played_at, excluded.played_at)",
     )?
     .execute([kept, gone])?;
+    // Each voter's vote in the copy goes to the kept one if it's newer than theirs there.
+    db.prepare_cached(
+        "INSERT OR IGNORE INTO poll_options (message, position, name, hash)
+            SELECT ?1, position, name, hash FROM poll_options WHERE message = ?2",
+    )?
+    .execute([kept, gone])?;
+    db.prepare_cached(
+        "DELETE FROM poll_votes WHERE message = ?1 AND voter IN (SELECT g.voter FROM poll_voters g
+            LEFT JOIN poll_voters k ON k.message = ?1 AND k.voter = g.voter
+            WHERE g.message = ?2 AND (k.voter IS NULL OR (g.at, g.id) > (k.at, k.id)))",
+    )?
+    .execute([kept, gone])?;
     db.prepare_cached(
         "INSERT OR IGNORE INTO poll_votes (message, voter, position, at)
-            SELECT ?1, voter, position, at FROM poll_votes WHERE message = ?2",
+            SELECT ?1, v.voter, v.position, v.at FROM poll_votes v
+            JOIN poll_voters g ON g.message = v.message AND g.voter = v.voter
+            LEFT JOIN poll_voters k ON k.message = ?1 AND k.voter = v.voter
+            WHERE v.message = ?2 AND (k.voter IS NULL OR (g.at, g.id) > (k.at, k.id))",
+    )?
+    .execute([kept, gone])?;
+    db.prepare_cached(
+        "INSERT INTO poll_voters (message, voter, at, id) SELECT ?1, voter, at, id FROM poll_voters WHERE message = ?2
+        ON CONFLICT (message, voter) DO UPDATE SET at = excluded.at, id = excluded.id
+            WHERE (excluded.at, excluded.id) > (poll_voters.at, poll_voters.id)",
     )?
     .execute([kept, gone])?;
     // A file downloaded for either copy is kept over one the other only knows how to fetch.
@@ -1746,6 +1779,9 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     };
     let Some(n) = changed else { return Ok(false) };
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+    if !message.poll.is_empty() {
+        polls::options(db, n, &message.poll)?;
+    }
     // The chat's newest message sets its sort; older history never moves it.
     let seq = stamps.seq(CHAT, Some(chat));
     let moved = db
@@ -1771,6 +1807,9 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         (false, _) => {}
     }
     if existing.is_none() {
+        if !message.poll.is_empty() {
+            polls::set_aside_back(db, &chat_id, &message.id)?;
+        }
         apply_pending(db, stamps, chat, n, &chat_id, &message.id)?;
     }
     Ok(true)
@@ -1854,6 +1893,9 @@ fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<
                 amend.mine,
                 serde_json::to_string(&amend.what)?
             ])?;
+            if amend.what.kind() == "vote" {
+                polls::bounded(db)?;
+            }
             Ok(false)
         }
     }
@@ -1872,8 +1914,10 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
     let Doing { what, sender, mine, at } = doing;
     // Someone new who reacts is made first, since making them takes the next seq.
     let someone = match (what, sender) {
-        (Amendment::React { .. } | Amendment::Status { .. }, Some(sender)) => Some(ensure_jid(db, stamps, sender)?),
-        (Amendment::React { .. } | Amendment::Status { .. }, None) => return Ok(false),
+        (Amendment::React { .. } | Amendment::Status { .. } | Amendment::Vote { .. }, Some(sender)) => {
+            Some(ensure_jid(db, stamps, sender)?)
+        }
+        (Amendment::React { .. } | Amendment::Status { .. } | Amendment::Vote { .. }, None) => return Ok(false),
         _ => None,
     };
     if matches!(what, Amendment::DeleteForMe) {
@@ -1963,6 +2007,17 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
                 }
                 _ => 0,
             }
+        }
+        Amendment::Vote { options, id } => {
+            let voter = someone.expect("a vote's voter is made above");
+            let poll: bool = db
+                .prepare_cached("SELECT kind = 'poll' AND NOT deleted FROM messages WHERE n = ?1")?
+                .query_row([n], |r| r.get(0))?;
+            let changed = if poll { polls::vote(db, stamps, n, voter, options, id, at)? } else { 0 };
+            if changed > 0 {
+                db.prepare_cached("UPDATE messages SET v = ?2 WHERE n = ?1")?.execute([n, seq])?;
+            }
+            changed
         }
         Amendment::DeleteForMe | Amendment::Keep { .. } => 0,
     };

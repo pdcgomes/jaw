@@ -255,15 +255,15 @@ async fn the_messages_held_before_links_were_kept_are_linked_a_short_step_at_a_t
     assert_eq!(links(&store).await.len(), 1);
 
     store.apply(Lane::Background, vec![Change::Backfill(LINKS)]).await.unwrap();
-    assert_eq!(backfill_left(&store).await, Some((LINKS_STEP, 600)), "a step looks at {LINKS_STEP} messages");
+    assert_eq!(backfill_left(&store).await, Some((STEP, 600)), "a step looks at {STEP} messages");
     let first = links(&store).await;
-    let expected = LINKS_STEP as usize / 3 + 1 + 1;
+    let expected = STEP as usize / 3 + 1 + 1;
     assert_eq!(first.len(), expected, "the first step's messages with a link, m7's preview and m300: {first:?}");
     drop(store);
 
     // Started again, it carries on from where it was.
     let store = Store::open(home.path()).unwrap();
-    store.apply(Lane::Background, vec![Change::Backfill(LINKS); 600 / LINKS_STEP as usize + 1]).await.unwrap();
+    store.apply(Lane::Background, vec![Change::Backfill(LINKS); 600 / STEP as usize + 1]).await.unwrap();
     assert_eq!(backfill_left(&store).await, None, "done, its row goes");
     let all = links(&store).await;
     assert_eq!(all.len(), 200 + 1, "every third of 600, and m7's preview: {}", all.len());
@@ -312,7 +312,7 @@ async fn a_backfill_step_that_fails_is_kept_in_quarantine_and_leaves_the_backfil
     })
     .await;
     assert_eq!(kept, 1);
-    store.apply(Lane::Background, vec![Change::Backfill(LINKS); 300 / LINKS_STEP as usize + 1]).await.unwrap();
+    store.apply(Lane::Background, vec![Change::Backfill(LINKS); 300 / STEP as usize + 1]).await.unwrap();
     assert_eq!(backfill_left(&store).await, None);
     assert_eq!(links(&store).await.len(), 100 + 1, "the links backfill goes on regardless");
 }
@@ -411,10 +411,10 @@ async fn measure_the_links_backfill_and_what_links_cost_a_write() {
         if !indexed {
             let side = Connection::open(home.path().join("jaw.db")).unwrap();
             let sql: String = side
-                .query_row("SELECT sql FROM sqlite_schema WHERE name = 'messages_links_insert'", [], |r| r.get(0))
+                .query_row("SELECT sql FROM sqlite_schema WHERE name = 'links_derived_insert'", [], |r| r.get(0))
                 .unwrap();
             let unindexed = sql.split("INSERT INTO links_fts").next().unwrap().to_string() + "END";
-            side.execute_batch(&format!("DROP TRIGGER messages_links_insert; {unindexed};")).unwrap();
+            side.execute_batch(&format!("DROP TRIGGER links_derived_insert; {unindexed};")).unwrap();
         }
         let batch: Vec<Change> = (0..20_000i64)
             .map(|k| {

@@ -19,6 +19,7 @@ mod forward;
 mod info;
 pub mod link;
 mod outbox;
+mod poll;
 mod presence;
 mod quote;
 mod reads;
@@ -34,7 +35,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jaw_proto::send::{
-    ChatInfo, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, React, Read, SendRetry, SendText, Typing,
+    ChatInfo, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, PollVote, React, Read, SendPoll, SendRetry,
+    SendText, Typing,
 };
 use jaw_proto::{Error, Push, code};
 use rusqlite::Connection;
@@ -165,6 +167,8 @@ impl Sending {
         let inner = &self.inner;
         match method {
             "send.text" => result(outbox::send_text(inner, params_of::<SendText>(method, params)?).await?),
+            "send.poll" => result(poll::send_poll(inner, params_of::<SendPoll>(method, params)?).await?),
+            "poll.vote" => poll::vote(inner, params_of::<PollVote>(method, params)?).await,
             "send.retry" => outbox::retry(inner, params_of::<SendRetry>(method, params)?).await,
             "chat.start" => result(start::start(inner, params_of::<ChatStart>(method, params)?).await?),
             "draft.set" => draft(inner, params_of::<DraftSet>(method, params)?).await,
@@ -183,6 +187,8 @@ impl Sending {
     /// The methods `call` answers.
     pub const METHODS: &[&str] = &[
         "send.text",
+        "send.poll",
+        "poll.vote",
         "send.retry",
         "chat.start",
         "draft.set",

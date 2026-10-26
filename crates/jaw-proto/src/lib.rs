@@ -452,6 +452,15 @@ pub struct Stored {
     pub link_thumbnail_bytes: u64,
     #[serde(default)]
     pub link_thumbnails_refused: u64,
+    /// Votes waiting for polls jaw hasn't seen yet, kept 10,000 at most, and those set aside in
+    /// quarantine past that, each with what's needed to apply it.
+    #[serde(default)]
+    pub votes_waiting: u64,
+    #[serde(default)]
+    pub votes_set_aside: u64,
+    /// Polls jaw.db held before votes were kept that are still to be given their options.
+    #[serde(default)]
+    pub polls_backfill: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

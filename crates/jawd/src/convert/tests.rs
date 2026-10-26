@@ -285,7 +285,54 @@ fn a_poll_of_any_version_is_its_question_and_options() {
         assert_eq!(m.text.as_deref(), Some("Dinner where?\nPorto\nLisbon"));
         let detail: serde_json::Value = serde_json::from_str(m.detail.as_deref().unwrap()).unwrap();
         assert_eq!(detail["poll"]["options"][1]["name"], "Lisbon");
+        assert_eq!((&detail["poll"]["max"], &detail["poll"]["voters"]), (&1.into(), &0.into()));
+        assert_eq!(m.poll, ["Porto", "Lisbon"], "its options kept, to count the votes in each");
     }
+    // 0, or more than it has, is any of them.
+    for selectable in [Some(0), Some(3), None] {
+        let any = e2e::PollCreationMessage { selectable_options_count: selectable, ..poll.clone() };
+        let m = row(e2e::Message { poll_creation_message: Some(Box::new(any)), ..Default::default() });
+        let detail: serde_json::Value = serde_json::from_str(m.detail.as_deref().unwrap()).unwrap();
+        assert_eq!(detail["poll"]["max"], 2, "{selectable:?}");
+    }
+}
+
+#[test]
+fn the_votes_history_keeps_on_a_poll_are_each_its_voters_with_their_time_and_their_own_id() {
+    let poll = e2e::PollCreationMessage {
+        name: Some("Dinner where?".into()),
+        options: vec![e2e::poll_creation_message::Option { option_name: Some("Porto".into()), ..Default::default() }],
+        ..Default::default()
+    };
+    let mut kept = info(GROUP, e2e::Message { poll_creation_message_v3: Some(Box::new(poll)), ..Default::default() });
+    let vote = |from_me: bool, participant: &str, id: &str, at: i64| PollUpdate {
+        poll_update_message_key: Some(MessageKey {
+            remote_jid: Some(GROUP.into()),
+            from_me: Some(from_me),
+            id: Some(id.into()),
+            participant: (!participant.is_empty()).then(|| participant.into()),
+        }),
+        vote: Some(e2e::PollVoteMessage { selected_options: vec![vec![0xab, 0x01]] }),
+        sender_timestamp_ms: Some(at),
+        ..Default::default()
+    };
+    kept.poll_updates = vec![vote(false, "100000000002@lid", "3EB0V1", AT + 5), vote(true, "", "3EB0V2", AT + 9)];
+    let [rui, mine] = message(&kept, &me(), false)
+        .into_iter()
+        .filter_map(|c| match c {
+            Change::Amend(a) => Some(a),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        (rui.target.as_str(), rui.sender.as_deref(), rui.mine, rui.at),
+        ("3EB0AA", Some("100000000002@lid"), false, AT + 5)
+    );
+    assert_eq!(rui.what, Amendment::Vote { options: vec!["ab01".into()], id: "3EB0V1".into() });
+    assert_eq!((mine.sender.as_deref(), mine.mine), (Some("351910000001@s.whatsapp.net"), true), "yours, as you");
+    assert_eq!(mine.what, Amendment::Vote { options: vec!["ab01".into()], id: "3EB0V2".into() });
 }
 
 #[test]

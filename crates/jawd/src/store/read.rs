@@ -345,10 +345,22 @@ const MESSAGE_COLUMNS: &str = "
             FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed'
                 ORDER BY n)),
         iif(instr(m.detail, '\"thumbnail\":\"') > 0, (SELECT h.sha256 FROM thumbnails h
-            WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL)";
+            WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL),
+        iif(m.kind = 'poll' AND NOT m.deleted, (SELECT json_group_array(json_object('name', o.name,
+                'votes', (SELECT count(*) FROM poll_votes v WHERE v.message = o.message AND v.position = o.position),
+                'mine', json(iif(EXISTS (SELECT 1 FROM poll_votes v JOIN person_jids vj ON vj.n = v.voter
+                    WHERE v.message = o.message AND v.position = o.position
+                        AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ',
+                            ' ' || vj.jid || ' ') > 0), 'true', 'false'))))
+            FROM (SELECT message, position, name FROM poll_options WHERE message = m.n ORDER BY position) o), NULL),
+        iif(m.kind = 'poll' AND NOT m.deleted, (SELECT count(*) FROM poll_voters pv WHERE pv.message = m.n
+            AND EXISTS (SELECT 1 FROM poll_votes v WHERE v.message = pv.message AND v.voter = pv.voter)), NULL),
+        iif(m.kind = 'poll' AND NOT m.deleted, (SELECT max(pv.at) FROM poll_voters pv JOIN person_jids pj ON pj.n = pv.voter
+            WHERE pv.message = m.n AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ',
+                ' ' || pj.jid || ' ') > 0), NULL)";
 
 /// How many columns MESSAGE_COLUMNS has, for queries that select more after them.
-const MESSAGE_COLUMN_COUNT: usize = 28;
+const MESSAGE_COLUMN_COUNT: usize = 31;
 
 const MESSAGE_JOINS: &str = "
     JOIN chats c ON c.n = m.chat
@@ -404,6 +416,25 @@ fn previewed(detail: &str, kept: Option<&str>) -> String {
     serde_json::to_string(&parsed).unwrap_or_else(|_| detail.to_string())
 }
 
+/// A poll's `detail` with its options as their votes are now, `options` (each its name, how many
+/// chose it and whether you did) and `voters`, the people who chose any.
+fn tallied(detail: &str, options: &str, voters: i64) -> String {
+    let (Ok(mut parsed), Ok(options)) =
+        (serde_json::from_str::<serde_json::Map<String, Value>>(detail), serde_json::from_str::<Value>(options))
+    else {
+        return detail.to_string();
+    };
+    if let Some(Value::Object(poll)) = parsed.get_mut("poll") {
+        // A poll converted before votes were kept has its options once the backfill gives them it;
+        // until then it shows them as it was converted, with no votes.
+        if options.as_array().is_some_and(|options| !options.is_empty()) {
+            poll.insert("options".into(), options);
+        }
+        poll.insert("voters".into(), voters.into());
+    }
+    serde_json::to_string(&parsed).unwrap_or_else(|_| detail.to_string())
+}
+
 fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
     let text: Option<String> = r.get(8)?;
     let mut spans = match r.get::<_, Option<String>>(9)? {
@@ -419,6 +450,9 @@ fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
     if let Some(shown) = detail.as_deref().filter(|detail| detail.contains("\"thumbnail\":\"")) {
         detail = Some(previewed(shown, r.get::<_, Option<String>>(27)?.as_deref()));
     }
+    if let (Some(shown), Some(options)) = (detail.as_deref(), r.get::<_, Option<String>>(28)?) {
+        detail = Some(tallied(shown, &options, r.get::<_, Option<i64>>(29)?.unwrap_or(0)));
+    }
     let (mut edited_at, mut deleted): (Option<i64>, bool) = (r.get(14)?, r.get(15)?);
     let mut reactions: String = r.get::<_, Option<String>>(24)?.unwrap_or_else(|| "[]".into());
     let row = super::overlay::Shown {
@@ -429,6 +463,7 @@ fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
         edited_at: &mut edited_at,
         deleted: &mut deleted,
         reactions: &mut reactions,
+        voted_at: r.get(30)?,
     };
     super::overlay::message(row, r.get::<_, Option<String>>(26)?.as_deref());
     let from = match r.get::<_, Option<i64>>(19)? {

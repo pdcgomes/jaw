@@ -805,22 +805,20 @@ pub(super) const MIGRATIONS: &[&str] = &[
     FROM link_previews p
     WHERE NOT EXISTS (SELECT 1 FROM link_spans d WHERE d.message = p.message AND d.url = p.url);
     -- A message's links as `links` keeps them: each URL's host is what comes between its scheme and
-    -- its path, without a user or a port, in lower case.
+    -- its path (r, what follows the scheme; a, the authority; h, it without a user), without a
+    -- port, in lower case. Each step is the one value of a json_each, which the next reads as a
+    -- column: as subqueries, SQLite would copy each step's expression into every use of it, and
+    -- the host's into thousands of instructions.
     CREATE VIEW message_links (message, place, chat, at, sender, mine, url, host, title, description) AS
-    SELECT message, place, chat, at, sender, mine, url,
-        lower(CASE WHEN hp LIKE '[%' THEN substr(hp, 1, instr(hp, ']'))
-            WHEN instr(hp, ':') > 0 THEN substr(hp, 1, instr(hp, ':') - 1) ELSE hp END),
-        title, description
-    FROM (SELECT message, place, chat, at, sender, mine, url, title, description,
-            substr(authority, instr(authority, '@') + 1) AS hp
-        FROM (SELECT message, place, chat, at, sender, mine, url, title, description,
-                substr(rest, 1, min(instr(rest || '/', '/'), instr(rest || '?', '?'), instr(rest || '#', '#')) - 1)
-                    AS authority
-            FROM (SELECT u.message, u.place, m.chat, m.at, m.sender, m.mine, u.url,
-                    substr(u.url, instr(u.url, '://') + 3) AS rest,
-                    iif(u.previewed, m.detail ->> '$.link.title', NULL) AS title,
-                    iif(u.previewed, m.detail ->> '$.link.description', NULL) AS description
-                FROM message_urls u JOIN messages m ON m.n = u.message)));
+    SELECT u.message, u.place, m.chat, m.at, m.sender, m.mine, u.url,
+        lower(CASE WHEN h.value LIKE '[%' THEN substr(h.value, 1, instr(h.value, ']'))
+            WHEN instr(h.value, ':') > 0 THEN substr(h.value, 1, instr(h.value, ':') - 1) ELSE h.value END),
+        iif(u.previewed, m.detail ->> '$.link.title', NULL), iif(u.previewed, m.detail ->> '$.link.description', NULL)
+    FROM message_urls u JOIN messages m ON m.n = u.message,
+        json_each(json_array(substr(u.url, instr(u.url, '://') + 3))) r,
+        json_each(json_array(substr(r.value, 1,
+            min(instr(r.value || '/', '/'), instr(r.value || '?', '?'), instr(r.value || '#', '#')) - 1))) a,
+        json_each(json_array(substr(a.value, instr(a.value, '@') + 1))) h;
 
     -- Class: derived from raw. The words of each message's links, their hosts, titles, descriptions
     -- and URLs, as one document by the message's t, so search reads them newest first and stops at
@@ -837,13 +835,21 @@ pub(super) const MIGRATIONS: &[&str] = &[
         FROM links l WHERE l.message = m.n)
     FROM messages m;
 
-    CREATE TRIGGER messages_links_insert AFTER INSERT ON messages
-    WHEN instr(new.spans, '\"t\":\"link\"') > 0 OR instr(new.detail, '\"link\":{') > 0 BEGIN
+    -- Writing a message's n here writes its links and its document, which an INSTEAD OF trigger
+    -- does, so the program reading the views runs only for a message that may have links: a
+    -- trigger's whole program is set up each time it fires, before its WHEN is looked at, and the
+    -- triggers on messages fire for every message.
+    CREATE VIEW links_derived (message) AS SELECT NULL WHERE 0;
+    CREATE TRIGGER links_derived_insert INSTEAD OF INSERT ON links_derived BEGIN
         INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description)
             SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links
-            WHERE message = new.n;
+            WHERE message = new.message;
         INSERT INTO links_fts (rowid, text)
-            SELECT t, text FROM message_link_text WHERE message = new.n AND text IS NOT NULL;
+            SELECT t, text FROM message_link_text WHERE message = new.message AND text IS NOT NULL;
+    END;
+    CREATE TRIGGER messages_links_insert AFTER INSERT ON messages
+    WHEN instr(new.spans, '\"t\":\"link\"') > 0 OR instr(new.detail, '\"link\":{') > 0 BEGIN
+        INSERT INTO links_derived (message) VALUES (new.n);
     END;
     CREATE TRIGGER messages_links_update AFTER UPDATE OF chat, at, sender, mine, spans, detail, deleted ON messages
     WHEN (old.chat IS NOT new.chat OR old.at IS NOT new.at OR old.sender IS NOT new.sender
@@ -853,11 +859,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
             OR instr(new.spans, '\"t\":\"link\"') > 0 OR instr(new.detail, '\"link\":{') > 0) BEGIN
         DELETE FROM links WHERE message = old.n;
         DELETE FROM links_fts WHERE rowid = old.t;
-        INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description)
-            SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links
-            WHERE message = new.n;
-        INSERT INTO links_fts (rowid, text)
-            SELECT t, text FROM message_link_text WHERE message = new.n AND text IS NOT NULL;
+        INSERT INTO links_derived (message) VALUES (new.n);
     END;
     CREATE TRIGGER messages_links_delete AFTER DELETE ON messages
     WHEN instr(old.spans, '\"t\":\"link\"') > 0 OR instr(old.detail, '\"link\":{') > 0 BEGIN
@@ -885,6 +887,33 @@ pub(super) const MIGRATIONS: &[&str] = &[
         bytes INTEGER NOT NULL CHECK (bytes > 0),
         at INTEGER NOT NULL
     ) STRICT, WITHOUT ROWID;
+    ",
+    // 15, a schema step: votes in polls. Each voter's latest vote is kept beside what it chose, so a
+    // vote older than it never replaces it, one that chose nothing among them, and each option's
+    // votes and the votes waiting for a poll are counted from indexes. Nothing wrote poll_votes
+    // before, so it's empty, and pending holds what waits for a message jaw hasn't seen yet, a few
+    // rows, so its index costs the same however many messages there are. The polls jaw.db already
+    // holds get their options, and how many a vote may choose, from a backfill that reads their raw
+    // protobufs.
+    "
+    -- Class: jaw's own, as poll_votes is, which keeps no raw once applied: each voter's latest vote
+    -- in each poll, by its sender's time and then its message's ID, which a vote older than it never
+    -- replaces; one that chose nothing is kept here too. poll_votes holds what it chose.
+    CREATE TABLE poll_voters (
+        message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
+        voter INTEGER NOT NULL REFERENCES person_jids (n),
+        at INTEGER NOT NULL,
+        id TEXT NOT NULL,
+        PRIMARY KEY (message, voter)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX poll_voters_by_voter ON poll_voters (voter);
+    -- Each option's votes, counted from the index.
+    CREATE INDEX poll_votes_by_option ON poll_votes (message, position);
+    -- The votes waiting for a poll jaw hasn't seen, counted, and the oldest found, from the index.
+    CREATE INDEX pending_by_kind ON pending (kind, n);
+    -- The polls among the messages jaw.db already holds.
+    INSERT INTO backfills (name, after, upto) SELECT 'polls', 0, seq FROM sqlite_sequence
+        WHERE name = 'messages' AND seq > 0;
     ",
 ];
 

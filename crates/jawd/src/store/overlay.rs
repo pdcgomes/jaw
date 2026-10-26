@@ -7,6 +7,7 @@
 
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::store::Amendment;
 
@@ -29,6 +30,8 @@ pub(super) struct Shown<'a> {
     pub edited_at: &'a mut Option<i64>,
     pub deleted: &'a mut bool,
     pub reactions: &'a mut String,
+    /// When your latest vote kept on a poll was made, if you've voted there.
+    pub voted_at: Option<i64>,
 }
 
 /// What a message you deleted for everyone shows.
@@ -71,9 +74,40 @@ pub(super) fn message(shown: Shown, actions: Option<&str>) {
             Amendment::React { emoji } if action.mine_at.is_none_or(|mine| action.at >= mine) => {
                 *shown.reactions = reacted(shown.reactions, &emoji);
             }
+            Amendment::Vote { options, .. }
+                if !*shown.deleted && shown.voted_at.is_none_or(|voted| action.at >= voted) =>
+            {
+                if let Some(detail) = shown.detail.as_deref() {
+                    *shown.detail = Some(voted(detail, &options));
+                }
+            }
             _ => {}
         }
     }
+}
+
+/// A poll's `detail` with your vote now `chosen` (each option by the hex SHA-256 of its name): your
+/// choices before come off their options' votes, these go on, and you're among its voters if
+/// you've chosen any.
+fn voted(detail: &str, chosen: &[String]) -> String {
+    let Ok(mut parsed) = serde_json::from_str::<Map<String, Value>>(detail) else { return detail.to_string() };
+    let Some(Value::Object(poll)) = parsed.get_mut("poll") else { return detail.to_string() };
+    let mut was_voter = false;
+    if let Some(Value::Array(options)) = poll.get_mut("options") {
+        for option in options.iter_mut().filter_map(Value::as_object_mut) {
+            let name = option.get("name").and_then(Value::as_str).unwrap_or_default();
+            let hash: String = Sha256::digest(name.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+            let (was, now) = (option.get("mine") == Some(&Value::Bool(true)), chosen.contains(&hash));
+            was_voter |= was;
+            let votes = option.get("votes").and_then(Value::as_i64).unwrap_or(0) - i64::from(was) + i64::from(now);
+            option.insert("votes".into(), votes.max(0).into());
+            option.insert("mine".into(), now.into());
+        }
+    }
+    let voters = poll.get("voters").and_then(Value::as_i64).unwrap_or(0);
+    let voter = !chosen.is_empty();
+    poll.insert("voters".into(), (voters - i64::from(was_voter) + i64::from(voter)).max(0).into());
+    Value::Object(parsed).to_string()
 }
 
 /// `reactions`, each emoji with how many and whether one's yours, with yours now `emoji`, or none

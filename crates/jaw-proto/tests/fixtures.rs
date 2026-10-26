@@ -8,7 +8,7 @@ use jaw_proto::find::{ChatOpened, Find, Found, Kind};
 use jaw_proto::layout::{LayoutGet, LayoutSet, Saved};
 use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
-    React, Read, SendRetry, SendText, Sent, Typing,
+    PollVote, React, Read, SendPoll, SendRetry, SendText, Sent, Typing,
 };
 use jaw_proto::settings::{Messages, Settings, SettingsKept, SettingsSet};
 use jaw_proto::sync::{HistoryMore, Notice};
@@ -91,6 +91,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "history.more" => params::<HistoryMore>(&name, &request.params),
                     "focus" => params::<Focus>(&name, &request.params),
                     "send.text" => params::<SendText>(&name, &request.params),
+                    "send.poll" => params::<SendPoll>(&name, &request.params),
+                    "poll.vote" => params::<PollVote>(&name, &request.params),
                     "send.retry" => params::<SendRetry>(&name, &request.params),
                     "chat.start" => params::<ChatStart>(&name, &request.params),
                     "draft.set" => params::<DraftSet>(&name, &request.params),
@@ -125,10 +127,10 @@ fn every_fixture_reads_and_writes_back_the_same() {
                         }
                     }
                     "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
-                    | "typing" | "react" | "edit" | "delete" => {
+                    | "typing" | "react" | "edit" | "delete" | "poll.vote" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
-                    "send.text" => params::<Sent>(&name, result),
+                    "send.text" | "send.poll" => params::<Sent>(&name, result),
                     "chat.start" => params::<ChatStarted>(&name, result),
                     "forward" => params::<Forwarded>(&name, result),
                     "message.info" => params::<Info>(&name, result),

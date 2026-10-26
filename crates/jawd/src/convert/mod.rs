@@ -16,7 +16,7 @@ use prost::Message as _;
 use serde_json::json;
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
-use wa_proto::wa_web_protobufs_web::{WebMessageInfo, web_message_info};
+use wa_proto::wa_web_protobufs_web::{PollUpdate, WebMessageInfo, web_message_info};
 
 use crate::engine::pb;
 use crate::store::{Amend, Amendment, Change, Chat, Message, Packed, Person};
@@ -172,6 +172,53 @@ pub fn message(info: &WebMessageInfo, me: &Me, live: bool) -> Vec<Change> {
         }
     }
     changes
+        .extend(info.poll_updates.iter().filter_map(|update| history_vote(&envelope, update, me)).map(Change::Amend));
+    changes
+}
+
+/// Each option a vote chose, as the hex SHA-256 of its name it names it by.
+fn chosen(vote: &e2e::PollVoteMessage) -> Vec<String> {
+    vote.selected_options.iter().map(|hash| hash.iter().map(|b| format!("{b:02x}")).collect()).collect()
+}
+
+/// A vote history keeps on the poll it's in, decrypted already.
+fn history_vote(envelope: &Envelope, update: &PollUpdate, me: &Me) -> Option<Amend> {
+    let key = update.poll_update_message_key.as_ref()?;
+    let mine = key.from_me.unwrap_or(false);
+    let sender = if mine {
+        me.jid().map(str::to_string)
+    } else {
+        key.participant
+            .clone()
+            .or_else(|| key.remote_jid.clone())
+            .filter(|jid| !jid.is_empty())
+            .map(|jid| user_jid(&jid))
+    };
+    Some(Amend {
+        chat: envelope.chat.clone(),
+        target: envelope.id.clone(),
+        sender,
+        mine,
+        at: update.sender_timestamp_ms.filter(|&at| at > 0).unwrap_or(envelope.at),
+        what: Amendment::Vote { options: chosen(update.vote.as_ref()?), id: key.id.clone().unwrap_or_default() },
+        raw: None,
+    })
+}
+
+/// The vote a live poll update's decrypted payload says (`decrypted`, a PollVoteMessage), in place
+/// of the vote `changes` would keep for a later jawd, which couldn't read it; says whether there was
+/// one to read.
+pub fn decrypted_vote(changes: &mut [Change], id: &str, decrypted: &[u8]) -> bool {
+    let Ok(vote) = e2e::PollVoteMessage::decode(decrypted) else { return false };
+    for change in changes {
+        if let Change::Amend(Amend { what, .. }) = change
+            && matches!(what, Amendment::Keep { kind } if kind == "vote")
+        {
+            *what = Amendment::Vote { options: chosen(&vote), id: id.to_string() };
+            return true;
+        }
+    }
+    false
 }
 
 /// What a message adds besides its kind's body: a reply, mentions, forwarding, expiry.
@@ -261,13 +308,14 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         return;
     }
     if let Some(update) = message.poll_update_message.as_ref() {
-        changes.extend(
-            update
-                .poll_creation_message_key
-                .as_ref()
-                .and_then(|key| keep(envelope, key, "vote", me))
-                .map(Change::Amend),
-        );
+        // Its sender's own time, as history keeps it too; the engine's decryption says what it chose.
+        if let Some(mut amend) =
+            update.poll_creation_message_key.as_ref().and_then(|key| keep(envelope, key, "vote", me))
+        {
+            amend.at = update.sender_timestamp_ms.filter(|&at| at > 0).unwrap_or(amend.at);
+            changes.push(Change::Amend(amend));
+            changes.extend(own_action(envelope));
+        }
         return;
     }
     if let Some(encrypted) = message.enc_reaction_message.as_ref() {
@@ -316,8 +364,14 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         live: envelope.live,
         mentions_me,
         raw: Some(Packed::new(&info.encode_to_vec())),
+        poll: body.poll,
         ..Message::default()
     }));
+}
+
+/// The poll a message creates, out of its wrappers, whichever version it was sent as.
+pub fn poll_of(message: &e2e::Message) -> Option<&e2e::PollCreationMessage> {
+    kinds::poll(unwrap(message).0)
 }
 
 /// The thumbnail a message's link preview came with, out of its wrappers.

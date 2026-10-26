@@ -116,6 +116,7 @@ pub fn action_kind(effect: &Amendment) -> &'static str {
     match effect {
         Amendment::React { .. } => "reaction",
         Amendment::Edit { .. } => "edit",
+        Amendment::Vote { .. } => "vote",
         _ => "revoke",
     }
 }
@@ -209,7 +210,7 @@ const QUEUED: &str = concat!(
 const UNCONFIRMED_ROWS: &str = "SELECT n, next_at FROM outbox WHERE state = 'unconfirmed'";
 /// What counts toward OUTBOX_MOST: every row but the actions kept for a late receipt.
 const WAITING: &str = "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox
-    WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke'))";
+    WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote'))";
 /// An outbox row as the sender takes it, with, for an action, the state of its message's own outbox
 /// row while that message is still to reach WhatsApp, and whether its message has been deleted for
 /// everyone.
@@ -227,8 +228,8 @@ const TOMBSTONED: &str = "SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2";
 /// An action's row, with its message's chat.
 const ACTION: &str =
     "SELECT o.target, o.effect, o.created_at, t.chat FROM outbox o LEFT JOIN messages t ON t.n = o.target
-    WHERE o.n = ?1 AND o.kind IN ('reaction', 'edit', 'revoke', 'app_state')";
-const ACTIONS_BY_ID: &str = "SELECT n FROM outbox WHERE id = ?1 AND kind IN ('reaction', 'edit', 'revoke')";
+    WHERE o.n = ?1 AND o.kind IN ('reaction', 'edit', 'revoke', 'vote', 'app_state')";
+const ACTIONS_BY_ID: &str = "SELECT n FROM outbox WHERE id = ?1 AND kind IN ('reaction', 'edit', 'revoke', 'vote')";
 /// A message of yours deleted for everyone once WhatsApp refused it, or had no receipt for it, is
 /// never sent again.
 const CANCELLED: &str = "DELETE FROM outbox WHERE message = ?1 AND state IN ('unconfirmed', 'failed')";
@@ -249,11 +250,12 @@ const RETRYABLE: &str =
     FROM messages m WHERE m.n = ?1";
 /// The actions kept for a late receipt that are past ACTION_KEPT_MS, and how many are kept.
 const PRUNE_KEPT: &str =
-    "DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke') AND created_at < ?1";
-const KEPT: &str = "SELECT count(*) FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke')";
+    "DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote') AND created_at < ?1";
+const KEPT: &str =
+    "SELECT count(*) FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote')";
 /// The oldest ?1 of the actions kept for a late receipt.
 const PRUNE_OLDEST_KEPT: &str = "DELETE FROM outbox WHERE n IN (SELECT n FROM outbox
-    WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke') ORDER BY n LIMIT ?1)";
+    WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote') ORDER BY n LIMIT ?1)";
 const FOLD_TARGETS: &str = "UPDATE outbox SET target = ?1 WHERE target = ?2";
 const BUMPED: &str = "UPDATE messages SET v = ?2 WHERE n = ?1";
 const OWING: &str = "SELECT n FROM chats WHERE told_at IS NOT NULL";
@@ -572,10 +574,11 @@ fn action(db: &Connection, outbox: i64) -> Result<Option<Action>> {
 /// (`deleted_for_everyone`).
 fn acted(db: &Connection, stamps: &mut Stamps, outbox: i64, action: Action, went: bool) -> Result<bool> {
     if let (true, Some((chat, n)), Some(effect)) = (went, action.target, &action.effect) {
-        let me = if matches!(effect, Amendment::React { .. }) { my_jid(db)? } else { None };
-        // A reaction is kept under your JID, which sync keeps once the engine has connected; until
-        // it does, the row stays, for a receipt or the next start to settle once it has.
-        if matches!(effect, Amendment::React { .. }) && me.is_none() {
+        let yours = matches!(effect, Amendment::React { .. } | Amendment::Vote { .. });
+        let me = if yours { my_jid(db)? } else { None };
+        // A reaction or a vote is kept under your JID, which sync keeps once the engine has
+        // connected; until it does, the row stays, for a receipt or the next start to settle once it has.
+        if yours && me.is_none() {
             return Ok(false);
         }
         apply_amendment(db, stamps, chat, n, Doing { what: effect, sender: me.as_deref(), mine: true, at: action.at })?;
@@ -1099,12 +1102,12 @@ pub struct Outboxed {
 }
 
 impl Outboxed {
-    /// Whether it's a reaction or an edit on a message deleted for everyone since it was asked,
-    /// which isn't sent: the phones show nothing of either on a deleted message, and jaw.db would
-    /// keep the reaction on the deleted row. Whoever deleted the message, you, your other devices,
-    /// history or whoever sent it, it's withdrawn as a refused one is.
+    /// Whether it's a reaction, an edit or a vote on a message deleted for everyone since it was
+    /// asked, which isn't sent: the phones show nothing of any of them on a deleted message, and
+    /// jaw.db would keep the reaction on the deleted row. Whoever deleted the message, you, your
+    /// other devices, history or whoever sent it, it's withdrawn as a refused one is.
     pub fn withdrawn(&self) -> bool {
-        self.target_deleted && matches!(self.kind.as_str(), "reaction" | "edit")
+        self.target_deleted && matches!(self.kind.as_str(), "reaction" | "edit" | "vote")
     }
 
     /// Whether it's an action that has to wait for its message to reach WhatsApp, so it never goes
@@ -1158,7 +1161,7 @@ fn outboxed_row(r: &rusqlite::Row) -> rusqlite::Result<Outboxed> {
 
 /// Whether an outbox row of `kind` is an action, rather than a message of yours.
 pub fn is_action(kind: &str) -> bool {
-    matches!(kind, "reaction" | "edit" | "revoke" | "app_state")
+    matches!(kind, "reaction" | "edit" | "revoke" | "vote" | "app_state")
 }
 
 /// Whether outbox row `outbox`'s message may be sent again by hand: not if it was deleted for

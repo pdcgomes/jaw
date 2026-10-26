@@ -25,6 +25,9 @@ func TestSendingCommandsWithoutASessionSaySoAndAreNotToBeTriedAsTheyAre(t *testi
 		{Kind: &enginepb.Command_AppStatePatch{AppStatePatch: &enginepb.AppStatePatch{
 			Name: "regular_high", Index: []string{"deleteMessageForMe", "351910000002@s.whatsapp.net", "3EB0AA", "1", "0"}, Version: 3,
 		}}},
+		{Kind: &enginepb.Command_PollVote{PollVote: &enginepb.PollVote{
+			Chat: "120363000000000002@g.us", Id: "3EB0BB", PollId: "3EB0AA", PollSender: "351910000002@s.whatsapp.net",
+		}}},
 	} {
 		command(t, jawd, uint64(n+1), cmd)
 		reply, err := jawd.Recv()
@@ -88,6 +91,21 @@ func TestASendThatMightWorkLaterIsTriedAgainAndOneThatCantIsNot(t *testing.T) {
 	} {
 		if retryable(err) {
 			t.Errorf("%v is tried again", err)
+		}
+	}
+}
+
+func TestAVoteThatCantBeRightIsRefusedForGoodBeforeItGoes(t *testing.T) {
+	e := newEngine(context.Background(), nil, NewLogger("test", "error"))
+	for name, vote := range map[string]*enginepb.PollVote{
+		"a device for a chat": {Chat: "351910000002:3@s.whatsapp.net", Id: "3EB0BB", PollId: "3EB0AA", PollSender: "351910000002@s.whatsapp.net"},
+		"no ID of its own":    {Chat: "120363000000000002@g.us", PollId: "3EB0AA", PollSender: "351910000002@s.whatsapp.net"},
+		"no poll":             {Chat: "120363000000000002@g.us", Id: "3EB0BB", PollSender: "351910000002@s.whatsapp.net"},
+		"nobody sent it":      {Chat: "120363000000000002@g.us", Id: "3EB0BB", PollId: "3EB0AA", PollSender: "@s.whatsapp.net"},
+	} {
+		failure := e.pollVote(vote).GetFailure()
+		if failure == nil || failure.Retry {
+			t.Errorf("%s: %v", name, failure)
 		}
 	}
 }

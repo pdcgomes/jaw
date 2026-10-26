@@ -112,6 +112,14 @@ SELECT c.ephemeral, coalesce(m.keep, c.n), c.kind FROM chats c LEFT JOIN chat_me
 SELECT value FROM sync_state WHERE key = 'me'
     SEARCH sync_state USING PRIMARY KEY (key=?)
 
+-- src/send/poll.rs
+SELECT detail FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/send/poll.rs
+SELECT name FROM poll_options WHERE message = ?1 ORDER BY position
+    SEARCH poll_options USING PRIMARY KEY (message=?)
+
 -- src/send/quote.rs
 SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, ''), m.kind, m.text, m.edited_at IS NOT NULL FROM messages m LEFT JOIN person_jids j ON j.n = m.sender WHERE m.chat = ?1 AND m.id = ?2
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
@@ -240,11 +248,11 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SCAN (subquery-3)
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) ORDER BY m.at DESC, m.n DESC LIMIT ?2
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT json_group_array(json_object('name', o.name, 'votes', (SELECT count(*) FROM poll_votes v WHERE v.message = o.message AND v.position = o.position), 'mine', json(iif(EXISTS (SELECT 1 FROM poll_votes v JOIN person_jids vj ON vj.n = v.voter WHERE v.message = o.message AND v.position = o.position AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || vj.jid || ' ') > 0), 'true', 'false')))) FROM (SELECT message, position, name FROM poll_options WHERE message = m.n ORDER BY position) o), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT count(*) FROM poll_voters pv WHERE pv.message = m.n AND EXISTS (SELECT 1 FROM poll_votes v WHERE v.message = pv.message AND v.voter = pv.voter)), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT max(pv.at) FROM poll_voters pv JOIN person_jids pj ON pj.n = pv.voter WHERE pv.message = m.n AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || pj.jid || ' ') > 0), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) ORDER BY m.at DESC, m.n DESC LIMIT ?2
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
-    SCALAR SUBQUERY 10
+    SCALAR SUBQUERY 19
       SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    REUSE SUBQUERY 10
+    REUSE SUBQUERY 19
     SEARCH m USING INDEX messages_by_time (chat=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -271,13 +279,32 @@ SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, co
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 14
+      CO-ROUTINE o
+        SEARCH poll_options USING PRIMARY KEY (message=?)
+      SCAN o
+      CORRELATED SCALAR SUBQUERY 10
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+      CORRELATED SCALAR SUBQUERY 12
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+        SEARCH vj USING INTEGER PRIMARY KEY (rowid=?)
+        SCALAR SUBQUERY 11
+          SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 16
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH v EXISTS USING COVERING INDEX poll_votes_by_voter (voter=? AND message=?)
+    CORRELATED SCALAR SUBQUERY 18
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH pj USING INTEGER PRIMARY KEY (rowid=?)
+      SCALAR SUBQUERY 17
+        SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) < (?2, ?3) ORDER BY m.at DESC, m.n DESC LIMIT ?4
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT json_group_array(json_object('name', o.name, 'votes', (SELECT count(*) FROM poll_votes v WHERE v.message = o.message AND v.position = o.position), 'mine', json(iif(EXISTS (SELECT 1 FROM poll_votes v JOIN person_jids vj ON vj.n = v.voter WHERE v.message = o.message AND v.position = o.position AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || vj.jid || ' ') > 0), 'true', 'false')))) FROM (SELECT message, position, name FROM poll_options WHERE message = m.n ORDER BY position) o), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT count(*) FROM poll_voters pv WHERE pv.message = m.n AND EXISTS (SELECT 1 FROM poll_votes v WHERE v.message = pv.message AND v.voter = pv.voter)), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT max(pv.at) FROM poll_voters pv JOIN person_jids pj ON pj.n = pv.voter WHERE pv.message = m.n AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || pj.jid || ' ') > 0), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) < (?2, ?3) ORDER BY m.at DESC, m.n DESC LIMIT ?4
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
-    SCALAR SUBQUERY 10
+    SCALAR SUBQUERY 19
       SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    REUSE SUBQUERY 10
+    REUSE SUBQUERY 19
     SEARCH m USING INDEX messages_by_time (chat=? AND at<?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -304,13 +331,32 @@ SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, co
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 14
+      CO-ROUTINE o
+        SEARCH poll_options USING PRIMARY KEY (message=?)
+      SCAN o
+      CORRELATED SCALAR SUBQUERY 10
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+      CORRELATED SCALAR SUBQUERY 12
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+        SEARCH vj USING INTEGER PRIMARY KEY (rowid=?)
+        SCALAR SUBQUERY 11
+          SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 16
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH v EXISTS USING COVERING INDEX poll_votes_by_voter (voter=? AND message=?)
+    CORRELATED SCALAR SUBQUERY 18
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH pj USING INTEGER PRIMARY KEY (rowid=?)
+      SCALAR SUBQUERY 17
+        SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) > (?2, ?3) ORDER BY m.at, m.n LIMIT ?4
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT json_group_array(json_object('name', o.name, 'votes', (SELECT count(*) FROM poll_votes v WHERE v.message = o.message AND v.position = o.position), 'mine', json(iif(EXISTS (SELECT 1 FROM poll_votes v JOIN person_jids vj ON vj.n = v.voter WHERE v.message = o.message AND v.position = o.position AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || vj.jid || ' ') > 0), 'true', 'false')))) FROM (SELECT message, position, name FROM poll_options WHERE message = m.n ORDER BY position) o), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT count(*) FROM poll_voters pv WHERE pv.message = m.n AND EXISTS (SELECT 1 FROM poll_votes v WHERE v.message = pv.message AND v.voter = pv.voter)), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT max(pv.at) FROM poll_voters pv JOIN person_jids pj ON pj.n = pv.voter WHERE pv.message = m.n AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || pj.jid || ' ') > 0), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) > (?2, ?3) ORDER BY m.at, m.n LIMIT ?4
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
-    SCALAR SUBQUERY 10
+    SCALAR SUBQUERY 19
       SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    REUSE SUBQUERY 10
+    REUSE SUBQUERY 19
     SEARCH m USING INDEX messages_by_time (chat=? AND at>?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -337,13 +383,32 @@ SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, co
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 14
+      CO-ROUTINE o
+        SEARCH poll_options USING PRIMARY KEY (message=?)
+      SCAN o
+      CORRELATED SCALAR SUBQUERY 10
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+      CORRELATED SCALAR SUBQUERY 12
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+        SEARCH vj USING INTEGER PRIMARY KEY (rowid=?)
+        SCALAR SUBQUERY 11
+          SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 16
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH v EXISTS USING COVERING INDEX poll_votes_by_voter (voter=? AND message=?)
+    CORRELATED SCALAR SUBQUERY 18
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH pj USING INTEGER PRIMARY KEY (rowid=?)
+      SCALAR SUBQUERY 17
+        SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND m.id = ?2
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT json_group_array(json_object('name', o.name, 'votes', (SELECT count(*) FROM poll_votes v WHERE v.message = o.message AND v.position = o.position), 'mine', json(iif(EXISTS (SELECT 1 FROM poll_votes v JOIN person_jids vj ON vj.n = v.voter WHERE v.message = o.message AND v.position = o.position AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || vj.jid || ' ') > 0), 'true', 'false')))) FROM (SELECT message, position, name FROM poll_options WHERE message = m.n ORDER BY position) o), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT count(*) FROM poll_voters pv WHERE pv.message = m.n AND EXISTS (SELECT 1 FROM poll_votes v WHERE v.message = pv.message AND v.voter = pv.voter)), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT max(pv.at) FROM poll_voters pv JOIN person_jids pj ON pj.n = pv.voter WHERE pv.message = m.n AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || pj.jid || ' ') > 0), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND m.id = ?2
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
-    SCALAR SUBQUERY 10
+    SCALAR SUBQUERY 19
       SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    REUSE SUBQUERY 10
+    REUSE SUBQUERY 19
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -370,6 +435,25 @@ SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, co
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 14
+      CO-ROUTINE o
+        SEARCH poll_options USING PRIMARY KEY (message=?)
+      SCAN o
+      CORRELATED SCALAR SUBQUERY 10
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+      CORRELATED SCALAR SUBQUERY 12
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+        SEARCH vj USING INTEGER PRIMARY KEY (rowid=?)
+        SCALAR SUBQUERY 11
+          SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 16
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH v EXISTS USING COVERING INDEX poll_votes_by_voter (voter=? AND message=?)
+    CORRELATED SCALAR SUBQUERY 18
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH pj USING INTEGER PRIMARY KEY (rowid=?)
+      SCALAR SUBQUERY 17
+        SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/read.rs
 SELECT raw FROM messages WHERE n = ?1
@@ -406,7 +490,7 @@ SELECT m.id, l.place, c.id, l.at, l.mine, p.n, p.name, p.push_name, p.verified_n
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.t = ?1
+SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person WHERE rj.jid = m.reply ->> 'from'), m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT json_group_array(json_object('name', o.name, 'votes', (SELECT count(*) FROM poll_votes v WHERE v.message = o.message AND v.position = o.position), 'mine', json(iif(EXISTS (SELECT 1 FROM poll_votes v JOIN person_jids vj ON vj.n = v.voter WHERE v.message = o.message AND v.position = o.position AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || vj.jid || ' ') > 0), 'true', 'false')))) FROM (SELECT message, position, name FROM poll_options WHERE message = m.n ORDER BY position) o), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT count(*) FROM poll_voters pv WHERE pv.message = m.n AND EXISTS (SELECT 1 FROM poll_votes v WHERE v.message = pv.message AND v.voter = pv.voter)), NULL), iif(m.kind = 'poll' AND NOT m.deleted, (SELECT max(pv.at) FROM poll_voters pv JOIN person_jids pj ON pj.n = pv.voter WHERE pv.message = m.n AND instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || pj.jid || ' ') > 0), NULL) FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.t = ?1
     SEARCH m USING INDEX sqlite_autoindex_messages_1 (t=?)
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -434,6 +518,25 @@ SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, co
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 14
+      CO-ROUTINE o
+        SEARCH poll_options USING PRIMARY KEY (message=?)
+      SCAN o
+      CORRELATED SCALAR SUBQUERY 10
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+      CORRELATED SCALAR SUBQUERY 12
+        SEARCH v USING COVERING INDEX poll_votes_by_option (message=? AND position=?)
+        SEARCH vj USING INTEGER PRIMARY KEY (rowid=?)
+        SCALAR SUBQUERY 11
+          SEARCH sync_state USING PRIMARY KEY (key=?)
+    CORRELATED SCALAR SUBQUERY 16
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH v EXISTS USING COVERING INDEX poll_votes_by_voter (voter=? AND message=?)
+    CORRELATED SCALAR SUBQUERY 18
+      SEARCH pv USING PRIMARY KEY (message=?)
+      SEARCH pj USING INTEGER PRIMARY KEY (rowid=?)
+      SCALAR SUBQUERY 17
+        SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/read.rs
 SELECT seq, at, type, key, chat FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2
@@ -581,6 +684,10 @@ SELECT n, instr(spans, '"t":"link"') > 0 OR instr(detail, '"link":') > 0 FROM me
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
 
 -- src/store/write/links.rs
+SELECT n, kind = 'poll' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
+
+-- src/store/write/links.rs
 SELECT 1 FROM links WHERE message = ?1
     SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
 
@@ -591,24 +698,30 @@ INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, des
         SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
         SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
         SCAN e VIRTUAL TABLE INDEX 1:
-        CORRELATED SCALAR SUBQUERY 18
+        CORRELATED SCALAR SUBQUERY 15
           SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
           SCAN e VIRTUAL TABLE INDEX 1:
-        CORRELATED SCALAR SUBQUERY 14
+        SCAN r VIRTUAL TABLE INDEX 1:
+        SCAN a VIRTUAL TABLE INDEX 1:
+        SCAN h VIRTUAL TABLE INDEX 1:
+        CORRELATED SCALAR SUBQUERY 11
           USE TEMP B-TREE FOR count(DISTINCT)
           SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
           SCAN e VIRTUAL TABLE INDEX 1:
-        CORRELATED SCALAR SUBQUERY 16
+        CORRELATED SCALAR SUBQUERY 13
           SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        CORRELATED SCALAR SUBQUERY 16
+        CORRELATED SCALAR SUBQUERY 13
           SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
       UNION ALL
         SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        CORRELATED SCALAR SUBQUERY 10
+        CORRELATED SCALAR SUBQUERY 7
           SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
           SCAN e VIRTUAL TABLE INDEX 1:
         SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        CORRELATED SCALAR SUBQUERY 8
+        SCAN r VIRTUAL TABLE INDEX 1:
+        SCAN a VIRTUAL TABLE INDEX 1:
+        SCAN h VIRTUAL TABLE INDEX 1:
+        CORRELATED SCALAR SUBQUERY 5
           USE TEMP B-TREE FOR count(DISTINCT)
           SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
           SCAN e VIRTUAL TABLE INDEX 1:
@@ -739,7 +852,7 @@ SELECT n, next_at FROM outbox WHERE state = 'unconfirmed'
     SCAN outbox
 
 -- src/store/write/outbox.rs
-SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke'))
+SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote'))
     SCAN outbox
 
 -- src/store/write/outbox.rs
@@ -760,12 +873,12 @@ SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2
     SEARCH tombstones USING PRIMARY KEY (chat=? AND id=?)
 
 -- src/store/write/outbox.rs
-SELECT o.target, o.effect, o.created_at, t.chat FROM outbox o LEFT JOIN messages t ON t.n = o.target WHERE o.n = ?1 AND o.kind IN ('reaction', 'edit', 'revoke', 'app_state')
+SELECT o.target, o.effect, o.created_at, t.chat FROM outbox o LEFT JOIN messages t ON t.n = o.target WHERE o.n = ?1 AND o.kind IN ('reaction', 'edit', 'revoke', 'vote', 'app_state')
     SEARCH o USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
 
 -- src/store/write/outbox.rs
-SELECT n FROM outbox WHERE id = ?1 AND kind IN ('reaction', 'edit', 'revoke')
+SELECT n FROM outbox WHERE id = ?1 AND kind IN ('reaction', 'edit', 'revoke', 'vote')
     SEARCH outbox USING INDEX outbox_by_id (id=?)
 
 -- src/store/write/outbox.rs
@@ -799,15 +912,15 @@ SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n
       SEARCH a USING INDEX outbox_by_target (target=?)
 
 -- src/store/write/outbox.rs
-DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke') AND created_at < ?1
+DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote') AND created_at < ?1
     SCAN outbox
 
 -- src/store/write/outbox.rs
-SELECT count(*) FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke')
+SELECT count(*) FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote')
     SCAN outbox
 
 -- src/store/write/outbox.rs
-DELETE FROM outbox WHERE n IN (SELECT n FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke') ORDER BY n LIMIT ?1)
+DELETE FROM outbox WHERE n IN (SELECT n FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote') ORDER BY n LIMIT ?1)
     SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
     LIST SUBQUERY 1
       SCAN outbox
@@ -927,6 +1040,66 @@ UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1
 SELECT n FROM chats WHERE id = ?1
     SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
 
+-- src/store/write/polls.rs
+INSERT INTO poll_options (message, position, name, hash) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (message, position) DO NOTHING
+
+-- src/store/write/polls.rs
+SELECT EXISTS (SELECT 1 FROM poll_options WHERE message = ?1)
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 1
+      SEARCH poll_options USING PRIMARY KEY (message=?)
+
+-- src/store/write/polls.rs
+SELECT at, id FROM poll_voters WHERE message = ?1 AND voter = ?2
+    SEARCH poll_voters USING PRIMARY KEY (message=? AND voter=?)
+
+-- src/store/write/polls.rs
+INSERT INTO poll_voters (message, voter, at, id) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (message, voter) DO UPDATE SET at = excluded.at, id = excluded.id
+
+-- src/store/write/polls.rs
+DELETE FROM poll_votes WHERE message = ?1 AND voter = ?2
+    SEARCH poll_votes USING INDEX poll_votes_by_voter (voter=? AND message=?)
+
+-- src/store/write/polls.rs
+INSERT INTO poll_votes (message, voter, position, at) SELECT message, ?2, position, ?3 FROM poll_options WHERE message = ?1 AND hash = ?4 ON CONFLICT (message, voter, position) DO NOTHING
+    SEARCH poll_options USING PRIMARY KEY (message=?)
+
+-- src/store/write/polls.rs
+SELECT count(*) FROM pending WHERE kind = 'vote'
+    SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
+
+-- src/store/write/polls.rs
+INSERT INTO quarantine (at, source, ref, error, raw) SELECT ?1, 'vote', chat || ' ' || target || ' ' || coalesce(sender, '') || ' ' || coalesce(effect ->> '$.id', n), 'more votes waited for polls jaw has not seen than it keeps in pending, so this one waits here for its poll', jsonb_object('chat', chat, 'target', target, 'at', at, 'sender', sender, 'mine', mine, 'effect', effect, 'raw', hex(raw)) FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = 'vote' ORDER BY n LIMIT ?2) ON CONFLICT (source, ref) DO NOTHING
+    SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
+    LIST SUBQUERY 1
+      SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
+
+-- src/store/write/polls.rs
+DELETE FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = 'vote' ORDER BY n LIMIT ?1)
+    SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
+    LIST SUBQUERY 1
+      SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
+
+-- src/store/write/polls.rs
+INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) SELECT raw ->> '$.chat', raw ->> '$.target', 'vote', raw ->> '$.at', unhex(raw ->> '$.raw'), raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect' FROM quarantine WHERE source = 'vote' AND ref >= ?1 AND ref < ?2
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
+
+-- src/store/write/polls.rs
+DELETE FROM quarantine WHERE source = 'vote' AND ref >= ?1 AND ref < ?2
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
+
+-- src/store/write/polls.rs
+SELECT chat, raw, detail FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/polls.rs
+UPDATE messages SET detail = json_set(detail, '$.poll.max', ?2), v = ?3 WHERE n = ?1 AND detail ->> '$.poll.max' IS NOT ?2
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/polls.rs
+UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
 -- src/store/write.rs
 SELECT coalesce(max(seq), 0) FROM events
     SEARCH events
@@ -1031,6 +1204,7 @@ INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM message
 -- src/store/write.rs
 DELETE FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH poll_voters USING PRIMARY KEY (message=?)
     SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
     SEARCH send_keys USING INDEX send_keys_by_message (message=?)
     SEARCH settled USING INTEGER PRIMARY KEY (rowid=?)
@@ -1093,6 +1267,7 @@ INSERT INTO people (v) VALUES (?1) RETURNING n
 
 -- src/store/write.rs
 INSERT INTO person_jids (jid, person) VALUES (?1, ?2) RETURNING n
+    SEARCH poll_voters USING INDEX poll_voters_by_voter (voter=?)
     SEARCH links USING COVERING INDEX links_by_sender (sender=?)
     SEARCH regroup USING INDEX regroup_by_member (member=?)
     SEARCH recipients USING COVERING INDEX recipients_by_member (member=?)
@@ -1297,8 +1472,25 @@ INSERT INTO receipts (message, recipient, delivered_at, read_at, played_at) SELE
     SEARCH receipts USING PRIMARY KEY (message=?)
 
 -- src/store/write.rs
-INSERT OR IGNORE INTO poll_votes (message, voter, position, at) SELECT ?1, voter, position, at FROM poll_votes WHERE message = ?2
-    SEARCH poll_votes USING PRIMARY KEY (message=?)
+INSERT OR IGNORE INTO poll_options (message, position, name, hash) SELECT ?1, position, name, hash FROM poll_options WHERE message = ?2
+    SEARCH poll_options USING PRIMARY KEY (message=?)
+
+-- src/store/write.rs
+DELETE FROM poll_votes WHERE message = ?1 AND voter IN (SELECT g.voter FROM poll_voters g LEFT JOIN poll_voters k ON k.message = ?1 AND k.voter = g.voter WHERE g.message = ?2 AND (k.voter IS NULL OR (g.at, g.id) > (k.at, k.id)))
+    SEARCH poll_votes USING PRIMARY KEY (message=? AND voter=?)
+    LIST SUBQUERY 1
+      SEARCH g USING PRIMARY KEY (message=?)
+      SEARCH k USING PRIMARY KEY (message=? AND voter=?) LEFT-JOIN
+
+-- src/store/write.rs
+INSERT OR IGNORE INTO poll_votes (message, voter, position, at) SELECT ?1, v.voter, v.position, v.at FROM poll_votes v JOIN poll_voters g ON g.message = v.message AND g.voter = v.voter LEFT JOIN poll_voters k ON k.message = ?1 AND k.voter = v.voter WHERE v.message = ?2 AND (k.voter IS NULL OR (g.at, g.id) > (k.at, k.id))
+    SEARCH v USING PRIMARY KEY (message=?)
+    SEARCH g USING PRIMARY KEY (message=? AND voter=?)
+    SEARCH k USING PRIMARY KEY (message=? AND voter=?) LEFT-JOIN
+
+-- src/store/write.rs
+INSERT INTO poll_voters (message, voter, at, id) SELECT ?1, voter, at, id FROM poll_voters WHERE message = ?2 ON CONFLICT (message, voter) DO UPDATE SET at = excluded.at, id = excluded.id WHERE (excluded.at, excluded.id) > (poll_voters.at, poll_voters.id)
+    SEARCH poll_voters USING PRIMARY KEY (message=?)
 
 -- src/store/write.rs
 DELETE FROM media WHERE message = ?1 AND path IS NULL AND variant IN (SELECT variant FROM media WHERE message = ?2 AND path IS NOT NULL)
@@ -1337,6 +1529,7 @@ UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, tex
 
 -- src/store/write.rs
 INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, reply, detail, forwarded, edited_at, deleted, expires_at, starred, view_once, raw, v, n, mentions_me, envelope, chat, id, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) RETURNING n
+    SEARCH poll_voters USING PRIMARY KEY (message=?)
     SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
     SEARCH send_keys USING INDEX send_keys_by_message (message=?)
     SEARCH settled USING INTEGER PRIMARY KEY (rowid=?)
@@ -1410,6 +1603,10 @@ UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
+SELECT kind = 'poll' AND NOT deleted FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
 UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -1473,6 +1670,49 @@ SELECT j.jid FROM person_jids j WHERE j.jid LIKE '%@lid' AND NOT EXISTS ( SELECT
     CORRELATED SCALAR SUBQUERY 1
       SEARCH k USING INDEX person_jids_by_person (person=?)
 
+-- trigger links_derived_insert
+INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description) SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links WHERE message = ?
+    COMPOUND QUERY
+      LEFT-MOST SUBQUERY
+        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+        SCAN e VIRTUAL TABLE INDEX 1:
+        CORRELATED SCALAR SUBQUERY 15
+          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+          SCAN e VIRTUAL TABLE INDEX 1:
+        SCAN r VIRTUAL TABLE INDEX 1:
+        SCAN a VIRTUAL TABLE INDEX 1:
+        SCAN h VIRTUAL TABLE INDEX 1:
+        CORRELATED SCALAR SUBQUERY 11
+          USE TEMP B-TREE FOR count(DISTINCT)
+          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+          SCAN e VIRTUAL TABLE INDEX 1:
+        CORRELATED SCALAR SUBQUERY 13
+          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+        CORRELATED SCALAR SUBQUERY 13
+          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+      UNION ALL
+        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+        CORRELATED SCALAR SUBQUERY 7
+          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+          SCAN e VIRTUAL TABLE INDEX 1:
+        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+        SCAN r VIRTUAL TABLE INDEX 1:
+        SCAN a VIRTUAL TABLE INDEX 1:
+        SCAN h VIRTUAL TABLE INDEX 1:
+        CORRELATED SCALAR SUBQUERY 5
+          USE TEMP B-TREE FOR count(DISTINCT)
+          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+          SCAN e VIRTUAL TABLE INDEX 1:
+
+-- trigger links_derived_insert
+INSERT INTO links_fts (rowid, text) SELECT t, text FROM message_link_text WHERE message = ? AND text IS NOT NULL
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 3
+      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+    CORRELATED SCALAR SUBQUERY 3
+      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+
 -- trigger messages_counted
 UPDATE chats SET message_count = message_count + 1 WHERE n = ?
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
@@ -1507,41 +1747,7 @@ DELETE FROM links_fts WHERE rowid = ?
     SCAN links_fts VIRTUAL TABLE INDEX 0:=
 
 -- trigger messages_links_insert
-INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description) SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links WHERE message = ?
-    COMPOUND QUERY
-      LEFT-MOST SUBQUERY
-        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        SCAN e VIRTUAL TABLE INDEX 1:
-        CORRELATED SCALAR SUBQUERY 18
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-          SCAN e VIRTUAL TABLE INDEX 1:
-        CORRELATED SCALAR SUBQUERY 14
-          USE TEMP B-TREE FOR count(DISTINCT)
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-          SCAN e VIRTUAL TABLE INDEX 1:
-        CORRELATED SCALAR SUBQUERY 16
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        CORRELATED SCALAR SUBQUERY 16
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-      UNION ALL
-        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        CORRELATED SCALAR SUBQUERY 10
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-          SCAN e VIRTUAL TABLE INDEX 1:
-        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        CORRELATED SCALAR SUBQUERY 8
-          USE TEMP B-TREE FOR count(DISTINCT)
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-          SCAN e VIRTUAL TABLE INDEX 1:
-
--- trigger messages_links_insert
-INSERT INTO links_fts (rowid, text) SELECT t, text FROM message_link_text WHERE message = ? AND text IS NOT NULL
-    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+INSERT INTO links_derived (message) VALUES (?)
 
 -- trigger messages_links_update
 DELETE FROM links WHERE message = ?
@@ -1552,41 +1758,7 @@ DELETE FROM links_fts WHERE rowid = ?
     SCAN links_fts VIRTUAL TABLE INDEX 0:=
 
 -- trigger messages_links_update
-INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description) SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links WHERE message = ?
-    COMPOUND QUERY
-      LEFT-MOST SUBQUERY
-        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        SCAN e VIRTUAL TABLE INDEX 1:
-        CORRELATED SCALAR SUBQUERY 18
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-          SCAN e VIRTUAL TABLE INDEX 1:
-        CORRELATED SCALAR SUBQUERY 14
-          USE TEMP B-TREE FOR count(DISTINCT)
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-          SCAN e VIRTUAL TABLE INDEX 1:
-        CORRELATED SCALAR SUBQUERY 16
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        CORRELATED SCALAR SUBQUERY 16
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-      UNION ALL
-        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        CORRELATED SCALAR SUBQUERY 10
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-          SCAN e VIRTUAL TABLE INDEX 1:
-        SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-        CORRELATED SCALAR SUBQUERY 8
-          USE TEMP B-TREE FOR count(DISTINCT)
-          SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-          SCAN e VIRTUAL TABLE INDEX 1:
-
--- trigger messages_links_update
-INSERT INTO links_fts (rowid, text) SELECT t, text FROM message_link_text WHERE message = ? AND text IS NOT NULL
-    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+INSERT INTO links_derived (message) VALUES (?)
 
 -- trigger messages_moved
 UPDATE chats SET message_count = message_count - 1 WHERE n = ?

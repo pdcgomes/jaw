@@ -166,13 +166,13 @@ fn key_of(target: &Target) -> MessageKey {
 }
 
 /// Whether an interface's key named an action already, which is then done.
-async fn already(inner: &Inner, key: &Option<String>) -> Result<bool, Error> {
+pub(super) async fn already(inner: &Inner, key: &Option<String>) -> Result<bool, Error> {
     let Some(key) = key.clone() else { return Ok(false) };
     Ok(query(inner, move |db| keyed(db, &key)).await?.is_some())
 }
 
 /// Commits an action's step, synced, and queues its outbox row after its chat's earlier sends.
-async fn enqueue(inner: &Arc<Inner>, step: Step, written: Written, what: &str) -> Result<Value, Error> {
+pub(super) async fn enqueue(inner: &Arc<Inner>, step: Step, written: Written, what: &str) -> Result<Value, Error> {
     let _order = inner.enqueue.lock().await;
     durably(inner, vec![Change::Outbox(step)], what).await?;
     match written.take() {
@@ -395,12 +395,13 @@ async fn delete_for_me(inner: &Arc<Inner>, target: &Target, key: Option<String>)
     enqueue(inner, step, written, "delete it for you").await
 }
 
-/// Says to every interface that a reaction or an edit wasn't sent, its message having been deleted
-/// for everyone before it went.
+/// Says to every interface that a reaction, an edit or a vote wasn't sent, its message having been
+/// deleted for everyone before it went.
 pub(super) fn withdrawn(inner: &Inner, kind: &str) {
     let what = match kind {
         "reaction" => "Your reaction",
         "edit" => "Your edit",
+        "vote" => "Your vote",
         _ => return,
     };
     let notice = Notice { text: format!("{what} wasn't sent: the message was deleted for everyone"), tone: Tone::Info };
@@ -415,6 +416,7 @@ pub(super) fn refused(inner: &Inner, kind: &str, why: &str) {
         "reaction" => "your reaction",
         "edit" => "your edit",
         "revoke" => "deleting your message for everyone",
+        "vote" => "your vote",
         "app_state" => "telling your other devices you deleted a message",
         _ => return,
     };

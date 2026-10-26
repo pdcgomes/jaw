@@ -294,6 +294,7 @@ message Command {
     Presence presence = 16;
     OnWhatsApp on_whatsapp = 17;
     AppStatePatch app_state_patch = 18;
+    PollVote poll_vote = 19;
   }
 }
 
@@ -304,6 +305,23 @@ message Send {
   string id = 2;
   // WAWebProtobufsE2E.Message.
   bytes raw = 3;
+}
+
+// Votes in a poll, as a message with the ID jawd made for the vote, which WhatsApp then knows it by;
+// answered with Sent once the server has it. The engine encrypts the vote with the poll's secret,
+// which whatsmeow keeps for every poll it has received or sent, and stamps it with `at_ms`, so a
+// vote sent again says the same; sending the same ID again is the same vote to WhatsApp.
+message PollVote {
+  string chat = 1;
+  // The vote's own ID.
+  string id = 2;
+  // The poll's ID, and who sent it as WhatsApp named them; empty when it's yours.
+  string poll_id = 3;
+  string poll_sender = 4;
+  bool poll_from_me = 5;
+  // SHA-256 of each chosen option's name, as a vote names an option; none takes a vote back.
+  repeated bytes options = 6;
+  int64 at_ms = 7;
 }
 
 // Tells WhatsApp these messages from `sender` in `chat` are read; whatsmeow makes it read-self when
