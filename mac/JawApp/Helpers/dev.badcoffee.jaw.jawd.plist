@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    jawd as the one LaunchAgent, under the label `jaw agent install` uses, so there can't be two
+    agents. It ships at jaw.app/Contents/Library/LaunchAgents/, and the app registers it with
+    SMAppService.agent(plistName:). BundleProgram is relative to the app, so moving the app keeps
+    it working. jawd is restarted 10 s after it stops and given 10 s to stop, as jaw agent's is, and
+    finds jaw-engine beside it, and ffmpeg on the PATH.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.badcoffee.jaw.jawd</string>
+    <key>BundleProgram</key>
+    <string>Contents/Helpers/jawd</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ExitTimeOut</key>
+    <integer>10</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>dev.badcoffee.jaw</string>
+    </array>
+</dict>
+</plist>

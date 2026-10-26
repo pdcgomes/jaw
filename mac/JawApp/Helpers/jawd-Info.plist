@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Embedded in jawd's binary (__TEXT,__info_plist) by `make mac`, so macOS asks for the microphone
+    in jaw's words, once, for a jawd signed with a stable identity.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>dev.badcoffee.jaw.jawd</string>
+    <key>CFBundleName</key>
+    <string>jawd</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>jaw records the voice messages you send.</string>
+</dict>
+</plist>

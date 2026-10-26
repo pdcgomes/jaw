@@ -1,0 +1,61 @@
+#!/bin/sh
+# `make mac`: jaw.app with jawd, jaw-engine and the terminal inside it, each signed.
+#
+# jawd and jaw are built for release here, since the build Mac has no Rust or Go, jawd with its
+# Info.plist embedded so macOS asks for the microphone in jaw's words; the app is built in Release on
+# the build Mac (here when it doesn't answer) and comes back to mac/build/release/jaw.app. The three
+# helpers go into Contents/Helpers, jawd's LaunchAgent into Contents/Library/LaunchAgents, and
+# everything is signed from the inside out with the hardened runtime: with JAW_SIGN_IDENTITY, else
+# the team's Developer ID Application identity by its SHA-1, else ad hoc, which runs here only.
+set -eu
+repo="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$repo"
+team="${JAW_TEAM_ID:-3JP75Z3F98}"
+out="mac/build/release"
+app="$out/jaw.app"
+
+echo "==> jawd, jaw and jaw-engine for release"
+cargo rustc --release -p jawd --bin jawd --quiet -- \
+    -C link-arg=-Wl,-sectcreate,__TEXT,__info_plist,"$repo/mac/JawApp/Helpers/jawd-Info.plist"
+cargo build --release -p jaw --bin jaw --quiet
+(cd engine && go build -trimpath -o ../target/engine/jaw-engine ./cmd/jaw-engine)
+
+echo "==> jaw.app in Release"
+rm -rf "$app"
+mkdir -p "$out"
+if ssh -o BatchMode=yes -o ConnectTimeout=5 "${JAW_BUILD_MAC:-build-mac}" true 2>/dev/null; then
+    mac/scripts/build-mac release "$out"
+else
+    echo "==> the build Mac doesn't answer; building here"
+    (cd mac && mise exec -- tuist generate --no-open >/dev/null &&
+        xcodebuild build -workspace Jaw.xcworkspace -scheme jaw -configuration Release \
+            -destination 'platform=macOS,arch=arm64' -derivedDataPath build/DerivedData-release -quiet)
+    ditto mac/build/DerivedData-release/Build/Products/Release/jaw.app "$app"
+fi
+
+echo "==> the helpers and jawd's agent"
+mkdir -p "$app/Contents/Helpers" "$app/Contents/Library/LaunchAgents"
+cp target/release/jawd target/release/jaw target/engine/jaw-engine "$app/Contents/Helpers/"
+cp mac/JawApp/Helpers/dev.badcoffee.jaw.jawd.plist "$app/Contents/Library/LaunchAgents/"
+jawd_version="$("$app/Contents/Helpers/jawd" --version | awk '{print $2}')"
+/usr/libexec/PlistBuddy -c "Add :JawdVersion string $jawd_version" "$app/Contents/Info.plist" 2>/dev/null ||
+    /usr/libexec/PlistBuddy -c "Set :JawdVersion $jawd_version" "$app/Contents/Info.plist"
+
+identity="${JAW_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null |
+    awk -v team="($team)\"" '/"Developer ID Application:/ && index($0, team) { print $2; exit }')}"
+if [ -z "$identity" ]; then
+    identity="-"
+    echo "==> no Developer ID Application identity for team $team: signing ad hoc, for this Mac only"
+fi
+flags="--force --options runtime --timestamp"
+[ "$identity" = "-" ] && flags="--force --options runtime"
+echo "==> signing with $identity"
+# Inside out: the helpers, the frameworks, then the app, keeping the app's own entitlements.
+codesign $flags --sign "$identity" --entitlements mac/JawApp/Helpers/jawd.entitlements "$app/Contents/Helpers/jawd"
+codesign $flags --sign "$identity" "$app/Contents/Helpers/jaw-engine" "$app/Contents/Helpers/jaw"
+for framework in "$app"/Contents/Frameworks/*.framework; do
+    [ -e "$framework" ] && codesign $flags --sign "$identity" "$framework"
+done
+codesign $flags --sign "$identity" --preserve-metadata=entitlements,requirements,flags "$app"
+codesign --verify --deep --strict "$app"
+echo "==> $app ($(du -sh "$app" | cut -f1)), jawd $jawd_version"

@@ -7,6 +7,7 @@
 #   mac/scripts/build-mac build [<Scheme>]                       # jaw by default
 #   mac/scripts/build-mac snapshot <out.png> [app options]       # jaw.app --demo drawn into a picture
 #   mac/scripts/build-mac references                             # the snapshot tests' pictures, back here
+#   mac/scripts/build-mac release <folder>                       # jaw.app in Release, unsigned, back here
 #
 # The build Mac has no Rust or Go, so jawd is built here (cargo build -p jawd) and its binary goes
 # with the checkout, for the live tests and --demo. When the build Mac doesn't answer, the job runs here.
@@ -50,6 +51,12 @@ case "$what" in
         out="$1"; shift
         run "scripts/check build jaw >/dev/null; rm -rf \\\$TMPDIR/jaw-mac-demo; build/DerivedData/Build/Products/Debug/jaw.app/Contents/MacOS/jaw --demo --snapshot /tmp/jaw-mac-snapshot.png $* > /tmp/jaw-mac-snapshot.log 2>&1; cat /tmp/jaw-mac-snapshot.log | tail -3"
         scp -q -o BatchMode=yes "$host:/tmp/jaw-mac-snapshot.png" "$out" && echo "==> $out"
+        ;;
+    release)
+        out="$1"
+        run "xcodebuild build -workspace Jaw.xcworkspace -scheme jaw -configuration Release -destination 'platform=macOS,arch=arm64' -derivedDataPath build/DerivedData-release -quiet CODE_SIGN_IDENTITY=- 2>&1 | grep -E 'error|BUILD' || true"
+        mkdir -p "$out"
+        rsync -a --delete -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/DerivedData-release/Build/Products/Release/jaw.app/" "$out/jaw.app/"
         ;;
     references)
         rsync -a -e "ssh -o BatchMode=yes" "$host:$remote/mac/Tests/JawUITests/References/" "$here/mac/Tests/JawUITests/References/"

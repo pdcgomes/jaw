@@ -161,6 +161,11 @@ fn domain() -> String {
 }
 
 fn install(places: &Places) -> Result<()> {
+    if let Some(app) = app_agent() {
+        println!("jaw.app starts jawd at login already ({app}), and jaw uses that jawd, so nothing is installed.");
+        println!("It's in System Settings › General › Login Items, as jaw.");
+        return Ok(());
+    }
     let jawd = jawd()?;
     let elsewhere = answering(places).is_some() && !loaded();
     let path = places.write(&jawd)?;
@@ -195,6 +200,11 @@ fn install(places: &Places) -> Result<()> {
 }
 
 fn uninstall(places: &Places) -> Result<()> {
+    if let Some(app) = app_agent() {
+        println!("jawd is jaw.app's ({app}): it stops starting at login once it's turned off in System Settings ›");
+        println!("General › Login Items, or once jaw.app is deleted.");
+        return Ok(());
+    }
     if cfg!(target_os = "macos") {
         let _ = Command::new("/bin/launchctl").args(["bootout", &format!("{}/{LABEL}", domain())]).output();
     } else {
@@ -216,10 +226,30 @@ pub struct Status {
     pub loaded: bool,
     /// jawd's version, if it answers.
     pub answering: Option<String>,
+    /// The program of the agent jaw.app registered under the same label, if it's the one loaded.
+    pub app: Option<String>,
 }
 
 fn status(places: &Places) -> Status {
-    Status { installed: places.agent().exists(), loaded: loaded(), answering: answering(places) }
+    Status { installed: places.agent().exists(), loaded: loaded(), answering: answering(places), app: app_agent() }
+}
+
+/// The jawd inside jaw.app, when the agent loaded under jaw's label is the one the app registered.
+fn app_agent() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = Command::new("/bin/launchctl").args(["print", &format!("{}/{LABEL}", domain())]).output().ok()?;
+    out.status.success().then(|| app_program(&String::from_utf8_lossy(&out.stdout))).flatten()
+}
+
+/// The program `launchctl print` names, when it's a jawd inside an app's bundle.
+fn app_program(print: &str) -> Option<String> {
+    print
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("program = "))
+        .find(|program| program.contains(".app/Contents/Helpers/jawd"))
+        .map(str::to_string)
 }
 
 /// Whether launchd or systemd has the agent loaded.
@@ -243,6 +273,9 @@ fn answering(places: &Places) -> Option<String> {
 pub fn describe(places: &Places, status: &Status) -> String {
     let agent = places.agent();
     let mut lines = vec![match (status.installed, status.loaded) {
+        _ if status.app.is_some() => {
+            format!("agent     jaw.app's, loaded: {}", status.app.as_deref().unwrap_or_default())
+        }
         (true, true) => format!("agent     installed and loaded: {}", agent.display()),
         (true, false) => format!("agent     installed but not loaded: {}; jaw agent install loads it", agent.display()),
         (false, true) => "agent     loaded, but its file is gone; jaw agent uninstall unloads it".to_string(),
@@ -341,11 +374,27 @@ mod tests {
     fn status_says_what_to_do_next() {
         let dir = Scratch::new();
         let places = places(dir.path());
-        let not = describe(&places, &Status { installed: false, loaded: false, answering: None });
+        let not = describe(&places, &Status { installed: false, loaded: false, answering: None, app: None });
         assert!(not.contains("not installed; jaw agent install") && not.contains("not answering on"), "{not}");
-        let running = describe(&places, &Status { installed: true, loaded: true, answering: Some("0.1.0".into()) });
+        let running =
+            describe(&places, &Status { installed: true, loaded: true, answering: Some("0.1.0".into()), app: None });
         assert!(running.contains("installed and loaded") && running.contains("0.1.0, answering\n"), "{running}");
-        let other = describe(&places, &Status { installed: false, loaded: false, answering: Some("0.1.0".into()) });
+        let other =
+            describe(&places, &Status { installed: false, loaded: false, answering: Some("0.1.0".into()), app: None });
         assert!(other.contains("started some other way"), "{other}");
+        let app = "/Applications/jaw.app/Contents/Helpers/jawd".to_string();
+        let theirs = describe(
+            &places,
+            &Status { installed: false, loaded: true, answering: Some("0.1.0".into()), app: Some(app) },
+        );
+        assert!(theirs.contains("jaw.app's, loaded: /Applications/jaw.app/Contents/Helpers/jawd"), "{theirs}");
+    }
+
+    #[test]
+    fn the_apps_agent_is_told_by_the_jawd_it_runs() {
+        let print = "gui/501/dev.badcoffee.jaw.jawd = {\n\tactive count = 1\n\tprogram = /Applications/jaw.app/Contents/Helpers/jawd\n}";
+        assert_eq!(app_program(print).as_deref(), Some("/Applications/jaw.app/Contents/Helpers/jawd"));
+        let terminal = "gui/501/dev.badcoffee.jaw.jawd = {\n\tprogram = /Users/u/src/jaw/target/release/jawd\n}";
+        assert_eq!(app_program(terminal), None, "the terminal's own agent isn't the app's");
     }
 }

@@ -4,7 +4,7 @@ GO ?= go
 CARGO ?= cargo
 BUF := github.com/bufbuild/buf/cmd/buf@v1.74.0
 
-.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit hooks perf clean
+.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit hooks perf clean mac mac-test
 
 build: engine rust
 
@@ -55,6 +55,17 @@ check-audit:
 # The same check before every push to main, from every worktree.
 hooks:
 	install -m 755 scripts/pre-push "$$(git rev-parse --git-common-dir)/hooks/pre-push"
+
+# jaw for the Mac (mac/): the app with jawd, jaw-engine and jaw inside it, each signed. The app builds
+# and tests on the build Mac when it answers (mac/scripts/build-mac), and here when it doesn't.
+mac:
+	mac/scripts/bundle
+
+mac-test:
+	$(CARGO) build -p jawd --bin jawd
+	mac/scripts/build-mac test JawKit
+	mac/scripts/build-mac test JawThemes
+	mac/scripts/build-mac test JawUITests
 
 clean:
 	$(CARGO) clean
