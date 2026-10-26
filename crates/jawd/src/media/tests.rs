@@ -23,10 +23,13 @@ const RUI: &str = "351913333333@s.whatsapp.net";
 
 /// jawd's media, store and sync on a folder of their own, with the demo engine.
 struct Rig {
-    home: tempfile::TempDir,
+    home: Arc<tempfile::TempDir>,
     store: Store,
     world: Arc<World>,
     media: Media,
+    supervisor: Supervisor,
+    live: crate::sync::Shared,
+    pushes: broadcast::Sender<jaw_proto::Push>,
 }
 
 fn quick() -> Config {
@@ -35,18 +38,32 @@ fn quick() -> Config {
         retry_first: Duration::from_millis(50),
         retry_most: Duration::from_millis(200),
         keep_free: 0,
+        settle_every: Duration::from_secs(3600),
         ..Config::default()
     }
 }
 
 async fn rig(config: Config) -> Rig {
-    let home = tempfile::tempdir().unwrap();
+    rig_in(Arc::new(tempfile::tempdir().unwrap()), config).await
+}
+
+/// A rig on jaw's folder `home`, as a jawd started on it.
+async fn rig_in(home: Arc<tempfile::TempDir>, config: Config) -> Rig {
     let store = Store::open(home.path()).unwrap();
     crate::sync::running(&store).await.unwrap();
     rig_on(home, store, config).await
 }
 
-async fn rig_on(home: tempfile::TempDir, store: Store, config: Config) -> Rig {
+/// Runs `jawd` on a runtime of its own, then ends it with everything it started, as a jawd that
+/// stops, so another can start on the same folder.
+fn as_a_jawd<T>(jawd: impl std::future::Future<Output = T>) -> T {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let out = runtime.block_on(jawd);
+    runtime.shutdown_timeout(Duration::from_secs(5));
+    out
+}
+
+async fn rig_on(home: Arc<tempfile::TempDir>, store: Store, config: Config) -> Rig {
     let engine = DemoEngine::with(vec![demo::connected()]);
     let world = engine.world();
     let (events, incoming) = mpsc::channel(1024);
@@ -64,17 +81,37 @@ async fn rig_on(home: tempfile::TempDir, store: Store, config: Config) -> Rig {
     let sync = crate::sync::run(
         incoming,
         store.clone(),
-        live,
-        pushes,
-        Some(supervisor),
+        live.clone(),
+        pushes.clone(),
+        Some(supervisor.clone()),
         home.path().to_path_buf(),
         Default::default(),
     );
     tokio::spawn(sync);
-    Rig { home, store, world, media }
+    Rig { home, store, world, media, supervisor, live, pushes }
 }
 
 impl Rig {
+    /// jawd's socket in the rig's folder, served as jawd serves it, with windows and media.
+    fn serve(&self) -> std::path::PathBuf {
+        let feed = crate::feed::Feed::start(self.store.clone(), Arc::new(|| false), crate::feed::Timing::default());
+        let socket = jaw_proto::local::socket(self.home.path());
+        let listener = crate::sock::listen(&socket).unwrap();
+        let state = crate::state::State::new(
+            self.home.path(),
+            Ok(self.supervisor.clone()),
+            self.media.lanes(),
+            self.live.clone(),
+            Some(self.store.clone()),
+            self.pushes.clone(),
+        )
+        .unwrap()
+        .with_feed(feed)
+        .with_media(self.media.clone());
+        tokio::spawn(crate::sock::serve(Arc::new(state), listener));
+        socket
+    }
+
     /// Message `id` in `chat`, as messages.watch sends it.
     async fn row(&self, chat: &'static str, id: &str) -> Value {
         let id = id.to_string();
@@ -177,6 +214,30 @@ async fn a_photo_arriving_shows_its_thumbnail_then_its_file_and_previews_each_wh
             .sum::<u64>();
     assert_eq!((status.cache_files, status.cache_bytes), (1, on_disk), "the cache counts every byte of it");
     assert_eq!(rig.world.downloads(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_downloaded_file_is_named_in_a_synced_commit_and_its_previews_only_after_it() {
+    // Its row waits long enough to share a commit that its previews are drawn well before it goes.
+    let rig = rig(Config { naming_within: Duration::from_secs(2), ..quick() }).await;
+    rig.world.gate_downloads(true);
+    rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0NAMED").await;
+    rig.until(ANA, "3EB0NAMED", "half downloaded", half).await;
+    let synced = rig.store.storage().synced_commits;
+    rig.world.gate_downloads(false);
+    // The file's row waits a moment to share a synced commit, and its previews are drawn meanwhile:
+    // no reader ever sees them before the file.
+    let began = std::time::Instant::now();
+    loop {
+        let row = rig.row(ANA, "3EB0NAMED").await;
+        assert!(local(&row) || row["media"]["previews"].is_null(), "previews named before their file: {row}");
+        if previewed(&row) {
+            break;
+        }
+        assert!(began.elapsed() < Duration::from_secs(30), "never drawn: {row}");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(rig.store.storage().synced_commits > synced, "the file's row reached the disk in a synced commit");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -466,6 +527,53 @@ async fn the_cache_drops_what_was_used_longest_ago_but_never_a_starred_or_unsent
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_cache_keeps_to_its_size_past_the_starred_files_it_cant_drop() {
+    let rig = rig(Config { cache_bytes: 1_000_000, ..quick() }).await;
+    let db = Connection::open(rig.home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute("INSERT INTO chats (id, kind, v) VALUES (?1, 'direct', 1)", [ANA]).unwrap();
+    // Four starred photos used longest ago, 1.2 MB between them, more than the cache holds; then
+    // ten others of 50 kB.
+    for n in 0..14u8 {
+        let (starred, bytes) = if n < 4 { (true, 300_000) } else { (false, 50_000) };
+        let sha256 = vec![n + 1; 32];
+        let path = format!("{FILES}/{}.jpg", to_hex(&sha256));
+        std::fs::write(rig.home.path().join(&path), vec![0u8; bytes]).unwrap();
+        db.execute(
+            "INSERT INTO messages (chat, id, at, t, kind, starred, v)
+            VALUES ((SELECT n FROM chats WHERE id = ?1), ?2, ?3, ?3, 'image', ?4, 1)",
+            rusqlite::params![ANA, format!("3EB0KEPT{n}"), i64::from(n), starred],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO media (message, variant, keys, sha256) VALUES (last_insert_rowid(), 'sd', 'image', ?1)",
+            [&sha256],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO media_files (sha256, path, bytes, used_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![sha256, path, bytes as i64, i64::from(n)],
+        )
+        .unwrap();
+    }
+    let mut status = rig.media.status();
+    for _ in 0..250 {
+        rig.media.inner.clean.notify_one();
+        status = rig.media.status();
+        if status.evicted >= 10 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        (status.evicted, status.cache_files, status.cache_bytes),
+        (10, 4, 1_200_000),
+        "every file it may drop goes, though the starred ones it can't come first and fill it alone"
+    );
+    assert_eq!(std::fs::read_dir(rig.home.path().join(FILES)).unwrap().count(), 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_file_goes_only_once_a_synced_commit_has_stopped_naming_it() {
     let rig = rig(quick()).await;
     let lake = Picture::lake(640, 480);
@@ -483,7 +591,7 @@ async fn a_file_goes_only_once_a_synced_commit_has_stopped_naming_it() {
     assert!(file.exists(), "the file stays while the commit that stops naming it can't be made");
     let synced = rig.store.storage().synced_commits;
     holder.execute_batch("COMMIT").unwrap();
-    assert_eq!(dropping.await.unwrap().unwrap(), 1);
+    assert_eq!(dropping.await.unwrap().unwrap().0, 1);
     assert!(!file.exists());
     assert!(rig.store.storage().synced_commits > synced);
     let row = rig.row(ANA, "3EB0DROP").await;
@@ -538,27 +646,105 @@ async fn a_message_deleted_takes_its_file_from_the_cache_unless_another_names_it
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_preview_left_empty_by_a_power_cut_reads_as_missing_and_is_made_again() {
-    let rig = rig(quick()).await;
-    let lake = Picture::lake(640, 480);
-    rig.photo(&lake, ANA, ANA, "3EB0CUT").await;
-    let row = rig.until(ANA, "3EB0CUT", "its previews", previewed).await;
-    let (small, thumbnail) = (rig.file(&row["media"]["previews"]["256"]), rig.file(&row["media"]["thumbnail"]));
+#[test]
+fn a_preview_left_empty_by_a_power_cut_is_made_again_at_the_next_start() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let drawn = |row: &Value| previewed(row) && row["media"]["thumbnail"].is_string();
+    // A jawd draws a photo's previews and thumbnail, and stops before they're sent to the drive.
+    let (small, thumbnail) = as_a_jawd(async {
+        let rig = rig_in(home.clone(), quick()).await;
+        rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0CUT").await;
+        let row = rig.until(ANA, "3EB0CUT", "its previews", drawn).await;
+        (rig.file(&row["media"]["previews"]["256"]), rig.file(&row["media"]["thumbnail"]))
+    });
     // As a power cut leaves files put in place without waiting for the disk.
     std::fs::write(&small, b"").unwrap();
     let cut = std::fs::read(&thumbnail).unwrap();
     std::fs::write(&thumbnail, &cut[..cut.len() / 2]).unwrap();
-    rig.store.files().forget_whole();
-    let row = rig.row(ANA, "3EB0CUT").await;
-    assert!(row["media"]["previews"].is_null(), "an empty preview reads as missing: {row}");
-    assert!(row["media"]["thumbnail"].is_null(), "and a thumbnail cut short: {row}");
-    let row =
-        rig.until(ANA, "3EB0CUT", "made again", |row| previewed(row) && row["media"]["thumbnail"].is_string()).await;
-    assert!(jaw_media::whole_preview(&rig.file(&row["media"]["previews"]["256"])));
-    assert!(jaw_media::whole_preview(&rig.file(&row["media"]["thumbnail"])));
-    assert_eq!(rig.media.status().remade, 2);
-    assert_eq!(rig.world.downloads(), 1, "made from the file in the cache, not downloaded again");
+    as_a_jawd(async {
+        let rig = rig_in(home.clone(), quick()).await;
+        let row = rig.until(ANA, "3EB0CUT", "made again", drawn).await;
+        assert!(jaw_media::whole_preview(&rig.file(&row["media"]["previews"]["256"])));
+        assert!(jaw_media::whole_preview(&rig.file(&row["media"]["thumbnail"])));
+        assert_eq!(rig.media.status().remade, 2, "the empty preview and the thumbnail cut short");
+        assert_eq!(rig.world.downloads(), 0, "made from the file in the cache, not downloaded again");
+    });
+}
+
+#[test]
+fn previews_settled_before_a_stop_are_shown_at_the_next_start_without_being_checked() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let drawn = |row: &Value| previewed(row) && row["media"]["thumbnail"].is_string();
+    let small = as_a_jawd(async {
+        let rig = rig_in(home.clone(), quick()).await;
+        rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0SETTLED").await;
+        let row = rig.until(ANA, "3EB0SETTLED", "its previews", drawn).await;
+        let synced = rig.store.storage().synced_commits;
+        rig.media.settle().await.unwrap();
+        let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+        assert_eq!((settled, made), (2, 2), "the previews and the thumbnail, numbered 1 and 2, are settled");
+        assert!(rig.store.storage().synced_commits > synced, "noted in a synced commit");
+        rig.file(&row["media"]["previews"]["256"])
+    });
+    // Only a power cut before they settled could break them; this one was broken by hand, which no
+    // check looks for, so the next start shows it as it is, never reading it on the way.
+    std::fs::write(&small, b"").unwrap();
+    as_a_jawd(async {
+        let rig = rig_in(home.clone(), quick()).await;
+        assert!(drawn(&rig.row(ANA, "3EB0SETTLED").await), "shown at once");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(rig.media.status().remade, 0, "and never checked");
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_read_path_shows_previews_a_power_cut_may_have_broken_only_once_the_check_has_passed_them() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute("INSERT INTO chats (id, kind, v) VALUES (?1, 'direct', 1)", [ANA]).unwrap();
+    // Files numbered 1 (settled), 5 (past it, from before the start) and 9 (made since); none is on
+    // disk, as the read path never looks.
+    for (n, made) in [(1u8, 1i64), (2, 5), (3, 9)] {
+        let sha256 = vec![n; 32];
+        db.execute(
+            "INSERT INTO messages (chat, id, at, t, kind, detail, v)
+            VALUES ((SELECT n FROM chats WHERE id = ?1), ?2, ?3, ?3, 'image', '{\"media\":{}}', 1)",
+            rusqlite::params![ANA, format!("3EB0MADE{made}"), made],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO media (message, variant, keys, sha256) VALUES (last_insert_rowid(), 'sd', 'image', ?1)",
+            [&sha256],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO media_files (sha256, path, small, large, thumbnail, used_at, made)
+            VALUES (?1, 'media/files/f.jpg', 'media/previews/s.jpg', 'media/previews/l.jpg', 'media/previews/t.jpg', 1, ?2)",
+            rusqlite::params![sha256, made],
+        )
+        .unwrap();
+    }
+    store.files().suspect(1, 7);
+    let shown = |id: &'static str| {
+        let store = store.clone();
+        async move {
+            let row = store
+                .reads()
+                .query(Priority::Interactive, move |db| Ok(read::message(db, ANA, id)?.map(|(row, _)| row)))
+                .await
+                .unwrap()
+                .unwrap();
+            let row = serde_json::to_value(crate::feed::message_row(row)).unwrap();
+            (row["media"]["previews"].is_object(), row["media"]["thumbnail"].is_string())
+        }
+    };
+    assert_eq!(shown("3EB0MADE1").await, (true, true), "settled before the start");
+    assert_eq!(shown("3EB0MADE5").await, (false, false), "not yet checked");
+    assert_eq!(shown("3EB0MADE9").await, (true, true), "made since the start");
+    store.files().checked(5);
+    assert_eq!(shown("3EB0MADE5").await, (true, true), "once the check has passed it");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -586,7 +772,7 @@ async fn a_start_removes_partial_files_and_files_no_row_names_and_takes_up_what_
         .await
         .unwrap();
     store.apply(Lane::Live, vec![Change::Media(Step::Downloading { message: n, variant: "sd" })]).await.unwrap();
-    let rig = rig_on(home, store, quick()).await;
+    let rig = rig_on(Arc::new(home), store, quick()).await;
     rig.world.serve(&lake.direct_path, lake.data.clone());
     assert!(!rig.home.path().join(&partial).exists(), "the partial file is removed before anything starts");
     assert_eq!(rig.media.status().partial_removed, 1);
@@ -886,16 +1072,284 @@ async fn the_caches_size_and_its_unnamed_files_are_kept_by_its_triggers() {
     assert_eq!(state(&db), (135, 1, 0), "named again, it doesn't");
     db.execute_batch("UPDATE media_files SET previews_bytes = NULL; DELETE FROM media_files").unwrap();
     assert_eq!(state(&db), (0, 0, 0));
+    db.execute_batch(
+        "INSERT INTO media_files (sha256, path, bytes, used_at) VALUES (randomblob(32), 'media/files/b.jpg', 7, 1)",
+    )
+    .unwrap();
+    assert_eq!(state(&db), (7, 1, 1), "a file's row written when no copy names it waits to go too");
     drop(store);
 }
 
+/// `event`, a photo, without the thumbnail its message carries, as a photo whose thumbnail hasn't
+/// been drawn yet is to the cache.
+fn without_thumbnail(mut event: pb::Event) -> pb::Event {
+    if let Some(pb::event::Kind::Message(message)) = event.kind.as_mut() {
+        let mut raw = e2e::Message::decode(message.raw.as_slice()).unwrap();
+        if let Some(image) = raw.image_message.as_mut() {
+            image.jpeg_thumbnail = None;
+        }
+        message.raw = raw.encode_to_vec();
+    }
+    event
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_media_row_from_before_migration_11_is_kept() {
+async fn a_message_deleted_while_its_file_downloads_leaves_nothing_of_it_in_the_cache() {
+    let rig = rig(quick()).await;
+    rig.world.gate_downloads(true);
+    let (revoked, deleted) = (Picture::lake(640, 480), Picture::lake(320, 240));
+    for (picture, id) in [(&revoked, "3EB0REVOKED"), (&deleted, "3EB0DELETED")] {
+        rig.world.deliver(without_thumbnail(rig.world.photo(picture, ANA, ANA, id, now_ms(), ""))).await.unwrap();
+        rig.until(ANA, id, "half downloaded", half).await;
+    }
+    let revoke = Change::Amend(crate::store::Amend {
+        chat: ANA.into(),
+        target: "3EB0REVOKED".into(),
+        sender: Some(ANA.into()),
+        mine: false,
+        at: now_ms(),
+        what: crate::store::Amendment::Revoke,
+        raw: None,
+    });
+    let deleted_for_me = Change::DeleteMessage { chat: ANA.into(), id: "3EB0DELETED".into() };
+    rig.store.apply(Lane::Live, vec![revoke, deleted_for_me]).await.unwrap();
+    rig.world.gate_downloads(false);
+    let count = |folder: &str| std::fs::read_dir(rig.home.path().join(folder)).unwrap().count() as i64;
+    // Their partial files stay in the cache's folder until each download ends and puts its file
+    // in place, so the folder is empty only once both have, and their files have gone.
+    let mut left = (0, 0, 0, 0, 0);
+    for _ in 0..500 {
+        rig.media.inner.clean.notify_one();
+        let rows: (i64, i64, i64) = rig
+            .query(|db| {
+                Ok(db.query_row(
+                    "SELECT (SELECT count(*) FROM media), (SELECT count(*) FROM media_files),
+                        (SELECT count(*) FROM media_drop)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .await;
+        left = (rows.0, rows.1, rows.2, count(FILES), count(PREVIEWS));
+        if left == (0, 0, 0, 0, 0) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        left,
+        (0, 0, 0, 0, 0),
+        "copies, files' rows, files waiting to go, files and previews: nothing of either is kept"
+    );
+    assert_eq!(rig.media.status().cache_bytes, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_an_interface_asks_of_media_reaches_the_disk_before_it_is_answered() {
+    let rig = rig(quick()).await;
+    rig.world.gate_downloads(true);
+    let (asked, saved) = (Picture::lake(640, 480), Picture::lake(320, 240));
+    rig.photo(&asked, ANA, ANA, "3EB0ASKED").await;
+    rig.photo(&saved, ANA, ANA, "3EB0SAVED").await;
+    for id in ["3EB0ASKED", "3EB0SAVED"] {
+        rig.until(ANA, id, "half downloaded", half).await;
+    }
+    let synced = || rig.store.storage().synced_commits;
+    let before = synced();
+    rig.call("media.fetch", json!({ "message": "3EB0ASKED" })).await.unwrap();
+    assert!(synced() > before, "media.fetch was answered before what it asked reached the disk");
+    let before = synced();
+    rig.call("media.cancel", json!({ "message": "3EB0ASKED" })).await.unwrap();
+    assert!(synced() > before, "media.cancel was answered before it reached the disk");
+    // media.save of a file not here yet keeps that it's wanted on the disk while it waits for it.
+    let to = rig.home.path().join("saved");
+    std::fs::create_dir(&to).unwrap();
+    let before = synced();
+    let saving = {
+        let (media, to) = (rig.media.clone(), to.display().to_string());
+        tokio::spawn(async move { media.call("media.save", json!({ "message": "3EB0SAVED", "to": to })).await })
+    };
+    for _ in 0..250 {
+        if synced() > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(synced() > before, "media.save's want didn't reach the disk while it waited for the file");
+    assert!(!saving.is_finished(), "it waits for the file");
+    rig.world.gate_downloads(false);
+    let saved = tokio::time::timeout(Duration::from_secs(30), saving).await.unwrap().unwrap().unwrap();
+    assert!(saved["path"].as_str().is_some_and(|path| path.starts_with(&to.display().to_string())), "{saved}");
+}
+
+/// One interface's connection to jawd's socket, reading what jawd sends it.
+struct Interface {
+    write: tokio::net::unix::OwnedWriteHalf,
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+}
+
+impl Interface {
+    async fn open(socket: &Path) -> Interface {
+        let (read, write) = tokio::net::UnixStream::connect(socket).await.unwrap().into_split();
+        Interface { write, lines: tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(read)) }
+    }
+
+    async fn send(&mut self, line: Value) {
+        tokio::io::AsyncWriteExt::write_all(&mut self.write, format!("{line}\n").as_bytes()).await.unwrap();
+    }
+
+    /// The first line jawd sends that `wanted` takes, within `within`; None if none comes.
+    async fn until(&mut self, within: Duration, wanted: impl Fn(&Value) -> bool) -> Option<Value> {
+        tokio::time::timeout(within, async {
+            while let Ok(Some(line)) = self.lines.next_line().await {
+                let line: Value = serde_json::from_str(&line).unwrap();
+                if wanted(&line) {
+                    return Some(line);
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Sends request `id` and waits for its reply.
+    async fn call(&mut self, id: u64, method: &str, params: Value) -> Value {
+        self.send(json!({ "id": id, "method": method, "params": params })).await;
+        self.until(Duration::from_secs(10), |line| line["id"] == id).await.expect("a reply")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_waiting_for_its_file_holds_up_nothing_else_on_its_connection() {
+    let rig = rig(quick()).await;
+    rig.world.gate_downloads(true);
+    let lake = Picture::lake(640, 480);
+    rig.photo(&lake, ANA, ANA, "3EB0SLOW").await;
+    rig.until(ANA, "3EB0SLOW", "half downloaded", half).await;
+    let to = rig.home.path().join("saved");
+    std::fs::create_dir(&to).unwrap();
+    let mut interface = Interface::open(&rig.serve()).await;
+    let hello = json!({ "protocol": jaw_proto::PROTOCOL, "client": "test", "version": "0" });
+    interface.call(1, "hello", hello).await;
+    interface.call(2, "messages.watch", json!({ "chat": ANA, "around": "newest", "before": 20 })).await;
+    interface.send(json!({ "id": 3, "method": "media.save", "params": { "message": "3EB0SLOW", "to": to } })).await;
+    // While the save waits for its file, the connection's other requests are answered...
+    interface.send(json!({ "id": 4, "method": "status" })).await;
+    let answered = interface.until(Duration::from_secs(5), |line| line["id"] == 4 || line["id"] == 3).await;
+    assert_eq!(answered.as_ref().map(|line| line["id"].clone()), Some(json!(4)), "status came first: {answered:?}");
+    // ...and its windows are told what arrives.
+    rig.world.deliver(demo::text(ANA, ANA, "3EB0WHILE", now_ms(), "meanwhile")).await.unwrap();
+    let pushed = interface
+        .until(Duration::from_secs(5), |line| {
+            line["params"]["upsert"].as_array().is_some_and(|rows| rows.iter().any(|row| row["id"] == "3EB0WHILE"))
+        })
+        .await;
+    assert!(pushed.is_some(), "the window wasn't told of the message while the save waited");
+    rig.world.gate_downloads(false);
+    let saved = interface.until(Duration::from_secs(30), |line| line["id"] == 3).await.expect("the save's reply");
+    assert!(
+        saved["result"]["path"].as_str().is_some_and(|path| path.starts_with(&to.display().to_string())),
+        "{saved}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn downloads_wait_while_the_disk_is_nearly_full_and_go_on_once_there_is_room() {
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(100_000_000));
+    let rig = rig(Config { keep_free: 512_000_000, free: Some(free.clone()), ..quick() }).await;
+    let (asked, waiting) = (Picture::lake(640, 480), Picture::lake(320, 240));
+    rig.photo(&waiting, ANA, ANA, "3EB0WAITING").await;
+    let mut status = rig.media.status();
+    for _ in 0..250 {
+        status = rig.media.status();
+        if status.paused.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let paused = status.paused.expect("background downloads say why they wait");
+    assert!(paused.contains("100 MB free") && paused.contains("512 MB"), "{paused}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.world.downloads(), 0, "nothing downloads in the background meanwhile");
+    // What an interface asks for keeps only 64 MB free, so it comes.
+    rig.photo(&asked, ANA, ANA, "3EB0ROOM").await;
+    rig.until(ANA, "3EB0ROOM", "converted", |row| !row.is_null()).await;
+    rig.call("media.fetch", json!({ "message": "3EB0ROOM" })).await.unwrap();
+    rig.until(ANA, "3EB0ROOM", "downloaded once asked", local).await;
+    assert!(!local(&rig.row(ANA, "3EB0WAITING").await), "the other still waits");
+    free.store(10_000_000_000, std::sync::atomic::Ordering::Relaxed);
+    rig.until(ANA, "3EB0WAITING", "downloaded once there's room", local).await;
+    assert_eq!(rig.media.status().paused, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_asks_the_phone_again_for_what_a_stopped_jawd_left_waiting_for_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    crate::sync::running(&store).await.unwrap();
+    // A photo gone from the server, whose phone a stopped jawd's engine asked for it: that engine
+    // kept the key to read the answer with, and is gone with it.
+    let lake = Picture::lake(640, 480);
+    let event = World::default().photo(&lake, ANA, ANA, "3EB0ASKEDBEFORE", now_ms(), "");
+    let Some(pb::event::Kind::Message(message)) = event.kind else { unreachable!() };
+    let web = crate::convert::web_message(&message).unwrap();
+    let me = crate::convert::Me::new([demo::ME.to_string()]);
+    store.apply(Lane::Live, crate::convert::message(&web, &me, true)).await.unwrap();
+    let (n, wanted): (i64, i64) = store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            Ok(db.query_row("SELECT message, wanted FROM media", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        })
+        .await
+        .unwrap();
+    let asked = Step::AskedPhone { message: n, variant: "sd", wanted, at: now_ms() };
+    store.apply(Lane::Live, vec![Change::Media(asked)]).await.unwrap();
+    // The phone's answer would be waited for for ten minutes; a start asks again at once.
+    let rig = rig_on(Arc::new(home), store, Config { phone_wait: Duration::from_secs(600), ..quick() }).await;
+    let _ = rig.world.photo(&lake, ANA, ANA, "3EB0ASKEDBEFORE", now_ms(), "");
+    rig.world.expire(&lake.direct_path);
+    let row = rig.until(ANA, "3EB0ASKEDBEFORE", "downloaded from the phone's new upload", local).await;
+    assert_eq!(std::fs::read(rig.file(&row["media"]["path"])).unwrap(), *lake.data);
+    let asked_again = rig.world.asked().iter().filter(|kind| matches!(kind, pb::command::Kind::MediaRetry(_))).count();
+    assert_eq!(asked_again, 1, "the phone was asked again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_hd_copy_never_attaches_to_a_message_deleted_for_everyone() {
+    let rig = rig(quick()).await;
+    let (sd, hd) = (Picture::lake(640, 480), Picture::lake(1600, 1200));
+    rig.photo(&sd, ANA, ANA, "3EB0SDGONE").await;
+    rig.until(ANA, "3EB0SDGONE", "its previews", previewed).await;
+    let revoke = Change::Amend(crate::store::Amend {
+        chat: ANA.into(),
+        target: "3EB0SDGONE".into(),
+        sender: Some(ANA.into()),
+        mine: false,
+        at: now_ms(),
+        what: crate::store::Amendment::Revoke,
+        raw: None,
+    });
+    rig.store.apply(Lane::Live, vec![revoke]).await.unwrap();
+    rig.world.deliver(hd_copy(&rig.world, &hd, "3EB0SDGONE", "3EB0HDLATE")).await.unwrap();
+    // Converted in order, so once a message after it is in, the HD copy has been taken in too.
+    rig.world.deliver(demo::text(ANA, ANA, "3EB0AFTERHD", now_ms(), "after")).await.unwrap();
+    rig.until(ANA, "3EB0AFTERHD", "converted", |row| !row.is_null()).await;
+    let hd_copies: i64 =
+        rig.query(|db| Ok(db.query_row("SELECT count(*) FROM media WHERE variant = 'hd'", [], |r| r.get(0))?)).await;
+    assert_eq!(hd_copies, 0, "no HD copy for a deleted message");
+    let row = rig.row(ANA, "3EB0SDGONE").await;
+    assert!(row["deleted"] == json!(true) && row["media"].get("hd").is_none(), "{row}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_media_row_from_before_migration_12_is_kept() {
     let mut db = Connection::open_in_memory().unwrap();
-    for migration in &crate::store::schema_for_tests()[..10] {
+    for migration in &crate::store::schema_for_tests()[..11] {
         db.execute_batch(migration).unwrap();
     }
-    db.pragma_update(None, "user_version", 10).unwrap();
+    db.pragma_update(None, "user_version", 11).unwrap();
     db.execute_batch(
         "INSERT INTO chats (id, kind, v) VALUES ('c', 'direct', 1);
         INSERT INTO messages (chat, id, at, t, kind, v) VALUES (1, 'a', 1, 1, 'image', 1);

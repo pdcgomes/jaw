@@ -635,6 +635,42 @@ async fn two_copies_of_a_message_folded_into_one_keep_the_file_downloaded_for_ei
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_copy_folded_into_another_is_wanted_after_any_want_a_job_took_of_either() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(&store, vec![Change::Message(mine(ANA, "both", AT)), Change::Message(mine(ANA_LID, "both", AT))]).await;
+    {
+        // A job took each copy at 5, and an interface then asked for the one in Ana's number's chat.
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        db.execute_batch(&format!(
+            "INSERT INTO media (message, variant, keys, sha256, wanted, asked) SELECT m.n, 'sd', 'image',
+                zeroblob(32), 6, 1 FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = '{ANA}';
+            INSERT INTO media (message, variant, keys, sha256, wanted) SELECT m.n, 'sd', 'image', zeroblob(32), 5
+                FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = '{ANA_LID}';"
+        ))
+        .unwrap();
+    }
+    joined(&store).await;
+    merged(&store).await;
+    let kept = |store: Store| async move {
+        query(&store, |db| {
+            Ok(db.query_row("SELECT message, wanted, asked FROM media", [], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, bool>(2)?))
+            })?)
+        })
+        .await
+    };
+    let (n, wanted, asked) = kept(store.clone()).await;
+    assert_eq!((wanted, asked), (Some(7), true), "wanted after either copy's want, and still asked for");
+    for taken in [5, 6] {
+        let settled = media::Step::Settled { message: n, variant: "sd", wanted: taken, state: "remote", error: None };
+        apply(&store, vec![Change::Media(settled)]).await;
+    }
+    assert_eq!(kept(store.clone()).await, (n, Some(7), true), "no job that took a want before the fold settles it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_row_kept_in_quarantine_leaves_it_once_it_converts() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();

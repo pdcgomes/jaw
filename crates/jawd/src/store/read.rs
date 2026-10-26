@@ -18,7 +18,7 @@ use serde_json::value::RawValue;
 use tokio::sync::oneshot;
 
 use super::files::{Files, Seen};
-use super::media::{Made, from_hex};
+use super::media::from_hex;
 use crate::work::{Priority, Report, Samples};
 
 /// The most readers, whatever the cores.
@@ -380,7 +380,7 @@ const MESSAGE_COLUMNS: &str = "
         m.reply ->> 'from',
         (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress,
                 'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail,
-                'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256),
+                'made', f.made, 'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256),
                 'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256
                     WHERE h.message = m.n AND h.variant = 'hd'))
             FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd')";
@@ -561,6 +561,7 @@ struct Copy {
     small: Option<String>,
     large: Option<String>,
     thumbnail: Option<String>,
+    made: Option<i64>,
     has_thumbnail: i64,
     sha256: Option<String>,
     hd: Option<Hd>,
@@ -575,8 +576,8 @@ struct Hd {
 const PICTURED: [&str; 5] = ["image", "sticker", "gif", "video", "video_note"];
 
 /// `detail`'s `media` as message `n`'s copy and its file are now: its state, its file once it's in
-/// the cache, and its previews and thumbnail where they're whole, checked through `files`; what the
-/// row lacked is told to media.
+/// the cache, and its previews and thumbnail unless a power cut may have broken them and the check
+/// since the start hasn't passed them (`files`); what the row lacked is told to media.
 fn with_media(
     detail: &mut Option<String>,
     n: i64,
@@ -591,19 +592,9 @@ fn with_media(
     else {
         return;
     };
-    let whole = |path: &Option<String>| path.clone().filter(|path| files.is_none_or(|files| files.whole(path)));
-    let mut broken = Vec::new();
-    let previews = match (whole(&copy.small), whole(&copy.large)) {
-        (Some(small), Some(large)) => Some((small, large)),
-        _ => {
-            broken.extend(copy.small.clone().or(copy.large.clone()).map(|path| (Made::Previews, path)));
-            None
-        }
-    };
-    let thumbnail = whole(&copy.thumbnail);
-    if thumbnail.is_none() {
-        broken.extend(copy.thumbnail.clone().map(|path| (Made::Thumbnail, path)));
-    }
+    let trusted = copy.made.is_none_or(|made| files.is_none_or(|files| files.trusted(made)));
+    let previews = copy.small.clone().zip(copy.large.clone()).filter(|_| trusted);
+    let thumbnail = copy.thumbnail.clone().filter(|_| trusted);
     if let Value::Object(media) = parsed.entry("media").or_insert_with(|| Value::Object(Default::default())) {
         media.insert("state".into(), copy.state.clone().into());
         if copy.state == "downloading" {
@@ -636,11 +627,12 @@ fn with_media(
         return;
     };
     let local = copy.path.is_some();
-    let no_thumbnail = copy.has_thumbnail != 0 && thumbnail.is_none();
-    let unpreviewed = local && previews.is_none() && PICTURED.contains(&kind);
+    // What the check since the start hasn't passed yet is the check's to mend, not media's to make.
+    let no_thumbnail = copy.has_thumbnail != 0 && copy.thumbnail.is_none();
+    let unpreviewed = local && copy.small.is_none() && PICTURED.contains(&kind);
     let unfetched = !local && copy.state == "remote";
-    if no_thumbnail || unpreviewed || unfetched || !broken.is_empty() {
-        files.seen(Seen { message: n, sha256, local, no_thumbnail, state: copy.state, broken });
+    if no_thumbnail || unpreviewed || unfetched {
+        files.seen(Seen { message: n, sha256, local, no_thumbnail, state: copy.state });
     }
 }
 

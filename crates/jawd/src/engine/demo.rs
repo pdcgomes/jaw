@@ -141,6 +141,9 @@ pub struct World {
     running: Mutex<HashMap<String, Arc<Notify>>>,
     /// Numbers the partial files downloads write.
     parts: AtomicU64,
+    /// Held while a downloaded file is sent to the drive and put in place, one at a time, as
+    /// jaw-engine does.
+    finishing: Mutex<()>,
     /// Each photo's direct path, by its message's ID, for the phone to send it again.
     photos: Mutex<HashMap<String, String>>,
 }
@@ -217,6 +220,36 @@ impl World {
         if let Some(info) = message.info.as_mut() {
             info.r#type = "media".into();
             info.media_type = "image".into();
+        }
+        pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(message)) }
+    }
+
+    /// A voice message from `sender` in `chat`, `seconds` long, of `data`, an Ogg file, which the
+    /// media server then holds.
+    pub fn voice(&self, data: Arc<Vec<u8>>, chat: &str, sender: &str, id: &str, at_ms: i64, seconds: u32) -> pb::Event {
+        let sha256 = <sha2::Sha256 as sha2::Digest>::digest(data.as_slice()).to_vec();
+        let name: String = sha256.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let direct_path = format!("/v/t62.7117-24/{name}.enc?ccb=11-4");
+        self.serve(&direct_path, data.clone());
+        let audio = e2e::AudioMessage {
+            mimetype: Some("audio/ogg; codecs=opus".into()),
+            file_sha256: Some(sha256.clone()),
+            file_length: Some(data.len() as u64),
+            seconds: Some(seconds),
+            ptt: Some(true),
+            media_key: Some((0..32u8).map(|n| n ^ 0x5a).collect()),
+            file_enc_sha256: Some(sha256.iter().rev().copied().collect()),
+            direct_path: Some(direct_path),
+            ..Default::default()
+        };
+        let raw = e2e::Message { audio_message: Some(Box::new(audio)), ..Default::default() };
+        let Some(pb::event::Kind::Message(mut message)) = text(chat, sender, id, at_ms, "").kind else {
+            unreachable!("a text is a message")
+        };
+        message.raw = raw.encode_to_vec();
+        if let Some(info) = message.info.as_mut() {
+            info.r#type = "media".into();
+            info.media_type = "ptt".into();
         }
         pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(message)) }
     }
@@ -686,6 +719,20 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
+/// Sends what's written to `file` to the drive, ordered before everything written after it, as
+/// jaw-engine does a downloaded file: F_BARRIERFSYNC on macOS, a full sync where there's none.
+fn barrier(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the descriptor is the open file's, which outlives the call.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } == 0 {
+            return Ok(());
+        }
+    }
+    file.sync_all()
+}
+
 /// Writes `data` to `path` as jaw-engine writes a history blob: through a .part file synced to the
 /// disk before it's renamed into place, and the folder synced after, so after a power cut the file
 /// is either whole or not there.
@@ -941,8 +988,9 @@ impl Sender {
     }
 
     /// Writes the file a download names where jawd asked, as jaw-engine does once it has decrypted
-    /// it: through a partial file, checked against its hash, synced, and linked in under its name,
-    /// never over a file there; half way, it waits while downloads are gated, and can be cancelled.
+    /// it: through a partial file, checked against its hash, sent to the drive ordered before
+    /// whatever follows, and linked in under its name, never over a file there, one at a time; half
+    /// way, it waits while downloads are gated, and can be cancelled.
     async fn download(&self, download: pb::MediaDownload) -> Result<pb::reply::Kind, EngineError> {
         use pb::media_file::State;
         let file = |state: State, bytes: u64, message: &str| {
@@ -1002,6 +1050,7 @@ impl Sender {
             return file(State::Cancelled, 0, "the download was cancelled");
         }
         let (sha256, total) = (download.file_sha256.clone(), data.len() as u64);
+        let shared = self.world.clone();
         let finished = tokio::task::spawn_blocking(move || -> std::io::Result<State> {
             let mut out = out;
             let placed = (|| {
@@ -1009,14 +1058,15 @@ impl Sender {
                 if <sha2::Sha256 as sha2::Digest>::digest(data.as_slice()).as_slice() != sha256.as_slice() {
                     return Ok(State::BadHash);
                 }
-                out.sync_all()?;
+                let _one = shared.finishing.lock().expect("the demo world");
+                barrier(&out)?;
                 match std::fs::hard_link(&part, &path) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(State::Exists),
                     Err(e) => return Err(e),
                 }
                 std::fs::remove_file(&part)?;
-                std::fs::File::open(path.parent().unwrap_or(Path::new(".")))?.sync_all()?;
+                barrier(&std::fs::File::open(path.parent().unwrap_or(Path::new(".")))?)?;
                 Ok(State::Placed)
             })();
             let _ = std::fs::remove_file(&part);

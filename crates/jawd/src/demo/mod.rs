@@ -10,7 +10,7 @@
 
 mod account;
 mod probe;
-mod usage;
+pub(crate) mod usage;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};

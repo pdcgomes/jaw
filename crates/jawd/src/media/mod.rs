@@ -14,17 +14,21 @@
 //!
 //! The files follow the media-files audit's rules (J1 to J9): every name is built one way, absolute
 //! and from jaw's folder, and named by content, so a file already there is the one wanted; a row
-//! names a file only once it's whole and synced, by the engine for a download; a file goes only
-//! after a synced commit has stopped naming it, while no job may be writing it (`cache::Claims`);
-//! the folders are made and synced, and a stopped jawd's partial files removed, before anything
-//! starts; free space is checked before a download. Previews and thumbnails are derived, put in
-//! place without waiting for the disk, and checked before a row carries them (`store::files`).
+//! names a downloaded file only in a synced commit, the engine having sent the file to the drive
+//! ordered before it, so the commit's flush makes both durable and may be an ack's (`fetch`); a file
+//! goes only after a synced commit has stopped naming it, while no job may be writing it
+//! (`cache::Claims`); the folders are made and synced, and a stopped jawd's partial files removed,
+//! before anything starts; free space is checked before a download. Previews and thumbnails are
+//! derived and put in place without waiting for the disk; they're made durable later, and those a
+//! power cut may have broken are checked at the next start, rows showing them only once they're
+//! passed (`settle`, `store::files`).
 
 mod cache;
 mod fetch;
 mod previews;
 mod save;
 mod schedule;
+mod settle;
 
 #[cfg(test)]
 mod tests;
@@ -68,6 +72,13 @@ pub struct Config {
     /// How long a download that couldn't be done waits before it's tried again, at first and at most.
     pub retry_first: Duration,
     pub retry_most: Duration,
+    /// The free space to take instead of asking the file system, as a test sets it.
+    pub free: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// How often the previews and thumbnails made since the last time are made durable.
+    pub settle_every: Duration,
+    /// How long a downloaded file's row may wait to share a synced commit before it goes with the
+    /// others waiting: while messages arrive, it goes with one's ack.
+    pub naming_within: Duration,
 }
 
 impl Default for Config {
@@ -85,6 +96,9 @@ impl Default for Config {
             keep_free: mb(512),
             retry_first: Duration::from_secs(2),
             retry_most: Duration::from_secs(300),
+            free: None,
+            settle_every: Duration::from_secs(5),
+            naming_within: Duration::from_millis(100),
         }
     }
 }
@@ -116,6 +130,9 @@ struct Inner {
     stats: Mutex<Stats>,
     /// Why background downloads are paused, while they are.
     paused: Mutex<Option<String>>,
+    /// Whether the start's check of previews a power cut may have broken is done, so newer ones
+    /// may be settled.
+    checked: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -179,7 +196,11 @@ impl Media {
             asked_phone: Notify::new(),
             stats: Mutex::new(Stats { partial_removed: partial as u64, ..Stats::default() }),
             paused: Mutex::new(None),
+            checked: std::sync::atomic::AtomicBool::new(false),
         });
+        // Previews and thumbnails a power cut may have broken are shown only once they're checked.
+        let (settled, made) = inner.store.pair("SELECT settled, made FROM media_made WHERE id = 1")?;
+        inner.store.files().suspect(settled, made);
         let (progress, progressing) = mpsc::channel(256);
         live.lock().expect("live state").media_progress = Some(progress);
         let (seen, seeing) = mpsc::channel(1_024);
@@ -189,7 +210,13 @@ impl Media {
         schedule::start(&inner, progressing, seeing, pushes.subscribe());
         cache::start(&inner);
         fetch::start(&inner);
+        settle::start(&inner, settled, made);
         Ok(Media { inner })
+    }
+
+    /// Makes the previews and thumbnails made since the last time durable now, as at a clean stop.
+    pub async fn settle(&self) -> anyhow::Result<()> {
+        settle::settle(&self.inner, Duration::ZERO).await
     }
 
     /// The download and image lanes, for `status`.

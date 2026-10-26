@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use jaw_proto::{ConnectionState, Push};
 use tokio::sync::{Notify, broadcast, mpsc};
 
-use super::fetch::{self, Asking, Fetched};
+use super::fetch::{self, Asking, Fetched, Naming};
 use super::previews::{self, Drawn};
 use super::{Inner, now_ms};
 use crate::engine::pb;
@@ -265,29 +265,38 @@ async fn job(inner: &Arc<Inner>, copy: Wanted) {
             eprintln!("jawd: no instant preview for message {} this time: {why}", copy.message);
         }
     };
-    let (_, path) = tokio::join!(thumbnail, file(inner, &copy, priority));
-    let Some(path) = path else { return };
+    let (_, file) = tokio::join!(thumbnail, file(inner, &copy, priority));
+    let Some(file) = file else { return };
     inner.schedule.later.lock().expect("schedule").remove(&key);
-    if let Some(path) = &path
-        && copy.variant == "sd"
-        && !copy.previews
-        && let Drawn::Failed(why) = previews::previews(inner, &copy, path, priority).await
-    {
-        eprintln!("jawd: no previews for message {} this time: {why}", copy.message);
+    if let Some((path, named)) = &file {
+        // Its previews are drawn while jaw.db comes to name its file, and named once it has.
+        let drawing = async {
+            if copy.variant == "sd"
+                && !copy.previews
+                && let Drawn::Failed(why) = previews::previews(inner, &copy, path, named.clone(), priority).await
+            {
+                eprintln!("jawd: no previews for message {} this time: {why}", copy.message);
+            }
+        };
+        let (named, ()) = tokio::join!(named.clone().wait(), drawing);
+        if let Err(why) = named {
+            later(inner, &copy, why).await;
+            return;
+        }
     }
-    let state = if path.is_some() || copy.state == "downloading" { "remote" } else { leave(&copy.state) };
+    let state = if file.is_some() || copy.state == "downloading" { "remote" } else { leave(&copy.state) };
     let _ = inner.store.apply(Lane::Live, vec![settled(&copy, state, None)]).await;
 }
 
-/// The copy's file: the one in place, or the one downloaded now if it's to be; None if the job
-/// ends here, having said why or left the copy to be tried again.
-async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) -> Option<Option<String>> {
+/// The copy's file, and whether jaw.db names it yet: the one in place, or the one downloaded now if
+/// it's to be; None if the job ends here, having said why or left the copy to be tried again.
+async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) -> Option<Option<(String, Naming)>> {
     // A copy left downloading is one whose download, shared with another message's copy, was
     // cancelled for that one, and is downloaded again.
     let fresh = matches!(copy.state.as_str(), "remote" | "downloading");
     let fetching = copy.local.is_none() && (copy.asked || (fresh && downloads_by_itself(inner, copy)));
     match (&copy.local, fetching) {
-        (Some(path), _) => return Some(Some(path.clone())),
+        (Some(path), _) => return Some(Some((path.clone(), Naming::named()))),
         (None, false) => return Some(None),
         (None, true) => {}
     }
@@ -297,7 +306,7 @@ async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) -> Option<O
         let _ = inner.store.apply(Lane::Live, vec![settled(copy, state, Some(why))]).await;
     };
     match fetch::file(inner, copy, priority).await {
-        Fetched::Placed { path, .. } => return Some(Some(path)),
+        Fetched::Placed { path, named } => return Some(Some((path, named))),
         Fetched::Gone(why) => {
             if fetch::gone(inner, copy, why.clone()).await {
                 later(inner, copy, why).await;
@@ -354,36 +363,25 @@ async fn progress(inner: Arc<Inner>, mut progressing: mpsc::Receiver<pb::MediaPr
     }
 }
 
-/// How long a copy a window showed with broken files isn't mended again for it, while the commit
-/// that forgets them is on its way.
-const MENDED_AGAIN: Duration = Duration::from_secs(10);
-
-/// Takes what windows show and lack: a broken preview mended, and the copy wanted, so its thumbnail
-/// is drawn and its file downloaded if it downloads by itself, ahead of what nobody's looking at.
-/// A copy is looked at for what it lacks at most once each SEEN_AGAIN, and for broken files once
-/// each MENDED_AGAIN, however often windows show it.
+/// Takes what windows show and lack: the copy wanted, so its thumbnail is drawn and its file
+/// downloaded if it downloads by itself, ahead of what nobody's looking at. A copy is looked at for
+/// what it lacks at most once each SEEN_AGAIN, however often windows show it.
 async fn seen(inner: Arc<Inner>, mut seeing: mpsc::Receiver<Seen>) {
-    let mut recently: HashMap<(i64, bool), Instant> = HashMap::new();
+    let mut recently: HashMap<i64, Instant> = HashMap::new();
     while let Some(first) = seeing.recv().await {
         let mut wants = Vec::new();
         let mut next = Some(first);
         while let Some(seen) = next.take() {
             next = seeing.try_recv().ok();
-            let broken = !seen.broken.is_empty();
-            let again = if broken { MENDED_AGAIN } else { SEEN_AGAIN };
-            if recently.get(&(seen.message, broken)).is_some_and(|at| at.elapsed() < again) {
+            if recently.get(&seen.message).is_some_and(|at| at.elapsed() < SEEN_AGAIN) {
                 continue;
             }
-            // A file a job is writing now isn't mended until a window shows it broken again.
-            if broken && !previews::mend(&inner, &seen).await {
-                continue;
-            }
-            recently.insert((seen.message, broken), Instant::now());
+            recently.insert(seen.message, Instant::now());
             inner.downloads.promote(&fetch::key(&seen.sha256));
             wants.push(Change::Media(Step::Want { message: seen.message, variant: "sd", at: now_ms(), asked: false }));
         }
         if recently.len() > 10_000 {
-            recently.retain(|&(_, broken), at| at.elapsed() < if broken { MENDED_AGAIN } else { SEEN_AGAIN });
+            recently.retain(|_, at| at.elapsed() < SEEN_AGAIN);
         }
         if !wants.is_empty() {
             let _ = inner.store.apply(Lane::Live, wants).await;

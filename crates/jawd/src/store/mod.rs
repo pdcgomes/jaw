@@ -132,8 +132,19 @@ enum Live {
         /// Whether its commit must reach the disk before it's said to be done.
         durable: bool,
     },
+    /// Changes whose commit must reach the disk, which may wait until `by` to share a synced
+    /// commit, an inbox group's or others like them, rather than flush the drive alone.
+    Soon { changes: Vec<Change>, done: Done, queued: Instant, by: Instant },
     /// Copies the whole WAL into the database and empties it, as at a clean stop.
     Truncate { done: oneshot::Sender<Result<(), String>> },
+}
+
+/// A durable write waiting to share a synced commit, until `by`.
+struct Waiting {
+    changes: Vec<Change>,
+    done: Done,
+    queued: Instant,
+    by: Instant,
 }
 
 /// A live write made in an inbox group's transaction, answered once that commits.
@@ -660,6 +671,7 @@ impl Store {
             live_pause: limits.live_pause,
             stream_step: limits.stream_step,
             shared_failing: None,
+            soon: Vec::new(),
         };
         std::thread::Builder::new().name("jawd-writer".into()).spawn(move || writer.run(background_rx))?;
         let checkpointing = wal.clone();
@@ -736,6 +748,19 @@ impl Store {
         let (done, applied) = oneshot::channel();
         self.live
             .send(Live::Changes { changes, done, queued: Instant::now(), durable: true })
+            .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?;
+        applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Applies `changes` in a synced commit, as `apply_durable` does, but lets them wait up to
+    /// `within` for one they can share: the next inbox group's, whose flush acks it anyway, or, once
+    /// the time is up, one with every other such write waiting. So writes that must reach the disk
+    /// without hurrying cost no flush of their own while messages arrive.
+    pub async fn apply_durable_soon(&self, changes: Vec<Change>, within: Duration) -> Result<Applied> {
+        let (done, applied) = oneshot::channel();
+        let queued = Instant::now();
+        self.live
+            .send(Live::Soon { changes, done, queued, by: queued + within })
             .map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?;
         applied.await.map_err(|_| anyhow::anyhow!("jawd's writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
     }
@@ -945,6 +970,8 @@ struct Writer {
     /// Why the last inbox commit with live writes in it failed, said once until the reason changes
     /// or one succeeds.
     shared_failing: Option<String>,
+    /// Durable writes waiting to share a synced commit, in the order they came.
+    soon: Vec<Waiting>,
 }
 
 /// Makes the groups of `changes` in `tx`, each in a savepoint: one that fails is rolled back and
@@ -1065,15 +1092,16 @@ impl Writer {
         self.prune();
         let (realtime, live) = (self.realtime.clone(), self.live.clone());
         loop {
-            let idle = self.idle_for();
+            self.soon_due();
+            let idle = self.idle_for().min(self.soon_left());
             select_biased! {
                 recv(realtime) -> row => match row {
                     Ok(row) => self.take_inbox(row),
-                    Err(_) => return,
+                    Err(_) => return self.flush_soon(),
                 },
                 recv(live) -> write => match write {
                     Ok(write) => self.live_write(write),
-                    Err(_) => return,
+                    Err(_) => return self.flush_soon(),
                 },
                 recv(background) -> write => match write {
                     Ok(Background::Changes { changes, done }) => {
@@ -1090,9 +1118,90 @@ impl Writer {
                             let _ = done.send(Ok(()));
                         }
                     }
-                    Err(_) => return,
+                    Err(_) => return self.flush_soon(),
                 },
-                default(idle) => self.index_step(),
+                default(idle) => {
+                    if !self.soon_due() {
+                        self.index_step();
+                    }
+                }
+            }
+        }
+    }
+
+    /// How long until the first durable write waiting to share a synced commit must go.
+    fn soon_left(&self) -> Duration {
+        let first = self.soon.iter().map(|write| write.by).min();
+        first.map_or(Duration::from_secs(3600), |by| by.saturating_duration_since(Instant::now()))
+    }
+
+    /// Commits the durable writes waiting to share a synced commit once the first one's time is up,
+    /// and says whether it did.
+    fn soon_due(&mut self) -> bool {
+        let due = self.soon.iter().any(|write| write.by <= Instant::now());
+        if due {
+            self.flush_soon();
+        }
+        due
+    }
+
+    /// Commits every durable write waiting to share a synced commit in one, each answered with
+    /// what it made. One that fails has them go one at a time, each in a synced commit of its own.
+    fn flush_soon(&mut self) {
+        let soon = std::mem::take(&mut self.soon);
+        if soon.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        self.unmerged |= soon.iter().any(|write| write::touches_fts(&write.changes));
+        let made = self.retrying(|w| {
+            w.synced(true)?;
+            w.stamps.begin();
+            let made = (|| {
+                let mut tx = w.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let mut made = Vec::with_capacity(soon.len());
+                for write in &soon {
+                    let groups = write::groups(&write.changes);
+                    made.push(make_groups(&mut tx, &mut w.stamps, &write.changes, &groups, |_| false)?);
+                }
+                write::settle(&tx, &mut w.stamps)?;
+                if !commits_synced(&tx)? {
+                    bail!("a durable change's commit would run unsynced, so it isn't made");
+                }
+                tx.commit()?;
+                Ok(made)
+            })();
+            match &made {
+                Ok(_) => {
+                    w.stats.lock().expect("the writer's stats").synced += 1;
+                    w.committed();
+                    let last = w.stamps.last();
+                    w.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
+                }
+                Err(_) => w.stamps.rolled_back(),
+            }
+            made
+        });
+        match made {
+            Ok(made) => {
+                let waited = soon.iter().map(|write| started.saturating_duration_since(write.queued)).max();
+                self.count(waited, started.elapsed());
+                let seq = self.stamps.last();
+                for (write, made) in soon.into_iter().zip(made) {
+                    let _ = write.done.send(Ok(Applied {
+                        changed: made.changed,
+                        quarantined: made.quarantined,
+                        error: made.error,
+                        transactions: 1,
+                        took: write.queued.elapsed(),
+                        seq,
+                    }));
+                }
+            }
+            Err(_) => {
+                for Waiting { changes, done, queued, .. } in soon {
+                    self.live_write(Live::Changes { changes, done, queued, durable: true });
+                }
             }
         }
     }
@@ -1400,6 +1509,14 @@ impl Writer {
                     insert.execute(params![row.kind, row.at_ms, row.payload])?;
                 }
             }
+            // The durable writes waiting to share a synced commit share this one.
+            if share {
+                for Waiting { changes, done, queued, .. } in self.soon.drain(..) {
+                    let groups = write::groups(&changes);
+                    let made = make_groups(&mut tx, &mut self.stamps, &changes, &groups, |_| false)?;
+                    shared.push(Shared { changes, done, queued, durable: true, began: Instant::now(), made });
+                }
+            }
             let sharing = Instant::now();
             loop {
                 let write = match first.take() {
@@ -1409,6 +1526,10 @@ impl Writer {
                         Ok(write) => write,
                         Err(_) => break,
                     },
+                };
+                let write = match write {
+                    Live::Soon { changes, done, queued, .. } => Live::Changes { changes, done, queued, durable: true },
+                    write => write,
                 };
                 match write {
                     Live::Changes { changes, done, queued, durable } => {
@@ -1492,6 +1613,7 @@ impl Writer {
             self.hold();
             let (realtime, live) = (self.realtime.clone(), self.live.clone());
             while !self.room() {
+                self.soon_due();
                 select_biased! {
                     recv(realtime) -> row => match row {
                         Ok(row) => self.take_inbox(row),
@@ -1577,7 +1699,12 @@ impl Writer {
     fn live_write(&mut self, write: Live) {
         let (changes, done, queued, durable) = match write {
             Live::Changes { changes, done, queued, durable } => (changes, done, queued, durable),
+            Live::Soon { changes, done, queued, by } => {
+                self.soon.push(Waiting { changes, done, queued, by });
+                return;
+            }
             Live::Truncate { done } => {
+                self.flush_soon();
                 let truncated = self.retrying(Writer::truncate);
                 let _ = done.send(truncated.map_err(|e| format!("{e:#}")));
                 return;
@@ -1739,6 +1866,7 @@ impl Writer {
 
     /// Takes the inbox and live writes waiting, between two background transactions.
     fn between(&mut self) {
+        self.soon_due();
         loop {
             if let Ok(row) = self.realtime.try_recv() {
                 self.take_inbox(row);
@@ -3026,6 +3154,50 @@ mod tests {
         assert!(synced.iter().any(|s| s.asked & 0x0f == ffi::SQLITE_SYNC_FULL), "no checkpoint synced: {synced:?}");
         let fenced: Vec<_> = synced.iter().filter(|s| s.made != Some(vfs::Made::Full)).collect();
         assert!(fenced.is_empty(), "synced other than in full: {fenced:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_durable_write_that_may_wait_shares_the_next_inbox_groups_commit_or_goes_with_the_others_at_its_time() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let chat = "351910000001@s.whatsapp.net";
+        let soon = |id: &'static str, within: Duration| {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply_durable_soon(messages([text(chat, id, 1_000, id)]), within).await })
+        };
+        // While messages arrive, it goes in the next inbox group's synced commit, long before its time.
+        let synced = store.storage().synced_commits;
+        let riding = soon("rides", Duration::from_secs(30));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!riding.is_finished(), "it waits for a commit to share");
+        assert_eq!(store.storage().synced_commits, synced, "and flushes nothing of its own");
+        let inbox = store.inboxed();
+        let inboxed = inbox.notified();
+        store.inbox("message", 0, vec![1], None);
+        let applied =
+            tokio::time::timeout(Duration::from_secs(5), riding).await.expect("answered with the inbox's commit");
+        assert_eq!(applied.unwrap().unwrap().changed, 1);
+        tokio::time::timeout(Duration::from_secs(5), inboxed).await.unwrap();
+        assert_eq!(store.storage().synced_commits, synced + 1, "one synced commit for the row and the write");
+        // With nothing arriving, those waiting go together in one synced commit once the first's time is up.
+        let synced = store.storage().synced_commits;
+        let began = Instant::now();
+        let (first, second) = (soon("first", Duration::from_millis(300)), soon("second", Duration::from_secs(30)));
+        let first = tokio::time::timeout(Duration::from_secs(5), first).await.expect("answered at its time");
+        assert!(began.elapsed() >= Duration::from_millis(250), "it waited for its time: {:?}", began.elapsed());
+        assert_eq!(first.unwrap().unwrap().changed, 1);
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), second).await.unwrap().unwrap().unwrap().changed, 1);
+        assert_eq!(store.storage().synced_commits, synced + 1, "both in one synced commit");
+        assert_eq!(
+            query(&store, |db| Ok(db.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?)).await,
+            3
+        );
+        // Emptying the WAL at a clean stop commits what waits first.
+        let waiting = soon("before the stop", Duration::from_secs(30));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        store.truncate().await.unwrap();
+        let applied = tokio::time::timeout(Duration::from_secs(1), waiting).await.expect("answered before the stop");
+        assert_eq!(applied.unwrap().unwrap().changed, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -24,10 +24,13 @@ import (
 )
 
 // Media: files downloaded for jawd, decrypted on the way to the path it names, and the phone asked
-// to upload one again once WhatsApp's server no longer has it. Like a history blob, a file is
-// written to a partial file of its own and synced before it's put in place, so a crash, a kill or
-// a power cut leaves the whole file under its name or nothing. Its name is jawd's, and comes from
-// its content, so a file already there is the same file and is never written over.
+// to upload one again once WhatsApp's server no longer has it. A file is written to a partial file
+// of its own, sent to the drive ordered before anything written after it, linked in under its
+// name, and its folder likewise, so a crash, a kill or a power cut leaves the whole file under its
+// name or nothing, and no row naming it reaches the disk before it. It's durable at the next full
+// flush, which jawd's synced commit naming it is, so files cost the drive no flush of their own
+// (on macOS; elsewhere fsync is the barrier, and durable). Its name is jawd's, and comes from its
+// content, so a file already there is the same file and is never written over.
 
 // mediaDownloader downloads and decrypts a file into the file it's given: whatsmeow's client, or
 // a fake in the tests.
@@ -57,9 +60,26 @@ type media struct {
 	keys map[string]retryKey
 	// Numbers the partial files this engine writes, so two never share a name.
 	next atomic.Uint64
-	// Held while a file is synced and put in place, so downloads flush the drive one at a time and
-	// a synced commit of jawd's waits behind one flush at most.
+	// Held while a file is sent to the drive and put in place, one at a time.
 	finishing sync.Mutex
+	// How a file is sent to the drive before it's linked in, and its folder after; the tests' own,
+	// to see the order, or barrierSync and barrierSyncDir.
+	syncFile   func(*os.File) error
+	syncFolder func(string) error
+}
+
+func (m *media) flushFile(f *os.File) error {
+	if m.syncFile != nil {
+		return m.syncFile(f)
+	}
+	return barrierSync(f)
+}
+
+func (m *media) flushFolder(dir string) error {
+	if m.syncFolder != nil {
+		return m.syncFolder(dir)
+	}
+	return barrierSyncDir(dir)
 }
 
 type retryKey struct {
@@ -213,12 +233,13 @@ func (e *Engine) mediaDownload(c *enginepb.MediaDownload) *enginepb.Reply {
 	return mediaFile(enginepb.MediaFile_PLACED, uint64(size), "")
 }
 
-// place syncs the partial file f, links it in under path, never over a file there, removes the
-// partial file and syncs the folder; nil once it's in place. One file at a time is placed.
+// place sends the partial file f to the drive, links it in under path, never over a file there,
+// removes the partial file and sends the folder; nil once it's in place. One file at a time is
+// placed.
 func (e *Engine) place(f *os.File, part, path string, size uint64) *enginepb.Reply {
 	e.media.finishing.Lock()
 	defer e.media.finishing.Unlock()
-	err := fullSync(f)
+	err := e.media.flushFile(f)
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
@@ -237,7 +258,7 @@ func (e *Engine) place(f *os.File, part, path string, size uint64) *enginepb.Rep
 		_ = os.Remove(path)
 		return writeFailed(err)
 	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
+	if err := e.media.flushFolder(filepath.Dir(path)); err != nil {
 		_ = os.Remove(path)
 		return writeFailed(err)
 	}

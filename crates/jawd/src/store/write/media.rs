@@ -166,6 +166,12 @@ pub enum Step {
     /// jawd is starting: copies a stopped jawd left downloading aren't any more, and those it left
     /// waiting for the phone, whose answer the engine started now can't read, are wanted again.
     Restarted { at: i64 },
+    /// Every preview and thumbnail numbered up to `through` has been sent to the drive, so this
+    /// step's synced commit makes them durable.
+    Flushed { through: i64 },
+    /// Files whose previews and thumbnail a start found whole: every message showing them gets a
+    /// new version, so windows show them again.
+    Checked { sha256s: Vec<Vec<u8>> },
 }
 
 /// Where a Drop says what it dropped. The last attempt at its transaction is the one that stands.
@@ -178,11 +184,12 @@ impl Dropped {
     }
 }
 
-/// A file dropped from the cache, and the paths of everything made of it.
+/// A file dropped from the cache, the paths of everything made of it, and their bytes on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DroppedFile {
     pub sha256: Vec<u8>,
     pub paths: Vec<String>,
+    pub bytes: u64,
 }
 
 const UPSERT: &str = "INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256,
@@ -221,11 +228,16 @@ const PLACED: &str = "INSERT INTO media_files (sha256, path, bytes, used_at) VAL
 const READY: &str = "UPDATE media SET state = 'remote', progress = NULL, error = NULL
     WHERE sha256 = ?1 AND (state IS NOT 'remote' OR progress IS NOT NULL OR error IS NOT NULL)";
 const PREVIEWS: &str = "UPDATE media_files SET small = ?2, large = ?3, previews_bytes = ?4,
-        used_at = max(used_at, ?5)
+        used_at = max(used_at, ?5), made = ?6
     WHERE sha256 = ?1 AND small IS NULL AND large IS NULL";
-const THUMBNAIL: &str = "INSERT INTO media_files (sha256, thumbnail, thumbnail_bytes, used_at) VALUES (?1, ?2, ?3, ?4)
-    ON CONFLICT (sha256) DO UPDATE SET thumbnail = excluded.thumbnail, thumbnail_bytes = excluded.thumbnail_bytes
+const THUMBNAIL: &str = "INSERT INTO media_files (sha256, thumbnail, thumbnail_bytes, used_at, made)
+    VALUES (?1, ?2, ?3, ?4, ?5)
+    ON CONFLICT (sha256) DO UPDATE SET thumbnail = excluded.thumbnail, thumbnail_bytes = excluded.thumbnail_bytes,
+        made = excluded.made
     WHERE thumbnail IS NULL";
+const NEXT_MADE: &str = "SELECT made + 1 FROM media_made WHERE id = 1";
+const MADE: &str = "UPDATE media_made SET made = ?1 WHERE id = 1";
+const SETTLED_THROUGH: &str = "UPDATE media_made SET settled = min(made, max(settled, ?1)) WHERE id = 1";
 const SETTLED: &str = "UPDATE media SET wanted = NULL, asked = 0, state = ?4, progress = NULL,
         error = iif(?5 IS NULL AND state = ?4, error, ?5)
     WHERE message = ?1 AND variant = ?2 AND wanted IS ?3";
@@ -251,7 +263,7 @@ const FORGET_THUMBNAIL: &str =
 const NAMED: &str = "SELECT EXISTS (SELECT 1 FROM media WHERE sha256 = ?1)";
 const KEPT: &str = "SELECT EXISTS (SELECT 1 FROM media md JOIN messages m ON m.n = md.message
     WHERE md.sha256 = ?1 AND (m.starred OR EXISTS (SELECT 1 FROM outbox o WHERE o.message = m.n)))";
-const FILE_PATHS: &str = "SELECT path, small, large, thumbnail FROM media_files WHERE sha256 = ?1";
+const FILE_PATHS: &str = "SELECT path, small, large, thumbnail, stored FROM media_files WHERE sha256 = ?1";
 const DROP_FILE: &str = "DELETE FROM media_files WHERE sha256 = ?1";
 const DROPPED: &str = "DELETE FROM media_drop WHERE sha256 = ?1";
 const LEFT_DOWNLOADING: &str =
@@ -274,8 +286,9 @@ const FOLD: &str = "INSERT INTO media (message, variant, keys, mime, bytes, w, h
         sha256 = coalesce(sha256, excluded.sha256), enc_sha256 = coalesce(enc_sha256, excluded.enc_sha256),
         media_key = coalesce(media_key, excluded.media_key), direct_path = coalesce(direct_path, excluded.direct_path),
         thumbnail = max(thumbnail, excluded.thumbnail),
-        wanted = coalesce(min(wanted, excluded.wanted), wanted, excluded.wanted), asked = max(asked, excluded.asked),
-        cancelled = max(cancelled, excluded.cancelled)";
+        wanted = CASE WHEN wanted IS NULL THEN excluded.wanted WHEN excluded.wanted IS NULL THEN wanted
+            ELSE max(wanted, excluded.wanted) + 1 END,
+        asked = max(asked, excluded.asked), cancelled = max(cancelled, excluded.cancelled)";
 
 /// Gives message `n` a new version, as something it shows changed.
 fn shown(db: &Connection, stamps: &mut Stamps, n: i64, chat: i64) -> Result<()> {
@@ -348,7 +361,8 @@ pub(super) fn revoked(db: &Connection, n: i64) -> Result<()> {
 }
 
 /// Message `gone`, the same as `kept`, is folded into it: its copies fill in what `kept`'s lack,
-/// and a download one of them was given goes on for `kept`; `gone`'s go with it.
+/// and a download one of them was given goes on for `kept`, wanted after both if both were, so no
+/// job that took either want settles it; `gone`'s go with it.
 pub(super) fn fold(db: &Connection, kept: i64, gone: i64) -> Result<()> {
     db.prepare_cached(FOLD)?.execute([kept, gone])?;
     Ok(())
@@ -386,15 +400,20 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
             Ok(placed || ready)
         }
         Step::Previews { sha256, small, large, bytes, at } => {
-            let made = db.prepare_cached(PREVIEWS)?.execute(params![sha256, small, large, *bytes as i64, at])? > 0;
+            let number: i64 = db.prepare_cached(NEXT_MADE)?.query_row([], |r| r.get(0))?;
+            let made =
+                db.prepare_cached(PREVIEWS)?.execute(params![sha256, small, large, *bytes as i64, at, number])? > 0;
             if made {
+                db.prepare_cached(MADE)?.execute([number])?;
                 shown_by(db, stamps, sha256)?;
             }
             Ok(made)
         }
         Step::Thumbnail { sha256, path, bytes, at } => {
-            let made = db.prepare_cached(THUMBNAIL)?.execute(params![sha256, path, *bytes as i64, at])? > 0;
+            let number: i64 = db.prepare_cached(NEXT_MADE)?.query_row([], |r| r.get(0))?;
+            let made = db.prepare_cached(THUMBNAIL)?.execute(params![sha256, path, *bytes as i64, at, number])? > 0;
             if made {
+                db.prepare_cached(MADE)?.execute([number])?;
                 shown_by(db, stamps, sha256)?;
             }
             Ok(made)
@@ -445,14 +464,18 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
                 if named && (!evict || db.prepare_cached(KEPT)?.query_row([sha256], |r| r.get::<_, bool>(0))?) {
                     continue;
                 }
-                let paths: Option<[Option<String>; 4]> = db
+                let file: Option<([Option<String>; 4], i64)> = db
                     .prepare_cached(FILE_PATHS)?
-                    .query_row([sha256], |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]))
+                    .query_row([sha256], |r| Ok(([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?], r.get(4)?)))
                     .optional()?;
-                let Some(paths) = paths else { continue };
+                let Some((paths, stored)) = file else { continue };
                 db.prepare_cached(DROP_FILE)?.execute([sha256])?;
                 shown_by(db, stamps, sha256)?;
-                files.push(DroppedFile { sha256: sha256.clone(), paths: paths.into_iter().flatten().collect() });
+                files.push(DroppedFile {
+                    sha256: sha256.clone(),
+                    paths: paths.into_iter().flatten().collect(),
+                    bytes: stored.max(0) as u64,
+                });
             }
             let any = !files.is_empty();
             *dropped.0.lock().expect("a drop's result") = files;
@@ -475,6 +498,16 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
                 changed |= one(db, stamps, n, db.prepare_cached(WANTED_AGAIN)?, params![n, variant, at])?;
             }
             Ok(changed)
+        }
+        Step::Flushed { through } => {
+            db.prepare_cached(SETTLED_THROUGH)?.execute([through])?;
+            Ok(false)
+        }
+        Step::Checked { sha256s } => {
+            for sha256 in sha256s {
+                shown_by(db, stamps, sha256)?;
+            }
+            Ok(!sha256s.is_empty())
         }
     }
 }
@@ -512,6 +545,8 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
         Step::Forget { sha256, made, .. } => format!("forget {made:?} {}", to_hex(sha256)),
         Step::Drop { sha256s, .. } => format!("drop {} files", sha256s.len()),
         Step::Restarted { .. } => "restarted".into(),
+        Step::Flushed { through } => format!("flushed through {through}"),
+        Step::Checked { sha256s } => format!("checked {} files", sha256s.len()),
     };
     ("media", what, None)
 }

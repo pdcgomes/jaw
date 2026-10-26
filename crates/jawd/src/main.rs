@@ -228,6 +228,15 @@ enum Bench {
         width: u32,
         #[arg(long, default_value_t = 3024)]
         height: u32,
+        /// Times texts' acks during a flood of this many photos instead
+        #[arg(long, default_value_t = 0)]
+        flood: u32,
+        /// A flood of voice messages rather than photos
+        #[arg(long)]
+        voice: bool,
+        /// Times this many texts' acks with no flood, to compare with
+        #[arg(long, default_value_t = 0)]
+        texts_alone: u32,
     },
     /// Sending: send.text answered with its synced commit, and sends there and back through the demo engine
     Send {
@@ -319,8 +328,8 @@ fn jawd(cli: Cli) -> Result<()> {
         Some(Command::Bench(Bench::Send { count, trips, chats })) => {
             bench_send(send::bench::Plan { count, trips, chats })
         }
-        Some(Command::Bench(Bench::Media { count, width, height })) => {
-            bench_media(media::bench::Plan { count, width, height })
+        Some(Command::Bench(Bench::Media { count, width, height, flood, voice, texts_alone })) => {
+            bench_media(media::bench::Plan { count, width, height, flood, voice, alone: texts_alone })
         }
         None => run(&home, cli.engine, cli.fail, &options),
     }
@@ -615,7 +624,8 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
 }
 
 /// Stops jawd in the order that keeps its data whole: first it stops taking work, so no interface
-/// is answered for something that won't be done; then whatsmeow disconnects, the engine is ended
+/// is answered for something that won't be done, and media settles its latest previews; then
+/// whatsmeow disconnects, the engine is ended
 /// and started no more, whatever its supervisor was waiting for, and anything it handed over that
 /// jawd hadn't acked comes again from WhatsApp; only then does jaw.db note a clean stop, and the
 /// store closes last, once jawd's tasks are dropped.
@@ -624,6 +634,12 @@ async fn stop(Started { state, notifications, .. }: Started, socket: &Path) {
     let _ = std::fs::remove_file(socket);
     if let Some(notifications) = notifications {
         notifications.abort();
+    }
+    // Previews and thumbnails made since media last settled them, so the next start needn't check them.
+    if let Some(media) = state.media()
+        && let Err(e) = media.settle().await
+    {
+        eprintln!("jawd: can't make the previews made lately durable at the stop: {e:#}");
     }
     match (state.store(), state.engine()) {
         (Some(store), engine) => sync::stop(store, engine.ok()).await,

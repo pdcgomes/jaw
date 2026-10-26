@@ -14,3 +14,14 @@ func fullSync(f *os.File) error {
 	}
 	return f.Sync()
 }
+
+// barrierSync sends what's written to f to the drive, ordered before everything written after it,
+// without waiting for the drive to empty its cache: whatever follows, the commit naming the file
+// included, can't reach the disk before it, and the next F_FULLFSYNC, by anyone, makes it durable.
+// A drive without barriers gets a full flush.
+func barrierSync(f *os.File) error {
+	if _, err := unix.FcntlInt(f.Fd(), unix.F_BARRIERFSYNC, 0); err == nil {
+		return nil
+	}
+	return fullSync(f)
+}

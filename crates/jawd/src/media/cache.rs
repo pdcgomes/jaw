@@ -233,7 +233,7 @@ async fn tidy(inner: &Arc<Inner>) -> anyhow::Result<bool> {
         })
         .await?;
     if !unnamed.is_empty() {
-        let dropped = drop_files(inner, unnamed, false).await?;
+        let (dropped, _) = drop_files(inner, unnamed, false).await?;
         return Ok(dropped > 0);
     }
     let bytes: i64 = inner
@@ -247,7 +247,9 @@ async fn tidy(inner: &Arc<Inner>) -> anyhow::Result<bool> {
     if bytes <= inner.config.cache_bytes {
         return Ok(false);
     }
-    // Down to nine tenths of the limit, so the cache doesn't drop a file for every one it places.
+    // Down to nine tenths of the limit, so the cache doesn't drop a file for every one it places;
+    // only what a drop removes counts, so files it keeps (a starred message's, one waiting to be
+    // sent, one a job holds) are gone past rather than taken as room made.
     let mut over = bytes - inner.config.cache_bytes * 9 / 10;
     let mut after: (i64, Vec<u8>) = (i64::MIN, Vec::new());
     while over > 0 {
@@ -267,17 +269,22 @@ async fn tidy(inner: &Arc<Inner>) -> anyhow::Result<bool> {
                     .collect::<rusqlite::Result<_>>()?)
             })
             .await?;
-        let Some(last) = oldest.last() else { break };
-        after = (last.0, last.1.clone());
+        if oldest.is_empty() {
+            break;
+        }
+        // The next look goes on from the last file taken, so none after it is passed over.
         let mut take = Vec::new();
-        for (_, sha256, stored) in oldest {
-            if over == 0 {
+        let mut covered = 0;
+        for (used_at, sha256, stored) in oldest {
+            if covered >= over {
                 break;
             }
-            over = over.saturating_sub(stored.max(0) as u64);
+            covered += stored.max(0) as u64;
+            after = (used_at, sha256.clone());
             take.push(sha256);
         }
-        let evicted = drop_files(inner, take, true).await?;
+        let (evicted, freed) = drop_files(inner, take, true).await?;
+        over = over.saturating_sub(freed);
         inner.stats.lock().expect("media stats").evicted += evicted as u64;
     }
     Ok(false)
@@ -285,11 +292,11 @@ async fn tidy(inner: &Arc<Inner>) -> anyhow::Result<bool> {
 
 /// Drops `sha256s` from the cache in one synced commit, those claimed by a job left for later, then
 /// removes the files of those it dropped; with `evict`, files copies name go too, but for a starred
-/// message's or one waiting to be sent. Says how many went.
-pub(super) async fn drop_files(inner: &Arc<Inner>, sha256s: Vec<Vec<u8>>, evict: bool) -> anyhow::Result<usize> {
+/// message's or one waiting to be sent. Says how many went, and the bytes they took.
+pub(super) async fn drop_files(inner: &Arc<Inner>, sha256s: Vec<Vec<u8>>, evict: bool) -> anyhow::Result<(usize, u64)> {
     let claims: Vec<_> = sha256s.iter().filter_map(|sha256| inner.claims.exclusive(sha256)).collect();
     if claims.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let held: Vec<Vec<u8>> = claims.iter().map(|claim| claim.sha256.clone()).collect();
     let dropped = Dropped::default();
@@ -305,7 +312,7 @@ pub(super) async fn drop_files(inner: &Arc<Inner>, sha256s: Vec<Vec<u8>>, evict:
     })
     .await?;
     drop(claims);
-    Ok(files.len())
+    Ok((files.len(), files.iter().map(|file| file.bytes).sum()))
 }
 
 /// The file a row names, if it's in the cache's folders, as every path media writes is.

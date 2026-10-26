@@ -678,6 +678,17 @@ func syncDir(dir string) error {
 	return fullSync(d)
 }
 
+// barrierSyncDir orders a name made in dir before everything written after it, as barrierSync
+// does a file.
+func barrierSyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return barrierSync(d)
+}
+
 // bench sends Bench events the way a message is sent, each waiting for its ack, and measures the
 // round trips.
 func (e *Engine) bench(count, size uint32) *enginepb.Reply {

@@ -379,6 +379,46 @@ func TestDownloadsAreSyncedAndPutInPlaceOneAtATime(t *testing.T) {
 	}
 }
 
+func TestAFileIsSentToTheDriveBeforeItsLinkedInAndItsFolderAfter(t *testing.T) {
+	e, jawd, _, closeLink := engineWithoutSession(t, link.Protocol)
+	defer closeLink()
+	frames := reading(jawd)
+	data := photo(3_000)
+	e.mediaDownloader = &fakeDownloader{data: data}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ab12.jpg")
+	there := func(p string) bool {
+		_, err := os.Lstat(p)
+		return err == nil
+	}
+	partials := func() int {
+		n := 0
+		for _, name := range left(t, dir) {
+			if strings.HasSuffix(name, ".part") {
+				n++
+			}
+		}
+		return n
+	}
+	var order []string
+	e.media.syncFile = func(f *os.File) error {
+		order = append(order, fmt.Sprintf("file: named %v, partial %v", there(path), there(f.Name())))
+		return barrierSync(f)
+	}
+	e.media.syncFolder = func(folder string) error {
+		order = append(order, fmt.Sprintf("folder %v: named %v, partials %d", folder == dir, there(path), partials()))
+		return barrierSyncDir(folder)
+	}
+	file, _ := downloaded(t, e, frames, downloadOf(data, path))
+	if file.GetState() != enginepb.MediaFile_PLACED {
+		t.Fatalf("the download answered %v", file)
+	}
+	want := []string{"file: named false, partial true", "folder true: named true, partials 0"}
+	if fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Fatalf("sent to the drive as %q, not %q", order, want)
+	}
+}
+
 func TestAPartialFileIsNamedAsJawdsStartRemovesThem(t *testing.T) {
 	e, jawd, _, closeLink := engineWithoutSession(t, link.Protocol)
 	defer closeLink()

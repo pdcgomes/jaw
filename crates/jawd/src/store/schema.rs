@@ -1058,9 +1058,23 @@ pub(super) const MIGRATIONS: &[&str] = &[
         thumbnail_bytes INTEGER CHECK (thumbnail_bytes >= 0),
         stored INTEGER NOT NULL
             GENERATED ALWAYS AS (coalesce(bytes, 0) + coalesce(previews_bytes, 0) + coalesce(thumbnail_bytes, 0)) STORED,
-        used_at INTEGER NOT NULL
+        used_at INTEGER NOT NULL,
+        -- The number media_made gave the last preview or thumbnail written of it, 0 for none.
+        made INTEGER NOT NULL DEFAULT 0 CHECK (made >= 0)
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX media_files_by_use ON media_files (used_at);
+    CREATE INDEX media_files_by_made ON media_files (made);
+
+    -- Class: jaw's own. Previews and thumbnails are put in place without waiting for the disk, so
+    -- each write is numbered (`made`, the last number given), and `settled` is the number up to
+    -- which they've since been sent to the drive and made durable by a synced commit; one past it
+    -- at a start may have been broken by a power cut, and is checked before it's shown.
+    CREATE TABLE media_made (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        made INTEGER NOT NULL DEFAULT 0 CHECK (made >= 0),
+        settled INTEGER NOT NULL DEFAULT 0 CHECK (settled >= 0 AND settled <= made)
+    ) STRICT;
+    INSERT INTO media_made (id) VALUES (1);
     -- What the old table knew of a downloaded file, by its content, where it had a hash.
     INSERT OR IGNORE INTO media_files (sha256, path, bytes, small, large, used_at)
     SELECT sha256, path, iif(path IS NULL, NULL, bytes), preview_small, preview_large, coalesce(opened_at, 0) FROM media
@@ -1102,6 +1116,12 @@ pub(super) const MIGRATIONS: &[&str] = &[
     END;
     CREATE TRIGGER media_renamed AFTER UPDATE OF sha256 ON media WHEN new.sha256 IS NOT NULL BEGIN
         DELETE FROM media_drop WHERE sha256 = new.sha256;
+    END;
+    -- A file's row written when no copy names it any more, as a download or a thumbnail finishing
+    -- after its message was deleted leaves one, waits to go as well.
+    CREATE TRIGGER media_files_unnamed AFTER INSERT ON media_files
+    WHEN NOT EXISTS (SELECT 1 FROM media WHERE sha256 = new.sha256) BEGIN
+        INSERT OR IGNORE INTO media_drop (sha256) VALUES (new.sha256);
     END;
     ",
 ];
