@@ -20,6 +20,37 @@ public final class GridView: NSView {
     /// The pane commands for a pane's context menu.
     public var paneMenu: ((Int) -> NSMenu?)?
     var dragging: PaneGrid.Line?
+    /// A chat dropped on a pane: on its middle to put it there, on an edge to split that way.
+    public var dropped: ((String, Int, DropZone) -> Void)?
+    let dropHint = NSView()
+
+    /// Where a dropped chat goes in a pane.
+    public enum DropZone: Equatable, Sendable {
+        case middle, left, right, top, bottom
+    }
+
+    /// The zone of `point` in a pane's `rect`: a band along each edge, a quarter of the pane deep
+    /// and at most 120 points, and the middle; in a top-down space.
+    public nonisolated static func zone(_ point: CGPoint, in rect: CGRect) -> DropZone? {
+        guard rect.contains(point) else { return nil }
+        let dx = min(rect.width / 4, 120), dy = min(rect.height / 4, 120)
+        let edges: [(DropZone, CGFloat)] = [
+            (.left, point.x - rect.minX), (.right, rect.maxX - point.x), (.top, point.y - rect.minY), (.bottom, rect.maxY - point.y),
+        ]
+        let near = edges.filter { zone, d in d < ((zone == .left || zone == .right) ? dx : dy) }
+        return near.min { $0.1 < $1.1 }?.0 ?? .middle
+    }
+
+    /// The part of a pane a zone shows as it's dragged over.
+    nonisolated static func hint(_ zone: DropZone, in r: CGRect) -> CGRect {
+        switch zone {
+        case .middle: r
+        case .left: CGRect(x: r.minX, y: r.minY, width: r.width / 2, height: r.height)
+        case .right: CGRect(x: r.midX, y: r.minY, width: r.width / 2, height: r.height)
+        case .top: CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height / 2)
+        case .bottom: CGRect(x: r.minX, y: r.midY, width: r.width, height: r.height / 2)
+        }
+    }
     /// How near a gutter the pointer takes it, either side.
     static let grip: CGFloat = 4
 
@@ -30,6 +61,11 @@ public final class GridView: NSView {
     override public init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+        registerForDraggedTypes([.jawChat])
+        dropHint.wantsLayer = true
+        dropHint.layer?.cornerRadius = Radius.control
+        dropHint.layer?.borderWidth = Stroke.focus
+        dropHint.isHidden = true
     }
 
     @available(*, unavailable)
@@ -60,8 +96,48 @@ public final class GridView: NSView {
             frame.removeFromSuperview()
             frames[id] = nil
         }
+        dropHint.layer?.backgroundColor = roles.accent.opacity(0.15).cgColor
+        dropHint.layer?.borderColor = roles.accent.cgColor
+        if dropHint.superview == nil { addSubview(dropHint) }
         needsLayout = true
         window?.invalidateCursorRects(for: self)
+    }
+
+    // MARK: Chats dropped
+
+    func target(_ info: any NSDraggingInfo) -> (Int, DropZone, CGRect)? {
+        guard let grid else { return nil }
+        let p = convert(info.draggingLocation, from: nil)
+        for (id, rect) in grid.frames(in: bounds) {
+            if let zone = Self.zone(p, in: rect) { return (id, zone, rect) }
+        }
+        return nil
+    }
+
+    override public func draggingEntered(_ info: any NSDraggingInfo) -> NSDragOperation {
+        draggingUpdated(info)
+    }
+
+    override public func draggingUpdated(_ info: any NSDraggingInfo) -> NSDragOperation {
+        guard let (_, zone, rect) = target(info) else {
+            dropHint.isHidden = true
+            return []
+        }
+        dropHint.frame = Self.hint(zone, in: rect).insetBy(dx: Space.xs, dy: Space.xs)
+        addSubview(dropHint, positioned: .above, relativeTo: nil)
+        dropHint.isHidden = false
+        return .move
+    }
+
+    override public func draggingExited(_: (any NSDraggingInfo)?) {
+        dropHint.isHidden = true
+    }
+
+    override public func performDragOperation(_ info: any NSDraggingInfo) -> Bool {
+        dropHint.isHidden = true
+        guard let (id, zone, _) = target(info), let chat = info.draggingPasteboard.string(forType: .jawChat) else { return false }
+        dropped?(chat, id, zone)
+        return true
     }
 
     override public func layout() {
@@ -157,8 +233,9 @@ final class SlotFrame: NSView {
 
     func show(_ view: NSView?, roles: Roles, focused: Bool, closable: Bool) {
         let shown = view ?? empty
-        if content !== shown {
-            content?.removeFromSuperview()
+        if content !== shown || shown.superview !== self {
+            // A view another pane took in this same pass is that pane's now.
+            if let content, content.superview === self { content.removeFromSuperview() }
             shown.removeFromSuperview()
             shown.translatesAutoresizingMaskIntoConstraints = false
             addSubview(shown, positioned: .below, relativeTo: closeButton)

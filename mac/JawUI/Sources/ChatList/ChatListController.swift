@@ -61,6 +61,7 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         table.action = #selector(clicked)
         table.list = self
         table.setAccessibilityLabel("Chats")
+        table.setDraggingSourceOperationMask(.move, forLocal: true)
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
@@ -190,6 +191,15 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
     }
 
     // MARK: The table
+
+    /// A chat dragged out of the list, onto a pane.
+    public func tableView(_: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        guard row < shown.count, shown[row].kind != .community else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(shown[row].id, forType: .jawChat)
+        item.setString(shown[row].name, forType: .string)
+        return item
+    }
 
     public func numberOfRows(in _: NSTableView) -> Int {
         shown.count
@@ -424,4 +434,9 @@ final class ChatCell: NSView {
     static func colour(_ id: String) -> Int {
         id.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF } % 8
     }
+}
+
+public extension NSPasteboard.PasteboardType {
+    /// A chat's id, dragged from the list.
+    static let jawChat = NSPasteboard.PasteboardType("dev.badcoffee.jaw.chat")
 }

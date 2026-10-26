@@ -406,6 +406,32 @@ final class AppModel {
         }
     }
 
+    /// A chat dropped from the list onto a pane: on its middle it takes the pane, moving from the
+    /// pane that showed it; on an edge the pane splits that way for it.
+    func drop(_ id: String, on slot: Int, _ zone: GridView.DropZone) {
+        guard let grid, let row = window?.chatList.row(id) ?? panes[id]?.chat else { return }
+        switch zone {
+        case .middle:
+            guard grid.slot(slot)?.chat != id else { return focus(slot: slot) }
+            if let old = grid.slot(slot)?.chat { closePane(old) }
+            if panes[id] == nil { _ = makePane(row, place: ConversationController.place(for: row)) }
+            self.grid = grid.with(chat: id, in: slot)
+            focusedSlot = nil
+            focus(slot: slot)
+            savePanes()
+        case .left, .right, .top, .bottom:
+            guard panes[id] == nil else { return say("\(row.name) is on screen already; drop it on a pane's middle to move it there") }
+            focus(slot: slot)
+            split(zone == .left || zone == .right ? .across : .down, with: row)
+            if zone == .left || zone == .top, let new = focusedSlot {
+                self.grid = self.grid?.swapping(slot, new)
+                focusedSlot = nil
+                focus(slot: slot)
+                savePanes()
+            }
+        }
+    }
+
     func closeFocusedPane() {
         guard let grid, let at = focusedSlot, grid.slots.count > 1 else {
             window?.window?.performClose(nil)

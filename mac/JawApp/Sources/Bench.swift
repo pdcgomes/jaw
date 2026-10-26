@@ -74,7 +74,16 @@ enum Bench {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             NSApp.activate()
             if model.window?.editorSheet == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
-            let step = key.hasPrefix("save:") || key == "revert" || key.hasPrefix("size:")
+            let step = key.hasPrefix("save:") || key == "revert" || key.hasPrefix("size:") || key.hasPrefix("drop:")
+            if key.hasPrefix("drop:") {
+                let parts = key.split(separator: ":")
+                let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
+                if parts.count == 3, let i = Int(parts[1]), let list = model.window?.chatList.all, i < list.count, let slot = model.focusedSlot,
+                   let zone = zones[String(parts[2])]
+                {
+                    model.drop(list[i].id, on: slot, zone)
+                }
+            }
             if key.hasPrefix("save:") { model.saveLayoutAs(String(key.dropFirst(5))) }
             if key == "revert" { model.revertLayout() }
             if key.hasPrefix("size:") {

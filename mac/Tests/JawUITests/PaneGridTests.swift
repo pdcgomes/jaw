@@ -146,3 +146,15 @@ func pinwheel() -> PaneGrid {
     let kept = try JSONDecoder().decode(PaneGrid.self, from: JSONEncoder().encode(work()))
     #expect(kept == work() && kept.holds)
 }
+
+@Test func `a chat dropped near an edge splits that way, and anywhere else takes the pane`() {
+    let r = CGRect(x: 100, y: 100, width: 800, height: 400)
+    #expect(GridView.zone(CGPoint(x: 500, y: 300), in: r) == .middle)
+    #expect(GridView.zone(CGPoint(x: 120, y: 300), in: r) == .left)
+    #expect(GridView.zone(CGPoint(x: 890, y: 300), in: r) == .right)
+    #expect(GridView.zone(CGPoint(x: 500, y: 110), in: r) == .top)
+    #expect(GridView.zone(CGPoint(x: 500, y: 495), in: r) == .bottom)
+    #expect(GridView.zone(CGPoint(x: 105, y: 102), in: r) == .top, "the nearer edge wins in a corner")
+    #expect(GridView.zone(CGPoint(x: 50, y: 300), in: r) == nil)
+    #expect(GridView.zone(CGPoint(x: 290, y: 300), in: r) == .middle, "the band is at most 120 points deep")
+}
