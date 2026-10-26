@@ -348,13 +348,16 @@ final class AppModel {
     func focus(slot id: Int, force: Bool = false) {
         guard let slot = grid?.slot(id) else { return }
         let changed = focusedSlot != id
+        if changed { conversation?.leave() }
         focusedSlot = id
+        if changed || force { window?.showPanes() }
         if let chat = slot.chat {
             window?.chatList.select(chat)
             panes[chat]?.focusBox()
             panes[chat]?.readIfLooking()
+        } else {
+            window?.window?.makeFirstResponder(window?.detail.panes)
         }
-        if changed || force { window?.showPanes() }
         window?.refresh()
     }
 

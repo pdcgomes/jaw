@@ -149,7 +149,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         for slot in grid.slots {
             if let chat = slot.chat, let c = model.panes[chat] { views[slot.id] = c.view }
         }
-        detail.show(panes: grid, views: views, focused: model.focusedSlot, roles: model.roles)
+        detail.show(panes: grid, views: views, focused: model.focusedSlot, box: model.conversation?.composer.view, roles: model.roles)
     }
 
     func restyle() {
@@ -371,23 +371,43 @@ extension JSONEncoder {
 @MainActor
 final class DetailController: NSViewController {
     let panes = GridView()
+    let box = BoxPlace()
+    /// The panes with the box under them.
+    let panesArea = NSView()
     var stateHost: NSHostingController<StateView>?
     var linkingHost: NSHostingController<LinkingView>?
     var shown: NSView?
 
     override func loadView() {
         view = NSView()
+        for v in [panes, box] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            panesArea.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            panes.topAnchor.constraint(equalTo: panesArea.topAnchor),
+            panes.leadingAnchor.constraint(equalTo: panesArea.leadingAnchor),
+            panes.trailingAnchor.constraint(equalTo: panesArea.trailingAnchor),
+            panes.bottomAnchor.constraint(equalTo: box.topAnchor),
+            box.leadingAnchor.constraint(equalTo: panesArea.leadingAnchor),
+            box.trailingAnchor.constraint(equalTo: panesArea.trailingAnchor),
+            box.bottomAnchor.constraint(equalTo: panesArea.bottomAnchor),
+        ])
     }
 
-    var drawn: (PaneGrid, Int?, [Int: ObjectIdentifier], Roles)?
+    var drawn: (PaneGrid, Int?, [Int: ObjectIdentifier], ObjectIdentifier?, Roles)?
 
-    /// Lays the panes out, unless they're already laid out this way.
-    func show(panes grid: PaneGrid, views: [Int: NSView], focused: Int?, roles: Roles, force: Bool = false) {
+    /// Lays the panes out with the focused chat's box under them, unless they're already so.
+    func show(panes grid: PaneGrid, views: [Int: NSView], focused: Int?, box composer: NSView?, roles: Roles, force: Bool = false) {
         let ids = views.mapValues(ObjectIdentifier.init)
-        if !force, shown === panes, let drawn, drawn.0 == grid, drawn.1 == focused, drawn.2 == ids, drawn.3 == roles { return }
-        place(panes)
+        let boxID = composer.map(ObjectIdentifier.init)
+        if !force, shown === panesArea, let drawn, drawn.0 == grid, drawn.1 == focused, drawn.2 == ids, drawn.3 == boxID, drawn.4 == roles {
+            return
+        }
+        place(panesArea)
         panes.show(grid, views: views, focused: focused, roles: roles)
-        drawn = (grid, focused, ids, roles)
+        box.show(composer, roles: roles)
+        drawn = (grid, focused, ids, boxID, roles)
     }
 
     func show(state kind: StateView.Kind, roles: Roles) {

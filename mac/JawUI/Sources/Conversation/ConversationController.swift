@@ -130,9 +130,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             guard let self else { return }
             host?.conversationFocused(self)
         }
-        addChild(composer)
-
-        for v in [header, scroll, newPill, composer.view] as [NSView] {
+        for v in [header, scroll, newPill] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -144,10 +142,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             scroll.topAnchor.constraint(equalTo: header.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: composer.view.topAnchor),
-            composer.view.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            composer.view.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            composer.view.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             newPill.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
             newPill.bottomAnchor.constraint(equalTo: scroll.bottomAnchor, constant: -12),
         ])
@@ -783,7 +778,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         view.window?.makeFirstResponder(composer.textView)
     }
 
-    /// Leaving the chat: its draft and typing settle now.
+    /// Leaving the chat, or the focus leaving its pane: its draft and typing settle now. The box
+    /// is the window's, under the panes, showing the focused chat's composer.
     public func leave() {
         composer.leave()
     }
