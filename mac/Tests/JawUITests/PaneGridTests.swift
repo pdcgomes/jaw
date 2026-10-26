@@ -10,17 +10,17 @@ let room = CGSize(width: 1200, height: 800)
 let square = CGRect(x: 0, y: 0, width: 1000, height: 1000)
 
 /// A slot's columns and rows, to compare.
-func span(_ s: GridLayout.Slot?) -> [Int] {
+func span(_ s: PaneGrid.Slot?) -> [Int] {
     s.map { [$0.c0, $0.c1, $0.r0, $0.r1] } ?? []
 }
 
-func split(_ g: GridLayout, _ id: Int, _ axis: GridLayout.Axis, _ chat: String?) throws -> (GridLayout, Int) {
+func split(_ g: PaneGrid, _ id: Int, _ axis: PaneGrid.Axis, _ chat: String?) throws -> (PaneGrid, Int) {
     try g.splitting(id, axis, chat: chat, size: room).get()
 }
 
 /// Work: a big slot on the left, Ana above Lisbon and an empty slot on the right.
-func work() -> GridLayout {
-    GridLayout(cols: [0, 0.5, 0.75, 1], rows: [0, 0.5, 1], slots: [
+func work() -> PaneGrid {
+    PaneGrid(cols: [0, 0.5, 0.75, 1], rows: [0, 0.5, 1], slots: [
         .init(id: 1, c0: 0, c1: 1, r0: 0, r1: 2, chat: "team"),
         .init(id: 2, c0: 1, c1: 3, r0: 0, r1: 1, chat: "ana"),
         .init(id: 3, c0: 1, c1: 2, r0: 1, r1: 2, chat: "lisbon"),
@@ -29,8 +29,8 @@ func work() -> GridLayout {
 }
 
 /// Four slots turning round the middle, where no two share a whole edge.
-func pinwheel() -> GridLayout {
-    GridLayout(cols: [0, 1.0 / 3, 2.0 / 3, 1], rows: [0, 1.0 / 3, 2.0 / 3, 1], slots: [
+func pinwheel() -> PaneGrid {
+    PaneGrid(cols: [0, 1.0 / 3, 2.0 / 3, 1], rows: [0, 1.0 / 3, 2.0 / 3, 1], slots: [
         .init(id: 1, c0: 0, c1: 2, r0: 0, r1: 1, chat: "a"),
         .init(id: 2, c0: 2, c1: 3, r0: 0, r1: 2, chat: "b"),
         .init(id: 3, c0: 1, c1: 3, r0: 2, r1: 3, chat: "c"),
@@ -59,16 +59,16 @@ func pinwheel() -> GridLayout {
 }
 
 @Test func `a split is refused under 240 points and past 12 panes`() throws {
-    let narrow = GridLayout.single("ana")
-    #expect(throws: GridLayout.Refusal.room) { try narrow.splitting(1, .across, chat: nil, size: CGSize(width: 470, height: 800)).get() }
-    var g = GridLayout.single("0")
-    for i in 1 ..< GridLayout.most {
+    let narrow = PaneGrid.single("ana")
+    #expect(throws: PaneGrid.Refusal.room) { try narrow.splitting(1, .across, chat: nil, size: CGSize(width: 470, height: 800)).get() }
+    var g = PaneGrid.single("0")
+    for i in 1 ..< PaneGrid.most {
         let id = g.reading.last!.id
         g = try g.splitting(id, i % 2 == 0 ? .across : .down, chat: "\(i)", size: CGSize(width: 1_000_000, height: 1_000_000)).get().0
     }
-    #expect(g.slots.count == GridLayout.most && g.holds)
-    #expect(throws: GridLayout.Refusal.most) { try g.splitting(1, .across, chat: nil, size: CGSize(width: 1_000_000, height: 1_000_000)).get() }
-    #expect(GridLayout.Refusal.room.said == "no room to split this pane; close one, or a bigger window")
+    #expect(g.slots.count == PaneGrid.most && g.holds)
+    #expect(throws: PaneGrid.Refusal.most) { try g.splitting(1, .across, chat: nil, size: CGSize(width: 1_000_000, height: 1_000_000)).get() }
+    #expect(PaneGrid.Refusal.room.said == "no room to split this pane; close one, or a bigger window")
 }
 
 @Test func `closing gives the space to the neighbour sharing its whole edge, and drops lines no one uses`() throws {
@@ -87,7 +87,7 @@ func pinwheel() -> GridLayout {
     let (g, grew) = pinwheel().closing(5)
     #expect(grew == nil && g.slot(5)?.chat == nil && g.slots.count == 5 && g.holds)
     #expect(pinwheel().holds)
-    let (once, _) = GridLayout.single("ana").closing(1)
+    let (once, _) = PaneGrid.single("ana").closing(1)
     #expect(once == .single("ana"), "the last pane stays")
 }
 
@@ -120,7 +120,7 @@ func pinwheel() -> GridLayout {
 
 @Test func `a tree of splits reads as the same panes in the same places`() {
     let tree = PaneLayout.split(.across, 0.6, .pane("ana"), .split(.down, 0.5, .pane("rui"), .pane("mum")))
-    let g = GridLayout.from(tree)
+    let g = PaneGrid.from(tree)
     #expect(g.holds && g.slots.count == 3)
     let frames = tree.frames(in: square)
     for slot in g.slots {
@@ -133,16 +133,16 @@ func pinwheel() -> GridLayout {
     #expect(cells.cols.count == 7 && cells.rows.count == 5)
     #expect(span(cells.slot(2)) == [3, 6, 0, 2] && span(cells.slot(3)) == [3, 5, 2, 4], "0.75 snaps to the fifth of six")
     #expect(cells.coversAll && !cells.holds, "every cell is covered, though not every line is used")
-    let merged = cells.merging(GridLayout.Cells(c0: 3, r0: 2, c1: 5, r1: 2))
+    let merged = cells.merging(PaneGrid.Cells(c0: 3, r0: 2, c1: 5, r1: 2))
     #expect(merged.slots.count == 3 && merged.coversAll, "Lisbon and the empty slot become one")
     #expect(merged.slots.contains { $0.chat == "lisbon" && $0.c1 == 6 })
-    let apart = try GridLayout.single("ana").onCells(columns: 2, rows: 2).intoCells(1).get()
+    let apart = try PaneGrid.single("ana").onCells(columns: 2, rows: 2).intoCells(1).get()
     #expect(apart.slots.count == 4 && apart.slot(1)?.chat == "ana")
-    #expect(throws: GridLayout.Refusal.most) { try GridLayout.single("ana").onCells(columns: 6, rows: 4).intoCells(1).get() }
+    #expect(throws: PaneGrid.Refusal.most) { try PaneGrid.single("ana").onCells(columns: 6, rows: 4).intoCells(1).get() }
     #expect(cells.pruned().cols == [0, 0.5, 5.0 / 6, 1] && cells.pruned().holds, "on its own lines again once saved")
 }
 
 @Test func `a layout is kept as JSON and read back the same`() throws {
-    let kept = try JSONDecoder().decode(GridLayout.self, from: JSONEncoder().encode(work()))
+    let kept = try JSONDecoder().decode(PaneGrid.self, from: JSONEncoder().encode(work()))
     #expect(kept == work() && kept.holds)
 }

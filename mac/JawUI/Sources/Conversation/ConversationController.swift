@@ -58,6 +58,11 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     let scroll = NSScrollView()
     let table = NSTableView()
     let header = HeaderView()
+    /// The pane's commands, on a right click of the header.
+    public var headerMenu: NSMenu? {
+        didSet { header.menu = headerMenu }
+    }
+
     let newPill = PillButton()
     let hover = HoverBar()
     public let composer: ComposerController

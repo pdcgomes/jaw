@@ -20,7 +20,7 @@ There's one model under both: a layout is slots on grid lines. The ad hoc splits
 
 ## The model
 
-`GridLayout` replaces `PaneLayout` in `JawUI/Panes`. It's a value with its rules tested on their own, as `PaneLayout`'s are:
+`PaneGrid` replaces `PaneLayout` in `JawUI/Panes`. It's a value with its rules tested on their own, as `PaneLayout`'s are:
 
 - `cols` and `rows`: the grid's lines as fractions of the width and the height, from 0 to 1, in order, the first 0 and the last 1.
 - `slots`: each one a rectangle given as line indices, `c0 < c1` and `r0 < r1`, with an id that stays the same through edits, and the chat it holds or none.
@@ -98,7 +98,7 @@ The panes kept by mac-m1 (`panes:` and a jaw folder's path) are read once as the
 
 ## Build order
 
-1. **G1, the grid under the panes:** `GridLayout` and its view replace the tree, with today's keys and behaviour, the 240-point room check, and dragging lines. Panes saved by mac-m1 are read.
+1. **G1, the grid under the panes:** `PaneGrid` and its view replace the tree, with today's keys and behaviour, the 240-point room check, and dragging lines. Panes saved by mac-m1 are read.
 2. **G2, the box:** one box under the slots, drafts swapped as the focus moves, the conversation without its box.
 3. **G3, named layouts:** the Layout menu, ⌃⌘1 to ⌃⌘9, the palette's layouts, Save, Revert, Save As, Rename, Delete, the edited state, switching with its windows.
 4. **G4, the editor:** the sheet, the presets, merging and splitting cells, the grid's size.

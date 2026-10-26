@@ -63,12 +63,8 @@ final class Glance: NSObject, NSPopoverDelegate {
     func go(_ chat: ChatRow, newPane: Bool) {
         popover?.close()
         guard let model else { return }
-        if newPane, model.layout != nil, model.panes[chat.id] == nil, let focused = model.focusedChat, model.panes.count < PaneLayout.most {
-            _ = model.makePane(chat, place: ConversationController.place(for: chat))
-            model.layout = model.layout?.splitting(focused, .across, with: chat.id)
-            model.focus(chat.id)
-            model.window?.showPanes()
-            model.savePanes()
+        if newPane, model.grid != nil, model.panes[chat.id] == nil {
+            model.split(.across, with: chat)
         } else {
             model.open(chat, opened: true)
         }

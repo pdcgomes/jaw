@@ -3,34 +3,8 @@ import Foundation
 @testable import JawUI
 import Testing
 
-/// The panes' rules, as the terminal's follow them, and the palette's: actions ranked as jawd ranks
+/// The palette's rules: actions ranked as jawd ranks
 /// names, Tab narrowing and stepping back, reactions by name, forwarding to five chats at most.
-
-@Test func `splitting, closing and swapping keep the panes in their places`() {
-    var layout = PaneLayout.pane("ana")
-    layout = layout.splitting("ana", .across, with: "rui")
-    layout = layout.splitting("rui", .down, with: "mum")
-    #expect(layout.panes == ["ana", "rui", "mum"])
-    #expect(layout.neighbour(of: "ana", .right) != nil && layout.neighbour(of: "ana", .left) == nil)
-    #expect(layout.neighbour(of: "rui", .down) == "mum" && layout.neighbour(of: "mum", .up) == "rui")
-    #expect(layout.neighbour(of: "mum", .left) == "ana")
-    let swapped = layout.swapping("ana", "mum")
-    #expect(swapped.panes == ["mum", "rui", "ana"])
-    let closed = layout.removing("rui")
-    #expect(closed == .split(.across, 0.5, .pane("ana"), .pane("mum")), "its sibling takes its place")
-    #expect(PaneLayout.pane("ana").removing("ana") == nil, "the last pane has nothing left")
-    #expect(layout.replacing("ana", with: "sofia").panes == ["sofia", "rui", "mum"])
-}
-
-@Test func `a split's share moves within its bounds and is kept as it was`() throws {
-    let layout = PaneLayout.pane("ana").splitting("ana", .across, with: "rui")
-    let wide = layout.resizing("ana", .across, to: 0.95)
-    #expect(wide == .split(.across, 0.8, .pane("ana"), .pane("rui")))
-    let frames = wide.frames(in: CGRect(x: 0, y: 0, width: 1000, height: 600))
-    #expect(frames["ana"]?.width == 800 && frames["rui"]?.minX == 800)
-    let kept = try JSONDecoder().decode(PaneLayout.self, from: JSONEncoder().encode(wide))
-    #expect(kept == wide, "kept in the preferences and read back the same")
-}
 
 @Test func `actions are matched as jawd matches names`() {
     #expect(PaletteModel.score("sta", "Start a chat") == 100, "the start")

@@ -74,6 +74,10 @@ enum Bench {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             NSApp.activate()
             model.window?.window?.makeKeyAndOrderFront(nil)
+            if key.hasPrefix("size:") {
+                let wh = key.dropFirst(5).split(separator: "x").compactMap { Double($0) }
+                if wh.count == 2 { model.window?.window?.setContentSize(NSSize(width: wh[0], height: wh[1])) }
+            }
             var parts = key.lowercased().split(separator: "+").map(String.init)
             let char = parts.popLast() ?? ""
             var mods: NSEvent.ModifierFlags = []
@@ -86,8 +90,12 @@ enum Bench {
                 default: break
                 }
             }
-            let codes: [String: UInt16] = ["d": 2, "w": 13, "k": 40, "f": 3, "j": 38]
-            let typed = mods.contains(.shift) ? char.uppercased() : char
+            let codes: [String: UInt16] = ["d": 2, "w": 13, "k": 40, "f": 3, "j": 38, "s": 1, "e": 14, "1": 18, "2": 19, "3": 20,
+                                           "left": 123, "right": 124, "down": 125, "up": 126, "return": 36]
+            let arrows: [String: Int] = ["left": NSLeftArrowFunctionKey, "right": NSRightArrowFunctionKey, "up": NSUpArrowFunctionKey,
+                                         "down": NSDownArrowFunctionKey]
+            if arrows[char] != nil { mods.insert([.numericPad, .function]) }
+            let typed = arrows[char].map { String(UnicodeScalar($0)!) } ?? (char == "return" ? "\r" : mods.contains(.shift) ? char.uppercased() : char)
             if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
                                             windowNumber: model.window?.window?.windowNumber ?? 0, context: nil,
                                             characters: typed, charactersIgnoringModifiers: typed, isARepeat: false, keyCode: codes[char] ?? 0)
@@ -96,7 +104,8 @@ enum Bench {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 let said = (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
-                FileHandle.standardError.write(Data("\(key): \(model.layout.map { "\($0)" } ?? "no panes")\(said)\n".utf8))
+                let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
+                FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0)\(said)\n".utf8))
                 press(Array(keys.dropFirst()), model: model, then: then)
             }
         }

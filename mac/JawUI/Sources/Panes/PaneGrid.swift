@@ -8,7 +8,7 @@ import Foundation
 ///
 /// Splitting and closing are edits to the grid, so the ad hoc splits and a layout drawn in the
 /// editor follow the same rules. A value, tested on its own, and kept as JSON.
-public struct GridLayout: Hashable, Sendable, Codable {
+public struct PaneGrid: Hashable, Sendable, Codable {
     public enum Axis: String, Hashable, Sendable, Codable {
         /// Side by side: a column line.
         case across
@@ -25,7 +25,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
 
         public var said: String {
             switch self {
-            case .most: "\(GridLayout.most) panes at most"
+            case .most: "\(PaneGrid.most) panes at most"
             case .room: "no room to split this pane; close one, or a bigger window"
             }
         }
@@ -107,8 +107,8 @@ public struct GridLayout: Hashable, Sendable, Codable {
     }
 
     /// One pane, the whole grid.
-    public static func single(_ chat: String?) -> GridLayout {
-        GridLayout(cols: [0, 1], rows: [0, 1], slots: [Slot(id: 1, c0: 0, c1: 1, r0: 0, r1: 1, chat: chat)])
+    public static func single(_ chat: String?) -> PaneGrid {
+        PaneGrid(cols: [0, 1], rows: [0, 1], slots: [Slot(id: 1, c0: 0, c1: 1, r0: 0, r1: 1, chat: chat)])
     }
 
     // MARK: Reading it
@@ -224,7 +224,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
     }
 
     /// The layout without its chats, to tell a change of shape from a change of chats.
-    public var shape: GridLayout {
+    public var shape: PaneGrid {
         var g = self
         for i in g.slots.indices {
             g.slots[i].chat = nil
@@ -236,7 +236,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
 
     /// Splits slot `id` along `axis`: at the line inside it nearest its middle when it spans
     /// several, or at a new line through its middle. The new slot holds `chat` and comes after.
-    public func splitting(_ id: Int, _ axis: Axis, chat: String?, size: CGSize) -> Result<(GridLayout, Int), Refusal> {
+    public func splitting(_ id: Int, _ axis: Axis, chat: String?, size: CGSize) -> Result<(PaneGrid, Int), Refusal> {
         guard let s = slot(id) else { return .failure(.room) }
         guard slots.count < Self.most else { return .failure(.most) }
         var g = self
@@ -282,7 +282,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
     /// Closes slot `id`: the neighbour sharing its whole edge grows into its place, the one before
     /// it in reading order first, and lines no slot uses go; it returns the slot that grew. With no
     /// such neighbour (a pinwheel) the slot stays, empty. The last slot stays as it is.
-    public func closing(_ id: Int) -> (GridLayout, Int?) {
+    public func closing(_ id: Int) -> (PaneGrid, Int?) {
         guard let s = slot(id), slots.count > 1 else { return (self, nil) }
         let sharing = slots.filter { n in
             n.id != id && ((n.r0 == s.r0 && n.r1 == s.r1 && (n.c1 == s.c0 || n.c0 == s.c1))
@@ -309,7 +309,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
     }
 
     /// With `chat` in slot `id`, and out of any other slot that showed it.
-    public func with(chat: String?, in id: Int) -> GridLayout {
+    public func with(chat: String?, in id: Int) -> PaneGrid {
         var g = self
         for i in g.slots.indices {
             if g.slots[i].id == id {
@@ -322,7 +322,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
     }
 
     /// With the chats of slots `a` and `b` exchanged; the shape stays.
-    public func swapping(_ a: Int, _ b: Int) -> GridLayout {
+    public func swapping(_ a: Int, _ b: Int) -> PaneGrid {
         guard let x = slot(a), let y = slot(b) else { return self }
         var g = self
         for i in g.slots.indices {
@@ -333,7 +333,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
     }
 
     /// With `line` moved to `position`, every slot along it resizing, none under 240 points.
-    public func moving(_ line: Line, to position: Double, size: CGSize) -> GridLayout {
+    public func moving(_ line: Line, to position: Double, size: CGSize) -> PaneGrid {
         let lines = lines(line.axis)
         let k = line.index
         guard k > 0, k < lines.count - 1 else { return self }
@@ -350,7 +350,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
     }
 
     /// Drops lines no slot's edge uses.
-    public func pruned() -> GridLayout {
+    public func pruned() -> PaneGrid {
         var g = self
         for axis in [Axis.across, .down] {
             var k = g.lines(axis).count - 2
@@ -376,7 +376,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
     // MARK: A tree of splits
 
     /// The layout a tree of splits draws, its panes' chats in their slots.
-    public static func from(_ tree: PaneLayout) -> GridLayout {
+    public static func from(_ tree: PaneLayout) -> PaneGrid {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
         let frames = tree.frames(in: unit)
         let xs = Set(frames.values.flatMap { [Double($0.minX), Double($0.maxX)] }).sorted()
@@ -387,14 +387,14 @@ public struct GridLayout: Hashable, Sendable, Codable {
             slots.append(Slot(id: i + 1, c0: xs.firstIndex(of: Double(f.minX))!, c1: xs.firstIndex(of: Double(f.maxX))!,
                               r0: ys.firstIndex(of: Double(f.minY))!, r1: ys.firstIndex(of: Double(f.maxY))!, chat: id))
         }
-        return GridLayout(cols: xs, rows: ys, slots: slots)
+        return PaneGrid(cols: xs, rows: ys, slots: slots)
     }
 
     // MARK: The editor's cells
 
     /// The layout on a grid of `columns` by `rows` cells: each line snapped to the nearest cell's
     /// edge, kept in order; every cell's line is kept, used or not, until `pruned`.
-    public func onCells(columns: Int, rows rowCount: Int) -> GridLayout {
+    public func onCells(columns: Int, rows rowCount: Int) -> PaneGrid {
         let columns = max(columns, cols.count - 1), rowCount = max(rowCount, rows.count - 1)
         func snap(_ lines: [Double], _ n: Int) -> [Int] {
             var out: [Int] = []
@@ -406,7 +406,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
             return out
         }
         let cx = snap(cols, columns), ry = snap(rows, rowCount)
-        var g = GridLayout(cols: (0 ... columns).map { Double($0) / Double(columns) }, rows: (0 ... rowCount).map { Double($0) / Double(rowCount) },
+        var g = PaneGrid(cols: (0 ... columns).map { Double($0) / Double(columns) }, rows: (0 ... rowCount).map { Double($0) / Double(rowCount) },
                            slots: slots.map { Slot(id: $0.id, c0: cx[$0.c0], c1: cx[$0.c1], r0: ry[$0.r0], r1: ry[$0.r1], chat: $0.chat) })
         g.next = max(g.next, next)
         return g
@@ -414,7 +414,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
 
     /// The editor's merge: the cells dragged across, grown until they cut no slot, become one slot,
     /// the first slot's in reading order, with the first chat among them.
-    public func merging(_ cells: Cells) -> GridLayout {
+    public func merging(_ cells: Cells) -> PaneGrid {
         var r = cells
         var grew = true
         while grew {
@@ -437,7 +437,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
     }
 
     /// The editor's split: slot `id` back into one slot a cell, the first keeping its id and chat.
-    public func intoCells(_ id: Int) -> Result<GridLayout, Refusal> {
+    public func intoCells(_ id: Int) -> Result<PaneGrid, Refusal> {
         guard let s = slot(id) else { return .success(self) }
         let count = (s.c1 - s.c0) * (s.r1 - s.r0)
         guard slots.count - 1 + count <= Self.most else { return .failure(.most) }
@@ -458,7 +458,7 @@ public struct GridLayout: Hashable, Sendable, Codable {
 
     // MARK: Equality and keeping
 
-    public static func == (a: GridLayout, b: GridLayout) -> Bool {
+    public static func == (a: PaneGrid, b: PaneGrid) -> Bool {
         a.cols == b.cols && a.rows == b.rows && a.slots == b.slots
     }
 

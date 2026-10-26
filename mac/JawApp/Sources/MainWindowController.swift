@@ -90,8 +90,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             self?.palette.close()
             self?.goTo(m)
         }
-        detail.panes.resized = { [weak model] pane, axis, share in model?.resized(pane, axis, share) }
-        detail.panes.close = { [weak model] pane in model?.close(pane: pane) }
+        detail.panes.moved = { [weak model] line, position, done in model?.moved(line, to: position, done: done) }
+        detail.panes.close = { [weak model] slot in model?.close(slot: slot) }
+        detail.panes.pick = { [weak model] slot in model?.focus(slot: slot) }
+        detail.panes.paneMenu = { [weak model] slot in
+            guard let model else { return nil }
+            model.focus(slot: slot)
+            return Menus.menu(["split.across", "split.down", "pane.close"].compactMap(model.command))
+        }
 
         let link = content.displayLink(target: self, selector: #selector(frame(_:)))
         link.isPaused = true
@@ -138,9 +144,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     /// Lays the panes out as the model's layout has them, the focused one outlined.
     func showPanes() {
-        guard let layout = model.layout, !model.panes.isEmpty, model.stateView == nil else { return }
-        let views = model.panes.mapValues(\.view)
-        detail.show(panes: layout, views: views, focused: model.focusedChat, roles: model.roles)
+        guard let grid = model.grid, model.stateView == nil else { return }
+        var views: [Int: NSView] = [:]
+        for slot in grid.slots {
+            if let chat = slot.chat, let c = model.panes[chat] { views[slot.id] = c.view }
+        }
+        detail.show(panes: grid, views: views, focused: model.focusedSlot, roles: model.roles)
     }
 
     func restyle() {
@@ -361,7 +370,7 @@ extension JSONEncoder {
 /// The panes' place: the panes, or what's there instead.
 @MainActor
 final class DetailController: NSViewController {
-    let panes = PaneView()
+    let panes = GridView()
     var stateHost: NSHostingController<StateView>?
     var linkingHost: NSHostingController<LinkingView>?
     var shown: NSView?
@@ -370,15 +379,15 @@ final class DetailController: NSViewController {
         view = NSView()
     }
 
-    var drawn: (PaneLayout, String?, [String: ObjectIdentifier], Roles)?
+    var drawn: (PaneGrid, Int?, [Int: ObjectIdentifier], Roles)?
 
     /// Lays the panes out, unless they're already laid out this way.
-    func show(panes layout: PaneLayout, views: [String: NSView], focused: String?, roles: Roles, force: Bool = false) {
+    func show(panes grid: PaneGrid, views: [Int: NSView], focused: Int?, roles: Roles, force: Bool = false) {
         let ids = views.mapValues(ObjectIdentifier.init)
-        if !force, shown === panes, let drawn, drawn.0 == layout, drawn.1 == focused, drawn.2 == ids, drawn.3 == roles { return }
+        if !force, shown === panes, let drawn, drawn.0 == grid, drawn.1 == focused, drawn.2 == ids, drawn.3 == roles { return }
         place(panes)
-        panes.show(layout, views: views, focused: focused, roles: roles)
-        drawn = (layout, focused, ids, roles)
+        panes.show(grid, views: views, focused: focused, roles: roles)
+        drawn = (grid, focused, ids, roles)
     }
 
     func show(state kind: StateView.Kind, roles: Roles) {

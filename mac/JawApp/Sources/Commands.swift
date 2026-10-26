@@ -12,7 +12,7 @@ extension AppModel {
         }
         let selected: @MainActor @Sendable () -> MessageRow? = { [weak self] in self?.conversation?.selectedRow }
         let chat: @MainActor @Sendable () -> ChatRow? = { [weak self] in self?.conversation?.chat }
-        let many: @MainActor @Sendable () -> Bool = { [weak self] in (self?.panes.count ?? 0) > 1 }
+        let many: @MainActor @Sendable () -> Bool = { [weak self] in (self?.grid?.slots.count ?? 0) > 1 }
 
         // Jaw
         add(Command("about", "About Jaw", place: .app, send: #selector(NSApplication.orderFrontStandardAboutPanel(_:))))
@@ -128,17 +128,18 @@ extension AppModel {
 
         // Panes
         add(Command("split.across", "Split Across", phrase: "Split this pane across", detail: "another chat beside it",
-                    symbol: "rectangle.split.2x1", key: Shortcut("d"), place: .panes, enabled: isChat) { [weak self] in self?.split(.across) })
+                    symbol: "rectangle.split.2x1", key: Shortcut("d"), place: .panes, enabled: { [weak self] in self?.grid != nil }) { [weak self] in self?.split(.across) })
         add(Command("split.down", "Split Down", phrase: "Split this pane down", detail: "another chat below it",
-                    symbol: "rectangle.split.1x2", key: Shortcut("d", [.command, .shift]), place: .panes, enabled: isChat)
+                    symbol: "rectangle.split.1x2", key: Shortcut("d", [.command, .shift]), place: .panes,
+                    enabled: { [weak self] in self?.grid != nil })
             { [weak self] in self?.split(.down) })
         for (i, (way, arrow)) in [("Left", "←"), ("Right", "→"), ("Up", "↑"), ("Down", "↓")].enumerated() {
-            let direction = [PaneLayout.Direction.left, .right, .up, .down][i]
+            let direction = [PaneGrid.Direction.left, .right, .up, .down][i]
             add(Command("pane.\(way.lowercased())", "Pane \(way)", phrase: "The pane \(way.lowercased())", key: Shortcut(arrow, [.command, .option]),
                         place: .panes, group: 1, palette: false, enabled: many) { [weak self] in self?.move(direction) })
         }
         for (i, (way, arrow)) in [("Left", "←"), ("Right", "→"), ("Up", "↑"), ("Down", "↓")].enumerated() {
-            let direction = [PaneLayout.Direction.left, .right, .up, .down][i]
+            let direction = [PaneGrid.Direction.left, .right, .up, .down][i]
             // ⌘⇧ and an arrow select to a line's end in the box, so swapping takes ⌃⌘.
             add(Command("swap.\(way.lowercased())", "Swap \(way)", phrase: "Swap with the pane \(way.lowercased())",
                         key: Shortcut(arrow, [.command, .control]), place: .panes, group: 2, palette: false, enabled: many)
@@ -147,7 +148,7 @@ extension AppModel {
         for n in 1 ... 9 {
             add(Command("pane.\(n)", "Pane \(n)", key: Shortcut("\(n)", [.command, .option]), place: .panes, group: 3, palette: false,
                         enabled: { [weak self] in
-                            let count = self?.panes.count ?? 0
+                            let count = self?.grid?.slots.count ?? 0
                             return count > 1 && n <= count
                         })
             { [weak self] in self?.goToPane(n) })

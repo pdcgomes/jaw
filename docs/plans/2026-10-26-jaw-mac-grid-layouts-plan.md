@@ -4,7 +4,7 @@
 
 **Goal:** Build [the grid layouts design](2026-10-26-jaw-mac-grid-layouts-design.md) on `mac-m1`: a component library and one list of commands under every menu, the grid under the panes, one box for the window, named layouts, the editor and dragging chats onto panes.
 
-**Architecture:** `JawUI/Components` holds the type scale, spacing, radii, motion, and the few controls every surface uses, so nothing sets a font or draws a button by hand. `JawUI/Commands` holds `Command` and `Shortcut`: the main menu, the toolbar's menus, context menus, the palette and the keys sheet are all built from one list, so every key has a menu item and every menu item shows its key. `GridLayout`, a value tested on its own, replaces `PaneLayout`; `GridView` lays slots out by hand in `layout()`, so they follow the window in the same frame.
+**Architecture:** `JawUI/Components` holds the type scale, spacing, radii, motion, and the few controls every surface uses, so nothing sets a font or draws a button by hand. `JawUI/Commands` holds `Command` and `Shortcut`: the main menu, the toolbar's menus, context menus, the palette and the keys sheet are all built from one list, so every key has a menu item and every menu item shows its key. `PaneGrid`, a value tested on its own, replaces `PaneLayout`; `GridView` lays slots out by hand in `layout()`, so they follow the window in the same frame.
 
 **Tech stack:** Swift 6, macOS 26, AppKit for the grid, the box and the lists, SwiftUI for the editor sheet and the palette, Swift Testing, Tuist 4 through mise, builds and tests on `build-mac` (`mac/scripts/build-mac`).
 
@@ -28,16 +28,16 @@ mac/JawUI/Sources/Components/Tone.swift        Tone: primary, secondary, tertiar
 mac/JawUI/Sources/Components/Controls.swift    IconButton, Labels, Surface (AppKit)
 mac/JawUI/Sources/Components/SwiftUI.swift     .textStyle, .tone, KeyCap, Card (SwiftUI)
 mac/JawUI/Sources/Commands/Command.swift       Shortcut, Command, MenuPlace, menus and palette actions built from commands
-mac/JawUI/Sources/Panes/GridLayout.swift       the model (replaces PaneLayout's rules; PaneLayout stays as the old preferences' reader)
+mac/JawUI/Sources/Panes/PaneGrid.swift       the model (replaces PaneLayout's rules; PaneLayout stays as the old preferences' reader)
 mac/JawUI/Sources/Panes/GridView.swift         slots laid out by hand, gutters, dragging lines, the focus outline, the empty pane
 mac/JawUI/Sources/Panes/LayoutBook.swift       named layouts, the edited state, version 1 JSON
 mac/JawUI/Sources/Panes/LayoutEditor.swift     the editor sheet (SwiftUI) and its model
 mac/JawApp/Sources/Commands.swift              the app's commands, grouped by menu
-mac/JawApp/Sources/AppModel.swift              panes on GridLayout, the book, the box's focus
+mac/JawApp/Sources/AppModel.swift              panes on PaneGrid, the book, the box's focus
 mac/JawApp/Sources/MainWindowController.swift  the box under the grid, the Layout toolbar menu
 mac/JawApp/Sources/AppDelegate.swift           the main menu from the commands
 mac/scripts/check-components                   the literal check
-mac/Tests/JawUITests/GridLayoutTests.swift, LayoutBookTests.swift, CommandTests.swift, ComponentTests.swift
+mac/Tests/JawUITests/PaneGridTests.swift, LayoutBookTests.swift, CommandTests.swift, ComponentTests.swift
 ```
 
 ---
@@ -91,20 +91,20 @@ public enum Menus { @MainActor public static func build(_ commands: [Command]) -
 
 ### Task 3: The grid model
 
-**Files:** create `Panes/GridLayout.swift`, `Tests/JawUITests/GridLayoutTests.swift`; trim `PaneLayout.swift` to the enum, `Codable` and `frames(in:)`; drop its rule tests.
+**Files:** create `Panes/PaneGrid.swift`, `Tests/JawUITests/PaneGridTests.swift`; trim `PaneLayout.swift` to the enum, `Codable` and `frames(in:)`; drop its rule tests.
 
-**Produces:** `GridLayout` (`cols`, `rows`, `slots: [Slot]` with `id`, `c0`, `c1`, `r0`, `r1`, `chat`), `Axis`, `Direction`, `Refusal { most, room; said }`, `single(_:)`, `reading`, `slot(_:)`, `slot(showing:)`, `frames(in:)`, `splitting(_:_:chat:size:) -> Result<(GridLayout, Int), Refusal>`, `closing(_:) -> (GridLayout, Int?)`, `with(chat:in:)`, `swapping(_:_:)`, `neighbour(of:_:)`, `lines`, `moving(_:to:size:)`, `from(_ tree: PaneLayout)`, `shape`, `holds`, and for the editor `onCells(columns:rows:)`, `merging(_:)`, `intoCells(_:)`, `pruned()`.
+**Produces:** `PaneGrid` (`cols`, `rows`, `slots: [Slot]` with `id`, `c0`, `c1`, `r0`, `r1`, `chat`), `Axis`, `Direction`, `Refusal { most, room; said }`, `single(_:)`, `reading`, `slot(_:)`, `slot(showing:)`, `frames(in:)`, `splitting(_:_:chat:size:) -> Result<(PaneGrid, Int), Refusal>`, `closing(_:) -> (PaneGrid, Int?)`, `with(chat:in:)`, `swapping(_:_:)`, `neighbour(of:_:)`, `lines`, `moving(_:to:size:)`, `from(_ tree: PaneLayout)`, `shape`, `holds`, and for the editor `onCells(columns:rows:)`, `merging(_:)`, `intoCells(_:)`, `pruned()`.
 
-- [ ] Write `GridLayoutTests`: splitting a single pane across and down; splitting a slot that spans columns uses the line inside it and adds none; the slots a new line crosses span one more column and keep their frames; refusals for 12 panes and under 240 points; closing gives the space to the neighbour sharing the whole edge, the one before first, and drops unused lines; a pinwheel's slot goes empty instead; `with(chat:in:)` takes the chat out of any other slot; swapping exchanges chats only; neighbours by direction; moving a line clamps at 240 points; a tree reads as the same frames; `onCells` snaps lines to the cells and keeps them in order; merging grows to the slots it cuts and keeps the first chat; `intoCells` refuses past 12; `holds` after every operation; `Codable` round trip.
+- [ ] Write `PaneGridTests`: splitting a single pane across and down; splitting a slot that spans columns uses the line inside it and adds none; the slots a new line crosses span one more column and keep their frames; refusals for 12 panes and under 240 points; closing gives the space to the neighbour sharing the whole edge, the one before first, and drops unused lines; a pinwheel's slot goes empty instead; `with(chat:in:)` takes the chat out of any other slot; swapping exchanges chats only; neighbours by direction; moving a line clamps at 240 points; a tree reads as the same frames; `onCells` snaps lines to the cells and keeps them in order; merging grows to the slots it cuts and keeps the first chat; `intoCells` refuses past 12; `holds` after every operation; `Codable` round trip.
 - [ ] Run: fails.
-- [ ] Write `GridLayout.swift`.
+- [ ] Write `PaneGrid.swift`.
 - [ ] Run; commit.
 
 ### Task 4: The grid under the panes
 
-**Files:** create `Panes/GridView.swift`; delete `PaneView.swift`; modify `AppModel.swift` (`grid: GridLayout?`, `focusedSlot: Int?`, `focusedChat` from it; open, split, close, move, swap, resize, step, restore and save on the grid, the old `panes:` preference read once), `MainWindowController.swift` (`DetailController` on `GridView`), `Bench.swift` (`--keys` prints the grid).
+**Files:** create `Panes/GridView.swift`; delete `PaneView.swift`; modify `AppModel.swift` (`grid: PaneGrid?`, `focusedSlot: Int?`, `focusedChat` from it; open, split, close, move, swap, resize, step, restore and save on the grid, the old `panes:` preference read once), `MainWindowController.swift` (`DetailController` on `GridView`), `Bench.swift` (`--keys` prints the grid).
 
-**Produces:** `GridView` with `show(_ grid:, views: [Int: NSView], focused: Int?, roles:)`, `moved: ((GridLayout.Line, Double) -> Void)?`, `close: ((Int) -> Void)?`, `pick: ((Int) -> Void)?`; slots placed in `layout()` from `grid.frames(in: bounds)`, a 1-point gutter in `roles.separator`, a resize cursor over each line's segments, dragging a line live; the focus outline as the slot's own border; an empty pane drawn with `Surface` and "⌘K or drag a chat here".
+**Produces:** `GridView` with `show(_ grid:, views: [Int: NSView], focused: Int?, roles:)`, `moved: ((PaneGrid.Line, Double) -> Void)?`, `close: ((Int) -> Void)?`, `pick: ((Int) -> Void)?`; slots placed in `layout()` from `grid.frames(in: bounds)`, a 1-point gutter in `roles.separator`, a resize cursor over each line's segments, dragging a line live; the focus outline as the slot's own border; an empty pane drawn with `Surface` and "⌘K or drag a chat here".
 
 - [ ] Run `--keys "cmd+d,cmd+shift+d,cmd+w"` on the build Mac and read the grid printed after each; resize the window by `setContentSize` in the snapshot and check frames.
 - [ ] Commit.
@@ -126,15 +126,15 @@ public enum Menus { @MainActor public static func build(_ commands: [Command]) -
 
 ```swift
 public struct LayoutBook: Codable, Hashable, Sendable {
-    public struct Saved: Codable, Hashable, Sendable { public var name: String; public var grid: GridLayout; public var edited: GridLayout?; public var focus: Int? }
+    public struct Saved: Codable, Hashable, Sendable { public var name: String; public var grid: PaneGrid; public var edited: PaneGrid?; public var focus: Int? }
     public var v = 1
     public var current: String?            // nil: the unnamed layout
-    public var unnamed: GridLayout?
+    public var unnamed: PaneGrid?
     public var layouts: [Saved]
-    public var grid: GridLayout?           // what's on screen: the edited shape, or the saved one, or the unnamed
+    public var grid: PaneGrid?           // what's on screen: the edited shape, or the saved one, or the unnamed
     public var isEdited: Bool
-    public mutating func reshape(_ grid: GridLayout)   // a split, a close, a moved line: edited when the shape differs
-    public mutating func rechat(_ grid: GridLayout)    // a chat put in or taken out: saved at once
+    public mutating func reshape(_ grid: PaneGrid)   // a split, a close, a moved line: edited when the shape differs
+    public mutating func rechat(_ grid: PaneGrid)    // a chat put in or taken out: saved at once
     public mutating func save(); revert(); saveAs(_ name: String) throws; rename(_ old: String, to: String) throws; delete(_ name: String); switchTo(_ name: String?)
     public static let most = 30
 }
@@ -152,7 +152,7 @@ public struct LayoutBook: Codable, Hashable, Sendable {
 
 **Produces:** `LayoutEditorModel` (`@Observable`: `grid`, `columns`, `rows`, `cursor`, `anchor`, `name`, `said`) and `LayoutEditorView`. **Keys:** arrows move the cell cursor, ⇧ and arrows grow the selection, M merges it, S splits the pane under the cursor into cells, 1 to 5 pick a preset, ⌘+ and ⌘− (⇧ for rows) change the grid's size, ⏎ saves, Esc cancels. **Mouse:** drag across cells to merge, ⊟ on a merged pane, presets clicked, steppers, Save and Cancel buttons.
 
-- [ ] Write tests on `LayoutEditorModel`: the cursor and selection move within the grid; merging and splitting change the grid as `GridLayout`'s do; presets; the grid's size can't go under what the layout needs; Save is refused with a reason when the name is empty or taken.
+- [ ] Write tests on `LayoutEditorModel`: the cursor and selection move within the grid; merging and splitting change the grid as `PaneGrid`'s do; presets; the grid's size can't go under what the layout needs; Save is refused with a reason when the name is empty or taken.
 - [ ] Run, implement, run; snapshot the sheet on the build Mac; commit.
 
 ### Task 8: Dragging chats onto panes

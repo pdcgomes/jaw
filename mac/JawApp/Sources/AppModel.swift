@@ -34,8 +34,8 @@ final class AppModel {
     /// Each pane's conversation, by the chat it shows; a chat shows in one pane at most.
     var panes: [String: ConversationController] = [:]
     var paneWindows: [WindowID: String] = [:]
-    var layout: PaneLayout?
-    var focusedChat: String?
+    var grid: PaneGrid?
+    var focusedSlot: Int?
     var restored = false
     let glance = Glance()
     var focusMode = false
@@ -277,7 +277,7 @@ final class AppModel {
         if reach == .up, !linked {
             return .linking(step: link, loggedOut: connection.state == .loggedOut ? (connection.reason ?? "logged out from the phone") : nil)
         }
-        if panes.isEmpty {
+        if grid == nil {
             return (window?.chatList.all.isEmpty ?? true) && reach == .up ? .noChats : .noChat
         }
         return nil
@@ -285,11 +285,21 @@ final class AppModel {
 
     // MARK: - Panes
 
+    /// The focused pane's chat, when it has one.
+    var focusedChat: String? {
+        focusedSlot.flatMap { grid?.slot($0)?.chat }
+    }
+
+    /// The grid's size on screen, for the room a split needs.
+    var gridSize: CGSize {
+        window?.detail.panes.bounds.size ?? CGSize(width: 1000, height: 800)
+    }
+
     /// Opens a chat: in the pane that shows it, or in the focused pane in place of its chat; `opened`
     /// when you picked it yourself, for frecency.
     func open(_ chat: ChatRow, opened: Bool, around message: String? = nil) {
-        if let existing = panes[chat.id] {
-            focus(chat.id)
+        if let existing = panes[chat.id], let slot = grid?.slot(showing: chat.id) {
+            focus(slot: slot.id)
             if let message { existing.go(to: message) }
             existing.focusBox()
             return
@@ -297,14 +307,15 @@ final class AppModel {
         let place = message.map { Place.around($0, before: ConversationController.rowsAround, after: ConversationController.rowsAround) }
             ?? ConversationController.place(for: chat)
         let c = makePane(chat, place: place)
-        if let old = focusedChat, let layout {
-            closePane(old, keepLayout: true)
-            self.layout = layout.replacing(old, with: chat.id)
+        if let grid, let at = focusedSlot, grid.slot(at) != nil {
+            if let old = grid.slot(at)?.chat { closePane(old) }
+            self.grid = grid.with(chat: chat.id, in: at)
         } else {
-            layout = .pane(chat.id)
+            grid = .single(chat.id)
+            focusedSlot = 1
         }
         if opened { jawd.opened(chat.id) }
-        focus(chat.id)
+        focus(slot: focusedSlot!, force: true)
         if let message { c.select(message) }
         savePanes()
     }
@@ -313,6 +324,8 @@ final class AppModel {
         let c = ConversationController(chat: chat, spec: spec, layouts: layouts, place: place)
         c.host = self
         c.notice = { [weak self] in self?.say($0) }
+        c.headerMenu = Menus.menu(["split.across", "split.down", "pane.close", "swap.left", "swap.right", "swap.up", "swap.down"]
+            .compactMap(command))
         _ = c.view
         panes[chat.id] = c
         paneWindows[jawd.watchMessages(chat.id, place)] = chat.id
@@ -320,7 +333,8 @@ final class AppModel {
         return c
     }
 
-    func closePane(_ chat: String, keepLayout: Bool = false) {
+    /// Lets a chat's pane go: its window unwatched, its draft kept by jawd.
+    func closePane(_ chat: String) {
         guard let c = panes.removeValue(forKey: chat) else { return }
         c.leave()
         c.view.removeFromSuperview()
@@ -328,18 +342,24 @@ final class AppModel {
             jawd.unwatch(w)
             paneWindows[w] = nil
         }
-        if !keepLayout { layout = layout?.removing(chat) }
+    }
+
+    /// Gives a pane the keys: its chat selected in the list, its box focused, its chat read.
+    func focus(slot id: Int, force: Bool = false) {
+        guard let slot = grid?.slot(id) else { return }
+        let changed = focusedSlot != id
+        focusedSlot = id
+        if let chat = slot.chat {
+            window?.chatList.select(chat)
+            panes[chat]?.focusBox()
+            panes[chat]?.readIfLooking()
+        }
+        if changed || force { window?.showPanes() }
+        window?.refresh()
     }
 
     func focus(_ chat: String) {
-        guard panes[chat] != nil else { return }
-        let changed = focusedChat != chat
-        focusedChat = chat
-        window?.chatList.select(chat)
-        if changed { window?.showPanes() }
-        panes[chat]?.focusBox()
-        panes[chat]?.readIfLooking()
-        window?.refresh()
+        if let slot = grid?.slot(showing: chat) { focus(slot: slot.id) }
     }
 
     /// The next chat in the list no pane shows, after the focused one, for a new pane.
@@ -354,63 +374,66 @@ final class AppModel {
         return nil
     }
 
-    func split(_ axis: PaneLayout.Axis) {
-        guard let layout, let focused = focusedChat else { return }
-        guard panes.count < PaneLayout.most else { return say("\(PaneLayout.most) panes at most") }
-        guard let next = nextUnshown() else { return say("every chat is on screen already") }
-        let size = panes[focused]?.view.bounds.size ?? .zero
-        guard (axis == .across ? size.width : size.height) >= 2 * PaneView.least else {
-            return say("no room to split this pane; close one, or a bigger window")
+    /// Splits the focused pane along `axis`, the new pane taking `chat`, or the next chat no pane
+    /// shows, and the keys.
+    func split(_ axis: PaneGrid.Axis, with chat: ChatRow? = nil) {
+        guard let grid, let at = focusedSlot else { return }
+        guard let next = chat ?? nextUnshown() else { return say("every chat is on screen already") }
+        switch grid.splitting(at, axis, chat: next.id, size: gridSize) {
+        case let .failure(refusal):
+            say(refusal.said)
+        case let .success((g, new)):
+            _ = makePane(next, place: ConversationController.place(for: next))
+            self.grid = g
+            focus(slot: new)
+            savePanes()
         }
-        _ = makePane(next, place: ConversationController.place(for: next))
-        self.layout = layout.splitting(focused, axis, with: next.id)
-        focus(next.id)
-        window?.showPanes()
-        savePanes()
     }
 
     func closeFocusedPane() {
-        guard let focused = focusedChat, panes.count > 1 else {
+        guard let grid, let at = focusedSlot, grid.slots.count > 1 else {
             window?.window?.performClose(nil)
             return
         }
-        close(pane: focused)
+        close(slot: at)
     }
 
-    /// Closes a pane of several; focus goes to its neighbour when it had it.
-    func close(pane chat: String) {
-        guard panes.count > 1, panes[chat] != nil else { return }
-        let next = layout?.neighbour(of: chat, .left) ?? layout?.neighbour(of: chat, .up)
-            ?? layout?.panes.first { $0 != chat }
-        closePane(chat)
-        if focusedChat == chat {
-            focusedChat = nil
-            if let next { focus(next) }
-        }
+    /// Closes a pane of several: its space goes to the neighbour sharing its whole edge, or it stays,
+    /// empty, in a pinwheel; the keys go to the neighbour when it had them.
+    func close(slot id: Int) {
+        guard let grid, grid.slots.count > 1, let slot = grid.slot(id) else { return }
+        let (g, grew) = grid.closing(id)
+        if let chat = slot.chat { closePane(chat) }
+        self.grid = g
+        if focusedSlot == id, let grew { focusedSlot = nil; focus(slot: grew) }
         window?.showPanes()
+        window?.refresh()
         savePanes()
     }
 
-    func move(_ direction: PaneLayout.Direction) {
-        guard let focused = focusedChat, let to = layout?.neighbour(of: focused, direction) else { return }
-        focus(to)
+    func move(_ direction: PaneGrid.Direction) {
+        guard let at = focusedSlot, let to = grid?.neighbour(of: at, direction) else { return }
+        focus(slot: to)
     }
 
     func goToPane(_ n: Int) {
-        guard let panes = layout?.panes, n >= 1, n <= panes.count else { return }
-        focus(panes[n - 1])
+        guard let reading = grid?.reading, n >= 1, n <= reading.count else { return }
+        focus(slot: reading[n - 1].id)
     }
 
-    func swap(_ direction: PaneLayout.Direction) {
-        guard let focused = focusedChat, let other = layout?.neighbour(of: focused, direction) else { return }
-        layout = layout?.swapping(focused, other)
-        window?.showPanes()
+    /// Swaps the focused pane's chat with its neighbour's; the keys go with it.
+    func swap(_ direction: PaneGrid.Direction) {
+        guard let at = focusedSlot, let other = grid?.neighbour(of: at, direction) else { return }
+        grid = grid?.swapping(at, other)
+        focusedSlot = nil
+        focus(slot: other)
         savePanes()
     }
 
-    func resized(_ pane: String, _ axis: PaneLayout.Axis, _ share: Double) {
-        layout = layout?.resizing(pane, axis, to: share)
-        savePanes()
+    /// A gutter dragged: the line moves live, and is kept when the drag ends.
+    func moved(_ line: PaneGrid.Line, to position: Double, done: Bool) {
+        grid = grid?.moving(line, to: position, size: gridSize)
+        if done { savePanes() }
     }
 
     func pick(folder id: String) {
@@ -429,43 +452,55 @@ final class AppModel {
     // MARK: - Keeping the panes
 
     struct Kept: Codable {
+        let grid: PaneGrid
+        let focus: Int?
+    }
+
+    /// The tree mac-m1 kept before the grid, read once.
+    struct KeptTree: Codable {
         let layout: PaneLayout
         let focused: String?
     }
 
     var keptKey: String {
-        "panes:" + launch.home
+        "grid:" + launch.home
     }
 
-    /// The layout kept in the app's preferences, per jaw folder, until jawd keeps an interface's
+    /// The panes kept in the app's preferences, per jaw folder, until jawd keeps an interface's
     /// state (P1).
     func savePanes() {
         guard restored else { return }
-        if let layout, let data = try? JSONEncoder().encode(Kept(layout: layout, focused: focusedChat)) {
+        if let grid, let data = try? JSONEncoder().encode(Kept(grid: grid, focus: focusedSlot)) {
             UserDefaults.standard.set(data, forKey: keptKey)
         } else {
             UserDefaults.standard.removeObject(forKey: keptKey)
         }
     }
 
-    /// Opens the panes kept from last time, once the chat list has the chats they show.
+    /// Opens the panes kept from last time, once the chat list has the chats they show; a chat
+    /// that isn't there any more leaves its pane empty.
     func restorePanes() {
         guard !restored, launch.bench == nil, launch.snapshot == nil else { return }
         restored = true
-        guard let data = UserDefaults.standard.data(forKey: keptKey), let kept = try? JSONDecoder().decode(Kept.self, from: data),
-              let list = window?.chatList
-        else { return }
-        var layout: PaneLayout? = kept.layout
-        for id in kept.layout.panes {
+        let defaults = UserDefaults.standard
+        var kept = defaults.data(forKey: keptKey).flatMap { try? JSONDecoder().decode(Kept.self, from: $0) }
+        if kept == nil, let old = defaults.data(forKey: "panes:" + launch.home), let tree = try? JSONDecoder().decode(KeptTree.self, from: old) {
+            let g = PaneGrid.from(tree.layout)
+            kept = Kept(grid: g, focus: tree.focused.flatMap { g.slot(showing: $0)?.id })
+        }
+        guard let kept, kept.grid.holds, let list = window?.chatList else { return }
+        var g = kept.grid
+        for slot in g.slots {
+            guard let id = slot.chat else { continue }
             if let row = list.row(id) {
                 _ = makePane(row, place: ConversationController.place(for: row))
             } else {
-                layout = layout?.removing(id)
+                g = g.with(chat: nil, in: slot.id)
             }
         }
-        self.layout = layout
-        if let focused = kept.focused, panes[focused] != nil { focus(focused) } else if let first = layout?.panes.first { focus(first) }
-        window?.showPanes()
+        grid = g
+        focus(slot: kept.focus.flatMap { g.slot($0)?.id } ?? g.reading.first!.id, force: true)
+        savePanes()
     }
 
     // MARK: - Focus
