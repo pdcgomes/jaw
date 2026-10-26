@@ -666,7 +666,6 @@ impl Store {
 
     /// What jaw.db holds for the setting `key` of `domain`, as its JSON, read on a connection of its
     /// own.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read settings until jawd serves them"))]
     pub fn setting(&self, domain: &str, key: &str) -> Result<Option<String>> {
         let db = connect(&self.path, Role::Reader)?;
         Ok(db

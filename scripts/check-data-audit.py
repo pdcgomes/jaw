@@ -21,6 +21,7 @@ DATA_PATHS = (
     "crates/jawd/src/engine/",
     "crates/jawd/src/sock.rs",
     "crates/jawd/src/layout.rs",
+    "crates/jawd/src/settings",
     "engine/internal/wa/",
     "proto/engine/",
     "crates/jaw-voice/src/record/",

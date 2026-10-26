@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use jaw_proto::find::{ChatOpened, Find};
+use jaw_proto::settings::{Settings as Shared, SettingsKept};
 use jaw_proto::sync::HistoryMore;
+use jaw_proto::themes::Themes;
 use jaw_proto::{Error, Focus, Hello, LinkStart, Outcome, PROTOCOL, Push, Reply, Request, code};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -48,6 +50,10 @@ struct Session {
     viewer: Viewer,
     /// Its interface's layout, as its other connections keep it.
     layout: Option<watch::Receiver<Option<Pushed>>>,
+    /// Its domain's settings as this connection was last told them: made at its hello, whose
+    /// answer carries what this receiver has seen, so no change between that answer and its first
+    /// push is missed; none for a client jawd keeps no settings for.
+    settings: Option<watch::Receiver<Shared>>,
 }
 
 /// Every connection's lane, waiting reply and requests answered on tasks of their own, summed for
@@ -223,6 +229,7 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
         windows: state.feed().map(|feed| feed.client(out.clone())),
         viewer: state.attention().viewer(),
         layout: None,
+        settings: None,
     };
     // Pushes start once the connection has said hello.
     let mut pushes: Option<broadcast::Receiver<Push>> = None;
@@ -331,6 +338,16 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
                 Some(_) => {}
                 None => session.layout = None,
             },
+            // The domain's settings, once they change, wait for room as a reply does, never
+            // dropped. The channel holds only the latest, so leaving it unread while a line waits
+            // loses nothing, and the connection ends on the latest.
+            settings = changed(&mut session.settings, session.greeted), if open => {
+                let push = Push {
+                    method: "settings".into(),
+                    params: serde_json::to_value(settings).expect("jawd's own types serialize"),
+                };
+                send(&out, &push, &mut owed, &mut session)?;
+            }
         }
     }
 }
@@ -383,6 +400,7 @@ fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::Unbo
             let (reply, then) = match request.method.as_str() {
                 "link.logout" => logout(&state, request.id).await,
                 "layout.get" | "layout.set" => (layouts(&state, request, &client, from).await, None),
+                "settings.set" => (settings_set(&state, request, &client).await, None),
                 _ => (answer(&state, request).await, None),
             };
             let gone = answered.send(reply).is_err();
@@ -483,6 +501,19 @@ async fn windows(windows: &mut Option<feed::Client>) -> feed::Ready {
     }
 }
 
+/// The settings once they've changed since this connection was last told them: only after its
+/// hello, and never once jawd has stopped publishing them. A push waits for room as a reply
+/// does, so none is dropped, and changes made meanwhile end in the latest.
+async fn changed(settings: &mut Option<watch::Receiver<Shared>>, greeted: bool) -> Shared {
+    match settings {
+        Some(settings) if greeted => match settings.changed().await {
+            Ok(()) => settings.borrow_and_update().clone(),
+            Err(_) => std::future::pending().await,
+        },
+        _ => std::future::pending().await,
+    }
+}
+
 /// Writes the lines sent to it to the interface, in order, until the connection ends.
 fn writer(mut write: tokio::net::unix::OwnedWriteHalf) -> mpsc::Sender<Vec<u8>> {
     let (out, mut lines) = mpsc::channel::<Vec<u8>>(WAITING_LINES);
@@ -523,9 +554,9 @@ fn apart_method(method: &str) -> bool {
 
 /// Takes one line from an interface: its windows, hello and focus are answered here, a find and
 /// the requests that can take long each on a task of its own, and the rest down the lane. A
-/// request is answered here only if it's quick and needs nothing but memory, as `themes` will be;
-/// one that writes jaw.db, asks the engine or must follow those sent before it takes the lane, as
-/// `media.fetch`, `media.cancel` and `settings.set` will.
+/// request is answered here only if it's quick and needs nothing but memory, as `themes` is; one
+/// that writes jaw.db, asks the engine or must follow those sent before it takes the lane, as
+/// `settings.set` does and `media.fetch` and `media.cancel` will.
 async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -549,12 +580,15 @@ async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
             Ok(hello) if hello.protocol == PROTOCOL => {
                 session.greeted = true;
                 session.layout = state.layouts().and_then(|layouts| layouts.subscribe(&hello.client));
+                session.settings = state.settings().and_then(|s| s.subscribe(&hello.client));
                 session.client = hello.client.into();
                 session.viewer.focus(hello.focus);
                 if let Some(windows) = session.windows.as_mut() {
                     windows.hello(hello.since);
                 }
-                succeeded(id, &state.welcome())
+                let mut welcome = state.welcome();
+                welcome.settings = session.settings.as_mut().map(|s| s.borrow_and_update().clone());
+                succeeded(id, &welcome)
             }
             Ok(hello) => {
                 let older = if hello.protocol > PROTOCOL { "jawd is older" } else { "this interface is older" };
@@ -613,6 +647,7 @@ async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
             }
             None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so there's nothing to watch")),
         },
+        "themes" => succeeded(id, &Themes { themes: jaw_proto::themes::all().to_vec() }),
         _ => return Taken::Lane(request),
     };
     Taken::Answer(reply)
@@ -704,6 +739,20 @@ async fn layouts(state: &State, request: Request, interface: &str, from: u64) ->
     }
 }
 
+/// `settings.set`, down the lane, in the domain the hello the connection had said when it sent it
+/// named, `client`: it waits on jaw.db, so it's answered in the order sent, as the lane's other
+/// requests are.
+async fn settings_set(state: &State, request: Request, client: &str) -> Reply {
+    let id = request.id;
+    match state.settings() {
+        Some(settings) => match settings.set(client, request.params).await {
+            Ok(settings) => succeeded(id, &SettingsKept { settings }),
+            Err(error) => failed(id, error),
+        },
+        None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it can't keep settings")),
+    }
+}
+
 /// Asks the phone for older messages in a chat; they arrive as upserts once it answers.
 async fn history_more(state: &State, id: u64, params: Value) -> Reply {
     let more = match serde_json::from_value::<HistoryMore>(params) {
@@ -764,6 +813,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::time::Duration;
 
+    use jaw_proto::settings::{Messages, Settings, TERMINAL};
     use jaw_proto::{AccountState, ConnectionState, Status};
     use serde_json::json;
 
@@ -1178,6 +1228,156 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(state.attention().connected(), 0, "the connection that ended is forgotten");
+    }
+
+    /// jawd serving jaw.db with its settings, on a socket in a folder of its own.
+    async fn serving_settings() -> (tempfile::TempDir, std::path::PathBuf, Store) {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let settings = Arc::new(crate::settings::Settings::load(store.clone()).unwrap());
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let state = State::new(
+            home.path(),
+            Err(("go", "no engine in this test".into())),
+            Vec::new(),
+            Arc::default(),
+            Some(store.clone()),
+            broadcast::channel(16).0,
+        )
+        .unwrap()
+        .with_settings(settings);
+        tokio::spawn(serve(Arc::new(state), listener));
+        (home, socket, store)
+    }
+
+    /// The answer to a hello from `client` as jawd wrote it, since `Settings` reads an empty or
+    /// unknown value as the default.
+    fn raw_hello(socket: &Path, client: &str) -> Value {
+        let stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        let mut heard = BufReader::new(stream.try_clone().unwrap());
+        let hello = json!({"id": 1, "method": "hello", "params": {"protocol": 1, "client": client, "version": "0"}});
+        (&stream).write_all(format!("{hello}\n").as_bytes()).unwrap();
+        let mut line = String::new();
+        heard.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hello_carries_a_domains_settings_and_each_change_is_pushed_to_its_connections_alone() {
+        let (_home, socket, _store) = serving_settings().await;
+        let checked = tokio::task::spawn_blocking(move || {
+            let fresh = raw_hello(&socket, TERMINAL);
+            assert_eq!(fresh["result"]["settings"], json!({"theme": "tokyo-night", "messages": "bubbles"}));
+            let (mut a, _) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
+            let (mut b, _) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
+            // A client of no domain, read line by line, so a push to it would show.
+            let other = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            let mut heard = BufReader::new(other.try_clone().unwrap());
+            let mut line = String::new();
+            let mut say = |request: &str, line: &mut String| {
+                (&other).write_all(format!("{request}\n").as_bytes()).unwrap();
+                line.clear();
+                heard.read_line(line).map(|_| serde_json::from_str::<Value>(line).unwrap())
+            };
+            let hello = r#"{"id":1,"method":"hello","params":{"protocol":1,"client":"test","version":"0"}}"#;
+            let welcome = say(hello, &mut line).unwrap();
+            assert!(welcome["result"].get("settings").is_none(), "a client jawd keeps no settings for gets none");
+            let kept = a.call("settings.set", json!({"theme": "gruvbox", "messages": "irc"})).unwrap();
+            assert_eq!(kept, json!({"settings": {"theme": "gruvbox", "messages": "irc"}}));
+            let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Irc };
+            for connection in [&mut a, &mut b] {
+                let push = connection.push().unwrap();
+                assert_eq!(push.method, "settings");
+                assert_eq!(serde_json::from_value::<Settings>(push.params).unwrap(), gruvbox);
+            }
+            let asked = r#"{"id":2,"method":"settings.set","params":{"theme":"nord"}}"#;
+            let answer = say(asked, &mut line).unwrap();
+            assert_eq!(answer["id"], 2, "the next line it hears is its answer, not a push: {answer}");
+            assert_eq!(answer["error"]["code"], code::NOT_FOUND);
+            assert_eq!(answer["error"]["data"], json!({"client": "test"}));
+            let (_, later) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
+            assert_eq!(later.settings, Some(gruvbox), "a later hello carries them");
+            let refused = a.call("settings.set", json!({"theme": "solarized"})).unwrap_err();
+            assert!(refused.to_string().contains("theme takes one of"), "{refused}");
+        });
+        tokio::time::timeout(Duration::from_secs(20), checked).await.expect("no push or answer went missing").unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_set_answers_only_once_its_commit_is_synced() {
+        let (home, socket, store) = serving_settings().await;
+        let path = socket.clone();
+        let (mut connection, _) =
+            tokio::task::spawn_blocking(move || jaw_client::Connection::open(&path, TERMINAL, "0").unwrap())
+                .await
+                .unwrap();
+        // jaw.db's write lock, held from outside, so the setting can't be kept until it's let go.
+        let holder = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let synced = store.storage().synced_commits;
+        let (answered, mut answer) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = answered.send(connection.call("settings.set", json!({"theme": "nord"})).map_err(|e| e.to_string()));
+        });
+        let early = tokio::time::timeout(Duration::from_millis(400), &mut answer).await;
+        assert!(early.is_err(), "answered while jaw.db couldn't keep it: {early:?}");
+        holder.execute_batch("COMMIT").unwrap();
+        let answer =
+            tokio::time::timeout(Duration::from_secs(5), answer).await.expect("answered once it could").unwrap();
+        assert_eq!(answer.unwrap()["settings"]["theme"], "nord");
+        assert_eq!(store.storage().synced_commits - synced, 1, "kept with one synced commit");
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap().as_deref(), Some("\"nord\""));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_that_reads_nothing_while_settings_change_ends_on_the_latest() {
+        let (_home, socket, _store) = serving_settings().await;
+        let seen = tokio::task::spawn_blocking(move || {
+            let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            writer
+                .write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":1,\"client\":\"jaw\",\"version\":\"0\"}}\n")
+                .unwrap();
+            // The themes asked for 40 times, each answer about 15 KB and none read: more than the
+            // socket takes and fewer than the connection's queue, so the pushes after them fill it.
+            for id in 2..42 {
+                writer.write_all(format!("{{\"id\":{id},\"method\":\"themes\"}}\n").as_bytes()).unwrap();
+            }
+            let (mut fast, _) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
+            for i in 0..150 {
+                let theme = ["gruvbox", "nord"][i % 2];
+                fast.call("settings.set", json!({"theme": theme})).unwrap();
+            }
+            fast.call("settings.set", json!({"theme": "kanagawa"})).unwrap();
+            stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+            let mut reader = BufReader::new(stream);
+            let (mut last, mut line) = (None, String::new());
+            while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                let value: Value = serde_json::from_str(&line).unwrap();
+                if value["method"] == "settings" {
+                    last = value["params"]["theme"].as_str().map(str::to_string);
+                }
+                line.clear();
+            }
+            last
+        });
+        let seen = tokio::time::timeout(Duration::from_secs(60), seen).await.unwrap().unwrap();
+        assert_eq!(seen.as_deref(), Some("kanagawa"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn themes_lists_every_theme_in_order_with_its_colours() {
+        let (_home, socket) = serving().await;
+        let themes = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&socket, "test", "0").unwrap();
+            connection.call("themes", Value::Null).unwrap()
+        })
+        .await
+        .unwrap();
+        let themes: jaw_proto::themes::Themes = serde_json::from_value(themes).unwrap();
+        assert_eq!(themes.themes.as_slice(), jaw_proto::themes::all());
+        assert_eq!(themes.themes[20].id, "tokyo-night");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -10,6 +10,7 @@ mod find;
 mod layout;
 mod notify;
 mod send;
+mod settings;
 mod sock;
 mod state;
 mod store;
@@ -459,11 +460,13 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, no_notify: bool
         Err(why) => why.clone(),
     };
     eprintln!("jawd: notifications {says}");
+    let settings = Arc::new(settings::Settings::load(store.clone())?);
     let state = state::State::new(home, supervisor, pools, live.clone(), Some(store.clone()), pushes.clone())?
         .with_feed(feed)
         .with_attention(attention)
         .with_sending(sending)
         .with_layouts(layout::Layouts::new(store.clone()))
+        .with_settings(settings)
         .with_notifications(says);
     let state = Arc::new(state);
     let _ = state.finder.set(finder);

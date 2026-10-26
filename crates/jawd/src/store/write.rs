@@ -47,7 +47,6 @@ pub enum Change {
     /// A frontend's settings changed together, in its domain, each as its key and its JSON, kept
     /// as jaw's own in one step, so they're kept all or none; `at` is when they were chosen, which
     /// a value already held doesn't change.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests keep settings until jawd serves them"))]
     Settings {
         domain: String,
         values: Vec<(String, String)>,

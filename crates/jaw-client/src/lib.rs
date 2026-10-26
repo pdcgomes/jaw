@@ -239,6 +239,20 @@ pub fn describe(status: &Status) -> String {
             windows.taken + windows.joined
         ));
     }
+    for (domain, settings) in &status.settings {
+        let said: Vec<String> = settings
+            .iter()
+            .map(|(key, value)| format!("{key} {}", value.as_str().map_or_else(|| value.to_string(), str::to_string)))
+            .collect();
+        let mut line = format!("settings  {domain}: {}", said.join(", "));
+        for ignored in status.settings_ignored.iter().filter(|i| &i.domain == domain) {
+            line.push_str(&format!(
+                "; {} {} isn't one this jawd takes, so its default is used",
+                ignored.key, ignored.value
+            ));
+        }
+        lines.push(line);
+    }
     if let Some(storage) = &status.storage {
         if let Some(trouble) = &storage.trouble {
             lines.push(format!("trouble   {trouble}"));
@@ -365,5 +379,19 @@ mod tests {
         assert_eq!(super::logged_out(Some("logged out from another device")), "logged out from another device");
         let gone = super::logged_out(Some("this device isn't linked any more"));
         assert_eq!(gone, "logged out: this device isn't linked any more");
+    }
+
+    #[test]
+    fn status_says_the_settings_and_any_this_jawd_doesnt_take() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/fixtures/status.result.json")).unwrap();
+        let status: jaw_proto::Status = serde_json::from_value(fixture["result"].clone()).unwrap();
+        let said = super::describe(&status);
+        assert!(
+            said.contains(
+                "settings  jaw: messages irc, theme tokyo-night; theme \"rose-pine-moon\" isn't one this jawd takes, so its default is used"
+            ),
+            "{said}"
+        );
     }
 }

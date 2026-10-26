@@ -16,6 +16,7 @@ use crate::feed::Feed;
 use crate::find::Finder;
 use crate::layout::Layouts;
 use crate::send::Sending;
+use crate::settings::Settings;
 use crate::sock::{APART_MOST, LANE_MOST, Lanes};
 use crate::store::Store;
 use crate::sync::Shared;
@@ -43,6 +44,7 @@ pub struct State {
     stopping: watch::Sender<bool>,
     sending: Option<Sending>,
     layouts: Option<Layouts>,
+    settings: Option<Arc<Settings>>,
 }
 
 impl State {
@@ -74,6 +76,7 @@ impl State {
             stopping: watch::channel(false).0,
             sending: None,
             layouts: None,
+            settings: None,
         })
     }
 
@@ -128,6 +131,16 @@ impl State {
 
     pub fn layouts(&self) -> Option<&Layouts> {
         self.layouts.as_ref()
+    }
+
+    /// Keeps each frontend's settings in `settings`.
+    pub fn with_settings(mut self, settings: Arc<Settings>) -> State {
+        self.settings = Some(settings);
+        self
+    }
+
+    pub fn settings(&self) -> Option<&Settings> {
+        self.settings.as_deref()
     }
 
     /// Serves windows from `feed`.
@@ -239,8 +252,8 @@ impl State {
             windows: self.feed.as_ref().map(Feed::windows),
             storage: self.store.as_ref().map(Store::storage),
             layouts: self.layouts.as_ref().map(Layouts::status),
-            settings: std::collections::BTreeMap::new(),
-            settings_ignored: Vec::new(),
+            settings: self.settings.as_ref().map(|s| s.by_domain()).unwrap_or_default(),
+            settings_ignored: self.settings.as_ref().map(|s| s.ignored()).unwrap_or_default(),
         }
     }
 
