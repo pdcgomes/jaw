@@ -9,6 +9,7 @@ pub mod find;
 pub mod layout;
 pub mod local;
 pub mod send;
+pub mod settings;
 pub mod sync;
 pub mod themes;
 pub mod windows;
@@ -118,6 +119,9 @@ pub struct Welcome {
     pub seq: u64,
     pub account: Account,
     pub connection: Connection,
+    /// Every setting with the value in effect.
+    #[serde(default)]
+    pub settings: settings::Settings,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -270,6 +274,11 @@ pub struct Status {
     /// The layouts kept for interfaces, and the limits on them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layouts: Option<Layouts>,
+    /// The settings in effect, and each whose value in jaw.db this jawd doesn't take.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<settings::Settings>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings_ignored: Vec<settings::Ignored>,
 }
 
 /// The layouts jawd keeps for interfaces (`layout.set`), and the most it keeps.

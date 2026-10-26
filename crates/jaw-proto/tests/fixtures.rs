@@ -10,7 +10,9 @@ use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
     React, Read, SendRetry, SendText, Sent, Typing,
 };
+use jaw_proto::settings::{Settings, SettingsKept, SettingsSet};
 use jaw_proto::sync::{HistoryMore, Notice};
+use jaw_proto::themes::Themes;
 use jaw_proto::windows::{
     ChatRow, ChatsPush, ChatsWatch, ChatsWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, Watch,
     WatchMove,
@@ -68,7 +70,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                 assert_eq!(request.method, method, "{name} is for {}", request.method);
                 match method {
                     "hello" => params::<Hello>(&name, &request.params),
-                    "status" => assert!(request.params.is_null(), "{name} has params"),
+                    "status" | "themes" => assert!(request.params.is_null(), "{name} has params"),
+                    "settings.set" => params::<SettingsSet>(&name, &request.params),
                     "find" => params::<Find>(&name, &request.params),
                     "chat.opened" => params::<ChatOpened>(&name, &request.params),
                     "chats.watch" => params::<ChatsWatch>(&name, &request.params),
@@ -124,6 +127,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "chats.watch" => params::<ChatsWatched>(&name, result),
                     // A move's result is its window's; this fixture moves a messages window.
                     "messages.watch" | "watch.move" => params::<MessagesWatched>(&name, result),
+                    "settings.set" => params::<SettingsKept>(&name, result),
+                    "themes" => params::<Themes>(&name, result),
                     _ => panic!("no type for {name}'s result"),
                 }
             }
@@ -137,6 +142,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "resync" => params::<Watch>(&name, &push.params),
                     "notice" => params::<Notice>(&name, &push.params),
                     "layout" => params::<Saved>(&name, &push.params),
+                    "settings" => params::<Settings>(&name, &push.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -152,4 +158,13 @@ fn every_fixture_reads_and_writes_back_the_same() {
 fn from_jawd(name: &str, value: Value, push: bool) {
     let line: FromJawd = serde_json::from_value(value).unwrap_or_else(|e| panic!("{name} isn't a line from jawd: {e}"));
     assert_eq!(matches!(line, FromJawd::Push(_)), push, "{name} reads as the wrong kind of line from jawd");
+}
+
+/// The themes fixture is the first two themes exactly as jaw-proto reads them from protocol/themes.
+#[test]
+fn the_themes_fixture_is_what_the_theme_files_say() {
+    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/fixtures/themes.result.json");
+    let value: Value = serde_json::from_str(&std::fs::read_to_string(folder).unwrap()).unwrap();
+    let themes: Themes = serde_json::from_value(value["result"].clone()).unwrap();
+    assert_eq!(themes.themes, jaw_proto::themes::all()[..2]);
 }
