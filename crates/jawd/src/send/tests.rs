@@ -343,6 +343,20 @@ fn a_scene_of_jawd_to_be_killed() {
                 running.world.until(|asked| sends(asked) == 2).await;
                 at(&id);
             }
+            "deletion behind" => {
+                world.hold(true);
+                let running = Running::on(home, world, true).await;
+                running
+                    .store
+                    .apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }])
+                    .await
+                    .unwrap();
+                running.chats(&[ANA]).await;
+                let id = running.send(ANA, "hi").await;
+                running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Send(_)))).await;
+                running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+                at(&id);
+            }
             other => panic!("there's no scene {other}"),
         }
     });
@@ -584,9 +598,11 @@ async fn an_action_refused_once_it_may_have_gone_and_no_receipt_comes_leaves_its
     assert_eq!(stored_text(&running, &id).await, "chego às 20h");
     let back = row(&running, ANA, &id).await.unwrap();
     assert_eq!(text_of(&back), "chego às 20h", "and the row is as it was");
-    // Ana's phone was off, and says now that it had the edit after all.
     let edit: String =
         running.query(|db| Ok(db.query_row("SELECT id FROM outbox WHERE kind = 'edit'", [], |r| r.get(0))?)).await;
+    let retried = running.call("send.retry", json!({ "message": edit })).await.unwrap_err();
+    assert_eq!(retried.code, code::NOT_FOUND, "an action's own ID names no message to send again");
+    // Ana's phone was off, and says now that it had the edit after all.
     running.receipt(ANA, &edit, ANA, "delivered").await;
     let done = row(&running, ANA, &id).await.unwrap();
     assert_eq!(
@@ -1896,30 +1912,162 @@ async fn a_deletion_for_everyone_of_a_message_whatsapp_refuses_leaves_nothing_of
     let id = running.send(ANA, "hi").await;
     running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
     running.world.refuse_next(1);
+    running.world.gate(true);
     running.connection(Online);
+    running.world.until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count() == 2).await;
+    let retried = running.call("send.retry", json!({ "message": id })).await.unwrap_err();
+    assert_eq!(retried.code, code::NOT_ALLOWED, "not while its deletion is on its way: {}", retried.message);
+    running.world.gate(false);
     until_stored(&running).await;
     assert_eq!(kinds_sent(&running), ["hi", "a deletion"]);
     let deleted = row(&running, ANA, &id).await.unwrap();
     assert!(deleted.deleted, "deleted, as nobody has it");
     let retried = running.call("send.retry", json!({ "message": id })).await.unwrap_err();
     assert_eq!(retried.code, code::NOT_FOUND, "nothing of it is left to send again: {}", retried.message);
-    // Refused too, and deleted for everyone from another of your devices: not sent again by hand.
-    running.world.refuse_next(1);
-    let other = running.send(ANA, "and this").await;
-    running.until_status(ANA, &other, "failed").await;
-    let revoke = Amend {
+}
+
+/// The outbox's rows as (kind, state), oldest first, and what counts toward its thousand.
+async fn outbox_rows(running: &Running) -> (Vec<(String, String)>, (u64, u64)) {
+    running
+        .query(|db| {
+            let rows = db
+                .prepare("SELECT kind, state FROM outbox ORDER BY n")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((rows, crate::store::outbox::waiting(db)?))
+        })
+        .await
+}
+
+/// Message `id` of yours in Ana's chat deleted for everyone from your phone.
+fn deleted_from_your_phone(id: &str) -> Change {
+    Change::Amend(Amend {
         chat: ANA.into(),
-        target: other.clone(),
+        target: id.into(),
         sender: Some(ME.into()),
         mine: true,
         at: now_ms(),
         what: Amendment::Revoke,
         raw: None,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_message_deleted_for_you_leaves_nothing_to_send_again() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    running.world.refuse_next(1);
+    let id = running.send(ANA, "nobody home").await;
+    running.until_status(ANA, &id, "failed").await;
+    running.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+    let app_state_gone = |db: &Connection| {
+        Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'app_state'", [], |r| r.get::<_, i64>(0))? == 0)
     };
-    running.store.apply(Lane::Live, vec![Change::Amend(revoke)]).await.unwrap();
-    let retried = running.call("send.retry", json!({ "message": other })).await.unwrap_err();
-    assert_eq!(retried.code, code::NOT_ALLOWED, "{}", retried.message);
-    assert_eq!(kinds_sent(&running), ["hi", "a deletion", "and this"]);
+    eventually(&running, "the app state patch to go", app_state_gone).await;
+    assert_eq!(outbox_rows(&running).await, (Vec::new(), (0, 0)), "nothing holds a place in the thousand");
+    let retried = running.call("send.retry", json!({ "message": id })).await.unwrap_err();
+    assert_eq!(retried.code, code::NOT_FOUND, "{}", retried.message);
+    assert_eq!(kinds_sent(&running), ["nobody home"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_message_deleted_for_everyone_from_another_device_leaves_nothing_to_send_again() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.chats(&[ANA]).await;
+    running.world.refuse_next(1);
+    let id = running.send(ANA, "and this").await;
+    running.until_status(ANA, &id, "failed").await;
+    running.store.apply(Lane::Live, vec![deleted_from_your_phone(&id)]).await.unwrap();
+    assert_eq!(outbox_rows(&running).await, (Vec::new(), (0, 0)), "nothing holds a place in the thousand");
+    assert!(row(&running, ANA, &id).await.unwrap().deleted);
+    let retried = running.call("send.retry", json!({ "message": id })).await.unwrap_err();
+    assert_eq!(retried.code, code::NOT_FOUND, "{}", retried.message);
+    assert_eq!(kinds_sent(&running), ["and this"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unconfirmed_message_deleted_for_everyone_from_another_device_leaves_nothing_to_send_again() {
+    let home = tempfile::tempdir().unwrap();
+    let id = crash(home.path(), "held").await;
+    let world = world();
+    world.refuse_next(1);
+    let timing = Timing { unconfirmed_for: Duration::from_millis(300), ..quick() };
+    let running = Running::timed(home.path(), world, true, true, timing).await;
+    let unconfirmed = |db: &Connection| {
+        Ok(db.query_row("SELECT count(*) FROM outbox WHERE state = 'unconfirmed'", [], |r| r.get::<_, i64>(0))? == 1)
+    };
+    eventually(&running, "the resend's refusal", unconfirmed).await;
+    running.store.apply(Lane::Live, vec![deleted_from_your_phone(&id)]).await.unwrap();
+    assert_eq!(outbox_rows(&running).await, (Vec::new(), (0, 0)), "it no longer waits for a receipt");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(outbox_rows(&running).await, (Vec::new(), (0, 0)), "and isn't left failed once its time has passed");
+    let retried = running.call("send.retry", json!({ "message": id })).await.unwrap_err();
+    assert_eq!(retried.code, code::NOT_FOUND, "{}", retried.message);
+    assert_eq!(kinds_sent(&running), ["did it go?"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_message_whose_deletion_is_kept_for_a_late_receipt_leaves_nothing_to_send_again() {
+    let home = tempfile::tempdir().unwrap();
+    let id = crash(home.path(), "deletion behind").await;
+    let world = world();
+    world.replying(Replies { delivered: Duration::from_secs(3_600), read: Duration::from_secs(3_600) });
+    world.refuse_next(2);
+    let timing = Timing { unconfirmed_for: Duration::from_millis(300), ..quick() };
+    let running = Running::timed(home.path(), world, true, true, timing).await;
+    // Both are refused once jawd starts, when they may have gone, and no receipt comes in their time.
+    let settled = |db: &Connection| {
+        let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0));
+        Ok(count("SELECT count(*) FROM outbox WHERE state = 'unconfirmed'")? == 0
+            && count("SELECT count(*) FROM outbox WHERE kind = 'revoke' AND state = 'failed'")? == 1)
+    };
+    eventually(&running, "the deletion kept for a late receipt", settled).await;
+    assert_eq!(
+        outbox_rows(&running).await,
+        (vec![("revoke".to_string(), "failed".to_string())], (0, 0)),
+        "only the deletion, kept outside the thousand, and nothing of the message it deletes"
+    );
+    let retried = running.call("send.retry", json!({ "message": id })).await.unwrap_err();
+    assert_eq!(retried.code, code::NOT_FOUND, "{}", retried.message);
+    let deletion: String =
+        running.query(|db| Ok(db.query_row("SELECT id FROM outbox WHERE kind = 'revoke'", [], |r| r.get(0))?)).await;
+    running.receipt(ANA, &deletion, ANA, "delivered").await;
+    assert!(row(&running, ANA, &id).await.unwrap().deleted, "a receipt for the deletion still does it");
+    assert_eq!(outbox_rows(&running).await, (Vec::new(), (0, 0)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deletion_held_across_a_merge_goes_once_its_message_is_unconfirmed_with_nothing_else_committed() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_secs(3_600), read: Duration::from_secs(3_600) });
+    let lid = "100000000001@lid";
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.chats(&[ANA, lid]).await;
+    running.world.fail_chats(&[ANA.to_string(), lid.to_string()]);
+    let id = running.send(lid, "um").await;
+    running.world.until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count() >= 2).await;
+    let both = Person { jids: vec![ANA.into(), lid.into()], ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
+    running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+    until_held(&running).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Its next try is refused when it may have gone: kept waiting for a receipt, which writes no
+    // event for anything that waits on commits to see.
+    running.world.refuse_next(1);
+    running.world.stop_failing_chats();
+    let went = tokio::time::timeout(Duration::from_secs(5), async {
+        while !kinds_sent(&running).iter().any(|sent| sent == "a deletion") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(went.is_ok(), "the deletion goes once its message is unconfirmed, with nothing else committed");
+    until_stored(&running).await;
+    assert!(row(&running, ANA, &id).await.unwrap().deleted);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -676,6 +676,22 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE INDEX outbox_by_target ON outbox (target);
     CREATE INDEX outbox_by_id ON outbox (id);
     ",
+    // 10, a data step: the failed messages of yours an earlier run left in the outbox that nothing
+    // can send again go, as the writer removes each from now on in the transaction that makes it
+    // so. It reads only the outbox, which holds at most a thousand rows waiting, and for each
+    // failed one its message by n and the outbox by target, so its time doesn't grow with the
+    // messages: 2.7 ms on the reference Mac for a full outbox of failed rows beside 200,000
+    // messages, its commit included.
+    "
+    -- Class: jaw's own rows of the outbox, none of which send.retry could reach or would send: a
+    -- failed message deleted for you, whose row has no message, deleted for everyone, or with your
+    -- deletion of it kept for a late receipt. Each held a place in the outbox's thousand for good.
+    DELETE FROM outbox WHERE state = 'failed' AND kind NOT IN ('reaction', 'edit', 'revoke', 'app_state')
+        AND (message IS NULL
+            OR EXISTS (SELECT 1 FROM messages m WHERE m.n = outbox.message AND m.deleted)
+            OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = outbox.message AND a.kind = 'revoke'
+                AND a.state = 'failed'));
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.

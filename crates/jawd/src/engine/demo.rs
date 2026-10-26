@@ -140,6 +140,12 @@ impl World {
         self.failing_chats.lock().expect("the demo world").extend(chats.iter().cloned());
     }
 
+    /// Lets sends to every chat `fail_chats` named go again.
+    #[cfg(test)]
+    pub fn stop_failing_chats(&self) {
+        self.failing_chats.lock().expect("the demo world").clear();
+    }
+
     /// Refuses the next `n` sends for good.
     #[cfg(test)]
     pub fn refuse_next(&self, n: u32) {

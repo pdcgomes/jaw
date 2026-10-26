@@ -520,7 +520,7 @@ pub(super) async fn retry(inner: &Arc<Inner>, retry: SendRetry) -> Result<Value,
         return Ok(done);
     }
     if retryable == Some(false) {
-        return Err(Error::new(code::NOT_ALLOWED, "it was deleted for everyone, so it isn't sent again"));
+        return Err(Error::new(code::NOT_ALLOWED, "it's being deleted for everyone, so it isn't sent again"));
     }
     let applied =
         durably(inner, vec![Change::Outbox(Step::Retry { outbox: row.outbox })], "queue the message again").await?;

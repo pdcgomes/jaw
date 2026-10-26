@@ -955,6 +955,7 @@ fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result
         "INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM messages WHERE n = ?1",
     )?
     .execute(params![n, now_ms()])?;
+    outbox::deleted_for_you(db, n)?;
     if db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([n])? == 0 {
         return Ok(false);
     }
@@ -1496,7 +1497,8 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
     if revoked {
         apply_amendment(db, stamps, chat, kept, Doing { what: &Amendment::Revoke, sender: None, mine: false, at: 0 })?;
     }
-    Ok(())
+    // The send that went to the kept copy may be one nothing can send again.
+    outbox::tidied(db, kept)
 }
 
 /// How many bits of a message's t count messages within one millisecond.
@@ -1843,14 +1845,16 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
                 WHERE n = ?1 AND deleted = 0 AND (edited_at IS NULL OR edited_at <= ?5)",
             )?
             .execute(params![n, text, spans, summary, at, seq])?,
-        Amendment::Revoke => db
-            .prepare_cached(
+        Amendment::Revoke => {
+            outbox::deleted_for_everyone(db, n)?;
+            db.prepare_cached(
                 "UPDATE messages SET deleted = 1, text = NULL, spans = NULL,
                     summary = iif(mine, 'You deleted this message', 'This message was deleted'),
                     reply = NULL, detail = NULL, raw = NULL, envelope = NULL, v = ?2
                 WHERE n = ?1 AND deleted = 0",
             )?
-            .execute([n, seq])?,
+            .execute([n, seq])?
+        }
         Amendment::Star { starred } => db
             .prepare_cached("UPDATE messages SET starred = ?2, v = ?3 WHERE n = ?1 AND starred IS NOT ?2")?
             .execute(params![n, starred, seq])?,
@@ -1960,8 +1964,10 @@ fn set_members(db: &Connection, stamps: &mut Stamps, members: &Members) -> Resul
 pub(super) const EVENTS_KEPT: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// Removes up to `limit` events older than the feed keeps, always leaving the newest, whose seq
-/// the next change follows. Says how many went.
+/// the next change follows, and the actions kept for a late receipt past their time. Says how
+/// many events went.
 pub(super) fn prune(db: &Connection, limit: usize) -> Result<usize> {
+    outbox::prune_kept(db)?;
     let before = now_ms() - EVENTS_KEPT.as_millis() as i64;
     Ok(db
         .prepare_cached(
