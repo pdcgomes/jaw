@@ -3,7 +3,7 @@
 set -u
 cd "$(dirname "$0")/.."
 action=build
-[ "${1:-}" = test ] && { action=test; shift; }
+case "${1:-}" in test|build) action="$1"; shift ;; esac
 scheme="${1:-jaw}"; shift 2>/dev/null || true
 xcodebuild "$action" -workspace Jaw.xcworkspace -scheme "$scheme" -destination 'platform=macOS,arch=arm64' \
     -derivedDataPath build/DerivedData "$@" 2>&1 \

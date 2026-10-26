@@ -84,7 +84,7 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
 
     func applyTheme() {
         guard isViewLoaded else { return }
-        view.layer?.backgroundColor = roles.surface.opacity(0.6).cgColor
+        view.layer?.backgroundColor = roles.surface.cgColor
         table.reloadData()
     }
 

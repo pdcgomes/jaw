@@ -297,6 +297,7 @@ final class DetailController: NSViewController {
             return
         }
         let host = NSHostingController(rootView: view)
+        host.sizingOptions = []
         stateHost = host
         place(host)
     }

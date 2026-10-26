@@ -49,6 +49,11 @@ public struct EmptyChatView: View {
     public var chat: ChatRow
     public var chomped = 0
 
+    public init(chat: ChatRow, chomped: Int = 0) {
+        self.chat = chat
+        self.chomped = chomped
+    }
+
     public var body: some View {
         VStack(spacing: 16) {
             MimicImage(look: .awake, scale: 4, chomps: chomped)
