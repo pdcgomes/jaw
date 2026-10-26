@@ -164,6 +164,9 @@ struct Wal {
     held: AtomicBool,
     /// Whether the writer copies the last few frames itself, so the checkpointer leaves them.
     finishing: AtomicBool,
+    /// How often the checkpointer has woken, for tests of an idle jawd.
+    #[cfg(test)]
+    woke: AtomicU64,
 }
 
 impl Wal {
@@ -177,6 +180,8 @@ impl Wal {
             peak: AtomicU64::new(0),
             held: AtomicBool::new(false),
             finishing: AtomicBool::new(false),
+            #[cfg(test)]
+            woke: AtomicU64::new(0),
         }
     }
 
@@ -268,15 +273,17 @@ const IDLE: Duration = Duration::from_secs(10);
 /// While background work waits for the checkpointer, how often the writer looks again.
 const HOLD_POLL: Duration = Duration::from_millis(1);
 
-/// The WAL's limits and the writer's busy timeout, which tests make smaller.
+/// The WAL's limits, the writer's busy timeout and how long jaw.db goes without a commit before
+/// the WAL is emptied, which tests make smaller.
 #[derive(Clone, Copy)]
 struct Limits {
     wal_soft: u64,
     wal_hard: u64,
     busy_ms: i64,
+    idle: Duration,
 }
 
-const LIMITS: Limits = Limits { wal_soft: WAL_SOFT, wal_hard: WAL_HARD, busy_ms: BUSY_MS };
+const LIMITS: Limits = Limits { wal_soft: WAL_SOFT, wal_hard: WAL_HARD, busy_ms: BUSY_MS, idle: IDLE };
 
 /// What a connection to jaw.db is for, which decides how it's set up.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -434,7 +441,7 @@ impl Store {
         let checkpointing = wal.clone();
         std::thread::Builder::new()
             .name("jawd-checkpoint".into())
-            .spawn(move || checkpoint(checkpointer, checkpointing, kicks))?;
+            .spawn(move || checkpoint(checkpointer, checkpointing, kicks, limits.idle))?;
         Ok(Store { path, realtime, live, background, reads, committed, stats, inboxed, wal, trouble: troubled })
     }
 
@@ -1366,23 +1373,26 @@ impl Writer {
 /// the WAL to start again, and until none do, without waiting for readers or holding up the
 /// writer, which keeps appending meanwhile; and says how far it has got. Once the writer copies
 /// the last few frames itself, it leaves them. Once jaw.db has gone IDLE without a commit, it
-/// empties the WAL. It ends when the writer has.
-fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>) {
+/// empties the WAL, and then sleeps until the next commit, so an idle jawd never wakes for it. It
+/// ends when the writer has.
+fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>, idle: Duration) {
     let mut emptied = false;
     loop {
-        match kicks.recv_timeout(IDLE) {
+        let kicked =
+            if emptied { kicks.recv().map_err(|_| RecvTimeoutError::Disconnected) } else { kicks.recv_timeout(idle) };
+        #[cfg(test)]
+        wal.woke.fetch_add(1, Ordering::Relaxed);
+        match kicked {
             Ok(()) => emptied = false,
             Err(RecvTimeoutError::Timeout) => {
-                if !emptied {
-                    match wal_checkpoint(&db, "TRUNCATE") {
-                        Ok((false, _, _)) => {
-                            wal.frames.store(0, Ordering::Relaxed);
-                            wal.passed((0, 0));
-                            emptied = true;
-                        }
-                        Ok((true, _, _)) => {}
-                        Err(e) => eprintln!("jawd: can't empty the WAL: {e:#}"),
+                match wal_checkpoint(&db, "TRUNCATE") {
+                    Ok((false, _, _)) => {
+                        wal.frames.store(0, Ordering::Relaxed);
+                        wal.passed((0, 0));
+                        emptied = true;
                     }
+                    Ok((true, _, _)) => {}
+                    Err(e) => eprintln!("jawd: can't empty the WAL: {e:#}"),
                 }
                 continue;
             }
@@ -2090,6 +2100,26 @@ mod tests {
         assert!(took < IDLE * 3, "indexing took {took:?} in {waits} waits for the checkpointer");
         let found = query(&store, |db| read::search(db, "numero 7919", None, None, 10)).await;
         assert_eq!(found.hits.len(), 1, "the history is found once it's indexed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_store_empties_its_wal_and_then_its_checkpointer_sleeps_until_the_next_commit() {
+        let home = tempfile::tempdir().unwrap();
+        let idle = Duration::from_millis(50);
+        let store = Store::open_with(home.path(), Limits { idle, ..LIMITS }).unwrap();
+        let wal = home.path().join("jaw.db-wal");
+        for round in 0..2 {
+            let id = format!("m{round}");
+            store.apply(Lane::Live, messages([text("351910000002@s.whatsapp.net", &id, round, "hi")])).await.unwrap();
+            let committed = Instant::now();
+            while std::fs::metadata(&wal).map_or(0, |m| m.len()) > 0 {
+                assert!(committed.elapsed() < Duration::from_secs(10), "the WAL was never emptied");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let woke = store.wal.woke.load(Ordering::Relaxed);
+            tokio::time::sleep(idle * 10).await;
+            assert_eq!(store.wal.woke.load(Ordering::Relaxed), woke, "the checkpointer woke with nothing to do");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
