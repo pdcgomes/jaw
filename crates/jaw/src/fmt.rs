@@ -155,6 +155,16 @@ pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// A file's size as a person reads it: 12 B, 820 KB, 3.2 MB, 1.4 GB.
+pub fn bytes(n: u64) -> String {
+    match n {
+        0..1_000 => format!("{n} B"),
+        1_000..1_000_000 => format!("{} KB", n / 1_000),
+        1_000_000..1_000_000_000 => format!("{:.1} MB", n as f64 / 1e6),
+        _ => format!("{:.1} GB", n as f64 / 1e9),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

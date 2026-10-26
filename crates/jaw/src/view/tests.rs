@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::art;
-use crate::data::{Chat, Hit, Kind, LibraryKind, Media, OtherJawd, Sender, Span, SpanKind};
+use crate::data::{Chat, Hit, Kind, LibraryKind, Media, OtherJawd, Sender, Span, SpanKind, Tick};
 use crate::demo::{Clock, Demo, State};
 use crate::graphics::{Images, Protocol};
 use crate::run::{self, Event};
@@ -2881,4 +2881,101 @@ fn the_palette_sends_someones_card_made_from_their_name_and_number_as_a_vcard_3(
     assert!(frame(&mut v).contains("whose card?"), "{}", frame(&mut v));
     press(&mut v, &rx, "\t");
     assert!(matches!(v.palette.as_ref().map(|p| &p.mode), Some(palette::Mode::Contact { .. })), "tab doesn't narrow");
+}
+
+/// A folder of files to pick, as yours would be.
+fn files_to_pick() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["lake.jpg", "swim.mov", "rent.pdf"] {
+        std::fs::write(dir.path().join(name), vec![0u8; 2_048]).unwrap();
+    }
+    std::fs::create_dir(dir.path().join("holiday")).unwrap();
+    dir
+}
+
+#[test]
+fn ctrl_o_picks_files_by_their_path_and_the_box_sends_them_with_a_caption_in_sd_or_hd() {
+    let dir = files_to_pick();
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<c-o>");
+    let folder = format!("{}/", dir.path().display());
+    if let Some(p) = v.palette.as_mut() {
+        p.query.set(&folder);
+    }
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ attach ─"), "{screen}");
+    let listed: Vec<usize> =
+        ["holiday/", "lake.jpg", "rent.pdf", "swim.mov"].iter().map(|n| row_of(&screen, n).unwrap()).collect();
+    assert!(listed.windows(2).all(|w| w[0] < w[1]), "folders first, then files by name:\n{screen}");
+    assert!(screen.contains("[ ] lake.jpg") && screen.contains("2 KB"), "{screen}");
+    // Typing narrows the folder to what matches, and Tab picks a file.
+    press(&mut v, &rx, "la<tab>");
+    if let Some(p) = v.palette.as_mut() {
+        p.query.set(&folder);
+    }
+    press(&mut v, &rx, "sw<tab>");
+    let screen = frame(&mut v);
+    assert!(screen.contains("2 picked"), "{screen}");
+    press(&mut v, &rx, "\n");
+    assert!(v.palette.is_none(), "Enter attaches what's picked");
+    let screen = frame(&mut v);
+    assert!(screen.contains("▣ 2 files · SD"), "the box holds them:\n{screen}");
+    assert!(screen.lines().last().unwrap().contains("⏎ sends them"), "{screen}");
+    press(&mut v, &rx, "<tab>");
+    assert!(frame(&mut v).contains("▣ 2 files · HD"), "Tab switches to HD");
+    press(&mut v, &rx, "the lake\n");
+    let screen = frame(&mut v);
+    assert!(!screen.contains("▣ 2 files"), "sent, the box is empty again:\n{screen}");
+    let messages = v.messages.as_ref().unwrap();
+    let mine: Vec<&Message> = messages.rows().filter(|m| m.mine && m.status == Some(Tick::Pending)).collect();
+    assert_eq!(mine.iter().map(|m| m.kind).collect::<Vec<_>>(), [Kind::Image, Kind::Video], "a message each, in order");
+    assert_eq!(mine[0].spans[0].s, "the lake", "the caption goes with the first");
+}
+
+#[test]
+fn files_dropped_on_the_terminal_are_attached_rather_than_typed() {
+    let dir = files_to_pick();
+    let (mut v, rx) = view(140, 40);
+    let pasted = format!("{} '{}'", dir.path().join("lake.jpg").display(), dir.path().join("rent.pdf").display());
+    v.on_input(Input::Paste(pasted));
+    run::settle(&mut v, &rx);
+    assert_eq!(v.attaching.as_ref().map(|a| a.files.len()), Some(2));
+    assert!(v.composer.is_empty(), "nothing was typed");
+    v.on_input(Input::Paste("see you at 8".into()));
+    assert_eq!(v.composer.text(), "see you at 8", "and text is typed as ever");
+    press(&mut v, &rx, "<esc>");
+    assert!(v.attaching.is_none(), "Esc drops them, and keeps what was typed");
+    assert_eq!(v.composer.text(), "see you at 8");
+}
+
+#[test]
+fn a_file_on_its_way_shows_how_far_it_has_got_and_x_stops_it() {
+    let dir = files_to_pick();
+    let (mut v, rx) = view(140, 40);
+    v.attach(vec![dir.path().join("lake.jpg")]);
+    press(&mut v, &rx, "\n");
+    let id = v.messages.as_ref().unwrap().rows().find(|m| m.mine && m.kind == Kind::Image).unwrap().id.clone();
+    v.apply(Update::Job(crate::data::Job {
+        id: "upload:1".into(),
+        kind: crate::data::JobKind::Upload,
+        message: id.clone(),
+        progress: 0.42,
+    }));
+    let screen = frame(&mut v);
+    assert!(screen.contains("uploading 42%") && !screen.contains("x stops it"), "{screen}");
+    press(&mut v, &rx, "<up>");
+    assert!(frame(&mut v).contains("uploading 42% · x stops it"), "and once it's selected, how to stop it");
+    press(&mut v, &rx, "x");
+    run::settle(&mut v, &rx);
+    let m = v.messages.as_ref().unwrap().get(&id).unwrap().clone();
+    assert_eq!(m.status, Some(Tick::Failed), "stopped, it fails until it's sent again");
+    assert!(!frame(&mut v).contains("uploading 42%"));
+}
+
+#[test]
+fn the_palettes_attach_files_opens_the_picker() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<c-k>attach files\n");
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ attach ─") && !screen.contains("comes with M4"), "{screen}");
 }

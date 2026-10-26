@@ -3,6 +3,7 @@
 //! (`keys`), and it draws itself (`draw`).
 
 mod actions;
+mod attach;
 mod composer;
 mod draw;
 mod focus_mode;
@@ -284,6 +285,12 @@ pub struct View {
     speed: f64,
     /// The voice message being recorded in the box, or stopped to listen to.
     recorder: Option<voice::Recorder>,
+    /// Files attached to the box, to send with what's typed as their caption, and where the
+    /// picker last picked from.
+    attaching: Option<attach::Attaching>,
+    attach_from: Option<String>,
+    /// How far each file of yours on its way has got, by its message, as jawd's `job` pushes say.
+    jobs: HashMap<String, (crate::data::JobKind, f64)>,
     /// Why the last message wasn't sent, said on the box it went back to until it's typed in.
     unsent: Option<String>,
     /// Ctrl-K's palette, while it's open.
@@ -405,6 +412,9 @@ impl View {
             voice_asked: None,
             speed: 1.0,
             recorder: None,
+            attaching: None,
+            attach_from: None,
+            jobs: HashMap::new(),
             unsent: None,
             palette: None,
             asked: 0,
@@ -672,6 +682,7 @@ impl View {
             Update::Notice(text) => self.say(text),
             Update::Playback(p) => self.on_playback(p),
             Update::Recorded(r) => self.on_recorded(r),
+            Update::Job(job) => self.on_job(job),
             Update::VoiceRefused(why) => self.voice_refused(why),
             Update::Members { chat, members } => self.on_members(chat, members),
             Update::Folders { upsert, remove, whole, favourites } => {

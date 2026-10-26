@@ -117,6 +117,8 @@ enum Later {
     Started,
     /// The next of who comes and goes in the roster.
     Presence(usize),
+    /// How far a file of yours on its way has got.
+    Job(crate::data::Job),
 }
 
 pub struct Account {
@@ -478,6 +480,15 @@ impl Account {
     fn run(&mut self, l: Later) {
         match l {
             Later::Tick { chat, id, tick } => self.tick(&chat, &id, tick),
+            Later::Job(job) => {
+                // A file stopped meanwhile says nothing more.
+                if self
+                    .locate(&job.message)
+                    .is_some_and(|(t, i)| self.threads[t].messages[i].status == Some(Tick::Pending))
+                {
+                    self.send(Update::Job(job));
+                }
+            }
             Later::Beat(i) => self.beat(i),
             Later::Qr => {
                 if matches!(self.state, State::Linking) {
@@ -1066,6 +1077,17 @@ impl Jawd for Demo {
     fn retry(&mut self, message: &str) {
         let message = message.to_string();
         self.defer(move |a| a.on_retry(&message));
+    }
+
+    fn send_media(&mut self, chat: &str, files: &[String], caption: &str, hd: bool, key: &str, reply: Option<&str>) {
+        let (chat, files, caption, key, reply) =
+            (chat.to_string(), files.to_vec(), caption.to_string(), key.to_string(), reply.map(String::from));
+        self.defer(move |a| a.on_send_media(&chat, &files, &caption, hd, &key, reply.as_deref()));
+    }
+
+    fn media_cancel(&mut self, _chat: &str, message: &str) {
+        let message = message.to_string();
+        self.defer(move |a| a.on_media_cancel(&message));
     }
 
     fn start_chat(&mut self, person: &str) {

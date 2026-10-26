@@ -164,6 +164,82 @@ impl Account {
         self.after(3_500, Later::Tick { chat, id, tick: Tick::Read });
     }
 
+    /// Files sent: each a message of yours, pending, made ready and uploaded as jawd would, then sent.
+    pub(super) fn on_send_media(
+        &mut self,
+        chat: &str,
+        files: &[String],
+        caption: &str,
+        _hd: bool,
+        key: &str,
+        _reply: Option<&str>,
+    ) {
+        let Some(&t) = self.index.get(chat) else { return };
+        if let Some(message) = self.keyed.get(key).cloned() {
+            self.send(Update::Sent { key: key.to_string(), message });
+            return;
+        }
+        for (n, file) in files.iter().enumerate() {
+            let at = self.now();
+            let said = if n == 0 && !caption.trim().is_empty() {
+                vec![Span { t: crate::data::SpanKind::Text, s: caption.trim().to_string(), person: None, url: None }]
+            } else {
+                vec![]
+            };
+            let mut m = self.message(at, None, said, Some(Tick::Pending));
+            let name =
+                std::path::Path::new(file).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let extension = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+            m.kind = match extension.as_str() {
+                "jpg" | "jpeg" | "png" | "heic" | "webp" => Kind::Image,
+                "mov" | "mp4" | "m4v" => Kind::Video,
+                "gif" => Kind::Gif,
+                "mp3" | "m4a" | "wav" | "flac" | "aac" => Kind::Audio,
+                _ => Kind::Document,
+            };
+            m.summary = Some(match m.kind {
+                Kind::Image => "▣ photo".into(),
+                Kind::Video => "▶ video".into(),
+                Kind::Gif => "▶ GIF".into(),
+                Kind::Audio => "♪ audio".into(),
+                _ => format!("▤ {name}"),
+            });
+            m.media = Some(Box::new(crate::data::Media {
+                w: 1600,
+                h: 1200,
+                bytes: std::fs::metadata(file).ok().map(|m| m.len()),
+                ..crate::data::Media::default()
+            }));
+            let (chat, id) = (chat.to_string(), m.id.clone());
+            self.arrive(t, m);
+            if n == 0 {
+                self.keyed.insert(key.to_string(), id.clone());
+                self.send(Update::Sent { key: key.to_string(), message: id.clone() });
+            }
+            let job = |kind, progress| {
+                Later::Job(crate::data::Job { id: format!("{kind:?}:{id}"), kind, message: id.clone(), progress })
+            };
+            let step = 300 * (n as i64 + 1);
+            self.after(step, job(crate::data::JobKind::Transcode, 1.0));
+            self.after(step + 200, job(crate::data::JobKind::Upload, 0.4));
+            self.after(step + 400, job(crate::data::JobKind::Upload, 1.0));
+            self.after(step + 450, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Sent });
+            self.after(step + 1_200, Later::Tick { chat, id, tick: Tick::Delivered });
+        }
+    }
+
+    /// A file of yours stopped on its way fails, until it's sent again.
+    pub(super) fn on_media_cancel(&mut self, message: &str) {
+        let Some((t, i)) = self.locate(message) else { return };
+        let m = &self.threads[t].messages[i];
+        if !m.mine || m.status != Some(Tick::Pending) {
+            return;
+        }
+        let chat = self.threads[t].chat.id.clone();
+        self.later.retain(|(_, later)| !matches!(later, Later::Tick { id, .. } if id == message));
+        self.tick(&chat, message, Tick::Failed);
+    }
+
     pub(super) fn on_react(&mut self, message: &str, emoji: &str) {
         let Some((t, i)) = self.locate(message) else { return };
         let m = &mut self.threads[t].messages[i];

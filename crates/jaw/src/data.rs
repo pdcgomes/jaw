@@ -498,6 +498,25 @@ pub enum PlayState {
     Failed,
 }
 
+/// jawd's `job` push: how far making or moving a message's file has got.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Job {
+    pub id: String,
+    pub kind: JobKind,
+    /// The message whose file it is; an HD copy's is its SD message's.
+    pub message: String,
+    #[serde(default)]
+    pub progress: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobKind {
+    Upload,
+    Download,
+    Transcode,
+}
+
 /// jawd's `playback` push: what's playing or paused, and where its playhead is.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Playback {
@@ -1102,6 +1121,8 @@ pub enum Update {
     },
     Playback(Playback),
     Recorded(Recorded),
+    /// How far a file on its way has got.
+    Job(Job),
     /// jawd turned down something asked of voice, and why.
     VoiceRefused(String),
     /// The folder tree: rows changed or gone, or with `whole` every row; and the favourite slots
@@ -1313,6 +1334,11 @@ pub trait Jawd {
     fn start_chat_by_phone(&mut self, phone: &str);
     /// Sends a failed message of yours again.
     fn retry(&mut self, message: &str);
+    /// Sends files to a chat, a message each, the first with `caption`, in HD if `hd`, as a reply
+    /// to `reply`; `key` is as `send_text`'s.
+    fn send_media(&mut self, chat: &str, files: &[String], caption: &str, hd: bool, key: &str, reply: Option<&str>);
+    /// Stops a file of yours on its way, which fails until it's retried.
+    fn media_cancel(&mut self, chat: &str, message: &str);
     /// Mutes a chat until then, `i64::MAX` for ever, or unmutes it with `None`.
     fn mute(&mut self, chat: &str, until: Option<i64>);
     fn archive(&mut self, chat: &str, archived: bool);

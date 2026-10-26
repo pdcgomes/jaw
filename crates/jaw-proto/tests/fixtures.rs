@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use jaw_proto::find::{ChatOpened, Find, Found, Kind};
 use jaw_proto::layout::{Book, LayoutGet, LayoutSet, Saved};
 use jaw_proto::library::{LibraryPush, LibraryShown, LibraryWatch, LibraryWatched};
-use jaw_proto::media::{MediaCancel, MediaFetch, MediaSave, Saved as MediaSaved};
+use jaw_proto::media::{Job, MediaCancel, MediaFetch, MediaSave, Saved as MediaSaved, SendMedia, SentMedia};
 use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
     PollVote, React, Read, SendContact, SendEvent, SendLocation, SendPoll, SendRetry, SendText, Sent, Typing,
@@ -111,6 +111,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "send.contact" => params::<SendContact>(&name, &request.params),
                     "poll.vote" => params::<PollVote>(&name, &request.params),
                     "send.retry" => params::<SendRetry>(&name, &request.params),
+                    "send.media" => params::<SendMedia>(&name, &request.params),
                     "chat.start" => params::<ChatStart>(&name, &request.params),
                     "draft.set" => params::<DraftSet>(&name, &request.params),
                     "read" => params::<Read>(&name, &request.params),
@@ -161,6 +162,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "send.text" | "send.poll" | "send.location" | "send.event" | "send.contact" => {
                         params::<Sent>(&name, result)
                     }
+                    "send.media" => params::<SentMedia>(&name, result),
                     "chat.start" => params::<ChatStarted>(&name, result),
                     "forward" => params::<Forwarded>(&name, result),
                     "message.info" => params::<Info>(&name, result),
@@ -196,6 +198,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "settings" => params::<Settings>(&name, &push.params),
                     "typing" => params::<TypingPush>(&name, &push.params),
                     "presence" => params::<PresencePush>(&name, &push.params),
+                    "job" => params::<Job>(&name, &push.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }

@@ -103,6 +103,11 @@ pub enum Does {
     Pane(PaneDo),
     /// Asks whose card to send in the open chat.
     SendContact,
+    /// Ctrl-O's picker, for files to attach.
+    Attach,
+    /// In the picker: a folder to look in, and a file to pick.
+    Open(std::path::PathBuf),
+    Pick(std::path::PathBuf),
 }
 
 /// What the palette is for: finding, or one of a message's actions that picks something.
@@ -155,6 +160,10 @@ pub enum Mode {
         name: String,
         numbers: Vec<(String, String)>,
     },
+    /// Files to attach: what's typed is a path, and these are picked so far.
+    Attach {
+        picked: Vec<std::path::PathBuf>,
+    },
 }
 
 /// One of the interface's own actions, matched against what's typed.
@@ -165,7 +174,7 @@ pub struct Action {
     /// Its key, so the palette teaches them.
     key: Option<&'static str>,
     /// What it shows before its name, where not ▸: an emoji, for a reaction.
-    lead: Option<String>,
+    pub(super) lead: Option<String>,
     /// The milestone it comes with, while it's not here yet.
     later: Option<&'static str>,
     pub does: Does,
@@ -174,7 +183,7 @@ pub struct Action {
 }
 
 impl Action {
-    fn new(name: impl Into<String>, detail: impl Into<String>, does: Does) -> Action {
+    pub(super) fn new(name: impl Into<String>, detail: impl Into<String>, does: Does) -> Action {
         Action {
             name: name.into(),
             detail: detail.into(),
@@ -725,9 +734,7 @@ impl View {
         all.extend([
             Action::new("New poll", "in this chat", Does::Later("polls come with M2")).key("/poll").later("M2"),
             Action::new("New group", "with people you pick", Does::Later("groups come with M2")).later("M2"),
-            Action::new("Attach files", "photos, videos, documents", Does::Later("attaching comes with M4"))
-                .key("ctrl-o")
-                .later("M4"),
+            Action::new("Attach files", "photos, videos, documents", Does::Attach).key("ctrl-o"),
             Action::new("Send a contact", "someone's card, in this chat", Does::SendContact),
             Action::new("Record a voice message", "in this chat", Does::Record).key("ctrl-r"),
             Action::new("Library", "everything shared, in every chat", Does::Library).key("ctrl-l"),
@@ -774,6 +781,9 @@ impl View {
     /// The palette's rows: headings and what's under them, in the order they show.
     pub fn palette_items(&self) -> Vec<Item> {
         let Some(p) = &self.palette else { return vec![] };
+        if let Mode::Attach { picked } = &p.mode {
+            return self.attach_items(p.query.text(), picked);
+        }
         match &p.mode {
             Mode::File { name, ticked, .. } => {
                 let mut items = vec![Item::Heading("file into", fmt::fit(name, 48))];
@@ -1023,6 +1033,11 @@ impl View {
                 picked.pop();
                 return;
             }
+            (Mode::Attach { .. }, KeyCode::Tab) => {
+                self.attach_tab();
+                return;
+            }
+            (Mode::Attach { .. }, KeyCode::BackTab) => return,
             _ => {}
         }
         let Some(p) = self.palette.as_mut() else { return };
@@ -1093,6 +1108,16 @@ impl View {
     }
 
     pub fn palette_paste(&mut self, s: &str) {
+        if let Some(Palette { mode: Mode::Attach { picked }, .. }) = self.palette.as_mut()
+            && let Some(files) = super::attach::dropped(s)
+        {
+            for file in files {
+                if !picked.contains(&file) {
+                    picked.push(file);
+                }
+            }
+            return;
+        }
         if let Some(p) = self.palette.as_mut() {
             p.query.insert(&fmt::one_line(s));
             self.ask();
@@ -1112,7 +1137,7 @@ impl View {
         self.palette.as_ref()?.results.get(i)
     }
 
-    fn palette_selected(&self) -> Option<Item> {
+    pub(super) fn palette_selected(&self) -> Option<Item> {
         let selected = self.palette.as_ref()?.selected;
         self.palette_items().into_iter().filter(Item::selectable).nth(selected)
     }
@@ -1159,6 +1184,7 @@ impl View {
     /// Enter: opens a chat, goes to a message, starts a chat with someone, or does an action.
     pub fn palette_act(&mut self) {
         match self.palette.as_ref().map(|p| &p.mode) {
+            Some(Mode::Attach { .. }) => return self.attach_act(),
             Some(Mode::Forward { .. }) => return self.forward_go(),
             Some(Mode::Contact { .. }) => return self.contact_go(),
             Some(Mode::File { .. }) => return self.file_go(),
@@ -1219,6 +1245,11 @@ impl View {
                 }
                 self.ask();
             }
+            Does::Attach => {
+                close(self);
+                self.attach_open();
+            }
+            Does::Open(_) | Does::Pick(_) => self.attach_act(),
             Does::Record => {
                 close(self);
                 self.focus = super::Focus::Typing;
@@ -1540,6 +1571,7 @@ impl View {
             Mode::Forward { .. } => (" forward ", " tab picks a chat · ⏎ forwards · esc closes "),
             Mode::Contact { .. } => (" contact ", " ↑↓ moves · ⏎ sends their card · esc closes "),
             Mode::Card { .. } => (" card ", " ↑↓ moves · ⏎ starts a chat · esc closes "),
+            Mode::Attach { .. } => (" attach ", " tab completes a folder or picks a file · ⏎ attaches · esc closes "),
         };
         let foot = Line::from(Span::styled(foot, Style::new().fg(t.muted)));
         let block = Block::bordered()
@@ -1587,6 +1619,8 @@ impl View {
                 "for whom?"
             } else if let Mode::Forward { .. } = p.mode {
                 "a chat to forward to"
+            } else if let Mode::Attach { .. } = p.mode {
+                "a file's path, from / or ~/"
             } else if p.scope.is_some() {
                 "words said in this chat"
             } else {
@@ -1719,10 +1753,11 @@ impl View {
         w: usize,
     ) -> Line<'static> {
         let detail_w: usize = detail.iter().map(|s| s.width()).sum();
-        let room = w.saturating_sub(4 + detail_w + 2);
+        let lead_w = 3 + lead.width();
+        let room = w.saturating_sub(lead_w + detail_w + 2);
         let mut spans = vec![Span::raw("  "), lead, Span::raw(" ")];
         let main = fit_spans(main, room);
-        let used = 4 + main.iter().map(|s| s.width()).sum::<usize>();
+        let used = lead_w + main.iter().map(|s| s.width()).sum::<usize>();
         spans.extend(main);
         spans.push(Span::raw(" ".repeat(w.saturating_sub(used + detail_w + 1))));
         spans.extend(detail);

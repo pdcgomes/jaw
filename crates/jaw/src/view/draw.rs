@@ -366,6 +366,7 @@ impl View {
                 ]
             }
             Focus::Typing if self.editing.is_some() => vec![("⏎", "saves", true), ("esc", "stops editing", true)],
+            Focus::Typing if self.attaching.is_some() => self.attaching_hints(),
             Focus::Typing if self.naming().is_some() => {
                 vec![("tab", "takes the name", true), ("↑↓", "moves", true), ("esc", "puts them away", true)]
             }
@@ -715,6 +716,13 @@ impl View {
             block = block
                 .title_bottom(Line::from(Span::styled(" ⏎ saves · esc stops editing ", Style::new().fg(t.comment))));
         }
+        if let Some(title) = self.attached_title() {
+            block = block.title(Line::from(Span::styled(title, Style::new().fg(t.text))).right_aligned());
+            if self.composer.is_empty() && self.unsent.is_none() {
+                block = block
+                    .title_bottom(Line::from(Span::styled(" a caption, if you like ", Style::new().fg(t.comment))));
+            }
+        }
         if let Some(why) = &self.unsent {
             block =
                 block.title_bottom(Line::from(Span::styled(format!(" not sent: {why} "), Style::new().fg(t.comment))));
@@ -823,7 +831,15 @@ impl View {
         if let Some(who) = who {
             said.insert(0, who);
         }
-        if let Some(status) = m.status {
+        let selected = self.focus == Focus::Message(m.id.clone());
+        if let Some(job) = self.job_said(m) {
+            // How far it has got comes first, so a narrow conversation cuts the time instead; the
+            // time is only for the one selected.
+            said = vec![if selected { format!("{job} · x stops it") } else { job }];
+            if selected {
+                said.push(fmt::full(m.at, self.tz));
+            }
+        } else if let Some(status) = m.status {
             said.push(
                 match status {
                     Tick::Pending => "waiting to send",
@@ -851,7 +867,8 @@ impl View {
         let day = new_day.then(|| fmt::day(m.at, self.now(), self.tz));
         let blank = (new_day && prev.is_some()) || (!new_day && self.gap(m, prev));
         let lines = self.lines(m, shape);
-        let detail = (self.focus == Focus::Message(m.id.clone())).then(|| self.detail(m, shape));
+        let selected = self.focus == Focus::Message(m.id.clone());
+        let detail = (selected || self.job_said(m).is_some()).then(|| self.detail(m, shape));
         Placing { id: m.id.clone(), sort: m.sort.clone(), top, day, blank, lines, detail }
     }
 
@@ -1252,7 +1269,7 @@ impl View {
             pair(("alt-d", "cut the next word", true), Some(("+  1-6", "react", true))),
             pair(("ctrl-y", "put back what was cut", true), Some(("f", "forward", true))),
             pair(("@", "a name, in a group", true), Some(("i", "info", true))),
-            pair(("ctrl-o", "attach · M4", false), Some(("s", "save · M3", false))),
+            pair(("ctrl-o tab", "attach files, SD or HD", true), Some(("s", "save · M3", false))),
             pair(("ctrl-r", "record a voice message", true), Some(("← →  x", "seek, speed of a voice one", true))),
             pair(("/search", "words in this chat", true), Some(("esc", "back to typing", true))),
         ];

@@ -182,6 +182,13 @@ impl View {
             self.record();
             return;
         }
+        if self.attaching.is_some() && self.on_attaching_key(k, ctrl, alt) {
+            return;
+        }
+        if ctrl && k.code == KeyCode::Char('o') {
+            self.attach_open();
+            return;
+        }
         if !ctrl && !alt && self.on_naming_key(k) {
             return;
         }
@@ -312,6 +319,9 @@ impl View {
                 KeyCode::Char('x') => return self.next_speed(&m),
                 _ => {}
             }
+        }
+        if k.code == KeyCode::Char('x') && !ctrl && !alt && self.cancel_upload(&m) {
+            return;
         }
         match k.code {
             KeyCode::Char('r') if ctrl => {
@@ -491,6 +501,9 @@ impl View {
             return;
         }
         self.focus = Focus::Typing;
+        if self.attach_dropped(s) {
+            return;
+        }
         self.composer.insert(s);
         self.typed();
     }

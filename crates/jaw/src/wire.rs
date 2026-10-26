@@ -649,6 +649,9 @@ impl Wire {
             From::Push(push) if push.method == "recording" => {
                 out.extend(serde_json::from_value(push.params).ok().map(Update::Recorded));
             }
+            From::Push(push) if push.method == "job" => {
+                out.extend(serde_json::from_value(push.params).ok().map(Update::Job));
+            }
             // A window that couldn't move stays where it was, which the screen already shows.
             From::Window { .. } | From::Push(_) => {}
         }
@@ -909,6 +912,26 @@ impl Jawd for Wire {
 
     fn retry(&mut self, message: &str) {
         self.ask("send.retry", json!({ "message": message }), Asked::Retry);
+    }
+
+    fn send_media(&mut self, chat: &str, files: &[String], caption: &str, hd: bool, key: &str, reply: Option<&str>) {
+        let files: Vec<serde_json::Value> = files
+            .iter()
+            .enumerate()
+            .map(|(i, path)| match (i, caption.trim().is_empty()) {
+                (0, false) => json!({ "path": path, "caption": caption }),
+                _ => json!({ "path": path }),
+            })
+            .collect();
+        let mut params = json!({ "chat": chat, "files": files, "quality": if hd { "hd" } else { "sd" }, "key": key });
+        if let Some(reply) = reply {
+            params["reply"] = json!(reply);
+        }
+        self.ask("send.media", params, Asked::Did("sending files"));
+    }
+
+    fn media_cancel(&mut self, chat: &str, message: &str) {
+        self.ask("media.cancel", json!({ "message": message, "chat": chat }), Asked::Did("stopping it"));
     }
 
     fn mute(&mut self, chat: &str, until: Option<i64>) {
