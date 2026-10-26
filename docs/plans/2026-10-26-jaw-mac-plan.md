@@ -6,6 +6,17 @@
 - **Nothing here touches jawd's data layer.** The proposals the app needs (P1 to P6 in the design) are jawd changes, built on jawd's branches by jawd's builders and audited by the database expert before they land; a milestone that needs one says what it does until it lands.
 - **The owner's account is never used for tests.** Tests and benches run on `jawd demo` in a folder of their own; the owner tries each milestone's build on his own account once it's done.
 
+## Building on the owner's Mac
+
+The owner's jaw, jawd and jaw-engine run on the Mac the app is built on, against his account. While building:
+
+- **His folder is never touched.** Nothing opens, copies or reads `~/Library/Application Support/jaw` (`jaw.db`, `session.db`), and jaw-engine never runs on a folder holding a `session.db`.
+- **His processes are never touched.** No process is stopped by name (`pkill`, `killall`); only the PIDs a build started.
+- **Tests run in a folder of their own:** `JAW_HOME=$(mktemp -d) jawd --engine demo`, and benches on `jawd demo --folder <tmp>`. A debug build takes `JAW_HOME` or `--demo`, never the default folder.
+- **The real agent label is never registered on this Mac.** Registering `dev.badcoffee.jaw.jawd`, or taking over the terminal's agent, would replace the owner's jawd with a build in progress. A debug build registers its own label (`dev.badcoffee.jaw.jawd.debug`) with a temporary `JAW_HOME`; the takeover of step 3 is tested on a clean user account.
+- **A jawd change is a proposal for jawd's builders,** audited by the database expert before it lands (`.cursor/rules/data-integrity.mdc`).
+- **Land from the worktree the work was built in:** rebase onto `origin/main`, then push with the pre-push hook, never with `--no-verify`.
+
 ## Decided (Owner, 26 Oct)
 
 Each with its reason; the design has the detail.
