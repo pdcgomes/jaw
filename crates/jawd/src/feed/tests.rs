@@ -14,6 +14,7 @@ use super::*;
 use crate::state::State;
 use crate::store::read::{self, Around};
 use crate::store::{Change, Chat, Lane, Message, Person, Read, Store};
+use crate::work::Report;
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
@@ -959,6 +960,59 @@ impl Line {
         }
         self.stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         came
+    }
+
+    /// Every line that comes until jawd closes the connection, and whether it did, rather than
+    /// sending nothing for the read timeout `open` set.
+    fn until_closed(&mut self) -> (Vec<Value>, bool) {
+        let mut came = Vec::new();
+        let mut text = String::new();
+        loop {
+            match self.reader.read_line(&mut text) {
+                Ok(0) => return (came, true),
+                Ok(_) => came.push(serde_json::from_str(&text).unwrap()),
+                Err(_) => return (came, false),
+            }
+            text.clear();
+        }
+    }
+}
+
+/// Holds every one of jaw.db's readers, and the reads asked for behind them, until it's dropped.
+fn hold_readers(bed: &Bed) -> crossbeam_channel::Sender<()> {
+    let (gate, waiting) = crossbeam_channel::bounded::<()>(0);
+    for _ in 0..8 {
+        let (waiting, reads) = (waiting.clone(), bed.store.reads().clone());
+        tokio::spawn(async move {
+            reads
+                .query(crate::work::Priority::Interactive, move |_| {
+                    let _ = waiting.recv();
+                    Ok(())
+                })
+                .await
+        });
+    }
+    gate
+}
+
+/// Floods `chat`, which a window of the interface shows while it reads nothing, until jawd's queue
+/// to it is full: its windows then ask for no read, however many messages come. Returns the last
+/// message's number.
+async fn fill_window(bed: &Bed, chat: &str, sender: &str) -> i64 {
+    let words = "words to fill the queue with, words to fill the queue with";
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut n, mut reads, mut since) = (0, bed.feed.reads(), Instant::now());
+    loop {
+        n += 1;
+        bed.apply(vec![Change::Message(text(chat, &format!("p{n}"), 2_000 + n, Some(sender), words))]).await;
+        tokio::time::sleep(ms(12)).await;
+        let now = bed.feed.reads();
+        if now != reads {
+            (reads, since) = (now, Instant::now());
+        } else if since.elapsed() > ms(500) {
+            return n;
+        }
+        assert!(Instant::now() < deadline, "jawd's queue to the interface never filled");
     }
 }
 
@@ -2325,6 +2379,7 @@ async fn a_watch_result_waiting_for_room_comes_before_anything_its_window_sends(
     ])
     .await;
     let socket = serve(&bed);
+    let other = socket.clone();
     let mut line = tokio::task::spawn_blocking(move || {
         let (mut line, _) = Line::open(&socket, None);
         line.call("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 30}));
@@ -2333,14 +2388,12 @@ async fn a_watch_result_waiting_for_room_comes_before_anything_its_window_sends(
     .await
     .unwrap();
 
-    // It stops reading while messages pour into the open chat, filling jawd's queue to it; then
-    // it watches the group, whose result finds no room, and messages come to the group too.
-    let words = "words to fill the queue with, words to fill the queue with";
-    for n in 0..150 {
-        bed.apply(vec![Change::Message(text(OPEN, &format!("p{n}"), 2_000 + n, Some(OPEN), words))]).await;
-        tokio::time::sleep(ms(12)).await;
-    }
+    // It stops reading while messages pour into the open chat, until jawd's queue to it is full;
+    // then it watches the group, whose result finds no room, and messages come to the group too.
+    fill_window(&bed, OPEN, OPEN).await;
     line.ask(50, "messages.watch", json!({"chat": GROUP, "around": "newest", "before": 10}));
+    let waiting = tokio::task::spawn_blocking(move || lanes(&mut Line::open(&other, None).0, [1, 0, 1])).await.unwrap();
+    assert_eq!(waiting, [1, 64, 0, 1], "its result waits: in the lanes, the most, lanes full, replies waiting");
     // A request after it waits unread until there's room for that result, so no reply is lost.
     line.ask(51, "focus", json!({"focused": false}));
     for n in 0..40 {
@@ -2671,4 +2724,113 @@ async fn replies_coming_down_the_lane_while_one_waits_for_room_each_come_once_in
     let ids: Vec<u64> = came.iter().filter_map(|value| value["id"].as_u64()).collect();
     assert_eq!(ids, (100..120).collect::<Vec<_>>(), "every reply, once and in order");
     assert_eq!(draft(&bed).await.as_deref(), Some("d19"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interface_that_closes_its_writing_side_still_gets_every_reply_and_then_the_connection_ends() {
+    let bed = Bed::new(brisk());
+    bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
+    let socket = serve_all(&bed).await;
+    let (mut line, _) = tokio::task::spawn_blocking(move || Line::open(&socket, None)).await.unwrap();
+
+    // A find waits on jaw.db's readers and ten drafts on its writer, both held meanwhile, when the
+    // interface closes its writing side, as a script does once its input ends.
+    let readers = hold_readers(&bed);
+    let locked = Locked::on(&bed);
+    line.ask(10, "find", json!({"query": "hi"}));
+    for n in 0..10u64 {
+        line.ask(20 + n, "draft.set", json!({"chat": OPEN, "text": format!("d{n}")}));
+    }
+    line.stream.shutdown(std::net::Shutdown::Write).unwrap();
+    tokio::time::sleep(ms(300)).await;
+    drop(readers);
+    drop(locked);
+
+    // Each is answered, the drafts in order, and only then does jawd end the connection.
+    let (came, closed) = tokio::task::spawn_blocking(move || line.until_closed()).await.unwrap();
+    let ids: Vec<u64> = came.iter().filter_map(|value| value["id"].as_u64()).collect();
+    let drafts: Vec<u64> = ids.iter().copied().filter(|&id| id != 10).collect();
+    assert_eq!(drafts, (20..30).collect::<Vec<_>>(), "the drafts' replies, in order: {ids:?}");
+    assert_eq!(ids.iter().filter(|&&id| id == 10).count(), 1, "the find's reply: {ids:?}");
+    assert!(came.iter().filter(|value| value.get("id").is_some()).all(|value| value.get("result").is_some()));
+    assert!(closed, "jawd kept the connection open once everything was answered");
+    assert_eq!(draft(&bed).await.as_deref(), Some("d9"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finds_reply_coming_while_another_reply_waits_for_room_neither_takes_its_place_nor_is_lost() {
+    let bed = Bed::new(Timing { behind: Duration::from_secs(60), ..brisk() });
+    bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
+    let (socket, pushes) = serve_all_pushing(&bed).await;
+    let other = socket.clone();
+    let (mut line, _) = tokio::task::spawn_blocking(move || Line::open(&socket, None)).await.unwrap();
+
+    // A find waits on jaw.db's readers, held meanwhile. The interface stops reading while pushes
+    // fill jawd's queue to it, and the reply to its status finds no room and waits.
+    let readers = hold_readers(&bed);
+    line.ask(10, "find", json!({"query": "hi"}));
+    fill(&pushes).await;
+    line.ask(11, "status", Value::Null);
+    let waiting = tokio::task::spawn_blocking(move || lanes(&mut Line::open(&other, None).0, [1, 0, 1])).await.unwrap();
+    assert_eq!(waiting, [1, 64, 0, 1], "its reply waits: in the lanes, the most, lanes full, replies waiting");
+
+    // Let go, the readers do the find's read, and its reply comes while that one waits.
+    let done = bed.store.reads().report().done;
+    drop(readers);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let reads = bed.store.reads().report();
+        if reads.done > done + 8 && reads.running == 0 && reads.queued_interactive == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the find never read");
+        tokio::time::sleep(ms(10)).await;
+    }
+    tokio::time::sleep(ms(300)).await;
+
+    // Once the interface reads, the reply that waited comes, then the find's, each once.
+    let came = tokio::task::spawn_blocking(move || line.came(ms(700))).await.unwrap();
+    let ids: Vec<u64> = came.iter().filter_map(|value| value["id"].as_u64()).collect();
+    assert_eq!(ids, [11, 10], "the reply that waited, then the find's");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_request_holds_up_neither_the_lane_nor_watches_and_a_connection_has_64_at_most() {
+    let bed = Bed::new(brisk());
+    bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
+    let socket = serve_all(&bed).await;
+    let (mut line, _) = tokio::task::spawn_blocking(move || Line::open(&socket, None)).await.unwrap();
+
+    // 64 stand-ins for a long request, as `media.save` waiting for its download, wait on jaw.db's
+    // writer, held meanwhile, and a 65th is refused. A status down the lane and a watch sent after
+    // them are answered all the same.
+    let locked = Locked::on(&bed);
+    let (mut line, early) = tokio::task::spawn_blocking(move || {
+        for n in 0..65u64 {
+            line.ask(100 + n, "test.wait", Value::Null);
+        }
+        line.ask(200, "status", Value::Null);
+        line.ask(201, "messages.watch", json!({"chat": OPEN, "around": "newest", "before": 10}));
+        let came = line.came(ms(1_000));
+        (line, came)
+    })
+    .await
+    .unwrap();
+    let reply = |id: u64| early.iter().find(|value| value["id"] == id).cloned();
+    let (status, watch) = (reply(200), reply(201));
+    assert!(status.is_some() && watch.is_some(), "the lane and the watch waited for the long requests: {early:?}");
+    let refused = reply(164).expect("the 65th, refused");
+    assert_eq!(refused["error"]["code"], code::LIMIT, "{refused}");
+    assert_eq!(refused["error"]["data"], json!({"limit": "apart", "most": 64}));
+    assert!((100..164).all(|id| reply(id).is_none()), "a long request was answered while it waited: {early:?}");
+    let interfaces = &status.unwrap()["result"]["interfaces"];
+    assert_eq!((interfaces["apart"].as_u64(), interfaces["apart_most"].as_u64()), (Some(64), Some(64)), "{interfaces}");
+
+    // Let go, each is answered.
+    drop(locked);
+    let later = tokio::task::spawn_blocking(move || line.came(ms(2_000))).await.unwrap();
+    let mut answered: Vec<u64> = later.iter().filter_map(|value| value["id"].as_u64()).collect();
+    answered.sort_unstable();
+    assert_eq!(answered, (100..164).collect::<Vec<_>>());
+    assert!(later.iter().all(|value| value.get("result").is_some()), "{later:?}");
 }

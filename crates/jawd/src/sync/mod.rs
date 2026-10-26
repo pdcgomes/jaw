@@ -134,14 +134,10 @@ pub fn starting(store: &Store, engine: bool) -> Live {
 }
 
 /// Ends the account after a logout jawd asked for, as WhatsApp logging it out would, since whatsmeow
-/// says nothing after one: jaw.db forgets the account, synced, and interfaces are told it's logged
-/// out, so they offer to link again.
-pub async fn logged_out(
-    store: &Store,
-    live: &Shared,
-    pushes: &broadcast::Sender<Push>,
-    reason: &str,
-) -> anyhow::Result<()> {
+/// says nothing after one: jaw.db forgets the account, synced. The `connection` push it returns
+/// tells interfaces it's logged out, so they offer to link again; the caller sends it once the
+/// logout's answer has gone ahead of it.
+pub async fn logged_out(store: &Store, live: &Shared, reason: &str) -> anyhow::Result<Push> {
     store.apply_durable(vec![Change::Remember { key: ACCOUNT.into(), value: String::new() }]).await?;
     let connection = {
         let mut live = live.lock().expect("live state");
@@ -150,8 +146,8 @@ pub async fn logged_out(
         live.connection.reason = Some(reason.into());
         live.connection.clone()
     };
-    push(pushes, "connection", connection);
-    Ok(())
+    let params = serde_json::to_value(connection).expect("jawd's own types serialize");
+    Ok(Push { method: "connection".into(), params })
 }
 
 /// Keeps the account's JIDs in jaw.db without holding up the caller, trying again until they're

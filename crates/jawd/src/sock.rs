@@ -29,6 +29,9 @@ use crate::sync::Refused;
 const WAITING_LINES: usize = 64;
 /// Requests a connection's lane holds, waiting or being answered, before it reads no more.
 pub const LANE_MOST: usize = 64;
+/// Requests a connection can have answered on tasks of their own at once; past it, another is
+/// refused.
+pub const APART_MOST: usize = 64;
 
 /// What a connection has said, its windows, and what it's looking at.
 struct Session {
@@ -37,12 +40,14 @@ struct Session {
     viewer: Viewer,
 }
 
-/// Every connection's lane and waiting reply, summed for `jawd status`.
+/// Every connection's lane, waiting reply and requests answered on tasks of their own, summed for
+/// `jawd status`.
 #[derive(Default)]
 pub struct Lanes {
     requests: AtomicI64,
     full: AtomicI64,
     waiting: AtomicI64,
+    apart: AtomicI64,
 }
 
 impl Lanes {
@@ -61,33 +66,45 @@ impl Lanes {
         Lanes::count(&self.waiting)
     }
 
+    /// The requests every connection has being answered on tasks of their own, finds among them.
+    pub fn apart(&self) -> u64 {
+        Lanes::count(&self.apart)
+    }
+
     fn count(count: &AtomicI64) -> u64 {
         u64::try_from(count.load(Ordering::Relaxed)).unwrap_or(0)
     }
 
-    fn add(&self, before: [i64; 3], after: [i64; 3]) {
-        for ((count, before), after) in [&self.requests, &self.full, &self.waiting].into_iter().zip(before).zip(after) {
+    fn add(&self, before: [i64; 4], after: [i64; 4]) {
+        let counts = [&self.requests, &self.full, &self.waiting, &self.apart];
+        for ((count, before), after) in counts.into_iter().zip(before).zip(after) {
             count.fetch_add(after - before, Ordering::Relaxed);
         }
     }
 }
 
 /// What a connection owes its interface: the requests it has sent down its lane and not had back,
-/// and the reply waiting for room in the queue, one at most. It's counted in `Lanes` for as long as
-/// the connection lasts, each change as it's made.
+/// those being answered on tasks of their own, and the reply waiting for room in the queue, one at
+/// most. It's counted in `Lanes` for as long as the connection lasts, each change as it's made.
 struct Owed<'a> {
     lanes: &'a Lanes,
     in_lane: usize,
+    apart: usize,
     waiting: Option<Vec<u8>>,
 }
 
 impl<'a> Owed<'a> {
     fn new(lanes: &'a Lanes) -> Owed<'a> {
-        Owed { lanes, in_lane: 0, waiting: None }
+        Owed { lanes, in_lane: 0, apart: 0, waiting: None }
     }
 
     fn full(&self) -> bool {
         self.in_lane >= LANE_MOST
+    }
+
+    /// Whether every request read has had its reply sent.
+    fn settled(&self) -> bool {
+        self.in_lane == 0 && self.apart == 0 && self.waiting.is_none()
     }
 
     /// A request sent down the lane.
@@ -98,6 +115,16 @@ impl<'a> Owed<'a> {
     /// A request's reply back from the lane.
     fn answered(&mut self) {
         self.change(|owed| owed.in_lane -= 1);
+    }
+
+    /// A request given a task of its own.
+    fn parted(&mut self) {
+        self.change(|owed| owed.apart += 1);
+    }
+
+    /// A reply back from a task of its own.
+    fn returned(&mut self) {
+        self.change(|owed| owed.apart -= 1);
     }
 
     /// Keeps `line` until there's room for it.
@@ -111,8 +138,8 @@ impl<'a> Owed<'a> {
     }
 
     /// Its part in `Lanes`.
-    fn counts(&self) -> [i64; 3] {
-        [self.in_lane as i64, i64::from(self.full()), i64::from(self.waiting.is_some())]
+    fn counts(&self) -> [i64; 4] {
+        [self.in_lane as i64, i64::from(self.full()), i64::from(self.waiting.is_some()), self.apart as i64]
     }
 
     fn change<T>(&mut self, change: impl FnOnce(&mut Self) -> T) -> T {
@@ -125,7 +152,7 @@ impl<'a> Owed<'a> {
 
 impl Drop for Owed<'_> {
     fn drop(&mut self) {
-        self.lanes.add(self.counts(), [0; 3]);
+        self.lanes.add(self.counts(), [0; 4]);
     }
 }
 
@@ -155,13 +182,15 @@ pub async fn serve(state: Arc<State>, listener: UnixListener) -> Result<()> {
     }
 }
 
-/// One connection. Its windows, hello and focus are answered on its own task, a find on a task of
-/// its own, and every other request down the connection's lane, in the order sent, so a watch
-/// never waits on jaw.db's writer, the engine or a search. Requests go ahead of the windows'
-/// flushes. A reply that finds the queue to the interface full waits, and meanwhile no request is
-/// read, no other reply or push is sent, and the windows send nothing, so nothing goes ahead of
-/// the watch a reply may be the result of; but they still take their changes, so an interface
-/// that leaves its queue full is told to watch again, a reply waiting or not.
+/// One connection. Its windows, hello and focus are answered on its own task; a find, and any
+/// request that can take long, on a task of its own; and every other request down the
+/// connection's lane, in the order sent, so a watch never waits on jaw.db's writer, the engine or
+/// a search, nor a send on a long request. Requests go ahead of the windows' flushes. A reply that
+/// finds the queue to the interface full waits, and meanwhile no request is read, no other reply
+/// or push is sent, and the windows send nothing, so nothing goes ahead of the watch a reply may
+/// be the result of; but they still take their changes, so an interface that leaves its queue
+/// full is told to watch again, a reply waiting or not. Once the interface has sent all it will,
+/// every request it sent is still answered before the connection ends.
 async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
     let peer = match stream.peer_cred() {
         Ok(credentials) => credentials.uid(),
@@ -182,13 +211,18 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
     };
     // Pushes start once the connection has said hello.
     let mut pushes: Option<broadcast::Receiver<Push>> = None;
-    // Finds answer when they're done, so the next line, perhaps a newer find, is read meanwhile.
+    // Finds and the requests on tasks of their own answer when they're done, so the next line,
+    // perhaps a newer find, is read meanwhile.
     let (found, mut finished) = mpsc::unbounded_channel();
     let mut finding = Finding::default();
     let (answered, mut answers) = mpsc::unbounded_channel();
     let lane = lane(state.clone(), answered);
     let mut owed = Owed::new(&state.lanes);
+    let mut reading = true;
     loop {
+        if !reading && owed.settled() {
+            return Ok(());
+        }
         if session.greeted && pushes.is_none() && owed.waiting.is_none() {
             pushes = Some(state.pushes.subscribe());
         }
@@ -206,15 +240,38 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
                 owed.answered();
                 send(&out, &reply, &mut owed, &mut session)?;
             }
-            Some(reply) = finished.recv(), if open => send(&out, &reply, &mut owed, &mut session)?,
-            line = lines.next_line(), if open && !owed.full() => {
-                let Some(line) = line? else { return Ok(()) };
+            Some(reply) = finished.recv(), if open => {
+                owed.returned();
+                send(&out, &reply, &mut owed, &mut session)?;
+            }
+            line = lines.next_line(), if reading && open && !owed.full() => {
+                // An interface that has sent all it will, its writing side closed, still gets the
+                // replies it's owed.
+                let Some(line) = line? else {
+                    reading = false;
+                    continue;
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
                 match take(state, &line, &mut session).await {
                     Taken::Answer(reply) => send(&out, &reply, &mut owed, &mut session)?,
-                    Taken::Find(request) => finding.start(state, request, found.clone()),
+                    Taken::Find(request) | Taken::Apart(request) if owed.apart >= APART_MOST => {
+                        let mut error = Error::new(
+                            code::LIMIT,
+                            format!("this interface already has {APART_MOST} finds and saves being answered"),
+                        );
+                        error.data = Some(serde_json::json!({ "limit": "apart", "most": APART_MOST }));
+                        send(&out, &failed(request.id, error), &mut owed, &mut session)?;
+                    }
+                    Taken::Find(request) => {
+                        owed.parted();
+                        finding.start(state, request, found.clone());
+                    }
+                    Taken::Apart(request) => {
+                        owed.parted();
+                        apart(state.clone(), request, found.clone());
+                    }
                     Taken::Lane(request) => {
                         owed.took();
                         lane.send(request).context("the connection's lane stopped")?;
@@ -227,8 +284,20 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
                 }
             }
             push = next(&mut pushes), if open => match push {
-                // A connection too slow for its pushes misses them; the next says how things are.
-                Ok(push) => drop(out.try_send(encode(&push))),
+                Ok(push) => {
+                    // The lane's replies handed over before this push was sent go ahead of it, so
+                    // a request's answer comes before the pushes it sends once it's answered.
+                    while owed.waiting.is_none()
+                        && let Ok(reply) = answers.try_recv()
+                    {
+                        owed.answered();
+                        send(&out, &reply, &mut owed, &mut session)?;
+                    }
+                    // A connection too slow for its pushes misses them; the next says how things are.
+                    if owed.waiting.is_none() {
+                        drop(out.try_send(encode(&push)));
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => pushes = None,
             },
@@ -254,7 +323,8 @@ fn send(out: &mpsc::Sender<Vec<u8>>, reply: &Reply, owed: &mut Owed<'_>, session
 
 /// A connection's lane: answers the requests sent down it one at a time, in order, each reply to
 /// `answered`, until the connection or jawd stops; the request being answered then is answered
-/// all the same.
+/// all the same. A push a request sends once it's answered, as a logout's `connection` push, goes
+/// to every connection after the reply is handed over, so the one that asked has it first.
 fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::UnboundedSender<Request> {
     let (lane, mut requests) = mpsc::unbounded_channel::<Request>();
     tokio::spawn(async move {
@@ -267,12 +337,27 @@ fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::Unbo
             if answered.is_closed() {
                 return;
             }
-            if answered.send(answer(&state, request).await).is_err() {
+            let (reply, then) = match request.method.as_str() {
+                "link.logout" => logout(&state, request.id).await,
+                _ => (answer(&state, request).await, None),
+            };
+            let gone = answered.send(reply).is_err();
+            if let Some(push) = then {
+                let _ = state.pushes.send(push);
+            }
+            if gone {
                 return;
             }
         }
     });
     lane
+}
+
+/// Answers `request` on a task of its own, its reply to `found` once it's done.
+fn apart(state: Arc<State>, request: Request, found: mpsc::UnboundedSender<Reply>) {
+    tokio::spawn(async move {
+        let _ = found.send(answer_apart(&state, request).await);
+    });
 }
 
 /// A connection's find in progress: the next find cancels it, and so does the connection ending.
@@ -356,14 +441,26 @@ fn encode(line: &impl serde::Serialize) -> Vec<u8> {
 enum Taken {
     /// Answered on the connection's own task.
     Answer(Reply),
-    /// A find, answered on a task of its own.
+    /// A find, answered on a task of its own and cancelled by the next.
     Find(Request),
+    /// A request that can take long, answered on a task of its own, in no order with the others.
+    Apart(Request),
     /// Answered down the connection's lane, after the requests sent there before it.
     Lane(Request),
 }
 
-/// Takes one line from an interface: its windows, hello and focus are answered here, a find on a
-/// task of its own, and the rest down the lane.
+/// Requests that can take long and that nothing needs in order, each answered on a task of its
+/// own: `media.save` waits for its file to be downloaded, for as long as the phone is away. In
+/// tests, `test.wait` stands in for one.
+fn apart_method(method: &str) -> bool {
+    method == "media.save" || (cfg!(test) && method == "test.wait")
+}
+
+/// Takes one line from an interface: its windows, hello and focus are answered here, a find and
+/// the requests that can take long each on a task of its own, and the rest down the lane. A
+/// request is answered here only if it's quick and needs nothing but memory, as `themes` will be;
+/// one that writes jaw.db, asks the engine or must follow those sent before it takes the lane, as
+/// `media.fetch`, `media.cancel` and `settings.set` will.
 async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -423,6 +520,7 @@ async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
             Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("chat.opened's params: {e}"))),
         },
         "find" => return Taken::Find(request),
+        method if apart_method(method) => return Taken::Apart(request),
         "chats.watch" | "messages.watch" | "watch.move" | "unwatch" => match session.windows.as_mut() {
             Some(windows) => {
                 let chat = match request.method.as_str() {
@@ -484,7 +582,6 @@ async fn answer(state: &State, request: Request) -> Reply {
             },
         },
         "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
-        "link.logout" => logout(state, id).await,
         "history.more" => history_more(state, id, request.params).await,
         method if crate::send::Sending::METHODS.contains(&method) => match state.sending() {
             Some(sending) => match sending.call(&request.method, request.params).await {
@@ -493,6 +590,27 @@ async fn answer(state: &State, request: Request) -> Reply {
             },
             None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it can't send")),
         },
+        method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
+    }
+}
+
+/// The answer to a request on a task of its own: whatever can take long.
+#[cfg_attr(not(test), allow(unused_variables))]
+async fn answer_apart(state: &State, request: Request) -> Reply {
+    let id = request.id;
+    match request.method.as_str() {
+        // A stand-in for a long request, which waits on jaw.db's writer.
+        #[cfg(test)]
+        "test.wait" => {
+            let waited = crate::store::Change::Remember { key: "test.wait".into(), value: id.to_string() };
+            match state.store().map(|store| store.apply_durable(vec![waited])) {
+                Some(applying) => match applying.await {
+                    Ok(_) => succeeded(id, &serde_json::json!({})),
+                    Err(e) => failed(id, Error::new(code::INTERNAL, format!("{e:#}"))),
+                },
+                None => failed(id, Error::new(code::INTERNAL, "no store to wait on")),
+            }
+        }
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
     }
 }
@@ -517,16 +635,18 @@ async fn history_more(state: &State, id: u64, params: Value) -> Reply {
 }
 
 /// Logs the account out, and once the engine has, ends it as WhatsApp logging it out would, before
-/// answering: whatsmeow says nothing after a logout it was asked for.
-async fn logout(state: &State, id: u64) -> Reply {
+/// answering: whatsmeow says nothing after a logout it was asked for. With the answer comes the
+/// `connection` push saying so, for every interface once the answer is on its way.
+async fn logout(state: &State, id: u64) -> (Reply, Option<Push>) {
     let reply = engine(state, id, pb::command::Kind::Logout(pb::Logout {})).await;
-    if let (Outcome::Result(_), Some(store)) = (&reply.outcome, state.store())
-        && let Err(e) = crate::sync::logged_out(store, state.live(), &state.pushes, "logged out from jaw").await
-    {
-        let why = format!("the account is logged out, but jaw.db couldn't forget it: {e:#}");
-        return failed(id, Error::new(code::INTERNAL, why));
+    let (Outcome::Result(_), Some(store)) = (&reply.outcome, state.store()) else { return (reply, None) };
+    match crate::sync::logged_out(store, state.live(), "logged out from jaw").await {
+        Ok(push) => (reply, Some(push)),
+        Err(e) => {
+            let why = format!("the account is logged out, but jaw.db couldn't forget it: {e:#}");
+            (failed(id, Error::new(code::INTERNAL, why)), None)
+        }
     }
-    reply
 }
 
 /// Carries out a command on the engine, with an empty result once it's done.
@@ -735,6 +855,66 @@ mod tests {
         assert_eq!(crate::sync::starting(&store, true).account.state, AccountState::Unlinked, "so the next start says");
         let (_, welcome) = hello(socket).await.unwrap();
         assert_eq!(welcome.account, jaw_proto::Account { state: AccountState::Unlinked, me: None }, "and a hello now");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_connection_push_after_a_logout_comes_after_its_answer_on_the_raw_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let pedro = jaw_proto::Me {
+            id: "351910000001:12@s.whatsapp.net".into(),
+            name: "Pedro".into(),
+            phone: "+351910000001".into(),
+        };
+        let account = Change::Remember { key: "account".into(), value: serde_json::to_string(&pedro).unwrap() };
+        store.apply(Lane::Live, vec![account]).await.unwrap();
+        let (events, _incoming) = tokio::sync::mpsc::channel(16);
+        let supervisor = Supervisor::spawn(Arc::new(Obliging), events, Backoff::default());
+        while supervisor.status().state.name() != "running" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let live = Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, true)));
+        let state =
+            State::new(home.path(), Ok(supervisor), Vec::new(), live, Some(store.clone()), broadcast::channel(16).0);
+        tokio::spawn(serve(Arc::new(state.unwrap()), listener));
+        // jaw-client keeps the pushes that come while a call waits, so only the raw socket shows
+        // their order.
+        let early = tokio::task::spawn_blocking(move || {
+            let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut read = move || {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                serde_json::from_str::<Value>(&line).unwrap()
+            };
+            stream.write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":1,\"client\":\"test\",\"version\":\"0\"}}\n").unwrap();
+            read();
+            let mut early = 0;
+            for id in 10..210u64 {
+                stream.write_all(format!("{{\"id\":{id},\"method\":\"link.logout\"}}\n").as_bytes()).unwrap();
+                let (mut answered, mut pushed, mut n) = (None, None, 0);
+                while answered.is_none() || pushed.is_none() {
+                    let value = read();
+                    if value["id"] == id {
+                        assert!(value.get("result").is_some(), "{value}");
+                        answered = Some(n);
+                    } else if value["method"] == "connection" {
+                        pushed = Some(n);
+                    }
+                    n += 1;
+                }
+                if pushed < answered {
+                    early += 1;
+                }
+            }
+            early
+        })
+        .await
+        .unwrap();
+        assert_eq!(early, 0, "of 200 logouts, the connection push came before the answer {early} times");
     }
 
     #[tokio::test(flavor = "multi_thread")]

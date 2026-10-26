@@ -288,6 +288,12 @@ pub struct Interfaces {
     /// most, which jawd reads nothing from and sends nothing else meanwhile.
     #[serde(default)]
     pub replies_waiting: u64,
+    /// The requests being answered on tasks of their own, finds and saves, and the most a
+    /// connection can have, past which another is refused.
+    #[serde(default)]
+    pub apart: u64,
+    #[serde(default)]
+    pub apart_most: u64,
 }
 
 /// The windows interfaces watch, and the reads jawd keeps for them.

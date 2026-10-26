@@ -132,6 +132,19 @@ impl Interface {
         self.apply(frame);
     }
 
+    /// jawd's status, once it has answered.
+    fn status(&mut self) -> Value {
+        let asked = self.client.request("status", Value::Null).unwrap();
+        let answer = |ui: &Interface| {
+            ui.events.iter().find_map(|e| match e {
+                Event::Reply { id, outcome: Ok(status) } if *id == asked => Some(status.clone()),
+                _ => None,
+            })
+        };
+        self.until(Duration::from_secs(30), "jawd's status", |ui| answer(ui).is_some());
+        answer(self).expect("it answered")
+    }
+
     /// Applies frames until `done` holds, for up to `within`.
     fn until(&mut self, within: Duration, what: &str, mut done: impl FnMut(&Interface) -> bool) {
         let until = Instant::now() + within;
@@ -238,11 +251,17 @@ fn an_interface_that_falls_behind_is_told_to_watch_again_and_ends_as_a_fresh_one
     }
 
     // With room for one event, the second reply stops the slow interface's reading, so jawd's
-    // queue to it fills while messages pour in, and after 5 seconds jawd drops its windows.
-    for _ in 0..3 {
-        slow.client.request("status", Value::Null).unwrap();
+    // queue to it fills while messages pour in, and 5 seconds later jawd drops its windows. Focus
+    // is answered at once, so the reading stops at once; then jawd is asked until only the fresh
+    // interface's two windows are watched.
+    for focused in [false, true, false] {
+        slow.client.request("focus", serde_json::json!({ "focused": focused })).unwrap();
     }
-    std::thread::sleep(Duration::from_secs(9));
+    let until = Instant::now() + Duration::from_secs(60);
+    while fresh.status()["windows"]["watched"] != 2 {
+        assert!(Instant::now() < until, "jawd never dropped the slow interface's windows");
+        std::thread::sleep(Duration::from_millis(200));
+    }
     slow.until(Duration::from_secs(10), "jawd's resync", |ui| ui.client.stats().resyncs == 2);
 
     // Once the bench has written its last message and gone, both hold what they last had.

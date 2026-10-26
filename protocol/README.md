@@ -12,7 +12,13 @@ The engine link, between jawd and jaw-engine, is a different protocol: `proto/en
   - a **request** has an `id` (an integer the client picks), a `method` and `params`;
   - a **reply** has the request's `id` and either a `result` or an `error`;
   - a **push**, from jawd, has a `method` and `params`, and no `id`.
-- Requests can be sent without waiting for replies; replies come in any order. A client never blocks on one: whatever it asked for arrives as data. jawd answers a connection's watches, `hello` and `focus` without waiting for its other requests, which it carries out in the order they were sent, so a chat opens at once even while a message sent just before it waits for the disk. A watch is answered with what jaw.db holds when it's read, which may be before a request sent ahead of it has taken effect; that request's effect then comes as a push, and a row it makes can't be an anchor until it has. jawd holds at most 64 of a connection's other requests; past that, or while a reply waits for the interface to read, it reads nothing more from that connection, watches included.
+- Requests can be sent without waiting for replies; replies come in any order. A client never blocks on one: whatever it asked for arrives as data.
+  - `hello`, `focus`, `chats.watch`, `messages.watch`, `watch.move` and `unwatch` are answered at once, without waiting for the connection's other requests, so a chat opens at once even while a message sent just before it waits for the disk.
+  - `find` and `media.save`, which can take long, are each answered on a task of their own once done, in no order with the rest. A connection can have 64 of them being answered; past that, another is error 5, with `data` `{"limit": "apart", "most": 64}`.
+  - Every other request waits for the ones sent before it: jawd carries them out one at a time, in the order they were sent. It holds 64 of a connection's at most; past that, or while a reply waits for the interface to read it, it reads nothing more from that connection, the requests answered at once included, until one of them is answered.
+  - A watch is answered with what jaw.db holds when it's read, which may be before a request sent ahead of it has taken effect: a send, a read position, a deletion. That request's effect then comes as a push, and a row it makes can't be an anchor until it has; `around: unread` just after a `read` anchors on the first message unread before it.
+  - A window's push can come before the reply to the request that caused it, so a `row` in a reply is an upsert like any other, applied by its `v`.
+  - An interface that closes its side for writing, as a script does once its input ends, still gets the reply to every request it sent; jawd then closes the connection.
 
 ```json
 {"id":7,"method":"send.text","params":{"chat":"351912345678@s.whatsapp.net","text":"on my way"}}
@@ -33,7 +39,7 @@ The engine link, between jawd and jaw-engine, is a different protocol: `proto/en
 | 2 | The engine isn't available right now; `data.retry_ms` says when to try again |
 | 3 | Not found: the chat, message, folder or person doesn't exist |
 | 4 | Not allowed, and why: editing a message older than WhatsApp allows, deleting someone else's message for everyone, voting twice on a single-choice poll |
-| 5 | A limit, and which: presence subscriptions, a file too large to send, text longer than 65,536 characters (a message's, an edit's or a draft's), the outbox, a forward's chats or a connection's windows, the last three with `data.limit` saying so |
+| 5 | A limit, and which: presence subscriptions, a file too large to send, text longer than 65,536 characters (a message's, an edit's or a draft's), the outbox, a forward's chats, a connection's windows or its finds and saves being answered, the last four with `data.limit` saying so |
 | 6 | Protocol versions don't match |
 | 7 | Cancelled: a newer request replaced this one, as each `find` replaces the last |
 
@@ -207,7 +213,7 @@ The whole tree; it's small. Each folder: `id`, `parent`, `name`, `position`, `sm
 - **`chat.start`** takes `phone` (international form; `+`, spaces, dashes and brackets are fine) or `person` (`person:` and a number, as `find` gives them) and answers with `chat`, as `chats.watch` sends it, found or made. A number is checked with WhatsApp first (error 3 if it isn't on WhatsApp, 2 if the engine isn't connected), and WhatsApp's LID for it is kept with it, so messages addressed either way are one chat. A person's chat is found under any JID they're known by before one is made.
 - **`draft.set`** keeps `text` as the chat's draft for every interface, shown in the chat list as `draft`; empty text clears it. Error 3 for a chat jawd doesn't have, 5 past 65,536 characters.
 - **`read`** says you've read `chat` up to `up_to`, a message's ID: the chat's read position moves forward (back only while it's the phone's guess, before WhatsApp has said where it is), its `unread` is counted again from there, and jawd marks the messages read on WhatsApp, at once and then at most every 2 seconds per chat, however fast an interface reads. Sending a message reads the chat up to it as replying on the phone does, and marks what it reads read on WhatsApp the same way; a forward reads none of the chats it goes to. When read receipts are off on the phone, only your own devices hear. Error 3 for a chat or message jawd doesn't have.
-- **`typing`** (`chat`, `state`: `composing`, `recording` or `paused`) answers at once. jawd tells WhatsApp when typing starts or changes, again every 10 seconds while it's said, and stops it 10 seconds after an interface last said so, or at once on `paused`.
+- **`typing`** (`chat`, `state`: `composing`, `recording` or `paused`) answers once the requests sent before it have been, as every request but those answered at once; it needs nothing from the disk itself. jawd tells WhatsApp when typing starts or changes, again every 10 seconds while it's said, and stops it 10 seconds after an interface last said so, or at once on `paused`.
 
 ## Reconnecting
 
@@ -222,7 +228,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | Method | Params | Result |
 | --- | --- | --- |
 | `hello` | `protocol`, `client`, `version`, `focus`, `since` | See Hello |
-| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), `interfaces`: how many are `connected`, whether one is `focused`, where `notifications` go, the requests `in_lanes`, read and not yet answered (this one among them), the most a connection's lane holds (`lane_most`), the `lanes_full`, whose connections jawd reads nothing more from until one is answered, and the connections with a reply waiting for room (`replies_waiting`, one each at most), which it reads nothing from and sends nothing else meanwhile, and `windows`: how many are `watched` on every connection, how many of them are `distinct`, the `most` one connection can watch, the bytes of the reads kept for windows watched alike to share (`kept_bytes`, at most `kept_most`, the oldest `let_go` past it), and the window `reads` made, `taken` from a kept read and `joined` to one under way |
+| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), `interfaces`: how many are `connected`, whether one is `focused`, where `notifications` go, the requests `in_lanes`, read and not yet answered (this one among them), the most a connection's lane holds (`lane_most`), the `lanes_full`, whose connections jawd reads nothing more from until one is answered, and the connections with a reply waiting for room (`replies_waiting`, one each at most), which it reads nothing from and sends nothing else meanwhile, and the finds and saves being answered on tasks of their own (`apart`, at most `apart_most` a connection); and `windows`: how many are `watched` on every connection, how many of them are `distinct`, the `most` one connection can watch, the bytes of the reads kept for windows watched alike to share (`kept_bytes`, at most `kept_most`, the oldest `let_go` past it), and the window `reads` made, `taken` from a kept read and `joined` to one under way |
 | `focus` | `focused` | |
 | `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes |
 | `link.cancel` | | |

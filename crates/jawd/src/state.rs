@@ -15,7 +15,7 @@ use crate::engine::supervisor::Supervisor;
 use crate::feed::Feed;
 use crate::find::Finder;
 use crate::send::Sending;
-use crate::sock::{LANE_MOST, Lanes};
+use crate::sock::{APART_MOST, LANE_MOST, Lanes};
 use crate::store::Store;
 use crate::sync::Shared;
 use crate::work::Report;
@@ -219,6 +219,8 @@ impl State {
                 lane_most: LANE_MOST as u64,
                 lanes_full: self.lanes.full(),
                 replies_waiting: self.lanes.waiting(),
+                apart: self.lanes.apart(),
+                apart_most: APART_MOST as u64,
             }),
             windows: self.feed.as_ref().map(Feed::windows),
             storage: self.store.as_ref().map(Store::storage),
