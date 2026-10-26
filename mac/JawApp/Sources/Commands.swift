@@ -158,6 +158,20 @@ extension AppModel {
         }, key: Shortcut("↩", [.command, .shift]), place: .panes, group: 4, enabled: isChat, on: { [weak self] in self?.focusMode ?? false })
             { [weak self] in self?.toggleFocusMode() })
 
+        // Layouts: the layouts themselves are `layoutCommands()`, made again as they change.
+        let book: @MainActor @Sendable () -> LayoutBook? = { [weak self] in self?.book }
+        add(Command("layout.save", "Save Layout", phrase: "Save this layout", detail: "keep its new shape", key: Shortcut("s", [.command, .option]),
+                    place: .layouts, group: 1, enabled: { book()?.isEdited ?? false }) { [weak self] in self?.saveLayout() })
+        add(Command("layout.revert", "Revert Layout", phrase: "Revert this layout", detail: "back to its saved shape", place: .layouts,
+                    group: 1, enabled: { book()?.isEdited ?? false }) { [weak self] in self?.revertLayout() })
+        add(Command("layout.save.as", "Save Layout As…", phrase: "Save these panes as a layout", detail: "with a name, to come back to",
+                    symbol: "rectangle.3.group", key: Shortcut("s", [.command, .option, .shift]), place: .layouts, group: 1,
+                    enabled: { [weak self] in self?.grid != nil }) { [weak self] in self?.window?.askLayoutName() })
+        add(Command("layout.rename", "Rename Layout…", phrase: "Rename this layout", detail: "", place: .layouts, group: 2,
+                    enabled: { book()?.current != nil }) { [weak self] in self?.window?.askLayoutRename() })
+        add(Command("layout.delete", "Delete Layout…", phrase: "Delete this layout", detail: "its panes stay on screen", place: .layouts,
+                    group: 2, enabled: { book()?.current != nil }) { [weak self] in self?.window?.askLayoutDelete() })
+
         // View
         add(Command("look.bubbles", "Bubbles", phrase: "Bubbles", detail: "how messages look", place: .view, submenu: "Message Style",
                     on: { [weak self] in self?.preferences.look == .bubbles }) { [weak self] in self?.preferences.look = .bubbles })
@@ -215,12 +229,31 @@ extension AppModel {
         }
     }
 
+    /// The layouts to go to, first in the Layouts menu: the unnamed one with ⌃⌘0, each saved one
+    /// by its place with ⌃⌘1 to ⌃⌘9.
+    func layoutCommands() -> [Command] {
+        var out = [Command("layout.unnamed", "Unsaved Panes", phrase: "Go to the unsaved panes", detail: "the panes before any layout",
+                           key: Shortcut("0", [.control, .command]), place: .layouts, palette: book.current != nil,
+                           on: { [weak self] in self?.book.current == nil }) { [weak self] in self?.switchLayout(nil) }]
+        for (i, name) in book.names.enumerated() {
+            out.append(Command("layout.\(i + 1)", name, phrase: "Go to \(name)", detail: "a layout", symbol: "rectangle.3.group",
+                               key: i < 9 ? Shortcut("\(i + 1)", [.control, .command]) : nil, place: .layouts,
+                               on: { [weak self] in self?.book.current == name }) { [weak self] in self?.switchLayout(name) })
+        }
+        return out
+    }
+
+    /// The commands now, the layouts' among them.
+    var allCommands: [Command] {
+        layoutCommands() + commands
+    }
+
     /// The chats with unread messages that aren't muted, in the list's order.
     func unreadChats() -> [ChatRow] {
         (window?.chatList.all ?? []).filter { $0.unread > 0 && !$0.muted && $0.kind != .community }
     }
 
     func command(_ id: String) -> Command? {
-        commands.first { $0.id == id }
+        allCommands.first { $0.id == id }
     }
 }

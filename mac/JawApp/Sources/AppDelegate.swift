@@ -21,8 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
 
         window = MainWindowController(model: model)
-        assert(Menus.problems(model.commands).isEmpty, Menus.problems(model.commands).joined(separator: "; "))
-        NSApp.mainMenu = Menus.bar(model.commands)
+        assert(Menus.problems(model.allCommands).isEmpty, Menus.problems(model.allCommands).joined(separator: "; "))
+        NSApp.mainMenu = Menus.bar(model.allCommands)
         NSApp.windowsMenu = NSApp.mainMenu?.item(withTitle: MenuPlace.window.rawValue)?.submenu
         NSApp.helpMenu = NSApp.mainMenu?.item(withTitle: MenuPlace.help.rawValue)?.submenu
         model.window = window

@@ -274,7 +274,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     func showKeys() {
         guard keysSheet == nil else { return }
-        let sheet = NSWindow(contentViewController: NSHostingController(rootView: KeysView(commands: Menus.keys(model.commands)) { [weak self] in
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: KeysView(commands: Menus.keys(model.allCommands)) { [weak self] in
             guard let self, let sheet = keysSheet else { return }
             window?.endSheet(sheet)
             keysSheet = nil
@@ -310,9 +310,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     static let find = NSToolbarItem.Identifier("find")
     static let newChat = NSToolbarItem.Identifier("newChat")
     static let splitAcross = NSToolbarItem.Identifier("split")
+    static let layout = NSToolbarItem.Identifier("layout")
+    var layoutItem: NSMenuToolbarItem?
 
     func toolbarDefaultItemIdentifiers(_: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.find, Self.splitAcross, Self.newChat]
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.layout, Self.find, Self.splitAcross, Self.newChat]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -340,6 +342,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             item.showsIndicator = true
             item.menu = Menus.menu(["split.across", "split.down", "pane.close"].compactMap(model.command))
             return item
+        case Self.layout:
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.label = "Layout"
+            item.showsIndicator = true
+            layoutItem = item
+            layoutsChanged()
+            return item
         case Self.newChat:
             let item = NSToolbarItem(itemIdentifier: id)
             item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Chat")
@@ -357,6 +366,63 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         model.split(.across)
     }
 
+}
+
+// MARK: - Layouts
+
+extension MainWindowController {
+    /// The layouts changed, or the one on screen did: the Layouts menu and the toolbar's say so.
+    func layoutsChanged() {
+        let commands = model.allCommands.filter { $0.place == .layouts }
+        if let item = NSApp.mainMenu?.item(withTitle: MenuPlace.layouts.rawValue) {
+            item.submenu = Menus.menu(commands, title: MenuPlace.layouts.rawValue)
+        }
+        guard let item = layoutItem else { return }
+        let name = model.book.current ?? "Unsaved Panes"
+        item.title = model.book.isEdited ? "\(name) •" : name
+        item.toolTip = model.book.isEdited ? "\(name), changed since it was saved: Save Layout (⌥⌘S) keeps it" : "The layout: ⌃⌘1 to ⌃⌘9 go to one"
+        item.menu = Menus.menu(commands)
+    }
+
+    /// Asks for a name, in a sheet that takes the keys at once: Return saves, Esc cancels.
+    func askName(_ title: String, _ detail: String, value: String = "", button: String, done: @escaping (String) -> Void) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        let field = NSTextField(string: value)
+        field.placeholderString = "Work"
+        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn { done(field.stringValue) }
+        }
+    }
+
+    func askLayoutName() {
+        askName("Save these panes as a layout", "It keeps their shape and their chats; ⌃⌘ and its number come back to it.",
+                button: "Save") { [weak model] name in model?.saveLayoutAs(name) }
+    }
+
+    func askLayoutRename() {
+        guard let old = model.book.current else { return }
+        askName("Rename \(old)", "", value: old, button: "Rename") { [weak model] name in model?.renameLayout(old, to: name) }
+    }
+
+    func askLayoutDelete() {
+        guard let window, let name = model.book.current else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete \(name)?"
+        alert.informativeText = "Its panes stay on screen, unsaved."
+        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak model] response in
+            if response == .alertFirstButtonReturn { model?.deleteLayout(name) }
+        }
+    }
 }
 
 extension JSONEncoder {

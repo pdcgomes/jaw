@@ -34,7 +34,10 @@ final class AppModel {
     /// Each pane's conversation, by the chat it shows; a chat shows in one pane at most.
     var panes: [String: ConversationController] = [:]
     var paneWindows: [WindowID: String] = [:]
-    var grid: PaneGrid?
+    /// The named layouts and the one on screen.
+    var book = LayoutBook()
+    /// The kept layouts couldn't be read, so they're left as they are rather than written over.
+    var keepKept = false
     var focusedSlot: Int?
     var restored = false
     let glance = Glance()
@@ -285,6 +288,16 @@ final class AppModel {
 
     // MARK: - Panes
 
+    /// The layout on screen; a change of its chats is saved at once, a change of its shape kept as
+    /// the layout's edit.
+    var grid: PaneGrid? {
+        get { book.grid }
+        set {
+            book.update(newValue)
+            window?.layoutsChanged()
+        }
+    }
+
     /// The focused pane's chat, when it has one.
     var focusedChat: String? {
         focusedSlot.flatMap { grid?.slot($0)?.chat }
@@ -452,6 +465,78 @@ final class AppModel {
         window?.chatList.step(by, skipping: others)
     }
 
+    // MARK: - Layouts
+
+    /// Goes to a layout by name, or to the unnamed one, with its chats and its focus.
+    func switchLayout(_ name: String?) {
+        guard name != book.current else { return }
+        book.focus = focusedSlot
+        conversation?.leave()
+        book.switchTo(name)
+        reconcile(focus: book.focus)
+    }
+
+    func saveLayout() {
+        book.save()
+        savePanes()
+        window?.layoutsChanged()
+    }
+
+    func revertLayout() {
+        book.revert()
+        reconcile(focus: focusedSlot)
+    }
+
+    func saveLayoutAs(_ name: String) {
+        do {
+            book.focus = focusedSlot
+            try book.saveAs(name)
+            savePanes()
+            window?.layoutsChanged()
+            say("saved as \(book.current ?? name)")
+        } catch {
+            say(error.said, warn: true)
+        }
+    }
+
+    func renameLayout(_ old: String, to new: String) {
+        do {
+            try book.rename(old, to: new)
+            savePanes()
+            window?.layoutsChanged()
+        } catch {
+            say(error.said, warn: true)
+        }
+    }
+
+    func deleteLayout(_ name: String) {
+        book.delete(name)
+        savePanes()
+        window?.layoutsChanged()
+    }
+
+    /// The panes for the layout on screen: windows let go for chats it doesn't show, opened for
+    /// the ones it does; a chat the list doesn't hold yet keeps its place, its pane waiting.
+    func reconcile(focus at: Int?) {
+        let shown = Set(grid?.chats ?? [])
+        for chat in panes.keys where !shown.contains(chat) {
+            closePane(chat)
+        }
+        for slot in grid?.slots ?? [] {
+            if let id = slot.chat, panes[id] == nil, let row = window?.chatList.row(id) {
+                _ = makePane(row, place: ConversationController.place(for: row))
+            }
+        }
+        focusedSlot = nil
+        if let grid {
+            focus(slot: at.flatMap { grid.slot($0)?.id } ?? grid.reading.first!.id, force: true)
+        } else {
+            window?.refresh()
+        }
+        savePanes()
+        window?.layoutsChanged()
+    }
+
     // MARK: - Keeping the panes
 
     struct Kept: Codable {
@@ -466,44 +551,45 @@ final class AppModel {
     }
 
     var keptKey: String {
-        "grid:" + launch.home
+        "layouts:" + launch.home
     }
 
-    /// The panes kept in the app's preferences, per jaw folder, until jawd keeps an interface's
+    /// The layouts kept in the app's preferences, per jaw folder, until jawd keeps an interface's
     /// state (P1).
     func savePanes() {
-        guard restored else { return }
-        if let grid, let data = try? JSONEncoder().encode(Kept(grid: grid, focus: focusedSlot)) {
-            UserDefaults.standard.set(data, forKey: keptKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: keptKey)
-        }
+        guard restored, !keepKept else { return }
+        book.focus = focusedSlot
+        if let data = try? JSONEncoder().encode(book) { UserDefaults.standard.set(data, forKey: keptKey) }
     }
 
-    /// Opens the panes kept from last time, once the chat list has the chats they show; a chat
-    /// that isn't there any more leaves its pane empty.
+    /// Opens the layouts kept from last time, once the chat list has the chats they show; what an
+    /// earlier build kept (the grid alone, or the tree) is read as the unnamed layout.
     func restorePanes() {
         guard !restored, launch.bench == nil, launch.snapshot == nil else { return }
         restored = true
         let defaults = UserDefaults.standard
-        var kept = defaults.data(forKey: keptKey).flatMap { try? JSONDecoder().decode(Kept.self, from: $0) }
-        if kept == nil, let old = defaults.data(forKey: "panes:" + launch.home), let tree = try? JSONDecoder().decode(KeptTree.self, from: old) {
-            let g = PaneGrid.from(tree.layout)
-            kept = Kept(grid: g, focus: tree.focused.flatMap { g.slot(showing: $0)?.id })
-        }
-        guard let kept, kept.grid.holds, let list = window?.chatList else { return }
-        var g = kept.grid
-        for slot in g.slots {
-            guard let id = slot.chat else { continue }
-            if let row = list.row(id) {
-                _ = makePane(row, place: ConversationController.place(for: row))
-            } else {
-                g = g.with(chat: nil, in: slot.id)
+        if let data = defaults.data(forKey: keptKey) {
+            do {
+                book = try JSONDecoder().decode(LayoutBook.self, from: data)
+            } catch {
+                say("the saved layouts couldn't be read: \((error as? LayoutBook.Problem)?.said ?? "\(error)"); they're kept as they were",
+                    warn: true)
+                keepKept = true
+                return
             }
+        } else if let data = defaults.data(forKey: "grid:" + launch.home), let kept = try? JSONDecoder().decode(Kept.self, from: data) {
+            book.update(kept.grid)
+            book.focus = kept.focus
+        } else if let old = defaults.data(forKey: "panes:" + launch.home), let tree = try? JSONDecoder().decode(KeptTree.self, from: old) {
+            let g = PaneGrid.from(tree.layout)
+            book.update(g)
+            book.focus = tree.focused.flatMap { g.slot(showing: $0)?.id }
         }
-        grid = g
-        focus(slot: kept.focus.flatMap { g.slot($0)?.id } ?? g.reading.first!.id, force: true)
-        savePanes()
+        guard let grid, grid.holds else {
+            window?.layoutsChanged()
+            return
+        }
+        reconcile(focus: book.focus)
     }
 
     // MARK: - Focus
@@ -523,7 +609,7 @@ final class AppModel {
 
     /// Every action the palette offers now: the commands that can run, by the palette's phrases.
     func actions() -> [PaletteAction] {
-        commands.filter { $0.inPalette && $0.enabled() }.map(\.paletteAction)
+        allCommands.filter { $0.inPalette && $0.enabled() }.map(\.paletteAction)
     }
 
     /// The next chat with unread messages after the focused one.
