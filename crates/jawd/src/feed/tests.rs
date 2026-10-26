@@ -3855,6 +3855,45 @@ mod folders {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_smart_folders_window_follows_its_rule_as_its_chats_are_answered_and_written_to() {
+        let bed = Bed::new(brisk());
+        let now = crate::feed::now_ms();
+        let day = 86_400_000;
+        let seq = bed
+            .apply(vec![
+                Change::Message(text(ANA, "a1", now - 2 * day, Some(ANA), "olá")),
+                Change::Message(text(RUI, "r1", now - 2 * day + 1, Some(RUI), "boas")),
+                Change::Message(text(INES, "i1", now - 3_600_000, Some(INES), "já?")),
+            ])
+            .await;
+        let waiting = bed
+            .store
+            .reads()
+            .query(crate::work::Priority::Interactive, |db| {
+                Ok(db.query_row("SELECT n FROM folders WHERE name = 'Waiting on me'", [], |r| r.get::<_, i64>(0))?)
+            })
+            .await
+            .unwrap();
+        let mut watcher = bed.watcher(64);
+        let list = watcher
+            .watch("chats.watch", json!({"folder": format!("smart:{waiting}"), "around": "top", "after": 10}))
+            .await;
+        let tree = watcher.watch("folders.watch", json!({})).await;
+        watcher.settle(seq).await;
+        let smart = format!("smart:{waiting}");
+        assert_eq!(watcher.windows[&list].ids(), [RUI, ANA], "those who wrote a day ago and wait");
+        assert_eq!(watcher.windows[&tree].rows[&smart]["count"], json!(2));
+        let seq = bed.apply(vec![Change::Message(text(ANA, "a2", now, None, "sim"))]).await;
+        watcher.settle(seq).await;
+        assert_eq!(watcher.windows[&list].ids(), [RUI], "Ana's answered");
+        assert_eq!(watcher.windows[&tree].rows[&smart]["count"], json!(1));
+        let seq = bed.apply(vec![Change::Message(text(RUI, "r2", now, Some(RUI), "e então?"))]).await;
+        watcher.settle(seq).await;
+        assert!(watcher.windows[&list].ids().is_empty(), "Rui's newest is new: he hasn't waited a day");
+        assert_eq!(watcher.windows[&tree].rows[&smart]["count"], json!(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_trees_window_sends_favourites_whole_when_they_change_and_a_deleted_folder_goes() {
         let bed = Bed::new(brisk());
         let seq = bed.apply(vec![Change::Message(text(ANA, "a1", AT, Some(ANA), "olá"))]).await;

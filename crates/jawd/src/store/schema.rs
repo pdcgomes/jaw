@@ -982,8 +982,11 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // message arriving counts in every folder it's in without any folder's chats being walked.
     // People gain their presence, which rosters sort by, and how many chats are theirs. It's a
     // data step because it rebuilds folders, which other tables refer to, so its foreign keys are
-    // checked before it commits; it reads each chat and person a few times, measured with the rest
-    // of the step's cost beside the migration's test.
+    // checked before it commits. It reads each chat and person a few times and no message:
+    // measured as jawd runs it, on its writer's connection, at 0.30 s beside a million messages,
+    // 3,000 chats and 5,000 people with 30 folders holding 600 of them, its foreign_key_check,
+    // fingerprint and commit included, on the reference Mac at a load of 57 to 65; the backup
+    // before it took 3.1 s (`measure_migration_12`).
     "
     -- Class: jaw's own, never dropped or rebuilt from anything else, copied as it is by any rebuild
     -- of jaw.db and kept in the daily backup. The folder tree: the five built-in folders (builtin),
@@ -2009,6 +2012,76 @@ mod tests {
             bytes(&db) as f64 / 1e6,
         );
         assert!((beside as f64) < before as f64 * DATA_STEP_ROOM, "the data steps took more room than is asked for");
+    }
+
+    /// Measures migration 12 on an account the size of `jawd demo`'s: 5,000 people, 3,000 chats
+    /// (2,400 of them people's, 600 groups, 60 of those in communities), as many messages as asked,
+    /// and 30 folders from before it holding 600 chats and people; its backup, its transaction and
+    /// its check of every foreign key included, as jawd runs it on its writer's connection:
+    /// `JAW_MEASURE_MESSAGES=1000000 cargo test --release -p jawd measure_migration_12 -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, a minute long at a million messages"]
+    fn measure_migration_12() {
+        let messages: i64 = std::env::var("JAW_MEASURE_MESSAGES").ok().and_then(|n| n.parse().ok()).unwrap_or(200_000);
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("jaw.db");
+        let mut db = at(Some(&path), 11);
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        // jawd's writer's connection: no checkpoint in a commit, and its cache.
+        db.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        db.pragma_update(None, "cache_size", -32 * 1024).unwrap();
+        db.execute_batch(&format!(
+            "BEGIN;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000)
+            INSERT INTO people (n, name, last_seen, v) SELECT x, 'Person ' || x, 1790000000000 + x, 1 FROM c;
+            INSERT INTO person_jids (n, jid, person) SELECT n, printf('3519%08d@s.whatsapp.net', n), n FROM people;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000)
+            INSERT INTO chats (n, id, kind, person, community, unread, mentions, last_at, v)
+            SELECT x, iif(x <= 2400, printf('3519%08d@s.whatsapp.net', x), printf('120363%012d@g.us', x)),
+                iif(x <= 2400, 'direct', 'group'), iif(x <= 2400, x, NULL), iif(x > 2940, 2401 + x % 6, NULL),
+                x % 7, iif(x % 13 = 0, 1, 0), 1790000000000 + x * 1000, 1 FROM c;
+            UPDATE chats SET kind = 'community', community = NULL WHERE n BETWEEN 2401 AND 2406;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {messages})
+            INSERT INTO messages (n, chat, id, at, t, sender, kind, summary, raw, v)
+            SELECT x, 1 + x % 3000, printf('3EB0%016d', x), 1790000000000 + x * 1000, (1790000000000 + x * 1000) << 20,
+                1 + x % 5000, 'text', 'mensagem ' || x, randomblob(300), x
+            FROM c;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 30)
+            INSERT INTO folders (n, parent, name, position, favourite, v)
+            SELECT x, iif(x <= 10, NULL, 1 + x % 10), 'Folder ' || x, x, iif(x <= 9, x, NULL), 1 FROM c;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 600)
+            INSERT OR IGNORE INTO folder_items (folder, chat, person)
+            SELECT 1 + x % 30, iif(x % 2 = 0, 1 + (x * 7) % 3000, NULL), iif(x % 2 = 1, 1 + (x * 11) % 5000, NULL) FROM c;
+            COMMIT;
+            PRAGMA wal_checkpoint(TRUNCATE);"
+        ))
+        .unwrap();
+        let began = std::time::Instant::now();
+        back_up(&db, &path, 11, None).unwrap();
+        let backup = began.elapsed();
+        // The data step as Runner runs it: its statements, its check of every foreign key, the
+        // schema's fingerprint and the commit.
+        let began = std::time::Instant::now();
+        db.pragma_update(None, "foreign_keys", false).unwrap();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        Runner::default().execute(&tx, MIGRATIONS[11]).unwrap();
+        let dangling: Option<String> =
+            tx.prepare("PRAGMA foreign_key_check").unwrap().query_row([], |r| r.get(0)).optional().unwrap();
+        assert_eq!(dangling, None);
+        tx.pragma_update(None, "user_version", 12).unwrap();
+        assert_eq!(fingerprint(&tx).unwrap(), expected(12).unwrap());
+        tx.commit().unwrap();
+        let took = began.elapsed();
+        let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        eprintln!(
+            "{messages} messages in 3,000 chats with 5,000 people and 30 folders holding {} chats and people: \
+             migration 12 took {:.2} s, its check of every foreign key, fingerprint and commit included, \
+             and the backup before it {:.2} s",
+            count("SELECT count(*) FROM folder_items"),
+            took.as_secs_f64(),
+            backup.as_secs_f64(),
+        );
+        assert!(super::super::lists::drift(&db).unwrap().is_empty(), "it counts what it holds");
     }
 
     #[test]
