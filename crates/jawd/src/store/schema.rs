@@ -676,12 +676,13 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE INDEX outbox_by_target ON outbox (target);
     CREATE INDEX outbox_by_id ON outbox (id);
     ",
-    // 10, a data step: the failed messages of yours an earlier run left in the outbox that nothing
-    // can send again go, as the writer removes each from now on in the transaction that makes it
-    // so. It reads only the outbox, which holds at most a thousand rows waiting, and for each
-    // failed one its message by n and the outbox by target, so its time doesn't grow with the
-    // messages: 2.7 ms on the reference Mac for a full outbox of failed rows beside 200,000
-    // messages, its commit included.
+    // 10, a schema step: the failed messages of yours an earlier run left in the outbox that
+    // nothing can send again go, as the writer removes each from now on in the transaction that
+    // makes it so. It reads only the outbox, which holds at most a thousand rows waiting, and for
+    // each failed one its message by n and the outbox by target, so it costs the same however many
+    // messages there are: 2.1 ms on the reference Mac for a full outbox of failed rows beside
+    // 200,000 messages, and 2.2 ms beside a million. It drops no table, and nothing refers to the
+    // outbox, so it needs neither a data step's backup nor its check of every foreign key.
     "
     -- Class: jaw's own rows of the outbox, none of which send.retry could reach or would send: a
     -- failed message deleted for you, whose row has no message, deleted for everyone, or with your
