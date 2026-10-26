@@ -645,8 +645,12 @@ async fn place(inner: &Arc<Inner>, copy: &Copy, plan: &Plan, prepared: Prepared)
     };
     let applied = inner.store.apply(WriteLane::Live, vec![Change::Outgoing(Step::Prepared(Box::new(step)))]).await;
     drop(claim);
-    if let Err(e) = applied {
-        return Err(Failed::Later(format!("the copy is made, and jaw.db couldn't say so yet: {e:#}")));
+    match applied {
+        Err(e) => return Err(Failed::Later(format!("the copy is made, and jaw.db couldn't say so yet: {e:#}"))),
+        Ok(applied) if applied.quarantined > 0 => {
+            return Err(Failed::Never("jaw.db couldn't keep the copy made; what failed is kept in quarantine".into()));
+        }
+        Ok(_) => {}
     }
     if !prepared.untouched {
         let _ = std::fs::remove_file(&made);
@@ -748,11 +752,16 @@ async fn upload_one(inner: &Arc<Inner>, copy: &Copy) -> Result<(), Failed> {
         raw: raw.encode_to_vec(),
         shown: shown(copy, &raw),
     };
-    inner
+    let applied = inner
         .store
         .apply_durable(vec![Change::Outgoing(Step::Uploaded(Box::new(step)))])
         .await
         .map_err(|e| Failed::Later(format!("the copy is uploaded, and jaw.db couldn't say so yet: {e:#}")))?;
+    if applied.quarantined > 0 {
+        return Err(Failed::Never(
+            "jaw.db couldn't keep where the copy was uploaded; what failed is kept in quarantine".into(),
+        ));
+    }
     if let Some((who, _)) = pushed {
         push(&inner.pushes, &who, JobKind::Upload, 1.0);
     }
@@ -766,8 +775,13 @@ async fn upload_one(inner: &Arc<Inner>, copy: &Copy) -> Result<(), Failed> {
 async fn unsent(inner: &Arc<Inner>, copies: &[Copy], failed: &[i64], why: &str) {
     let changes: Vec<Change> =
         failed.iter().map(|&outbox| Change::Outbox(OutboxStep::Unsent { outbox, error: why.to_string() })).collect();
-    if let Err(e) = inner.store.apply_durable(changes).await {
-        eprintln!("jawd: can't keep that a copy couldn't be sent, so it's tried again: {e:#}");
+    let kept = match inner.store.apply_durable(changes).await {
+        Ok(applied) if applied.quarantined == 0 => Ok(()),
+        Ok(_) => Err("what failed is kept in quarantine".to_string()),
+        Err(e) => Err(format!("{e:#}")),
+    };
+    if let Err(why) = kept {
+        eprintln!("jawd: can't keep that a copy couldn't be sent, so it's tried again later: {why}");
         for &outbox in failed {
             inner.sending.try_later(outbox, inner.config.retry_first, inner.config.retry_most);
         }

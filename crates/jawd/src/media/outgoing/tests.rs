@@ -557,6 +557,72 @@ async fn an_upload_that_fails_on_the_way_is_tried_again_and_one_refused_fails_un
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_copy_jaw_db_cant_say_is_made_or_uploaded_fails_its_message_rather_than_going_round_again() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    let refuse = |state: &str| {
+        db.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS refused;
+             CREATE TRIGGER refused BEFORE UPDATE OF state ON outgoing WHEN NEW.state = '{state}'
+             BEGIN SELECT RAISE(ABORT, 'refused by the test'); END;"
+        ))
+        .unwrap();
+    };
+    let quarantined = || async {
+        rig.query(|db| Ok(db.query_row("SELECT count(*) FROM quarantine", [], |r| r.get::<_, i64>(0))?)).await
+    };
+    // Made, and jaw.db can't say so.
+    refuse("uploading");
+    let path = yours(picked.path(), "a.jpg", &Picture::lake(640, 480));
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+    let made = answer["messages"][0].as_str().unwrap().to_string();
+    rig.until(&made, "failed", failed).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(rig.world.uploads().is_empty(), "nothing is uploaded of a copy jaw.db doesn't name");
+    assert_eq!(quarantined().await, 1, "what failed is kept");
+    // Uploaded, and jaw.db can't say so.
+    refuse("ready");
+    let path = yours(picked.path(), "b.jpg", &Picture::lake(700, 480));
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+    let uploaded = answer["messages"][0].as_str().unwrap().to_string();
+    rig.until(&uploaded, "failed", failed).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.world.uploads().len(), 1, "uploaded once, not again and again");
+    assert!(rig.sent(&uploaded).is_empty(), "a message whose upload jaw.db doesn't have isn't sent");
+    assert_eq!(quarantined().await, 2);
+    // Failed, and jaw.db can't say so either: it's tried again until it can.
+    refuse("uploading");
+    db.execute_batch(
+        "CREATE TRIGGER unfailed BEFORE UPDATE OF state ON outbox WHEN NEW.state = 'failed'
+         BEGIN SELECT RAISE(ABORT, 'refused by the test'); END;",
+    )
+    .unwrap();
+    let mut pushes = rig.pushes.subscribe();
+    let path = yours(picked.path(), "c.jpg", &Picture::lake(760, 480));
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+    let unfailed = answer["messages"][0].as_str().unwrap().to_string();
+    let noticed = async {
+        loop {
+            if pushes.recv().await.unwrap().method == "notice" {
+                return;
+            }
+        }
+    };
+    let early = tokio::time::timeout(Duration::from_millis(800), noticed).await;
+    assert!(early.is_err(), "nobody is told it failed before jaw.db says so");
+    assert_eq!(rig.row(&unfailed).await["status"], "pending");
+    db.execute_batch("DROP TRIGGER unfailed").unwrap();
+    rig.until(&unfailed, "failed once jaw.db can say so", failed).await;
+    db.execute_batch("DROP TRIGGER refused").unwrap();
+    for id in [&made, &uploaded, &unfailed] {
+        rig.call("send.retry", json!({ "message": id })).await.unwrap();
+        rig.until(id, "sent once retried", sent).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_message_waiting_for_its_file_keeps_its_place_in_its_chat_and_messages_after_it_wait() {
     let home = tempfile::tempdir().unwrap();
     let picked = tempfile::tempdir().unwrap();
