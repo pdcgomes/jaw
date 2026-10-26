@@ -168,3 +168,17 @@ fn the_themes_fixture_is_what_the_theme_files_say() {
     let themes: Themes = serde_json::from_value(value["result"].clone()).unwrap();
     assert_eq!(themes.themes, jaw_proto::themes::all()[..2]);
 }
+
+/// Hello's answer carries the terminal's settings, and status every domain's by its name.
+#[test]
+fn hello_carries_its_domains_settings_and_status_every_domains() {
+    let read = |name: &str| -> Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../protocol/fixtures/{name}.json"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let hello: jaw_proto::Welcome = serde_json::from_value(read("hello.result")["result"].clone()).unwrap();
+    assert_eq!(hello.settings, Some(Settings::default()));
+    let status: jaw_proto::Status = serde_json::from_value(read("status.result")["result"].clone()).unwrap();
+    assert_eq!(status.settings["jaw"]["messages"], "irc");
+    assert_eq!(status.settings_ignored[0].domain, "jaw");
+}

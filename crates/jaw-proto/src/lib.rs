@@ -2,6 +2,8 @@
 //! like JSON-RPC 2.0 without its `jsonrpc` member. protocol/README.md specifies it, and
 //! protocol/fixtures/ pins it: each fixture reads into these types and writes back the same.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -119,9 +121,10 @@ pub struct Welcome {
     pub seq: u64,
     pub account: Account,
     pub connection: Connection,
-    /// Every setting with the value in effect.
-    #[serde(default)]
-    pub settings: settings::Settings,
+    /// The settings of the connection's own domain, the one its `client` names, each with the
+    /// value in effect; absent for a client jawd keeps no settings for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<settings::Settings>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -274,9 +277,10 @@ pub struct Status {
     /// The layouts kept for interfaces, and the limits on them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layouts: Option<Layouts>,
-    /// The settings in effect, and each whose value in jaw.db this jawd doesn't take.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settings: Option<settings::Settings>,
+    /// Each domain's settings in effect, by the domain's name, and each setting whose value in
+    /// jaw.db this jawd doesn't take.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, serde_json::Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settings_ignored: Vec<settings::Ignored>,
 }

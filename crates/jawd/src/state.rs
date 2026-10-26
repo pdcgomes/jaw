@@ -161,7 +161,7 @@ impl State {
             seq: self.feed.as_ref().map_or(0, Feed::seq),
             account: self.account(),
             connection: self.connection(),
-            settings: Default::default(),
+            settings: None,
         }
     }
 
@@ -239,7 +239,7 @@ impl State {
             windows: self.feed.as_ref().map(Feed::windows),
             storage: self.store.as_ref().map(Store::storage),
             layouts: self.layouts.as_ref().map(Layouts::status),
-            settings: None,
+            settings: std::collections::BTreeMap::new(),
             settings_ignored: Vec::new(),
         }
     }
