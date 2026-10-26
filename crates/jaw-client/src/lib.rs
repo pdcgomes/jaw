@@ -212,6 +212,19 @@ pub fn describe(status: &Status) -> String {
         };
         lines.push(format!("open      {connected}{front}; notifications {}", interfaces.notifications));
     }
+    if let Some(windows) = &status.windows {
+        lines.push(format!(
+            "windows   {} watched, {} of them different, at most {} a connection; their reads kept {:.1} of {:.1} MB, {} let go; {} reads, and {} times a window took another's",
+            windows.watched,
+            windows.distinct,
+            windows.most,
+            windows.kept_bytes as f64 / 1e6,
+            windows.kept_most as f64 / 1e6,
+            windows.let_go,
+            windows.reads,
+            windows.taken + windows.joined
+        ));
+    }
     if let Some(storage) = &status.storage {
         if let Some(trouble) = &storage.trouble {
             lines.push(format!("trouble   {trouble}"));

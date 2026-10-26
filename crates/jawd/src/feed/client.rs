@@ -12,23 +12,29 @@
 //! of, or the read under way if that was asked for since, or else asks for one that the others can
 //! take in turn, and each connection diffs it against its own hashes. So a commit costs a read for
 //! each distinct window, however many interfaces watch it.
+//!
+//! A window's last read is kept for the connections that haven't taken it yet, each row as the
+//! JSON it's sent as. The reads kept are counted in bytes, and past `KEPT_MOST` the oldest are let
+//! go, after which a window asks for a read again; a connection watches at most `MOST_WINDOWS`.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Instant;
 
 use jaw_proto::windows::{
     Around, ChatRow, ChatsPush, ChatsWatch, ChatsWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched,
     Watch, WatchMove,
 };
-use jaw_proto::{Error, Push, code};
+use jaw_proto::{Error, Windows, code};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use serde_json::value::RawValue;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::{mpsc, watch};
 
@@ -39,6 +45,11 @@ use crate::work::Priority;
 
 /// The most rows a window keeps on either side of its anchor.
 const MOST_ROWS: u32 = 1_000;
+/// The most windows a connection can watch at once.
+pub(super) const MOST_WINDOWS: usize = 32;
+/// The most bytes the reads kept for windows to share can hold: about 30 windows of 1,000 short
+/// messages, at half a kilobyte a row, or a couple of hundred of the size jaw shows.
+const KEPT_MOST: u64 = 16 << 20;
 
 /// What a client waits for.
 pub enum Ready {
@@ -69,14 +80,55 @@ pub struct Client {
     resync: Vec<String>,
 }
 
-/// What every connection shares: its windows' reads, and how many there have been.
-#[derive(Default)]
+/// What every connection shares: each distinct window's reads, the bytes of those kept, and how
+/// many windows are watched and read.
 pub(super) struct Shared {
+    /// Window reads asked for, and the times a window took instead a read its slot kept, or one
+    /// under way.
     reads: AtomicU64,
+    taken: AtomicU64,
+    joined: AtomicU64,
+    /// Windows watched on every connection.
+    windows: AtomicU64,
+    /// The bytes the slots' kept reads hold, the most they may, and the kept reads let go to stay
+    /// under it.
+    kept: Arc<AtomicU64>,
+    kept_most: AtomicU64,
+    let_go: AtomicU64,
+    /// Orders kept reads, so the oldest are let go first.
+    stamps: AtomicU64,
     slots: Mutex<HashMap<Spec, Weak<Slot>>>,
     /// Makes every window read fail on its reader, as a broken row would.
     #[cfg(test)]
     pub(super) failing: std::sync::atomic::AtomicBool,
+    /// Holds each window read's answer back this many milliseconds after its snapshot is taken.
+    #[cfg(test)]
+    pub(super) slow: AtomicU64,
+    /// Makes the next shared read's task panic once its read has answered.
+    #[cfg(test)]
+    pub(super) panicking: std::sync::atomic::AtomicBool,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Shared {
+            reads: AtomicU64::default(),
+            taken: AtomicU64::default(),
+            joined: AtomicU64::default(),
+            windows: AtomicU64::default(),
+            kept: Arc::default(),
+            kept_most: AtomicU64::new(KEPT_MOST),
+            let_go: AtomicU64::default(),
+            stamps: AtomicU64::default(),
+            slots: Mutex::default(),
+            #[cfg(test)]
+            failing: Default::default(),
+            #[cfg(test)]
+            slow: AtomicU64::default(),
+            #[cfg(test)]
+            panicking: Default::default(),
+        }
+    }
 }
 
 /// The reads of one window, shared by every connection watching it, and held by each of their
@@ -88,11 +140,25 @@ struct Slot {
 
 #[derive(Default)]
 struct SlotState {
-    /// The newest read that succeeded.
-    found: Option<Arc<Found>>,
+    /// The newest read that succeeded, unless it was let go to keep the bytes kept under the most.
+    kept: Option<Kept>,
     /// The read under way, if any.
     reading: Option<Reading>,
     asked: u64,
+}
+
+/// A read a slot keeps for its windows, its bytes counted with every slot's for as long as it's
+/// kept.
+struct Kept {
+    found: Arc<Found>,
+    stamp: u64,
+    bytes: Arc<AtomicU64>,
+}
+
+impl Drop for Kept {
+    fn drop(&mut self) {
+        self.bytes.fetch_sub(self.found.bytes, Ordering::Relaxed);
+    }
 }
 
 type Answer = Option<Result<Arc<Found>, Error>>;
@@ -105,7 +171,23 @@ struct Reading {
     answer: watch::Receiver<Answer>,
 }
 
-/// A window as one read found it, each row with the hash of it as sent.
+/// A read under way, forgotten by its slot when its task ends however it ends, so a task that
+/// panicked leaves no read for windows to join and wait on until they're resynced.
+struct UnderWay {
+    slot: Arc<Slot>,
+    asked: u64,
+}
+
+impl Drop for UnderWay {
+    fn drop(&mut self) {
+        let mut state = self.slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.reading.as_ref().is_some_and(|reading| reading.asked == self.asked) {
+            state.reading = None;
+        }
+    }
+}
+
+/// A window as one read found it, each row as it's sent.
 struct Found {
     /// It has every change up to this seq: the last committed when it was asked for, or the newest
     /// event it saw if that's later.
@@ -114,27 +196,64 @@ struct Found {
     total: u64,
     older: bool,
     newer: u64,
-    rows: Lines,
+    rows: Vec<Line>,
     chat: Option<i64>,
     senders: HashSet<i64>,
     /// The window as it was read, its anchor where the read found it.
     spec: Spec,
+    /// The bytes it holds, about.
+    bytes: u64,
 }
 
-struct Line<R> {
+/// A row as a read found it: the JSON it's sent as, the hash of that, and what a connection needs
+/// to know whether its interface holds it so.
+struct Line {
     n: i64,
     hash: u64,
-    row: R,
+    id: String,
+    sort: String,
+    v: u64,
+    json: Box<RawValue>,
 }
 
-enum Lines {
-    Chats(Vec<Line<ChatRow>>),
-    Messages(Vec<Line<MessageRow>>),
+impl Line {
+    fn of(n: i64, row: &impl Row) -> Line {
+        let json = serde_json::value::to_raw_value(row).expect("jawd's own types serialize");
+        let mut hasher = DefaultHasher::new();
+        hasher.write(json.get().as_bytes());
+        Line { n, hash: hasher.finish(), id: row.id().to_string(), sort: row.sort().to_string(), v: row.v(), json }
+    }
+
+    fn bytes(&self) -> usize {
+        size_of::<Line>() + self.id.capacity() + self.sort.capacity() + self.json.get().len()
+    }
 }
 
 impl Shared {
     pub(super) fn reads(&self) -> u64 {
         self.reads.load(Ordering::Relaxed)
+    }
+
+    /// The windows watched, and the reads kept for them.
+    pub(super) fn windows(&self) -> Windows {
+        let distinct =
+            self.slots.lock().expect("the feed's slots").values().filter(|slot| slot.strong_count() > 0).count();
+        Windows {
+            watched: self.windows.load(Ordering::Relaxed),
+            distinct: distinct as u64,
+            most: MOST_WINDOWS as u64,
+            kept_bytes: self.kept.load(Ordering::Relaxed),
+            kept_most: self.kept_most.load(Ordering::Relaxed),
+            let_go: self.let_go.load(Ordering::Relaxed),
+            reads: self.reads(),
+            taken: self.taken.load(Ordering::Relaxed),
+            joined: self.joined.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn keep_at_most(&self, bytes: u64) {
+        self.kept_most.store(bytes, Ordering::Relaxed);
     }
 
     /// The slot for windows showing `spec`, made if none holds one.
@@ -149,6 +268,42 @@ impl Shared {
         slot
     }
 
+    /// `found` as a slot keeps it, counted among the bytes kept.
+    fn keep(&self, found: Arc<Found>) -> Kept {
+        self.kept.fetch_add(found.bytes, Ordering::Relaxed);
+        Kept { found, stamp: self.stamps.fetch_add(1, Ordering::Relaxed), bytes: self.kept.clone() }
+    }
+
+    /// Lets go of the oldest reads slots keep while they hold more bytes than the most. A window
+    /// whose slot keeps none asks for a read of its own, which the others watching it can share,
+    /// and it never takes one older than what its interface holds, so nothing depends on them.
+    fn trim(&self) {
+        let most = self.kept_most.load(Ordering::Relaxed);
+        if self.kept.load(Ordering::Relaxed) <= most {
+            return;
+        }
+        let slots: Vec<Arc<Slot>> =
+            self.slots.lock().expect("the feed's slots").values().filter_map(Weak::upgrade).collect();
+        let mut kept: Vec<(u64, Arc<Slot>)> = slots
+            .into_iter()
+            .filter_map(|slot| {
+                let stamp = slot.state.lock().expect("a window's reads").kept.as_ref()?.stamp;
+                Some((stamp, slot))
+            })
+            .collect();
+        kept.sort_unstable_by_key(|(stamp, _)| *stamp);
+        for (stamp, slot) in kept {
+            if self.kept.load(Ordering::Relaxed) <= most {
+                break;
+            }
+            let mut state = slot.state.lock().expect("a window's reads");
+            if state.kept.as_ref().is_some_and(|kept| kept.stamp == stamp) {
+                state.kept = None;
+                self.let_go.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// The query that reads `spec`, or just the chats `only` names.
     fn query(
         &self,
@@ -157,39 +312,46 @@ impl Shared {
     ) -> impl FnOnce(&Connection) -> anyhow::Result<(Snapshot, Spec)> + Send + 'static {
         #[cfg(test)]
         let failing = self.failing.load(Ordering::Relaxed);
+        #[cfg(test)]
+        let slow = self.slow.load(Ordering::Relaxed);
         move |db| {
             #[cfg(test)]
             anyhow::ensure!(!failing, "the test made window reads fail");
-            window::query(db, spec, only)
+            let read = window::query(db, spec, only);
+            #[cfg(test)]
+            std::thread::sleep(std::time::Duration::from_millis(slow));
+            read
         }
     }
 }
 
-fn lines<R: Row>(rows: Vec<(i64, R)>) -> Vec<Line<R>> {
-    rows.into_iter().map(|(n, row)| Line { n, hash: hash(&row), row }).collect()
-}
-
 /// What a read of the window found, asked for when `from` was the last committed seq.
 fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
+    let rows: Vec<Line> = match &snapshot.rows {
+        Rows::Chats(rows) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
+        Rows::Messages(rows) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
+    };
+    let bytes = size_of::<Found>()
+        + rows.iter().map(Line::bytes).sum::<usize>()
+        + snapshot.senders.capacity() * size_of::<i64>();
     Found {
         fresh: from.max(snapshot.seq),
         seq: snapshot.seq,
         total: snapshot.total,
         older: snapshot.older,
         newer: snapshot.newer,
-        rows: match snapshot.rows {
-            Rows::Chats(rows) => Lines::Chats(lines(rows)),
-            Rows::Messages(rows) => Lines::Messages(lines(rows)),
-        },
+        rows,
         chat: snapshot.chat,
         senders: snapshot.senders,
         spec,
+        bytes: bytes as u64,
     }
 }
 
 struct Window {
     spec: Spec,
     slot: Arc<Slot>,
+    _watched: Watched,
     state: State,
     /// When the first and the latest changes waiting to be sent came, if any are, and the newest
     /// one's seq.
@@ -204,6 +366,22 @@ struct Window {
     /// When a chat list last took its order from a fresh query, and whether it owes one.
     reordered: Instant,
     reorder: bool,
+}
+
+/// Counts a window among every connection's for as long as it's watched.
+struct Watched(Arc<Shared>);
+
+impl Watched {
+    fn new(shared: &Arc<Shared>) -> Watched {
+        shared.windows.fetch_add(1, Ordering::Relaxed);
+        Watched(shared.clone())
+    }
+}
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        self.0.windows.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// What a window's interface holds, and what jawd needs to know which changes touch it.
@@ -228,19 +406,15 @@ struct Held {
     n: i64,
 }
 
-/// What an interface needs to go from what it holds to a snapshot.
-struct Update {
+/// What an interface needs to go from what it holds to a read, the rows as the read keeps them.
+struct Update<'a> {
+    chats: bool,
     seq: u64,
     total: u64,
     older: bool,
     newer: u64,
-    upsert: Upsert,
+    upsert: Vec<&'a RawValue>,
     remove: Vec<String>,
-}
-
-enum Upsert {
-    Chats(Vec<ChatRow>),
-    Messages(Vec<MessageRow>),
 }
 
 trait Row: Serialize {
@@ -273,29 +447,23 @@ impl Row for MessageRow {
     }
 }
 
-fn hash(row: &impl Serialize) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    hasher.write(&serde_json::to_vec(row).expect("jawd's own types serialize"));
-    hasher.finish()
-}
-
 /// The rows of `rows` an interface holding `held` lacks or holds otherwise, leaving out those it
 /// holds that haven't changed since `since`; the ids it holds that aren't in `rows`; and what it
 /// holds afterwards.
-fn changed<R: Row + Clone>(
+fn changed<'a>(
     held: &HashMap<String, Held>,
-    rows: &[Line<R>],
+    rows: &'a [Line],
     since: Option<i64>,
-) -> (Vec<R>, Vec<String>, HashMap<String, Held>) {
+) -> (Vec<&'a RawValue>, Vec<String>, HashMap<String, Held>) {
     let mut now = HashMap::with_capacity(rows.len());
     let mut upsert = Vec::new();
-    for &Line { n, hash, ref row } in rows {
+    for line in rows {
         let same = held
-            .get(row.id())
-            .is_some_and(|held| held.hash == hash || since.is_some_and(|since| row.v() as i64 <= since));
-        now.insert(row.id().to_string(), Held { hash, sort: row.sort().to_string(), n });
+            .get(&line.id)
+            .is_some_and(|held| held.hash == line.hash || since.is_some_and(|since| line.v as i64 <= since));
+        now.insert(line.id.clone(), Held { hash: line.hash, sort: line.sort.clone(), n: line.n });
         if !same {
-            upsert.push(row.clone());
+            upsert.push(&*line.json);
         }
     }
     let mut remove: Vec<String> = held.keys().filter(|id| !now.contains_key(*id)).cloned().collect();
@@ -304,18 +472,10 @@ fn changed<R: Row + Clone>(
 }
 
 /// What an interface holding `held` needs to hold what `found` found, and what it holds then.
-fn settle(held: &HashMap<String, Held>, found: &Found, since: Option<i64>) -> (Update, State) {
-    let (upsert, remove, held) = match &found.rows {
-        Lines::Chats(rows) => {
-            let (rows, remove, held) = changed(held, rows, since);
-            (Upsert::Chats(rows), remove, held)
-        }
-        Lines::Messages(rows) => {
-            let (rows, remove, held) = changed(held, rows, since);
-            (Upsert::Messages(rows), remove, held)
-        }
-    };
+fn settle<'a>(held: &HashMap<String, Held>, found: &'a Found, since: Option<i64>) -> (Update<'a>, State) {
+    let (upsert, remove, held) = changed(held, &found.rows, since);
     let update = Update {
+        chats: matches!(found.spec, Spec::Chats(_)),
         seq: found.seq.max(0) as u64,
         total: found.total,
         older: found.older,
@@ -337,41 +497,42 @@ fn settle(held: &HashMap<String, Held>, found: &Found, since: Option<i64>) -> (U
 
 /// `update` as a watch's or a move's result.
 fn result(watch: String, update: Update) -> Value {
-    let Update { seq, total, older, newer, upsert, remove } = update;
-    let value = match upsert {
-        Upsert::Chats(rows) => serde_json::to_value(ChatsWatched { watch, seq, total, rows, remove }),
-        Upsert::Messages(rows) => {
-            serde_json::to_value(MessagesWatched { watch, seq, total, older, newer, rows, remove })
-        }
+    let Update { chats, seq, total, older, newer, upsert: rows, remove } = update;
+    let value = match chats {
+        true => serde_json::to_value(ChatsWatched { watch, seq, total, rows, remove }),
+        false => serde_json::to_value(MessagesWatched { watch, seq, total, older, newer, rows, remove }),
     };
     value.expect("jawd's own types serialize")
 }
 
 /// `update` as a push to an interface holding `was`, unless nothing in it changed.
 fn push(watch: String, update: Update, was: &State) -> Option<Vec<u8>> {
-    let Update { seq, total, older, newer, upsert, remove } = update;
+    let Update { chats, seq, total, older, newer, upsert, remove } = update;
     let total = (total != was.total).then_some(total);
-    match upsert {
-        Upsert::Chats(upsert) => {
-            if upsert.is_empty() && remove.is_empty() && total.is_none() {
-                return None;
-            }
-            Some(line("chats", ChatsPush { watch, seq, total, upsert, remove }))
+    if chats {
+        if upsert.is_empty() && remove.is_empty() && total.is_none() {
+            return None;
         }
-        Upsert::Messages(upsert) => {
-            let older = (older != was.older).then_some(older);
-            let newer = (newer != was.newer).then_some(newer);
-            if upsert.is_empty() && remove.is_empty() && total.is_none() && older.is_none() && newer.is_none() {
-                return None;
-            }
-            Some(line("messages", MessagesPush { watch, seq, total, older, newer, upsert, remove }))
-        }
+        return Some(line("chats", ChatsPush { watch, seq, total, upsert, remove }));
     }
+    let older = (older != was.older).then_some(older);
+    let newer = (newer != was.newer).then_some(newer);
+    if upsert.is_empty() && remove.is_empty() && total.is_none() && older.is_none() && newer.is_none() {
+        return None;
+    }
+    Some(line("messages", MessagesPush { watch, seq, total, older, newer, upsert, remove }))
+}
+
+/// A push, as `jaw_proto::Push` carries one, with its params written as they are rather than made
+/// a `Value` first, so the rows reads keep as JSON go as they are.
+#[derive(Serialize)]
+struct Pushed<'a, P> {
+    method: &'a str,
+    params: P,
 }
 
 fn line(method: &str, params: impl Serialize) -> Vec<u8> {
-    let params = serde_json::to_value(params).expect("jawd's own types serialize");
-    let mut line = serde_json::to_vec(&Push { method: method.into(), params }).expect("jawd's own types serialize");
+    let mut line = serde_json::to_vec(&Pushed { method, params }).expect("jawd's own types serialize");
     line.push(b'\n');
     line
 }
@@ -443,11 +604,12 @@ async fn read_on<T: Send + 'static>(
 }
 
 impl Window {
-    fn new(spec: Spec, slot: Arc<Slot>) -> Window {
+    fn new(spec: Spec, slot: Arc<Slot>, shared: &Arc<Shared>) -> Window {
         let now = Instant::now();
         Window {
             spec,
             slot,
+            _watched: Watched::new(shared),
             state: State::default(),
             first: None,
             last: None,
@@ -571,11 +733,13 @@ impl Client {
             "chats.watch" => {
                 let watch: ChatsWatch = params_of(method, params)?;
                 let archived = archived(&watch.folder)?;
+                self.room_for_another()?;
                 let spec = self.chat_spec(archived, watch.around, watch.before, watch.after).await?;
                 self.watch(Spec::Chats(spec), watch.since, watch.have).await
             }
             "messages.watch" => {
                 let watch: MessagesWatch = params_of(method, params)?;
+                self.room_for_another()?;
                 let spec = self.message_spec(watch.chat, watch.around, watch.before, watch.after).await?;
                 self.watch(Spec::Messages(spec), watch.since, watch.have).await
             }
@@ -601,6 +765,19 @@ impl Client {
             }
             _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
         }
+    }
+
+    /// Refuses another window to a connection already watching the most.
+    fn room_for_another(&self) -> Result<(), Error> {
+        if self.windows.len() < MOST_WINDOWS {
+            return Ok(());
+        }
+        let mut error = Error::new(
+            code::LIMIT,
+            format!("a connection can watch at most {MOST_WINDOWS} windows at once, so one has to be unwatched first"),
+        );
+        error.data = Some(serde_json::json!({ "limit": "windows", "most": MOST_WINDOWS }));
+        Err(error)
     }
 
     async fn read<T: Send + 'static>(
@@ -668,33 +845,42 @@ impl Client {
     async fn shared(&self, slot: &Arc<Slot>, owed: i64) -> Result<Arc<Found>, Error> {
         let mut answer = {
             let mut state = slot.state.lock().expect("a window's reads");
-            if let Some(found) = state.found.as_ref().filter(|found| found.fresh >= owed) {
-                return Ok(found.clone());
+            if let Some(kept) = state.kept.as_ref().filter(|kept| kept.found.fresh >= owed) {
+                self.shared.taken.fetch_add(1, Ordering::Relaxed);
+                return Ok(kept.found.clone());
             }
             match state.reading.as_ref().filter(|reading| reading.from >= owed) {
-                Some(reading) => reading.answer.clone(),
+                Some(reading) => {
+                    self.shared.joined.fetch_add(1, Ordering::Relaxed);
+                    reading.answer.clone()
+                }
                 None => {
                     let from = *self.store.committed().borrow();
                     let (tell, answer) = watch::channel(None);
                     state.asked += 1;
-                    let asked = state.asked;
-                    state.reading = Some(Reading { asked, from, answer: answer.clone() });
+                    let under_way = UnderWay { slot: slot.clone(), asked: state.asked };
+                    state.reading = Some(Reading { asked: state.asked, from, answer: answer.clone() });
+                    self.shared.reads.fetch_add(1, Ordering::Relaxed);
                     let query = self.shared.query(slot.spec.clone(), None);
-                    let (store, shared, slot) = (self.store.clone(), self.shared.clone(), slot.clone());
+                    let (store, shared) = (self.store.clone(), self.shared.clone());
                     tokio::spawn(async move {
                         let read = read_on(&store, query).await;
-                        shared.reads.fetch_add(1, Ordering::Relaxed);
+                        #[cfg(test)]
+                        if shared.panicking.swap(false, Ordering::Relaxed) {
+                            panic!("the test made a window read's task panic");
+                        }
                         let read = read.map(|(snapshot, spec)| Arc::new(found(snapshot, spec, from)));
-                        let mut state = slot.state.lock().expect("a window's reads");
-                        if state.reading.as_ref().is_some_and(|reading| reading.asked == asked) {
+                        let mut state = under_way.slot.state.lock().expect("a window's reads");
+                        if state.reading.as_ref().is_some_and(|reading| reading.asked == under_way.asked) {
                             state.reading = None;
                         }
                         if let Ok(read) = &read
-                            && state.found.as_ref().is_none_or(|found| found.fresh <= read.fresh)
+                            && state.kept.as_ref().is_none_or(|kept| kept.found.fresh <= read.fresh)
                         {
-                            state.found = Some(read.clone());
+                            state.kept = Some(shared.keep(read.clone()));
                         }
                         drop(state);
+                        shared.trim();
                         tell.send_replace(Some(read));
                     });
                     answer
@@ -716,11 +902,12 @@ impl Client {
             .and_then(|since| i64::try_from(since).ok())
             .filter(|&since| since >= snapshot.oldest - 1 && since <= snapshot.seq);
         let have = have.into_iter().map(|id| (id, Held { hash: 0, sort: String::new(), n: 0 })).collect();
-        let (update, state) = settle(&have, &found(snapshot, spec.clone(), from), since);
+        let found = found(snapshot, spec.clone(), from);
+        let (update, state) = settle(&have, &found, since);
         let watch = format!("w{}", self.next);
         self.next += 1;
         let slot = self.shared.slot(&spec);
-        let mut window = Window::new(spec, slot);
+        let mut window = Window::new(spec, slot, &self.shared);
         window.keep(state, Some(Instant::now()));
         self.windows.insert(watch.clone(), window);
         Ok(result(watch, update))
@@ -730,7 +917,8 @@ impl Client {
         let (snapshot, spec, from) = self.snapshot(spec, None).await?;
         let slot = self.shared.slot(&spec);
         let window = self.windows.get_mut(&watch).ok_or_else(|| unknown(&watch))?;
-        let (update, state) = settle(&window.state.held, &found(snapshot, spec.clone(), from), None);
+        let found = found(snapshot, spec.clone(), from);
+        let (update, state) = settle(&window.state.held, &found, None);
         window.spec = spec;
         window.slot = slot;
         window.keep(state, Some(Instant::now()));
@@ -835,8 +1023,8 @@ impl Client {
             let read = match only {
                 None => self.shared(&window.slot.clone(), window.owed(self.heard)).await,
                 Some(only) => {
-                    let read = self.snapshot(window.spec.clone(), Some(only)).await;
                     self.shared.reads.fetch_add(1, Ordering::Relaxed);
+                    let read = self.snapshot(window.spec.clone(), Some(only)).await;
                     read.map(|(mut snapshot, spec, from)| {
                         // A chat list held while catching up keeps the order its interface has.
                         if let (Some(window), Rows::Chats(rows)) = (self.windows.get(&watch), &mut snapshot.rows) {

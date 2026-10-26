@@ -96,7 +96,12 @@ pub struct Feed {
 impl Feed {
     /// Starts the task that reads the store's events as they're committed.
     pub fn start(store: Store, catching_up: CatchingUp, timing: Timing) -> Feed {
-        let (changes, _) = broadcast::channel(CHANGES_KEPT);
+        Feed::keeping(store, catching_up, timing, CHANGES_KEPT)
+    }
+
+    /// Starts the feed keeping `kept` reads of the events for a client that falls behind.
+    fn keeping(store: Store, catching_up: CatchingUp, timing: Timing, kept: usize) -> Feed {
+        let (changes, _) = broadcast::channel(kept);
         let committed = store.committed();
         tokio::spawn(follow(store.clone(), committed.clone(), changes.clone()));
         Feed { store, changes, committed, catching_up, timing, shared: Arc::default() }
@@ -113,16 +118,39 @@ impl Feed {
         Client::new(self.store.clone(), changes, self.catching_up.clone(), self.timing, out, self.shared.clone())
     }
 
-    /// How many times any connection has read one of its windows again since jawd started, a read
-    /// shared by several counting once.
+    /// How many times any connection has asked to read one of its windows again since jawd
+    /// started, a read shared by several counting once.
     pub fn reads(&self) -> u64 {
         self.shared.reads()
+    }
+
+    /// The windows interfaces watch, and the reads kept for them to share, for `jawd status`.
+    pub fn windows(&self) -> jaw_proto::Windows {
+        self.shared.windows()
     }
 
     /// Makes every window read fail on its reader, or read again.
     #[cfg(test)]
     pub(super) fn fail_reads(&self, failing: bool) {
         self.shared.failing.store(failing, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Holds each window read's answer back `ms` after its snapshot is taken.
+    #[cfg(test)]
+    pub(super) fn slow_reads(&self, ms: u64) {
+        self.shared.slow.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Makes the next shared read's task panic once its read has answered.
+    #[cfg(test)]
+    pub(super) fn panic_next_read(&self) {
+        self.shared.panicking.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Lets the reads kept for windows to share hold at most `bytes`.
+    #[cfg(test)]
+    pub(super) fn keep_at_most(&self, bytes: u64) {
+        self.shared.keep_at_most(bytes);
     }
 }
 

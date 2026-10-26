@@ -68,7 +68,7 @@ An interface never asks for "all chats" or "all messages". It watches windows: a
 - `before` and `after` say how many rows to keep on each side of the anchor, at most 1,000 each. A window around a row holds `before` rows, the row, and `after` rows; `top` is the place above the chat list's first row, so it takes `after`, and `newest` the place below a chat's newest message, so it takes `before`. jawd keeps that many as rows move, removing those that fall out and upserting those that come in.
 - `total` is how many rows the whole list has, for a scroll bar.
 - Each result and push carries the `seq` it's as of; a client keeps the newest it has seen for reconnecting.
-- `watch.move` re-anchors a window, for scrolling; its result is like a push: the rows the client doesn't already hold as they are, and `remove` for those that left. `unwatch` ends a window. A connection can have any number of windows.
+- `watch.move` re-anchors a window, for scrolling; its result is like a push: the rows the client doesn't already hold as they are, and `remove` for those that left. `unwatch` ends a window. A connection watches at most 32 windows at once: watching another is error 5, with `data` `{"limit": "windows", "most": 32}`, until one is unwatched.
 
 ### chats.watch
 
@@ -222,7 +222,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | Method | Params | Result |
 | --- | --- | --- |
 | `hello` | `protocol`, `client`, `version`, `focus`, `since` | See Hello |
-| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), and `interfaces`: how many are `connected`, whether one is `focused`, and where `notifications` go |
+| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), `interfaces`: how many are `connected`, whether one is `focused`, and where `notifications` go, and `windows`: how many are `watched` on every connection, how many of them are `distinct`, the `most` one connection can watch, the bytes of the reads kept for windows watched alike to share (`kept_bytes`, at most `kept_most`, the oldest `let_go` past it), and the window `reads` made, `taken` from a kept read and `joined` to one under way |
 | `focus` | `focused` | |
 | `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes |
 | `link.cancel` | | |

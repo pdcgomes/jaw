@@ -3,9 +3,9 @@
 //! them, with a few deleted for me; then messages one at a time after quiet spells, and again
 //! while the unread counts and names of chats no window shows keep changing. It reports the
 //! batches a second each window got during the burst, how long each message took from its commit
-//! to the first interface reading its push, in the burst and alone, how often windows were read,
-//! and the CPU jawd spent, with the writes alone first so the windows' share shows. Several
-//! interfaces can watch at once.
+//! to the first interface reading its push, in the burst and alone, and each lone message to every
+//! interface when several watch, how often windows were read, and the CPU jawd spent, with the
+//! writes alone first so the windows' share shows.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
@@ -163,26 +163,13 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         seens.push(client.join().map_err(|_| anyhow::anyhow!("the bench's interface panicked"))??);
     }
     let watching_cpu: Duration = seens.iter().map(|seen| seen.cpu).sum();
+    let commits = commits.lock().expect("commit times");
+    let (every_alone, every_busy) = (every_interface(&seens, "l", &commits), every_interface(&seens, "m", &commits));
     let mut seen = seens.swap_remove(0);
     seen.chats.retain(|&at| at < burst_ended);
     seen.messages.retain(|&at| at < burst_ended);
-
-    let commits = commits.lock().expect("commit times");
-    let delays_of = |run: &str| {
-        let mut delays: Vec<Duration> = seen
-            .rows
-            .iter()
-            .filter(|(id, _)| id.starts_with(run))
-            .filter_map(|(id, read)| commits.get(id).map(|committed| read.saturating_duration_since(*committed)))
-            .collect();
-        delays.sort();
-        delays
-    };
+    let delays_of = |run: &str| delays(&seen, run, &commits);
     let (delays, alone_delays, busy_delays) = (delays_of("b"), delays_of("l"), delays_of("m"));
-    let percentile = |delays: &[Duration], p: f64| {
-        let at = delays.get(((delays.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or_default();
-        at.as_secs_f64() * 1e3
-    };
     let per_second = |n: usize| n as f64 / wrote.as_secs_f64();
     let busiest = |times: &[Instant]| {
         let mut most = 0;
@@ -232,6 +219,9 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         LONE_EVERY.as_millis(),
         quiet.reads_per_second
     );
+    if plan.interfaces > 1 {
+        println!("  every interface {every_alone}");
+    }
     if let Some((busy, far_changed)) = busy {
         println!(
             "  while busy     p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms, for {} more while {far_changed} unread counts and names changed in {} chats no window shows, {FAR_RATE} a second; {:.0} window reads a second",
@@ -242,6 +232,9 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
             plan.far,
             busy.reads_per_second
         );
+        if plan.interfaces > 1 {
+            println!("  every interface {every_busy}");
+        }
     }
     println!(
         "jawd's CPU       {:.1}% of a core writing alone, {:.1}% with {} watching (their own parsing left out, {:.1}%)",
@@ -258,6 +251,55 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// How long `seen` took to read each of `run`'s messages from its commit, shortest first.
+fn delays(seen: &Seen, run: &str, commits: &HashMap<String, Instant>) -> Vec<Duration> {
+    let mut delays: Vec<Duration> = seen
+        .rows
+        .iter()
+        .filter(|(id, _)| id.starts_with(run))
+        .filter_map(|(id, read)| commits.get(id).map(|committed| read.saturating_duration_since(*committed)))
+        .collect();
+    delays.sort();
+    delays
+}
+
+/// The `p` percentile of `delays`, sorted, in milliseconds.
+fn percentile(delays: &[Duration], p: f64) -> f64 {
+    let at = delays.get(((delays.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or_default();
+    at.as_secs_f64() * 1e3
+}
+
+/// `run`'s messages as every interface read them: their delays together, the worst interface's
+/// p99, and how far apart the slowest message reached them, which says whether it was late for
+/// one interface or for all of them.
+fn every_interface(seens: &[Seen], run: &str, commits: &HashMap<String, Instant>) -> String {
+    let each: Vec<Vec<Duration>> = seens.iter().map(|seen| delays(seen, run, commits)).collect();
+    let mut all: Vec<Duration> = each.iter().flatten().copied().collect();
+    all.sort();
+    let worst = each.iter().map(|delays| percentile(delays, 0.99)).fold(0.0, f64::max);
+    let mut spans: HashMap<&str, (Duration, Duration)> = HashMap::new();
+    for seen in seens {
+        for (id, read) in seen.rows.iter().filter(|(id, _)| id.starts_with(run)) {
+            if let Some(committed) = commits.get(id) {
+                let delay = read.saturating_duration_since(*committed);
+                let span = spans.entry(id).or_insert((delay, delay));
+                *span = (span.0.min(delay), span.1.max(delay));
+            }
+        }
+    }
+    let (first, last) = spans.values().max_by_key(|(_, last)| *last).copied().unwrap_or_default();
+    format!(
+        "p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms over {} reads; the worst interface's p99 {:.2} ms, and the slowest message reached them between {:.2} and {:.2} ms",
+        percentile(&all, 0.5),
+        percentile(&all, 0.99),
+        percentile(&all, 1.0),
+        all.len(),
+        worst,
+        first.as_secs_f64() * 1e3,
+        last.as_secs_f64() * 1e3
+    )
 }
 
 struct Lone {

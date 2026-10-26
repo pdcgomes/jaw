@@ -212,6 +212,7 @@ impl State {
                 focused: self.focused(),
                 notifications: self.notifications.clone(),
             }),
+            windows: self.feed.as_ref().map(Feed::windows),
             storage: self.store.as_ref().map(Store::storage),
         }
     }

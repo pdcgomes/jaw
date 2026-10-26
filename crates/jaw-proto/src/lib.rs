@@ -259,6 +259,9 @@ pub struct Status {
     pub stored: Option<Stored>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interfaces: Option<Interfaces>,
+    /// The windows interfaces watch, and the reads jawd keeps for them to share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<Windows>,
     /// jaw.db's WAL and commits, and why it can't be written if it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<Storage>,
@@ -272,6 +275,26 @@ pub struct Interfaces {
     pub focused: bool,
     /// Where notifications go (`Notification Center`, `notify-send`), or why they don't.
     pub notifications: String,
+}
+
+/// The windows interfaces watch, and the reads jawd keeps for them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Windows {
+    /// Windows watched on every connection, how many of them differ, and the most a connection
+    /// can watch at once.
+    pub watched: u64,
+    pub distinct: u64,
+    pub most: u64,
+    /// The bytes of the reads kept for windows watched alike to share, the most they may hold, and
+    /// how many were let go to stay under it.
+    pub kept_bytes: u64,
+    pub kept_most: u64,
+    pub let_go: u64,
+    /// Window reads since jawd started, and the times a window took a read kept or under way
+    /// instead.
+    pub reads: u64,
+    pub taken: u64,
+    pub joined: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
