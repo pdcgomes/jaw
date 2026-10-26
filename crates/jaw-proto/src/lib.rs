@@ -277,10 +277,10 @@ pub struct Status {
     /// The layouts kept for interfaces, and the limits on them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layouts: Option<Layouts>,
-    /// Each domain's settings in effect, by the domain's name, and each setting whose value in
-    /// jaw.db this jawd doesn't take.
+    /// Each domain's settings in effect, by the domain's name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, serde_json::Map<String, Value>>,
+    /// Each setting whose value in jaw.db this jawd doesn't take.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settings_ignored: Vec<settings::Ignored>,
 }

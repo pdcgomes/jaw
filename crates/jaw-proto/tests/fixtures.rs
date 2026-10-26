@@ -10,7 +10,7 @@ use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
     React, Read, SendRetry, SendText, Sent, Typing,
 };
-use jaw_proto::settings::{Settings, SettingsKept, SettingsSet};
+use jaw_proto::settings::{Messages, Settings, SettingsKept, SettingsSet};
 use jaw_proto::sync::{HistoryMore, Notice};
 use jaw_proto::themes::Themes;
 use jaw_proto::windows::{
@@ -22,15 +22,25 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+/// protocol/fixtures/, where every fixture is.
+const FOLDER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../protocol/fixtures");
+
 fn fixtures() -> Vec<PathBuf> {
-    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/fixtures");
-    let mut files: Vec<_> = std::fs::read_dir(&folder)
+    let folder = Path::new(FOLDER);
+    let mut files: Vec<_> = std::fs::read_dir(folder)
         .unwrap_or_else(|e| panic!("can't read {}: {e}", folder.display()))
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|e| e == "json"))
         .collect();
     files.sort();
     files
+}
+
+/// The fixture `name`, such as `status.result`, as JSON.
+fn fixture(name: &str) -> Value {
+    let path = Path::new(FOLDER).join(format!("{name}.json"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name} isn't JSON: {e}"))
 }
 
 /// `value` read as `T` and written back, which must give `value` again.
@@ -163,22 +173,17 @@ fn from_jawd(name: &str, value: Value, push: bool) {
 /// The themes fixture is the first two themes exactly as jaw-proto reads them from protocol/themes.
 #[test]
 fn the_themes_fixture_is_what_the_theme_files_say() {
-    let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/fixtures/themes.result.json");
-    let value: Value = serde_json::from_str(&std::fs::read_to_string(folder).unwrap()).unwrap();
-    let themes: Themes = serde_json::from_value(value["result"].clone()).unwrap();
+    let themes: Themes = serde_json::from_value(fixture("themes.result")["result"].clone()).unwrap();
     assert_eq!(themes.themes, jaw_proto::themes::all()[..2]);
 }
 
 /// Hello's answer carries the terminal's settings, and status every domain's by its name.
 #[test]
 fn hello_carries_its_domains_settings_and_status_every_domains() {
-    let read = |name: &str| -> Value {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../protocol/fixtures/{name}.json"));
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-    };
-    let hello: jaw_proto::Welcome = serde_json::from_value(read("hello.result")["result"].clone()).unwrap();
+    let hello: Welcome = serde_json::from_value(fixture("hello.result")["result"].clone()).unwrap();
     assert_eq!(hello.settings, Some(Settings::default()));
-    let status: jaw_proto::Status = serde_json::from_value(read("status.result")["result"].clone()).unwrap();
-    assert_eq!(status.settings["jaw"]["messages"], "irc");
+    let status: Status = serde_json::from_value(fixture("status.result")["result"].clone()).unwrap();
+    let jaw: Settings = same_as("status.result's jaw domain", &Value::Object(status.settings["jaw"].clone()));
+    assert_eq!(jaw, Settings { theme: "tokyo-night".into(), messages: Messages::Irc });
     assert_eq!(status.settings_ignored[0].domain, "jaw");
 }
