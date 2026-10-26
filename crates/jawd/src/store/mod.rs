@@ -3,9 +3,10 @@
 //! only then acked, before WhatsApp hears it arrived. Live changes (conversions as messages arrive,
 //! and actions) come next, each in a transaction of its own, or in the next inbox group's synced
 //! commit while rows keep coming, so a stream of them never holds a live change back. Background
-//! changes and history go in
-//! transactions of at most 1,000 rows or 3 ms with their commit, ending early as soon as an inbox or
-//! live write is waiting, which is taken before the next. Every message's text, live or history, is
+//! changes and history go in transactions of at most 1,000 rows or 3 ms with their commit, ending
+//! early, once they've had 1 ms, when an inbox row or a live write is waiting, which is taken
+//! before the next, so history's small chats go several to a transaction while a catch-up's rows
+//! keep coming. Every message's text, live or history, is
 //! indexed for search afterwards, in steps as short, while nothing else is waiting, so FTS5's work
 //! at commit never lands in one an ack or a live write waits on. Queries go to the read pool, so a
 //! page never waits behind a sync.
@@ -256,6 +257,11 @@ pub struct Store {
 const BATCH_ROWS: usize = 1_000;
 /// What a background transaction may take, its commit included, since a live write waits for it.
 const BATCH_TIME: Duration = Duration::from_millis(3);
+/// What a background transaction's work has at least before it gives way to an inbox row or a live
+/// write waiting, its commit coming after. Giving way after every change, while a catch-up's rows
+/// kept coming, left history's small chats one change to a transaction, each writing the same pages
+/// again. A step of indexing still gives way at once, since FTS5 does most of its work at commit.
+const YIELD_AFTER: Duration = Duration::from_millis(1);
 /// The pause between two steps of indexing for search. A writer that never pauses looks like a
 /// batch job to the OS, which then lets other threads ahead of it when a live write comes.
 const INDEX_PAUSE: Duration = Duration::from_millis(1);
@@ -321,7 +327,8 @@ const IDLE: Duration = Duration::from_secs(10);
 const HOLD_POLL: Duration = Duration::from_millis(1);
 
 /// The WAL's limits, the writer's busy timeout and how long jaw.db goes without a commit before the
-/// WAL is emptied, which tests make smaller, and when indexing goes on among live writes.
+/// WAL is emptied, which tests make smaller, when indexing goes on among live writes, and what a
+/// background transaction takes, which tests make longer.
 #[derive(Clone, Copy)]
 struct Limits {
     wal_soft: u64,
@@ -330,6 +337,8 @@ struct Limits {
     idle: Duration,
     live_pause: Duration,
     stream_step: Duration,
+    batch_time: Duration,
+    yield_after: Duration,
 }
 
 const LIMITS: Limits = Limits {
@@ -339,6 +348,8 @@ const LIMITS: Limits = Limits {
     idle: IDLE,
     live_pause: LIVE_PAUSE,
     stream_step: STREAM_STEP,
+    batch_time: BATCH_TIME,
+    yield_after: YIELD_AFTER,
 };
 
 /// What a connection to jaw.db is for, which decides how it's set up.
@@ -534,8 +545,8 @@ impl Store {
             trouble,
             seq,
             pruned: Instant::now(),
-            changes_pace: Pace::default(),
-            index_pace: Pace::default(),
+            changes_pace: Pace::new(&limits),
+            index_pace: Pace::new(&limits),
             backlog,
             unmerged: true,
             indexed: Vec::new(),
@@ -823,28 +834,57 @@ fn make_groups(
 /// What a kind of background transaction's commit has lately cost for each row it took. SQLite
 /// writes every page a transaction dirtied at commit, and history's rows land all over the
 /// indexes, so a commit can cost more than the work before it. The next transaction stops in time
-/// for its commit to fit in BATCH_TIME too.
-#[derive(Clone, Copy, Default)]
+/// for its commit to fit in BATCH_TIME too. Only transactions of PACE_ROWS or more teach it, and
+/// none is ended for its commit short of that: a commit costs much the same for one row as for a
+/// few, so a short one's cost for each row would end the next after a row or two, which would
+/// teach it the same again, and a stretch of commits slow for each row would keep every
+/// transaction after it too short to teach it otherwise.
+#[derive(Clone, Copy)]
 struct Pace {
     commit_per_row: Duration,
     per_row: Duration,
+    /// BATCH_TIME and YIELD_AFTER, as the writer's limits have them.
+    time: Duration,
+    yield_after: Duration,
 }
 
+const PACE_ROWS: usize = 16;
+
 impl Pace {
-    fn enough(&self, body: Duration, rows: usize) -> bool {
-        body + self.commit_per_row * rows as u32 >= BATCH_TIME
+    fn new(limits: &Limits) -> Pace {
+        Pace {
+            commit_per_row: Duration::ZERO,
+            per_row: Duration::ZERO,
+            time: limits.batch_time,
+            yield_after: limits.yield_after,
+        }
     }
 
-    /// How many rows a transaction can take in BATCH_TIME, as rows have lately cost.
+    /// Whether a transaction that has run for `body` and taken `rows` has had BATCH_TIME, with its
+    /// commit as rows have lately cost once it has PACE_ROWS, so a commit that once cost much can't
+    /// keep every transaction after it too short to teach the pace otherwise.
+    fn enough(&self, body: Duration, rows: usize) -> bool {
+        body >= self.time || (rows >= PACE_ROWS && body + self.commit_per_row * rows as u32 >= self.time)
+    }
+
+    /// Whether a background transaction that has run for `body` and taken `rows` ends before its
+    /// next group: at BATCH_ROWS, once it has had BATCH_TIME, or, while an inbox row or a live write
+    /// is `waiting`, once its work has had YIELD_AFTER.
+    fn ends(&self, body: Duration, rows: usize, waiting: bool) -> bool {
+        rows >= BATCH_ROWS || self.enough(body, rows) || (waiting && body >= self.yield_after)
+    }
+
+    /// How many rows a transaction can take in BATCH_TIME, as rows have lately cost, and at least
+    /// PACE_ROWS.
     fn rows(&self) -> usize {
         if self.per_row.is_zero() {
             return 100;
         }
-        (BATCH_TIME.as_nanos() / self.per_row.as_nanos()).clamp(1, BATCH_ROWS as u128) as usize
+        (self.time.as_nanos() / self.per_row.as_nanos()).clamp(PACE_ROWS as u128, BATCH_ROWS as u128) as usize
     }
 
     fn learn(&mut self, body: Duration, commit: Duration, rows: usize) {
-        if rows > 0 {
+        if rows >= PACE_ROWS {
             self.commit_per_row = (self.commit_per_row * 3 + commit / rows as u32) / 4;
             self.per_row = (self.per_row * 3 + (body + commit) / rows as u32) / 4;
         }
@@ -1399,10 +1439,15 @@ impl Writer {
     /// beginning: what arrives meanwhile waits about two flushes of the drive, once each WAL_HARD
     /// frames. While the checkpointer's pass runs it tries again after its next commit, unless the
     /// WAL is WAL_EDGE frames past WAL_HARD, when it waits for the pass, and behind a reader that
-    /// holds the frames longer, it tries again RESTART_AGAIN later.
+    /// holds the frames longer, it tries again RESTART_AGAIN later. While background work waits
+    /// for the WAL to start again, it starts it past WAL_SOFT: the checkpointer can't copy the last
+    /// frames while inbox rows and live writes keep coming, and a reader on the WAL keeps
+    /// background work's next transaction from starting it, so the wait would last until they had
+    /// taken the WAL from WAL_SOFT to WAL_HARD, which a first run's took seconds over.
     fn bound_wal(&mut self) {
         let (began, frames) = (Instant::now(), self.wal.frames.load(Ordering::Relaxed));
-        if frames < self.wal.hard || self.restart_after.is_some_and(|at| began < at) {
+        let bound = if self.holding.is_some() { self.wal.soft } else { self.wal.hard };
+        if frames < bound || self.restart_after.is_some_and(|at| began < at) {
             return;
         }
         let at_edge = frames >= self.wal.hard + WAL_EDGE;
@@ -1457,10 +1502,10 @@ impl Writer {
     }
 
     /// Makes the groups of `changes` in one transaction, all of them for a live one; a background
-    /// one stops between groups at BATCH_ROWS, at BATCH_TIME with its commit, or as soon as an inbox
-    /// or live write is waiting. Each group runs in a savepoint: one that fails is rolled back and
-    /// kept in quarantine with its error, and the rest go on. A durable one is refused unless it
-    /// commits synced. Says how many changes were taken.
+    /// one stops between groups at BATCH_ROWS, at BATCH_TIME with its commit, or, once an inbox row
+    /// or a live write is waiting, past YIELD_AFTER with it. Each group runs in a savepoint: one
+    /// that fails is rolled back and kept in quarantine with its error, and the rest go on. A
+    /// durable one is refused unless it commits synced. Says how many changes were taken.
     fn transaction(
         &mut self,
         changes: &[Change],
@@ -1474,11 +1519,7 @@ impl Writer {
             let mut tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let (realtime, live, pace) = (&self.realtime, &self.live, self.changes_pace);
             let made = make_groups(&mut tx, &mut self.stamps, changes, groups, |taken| {
-                background
-                    && (taken >= BATCH_ROWS
-                        || !realtime.is_empty()
-                        || !live.is_empty()
-                        || pace.enough(began.elapsed(), taken))
+                background && pace.ends(began.elapsed(), taken, !realtime.is_empty() || !live.is_empty())
             })?;
             write::settle(&tx, &mut self.stamps)?;
             let synced = commits_synced(&tx)?;
@@ -2153,6 +2194,88 @@ mod tests {
         assert!(applied.transactions >= 20, "{} transactions", applied.transactions);
     }
 
+    #[test]
+    fn background_work_gives_way_to_what_waits_only_once_it_has_had_its_millisecond() {
+        let pace = Pace {
+            commit_per_row: Duration::from_micros(10),
+            per_row: Duration::from_micros(40),
+            ..Pace::new(&LIMITS)
+        };
+        let us = Duration::from_micros;
+        assert!(!pace.ends(us(200), 10, true), "a moment in, it goes on though an inbox row waits");
+        assert!(pace.ends(us(1_000), 10, true), "it has had its millisecond");
+        assert!(!pace.ends(us(1_000), 10, false), "with nothing waiting it goes on to BATCH_TIME");
+        assert!(pace.ends(us(2_900), 20, false), "its commit would end it past BATCH_TIME");
+        assert!(pace.ends(Duration::ZERO, BATCH_ROWS, false), "BATCH_ROWS is as many as it takes");
+    }
+
+    #[test]
+    fn a_commit_that_once_cost_much_cant_keep_transactions_too_short_to_teach_the_pace_again() {
+        let (us, ms) = (Duration::from_micros, Duration::from_millis);
+        let slow = Pace { commit_per_row: ms(1), per_row: ms(1), ..Pace::new(&LIMITS) };
+        assert!(!slow.ends(us(500), PACE_ROWS - 1, false), "its estimate doesn't end it short of PACE_ROWS");
+        assert!(slow.ends(us(500), PACE_ROWS, false), "at PACE_ROWS it does");
+        assert!(slow.ends(ms(3), 1, false), "its own work still ends it at BATCH_TIME");
+        assert_eq!(slow.rows(), PACE_ROWS, "a step of indexing takes as many");
+    }
+
+    #[test]
+    fn only_a_transaction_of_many_rows_teaches_the_pace_what_its_commit_costs_for_each() {
+        let (us, mut pace) = (Duration::from_micros, Pace::new(&LIMITS));
+        pace.learn(us(100), us(2_000), 1);
+        assert_eq!(pace.commit_per_row, Duration::ZERO, "a commit of one row costs what one of a few does");
+        pace.learn(us(1_000), us(400), 40);
+        assert_eq!((pace.commit_per_row, pace.per_row), (us(10) / 4, us(35) / 4));
+    }
+
+    /// Inbox rows handed over one at a time until `stop`, each only once the one before was acked,
+    /// as jaw-engine hands them over: says how many went, and the longest an ack took.
+    fn one_at_a_time(store: &Store, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<(u64, Duration)> {
+        let store = store.clone();
+        std::thread::spawn(move || {
+            let (acks, mut acked) = mpsc::unbounded_channel();
+            let (mut sent, mut slowest) = (0u64, Duration::ZERO);
+            while !stop.load(Ordering::Relaxed) {
+                let began = Instant::now();
+                store.inbox("message", 0, vec![7; 200], Some(crate::engine::Ack::to(sent, acks.clone())));
+                if acked.blocking_recv().is_none() {
+                    break;
+                }
+                slowest = slowest.max(began.elapsed());
+                sent += 1;
+            }
+            (sent, slowest)
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn small_chats_of_history_go_many_to_a_transaction_while_inbox_rows_come_one_at_a_time() {
+        let home = tempfile::tempdir().unwrap();
+        // A transaction's millisecond made long, so even a machine too busy for more than a change
+        // in a millisecond takes dozens while the rows wait.
+        let (batch_time, yield_after) = (Duration::from_millis(200), Duration::from_millis(100));
+        let store = Store::open_with(home.path(), Limits { batch_time, yield_after, ..LIMITS }).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let rows = one_at_a_time(&store, stop.clone());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // A first pass of history, each chat's newest two, every message a change of its own.
+        let history = (0..1_000i64).map(|n| {
+            text(&format!("3519300{:05}@s.whatsapp.net", n / 2), &format!("h{n}"), n, "the newest of a small chat")
+        });
+        let applied = store.apply(Lane::Background, messages(history)).await.unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let (sent, slowest) = rows.join().unwrap();
+        assert_eq!(applied.changed, 1_000);
+        assert!(sent >= 3, "only {sent} inbox rows came while the history went in");
+        // Giving way after a change, as before, took over 800.
+        assert!(
+            applied.transactions * 10 <= 1_000,
+            "{} transactions for 1,000 changes, {sent} rows meanwhile",
+            applied.transactions
+        );
+        assert!(slowest < Duration::from_secs(2), "an ack of {sent} waited {slowest:?}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_comes_back_by_its_id_with_its_raw_protobuf() {
         let home = tempfile::tempdir().unwrap();
@@ -2493,6 +2616,8 @@ mod tests {
         // One background transaction can begin just under the hard limit.
         assert!(storage.wal_peak_frames < hard + 400, "the WAL held {} frames", storage.wal_peak_frames);
         assert!(storage.wal_bytes < (hard + 400) * 4_120, "the WAL file is {} bytes", storage.wal_bytes);
+        // The history's text indexed first, so no step of it begins the WAL again as it's emptied.
+        store.indexed().await.unwrap();
         store.truncate().await.unwrap();
         assert_eq!(std::fs::metadata(home.path().join("jaw.db-wal")).unwrap().len(), 0);
         assert_eq!(store.count("messages").unwrap(), 20_000 + live as u64);
@@ -2578,8 +2703,8 @@ mod tests {
     }
 
     /// The WAL was started again, each time only once it held HARD frames, since each start costs
-    /// live writes two flushes, and never held much more than HARD frames: one transaction can
-    /// begin just under it.
+    /// live writes two flushes and no background work waited for it, and never held much more than
+    /// HARD frames: one transaction can begin just under it.
     fn assert_bounded(store: &Store) {
         let (storage, restarted) = (store.storage(), restarted(store));
         assert!(restarted >= 2, "the WAL started again {restarted} times");
@@ -2614,6 +2739,39 @@ mod tests {
         let store = bounded_store(home.path());
         converting_until(&store, |store| restarted(store) >= 2).await;
         assert_bounded(&store);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_work_waiting_for_the_wal_has_it_started_again_at_the_next_live_write_past_wal_soft() {
+        let home = tempfile::tempdir().unwrap();
+        let store = bounded_store(home.path());
+        let history: Vec<Message> =
+            (0..20_000).map(|n| text("351910000001@s.whatsapp.net", &format!("h{n}"), n, "history")).collect();
+        let stop = Arc::new(AtomicBool::new(false));
+        let batch = {
+            let (store, stop) = (store.clone(), stop.clone());
+            tokio::spawn(async move {
+                let applied = store.apply(Lane::Background, messages(history)).await.unwrap();
+                stop.store(true, Ordering::Relaxed);
+                applied
+            })
+        };
+        // A catch-up's conversions all the while the history goes in.
+        converting(&store, &stop).await;
+        assert_eq!(batch.await.unwrap().changed, 20_000);
+        let storage = store.storage();
+        assert!(storage.background_waits > 0, "the history never waited for the WAL");
+        let early: Vec<u64> = store
+            .wal
+            .restarts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.restarted && r.frames < HARD)
+            .map(|r| r.frames)
+            .collect();
+        assert!(!early.is_empty(), "the history waited each time until the live writes took the WAL to WAL_HARD");
+        assert!(early.iter().all(|&frames| frames >= SOFT), "the WAL started again at {early:?} frames");
     }
 
     #[tokio::test(flavor = "multi_thread")]
