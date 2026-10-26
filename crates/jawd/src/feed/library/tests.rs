@@ -1,10 +1,15 @@
+use std::collections::BTreeSet;
+
+use rusqlite::Connection;
 use serde_json::{Value, json};
 
 use super::*;
 use crate::feed::tests::{Bed, Model, brisk};
 use crate::store::{Amend, Amendment, Change, Chat, Lane, Message, Person};
+use crate::work::Priority;
 
 const ANA: &str = "351910000001@s.whatsapp.net";
+const ANA_LID: &str = "100000000001@lid";
 const RUI: &str = "351910000002@s.whatsapp.net";
 const RUI_LID: &str = "100000000002@lid";
 const CLIMBING: &str = "120363000000000001@g.us";
@@ -433,6 +438,259 @@ async fn windows_match_fresh_watches_after_random_writes() {
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn older_says_an_item_is_left_past_the_window_and_not_when_exactly_after_remain() {
+    let bed = Bed::new(brisk());
+    bed.apply(people_and_chats()).await;
+    let photos =
+        (1..=6).map(|k| Change::Message(item(CLIMBING, &format!("p{k}"), k * 1_000, Some(RUI), "image", None)));
+    bed.apply(photos.collect()).await;
+    let mut w = bed.watcher(64);
+    let mut window = async |params: Value| {
+        let result = w.call("library.watch", params).await.unwrap();
+        (ids(&result).iter().map(|id| id.to_string()).collect::<Vec<_>>(), result["older"].as_bool().unwrap())
+    };
+    let top = |after| json!({"kind": "photo", "chat": CLIMBING, "around": "top", "after": after});
+    assert!(!window(top(6)).await.1, "all six, none past them");
+    assert_eq!(window(top(5)).await, (vec!["p6".into(), "p5".into(), "p4".into(), "p3".into(), "p2".into()], true));
+    let around = |after| json!({"kind": "photo", "chat": CLIMBING, "around": "p4", "before": 0, "after": after});
+    assert_eq!(window(around(3)).await, (vec!["p4".into(), "p3".into(), "p2".into(), "p1".into()], false));
+    assert_eq!(window(around(2)).await, (vec!["p4".into(), "p3".into(), "p2".into()], true));
+    // An anchor that goes keeps the window's place, and takes no room in it.
+    let mut held = bed.watcher(64);
+    let exactly = held.watch("library.watch", around(3)).await;
+    let short = held.watch("library.watch", around(2)).await;
+    let seq = bed.apply(vec![Change::DeleteMessage { chat: CLIMBING.into(), id: "p4".into() }]).await;
+    held.settle(seq).await;
+    assert_eq!(
+        (held.windows[&exactly].ids(), held.windows[&exactly].older),
+        (vec!["p3".into(), "p2".into(), "p1".into()], false)
+    );
+    assert_eq!((held.windows[&short].ids(), held.windows[&short].older), (vec!["p3".into(), "p2".into()], true));
+}
+
+/// The window a fresh watch of `method` with `params` gives, on a connection of its own; none when
+/// it's refused, as a watch of a chat that's gone is.
+async fn watched_afresh(bed: &Bed, method: &str, params: &Value) -> Option<Model> {
+    let mut w = bed.watcher(64);
+    let result = w.call(method, params.clone()).await.ok()?;
+    let watch = result["watch"].as_str()?.to_string();
+    w.windows.remove(&watch)
+}
+
+/// What differs between a window as its interface holds it and a fresh watch of it.
+fn differs(held: &Model, fresh: Option<&Model>) -> Option<String> {
+    let Some(fresh) = fresh else {
+        // Its chat is gone, so a fresh watch is refused: what's held must be empty.
+        let none = held.counts.as_object().is_none_or(|counts| counts.values().all(|n| n.as_u64().unwrap_or(0) == 0));
+        return (!held.ids().is_empty() || held.total != 0 || !none).then(|| {
+            format!("chat gone, yet it holds {:?}, total {}, counts {}", held.ids(), held.total, held.counts)
+        });
+    };
+    let mut what = Vec::new();
+    if held.ids() != fresh.ids() {
+        what.push(format!("rows {:?} against {:?}", held.ids(), fresh.ids()));
+    } else if held.ordered() != fresh.ordered() {
+        what.push("what its rows say".to_string());
+    }
+    if (held.total, held.older) != (fresh.total, fresh.older) {
+        what.push(format!("total and older {:?} against {:?}", (held.total, held.older), (fresh.total, fresh.older)));
+    }
+    if held.counts != fresh.counts {
+        what.push(format!("counts {} against {}", held.counts, fresh.counts));
+    }
+    (!what.is_empty()).then(|| what.join("; "))
+}
+
+/// The postings of FTS5 index `table`: each term's row, column and offset.
+fn postings(db: &Connection, table: &str) -> rusqlite::Result<BTreeSet<(String, i64, String, i64)>> {
+    db.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS temp.{table}_postings USING fts5vocab(main, {table}, instance)"
+    ))?;
+    let mut select = db.prepare(&format!("SELECT term, doc, col, offset FROM temp.{table}_postings"))?;
+    let rows = select.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    rows.collect()
+}
+
+/// What's derived and isn't exact, read on a connection of its own in one snapshot: shelves and
+/// message_count against a fresh count, and both search indexes, posting by posting, against ones
+/// built afresh from the messages not waiting in fts_backlog.
+fn inexact(path: &str) -> Vec<String> {
+    let db = Connection::open(path).unwrap();
+    db.execute_batch("BEGIN").unwrap();
+    let mut problems = Vec::new();
+    let triples = |sql: &str| -> BTreeSet<(i64, String, i64)> {
+        let mut select = db.prepare(sql).unwrap();
+        select.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect()
+    };
+    let kept = triples("SELECT chat, shelf, items FROM shelves");
+    let counted = triples(
+        "SELECT chat, shelf, count(*) FROM messages WHERE shelf IS NOT NULL GROUP BY chat, shelf
+        UNION ALL SELECT 0, shelf, count(*) FROM messages WHERE shelf IS NOT NULL GROUP BY shelf",
+    );
+    if kept != counted {
+        problems.push(format!(
+            "shelves: kept but not counted {:?}; counted but not kept {:?}",
+            kept.difference(&counted).collect::<Vec<_>>(),
+            counted.difference(&kept).collect::<Vec<_>>()
+        ));
+    }
+    let drifted: i64 = db
+        .query_row(
+            "SELECT count(*) FROM chats c WHERE message_count IS NOT (SELECT count(*) FROM messages m WHERE m.chat = c.n)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if drifted > 0 {
+        problems.push(format!("message_count: {drifted} chats drifted"));
+    }
+    let afresh = Connection::open_in_memory().unwrap();
+    afresh
+        .execute_batch(
+            "CREATE VIRTUAL TABLE messages_fts USING fts5 (text, tokenize = 'unicode61 remove_diacritics 2');
+            CREATE VIRTUAL TABLE library_fts USING fts5 (text, tags, tokenize = 'unicode61 remove_diacritics 2');",
+        )
+        .unwrap();
+    let mut select = db
+        .prepare(
+            "SELECT t, text, shelf IS NOT NULL, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none'))
+            FROM messages WHERE text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog b WHERE b.n = messages.n)",
+        )
+        .unwrap();
+    let rows = select
+        .query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?, r.get::<_, Option<String>>(3)?))
+        })
+        .unwrap();
+    for row in rows {
+        let (t, text, shelved, tags) = row.unwrap();
+        afresh.execute("INSERT INTO messages_fts (rowid, text) VALUES (?1, ?2)", rusqlite::params![t, text]).unwrap();
+        if shelved {
+            afresh
+                .execute(
+                    "INSERT INTO library_fts (rowid, text, tags) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![t, text, tags],
+                )
+                .unwrap();
+        }
+    }
+    for index in ["messages_fts", "library_fts"] {
+        let (found, wanted) = (postings(&db, index).unwrap(), postings(&afresh, index).unwrap());
+        if found != wanted {
+            problems.push(format!(
+                "{index}: {} postings found that shouldn't be, such as {:?}; {} missing, such as {:?}",
+                found.difference(&wanted).count(),
+                found.difference(&wanted).take(6).collect::<Vec<_>>(),
+                wanted.difference(&found).count(),
+                wanted.difference(&found).take(6).collect::<Vec<_>>()
+            ));
+        }
+    }
+    drop(select);
+    db.execute_batch("COMMIT").unwrap();
+    problems
+}
+
+async fn person_of(bed: &Bed, jid: &'static str) -> i64 {
+    let query =
+        move |db: &Connection| Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [jid], |r| r.get(0))?);
+    bed.store.reads().query(Priority::Interactive, query).await.unwrap()
+}
+
+async fn merging(bed: &Bed) -> bool {
+    let query = |db: &Connection| Ok(db.query_row("SELECT EXISTS (SELECT 1 FROM chat_merges)", [], |r| r.get(0))?);
+    bed.store.reads().query(Priority::Interactive, query).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_on_a_chat_being_merged_away_follow_each_step() {
+    merged_step_by_step(false).await;
+}
+
+/// The same with the chat merged away holding only your own photos, so its unread count never
+/// moves as they go.
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_on_a_chat_of_yours_being_merged_away_follow_each_step() {
+    merged_step_by_step(true).await;
+}
+
+/// Joining Ana's number and LID merges her two chats, MERGE_STEP messages a step: after each step,
+/// every window on either chat, across chats and on her is as a fresh watch gives it, and every
+/// count and index is exact.
+async fn merged_step_by_step(yours: bool) {
+    let bed = Bed::new(brisk());
+    bed.apply(vec![
+        Change::Person(Person { jids: vec![ANA.into()], name: Some("Ana".into()), ..Person::default() }),
+        Change::Person(Person { jids: vec![ANA_LID.into()], ..Person::default() }),
+        Change::Chat(Chat { id: ANA.into(), ..Chat::default() }),
+        Change::Chat(Chat { id: ANA_LID.into(), ..Chat::default() }),
+        Change::Chat(Chat { id: CLIMBING.into(), name: Some("Lisbon Climbing".into()), ..Chat::default() }),
+    ])
+    .await;
+    let mut changes = Vec::new();
+    for k in 0..450 {
+        let caption = (k % 3 == 0).then_some("na praia");
+        let sender = (!yours).then_some(ANA_LID);
+        changes.push(Change::Message(item(ANA_LID, &format!("l{k:03}"), 1_000 + k * 1_000, sender, "image", caption)));
+    }
+    for k in 0..30 {
+        changes.push(Change::Message(item(
+            ANA,
+            &format!("p{k:02}"),
+            2_500 + k * 7_000,
+            Some(ANA),
+            "image",
+            Some("praia"),
+        )));
+    }
+    // Three messages both chats have, as one arriving by her number and by her LID would be.
+    for k in [5, 205, 405] {
+        changes.push(Change::Message(item(ANA, &format!("l{k:03}"), 1_000 + k * 1_000, Some(ANA), "image", None)));
+    }
+    changes.push(Change::Message(item(CLIMBING, "c1", 900_000, Some(ANA_LID), "image", Some("praia"))));
+    bed.apply(changes).await;
+    bed.store.indexed().await.unwrap();
+    let ana = person_of(&bed, ANA).await;
+    let wants: Vec<(&str, Value)> = vec![
+        ("library.watch", json!({"kind": "photo", "chat": ANA_LID, "around": "top", "after": 50})),
+        ("library.watch", json!({"kind": "photo", "chat": ANA, "around": "top", "after": 50})),
+        ("library.watch", json!({"kind": "photo", "around": "top", "after": 50})),
+        ("library.watch", json!({"kind": "photo", "person": format!("person:{ana}"), "around": "top", "after": 50})),
+        ("library.watch", json!({"kind": "photo", "chat": ANA_LID, "text": "praia", "around": "top", "after": 20})),
+        ("messages.watch", json!({"chat": ANA_LID, "around": "newest", "before": 50, "after": 0})),
+        ("messages.watch", json!({"chat": ANA, "around": "newest", "before": 50, "after": 0})),
+    ];
+    let mut w = bed.watcher(512);
+    let mut watched = Vec::new();
+    for (method, want) in &wants {
+        watched.push((w.watch(method, want.clone()).await, *method, want.clone()));
+    }
+    let path = bed.store.reads().query(Priority::Interactive, |db| Ok(db.path().unwrap().to_string())).await.unwrap();
+    let seq =
+        bed.apply(vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
+    w.settle(seq.max(bed.feed.seq() as i64)).await;
+    let (mut stale, mut step) = (Vec::new(), 0);
+    loop {
+        for (watch, method, want) in &watched {
+            if let Some(what) = differs(&w.windows[watch], watched_afresh(&bed, method, want).await.as_ref()) {
+                stale.push(format!("step {step}, {method} {want}: {what}"));
+            }
+        }
+        let path = path.clone();
+        let problems = tokio::task::spawn_blocking(move || inexact(&path)).await.unwrap();
+        assert!(problems.is_empty(), "step {step}: {problems:?}");
+        if !merging(&bed).await {
+            break;
+        }
+        step += 1;
+        let seq = bed.store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap().seq;
+        w.settle(seq.max(bed.feed.seq() as i64)).await;
+    }
+    assert_eq!(step, 3, "450 messages merge in three steps");
+    assert!(stale.is_empty(), "windows differed from fresh watches during the merge:\n{}", stale.join("\n"));
 }
 
 #[test]

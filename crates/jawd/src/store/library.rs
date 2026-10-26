@@ -8,14 +8,18 @@
 //!
 //! jaw.db is never analyzed, so the planner can't tell a sender's or a chat's items from all of a
 //! kind's: each read names the index it's for, and fails to prepare if that index can't serve it.
+//!
+//! A window holds more items than a screen shows, so reading one asks media for nothing: an
+//! interface names the items it has on screen (`on_screen`), and media is told what those lack.
 
 use std::collections::HashMap;
 
 use anyhow::Result;
+use jaw_proto::library::SHOWN;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Map, Value};
 
-use super::files::Files;
+use super::files::{Files, Seen};
 use super::read::{From, chat_name, shown, with_media};
 use super::write::{LAST_MS, SAME_MS_BITS};
 
@@ -379,9 +383,13 @@ const ITEM: &str = "SELECT m.n, m.id, m.chat, c.id, m.v, m.at, m.t, m.mine, m.ki
     LEFT JOIN people p ON p.n = j.person
     WHERE m.n = ?1";
 
-/// The items with these n that are still items, in the order given; showing them tells media of
-/// the copies they lack, as a messages window's rows do.
+/// The items with these n that are still items, in the order given.
 pub fn items(db: &Connection, ns: &[i64]) -> Result<Vec<Item>> {
+    Ok(lacking(db, ns)?.into_iter().map(|(item, _)| item).collect())
+}
+
+/// The items with these n that are still items, each with what its copy lacks, for media.
+fn lacking(db: &Connection, ns: &[i64]) -> Result<Vec<(Item, Option<Seen>)>> {
     let files = Files::of(db);
     let mut select = db.prepare_cached(ITEM)?;
     let mut items = Vec::with_capacity(ns.len());
@@ -392,11 +400,36 @@ pub fn items(db: &Connection, ns: &[i64]) -> Result<Vec<Item>> {
     Ok(items)
 }
 
-fn item(r: &Row, files: Option<&Files>) -> rusqlite::Result<Option<Item>> {
+const SHOWN_NAMED: &str =
+    "SELECT n FROM messages INDEXED BY messages_shelved_named WHERE id = ?1 AND shelf IS NOT NULL";
+
+/// Tells media what the items an interface has on screen lack, as a messages window's rows do: a
+/// thumbnail drawn, previews, their file where it downloads by itself. `ids` are items' ids, at
+/// most SHOWN; those that name no item are passed over. Says how many were told.
+pub fn on_screen(db: &Connection, ids: &[String]) -> Result<usize> {
+    let Some(files) = Files::of(db) else { return Ok(0) };
+    let mut ns = Vec::new();
+    let mut select = db.prepare_cached(SHOWN_NAMED)?;
+    for id in ids.iter().take(SHOWN) {
+        ns.extend(select.query_map([id], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
+    ns.sort_unstable();
+    ns.dedup();
+    let mut told = 0;
+    for (_, lacks) in lacking(db, &ns)? {
+        if let Some(lacks) = lacks {
+            files.seen(lacks);
+            told += 1;
+        }
+    }
+    Ok(told)
+}
+
+fn item(r: &Row, files: Option<&Files>) -> rusqlite::Result<Option<(Item, Option<Seen>)>> {
     let Some(shelf) = r.get::<_, Option<String>>(9)?.as_deref().and_then(Shelf::of) else { return Ok(None) };
     let (n, kind): (i64, String) = (r.get(0)?, r.get(8)?);
     let mut detail: Option<String> = r.get(12)?;
-    with_media(&mut detail, n, &kind, r.get(13)?, r.get(19)?, files);
+    let lacks = with_media(&mut detail, n, &kind, r.get(13)?, r.get(19)?, files);
     let media = match detail.as_deref().map(serde_json::from_str::<Value>) {
         Some(Ok(Value::Object(mut detail))) => match detail.remove("media") {
             Some(Value::Object(media)) => media,
@@ -417,21 +450,24 @@ fn item(r: &Row, files: Option<&Files>) -> rusqlite::Result<Option<Item>> {
         }
         None => None,
     };
-    Ok(Some(Item {
-        n,
-        id: r.get(1)?,
-        chat_n: r.get(2)?,
-        chat: r.get(3)?,
-        v: r.get(4)?,
-        at: r.get(5)?,
-        t: r.get(6)?,
-        mine: r.get(7)?,
-        shelf,
-        caption,
-        summary: r.get(11)?,
-        media,
-        from,
-    }))
+    Ok(Some((
+        Item {
+            n,
+            id: r.get(1)?,
+            chat_n: r.get(2)?,
+            chat: r.get(3)?,
+            v: r.get(4)?,
+            at: r.get(5)?,
+            t: r.get(6)?,
+            mine: r.get(7)?,
+            shelf,
+            caption,
+            summary: r.get(11)?,
+            media,
+            from,
+        },
+        lacks,
+    )))
 }
 
 const CHAT_NAME: &str = "SELECT c.id, c.name, p.name, p.push_name, p.verified_name,

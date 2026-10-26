@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use jaw_proto::find::{ChatOpened, Find};
+use jaw_proto::library::{LibraryShown, SHOWN};
 use jaw_proto::settings::{Settings as Terminal, SettingsKept};
 use jaw_proto::sync::HistoryMore;
 use jaw_proto::themes::Themes;
@@ -25,6 +26,7 @@ use crate::find::{Cancel, Cancelled};
 use crate::layout::Pushed;
 use crate::state::State;
 use crate::sync::Refused;
+use crate::work::Priority;
 
 /// Lines waiting for an interface to read them. Window updates wait in their windows instead, so a
 /// slow interface never holds anything else up, and a reply, a `layout` push or a `settings` push
@@ -729,6 +731,25 @@ async fn answer(state: &State, request: Request) -> Reply {
             },
             None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it keeps no media")),
         },
+        "library.shown" => match (serde_json::from_value::<LibraryShown>(request.params), state.store()) {
+            (Err(e), _) => failed(id, Error::new(code::INVALID_PARAMS, format!("library.shown's params: {e}"))),
+            (Ok(shown), _) if shown.items.len() > SHOWN => {
+                failed(id, Error::new(code::LIMIT, format!("library.shown names at most {SHOWN} items at once")))
+            }
+            (Ok(_), None) => {
+                failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it keeps no media"))
+            }
+            (Ok(LibraryShown { items }), Some(store)) => {
+                let told = store
+                    .reads()
+                    .query(Priority::Interactive, move |db| crate::store::library::on_screen(db, &items))
+                    .await;
+                match told {
+                    Ok(_) => succeeded(id, &serde_json::json!({})),
+                    Err(e) => failed(id, Error::new(code::INTERNAL, format!("jawd couldn't read those items: {e:#}"))),
+                }
+            }
+        },
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
     }
 }
@@ -1270,6 +1291,39 @@ mod tests {
         assert_eq!(replies[8]["error"]["code"], code::NOT_ALLOWED, "filing into a built-in folder");
         assert_eq!(replies[9]["error"]["code"], code::NOT_ALLOWED, "a name a sibling has, whatever its case");
         assert_eq!(replies[10]["error"]["code"], code::NOT_FOUND, "a person jawd doesn't have");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn library_shown_names_at_most_two_hundred_items() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let state = State::new(
+            home.path(),
+            Err(("go", "no engine in this test".into())),
+            Vec::new(),
+            Arc::default(),
+            Some(store),
+            broadcast::channel(16).0,
+        )
+        .unwrap();
+        tokio::spawn(serve(Arc::new(state), listener));
+        let shown = |n: usize| {
+            let items: Vec<String> = (0..n).map(|k| format!("3EB0{k:012}")).collect();
+            json!({"id": n, "method": "library.shown", "params": {"items": items}}).to_string()
+        };
+        let replies = tokio::task::spawn_blocking(move || {
+            let hello = format!(
+                r#"{{"id":1,"method":"hello","params":{{"protocol":{PROTOCOL},"client":"test","version":"0"}}}}"#
+            );
+            exchange(&socket, &[&hello, &shown(200), &shown(201), r#"{"id":3,"method":"library.shown","params":{}}"#])
+        })
+        .await
+        .unwrap();
+        assert_eq!(replies[1]["result"], json!({}), "{}", replies[1]);
+        assert_eq!(replies[2]["error"]["code"], code::LIMIT, "{}", replies[2]);
+        assert_eq!(replies[3]["error"]["code"], code::INVALID_PARAMS, "{}", replies[3]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -108,6 +108,13 @@ enum Command {
         /// Times lone messages, opening chats, pages at any depth and finds, with nothing else going on
         #[arg(long)]
         steady: bool,
+        /// With --steady, pages the library's photos 120 at a time while the lone messages come, this
+        /// many milliseconds apart (0 for back to back), as jaw pages it
+        #[arg(long)]
+        paging: Option<u64>,
+        /// Of each page --paging reads, the items named as on screen: a 140-by-40 jaw shows 49
+        #[arg(long, default_value_t = 49)]
+        shown: usize,
         /// Messages a second to pour in, a quarter of them into the newest chat
         #[arg(long)]
         flood: Option<u32>,
@@ -290,6 +297,8 @@ fn jawd(cli: Cli) -> Result<()> {
             recent,
             first_run,
             steady,
+            paging,
+            shown,
             flood,
             typing,
             seconds,
@@ -311,6 +320,7 @@ fn jawd(cli: Cli) -> Result<()> {
             },
             first_run,
             steady,
+            paging: paging.map(|ms| demo::Paging { apart: std::time::Duration::from_millis(ms), shown }),
             flood,
             typing,
             seconds,

@@ -82,6 +82,15 @@ pub struct Counts {
 /// The most items of a kind counted when a window has a filter other than its chat.
 pub const COUNTED: u64 = 1_000;
 
+/// `library.shown`'s params: the items an interface has on screen, by their `id`, at most `SHOWN`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LibraryShown {
+    pub items: Vec<String>,
+}
+
+/// The most items `library.shown` names at once, more than any screen of tiles holds.
+pub const SHOWN: usize = 200;
+
 /// What `library.watch` returns, and `watch.move` on a library window: the rows the client doesn't
 /// hold as they are, and those it holds that have left the window.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

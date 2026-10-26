@@ -1210,6 +1210,8 @@ pub trait Jawd {
     /// keeps it current.
     fn watch_library(&mut self, ask: &LibraryAsk);
     fn unwatch_library(&mut self);
+    /// Names the library's items on screen, by `id`, so jawd asks media for what they lack.
+    fn library_shown(&mut self, items: &[String]);
     /// The folder tree, kept current with `Update::Folders`.
     fn watch_folders(&mut self);
     /// A folder's people, kept current with `Update::Roster`.

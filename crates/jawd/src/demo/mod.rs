@@ -40,6 +40,7 @@ pub struct Plan {
     /// Whether the history comes as on a first run, with a backlog and the app state at once.
     pub first_run: bool,
     pub steady: bool,
+    pub paging: Option<Paging>,
     pub flood: Option<u32>,
     /// Chats whose people type, record and stop, each a few times a second.
     pub typing: u32,
@@ -54,6 +55,14 @@ pub struct Plan {
     pub fail: Option<Failure>,
     /// How its jawd runs; a demo sends no notifications unless asked.
     pub options: crate::Options,
+}
+
+/// The library paged while `--steady`'s lone messages come: the time between pages, and how many
+/// of each page's items are named as on screen.
+#[derive(Clone, Copy, Debug)]
+pub struct Paging {
+    pub apart: Duration,
+    pub shown: usize,
 }
 
 /// The folder a demo uses unless told otherwise, kept between runs so its history comes once.
@@ -384,6 +393,33 @@ fn library(asker: &mut Asker, account: &Account) -> Result<Library> {
     Ok(Library { windows, walk, deepest, loads: (before, load_average()) })
 }
 
+/// Walks down the library's photos 120 at a time as jaw pages them, `paging.apart` between pages,
+/// naming the first `paging.shown` of each as on screen, until `halt`; says what each page took and
+/// how deep it got, going round again from the top at the end.
+fn walk(socket: &Path, paging: Paging, halt: &AtomicBool) -> Result<(Vec<Duration>, usize)> {
+    let mut asker = Asker::open(socket)?;
+    let (mut took, mut deepest, mut around) = (Vec::new(), 0, "top".to_string());
+    while !halt.load(Ordering::Relaxed) {
+        let (t, window) =
+            asker.library(json!({"kind": "photo", "around": around, "before": 0, "after": LIBRARY_PAGE}))?;
+        took.push(t);
+        let rows = window["rows"].as_array().cloned().unwrap_or_default();
+        if paging.shown > 0 {
+            let on_screen: Vec<&str> = rows.iter().take(paging.shown).filter_map(|row| row["id"].as_str()).collect();
+            asker.shown(&on_screen)?;
+        }
+        match rows.last() {
+            Some(last) if window["older"] == true => {
+                deepest += rows.len() - usize::from(around != "top");
+                around = last["id"].as_str().unwrap_or_default().to_string();
+            }
+            _ => around = "top".to_string(),
+        }
+        std::thread::sleep(paging.apart);
+    }
+    Ok((took, deepest))
+}
+
 /// The machine's load average over the last minute.
 fn load_average() -> f64 {
     let mut loads = [0f64; 3];
@@ -431,7 +467,7 @@ impl Demo {
             self.catch_up(backlog, plan.in_flight).await?;
         }
         if plan.steady {
-            self.steady().await?;
+            self.steady(plan.paging).await?;
         }
         if let Some(rate) = plan.flood {
             match plan.seconds {
@@ -804,9 +840,26 @@ impl Demo {
     }
 
     /// Lone messages after quiet spells, chats opened, pages at three depths and finds, with nothing
-    /// else going on.
-    async fn steady(&self) -> Result<()> {
+    /// else going on, or with the library paged while the lone messages come.
+    async fn steady(&self, paging: Option<Paging>) -> Result<()> {
         let watcher = self.watch().await?;
+        let halt = Arc::new(AtomicBool::new(false));
+        let walking = paging.map(|paging| {
+            let (socket, halt) = (self.socket.clone(), halt.clone());
+            tokio::task::spawn_blocking(move || walk(&socket, paging, &halt))
+        });
+        let wal = {
+            let (store, halt) = (self.store.clone(), halt.clone());
+            tokio::spawn(async move {
+                let mut most = 0;
+                while !halt.load(Ordering::Relaxed) {
+                    most = most.max(store.storage().wal_frames);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                most
+            })
+        };
+        let load = load_average();
         let mut acks = Vec::new();
         for _ in 0..LONE {
             tokio::time::sleep(LONE_EVERY).await;
@@ -814,10 +867,17 @@ impl Demo {
         }
         self.converted().await?;
         tokio::time::sleep(LONE_EVERY).await;
+        halt.store(true, Ordering::Relaxed);
+        let walked = match walking {
+            Some(walking) => Some(walking.await??),
+            None => None,
+        };
+        let wal_most = wal.await?;
         stop(watcher).await;
         let (came, missing) = self.expected.take();
         let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
         let from_commit = self.since_commit(&came);
+        let paged = walked.map(|(took, deepest)| (paging.expect("paged as asked"), took, deepest));
 
         let (socket, account) = (self.socket.clone(), self.account.clone());
         let asked = tokio::task::spawn_blocking(move || -> Result<_> {
@@ -859,19 +919,42 @@ impl Demo {
         let (opens, pages, finds, shelves) = asked.await??;
         let usage = usage::now();
         println!("steady, with the account's {} messages:", self.account.shape.messages);
-        println!("{}", line(&format!("a lone message, {} ms apart, acked", LONE_EVERY.as_millis()), &acks));
+        if let Some((paging, took, deepest)) = &paged {
+            println!(
+                "{}",
+                line(
+                    &format!(
+                        "while the lone messages come, the library's photos paged {} ms apart, {} of each page named on \
+                        screen, to {deepest} in",
+                        paging.apart.as_millis(),
+                        paging.shown
+                    ),
+                    took
+                )
+            );
+        }
+        println!(
+            "{}",
+            line(&format!("a lone message, {} ms apart, acked (load {load:.0})", LONE_EVERY.as_millis()), &acks)
+        );
         println!("{}", line("  from hand-over to the interface", &arrivals));
         println!("{}", line("  from its commit to the interface", &from_commit));
+        println!("  the WAL held {wal_most} frames at most meanwhile");
         println!("{}", line(&format!("a chat opened, {OPENS} of them"), &opens));
         let mut numbers = json!({
             "lone_ack": summary(&acks),
             "lone_arrival": summary(&arrivals),
             "commit_to_interface": summary(&from_commit),
+            "lone_wal_frames": wal_most,
+            "lone_load": load,
             "open": summary(&opens),
             "missing": missing,
             "footprint_mb": mb(usage.footprint),
             "resident_mb": mb(usage.resident),
         });
+        if let Some((paging, took, deepest)) = &paged {
+            numbers["paging"] = json!({"apart_ms": paging.apart.as_millis() as u64, "shown": paging.shown, "deepest": deepest, "page": summary(took)});
+        }
         for (what, depth, took) in &pages {
             println!("{}", line(&format!("the biggest chat's {what} page ({depth} messages in)"), took));
             numbers[format!("page_{what}")] = summary(took);

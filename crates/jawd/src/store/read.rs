@@ -650,7 +650,8 @@ const PICTURED: [&str; 5] = ["image", "sticker", "gif", "video", "video_note"];
 
 /// `detail`'s `media` as message `n`'s copy and its file are now: its state, its file once it's in
 /// the cache, and its previews and thumbnail unless a power cut may have broken them and the check
-/// since the start hasn't passed them (`files`); what the row lacked is told to media.
+/// since the start hasn't passed them (`files`). Gives back what the row lacks, for media to be
+/// told of if it's shown.
 pub(super) fn with_media(
     detail: &mut Option<String>,
     n: i64,
@@ -658,12 +659,12 @@ pub(super) fn with_media(
     view_once: bool,
     copy: Option<String>,
     files: Option<&Files>,
-) {
-    let (Some(text), Some(copy)) = (detail.as_deref(), copy) else { return };
+) -> Option<Seen> {
+    let (Some(text), Some(copy)) = (detail.as_deref(), copy) else { return None };
     let (Ok(copy), Ok(mut parsed)) =
         (serde_json::from_str::<Copy>(&copy), serde_json::from_str::<serde_json::Map<String, Value>>(text))
     else {
-        return;
+        return None;
     };
     let trusted = copy.sha256.as_deref().is_none_or(|sha256| files.is_none_or(|files| files.trusted(sha256)));
     let previews = copy.small.clone().zip(copy.large.clone()).filter(|_| trusted);
@@ -694,19 +695,22 @@ pub(super) fn with_media(
     }
     *detail = Some(Value::Object(parsed).to_string());
     // A view-once message's file is never kept, so there's nothing to tell.
-    let (Some(files), Some(sha256), false) =
-        (files, copy.sha256.as_deref().and_then(|hex| from_hex(&hex.to_lowercase())), view_once)
+    let (Some(sha256), false) = (copy.sha256.as_deref().and_then(|hex| from_hex(&hex.to_lowercase())), view_once)
     else {
-        return;
+        return None;
     };
     let local = copy.path.is_some();
     // What the check since the start hasn't passed yet is the check's to mend, not media's to make.
     let no_thumbnail = copy.has_thumbnail != 0 && copy.thumbnail.is_none();
     let unpreviewed = local && copy.small.is_none() && PICTURED.contains(&kind);
     let unfetched = !local && copy.state == "remote";
-    if no_thumbnail || unpreviewed || unfetched {
-        files.seen(Seen { message: n, sha256, local, no_thumbnail, state: copy.state });
-    }
+    (no_thumbnail || unpreviewed || unfetched).then_some(Seen {
+        message: n,
+        sha256,
+        local,
+        no_thumbnail,
+        state: copy.state,
+    })
 }
 
 fn message_row(r: &Row, polls: &mut Polls, files: Option<&Files>) -> rusqlite::Result<MessageRow> {
@@ -757,7 +761,12 @@ fn message_row(r: &Row, polls: &mut Polls, files: Option<&Files>) -> rusqlite::R
         reactions = "[]".into();
     }
     let kind: String = r.get(6)?;
-    with_media(&mut detail, r.get(0)?, &kind, r.get(18)?, r.get(29)?, files);
+    // A messages window's rows are what it shows.
+    if let Some(lacking) = with_media(&mut detail, r.get(0)?, &kind, r.get(18)?, r.get(29)?, files)
+        && let Some(files) = files
+    {
+        files.seen(lacking);
+    }
     let from = match r.get::<_, Option<i64>>(19)? {
         Some(id) => {
             let jid: Option<String> = r.get(23)?;

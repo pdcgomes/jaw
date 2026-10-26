@@ -7,6 +7,7 @@ fn plan(folder: &Path, report: &Path) -> Plan {
         shape: Asked { chats: Some(30), people: Some(40), messages: Some(3_000), chunk: Some(500), recent: None },
         first_run: false,
         steady: false,
+        paging: None,
         flood: None,
         typing: 0,
         seconds: None,
@@ -53,6 +54,7 @@ fn a_demo_accounts_history_catch_up_and_flood_each_arrive_whole_through_the_engi
         catch_up: Some(150),
         in_flight: 1,
         steady: true,
+        paging: Some(Paging { apart: Duration::from_millis(50), shown: 49 }),
         ..plan(folder.path(), &report_to)
     };
     run(again).unwrap();
@@ -64,6 +66,7 @@ fn a_demo_accounts_history_catch_up_and_flood_each_arrive_whole_through_the_engi
         assert!(steady[page]["n"].as_u64().unwrap() > 0, "{page} was read");
     }
     assert!(numbers.get("history").is_none(), "the history came once");
+    assert!(steady["paging"]["page"]["n"].as_u64().unwrap() > 0, "the library was paged as lone messages came");
     let arrived = 150 + steady["lone_ack"]["n"].as_i64().unwrap();
     assert_eq!(count(folder.path(), "messages"), before + arrived);
 

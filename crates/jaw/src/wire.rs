@@ -673,6 +673,10 @@ impl Jawd for Wire {
         }
     }
 
+    fn library_shown(&mut self, items: &[String]) {
+        self.ask("library.shown", json!({ "items": items }), Asked::Quiet);
+    }
+
     fn watch_folders(&mut self) {
         self.folders = Some(None);
         self.ask("folders.watch", json!({}), Asked::Folders);

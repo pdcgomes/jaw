@@ -193,6 +193,12 @@ impl Asker {
         Ok((took, window))
     }
 
+    /// Names the library's items on screen, as jaw does when what it draws changes.
+    pub fn shown(&mut self, items: &[&str]) -> Result<()> {
+        self.line.call("library.shown", json!({"items": items}))?;
+        Ok(())
+    }
+
     /// The palette's find for `query`, messages only, as jaw asks for them; says how many matched,
     /// up to the 1,000 find counts.
     pub fn find(&mut self, query: &str) -> Result<(Duration, u64)> {

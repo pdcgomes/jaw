@@ -1252,7 +1252,7 @@ pub(super) fn index(
         .execute([n])?;
         let item = db
             .prepare_cached(
-                "INSERT INTO library_fts (rowid, text, tags)
+                "INSERT OR REPLACE INTO library_fts (rowid, text, tags)
                 SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none'))
                 FROM messages WHERE n = ?1 AND text IS NOT NULL AND shelf IS NOT NULL",
             )?
@@ -1796,8 +1796,9 @@ fn rehome(db: &Connection, stamps: &mut Stamps, person: i64) -> Result<()> {
 const MERGE_STEP: i64 = 200;
 
 /// Moves up to MERGE_STEP messages of the first chat being merged into the chat it's merged into,
-/// folding a message both have into one by the usual rules. Once none are left, the kept chat shows
-/// its newest message and the other chat is removed. Says whether anything changed.
+/// folding a message both have into one by the usual rules. Both chats then show their newest
+/// message, so what watches either is told its messages moved, and once none are left the other
+/// chat is removed. Says whether anything changed.
 fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result<bool> {
     let found: Option<(i64, i64)> = match gone {
         Some(gone) => db
@@ -1821,6 +1822,7 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     for &n in &moving {
         move_merged(db, stamps, gone, keep, n)?;
     }
+    show_newest(db, stamps, gone)?;
     show_newest(db, stamps, keep)?;
     // Oldest first, so the chat being merged keeps its newest until the last step.
     if moving.len() as i64 == MERGE_STEP {

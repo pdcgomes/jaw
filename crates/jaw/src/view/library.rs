@@ -89,6 +89,8 @@ pub struct Library {
     pub words: String,
     /// What jawd says the library can't hold yet, as its latest answer said.
     pub note: Option<String>,
+    /// The items last named to jawd as on screen, so it's told again only when they change.
+    pub shown: Vec<String>,
 }
 
 /// Where an item is drawn: its line from the top of the library's content, its column and size.
@@ -854,6 +856,18 @@ impl View {
             }
         }
         let top = l.top;
+        // jawd asks media only for what's on screen, so it's told what that is as it changes.
+        let on_screen: Vec<String> = laid
+            .slots
+            .iter()
+            .filter(|s| s.line < top + rows && s.line + s.rows as usize > top)
+            .filter_map(|s| l.rows.get(s.item).map(|r| r.id.clone()))
+            .take(jaw_proto::library::SHOWN)
+            .collect();
+        let newly_shown = (on_screen != l.shown).then(|| {
+            l.shown.clone_from(&on_screen);
+            on_screen
+        });
         let scoped = l.chat.is_some();
         let selected = l.at.clone();
         let rows_data = l.rows.clone();
@@ -968,6 +982,9 @@ impl View {
                     Line::from(Span::styled(format!("{mark:^w$}", w = TILE.0 as usize), Style::new().fg(t.gutter)));
                 f.buffer_mut().set_line(place.x, (top + 1) as u16, &line, TILE.0);
             }
+        }
+        if let Some(items) = newly_shown {
+            self.jawd.library_shown(&items);
         }
     }
 

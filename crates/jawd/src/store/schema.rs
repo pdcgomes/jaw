@@ -1250,7 +1250,9 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- kind, `c` and the chat's n, `f` and the sender's n in person_jids, or `fme` for yours), so the
     -- library's search reads only the items a window asks for, newest first, and stops at a page,
     -- and counts them by their rowids alone. A message waiting in fts_backlog is indexed here when
-    -- it's indexed there, and the writer merges its segments as it merges messages_fts's.
+    -- it's indexed there, and the writer merges its segments as it merges messages_fts's. Every
+    -- entry is written OR REPLACE: a contentless table takes a second insert of a rowid it holds,
+    -- and a delete then takes only the second, leaving the first findable.
     CREATE VIRTUAL TABLE library_fts USING fts5 (
         text,
         tags,
@@ -1260,7 +1262,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     );
     INSERT INTO library_fts (library_fts, rank) VALUES ('automerge', 0);
     INSERT INTO library_fts (library_fts, rank) VALUES ('crisismerge', 64);
-    INSERT INTO library_fts (rowid, text, tags)
+    INSERT OR REPLACE INTO library_fts (rowid, text, tags)
     SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none'))
     FROM messages INDEXED BY messages_shelved WHERE shelf IS NOT NULL AND text IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM fts_backlog b WHERE b.n = messages.n);
@@ -1303,7 +1305,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages
     WHEN new.text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = new.n) BEGIN
         INSERT INTO messages_fts (rowid, text) VALUES (new.t, new.text);
-        INSERT INTO library_fts (rowid, text, tags)
+        INSERT OR REPLACE INTO library_fts (rowid, text, tags)
             SELECT new.t, new.text, 's' || new.shelf || ' c' || new.chat || ' f' || coalesce(new.sender, iif(new.mine, 'me', 'none'))
             WHERE new.shelf IS NOT NULL;
     END;
@@ -1324,7 +1326,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
             WHERE old.text IS NOT NULL AND old.text IS NOT new.text;
         INSERT INTO messages_fts (rowid, text) SELECT new.t, new.text WHERE new.text IS NOT NULL AND old.text IS NOT new.text;
         DELETE FROM library_fts WHERE old.shelf IS NOT NULL AND old.text IS NOT NULL AND rowid = old.t;
-        INSERT INTO library_fts (rowid, text, tags)
+        INSERT OR REPLACE INTO library_fts (rowid, text, tags)
             SELECT new.t, new.text, 's' || new.shelf || ' c' || new.chat || ' f' || coalesce(new.sender, iif(new.mine, 'me', 'none'))
             WHERE new.shelf IS NOT NULL AND new.text IS NOT NULL;
     END;

@@ -644,3 +644,160 @@ async fn an_items_previews_a_power_cut_may_have_broken_are_shown_only_once_the_c
     store.files().passed(&[vec![2u8; 32]]);
     assert_eq!(shown().await, [(true, true); 3], "once the check has passed it");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_items_tells_media_nothing_and_naming_them_on_screen_tells_it_what_they_lack() {
+    use crate::store::Store;
+    use crate::work::Priority;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tell, mut told) = tokio::sync::mpsc::channel(1_000);
+    store.files().watch(tell);
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    db.execute("INSERT INTO chats (id, kind, v) VALUES ('ana@s.whatsapp.net', 'direct', 1)", []).unwrap();
+    // Five photos never fetched, one whose file and previews are in the cache, one seen once and a
+    // text: only the five lack anything, and only photos are items.
+    let mut ns = BTreeMap::new();
+    for (k, (id, kind, view_once)) in [
+        ("p1", "image", false),
+        ("p2", "image", false),
+        ("p3", "image", false),
+        ("p4", "image", false),
+        ("p5", "image", false),
+        ("cached", "image", false),
+        ("once", "image", true),
+        ("said", "text", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let detail = (kind == "image").then_some(r#"{"media":{}}"#);
+        db.execute(
+            "INSERT INTO messages (chat, id, at, t, mine, kind, text, detail, view_once, v)
+            VALUES (1, ?1, ?2, ?2, 1, ?3, 'hi', ?4, ?5, 1)",
+            params![id, k as i64 + 1, kind, detail, view_once],
+        )
+        .unwrap();
+        let n = db.last_insert_rowid();
+        ns.insert(id, n);
+        if kind == "image" {
+            let sha256 = vec![k as u8 + 1; 32];
+            db.execute(
+                "INSERT INTO media (message, variant, keys, sha256) VALUES (?1, 'sd', 'image', ?2)",
+                params![n, sha256],
+            )
+            .unwrap();
+            if id == "cached" {
+                db.execute(
+                    "INSERT INTO media_files (sha256, path, small, large, used_at, made)
+                    VALUES (?1, 'media/files/f.jpg', 'media/previews/s.jpg', 'media/previews/l.jpg', 1, 1)",
+                    [sha256],
+                )
+                .unwrap();
+            }
+        }
+    }
+    let all: Vec<i64> = ns.values().copied().collect();
+    let read = store.reads().query(Priority::Interactive, move |db| items(db, &all)).await.unwrap();
+    assert_eq!(read.len(), 6, "the photos, the one seen once aside");
+    assert!(told.try_recv().is_err(), "a window's read asks media for nothing");
+    let ids: Vec<String> = ["p1", "p3", "cached", "once", "said", "nope"].map(String::from).into();
+    let named = store.reads().query(Priority::Interactive, move |db| on_screen(db, &ids)).await.unwrap();
+    let mut seen = BTreeSet::new();
+    while let Ok(lacking) = told.try_recv() {
+        seen.insert(lacking.message);
+    }
+    assert_eq!((named, seen), (2, BTreeSet::from([ns["p1"], ns["p3"]])), "the two named that lack their file");
+    // At most SHOWN are taken from one naming, however many it has.
+    let mut ids: Vec<String> = (0..jaw_proto::library::SHOWN).map(|k| format!("nope{k}")).collect();
+    ids.push("p5".into());
+    let named = store.reads().query(Priority::Interactive, move |db| on_screen(db, &ids)).await.unwrap();
+    assert_eq!((named, told.try_recv().is_err()), (0, true), "the one past SHOWN isn't taken");
+}
+
+#[test]
+fn an_item_indexed_again_is_found_by_its_words_now_and_by_nothing_once_it_goes() {
+    let db = migrated();
+    db.execute(
+        "INSERT INTO messages (n, chat, id, at, t, mine, kind, text, v) VALUES (1, 1, 'p1', 1, 1048576, 1, 'image', 'praia', 1)",
+        [],
+    )
+    .unwrap();
+    while indexed(&db, 10) {}
+    // As a later path might, its message is queued to be indexed again, and its caption changes
+    // while it waits, which the triggers leave to the index step.
+    db.execute("INSERT INTO fts_backlog (n) VALUES (1)", []).unwrap();
+    db.execute("UPDATE messages SET text = 'jantar' WHERE n = 1", []).unwrap();
+    while indexed(&db, 10) {}
+    assert_eq!(found(&db, "library_fts", "jantar"), BTreeSet::from([1048576]));
+    assert!(found(&db, "library_fts", "praia").is_empty(), "its old caption left nothing to find");
+    db.execute("DELETE FROM messages WHERE n = 1", []).unwrap();
+    assert!(found(&db, "library_fts", "jantar").is_empty(), "nothing of it left to find");
+    // A message written where library_fts holds an entry already replaces it.
+    db.execute("INSERT INTO library_fts (rowid, text, tags) VALUES (2097152, 'praia', 'sphoto c1 fme')", []).unwrap();
+    db.execute(
+        "INSERT INTO messages (n, chat, id, at, t, mine, kind, text, v) VALUES (2, 1, 'p2', 2, 2097152, 1, 'image', 'jantar', 1)",
+        [],
+    )
+    .unwrap();
+    assert_eq!(found(&db, "library_fts", "jantar"), BTreeSet::from([2097152]));
+    assert!(found(&db, "library_fts", "praia").is_empty(), "what it held is gone");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_writer_merges_items_words_as_it_merges_messages_words() {
+    use crate::store::{Change, Lane, Message, Store};
+    use crate::work::Priority;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // Forty rounds of captions, each indexed before the next comes, so each is a segment of its own.
+    for round in 0..40 {
+        let photos = (0..25).map(|k| {
+            let k = round * 25 + k;
+            Change::Message(Message {
+                chat: "120363000000000009@g.us".into(),
+                id: format!("3EB0MERGE{k:06}"),
+                at: 1_792_000_000_000 + k * 1_000,
+                sender: Some("351910000002@s.whatsapp.net".into()),
+                kind: "image",
+                text: Some(format!("na praia {k} com a família")),
+                summary: format!("na praia {k}"),
+                detail: Some(r#"{"media":{"mime":"image/jpeg","w":800,"h":600}}"#.into()),
+                live: true,
+                ..Message::default()
+            })
+        });
+        store.apply(Lane::Live, photos.collect()).await.unwrap();
+        store.indexed().await.unwrap();
+    }
+    // Whether a merge would find a level of library_fts with enough segments to merge.
+    let mergeable = |path: std::path::PathBuf| {
+        let db = Connection::open(path).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let before = db.total_changes();
+        db.execute("INSERT INTO library_fts (library_fts, rank) VALUES ('merge', 64)", []).unwrap();
+        let merged = db.total_changes() > before + 1;
+        db.execute_batch("ROLLBACK").unwrap();
+        merged
+    };
+    let path = home.path().join("jaw.db");
+    let began = std::time::Instant::now();
+    while mergeable(path.clone()) && began.elapsed() < std::time::Duration::from_secs(20) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(!mergeable(path), "the idle writer left library_fts nothing to merge");
+    let found = store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM library_fts WHERE library_fts MATCH 'praia AND tags : sphoto'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(found, 1_000);
+}

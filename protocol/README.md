@@ -251,6 +251,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `contacts.find` | `query` | People and chats to start or open, best first; numbers are checked against WhatsApp |
 | `find` | `query`, `kinds` (any of `chat`, `person`, `folder`, `message`, `link`, `media`, `file`; all by default), `chat` (optional), `limit` (of each kind) | `results`, best first, each with its `kind`, a `score`, the match marked, and the row it found, and `counts` of each kind; a newer `find` from the same connection cancels this one. See Finding |
 | `chat.opened` | `chat` | |
+| `library.shown` | `items`: the `id`s of the library's items on screen, at most 200 | See Library |
 | `library.watch` | `kind` (`photo`, `video`, `voice`, `file`, `link` or `all`), and optionally `chat`, `person`, `since`, `until`, `text`, with `around`, `before`, `after` | `watch`, `seq`, `total`, `older`, `counts`, `rows`: each an item, a message's photo, video, voice message or file, with what it needs to show, its sender, chat and time, and the message's `id` to jump to; and `note`. See Library |
 | `send.text` | `chat`, `text`, `reply`, `mentions`, `preview` (default true), `key`, and `at` and `repeat` to send it later | `message` and `row`, or `scheduled` when it's sent later. See Sending, and Scheduled messages and reminders |
 | `send.retry` | `message` | |
@@ -438,6 +439,7 @@ Every photo, video, voice message and file shared, across all chats or in one, a
 - **Albums.** An album's photos and videos each arrive as a message of their own, so each is an item with its own message's `id`. Once jaw keeps an album as one message, its items will be that message's ID with `:` and their place.
 - **Pushes.** `library` pushes upsert items as they come and change and remove those that go, with `total`, `older` and `counts` when they change, as other windows' pushes do. A deletion for everyone of yours still on its way leaves its item, as it leaves the counts, until WhatsApp has it.
 - **`note`** says what a window can't hold yet and why, in words to show: links, for a `link` or `all` window, until jaw keeps them.
+- **What's on screen.** A library window holds more items than a screen shows, and a walk through the library reads thousands, so reading one asks media for nothing. An interface names the items it has on screen with `library.shown`, again whenever they change, and jawd asks media for what they lack, as it does for every row a messages window holds: a thumbnail drawn from what WhatsApp sent, previews, and the file where it downloads by itself. An item named again soon after, or one that lacks nothing, changes nothing, and an `id` that names no item is passed over. More than 200 `items` is error 5.
 - **Errors.** A `chat`, `person` or anchoring item jawd doesn't have is error 3. `since` after `until`, a `person` that's neither, `around` `newest` or `unread`, and an item to anchor `all` on are -32602, with `data.param`.
 
 ## Folders and the roster

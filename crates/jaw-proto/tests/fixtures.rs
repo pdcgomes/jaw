@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use jaw_proto::find::{ChatOpened, Find, Found, Kind};
 use jaw_proto::layout::{Book, LayoutGet, LayoutSet, Saved};
-use jaw_proto::library::{LibraryPush, LibraryWatch, LibraryWatched};
+use jaw_proto::library::{LibraryPush, LibraryShown, LibraryWatch, LibraryWatched};
 use jaw_proto::media::{MediaCancel, MediaFetch, MediaSave, Saved as MediaSaved};
 use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
@@ -99,6 +99,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "chats.watch" => params::<ChatsWatch>(&name, &request.params),
                     "messages.watch" => params::<MessagesWatch>(&name, &request.params),
                     "library.watch" => params::<LibraryWatch>(&name, &request.params),
+                    "library.shown" => params::<LibraryShown>(&name, &request.params),
                     "watch.move" => params::<WatchMove>(&name, &request.params),
                     "unwatch" => params::<Watch>(&name, &request.params),
                     "history.more" => params::<HistoryMore>(&name, &request.params),
@@ -152,7 +153,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     }
                     "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
                     | "typing" | "react" | "edit" | "delete" | "poll.vote" | "folder.add" | "favourite.set"
-                    | "media.fetch" | "media.cancel" => {
+                    | "media.fetch" | "media.cancel" | "library.shown" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
                     "media.save" => params::<MediaSaved>(&name, result),

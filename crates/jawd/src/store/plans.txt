@@ -420,6 +420,10 @@ SELECT m.n, m.id, m.chat, c.id, m.v, m.at, m.t, m.mine, m.kind, m.shelf, m.text,
         SEARCH hf USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/store/library.rs
+SELECT n FROM messages INDEXED BY messages_shelved_named WHERE id = ?1 AND shelf IS NOT NULL
+    SEARCH messages USING INDEX messages_shelved_named (id=?)
+
+-- src/store/library.rs
 SELECT c.id, c.name, p.name, p.push_name, p.verified_name, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person WHERE c.n = ?1
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -3386,7 +3390,7 @@ INSERT INTO messages_fts (rowid, text) SELECT t, text FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
-INSERT INTO library_fts (rowid, text, tags) SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none')) FROM messages WHERE n = ?1 AND text IS NOT NULL AND shelf IS NOT NULL
+INSERT OR REPLACE INTO library_fts (rowid, text, tags) SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none')) FROM messages WHERE n = ?1 AND text IS NOT NULL AND shelf IS NOT NULL
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
@@ -4302,7 +4306,7 @@ DELETE FROM fts_backlog WHERE n = ?
 INSERT INTO messages_fts (rowid, text) VALUES (?, ?)
 
 -- trigger messages_fts_insert
-INSERT INTO library_fts (rowid, text, tags) SELECT ?, ?, 's' || ? || ' c' || ? || ' f' || coalesce(?, iif(?, 'me', 'none')) WHERE ? IS NOT NULL
+INSERT OR REPLACE INTO library_fts (rowid, text, tags) SELECT ?, ?, 's' || ? || ' c' || ? || ' f' || coalesce(?, iif(?, 'me', 'none')) WHERE ? IS NOT NULL
     SCAN CONSTANT ROW
 
 -- trigger messages_fts_update
@@ -4318,7 +4322,7 @@ DELETE FROM library_fts WHERE ? IS NOT NULL AND ? IS NOT NULL AND rowid = ?
     SCAN library_fts VIRTUAL TABLE INDEX 0:=
 
 -- trigger messages_fts_update
-INSERT INTO library_fts (rowid, text, tags) SELECT ?, ?, 's' || ? || ' c' || ? || ' f' || coalesce(?, iif(?, 'me', 'none')) WHERE ? IS NOT NULL AND ? IS NOT NULL
+INSERT OR REPLACE INTO library_fts (rowid, text, tags) SELECT ?, ?, 's' || ? || ' c' || ? || ' f' || coalesce(?, iif(?, 'me', 'none')) WHERE ? IS NOT NULL AND ? IS NOT NULL
     SCAN CONSTANT ROW
 
 -- trigger messages_links_delete

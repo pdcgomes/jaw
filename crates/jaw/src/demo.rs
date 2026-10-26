@@ -867,6 +867,9 @@ impl Jawd for Demo {
         self.defer(|a| a.on_unwatch_library());
     }
 
+    /// The made-up account's items have their previews already.
+    fn library_shown(&mut self, _items: &[String]) {}
+
     fn watch_roster(&mut self, folder: &str) {
         let folder = folder.to_string();
         self.defer(move |a| a.on_watch_roster(&folder));

@@ -2,7 +2,8 @@
 //! pinned in plans.txt beside this file. A statement that's new or plans differently fails the test
 //! until plans.txt is written again (`JAW_PLANS=write cargo test -p jawd plans`) and the change is
 //! looked at; one that scans a table or sorts in a temporary b-tree fails it unless it's allowed
-//! below, with why.
+//! below, with why. One that names an index the schema doesn't have fails it whatever plans.txt
+//! says, and so does a trigger that names one, since every write that fires it would fail.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -404,8 +405,14 @@ fn row_values(statement: &str) -> String {
     out
 }
 
-/// Plans `sql`, from `file`, into `out`, noting in `broken` a scan or a sort it isn't allowed.
+/// Plans `sql`, from `file`, into `out`, noting in `broken` a scan or a sort it isn't allowed, an
+/// index it names that the schema doesn't have, and an index a trigger names.
 fn planned(db: &Connection, file: &str, sql: &str, out: &mut String, broken: &mut Vec<String>) {
+    if file.starts_with("trigger ") && sql.contains("INDEXED BY") {
+        broken.push(format!(
+            "{file}: {sql}\n    names its index, so dropping that index would stop every write that fires it"
+        ));
+    }
     match plan(db, sql) {
         Ok(lines) => {
             for line in &lines {
@@ -418,6 +425,9 @@ fn planned(db: &Connection, file: &str, sql: &str, out: &mut String, broken: &mu
                     broken.push(format!("{file}: {sql}\n    {}", line.trim()));
                 }
             }
+        }
+        Err(e) if e.contains("no such index") => {
+            broken.push(format!("{file}: {sql}\n    names an index the schema doesn't have: {e}"));
         }
         Err(e) => {
             let _ = writeln!(out, "    (a part of a statement, planned with the rest: {e})");
@@ -487,7 +497,8 @@ fn every_statement_plans_as_pinned_without_scanning_a_table_or_sorting_in_a_temp
     }
     assert!(
         broken.is_empty(),
-        "statements that scan or sort, which need an index or a reason in ALLOWED:\n{}",
+        "statements that scan or sort, which need an index or a reason in ALLOWED, or that name an index they \
+        can't have:\n{}",
         broken.join("\n")
     );
     let was = std::fs::read_to_string(&pinned).unwrap_or_default();
@@ -499,10 +510,26 @@ fn every_statement_plans_as_pinned_without_scanning_a_table_or_sorting_in_a_temp
             .unwrap_or(was.lines().count().min(now.lines().count()));
         let around = |text: &str| text.lines().skip(first.saturating_sub(2)).take(6).collect::<Vec<_>>().join("\n");
         panic!(
-            "a statement is new or plans differently from plans.txt; look at it, then JAW_PLANS=write cargo test -p jawd plans\n\
+            "a statement is new or plans differently from plans.txt. If it names its index (INDEXED BY), check that \
+            index first: its plan changes only when the index does. Then look at the plan, and once it's right, \
+            JAW_PLANS=write cargo test -p jawd plans\n\
             pinned:\n{}\nnow:\n{}",
             around(&was),
             around(&now)
         );
     }
+}
+
+#[test]
+fn a_statement_naming_an_index_the_schema_lacks_or_a_trigger_naming_one_fails_whatever_plans_txt_says() {
+    let mut db = Connection::open_in_memory().unwrap();
+    super::schema::migrate(&mut db).unwrap();
+    let (mut out, mut broken) = (String::new(), Vec::new());
+    planned(&db, "src/x.rs", "SELECT n FROM messages INDEXED BY messages_gone WHERE id = ?1", &mut out, &mut broken);
+    assert!(broken.len() == 1 && broken[0].contains("no such index: messages_gone"), "{broken:?}");
+    let named = "SELECT n FROM messages INDEXED BY messages_shelved_named WHERE id = ? AND shelf IS NOT NULL";
+    planned(&db, "src/x.rs", named, &mut out, &mut broken);
+    assert_eq!(broken.len(), 1, "an index the schema has, named by a read, is fine: {broken:?}");
+    planned(&db, "trigger t", named, &mut out, &mut broken);
+    assert!(broken.len() == 2 && broken[1].contains("trigger t"), "{broken:?}");
 }

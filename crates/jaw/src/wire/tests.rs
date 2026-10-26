@@ -197,7 +197,8 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             json!({ "settings": settings })
         }
         "library.watch" => fixture("library.watch.result")["result"].clone(),
-        "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" | "history.more" => {
+        "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" | "history.more"
+        | "library.shown" => {
             json!({})
         }
         _ => {
@@ -817,11 +818,15 @@ fn the_library_is_jawds_window_through_the_client() {
         Some(&json!({ "kind": "all", "chat": ANA, "around": "top", "before": 0, "after": 14 })),
         "every kind's newest, in the open chat"
     );
+    let shown = || jawd.asked("library.shown");
+    assert!(until_true(&mut v, &rx, |_| !shown().is_empty()), "the items on screen named");
+    assert_eq!(shown(), [json!({ "items": ["3EB0A1B2C3D4E5F6"] })], "named once, however often it's drawn");
     run::press_live(&mut v, &rx, "<tab>").unwrap();
     until(&mut v, &rx, "na praia");
     let asked = jawd.asked("library.watch");
     assert_eq!(asked.last().map(|ask| ask["kind"].clone()), Some(json!("photo")), "Tab narrows to photos: {asked:?}");
     assert!(jawd.asked("unwatch").iter().any(|u| u["watch"] == "w7"), "the last window let go");
+    assert_eq!(shown().len(), 1, "the same photo on screen, so nothing new to name");
 }
 
 #[test]
