@@ -124,7 +124,8 @@ enum Bench {
     }
 
     static func draw(to path: String, model: AppModel) {
-        guard let view = model.window?.editorSheet?.contentView ?? model.window?.window?.contentView else { return finish(["error": 2]) }
+        // The window's frame view, so the toolbar is drawn too.
+        guard let view = model.window?.editorSheet?.contentView ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
         let rect = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }
         view.cacheDisplay(in: rect, to: rep)

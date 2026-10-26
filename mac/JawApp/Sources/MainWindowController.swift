@@ -312,7 +312,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     static let newChat = NSToolbarItem.Identifier("newChat")
     static let splitAcross = NSToolbarItem.Identifier("split")
     static let layout = NSToolbarItem.Identifier("layout")
-    var layoutItem: NSMenuToolbarItem?
+    var layoutItem: NSToolbarItem?
+    var layoutButton: NSButton?
+    var layoutMenu: NSMenu?
     var editorSheet: NSWindow?
 
     func toolbarDefaultItemIdentifiers(_: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -345,10 +347,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             item.menu = Menus.menu(["split.across", "split.down", "pane.close"].compactMap(model.command))
             return item
         case Self.layout:
-            let item = NSMenuToolbarItem(itemIdentifier: id)
+            // A button with the layout's name and a grid, since an icon-only toolbar draws a menu
+            // item with no image as nothing.
+            let item = NSToolbarItem(itemIdentifier: id)
+            let button = NSButton(title: "Unsaved Panes", image: NSImage(systemSymbolName: "square.grid.3x2", accessibilityDescription: "Layout")!,
+                                  target: self, action: #selector(showLayoutMenu(_:)))
+            button.imagePosition = .imageLeading
+            button.bezelStyle = .toolbar
+            item.view = button
             item.label = "Layout"
-            item.showsIndicator = true
             layoutItem = item
+            layoutButton = button
             layoutsChanged()
             return item
         case Self.newChat:
@@ -379,11 +388,16 @@ extension MainWindowController {
         if let item = NSApp.mainMenu?.item(withTitle: MenuPlace.layouts.rawValue) {
             item.submenu = Menus.menu(commands, title: MenuPlace.layouts.rawValue)
         }
-        guard let item = layoutItem else { return }
         let name = model.book.current ?? "Unsaved Panes"
-        item.title = model.book.isEdited ? "\(name) •" : name
-        item.toolTip = model.book.isEdited ? "\(name), changed since it was saved: Save Layout (⌥⌘S) keeps it" : "The layout: ⌃⌘1 to ⌃⌘9 go to one"
-        item.menu = Menus.menu(commands)
+        layoutButton?.title = (model.book.isEdited ? "\(name) •" : name) + "  ▾"
+        layoutButton?.toolTip = model.book.isEdited
+            ? "\(name), changed since it was saved: Save Layout (⌥⌘S) keeps it"
+            : "Layouts on a grid: Edit Layout (⌥⌘E), and ⌃⌘1 to ⌃⌘9 to go to one"
+        layoutMenu = Menus.menu(commands)
+    }
+
+    @objc func showLayoutMenu(_ sender: NSButton) {
+        layoutMenu?.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + Space.xs), in: sender)
     }
 
     /// Asks for a name, in a sheet that takes the keys at once: Return saves, Esc cancels.
