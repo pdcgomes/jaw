@@ -20,6 +20,7 @@
 
 pub mod bench;
 pub mod files;
+pub mod library;
 pub mod lists;
 mod overlay;
 #[cfg(test)]
@@ -1595,16 +1596,19 @@ impl Writer {
         stats.held_for += held;
     }
 
-    /// Merges MERGE_PAGES of FTS5's segments, messages' or links', if any level has enough to merge.
+    /// Merges MERGE_PAGES of FTS5's segments, messages', links' or the library's items', if any
+    /// level has enough to merge.
     fn merge(&mut self) -> Result<()> {
         let began = Instant::now();
         self.synced(false)?;
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // The messages' index first, and the links' once it has nothing to merge, a step's worth.
+        // The messages' index first, then the links' and the items', each once the one before it has
+        // nothing to merge, a step's worth.
         let mut merged = false;
         for merge in [
             "INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)",
             "INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)",
+            "INSERT INTO library_fts (library_fts, rank) VALUES ('merge', ?1)",
         ] {
             let before = tx.total_changes();
             tx.execute(merge, [MERGE_PAGES])?;
@@ -1620,20 +1624,34 @@ impl Writer {
         Ok(())
     }
 
-    /// Indexes a short transaction's worth of fts_backlog for search.
+    /// Indexes a short transaction's worth of fts_backlog for search, telling the feed of the items
+    /// it made findable.
     fn index(&mut self) -> Result<()> {
         let began = Instant::now();
         self.synced(false)?;
-        let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (realtime, live, pace) = (&self.realtime, &self.live, self.index_pace);
-        let (taken, more) = write::index(&tx, pace.rows(), |taken| {
-            !realtime.is_empty() || !live.is_empty() || pace.enough(began.elapsed(), taken)
-        })?;
-        let body = began.elapsed();
-        tx.commit()?;
+        self.stamps.begin();
+        let indexed = (|| {
+            let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let (realtime, live, pace) = (&self.realtime, &self.live, self.index_pace);
+            let indexed = write::index(&tx, &mut self.stamps, pace.rows(), |taken| {
+                !realtime.is_empty() || !live.is_empty() || pace.enough(began.elapsed(), taken)
+            })?;
+            let body = began.elapsed();
+            tx.commit()?;
+            anyhow::Ok((indexed, body))
+        })();
+        let ((taken, more), body) = match indexed {
+            Ok(indexed) => indexed,
+            Err(e) => {
+                self.stamps.rolled_back();
+                return Err(e);
+            }
+        };
         self.index_pace.learn(body, began.elapsed() - body, taken);
         self.unmerged = true;
         self.committed();
+        let last = self.stamps.last();
+        self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
         self.count(None, began.elapsed());
         self.backlog = more;
         Ok(())
@@ -2024,7 +2042,7 @@ mod tests {
             write::apply(&db, &mut stamps, &Change::Message(message)).unwrap();
         }
         assert_eq!(index_against_text(&db), (0, 0), "waiting in fts_backlog, so in neither");
-        while write::index(&db, 1, |_| false).unwrap().1 {}
+        while write::index(&db, &mut stamps, 1, |_| false).unwrap().1 {}
         assert_eq!(index_against_text(&db), (0, 0));
         let rank_1 = db.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('integrity-check', 1)", []);
         assert!(rank_1.is_err(), "FTS5's check against its content wants the photo, which has no text, indexed");
@@ -2182,7 +2200,7 @@ mod tests {
         let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
         let matching = "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'jantar'";
         assert_eq!((count("SELECT count(*) FROM fts_backlog"), count(matching)), (1, 0), "waiting, not in FTS5");
-        assert_eq!(write::index(&db, 10, |_| false).unwrap(), (1, false));
+        assert_eq!(write::index(&db, &mut stamps, 10, |_| false).unwrap(), (1, false));
         assert_eq!((count("SELECT count(*) FROM fts_backlog"), count(matching)), (0, 1), "indexed");
     }
 

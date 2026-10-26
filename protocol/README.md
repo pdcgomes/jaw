@@ -245,13 +245,13 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `link.cancel` | | |
 | `link.logout` | | Answered once the account is logged out and jawd has forgotten it; a `connection` push says `logged_out` (`logged out from jaw`), on the connection that asked just after the answer |
 | `chats.watch`, `messages.watch`, `roster.watch`, `folders.watch` | See Windows, and `since` and `have` when watching again | `watch`, `seq`, `total`, `rows`, `remove` (with `have`); `older` and `newer` for messages |
-| `watch.move` | `watch`, `around`, `before`, `after` | As its watch's, with only the rows the client lacks and `remove` |
+| `watch.move` | `watch`, `around`, `before`, `after` | As its watch's, with only the rows the client lacks and `remove`; a library window keeps its kind and filters |
 | `unwatch` | `watch` | |
 | `search` | `query`, `chat` (optional), `limit`, `cursor` | `hits` (message rows with the match marked) and the next `cursor` |
 | `contacts.find` | `query` | People and chats to start or open, best first; numbers are checked against WhatsApp |
 | `find` | `query`, `kinds` (any of `chat`, `person`, `folder`, `message`, `link`, `media`, `file`; all by default), `chat` (optional), `limit` (of each kind) | `results`, best first, each with its `kind`, a `score`, the match marked, and the row it found, and `counts` of each kind; a newer `find` from the same connection cancels this one. See Finding |
 | `chat.opened` | `chat` | |
-| `library.watch` | `kind` (`photo`, `video`, `voice`, `file`, `link` or `all`), and optionally `chat`, `person`, `since`, `until`, `text`, with `around`, `before`, `after` | `watch`, `total`, `rows`: each the message's media, file or link with its preview, sender, chat and time, and the message's `id` to jump to |
+| `library.watch` | `kind` (`photo`, `video`, `voice`, `file`, `link` or `all`), and optionally `chat`, `person`, `since`, `until`, `text`, with `around`, `before`, `after` | `watch`, `seq`, `total`, `older`, `counts`, `rows`: each an item, a message's photo, video, voice message or file, with what it needs to show, its sender, chat and time, and the message's `id` to jump to; and `note`. See Library |
 | `send.text` | `chat`, `text`, `reply`, `mentions`, `preview` (default true), `key`, and `at` and `repeat` to send it later | `message` and `row`, or `scheduled` when it's sent later. See Sending, and Scheduled messages and reminders |
 | `send.retry` | `message` | |
 | `chat.start` | `phone` or `person` | `chat`. See Sending |
@@ -417,26 +417,28 @@ A message's file comes into jaw's cache by itself or when asked, and its row say
 - **`media.cancel`** stops the message's download and anything waiting to be done for it; the file isn't fetched again until it's asked for.
 - **The cache** keeps files by their content, so a file sent to several chats is downloaded once, and drops what was used longest ago once it passes its size (5 GB, `JAW_MEDIA_CACHE_MB`), never a starred message's file or one waiting to be sent; a dropped file is `remote` again. A message deleted for you or for everyone takes its file with it, unless another message has the same one.
 
-## Library (proposed)
+## Library
 
-Proposed with the terminal's library in M3, for jawd to build; until then the `library.watch` row above is the draft. It keeps its name and fills in what it leaves open.
+Every photo, video, voice message and file shared, across all chats or in one, as a window jawd keeps: `library.watch`. Links join it once jaw keeps them (M2's links); until then a `link` window is empty and says so.
 
 ```json
-{"id":60,"method":"library.watch","params":{"kind":"photo","chat":"120363000000000002@g.us","person":"person:4","since":1785542400000,"until":null,"text":"praia","around":"top","before":0,"after":100}}
-{"id":60,"result":{"watch":"w7","seq":81300,"total":6,"older":false,"counts":{"photo":6,"video":1,"voice":0,"file":0,"link":2},"rows":[{"id":"3EB0A1B2C3D4E5F6","sort":"1785763200000~3EB0A1B2C3D4E5F6","kind":"photo","message":"3EB0A1B2C3D4E5F6","chat":"120363000000000002@g.us","chat_name":"Família Gomes","from":{"id":"person:4","name":"Inês","colour":2},"mine":false,"at":1785763200000,"media":{"w":4032,"h":3024,"previews":{"256":"media/p/3eb0a1.256.jpg"}},"caption":[{"t":"text","s":"na "},{"t":"mark","s":"praia"}]}]}}
+{"id":60,"method":"library.watch","params":{"kind":"photo","chat":"120363000000000002@g.us","person":"person:4","since":1785542400000,"text":"praia","around":"top","before":0,"after":100}}
+{"id":60,"result":{"watch":"w7","seq":81300,"total":6,"older":false,"counts":{"photo":6,"video":1,"voice":0,"file":0},"rows":[{"id":"3EB0A1B2C3D4E5F6","v":81230,"sort":"1785763200000~0000000","kind":"photo","message":"3EB0A1B2C3D4E5F6","chat":"120363000000000002@g.us","chat_name":"Família Gomes","from":{"id":"person:4","name":"Inês","colour":4},"mine":false,"at":1785763200000,"caption":[{"t":"text","s":"na "},{"t":"mark","s":"praia"}],"media":{"w":4032,"h":3024,"previews":{"256":"media/previews/9d6c20c8.256.jpg","…":"…"}}}]}}
 {"method":"library","params":{"watch":"w7","seq":81301,"total":7,"counts":{"photo":7,"…":"…"},"upsert":[{"id":"…","…":"…"}]}}
 ```
 
-- **What's asked.** `kind` is `photo`, `video` (GIFs and video notes too), `voice`, `file`, `link` or `all`. `chat` and `person` narrow to one chat and one sender (`person:` and a number, or `me` for yours); `since` and `until` are milliseconds since the epoch, either end open; `text` matches captions, file names and link titles, hosts and descriptions, as `find` matches messages: accent-blind, each word typed starting a word. Every filter can be absent.
-- **A window,** newest first, paged by keyset as the chat list is: `around` is `top` or an item's `id`, with `before` (newer) and `after` (older) rows, and `watch.move` re-anchors it. `older` says whether more come after the window's last row; `total` is how many items of the kind match. `kind` `all` is different: it isn't paged, and holds the newest `after` items of each kind, so an interface can show a shelf of each, and narrows to one kind to page.
-- **`counts`** are how many items of each kind match the other filters, for the kind strip, and come again in pushes when they change.
-- **Rows** are items, sorted by `sort` descending (the time, then the `id`). An item is a message's photo, video, voice message or file, one of an album's photos, or one of a message's links, so a message can give several. Each has its own `id` (the message's ID, with `:` and the place for an album's photos and `~` and the place for links), its `kind`, its `message` to go to, its `chat` and `chat_name`, `from` (absent on yours, with `mine` true), `at`, `caption` (the message's text, the words that matched marked as `find` marks them, empty when there's none), and what its kind needs:
+- **What's asked.** `kind` is `photo`, `video` (GIFs and video messages too), `voice`, `file` (documents and audio files), `link` or `all`. `chat` and `person` narrow to one chat and one sender: `person:` and a number, by any of their JIDs, or `me` for yours, as the account's own person is. `since` and `until` are milliseconds since the epoch, both included, either end open. `text` matches captions and file names as `find` matches messages: accent-blind, every word typed, one of three letters or more matching the words it starts and one of one or two only itself. Every filter can be absent.
+- **A window,** newest first, paged by keyset: `around` is `top` or an item's `id`, with `before` (newer) and `after` (older) items, at most 1,000 each. Around an item it holds `before` items, the item and `after` items, and keeps that place if the item goes. `watch.move` re-anchors it with the same kind and filters. `older` says whether more items come after the window's last row; `total` is how many items of the kind match. `kind` `all` isn't paged: it holds the newest `after` items of each kind, `older` false and `total` every kind's together, so an interface can show a shelf of each and narrow to one kind to page.
+- **`counts`** are how many items of each kind match the other filters, for the kind strip. For a kind across chats or in one chat they're exact, kept as items come and go; with `person`, `since`, `until` or `text`, each is counted up to 1,000, where 1,000 means at least that many, so they cost the same at any depth, as `find`'s counts do. `link` is left out while jaw keeps no links.
+- **Rows** are items, sorted by `sort` descending: its message's time, then its place in that millisecond. An item is a message's photo, video, voice message or file; stickers, messages seen once and messages deleted for everyone are none. Each has its own `id` (its message's ID, and `~` and the place for one of a message's links, once links come), its message's `v`, its `kind`, its `message` to go to, its `chat` and `chat_name`, `from` (absent on yours, with `mine` true), `at`, `caption` (the message's caption on one line, at most 160 characters from a little before the first word `text` matched, with the words it matched marked as `find` marks them; empty when there's none, and never a file's name), and what its kind needs:
   - `photo` and `video`: `media` as message rows have it, with `seconds` for a video;
-  - `voice`: `voice` as message rows have it;
-  - `file`: `file`: its `name`, `type` (as shown: `PDF`, `GPX`), `bytes`, `pages` where known, and `path` once downloaded;
+  - `voice`: `voice`, its `seconds`;
+  - `file`: `file`: its `name` (an audio file has none, and goes by its line, such as "Audio, 3:02"), `type` as shown (`PDF`, `GPX`, from its name or its MIME type), `bytes`, `pages` where known, and `path` once downloaded;
   - `link`: `link`: its `url`, `host`, and the preview's `title` and `description` where it had one.
-- **Pushes.** `library` pushes upsert items as they come and change and remove those deleted, with `total`, `older` and `counts` when they change, as other windows' pushes do.
-- **Errors.** A `chat` or `person` jawd doesn't have is error 3; `since` after `until` is -32602.
+- **Albums.** An album's photos and videos each arrive as a message of their own, so each is an item with its own message's `id`. Once jaw keeps an album as one message, its items will be that message's ID with `:` and their place.
+- **Pushes.** `library` pushes upsert items as they come and change and remove those that go, with `total`, `older` and `counts` when they change, as other windows' pushes do. A deletion for everyone of yours still on its way leaves its item, as it leaves the counts, until WhatsApp has it.
+- **`note`** says what a window can't hold yet and why, in words to show: links, for a `link` or `all` window, until jaw keeps them.
+- **Errors.** A `chat`, `person` or anchoring item jawd doesn't have is error 3. `since` after `until`, a `person` that's neither, `around` `newest` or `unread`, and an item to anchor `all` on are -32602, with `data.param`.
 
 ## Folders and the roster
 

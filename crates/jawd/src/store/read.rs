@@ -280,13 +280,26 @@ pub(super) const CHAT_JOINS: &str = "
     LEFT JOIN person_jids mj ON mj.n = m.sender
     LEFT JOIN people mp ON mp.n = mj.person";
 
+/// A chat's name as the chat list shows it: its own, a group's members' when it has no subject, as
+/// the phone shows it, or else its person's.
+pub(super) fn chat_name(
+    name: Option<String>,
+    members: Option<String>,
+    person: [Option<String>; 3],
+    id: &str,
+) -> String {
+    match (name, members) {
+        (Some(name), _) | (None, Some(name)) => name,
+        (None, None) => {
+            let [name, push_name, verified] = person;
+            shown(name, push_name, verified, Some(id))
+        }
+    }
+}
+
 pub(super) fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
     let id: String = r.get(1)?;
-    // A group without a subject goes by its members' names, as the phone shows it.
-    let name = match (r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(29)?) {
-        (Some(name), _) | (None, Some(name)) => name,
-        (None, None) => shown(r.get(16)?, r.get(17)?, r.get(18)?, Some(&id)),
-    };
+    let name = chat_name(r.get(5)?, r.get(29)?, [r.get(16)?, r.get(17)?, r.get(18)?], &id);
     let last = match r.get::<_, Option<i64>>(19)? {
         Some(_) => {
             let from = match r.get::<_, Option<String>>(28)? {
@@ -638,7 +651,7 @@ const PICTURED: [&str; 5] = ["image", "sticker", "gif", "video", "video_note"];
 /// `detail`'s `media` as message `n`'s copy and its file are now: its state, its file once it's in
 /// the cache, and its previews and thumbnail unless a power cut may have broken them and the check
 /// since the start hasn't passed them (`files`); what the row lacked is told to media.
-fn with_media(
+pub(super) fn with_media(
     detail: &mut Option<String>,
     n: i64,
     kind: &str,

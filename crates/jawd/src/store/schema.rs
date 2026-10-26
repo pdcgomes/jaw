@@ -1202,6 +1202,133 @@ pub(super) const MIGRATIONS: &[&str] = &[
         message INTEGER PRIMARY KEY REFERENCES messages (n) ON DELETE CASCADE
     ) STRICT;
     ",
+    // 25, a data step: the library. Every message that's a photo, a video, a voice message or a file
+    // is an item of that kind (its shelf), found by indexes on messages that hold only the items, in
+    // the order of their t, so a library window is a keyset across chats, in a chat or from one
+    // sender; how many items of each kind each chat has is kept by the triggers that count its
+    // messages, and items' words are indexed apart from the rest by the triggers that index
+    // messages', with each item's kind, chat and sender as tags, so neither adds a trigger to fire
+    // for every message and a search reads only what its window asks for. Its indexes read every
+    // message once each, so its cost grows with them: 4.6 to 6.0 s for a million messages, 150,000 of
+    // them items, in a jaw.db of 618 MB, which it grows by 20 MB, at a load of 50 to 74, after the 2.3
+    // to 3.6 s a data step's backup takes; the backup is all it needs beside jaw.db.
+    "
+    -- Class: derived from messages, a column of each one's kind and flags, computed as it's read and
+    -- never stored: the library's kind of the item it is. A message deleted for everyone or seen once
+    -- is none, and so are stickers and every kind but these.
+    ALTER TABLE messages ADD COLUMN shelf TEXT GENERATED ALWAYS AS (CASE
+        WHEN deleted OR view_once THEN NULL
+        WHEN kind = 'image' THEN 'photo'
+        WHEN kind IN ('video', 'gif', 'video_note') THEN 'video'
+        WHEN kind = 'voice' THEN 'voice'
+        WHEN kind IN ('document', 'audio') THEN 'file' END) VIRTUAL;
+    -- The library's windows, newest first by t (the time, then the place in that millisecond):
+    -- across chats; in one chat, with who sent each, for one person's items there; and from one
+    -- sender across chats, yours having none. Each holds only the messages that are items.
+    CREATE INDEX messages_shelved ON messages (shelf, t) WHERE shelf IS NOT NULL;
+    CREATE INDEX messages_shelved_in ON messages (chat, shelf, t, sender, mine) WHERE shelf IS NOT NULL;
+    CREATE INDEX messages_shelved_by ON messages (sender, shelf, t, mine) WHERE shelf IS NOT NULL;
+    -- An item by its message's ID alone, for a window anchored on it across chats.
+    CREATE INDEX messages_shelved_named ON messages (id) WHERE shelf IS NOT NULL;
+
+    -- Class: derived from messages, kept by their triggers: how many items of each kind each chat
+    -- has, and every chat together as chat 0, so a library window's counts are read, not counted.
+    -- Links are counted here once jaw keeps them.
+    CREATE TABLE shelves (
+        chat INTEGER NOT NULL CHECK (chat >= 0),
+        shelf TEXT NOT NULL CHECK (shelf IN ('photo', 'video', 'voice', 'file', 'link')),
+        items INTEGER NOT NULL CHECK (items > 0),
+        PRIMARY KEY (chat, shelf)
+    ) STRICT, WITHOUT ROWID;
+    INSERT INTO shelves (chat, shelf, items)
+    SELECT chat, shelf, count(*) FROM messages INDEXED BY messages_shelved_in WHERE shelf IS NOT NULL
+    GROUP BY chat, shelf;
+    INSERT INTO shelves (chat, shelf, items) SELECT 0, shelf, sum(items) FROM shelves GROUP BY shelf;
+
+    -- Class: derived from messages, as messages_fts is: the words of each item, its caption and a
+    -- file's name, by its message's t, and in `tags` its kind, its chat and who sent it (`s` and the
+    -- kind, `c` and the chat's n, `f` and the sender's n in person_jids, or `fme` for yours), so the
+    -- library's search reads only the items a window asks for, newest first, and stops at a page,
+    -- and counts them by their rowids alone. A message waiting in fts_backlog is indexed here when
+    -- it's indexed there, and the writer merges its segments as it merges messages_fts's.
+    CREATE VIRTUAL TABLE library_fts USING fts5 (
+        text,
+        tags,
+        content = '',
+        contentless_delete = 1,
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+    INSERT INTO library_fts (library_fts, rank) VALUES ('automerge', 0);
+    INSERT INTO library_fts (library_fts, rank) VALUES ('crisismerge', 64);
+    INSERT INTO library_fts (rowid, text, tags)
+    SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none'))
+    FROM messages INDEXED BY messages_shelved WHERE shelf IS NOT NULL AND text IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM fts_backlog b WHERE b.n = messages.n);
+
+    -- The triggers that count messages count items too: one that comes, goes, moves to another chat
+    -- or becomes another kind of item or none moves its count, and a chat's count of a kind goes with
+    -- its last item of that kind.
+    DROP TRIGGER messages_counted;
+    CREATE TRIGGER messages_counted AFTER INSERT ON messages BEGIN
+        UPDATE chats SET message_count = message_count + 1 WHERE n = new.chat;
+        INSERT INTO shelves (chat, shelf, items) SELECT new.chat, new.shelf, 1 WHERE new.shelf IS NOT NULL
+            ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1;
+        INSERT INTO shelves (chat, shelf, items) SELECT 0, new.shelf, 1 WHERE new.shelf IS NOT NULL
+            ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1;
+    END;
+    DROP TRIGGER messages_uncounted;
+    CREATE TRIGGER messages_uncounted AFTER DELETE ON messages BEGIN
+        UPDATE chats SET message_count = message_count - 1 WHERE n = old.chat;
+        DELETE FROM shelves WHERE old.shelf IS NOT NULL AND chat IN (old.chat, 0) AND shelf = old.shelf AND items = 1;
+        UPDATE shelves SET items = items - 1 WHERE old.shelf IS NOT NULL AND chat IN (old.chat, 0) AND shelf = old.shelf;
+    END;
+    DROP TRIGGER messages_moved;
+    CREATE TRIGGER messages_moved AFTER UPDATE OF chat, kind, deleted, view_once ON messages
+    WHEN new.chat IS NOT old.chat OR new.shelf IS NOT old.shelf BEGIN
+        UPDATE chats SET message_count = message_count - 1 WHERE n = old.chat AND new.chat IS NOT old.chat;
+        UPDATE chats SET message_count = message_count + 1 WHERE n = new.chat AND new.chat IS NOT old.chat;
+        DELETE FROM shelves WHERE old.shelf IS NOT NULL AND chat IN (old.chat, 0) AND shelf = old.shelf AND items = 1;
+        UPDATE shelves SET items = items - 1 WHERE old.shelf IS NOT NULL AND chat IN (old.chat, 0) AND shelf = old.shelf;
+        INSERT INTO shelves (chat, shelf, items) SELECT new.chat, new.shelf, 1 WHERE new.shelf IS NOT NULL
+            ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1;
+        INSERT INTO shelves (chat, shelf, items) SELECT 0, new.shelf, 1 WHERE new.shelf IS NOT NULL
+            ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1;
+    END;
+
+    -- The triggers that index messages' words index items' words too: a message that's an item
+    -- with words is in library_fts once it's out of fts_backlog, and one whose words change, that
+    -- becomes an item or stops being one, or that moves to another chat or another sender, as a
+    -- merge moves it, is indexed again.
+    DROP TRIGGER messages_fts_insert;
+    CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages
+    WHEN new.text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = new.n) BEGIN
+        INSERT INTO messages_fts (rowid, text) VALUES (new.t, new.text);
+        INSERT INTO library_fts (rowid, text, tags)
+            SELECT new.t, new.text, 's' || new.shelf || ' c' || new.chat || ' f' || coalesce(new.sender, iif(new.mine, 'me', 'none'))
+            WHERE new.shelf IS NOT NULL;
+    END;
+    DROP TRIGGER messages_fts_delete;
+    CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts (messages_fts, rowid, text) SELECT 'delete', old.t, old.text
+            WHERE old.text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = old.n);
+        DELETE FROM library_fts WHERE old.shelf IS NOT NULL AND old.text IS NOT NULL AND rowid = old.t
+            AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = old.n);
+        DELETE FROM fts_backlog WHERE n = old.n;
+    END;
+    DROP TRIGGER messages_fts_update;
+    CREATE TRIGGER messages_fts_update AFTER UPDATE OF text, kind, deleted, view_once, chat, sender, mine ON messages
+    WHEN (old.text IS NOT new.text OR old.shelf IS NOT new.shelf OR old.shelf IS NOT NULL AND (old.chat IS NOT new.chat
+            OR old.sender IS NOT new.sender OR old.mine IS NOT new.mine))
+        AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = old.n) BEGIN
+        INSERT INTO messages_fts (messages_fts, rowid, text) SELECT 'delete', old.t, old.text
+            WHERE old.text IS NOT NULL AND old.text IS NOT new.text;
+        INSERT INTO messages_fts (rowid, text) SELECT new.t, new.text WHERE new.text IS NOT NULL AND old.text IS NOT new.text;
+        DELETE FROM library_fts WHERE old.shelf IS NOT NULL AND old.text IS NOT NULL AND rowid = old.t;
+        INSERT INTO library_fts (rowid, text, tags)
+            SELECT new.t, new.text, 's' || new.shelf || ' c' || new.chat || ' f' || coalesce(new.sender, iif(new.mine, 'me', 'none'))
+            WHERE new.shelf IS NOT NULL AND new.text IS NOT NULL;
+    END;
+    ",
 ];
 
 /// Migration 19's text, named so the tests that check and measure it find it whatever number it
@@ -1957,6 +2084,12 @@ fn free_space(folder: &Path) -> Result<u64> {
     Ok(stats.f_bavail as u64 * stats.f_frsize as u64)
 }
 
+/// How many migrations come before the library's, wherever it's numbered.
+#[cfg(test)]
+pub(super) fn before_the_library() -> usize {
+    MIGRATIONS.iter().position(|migration| migration.contains("ADD COLUMN shelf")).expect("the library's migration")
+}
+
 #[cfg(test)]
 mod kept;
 
@@ -2186,6 +2319,108 @@ mod tests {
         assert_eq!(fingerprint(&db).unwrap(), expected(2).unwrap());
         assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1, "no backup");
         assert!(free_space(home.path()).unwrap() > 0);
+    }
+
+    /// Measures the library's migration on a jaw.db at the version before it with this many
+    /// messages, one in seven of them an item: how long the upgrade takes, its backup apart, and
+    /// what it takes on disk beside jaw.db at its peak:
+    /// `JAW_MEASURE_MESSAGES=1000000 cargo test --release -p jawd measure_the_librarys -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, a minute long at a million messages"]
+    fn measure_the_librarys_step() {
+        let messages: i64 = std::env::var("JAW_MEASURE_MESSAGES").ok().and_then(|n| n.parse().ok()).unwrap_or(200_000);
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("jaw.db");
+        let mut db = Connection::open(&path).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        let version = super::before_the_library();
+        for migration in &MIGRATIONS[..version] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", version as i64).unwrap();
+        db.execute_batch(&format!(
+            "BEGIN;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000)
+            INSERT INTO people (n, name, v) SELECT x, 'Person ' || x, 1 FROM c;
+            INSERT INTO person_jids (n, jid, person) SELECT n, printf('3519%08d@s.whatsapp.net', n), n FROM people;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000)
+            INSERT INTO chats (n, id, kind, person, last_at, v)
+            SELECT x, printf('3519%08d@s.whatsapp.net', x), 'direct', x, x, 1 FROM c;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {messages}),
+                k(x, kind) AS (SELECT x, CASE WHEN x % 1000 < 90 THEN 'image' WHEN x % 1000 < 110 THEN 'video'
+                    WHEN x % 1000 < 120 THEN 'gif' WHEN x % 1000 < 140 THEN 'voice' WHEN x % 1000 < 150 THEN 'document'
+                    ELSE 'text' END FROM c)
+            INSERT INTO messages (n, chat, id, at, t, sender, mine, kind, text, spans, summary, detail, raw, v)
+            SELECT x, 1 + x % 2000, printf('3EB0%016d', x), 1790000000000 + x * 1000, (1790000000000 + x * 1000) << 20,
+                iif(x % 7 = 0, NULL, 1 + x % 5000), x % 7 = 0, kind,
+                CASE kind WHEN 'text' THEN 'mensagem número ' || x || ' com algumas palavras de conversa'
+                    WHEN 'image' THEN iif(x % 3 = 0, 'na praia com a família ' || x, NULL)
+                    WHEN 'document' THEN 'relatorio-' || x || '.pdf' END,
+                NULL, 'mensagem ' || x,
+                iif(kind = 'text', NULL, json_object('media', json_object('mime', 'image/jpeg', 'w', 1600, 'h', 1200))),
+                randomblob(300), x
+            FROM k;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 50000)
+            INSERT INTO events (seq, at, type, key, chat) SELECT x, 0, 'message', {messages} - x, 1 + x % 2000 FROM c;
+            COMMIT;
+            PRAGMA wal_checkpoint(TRUNCATE);"
+        ))
+        .unwrap();
+        let bytes = |db: &Connection| {
+            let pages: i64 = db.pragma_query_value(None, "page_count", |r| r.get(0)).unwrap();
+            let page: i64 = db.pragma_query_value(None, "page_size", |r| r.get(0)).unwrap();
+            (pages * page) as u64
+        };
+        let before = bytes(&db);
+        let copy = home.path().join("copy.db");
+        let began = std::time::Instant::now();
+        db.execute("VACUUM INTO ?1", [copy.to_str().unwrap()]).unwrap();
+        let backup = began.elapsed();
+        std::fs::remove_file(&copy).unwrap();
+        let (stop, peak) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
+        let sampler = {
+            let (stop, peak, folder) = (stop.clone(), peak.clone(), home.path().to_path_buf());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let used: u64 = std::fs::read_dir(&folder)
+                        .unwrap()
+                        .filter_map(|e| e.ok()?.metadata().ok())
+                        .map(|m| m.len())
+                        .sum();
+                    peak.fetch_max(used, Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+        };
+        let began = std::time::Instant::now();
+        Runner::default().run(&mut db).unwrap();
+        let took = began.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        sampler.join().unwrap();
+        let items: i64 = db.query_row("SELECT sum(items) FROM shelves WHERE chat = 0", [], |r| r.get(0)).unwrap();
+        let beside = peak.load(Ordering::Relaxed).saturating_sub(before);
+        eprintln!(
+            "{messages} messages, {items} items: jaw.db {:.0} MB at version {version}; upgraded in {:.1} s, of which its backup \
+             about {:.1} s and the step {:.1} s; {:.0} MB beside jaw.db at its peak, {:.2} times it (DATA_STEP_ROOM is \
+             {DATA_STEP_ROOM}); jaw.db after: {:.0} MB; load {:.0}",
+            before as f64 / 1e6,
+            took.as_secs_f64(),
+            backup.as_secs_f64(),
+            took.saturating_sub(backup).as_secs_f64(),
+            beside as f64 / 1e6,
+            beside as f64 / before as f64,
+            bytes(&db) as f64 / 1e6,
+            load(),
+        );
+        assert!((beside as f64) < before as f64 * DATA_STEP_ROOM, "the step took more room than is asked for");
+    }
+
+    /// The machine's load average over the last minute.
+    fn load() -> f64 {
+        let mut loads = [0f64; 3];
+        // SAFETY: getloadavg fills at most as many values as it's given room for.
+        unsafe { libc::getloadavg(loads.as_mut_ptr(), 3) };
+        loads[0]
     }
 
     /// Measures what the data steps take on disk beside jaw.db at their peak, for DATA_STEP_ROOM:

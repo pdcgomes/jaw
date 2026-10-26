@@ -308,6 +308,128 @@ SELECT n FROM chats WHERE person = ?1 AND kind = 'direct' ORDER BY n LIMIT 1
 SELECT jid FROM person_jids WHERE person = ?1 ORDER BY n
     SEARCH person_jids USING INDEX person_jids_by_person (person=?)
 
+-- src/store/library.rs
+SELECT n, t FROM messages INDEXED BY messages_shelved WHERE shelf = ?1 AND t < ?2 AND t >= ?3 ORDER BY t DESC LIMIT ?4
+    SEARCH messages USING INDEX messages_shelved (shelf=? AND t>? AND t<?)
+
+-- src/store/library.rs
+SELECT n, t FROM messages INDEXED BY messages_shelved WHERE shelf = ?1 AND t > ?2 AND t <= ?3 ORDER BY t LIMIT ?4
+    SEARCH messages USING INDEX messages_shelved (shelf=? AND t>? AND t<?)
+
+-- src/store/library.rs
+SELECT n, t FROM messages INDEXED BY messages_shelved_in WHERE chat = ?1 AND shelf = ?2 AND t < ?3 AND t >= ?4 ORDER BY t DESC LIMIT ?5
+    SEARCH messages USING INDEX messages_shelved_in (chat=? AND shelf=? AND t>? AND t<?)
+
+-- src/store/library.rs
+SELECT n, t FROM messages INDEXED BY messages_shelved_in WHERE chat = ?1 AND shelf = ?2 AND t > ?3 AND t <= ?4 ORDER BY t LIMIT ?5
+    SEARCH messages USING INDEX messages_shelved_in (chat=? AND shelf=? AND t>? AND t<?)
+
+-- src/store/library.rs
+SELECT n, t FROM messages INDEXED BY messages_shelved_in WHERE chat = ?1 AND shelf = ?2 AND sender IS ?3 AND mine = ?4 AND t < ?5 AND t >= ?6 ORDER BY t DESC LIMIT ?7
+    SEARCH messages USING INDEX messages_shelved_in (chat=? AND shelf=? AND t>? AND t<?)
+
+-- src/store/library.rs
+SELECT n, t FROM messages INDEXED BY messages_shelved_in WHERE chat = ?1 AND shelf = ?2 AND sender IS ?3 AND mine = ?4 AND t > ?5 AND t <= ?6 ORDER BY t LIMIT ?7
+    SEARCH messages USING INDEX messages_shelved_in (chat=? AND shelf=? AND t>? AND t<?)
+
+-- src/store/library.rs
+SELECT n, t FROM messages INDEXED BY messages_shelved_by WHERE sender IS ?1 AND shelf = ?2 AND mine = ?3 AND t < ?4 AND t >= ?5 ORDER BY t DESC LIMIT ?6
+    SEARCH messages USING INDEX messages_shelved_by (sender=? AND shelf=? AND t>? AND t<?)
+
+-- src/store/library.rs
+SELECT n, t FROM messages INDEXED BY messages_shelved_by WHERE sender IS ?1 AND shelf = ?2 AND mine = ?3 AND t > ?4 AND t <= ?5 ORDER BY t LIMIT ?6
+    SEARCH messages USING INDEX messages_shelved_by (sender=? AND shelf=? AND t>? AND t<?)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM messages INDEXED BY messages_shelved WHERE shelf = ?1 AND t <= ?2 AND t >= ?3 LIMIT ?4)
+    CO-ROUTINE (subquery-1)
+      SEARCH messages USING INDEX messages_shelved (shelf=? AND t>? AND t<?)
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM messages INDEXED BY messages_shelved_in WHERE chat = ?1 AND shelf = ?2 AND t <= ?3 AND t >= ?4 LIMIT ?5)
+    CO-ROUTINE (subquery-1)
+      SEARCH messages USING INDEX messages_shelved_in (chat=? AND shelf=? AND t>? AND t<?)
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM messages INDEXED BY messages_shelved_in WHERE chat = ?1 AND shelf = ?2 AND sender IS ?3 AND mine = ?4 AND t <= ?5 AND t >= ?6 LIMIT ?7)
+    CO-ROUTINE (subquery-1)
+      SEARCH messages USING INDEX messages_shelved_in (chat=? AND shelf=? AND t>? AND t<?)
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM messages INDEXED BY messages_shelved_by WHERE sender IS ?1 AND shelf = ?2 AND mine = ?3 AND t <= ?4 AND t >= ?5 LIMIT ?6)
+    CO-ROUTINE (subquery-1)
+      SEARCH messages USING INDEX messages_shelved_by (sender=? AND shelf=? AND t>? AND t<?)
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT shelf, items FROM shelves WHERE chat = ?1
+    SEARCH shelves USING PRIMARY KEY (chat=?)
+
+-- src/store/library.rs
+SELECT m.n, m.t FROM library_fts CROSS JOIN messages m ON m.t = library_fts.rowid WHERE library_fts MATCH ?1 AND library_fts.rowid < ?2 AND library_fts.rowid >= ?3 ORDER BY library_fts.rowid DESC LIMIT ?4
+    SCAN library_fts VIRTUAL TABLE INDEX 192:M2<>
+    SEARCH m USING COVERING INDEX sqlite_autoindex_messages_1 (t=?)
+
+-- src/store/library.rs
+SELECT m.n, m.t FROM library_fts CROSS JOIN messages m ON m.t = library_fts.rowid WHERE library_fts MATCH ?1 AND library_fts.rowid > ?2 AND library_fts.rowid <= ?3 ORDER BY library_fts.rowid LIMIT ?4
+    SCAN library_fts VIRTUAL TABLE INDEX 64:M2><
+    SEARCH m USING COVERING INDEX sqlite_autoindex_messages_1 (t=?)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM library_fts WHERE library_fts MATCH ?1 AND rowid <= ?2 AND rowid >= ?3 LIMIT ?4)
+    CO-ROUTINE (subquery-1)
+      SCAN library_fts VIRTUAL TABLE INDEX 0:M2<>
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT n, t, shelf FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1) AND id = ?2
+    SEARCH messages USING INDEX messages_by_id (chat=? AND id=?)
+    SCALAR SUBQUERY 1
+      SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+
+-- src/store/library.rs
+SELECT n, t, shelf FROM messages INDEXED BY messages_shelved_named WHERE id = ?1 AND shelf IS NOT NULL
+    SEARCH messages USING INDEX messages_shelved_named (id=?)
+
+-- src/store/library.rs
+SELECT EXISTS (SELECT 1 FROM people WHERE n = ?1)
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 1
+      SEARCH people USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/library.rs
+SELECT j.n, instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || j.jid || ' ') > 0 FROM person_jids j WHERE j.person = ?1
+    SEARCH j USING INDEX person_jids_by_person (person=?)
+    SCALAR SUBQUERY 1
+      SEARCH sync_state USING PRIMARY KEY (key=?)
+
+-- src/store/library.rs
+SELECT m.n, m.id, m.chat, c.id, m.v, m.at, m.t, m.mine, m.kind, m.shelf, m.text, coalesce(m.summary, m.text, ''), m.detail, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress, 'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail, 'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256), 'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256 WHERE h.message = m.n AND h.variant = 'hd')) FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd') FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE m.n = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+      SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+      CORRELATED SCALAR SUBQUERY 1
+        SEARCH h USING PRIMARY KEY (message=? AND variant=?)
+        SEARCH hf USING PRIMARY KEY (sha256=?) LEFT-JOIN
+
+-- src/store/library.rs
+SELECT c.id, c.name, p.name, p.push_name, p.verified_name, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person WHERE c.n = ?1
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 2
+      CO-ROUTINE (subquery-1)
+        SEARCH g USING PRIMARY KEY (chat=?)
+        SEARCH gj USING INTEGER PRIMARY KEY (rowid=?)
+        SEARCH gp USING INTEGER PRIMARY KEY (rowid=?)
+      SCAN (subquery-1)
+
 -- src/store/lists.rs
 SELECT rule FROM folders WHERE n = ?1 AND rule IS NOT NULL
     SEARCH folders USING INTEGER PRIMARY KEY (rowid=?)
@@ -1538,6 +1660,9 @@ INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)
 
 -- src/store/mod.rs
 INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)
+
+-- src/store/mod.rs
+INSERT INTO library_fts (library_fts, rank) VALUES ('merge', ?1)
 
 -- src/store/read.rs
 SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
@@ -3250,7 +3375,7 @@ UPDATE chats SET v = ?3, last_message = (SELECT n FROM messages WHERE chat = ?1 
       SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
 
 -- src/store/write.rs
-SELECT m.t, b.n FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b JOIN messages m ON m.n = b.n
+SELECT m.t, b.n, m.chat FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b JOIN messages m ON m.n = b.n
     CO-ROUTINE b
       SCAN fts_backlog
     SCAN b
@@ -3258,6 +3383,10 @@ SELECT m.t, b.n FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b JOIN
 
 -- src/store/write.rs
 INSERT INTO messages_fts (rowid, text) SELECT t, text FROM messages WHERE n = ?1 AND text IS NOT NULL
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+INSERT INTO library_fts (rowid, text, tags) SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none')) FROM messages WHERE n = ?1 AND text IS NOT NULL AND shelf IS NOT NULL
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
@@ -4145,9 +4274,23 @@ INSERT OR IGNORE INTO media_drop (sha256) SELECT ? WHERE EXISTS (SELECT 1 FROM m
 UPDATE chats SET message_count = message_count + 1 WHERE n = ?
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
+-- trigger messages_counted
+INSERT INTO shelves (chat, shelf, items) SELECT ?, ?, 1 WHERE ? IS NOT NULL ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1
+    SCAN CONSTANT ROW
+
+-- trigger messages_counted
+INSERT INTO shelves (chat, shelf, items) SELECT 0, ?, 1 WHERE ? IS NOT NULL ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1
+    SCAN CONSTANT ROW
+
 -- trigger messages_fts_delete
 INSERT INTO messages_fts (messages_fts, rowid, text) SELECT 'delete', ?, ? WHERE ? IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = ?)
     SCAN CONSTANT ROW
+    SCALAR SUBQUERY 1
+      SEARCH fts_backlog USING INTEGER PRIMARY KEY (rowid=?)
+
+-- trigger messages_fts_delete
+DELETE FROM library_fts WHERE ? IS NOT NULL AND ? IS NOT NULL AND rowid = ? AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = ?)
+    SCAN library_fts VIRTUAL TABLE INDEX 0:=
     SCALAR SUBQUERY 1
       SEARCH fts_backlog USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -4158,12 +4301,24 @@ DELETE FROM fts_backlog WHERE n = ?
 -- trigger messages_fts_insert
 INSERT INTO messages_fts (rowid, text) VALUES (?, ?)
 
--- trigger messages_fts_update
-INSERT INTO messages_fts (messages_fts, rowid, text) SELECT 'delete', ?, ? WHERE ? IS NOT NULL
+-- trigger messages_fts_insert
+INSERT INTO library_fts (rowid, text, tags) SELECT ?, ?, 's' || ? || ' c' || ? || ' f' || coalesce(?, iif(?, 'me', 'none')) WHERE ? IS NOT NULL
     SCAN CONSTANT ROW
 
 -- trigger messages_fts_update
-INSERT INTO messages_fts (rowid, text) SELECT ?, ? WHERE ? IS NOT NULL
+INSERT INTO messages_fts (messages_fts, rowid, text) SELECT 'delete', ?, ? WHERE ? IS NOT NULL AND ? IS NOT ?
+    SCAN CONSTANT ROW
+
+-- trigger messages_fts_update
+INSERT INTO messages_fts (rowid, text) SELECT ?, ? WHERE ? IS NOT NULL AND ? IS NOT ?
+    SCAN CONSTANT ROW
+
+-- trigger messages_fts_update
+DELETE FROM library_fts WHERE ? IS NOT NULL AND ? IS NOT NULL AND rowid = ?
+    SCAN library_fts VIRTUAL TABLE INDEX 0:=
+
+-- trigger messages_fts_update
+INSERT INTO library_fts (rowid, text, tags) SELECT ?, ?, 's' || ? || ' c' || ? || ' f' || coalesce(?, iif(?, 'me', 'none')) WHERE ? IS NOT NULL AND ? IS NOT NULL
     SCAN CONSTANT ROW
 
 -- trigger messages_links_delete
@@ -4193,16 +4348,40 @@ DELETE FROM links_fts WHERE rowid = ? AND NOT EXISTS (SELECT 1 FROM fts_backlog 
 INSERT INTO links_derived (message) VALUES (?)
 
 -- trigger messages_moved
-UPDATE chats SET message_count = message_count - 1 WHERE n = ?
+UPDATE chats SET message_count = message_count - 1 WHERE n = ? AND ? IS NOT ?
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- trigger messages_moved
-UPDATE chats SET message_count = message_count + 1 WHERE n = ?
+UPDATE chats SET message_count = message_count + 1 WHERE n = ? AND ? IS NOT ?
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- trigger messages_moved
+DELETE FROM shelves WHERE ? IS NOT NULL AND chat IN (?, 0) AND shelf = ? AND items = 1
+    SEARCH shelves USING PRIMARY KEY (chat=? AND shelf=?)
+
+-- trigger messages_moved
+UPDATE shelves SET items = items - 1 WHERE ? IS NOT NULL AND chat IN (?, 0) AND shelf = ?
+    SEARCH shelves USING PRIMARY KEY (chat=? AND shelf=?)
+
+-- trigger messages_moved
+INSERT INTO shelves (chat, shelf, items) SELECT ?, ?, 1 WHERE ? IS NOT NULL ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1
+    SCAN CONSTANT ROW
+
+-- trigger messages_moved
+INSERT INTO shelves (chat, shelf, items) SELECT 0, ?, 1 WHERE ? IS NOT NULL ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1
+    SCAN CONSTANT ROW
 
 -- trigger messages_uncounted
 UPDATE chats SET message_count = message_count - 1 WHERE n = ?
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- trigger messages_uncounted
+DELETE FROM shelves WHERE ? IS NOT NULL AND chat IN (?, 0) AND shelf = ? AND items = 1
+    SEARCH shelves USING PRIMARY KEY (chat=? AND shelf=?)
+
+-- trigger messages_uncounted
+UPDATE shelves SET items = items - 1 WHERE ? IS NOT NULL AND chat IN (?, 0) AND shelf = ?
+    SEARCH shelves USING PRIMARY KEY (chat=? AND shelf=?)
 
 -- trigger people_chatted
 UPDATE folder_people SET lone = ? = 0 WHERE person = ?

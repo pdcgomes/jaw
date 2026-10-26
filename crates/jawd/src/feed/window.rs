@@ -1,18 +1,21 @@
 //! What a window is and the query that fills it. A window is a stretch of a list around an
 //! anchor: a folder's chat list from its top or around a chat, a chat's messages from its newest or
-//! around a message, a folder's roster from its top or around someone; or the folder tree, whole.
-//! Each query reads the window whole in one read transaction, with the feed's seq it's as of, so
-//! what an interface is sent always matches a fresh query.
+//! around a message, a folder's roster from its top or around someone, the library's items from the
+//! newest or around an item; or the folder tree, whole. Each query reads the window whole in one
+//! read transaction, with the feed's seq it's as of, so what an interface is sent always matches a
+//! fresh query.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use jaw_proto::library::{Counts, LibraryRow};
 use jaw_proto::windows as proto;
 use rusqlite::Connection;
 use serde_json::{Map, Value};
 
 use super::hashed;
+use super::library::{self, LibrarySpec};
 use crate::store::lists::{self, List, PersonCursor};
 use crate::store::read::{self, Around, ChatCursor, MessageCursor};
 
@@ -22,6 +25,7 @@ pub(super) enum Spec {
     Messages(MessageSpec),
     Folders,
     Roster(RosterSpec),
+    Library(LibrarySpec),
 }
 
 /// A stretch of a folder's chat list: from the top, or `before` chats above a chat and `after`
@@ -89,15 +93,19 @@ pub(super) struct Snapshot {
     pub older: bool,
     pub newer: u64,
     pub rows: Rows,
-    /// A messages window's chat, by n, if it exists.
+    /// A messages window's chat, or a library window's, by n, if it exists.
     pub chat: Option<i64>,
-    /// The people who sent a messages window's rows.
+    /// The people who sent a messages or library window's rows.
     pub senders: HashSet<i64>,
     /// The JIDs a messages window's rows mention or quote someone by, `hashed`, whether or not
     /// jaw knows whose they are yet.
     pub named: HashSet<u64>,
     /// Whose presence the window shows: a roster's people, a one-to-one chat's person.
     pub people: Vec<i64>,
+    /// A library window's counts of each kind, the chats its rows are in, and what it can't hold.
+    pub counts: Option<Counts>,
+    pub chats: HashSet<i64>,
+    pub note: Option<String>,
 }
 
 pub(super) enum Rows {
@@ -105,6 +113,7 @@ pub(super) enum Rows {
     Messages(Vec<(i64, proto::MessageRow)>),
     Folders(Vec<(i64, proto::FolderRow)>, Vec<proto::Favourite>),
     People(Vec<(i64, proto::RosterRow)>),
+    Library(Vec<(i64, LibraryRow)>),
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -128,6 +137,9 @@ pub(super) fn query(db: &Connection, mut spec: Spec, only: Option<Vec<i64>>) -> 
         senders: HashSet::new(),
         named: HashSet::new(),
         people: Vec::new(),
+        counts: None,
+        chats: HashSet::new(),
+        note: None,
     };
     match &mut spec {
         Spec::Chats(spec) => {
@@ -228,6 +240,17 @@ pub(super) fn query(db: &Connection, mut spec: Spec, only: Option<Vec<i64>>) -> 
             };
             snapshot.people = rows.iter().map(|row| row.n).collect();
             snapshot.rows = Rows::People(rows.into_iter().map(|row| (row.n, roster_row(row))).collect());
+        }
+        Spec::Library(spec) => {
+            let found = library::read(&db, spec)?;
+            snapshot.total = found.total;
+            snapshot.older = found.older;
+            snapshot.counts = Some(found.counts);
+            snapshot.chat = found.chat;
+            snapshot.senders = found.senders;
+            snapshot.chats = found.chats;
+            snapshot.note = found.note;
+            snapshot.rows = Rows::Library(found.rows);
         }
     }
     Ok((snapshot, spec))
@@ -352,6 +375,11 @@ fn roster_row(row: lists::PersonRow) -> proto::RosterRow {
 /// How many sender colours there are for an interface to choose from.
 const COLOURS: i64 = 8;
 
+/// Who sent a row, as the wire has it: their person id, the name to show and their colour.
+pub(super) fn from_row(from: read::From) -> proto::From {
+    proto::From { id: format!("person:{}", from.id), name: from.name, colour: from.id.rem_euclid(COLOURS) as u8 }
+}
+
 /// A message's sort on the wire: its time, then its n, both zero-padded so they compare bytewise.
 pub(crate) fn message_row(row: read::MessageRow) -> proto::MessageRow {
     let json = |raw: &serde_json::value::RawValue| serde_json::from_str::<Value>(raw.get()).unwrap_or(Value::Null);
@@ -365,11 +393,7 @@ pub(crate) fn message_row(row: read::MessageRow) -> proto::MessageRow {
         v: row.v.max(0) as u64,
         chat: row.chat,
         at: row.at,
-        from: row.from.map(|from| proto::From {
-            id: format!("person:{}", from.id),
-            name: from.name,
-            colour: from.id.rem_euclid(COLOURS) as u8,
-        }),
+        from: row.from.map(from_row),
         mine: row.mine,
         kind: row.kind,
         spans: json(&row.spans),

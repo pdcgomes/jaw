@@ -96,6 +96,12 @@ const CLASSES: &[(&str, Class, &[&str])] = &[
     ("media_made", Own, &[]),
     ("media_cache", Derived, &[]),
     ("media_drop", Own, &[]),
+    ("shelves", Derived, &[]),
+    ("library_fts", Derived, &[]),
+    ("library_fts_data", Derived, &[]),
+    ("library_fts_idx", Derived, &[]),
+    ("library_fts_docsize", Derived, &[]),
+    ("library_fts_config", Derived, &[]),
 ];
 
 /// The rows the test writes, in an order that keeps every foreign key, each column's value as SQL.

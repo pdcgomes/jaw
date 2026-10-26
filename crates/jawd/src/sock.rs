@@ -642,10 +642,8 @@ async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
         },
         "find" => return Taken::Find(request),
         method if apart_method(method) => return Taken::Apart(request),
-        "chats.watch" | "messages.watch" | "folders.watch" | "roster.watch" | "watch.move" | "unwatch" => match session
-            .windows
-            .as_mut()
-        {
+        "chats.watch" | "messages.watch" | "folders.watch" | "roster.watch" | "library.watch" | "watch.move"
+        | "unwatch" => match session.windows.as_mut() {
             Some(windows) => {
                 let chat = match request.method.as_str() {
                     "messages.watch" => request.params.get("chat").and_then(Value::as_str).map(str::to_string),

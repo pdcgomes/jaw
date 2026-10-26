@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use jaw_proto::find::{ChatOpened, Find, Found, Kind};
 use jaw_proto::layout::{Book, LayoutGet, LayoutSet, Saved};
+use jaw_proto::library::{LibraryPush, LibraryWatch, LibraryWatched};
 use jaw_proto::media::{MediaCancel, MediaFetch, MediaSave, Saved as MediaSaved};
 use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
@@ -97,6 +98,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "chat.opened" => params::<ChatOpened>(&name, &request.params),
                     "chats.watch" => params::<ChatsWatch>(&name, &request.params),
                     "messages.watch" => params::<MessagesWatch>(&name, &request.params),
+                    "library.watch" => params::<LibraryWatch>(&name, &request.params),
                     "watch.move" => params::<WatchMove>(&name, &request.params),
                     "unwatch" => params::<Watch>(&name, &request.params),
                     "history.more" => params::<HistoryMore>(&name, &request.params),
@@ -165,6 +167,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "folders.watch" => params::<FoldersWatched>(&name, result),
                     "roster.watch" => params::<ChatsWatched<RosterRow>>(&name, result),
                     "folder.create" => params::<FolderRow>(&name, &result["folder"]),
+                    "library.watch" => params::<LibraryWatched>(&name, result),
                     // A move's result is its window's; this fixture moves a messages window.
                     "messages.watch" | "watch.move" => params::<MessagesWatched>(&name, result),
                     "settings.set" => params::<SettingsKept>(&name, result),
@@ -181,6 +184,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "messages" => params::<MessagesPush>(&name, &push.params),
                     "folders" => params::<FoldersPush>(&name, &push.params),
                     "roster" => params::<ChatsPush<RosterRow>>(&name, &push.params),
+                    "library" => params::<LibraryPush>(&name, &push.params),
                     "resync" => params::<Watch>(&name, &push.params),
                     "notice" => params::<Notice>(&name, &push.params),
                     "layout" if book => params::<Saved<Book>>(&name, &push.params),

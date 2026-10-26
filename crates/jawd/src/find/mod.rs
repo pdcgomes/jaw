@@ -344,10 +344,10 @@ fn fold(text: &str) -> String {
 }
 
 /// The words typed, folded, each with whether it finds the words it starts.
-struct Words(Vec<(String, bool)>);
+pub(crate) struct Words(Vec<(String, bool)>);
 
 impl Words {
-    fn new(typed: &str) -> Words {
+    pub(crate) fn new(typed: &str) -> Words {
         let words = typed
             .split(|c: char| !c.is_alphanumeric())
             .filter(|word| !word.is_empty())
@@ -356,8 +356,13 @@ impl Words {
         Words(words)
     }
 
+    /// Whether nothing typed is a word.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// The FTS5 query: every word, each quoted so nothing typed is FTS5's syntax.
-    fn fts(&self) -> String {
+    pub(crate) fn fts(&self) -> String {
         let words = self.0.iter().map(|(word, prefix)| format!("\"{word}\"{}", if *prefix { "*" } else { "" }));
         words.collect::<Vec<_>>().join(" ")
     }
@@ -372,7 +377,7 @@ impl Words {
     }
 
     /// Where in `text` the words matched: each word of it that one finds, as byte ranges.
-    fn marks(&self, text: &str) -> Vec<(usize, usize)> {
+    pub(crate) fn marks(&self, text: &str) -> Vec<(usize, usize)> {
         let mut marks = Vec::new();
         let mut start = None;
         for (at, c) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
@@ -455,7 +460,7 @@ const SNIPPET_MOST: usize = 160;
 
 /// A stretch of a message around its first match, as spans: from the start of a word a little
 /// before it, with an ellipsis where text is left out.
-fn snippet(text: &str, marks: &[(usize, usize)]) -> Vec<Span> {
+pub(crate) fn snippet(text: &str, marks: &[(usize, usize)]) -> Vec<Span> {
     let first = marks.first().map_or(0, |mark| mark.0);
     let before = text[..first].chars().count();
     let mut start = 0;

@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Instant;
 
+use jaw_proto::library::{Counts, Kind as LibraryKind, LibraryPush, LibraryRow, LibraryWatch, LibraryWatched};
 use jaw_proto::windows::{
     Around, ChatRow, ChatsPush, ChatsWatch, ChatsWatched, Favourite, FolderRow, FoldersPush, FoldersWatch,
     FoldersWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, RosterRow, RosterWatch, TypingPush,
@@ -45,11 +46,13 @@ use serde_json::value::RawValue;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::{mpsc, watch};
 
+use super::library::{ItemAnchor, LibrarySpec, Whose};
 use super::typing::Watching;
 use super::window::{
     self, ChatAnchor, ChatSpec, MessageAnchor, MessageSpec, PersonAnchor, RosterSpec, Rows, Snapshot, Spec,
 };
 use super::{CatchingUp, Changes, Timing};
+use crate::store::library::{self as items, Shelf};
 use crate::store::lists::{self, List};
 use crate::store::{Store, read};
 use crate::work::Priority;
@@ -239,6 +242,10 @@ struct Found {
     favourites: Option<(u64, Box<RawValue>)>,
     /// Whose presence it shows.
     people: Vec<i64>,
+    /// A library window's counts, its rows' chats, and what it can't hold.
+    counts: Option<Counts>,
+    chats: HashSet<i64>,
+    note: Option<String>,
     /// The window as it was read, its anchor where the read found it.
     spec: Spec,
     /// The bytes it holds, about.
@@ -418,6 +425,7 @@ fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
         Rows::Messages(rows) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
         Rows::Folders(rows, _) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
         Rows::People(rows) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
+        Rows::Library(rows) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
     };
     let favourites = match &snapshot.rows {
         Rows::Folders(_, favourites) => {
@@ -430,7 +438,7 @@ fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
     };
     let bytes = size_of::<Found>()
         + rows.iter().map(Line::bytes).sum::<usize>()
-        + snapshot.senders.capacity() * size_of::<i64>()
+        + (snapshot.senders.capacity() + snapshot.chats.capacity()) * size_of::<i64>()
         + snapshot.named.capacity() * size_of::<u64>();
     Found {
         fresh: from.max(snapshot.seq),
@@ -444,6 +452,9 @@ fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
         named: snapshot.named,
         favourites,
         people: snapshot.people,
+        counts: snapshot.counts,
+        chats: snapshot.chats,
+        note: snapshot.note,
         spec,
         bytes: bytes as u64,
     }
@@ -502,7 +513,7 @@ struct State {
     total: u64,
     older: bool,
     newer: u64,
-    /// A messages window's chat, by n, once it exists.
+    /// A messages or library window's chat, by n, once it exists.
     chat: Option<i64>,
     senders: HashSet<i64>,
     /// The JIDs its rows mention or quote someone by, as the read it was settled from has them.
@@ -510,6 +521,9 @@ struct State {
     /// The hash of the favourite slots a folder tree's interface holds.
     favourites: Option<u64>,
     people: Vec<i64>,
+    /// A library window's counts, and the chats its rows are in.
+    counts: Option<Counts>,
+    chats: HashSet<i64>,
 }
 
 /// A row as its interface holds it.
@@ -530,6 +544,8 @@ struct Update<'a> {
     upsert: Vec<&'a RawValue>,
     remove: Vec<String>,
     favourites: Option<&'a RawValue>,
+    counts: Option<Counts>,
+    note: Option<String>,
 }
 
 /// What kind of window an update is for.
@@ -539,6 +555,7 @@ enum Kind {
     Messages,
     Folders,
     Roster,
+    Library,
 }
 
 impl Kind {
@@ -548,6 +565,7 @@ impl Kind {
             Spec::Messages(_) => Kind::Messages,
             Spec::Folders => Kind::Folders,
             Spec::Roster(_) => Kind::Roster,
+            Spec::Library(_) => Kind::Library,
         }
     }
 }
@@ -595,6 +613,18 @@ impl Row for FolderRow {
 }
 
 impl Row for RosterRow {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn sort(&self) -> &str {
+        &self.sort
+    }
+    fn v(&self) -> u64 {
+        self.v
+    }
+}
+
+impl Row for LibraryRow {
     fn id(&self) -> &str {
         &self.id
     }
@@ -656,6 +686,8 @@ fn settle<'a>(
         upsert,
         remove,
         favourites: found.favourites.as_ref().filter(|(hash, _)| favourites != Some(*hash)).map(|(_, json)| &**json),
+        counts: found.counts,
+        note: found.note.clone(),
     };
     let state = State {
         held,
@@ -668,13 +700,15 @@ fn settle<'a>(
         named: found.named.clone(),
         favourites: found.favourites.as_ref().map(|(hash, _)| *hash),
         people: found.people.clone(),
+        counts: found.counts,
+        chats: found.chats.clone(),
     };
     (update, state)
 }
 
 /// `update` as a watch's or a move's result, with who's typing in the window's chats.
 fn result(watch: String, update: Update, typing: Typists) -> Value {
-    let Update { kind, seq, total, older, newer, upsert: rows, remove, favourites } = update;
+    let Update { kind, seq, total, older, newer, upsert: rows, remove, favourites, counts, note } = update;
     let value = match kind {
         Kind::Chats | Kind::Roster => serde_json::to_value(ChatsWatched { watch, seq, total, rows, remove, typing }),
         Kind::Messages => {
@@ -685,13 +719,17 @@ fn result(watch: String, update: Update, typing: Typists) -> Value {
                 favourites.map(|json| serde_json::from_str(json.get()).unwrap_or_default()).unwrap_or_default();
             serde_json::to_value(FoldersWatched { watch, seq, rows, remove, favourites })
         }
+        Kind::Library => {
+            let counts = counts.unwrap_or_default();
+            serde_json::to_value(LibraryWatched { watch, seq, total, older, counts, rows, remove, note })
+        }
     };
     value.expect("jawd's own types serialize")
 }
 
 /// `update` as a push to an interface holding `was`, unless nothing in it changed.
 fn push(watch: String, update: Update, was: &State) -> Option<Vec<u8>> {
-    let Update { kind, seq, total, older, newer, upsert, remove, favourites } = update;
+    let Update { kind, seq, total, older, newer, upsert, remove, favourites, counts, .. } = update;
     let total = (total != was.total).then_some(total);
     match kind {
         Kind::Chats | Kind::Roster => {
@@ -708,6 +746,14 @@ fn push(watch: String, update: Update, was: &State) -> Option<Vec<u8>> {
             let favourites: Option<Vec<Favourite>> =
                 favourites.map(|json| serde_json::from_str(json.get()).unwrap_or_default());
             return Some(line("folders", FoldersPush { watch, seq, upsert, remove, favourites }));
+        }
+        Kind::Library => {
+            let older = (older != was.older).then_some(older);
+            let counts = counts.filter(|counts| Some(counts) != was.counts.as_ref());
+            if upsert.is_empty() && remove.is_empty() && total.is_none() && older.is_none() && counts.is_none() {
+                return None;
+            }
+            return Some(line("library", LibraryPush { watch, seq, total, older, counts, upsert, remove }));
         }
         Kind::Messages => {}
     }
@@ -758,6 +804,25 @@ fn list(folder: &str) -> Result<List, Error> {
 
 fn unknown(watch: &str) -> Error {
     Error::new(code::NOT_FOUND, format!("this connection has no watch {watch}"))
+}
+
+/// -32602 for a param that can't be used, saying which.
+fn bad(param: &str, message: impl Into<String>) -> Error {
+    let mut error = Error::new(code::INVALID_PARAMS, message);
+    error.data = Some(serde_json::json!({ "param": param }));
+    error
+}
+
+/// Whose items `library.watch`'s `person` asks for.
+fn person(person: Option<&str>) -> Result<Whose, Error> {
+    match person {
+        None => Ok(Whose::Anyone),
+        Some("me") => Ok(Whose::Me),
+        Some(id) => match id.strip_prefix("person:").and_then(|n| n.parse::<i64>().ok()) {
+            Some(n) => Ok(Whose::Person(n)),
+            None => Err(bad("person", format!("a person is person: and a number, or me, not {id}"))),
+        },
+    }
 }
 
 async fn until(at: Option<Instant>) {
@@ -862,6 +927,16 @@ impl Window {
                     || meet(&self.state.named, &changes.jids)
             }
             (Spec::Messages(_), None) => !changes.chats.is_empty(),
+            // Its rows name their chats, which a group's members or a person can name, as the chat
+            // list does.
+            (Spec::Library(_), _) if !changes.people.is_empty() => true,
+            (Spec::Library(library), Some(chat)) if library.chat.is_some() => {
+                changes.messages.contains(&chat) || changes.chats.contains(&chat)
+            }
+            (Spec::Library(library), None) if library.chat.is_some() => !changes.chats.is_empty(),
+            (Spec::Library(_), _) => {
+                !changes.messages.is_empty() || self.state.chats.iter().any(|chat| changes.chats.contains(chat))
+            }
         }
     }
 
@@ -887,7 +962,7 @@ impl Window {
         match &self.spec {
             Spec::Chats(_) => self.state.held.contains_key(chat),
             Spec::Messages(messages) => messages.chat == chat,
-            Spec::Folders | Spec::Roster(_) => false,
+            Spec::Folders | Spec::Roster(_) | Spec::Library(_) => false,
         }
     }
 
@@ -896,7 +971,7 @@ impl Window {
         match &self.spec {
             Spec::Chats(_) => self.state.held.keys().cloned().collect(),
             Spec::Messages(messages) => vec![messages.chat.clone()],
-            Spec::Folders | Spec::Roster(_) => Vec::new(),
+            Spec::Folders | Spec::Roster(_) | Spec::Library(_) => Vec::new(),
         }
     }
 
@@ -1020,7 +1095,7 @@ impl Client {
         self.held = held;
     }
 
-    /// Answers `chats.watch`, `messages.watch`, `watch.move` or `unwatch`.
+    /// Answers `chats.watch`, `messages.watch`, `library.watch`, `watch.move` or `unwatch`.
     pub async fn call(&mut self, method: &str, params: Value) -> Result<Value, Error> {
         match method {
             "chats.watch" => {
@@ -1050,6 +1125,29 @@ impl Client {
                 let spec = self.message_spec(watch.chat, watch.around, watch.before, watch.after).await?;
                 self.watch(Spec::Messages(spec), watch.since, watch.have).await
             }
+            "library.watch" => {
+                let watch: LibraryWatch = params_of(method, params)?;
+                self.room_for_another()?;
+                if let (Some(since), Some(until)) = (watch.since, watch.until)
+                    && since > until
+                {
+                    return Err(bad("since", "since comes after until, so nothing could be in between"));
+                }
+                let filters = LibrarySpec {
+                    kind: watch.kind,
+                    chat: watch.chat,
+                    person: person(watch.person.as_deref())?,
+                    since: watch.since,
+                    until: watch.until,
+                    text: watch.text,
+                    anchor: None,
+                    before: 0,
+                    after: 0,
+                };
+                let spec = self.library_spec(filters, watch.around, watch.before, watch.after).await?;
+                // Its `since` is a time, not a seq, so a library window is always watched whole.
+                self.watch(Spec::Library(spec), None, Vec::new()).await
+            }
             "watch.move" => {
                 let moving: WatchMove = params_of(method, params)?;
                 let spec = match self.windows.get(&moving.watch).map(|window| &window.spec) {
@@ -1068,6 +1166,10 @@ impl Client {
                     Some(Spec::Messages(messages)) => {
                         let chat = messages.chat.clone();
                         Spec::Messages(self.message_spec(chat, moving.around, moving.before, moving.after).await?)
+                    }
+                    Some(Spec::Library(library)) => {
+                        let filters = library.clone();
+                        Spec::Library(self.library_spec(filters, moving.around, moving.before, moving.after).await?)
                     }
                     None => return Err(unknown(&moving.watch)),
                 };
@@ -1181,6 +1283,69 @@ impl Client {
             }
         };
         Ok(MessageSpec { chat, anchor, before, after })
+    }
+
+    /// A library window with `filters`' kind and filters, anchored at `around`: the top, or an item
+    /// of its kind by its id, whose place it keeps. The chat and the person it names must exist.
+    async fn library_spec(
+        &self,
+        filters: LibrarySpec,
+        around: Around,
+        before: u32,
+        after: u32,
+    ) -> Result<LibrarySpec, Error> {
+        let (before, after) = sides(before, after)?;
+        let shelf = match filters.kind {
+            LibraryKind::Photo => Some(Shelf::Photo),
+            LibraryKind::Video => Some(Shelf::Video),
+            LibraryKind::Voice => Some(Shelf::Voice),
+            LibraryKind::File => Some(Shelf::File),
+            LibraryKind::Link | LibraryKind::All => None,
+        };
+        let anchor = match around {
+            Around::Top => None,
+            Around::Row(id) if shelf.is_some() => Some(id),
+            Around::Row(_) if filters.kind == LibraryKind::All => {
+                return Err(bad("around", "a library window of every kind holds the newest of each, from the top"));
+            }
+            Around::Row(id) => {
+                return Err(Error::new(code::NOT_FOUND, format!("jawd keeps no links yet, so not {id}")));
+            }
+            Around::Newest | Around::Unread => {
+                return Err(bad("around", "a library window is anchored at top or on an item's id"));
+            }
+        };
+        let (chat, person, kind) = (filters.chat.clone(), filters.person, filters.kind);
+        let found = self
+            .read(move |db| {
+                let chat_found = chat.as_deref().map(|chat| read::chat_n(db, chat)).transpose()?;
+                let person_found = match person {
+                    Whose::Person(n) => Some(items::person(db, n)?.is_some()),
+                    Whose::Anyone | Whose::Me => None,
+                };
+                let named = match &anchor {
+                    Some(id) => items::named(db, id, chat.as_deref())?
+                        .into_iter()
+                        .filter(|&(_, _, found)| Some(found) == shelf)
+                        .map(|(_, t, _)| t)
+                        .max()
+                        .map(|t| ItemAnchor { id: id.clone(), t }),
+                    None => None,
+                };
+                anyhow::Ok((chat_found, person_found, anchor, named))
+            })
+            .await?;
+        let (chat_found, person_found, asked, anchor) = found;
+        if let (Some(chat), Some(None)) = (&filters.chat, chat_found) {
+            return Err(Error::new(code::NOT_FOUND, format!("jawd has no chat {chat}")));
+        }
+        if let (Whose::Person(n), Some(false)) = (filters.person, person_found) {
+            return Err(Error::new(code::NOT_FOUND, format!("jawd has no person:{n}")));
+        }
+        if let (Some(id), None) = (&asked, &anchor) {
+            return Err(Error::new(code::NOT_FOUND, format!("jawd has no {} {id} in the library", kind.as_str())));
+        }
+        Ok(LibrarySpec { anchor, before, after, ..filters })
     }
 
     /// Reads `spec`, or just the chats `only` names, for this connection alone, with the feed's

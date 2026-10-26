@@ -11,6 +11,7 @@
 
 pub mod bench;
 mod client;
+mod library;
 #[cfg(test)]
 mod tests;
 pub mod typing;

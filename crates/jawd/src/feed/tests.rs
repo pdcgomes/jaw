@@ -17,23 +17,23 @@ use crate::store::read::{self, Around};
 use crate::store::{Amend, Amendment, Change, Chat, Lane, Message, Person, Read, Store};
 use crate::work::Report;
 
-fn ms(n: u64) -> Duration {
+pub(super) fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-fn brisk() -> Timing {
+pub(super) fn brisk() -> Timing {
     Timing { quiet: ms(1), burst: ms(10), hold: ms(300), behind: ms(300) }
 }
 
-struct Bed {
+pub(super) struct Bed {
     home: tempfile::TempDir,
-    store: Store,
-    feed: Feed,
+    pub(super) store: Store,
+    pub(super) feed: Feed,
     catching_up: Arc<AtomicBool>,
 }
 
 impl Bed {
-    fn new(timing: Timing) -> Bed {
+    pub(super) fn new(timing: Timing) -> Bed {
         Bed::keeping(timing, CHANGES_KEPT)
     }
 
@@ -47,11 +47,11 @@ impl Bed {
         Bed { home, store, feed, catching_up }
     }
 
-    async fn apply(&self, changes: Vec<Change>) -> i64 {
+    pub(super) async fn apply(&self, changes: Vec<Change>) -> i64 {
         self.store.apply(Lane::Live, changes).await.unwrap().seq
     }
 
-    fn watcher(&self, room: usize) -> Watcher {
+    pub(super) fn watcher(&self, room: usize) -> Watcher {
         let (out, lines) = mpsc::channel(room);
         Watcher {
             client: self.feed.client(out),
@@ -101,15 +101,17 @@ fn named(jid: &str, name: &str) -> Person {
 
 /// A window as an interface holds it, built only from results and pushes.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct Model {
+pub(super) struct Model {
     chats: bool,
     /// A messages window's chat.
     of: Option<String>,
     rows: HashMap<String, Value>,
-    total: u64,
-    older: bool,
+    pub(super) total: u64,
+    pub(super) older: bool,
     newer: u64,
     seq: u64,
+    /// A library window's counts of each kind.
+    pub(super) counts: Value,
 }
 
 impl Model {
@@ -136,10 +138,14 @@ impl Model {
         if let Some(seq) = update["seq"].as_u64() {
             self.seq = self.seq.max(seq);
         }
+        if let Some(counts) = update.get("counts") {
+            self.counts = counts.clone();
+        }
     }
 
-    /// Its rows in the list's order: chats from the largest sort down, messages from the smallest up.
-    fn ordered(&self) -> Vec<Value> {
+    /// Its rows in the list's order: chats and items from the largest sort down, messages from the
+    /// smallest up.
+    pub(super) fn ordered(&self) -> Vec<Value> {
         let mut rows: Vec<Value> = self.rows.values().cloned().collect();
         rows.sort_by(|a, b| a["sort"].as_str().cmp(&b["sort"].as_str()));
         if self.chats {
@@ -148,7 +154,7 @@ impl Model {
         rows
     }
 
-    fn ids(&self) -> Vec<String> {
+    pub(super) fn ids(&self) -> Vec<String> {
         self.ordered().iter().map(|row| row["id"].as_str().unwrap().to_string()).collect()
     }
 
@@ -171,10 +177,10 @@ impl Model {
 }
 
 /// A client driven by the test, with what its interface would hold.
-struct Watcher {
+pub(super) struct Watcher {
     client: Client,
     lines: mpsc::Receiver<Vec<u8>>,
-    windows: HashMap<String, Model>,
+    pub(super) windows: HashMap<String, Model>,
     seen: i64,
     resynced: Vec<String>,
     batches: HashMap<String, usize>,
@@ -187,13 +193,17 @@ struct Watcher {
 }
 
 impl Watcher {
-    async fn call(&mut self, method: &str, params: Value) -> Result<Value, jaw_proto::Error> {
+    pub(super) async fn call(&mut self, method: &str, params: Value) -> Result<Value, jaw_proto::Error> {
         let of = params.get("chat").and_then(Value::as_str).map(str::to_string);
         let unwatching = (method == "unwatch").then(|| params["watch"].as_str().unwrap_or_default().to_string());
         let result = self.client.call(method, params).await?;
         if let Some(watch) = result["watch"].as_str() {
             let model = self.windows.entry(watch.to_string()).or_default();
-            model.chats = result.get("older").is_none();
+            // Its kind is the method that watched it, which a move keeps: a chat's messages read
+            // from the smallest sort up, and every other window from the largest down.
+            if method != "watch.move" {
+                model.chats = method != "messages.watch";
+            }
             if method == "messages.watch" {
                 model.of = of;
             }
@@ -220,7 +230,7 @@ impl Watcher {
         self.typing.retain(|chat, _| shown.contains(chat));
     }
 
-    async fn watch(&mut self, method: &str, params: Value) -> String {
+    pub(super) async fn watch(&mut self, method: &str, params: Value) -> String {
         let result = self.call(method, params).await.unwrap();
         result["watch"].as_str().unwrap().to_string()
     }
@@ -253,7 +263,7 @@ impl Watcher {
                 self.windows.remove(&watch);
                 self.resynced.push(watch);
             }
-            "chats" | "messages" | "roster" | "folders" => {
+            "chats" | "messages" | "roster" | "folders" | "library" => {
                 *self.batches.entry(watch.clone()).or_default() += 1;
                 let model = self.windows.get_mut(&watch).expect("a push for a window it watches");
                 // A window never goes back to an older read than its interface holds.
@@ -288,7 +298,7 @@ impl Watcher {
     }
 
     /// Runs the client until it has taken every change up to `seq` and sent what they meant.
-    async fn settle(&mut self, seq: i64) {
+    pub(super) async fn settle(&mut self, seq: i64) {
         loop {
             self.drain();
             if self.seen >= seq && !self.client.pending() {
@@ -367,7 +377,7 @@ async fn fresh(store: &Store, want: &Want) -> Model {
                 };
                 let rows =
                     rows.into_iter().map(|row| (row.id.clone(), serde_json::to_value(message_row(row)).unwrap()));
-                Model { chats: false, of: Some(chat), rows: rows.collect(), total, older, newer, seq: 0 }
+                Model { chats: false, of: Some(chat), rows: rows.collect(), total, older, newer, ..Model::default() }
             }
         })
     };
@@ -5152,5 +5162,114 @@ async fn the_tree_and_a_roster_are_told_no_typing_while_a_folders_chat_list_besi
     let told: Vec<&str> = watcher.told.iter().map(|(chat, _)| chat.as_str()).collect();
     assert_eq!(told, [GROUP], "only the group's chat list is told, once");
     assert_eq!(*bed.store.committed().borrow(), seq, "typing wrote nothing past the two changes");
+    assert!(committed < seq);
+}
+
+/// A photo of `sender`'s in `chat`, captioned.
+fn photo(chat: &str, id: &str, at: i64, sender: &str) -> Message {
+    let media = json!({"media": {"mime": "image/jpeg", "w": 1600, "h": 1200, "bytes": 200_000}});
+    Message { kind: "image", detail: Some(media.to_string()), ..text(chat, id, at, Some(sender), "na praia") }
+}
+
+/// The library's photos of Ana's chat and across chats.
+fn ana_photos() -> Value {
+    json!({"kind": "photo", "chat": OPEN, "around": "top", "after": 10})
+}
+
+fn every_photo() -> Value {
+    json!({"kind": "photo", "around": "top", "after": 10})
+}
+
+/// The answers of the library's windows of Ana's chat and across chats on a fresh connection,
+/// their watch ids left out.
+async fn library_answers(bed: &Bed) -> (Value, Value) {
+    let mut watcher = bed.watcher(64);
+    let mut ana = watcher.call("library.watch", ana_photos()).await.unwrap();
+    let mut every = watcher.call("library.watch", every_photo()).await.unwrap();
+    for answer in [&mut ana, &mut every] {
+        answer.as_object_mut().unwrap().remove("watch");
+    }
+    (ana, every)
+}
+
+/// A library window shows items, not a chat, so typing reaches none, of one chat or across chats:
+/// they answer and push as they do with nobody typing, while a conversation beside them is told
+/// who's typing in its chat, a library window of that chat watched meanwhile leaving it owed what
+/// changed there, and nothing is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn library_windows_are_told_no_typing_while_a_conversation_beside_them_is() {
+    let (bed, typing, _hearing) = typing_bed(NEVER).await;
+    bed.apply(vec![
+        Change::Message(photo(OPEN, "p-ana", 11_000, OPEN)),
+        Change::Message(photo(GROUP, "p-rui", 12_000, &person(9))),
+    ])
+    .await;
+    // Their captions' words are indexed, which tells library windows, before anything is compared.
+    bed.store.indexed().await.unwrap();
+    let quiet = library_answers(&bed).await;
+    let committed = *bed.store.committed().borrow();
+    typing.heard(OPEN, OPEN, Composing);
+    typing.heard(GROUP, &person(9), Recording);
+    typed(&typing, OPEN, &["Ana"]).await;
+    typed(&typing, GROUP, &["Rui"]).await;
+
+    // Ana types in her chat and Rui records in the group, beside their photos: the library's
+    // windows answer as they did with nobody typing, with no typing of their own.
+    let typed_in = library_answers(&bed).await;
+    assert_eq!(typed_in, quiet, "the library windows' answers with someone typing");
+    let keys = |answer: &Value| {
+        let mut keys: Vec<String> = answer.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    let rows = |answer: &Value| -> Vec<String> {
+        answer["rows"].as_array().unwrap().iter().map(|row| row["id"].as_str().unwrap().to_string()).collect()
+    };
+    for answer in [&typed_in.0, &typed_in.1] {
+        assert_eq!(keys(answer), ["counts", "older", "rows", "seq", "total"], "{answer}");
+    }
+    assert_eq!(rows(&typed_in.0), ["p-ana"]);
+    assert_eq!(rows(&typed_in.1), ["p-rui", "p-ana"]);
+
+    // A connection watching only them is told none of the typing that follows, and their pushes
+    // say what they say with nobody typing.
+    let mut watcher = bed.watcher(64);
+    let ana = watcher.watch("library.watch", ana_photos()).await;
+    let every = watcher.watch("library.watch", every_photo()).await;
+    typing.heard(GROUP, &person(10), Composing);
+    typing.heard(OPEN, OPEN, Paused);
+    typed(&typing, GROUP, &["Rui", "Zé"]).await;
+    typed(&typing, OPEN, &[]).await;
+    typing.heard(OPEN, OPEN, Recording);
+    typed(&typing, OPEN, &["Ana"]).await;
+    let taken = Change::Message(Message { live: true, ..photo(OPEN, "p-ana-2", 20_000, OPEN) });
+    bed.apply(vec![taken]).await;
+    bed.store.indexed().await.unwrap();
+    let seq = *bed.store.committed().borrow();
+    watcher.settle(seq).await;
+    watcher.run_for(ms(300)).await;
+    assert!(watcher.told.is_empty(), "typing told to library windows: {:?}", watcher.told);
+    assert_eq!(watcher.windows[&ana].ids(), ["p-ana-2", "p-ana"]);
+    assert_eq!(watcher.windows[&every].ids(), ["p-ana-2", "p-rui", "p-ana"]);
+    assert!(!watcher.pushes.is_empty());
+    for (method, params) in &watcher.pushes {
+        assert_eq!(method, "library", "a {method} push to library windows: {params}");
+        let theirs = ["counts", "older", "remove", "seq", "total", "upsert", "watch"];
+        assert!(keys(params).iter().all(|key| theirs.contains(&key.as_str())), "a library push: {params}");
+    }
+
+    // A conversation of Ana's chat beside them is told who's typing there by its answer, and once
+    // she stops, by a push, though a library window of her chat is watched before the connection
+    // has heard she stopped.
+    let conversation = json!({"chat": OPEN, "around": "newest", "before": 5});
+    let conversation = watcher.call("messages.watch", conversation).await.unwrap();
+    assert_eq!(answered_typing(&conversation), want(&[(OPEN, &["Ana"])]), "{conversation}");
+    typing.heard(OPEN, OPEN, Paused);
+    typed(&typing, OPEN, &[]).await;
+    watcher.watch("library.watch", json!({"kind": "photo", "chat": OPEN, "around": "top", "after": 5})).await;
+    watcher.until_typing(&[]).await;
+    let told: Vec<&str> = watcher.told.iter().map(|(chat, _)| chat.as_str()).collect();
+    assert_eq!(told, [OPEN], "only the conversation is told, once");
+    assert_eq!(*bed.store.committed().borrow(), seq, "typing wrote nothing past the photo and its words");
     assert!(committed < seq);
 }

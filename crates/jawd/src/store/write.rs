@@ -1224,24 +1224,43 @@ fn remove_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result
 }
 
 /// Indexes up to `limit` messages from fts_backlog for search, their text and their links' words,
-/// the latest written first, stopping early when `enough` says so, given how many it has taken.
-/// They go into FTS5 in the order of its rowid, their time, since FTS5 writes out what it holds
-/// whenever a rowid comes lower than the last. Says how many it took and whether the backlog may
+/// and those that are the library's items for its search too, the latest written first, stopping
+/// early when `enough` says so, given how many it has taken. They go into FTS5 in the order of its
+/// rowid, their time, since FTS5 writes out what it holds whenever a rowid comes lower than the
+/// last. An item found by its words now changes what a library window shows, so its message's
+/// event is written, though its row is as it was. Says how many it took and whether the backlog may
 /// have more.
-pub(super) fn index(db: &Connection, limit: usize, mut enough: impl FnMut(usize) -> bool) -> Result<(usize, bool)> {
-    let mut waiting: Vec<(i64, i64)> = db
+pub(super) fn index(
+    db: &Connection,
+    stamps: &mut Stamps,
+    limit: usize,
+    mut enough: impl FnMut(usize) -> bool,
+) -> Result<(usize, bool)> {
+    let mut waiting: Vec<(i64, i64, i64)> = db
         .prepare_cached(
-            "SELECT m.t, b.n FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b JOIN messages m ON m.n = b.n",
+            "SELECT m.t, b.n, m.chat FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b
+            JOIN messages m ON m.n = b.n",
         )?
-        .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     waiting.sort_unstable();
     let mut taken = 0;
-    for (_, n) in &waiting {
+    for &(_, n, chat) in &waiting {
         db.prepare_cached(
             "INSERT INTO messages_fts (rowid, text) SELECT t, text FROM messages WHERE n = ?1 AND text IS NOT NULL",
         )?
         .execute([n])?;
+        let item = db
+            .prepare_cached(
+                "INSERT INTO library_fts (rowid, text, tags)
+                SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none'))
+                FROM messages WHERE n = ?1 AND text IS NOT NULL AND shelf IS NOT NULL",
+            )?
+            .execute([n])?;
+        if item > 0 {
+            let seq = stamps.seq(MESSAGE, Some(n));
+            stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+        }
         db.prepare_cached("DELETE FROM fts_backlog WHERE n = ?1")?.execute([n])?;
         db.prepare_cached(links::INDEX_LINKS)?.execute([n])?;
         taken += 1;
@@ -2135,9 +2154,9 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
 }
 
 /// How many bits of a message's t count messages within one millisecond.
-const SAME_MS_BITS: u32 = 20;
+pub(super) const SAME_MS_BITS: u32 = 20;
 /// The latest time a message's t can hold, in the year 2248.
-const LAST_MS: i64 = (1 << (63 - SAME_MS_BITS)) - 1;
+pub(super) const LAST_MS: i64 = (1 << (63 - SAME_MS_BITS)) - 1;
 
 /// A free t for a message sent at `at`: its millisecond, then the next count free in it.
 fn allocate(db: &Connection, at: i64) -> Result<i64> {

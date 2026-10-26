@@ -9,6 +9,7 @@ use serde_json::Value;
 
 pub mod find;
 pub mod layout;
+pub mod library;
 pub mod local;
 pub mod media;
 pub mod send;
