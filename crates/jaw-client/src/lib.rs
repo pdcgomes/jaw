@@ -212,9 +212,12 @@ pub fn describe(status: &Status) -> String {
         };
         lines.push(format!("open      {connected}{front}; notifications {}", interfaces.notifications));
         if interfaces.lane_most > 0 {
+            let requests = match interfaces.in_lanes {
+                1 => "1 request".to_string(),
+                n => format!("{n} requests"),
+            };
             lines.push(format!(
-                "lanes     {} requests, this one among them, at most {} a connection; {} lanes full, {} replies waiting for their interface to read; {} finds and saves on tasks of their own, at most {} a connection",
-                interfaces.in_lanes,
+                "lanes     {requests}, this one among them, at most {} a connection; {} lanes full, {} replies waiting for their interface to read; {} finds and saves on tasks of their own, at most {} a connection",
                 interfaces.lane_most,
                 interfaces.lanes_full,
                 interfaces.replies_waiting,

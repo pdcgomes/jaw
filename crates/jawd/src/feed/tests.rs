@@ -2548,13 +2548,24 @@ async fn with_64_requests_in_its_lane_a_connection_reads_no_more_and_drops_none(
 /// the most one holds, the lanes full and the replies waiting. It asks until the three counts are
 /// `want`, or for 10 s.
 fn lanes(asking: &mut Line, want: [u64; 3]) -> [u64; 4] {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let counts = |interfaces: &Value| {
+        let count = |name: &str| interfaces[name].as_u64().unwrap_or_else(|| panic!("no {name}: {interfaces}"));
+        [count("in_lanes"), count("lane_most"), count("lanes_full"), count("replies_waiting")]
+    };
+    counts(&interfaces_once(asking, Duration::from_secs(10), |interfaces| {
+        let said = counts(interfaces);
+        [said[0], said[2], said[3]] == want
+    }))
+}
+
+/// What `status`, asked on `asking`, says of the interfaces once `done` holds of it, or once
+/// `within` has passed.
+fn interfaces_once(asking: &mut Line, within: Duration, done: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + within;
     loop {
         let interfaces = asking.call("status", Value::Null)["interfaces"].clone();
-        let count = |name: &str| interfaces[name].as_u64().unwrap_or_else(|| panic!("no {name}: {interfaces}"));
-        let said = [count("in_lanes"), count("lane_most"), count("lanes_full"), count("replies_waiting")];
-        if [said[0], said[2], said[3]] == want || Instant::now() > deadline {
-            return said;
+        if done(&interfaces) || Instant::now() > deadline {
+            return interfaces;
         }
         std::thread::sleep(ms(20));
     }
@@ -2833,4 +2844,126 @@ async fn a_long_request_holds_up_neither_the_lane_nor_watches_and_a_connection_h
     answered.sort_unstable();
     assert_eq!(answered, (100..164).collect::<Vec<_>>());
     assert!(later.iter().all(|value| value.get("result").is_some()), "{later:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_half_closed_connection_with_long_requests_and_replies_waiting_gets_every_reply_then_ends() {
+    let bed = Bed::new(Timing { behind: Duration::from_secs(60), ..brisk() });
+    bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
+    let (socket, pushes) = serve_all_pushing(&bed).await;
+    let (mut line, _) = tokio::task::spawn_blocking(move || Line::open(&socket, None)).await.unwrap();
+
+    // Five long requests and five drafts wait on jaw.db's writer, held meanwhile, and the
+    // interface reads nothing while pushes fill jawd's queue to it, then closes its writing side.
+    let locked = Locked::on(&bed);
+    for n in 0..5u64 {
+        line.ask(10 + n, "test.wait", Value::Null);
+        line.ask(20 + n, "draft.set", json!({"chat": OPEN, "text": format!("d{n}")}));
+    }
+    tokio::time::sleep(ms(200)).await;
+    fill(&pushes).await;
+    line.stream.shutdown(std::net::Shutdown::Write).unwrap();
+    tokio::time::sleep(ms(300)).await;
+
+    // Let go, they're all answered while the first reply waits for room; once the interface
+    // reads, every reply comes, the drafts' in order, and only then does the connection end.
+    drop(locked);
+    tokio::time::sleep(ms(500)).await;
+    let (came, closed) = tokio::task::spawn_blocking(move || line.until_closed()).await.unwrap();
+    let ids: Vec<u64> = came.iter().filter_map(|value| value["id"].as_u64()).collect();
+    let drafts: Vec<u64> = ids.iter().copied().filter(|id| (20..25).contains(id)).collect();
+    let mut long: Vec<u64> = ids.iter().copied().filter(|id| (10..15).contains(id)).collect();
+    long.sort_unstable();
+    assert_eq!(drafts, (20..25).collect::<Vec<_>>(), "the drafts' replies, in order: {ids:?}");
+    assert_eq!(long, (10..15).collect::<Vec<_>>(), "the long requests' replies: {ids:?}");
+    assert_eq!(ids.len(), 10, "each once: {ids:?}");
+    assert!(closed, "jawd kept the connection open once everything was answered");
+    assert_eq!(draft(&bed).await.as_deref(), Some("d4"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_half_closed_connections_last_reply_waiting_for_room_still_comes_before_it_ends() {
+    let bed = Bed::new(Timing { behind: Duration::from_secs(60), ..brisk() });
+    bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
+    let (socket, pushes) = serve_all_pushing(&bed).await;
+    let other = socket.clone();
+    let (mut line, _) = tokio::task::spawn_blocking(move || Line::open(&socket, None)).await.unwrap();
+
+    // A draft waits on jaw.db's writer, held meanwhile; the interface closes its writing side and
+    // reads nothing while pushes fill jawd's queue to it.
+    let locked = Locked::on(&bed);
+    line.ask(20, "draft.set", json!({"chat": OPEN, "text": "d0"}));
+    tokio::time::sleep(ms(200)).await;
+    line.stream.shutdown(std::net::Shutdown::Write).unwrap();
+    fill(&pushes).await;
+
+    // Let go, the writer answers it, and its reply, the only one owed, waits for room, the
+    // connection kept for it.
+    drop(locked);
+    let waiting = tokio::task::spawn_blocking(move || lanes(&mut Line::open(&other, None).0, [1, 0, 1])).await.unwrap();
+    let counted = "in the lanes, the most, lanes full, replies waiting";
+    assert_eq!(waiting, [1, 64, 0, 1], "no reply waits, so the connection didn't stay for it: {counted}");
+
+    // Once the interface reads, the reply comes, and only then does the connection end.
+    let (came, closed) = tokio::task::spawn_blocking(move || line.until_closed()).await.unwrap();
+    let ids: Vec<u64> = came.iter().filter_map(|value| value["id"].as_u64()).collect();
+    assert_eq!(ids, [20], "the reply that waited came before the connection ended");
+    assert!(closed, "jawd kept the connection open once its reply had gone");
+    assert_eq!(draft(&bed).await.as_deref(), Some("d0"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_whose_lane_dies_ends_and_nothing_of_it_is_counted() {
+    let bed = Bed::new(brisk());
+    let socket = serve_all(&bed).await;
+    let other = socket.clone();
+
+    // A focused interface's lane task panics on its request; jawd ends the connection, so the
+    // interface connects and asks again.
+    let (came, closed) = tokio::task::spawn_blocking(move || {
+        let (mut line, _) = Line::open(&socket, None);
+        line.call("focus", json!({"focused": true}));
+        line.stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        line.ask(5, "test.panic", Value::Null);
+        line.until_closed()
+    })
+    .await
+    .unwrap();
+    assert!(closed, "jawd kept the connection whose lane died: {came:?}");
+
+    // Once it has ended, it's neither connected nor in front, and none of its requests is counted.
+    let interfaces = tokio::task::spawn_blocking(move || {
+        interfaces_once(&mut Line::open(&other, None).0, Duration::from_secs(3), |interfaces| {
+            interfaces["connected"] == 1
+        })
+    })
+    .await
+    .unwrap();
+    let counted = (&interfaces["connected"], &interfaces["focused"], &interfaces["in_lanes"]);
+    assert_eq!(counted, (&json!(1), &json!(false), &json!(1)), "only the asking status: {interfaces}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_half_closed_connection_whose_long_request_dies_is_told_and_still_ends() {
+    let bed = Bed::new(brisk());
+    let socket = serve_all(&bed).await;
+
+    // A long request's task panics, and the interface closes its writing side after a status.
+    let (came, closed) = tokio::task::spawn_blocking(move || {
+        let (mut line, _) = Line::open(&socket, None);
+        line.stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        line.ask(5, "test.panic.apart", Value::Null);
+        line.ask(6, "status", Value::Null);
+        line.stream.shutdown(std::net::Shutdown::Write).unwrap();
+        line.until_closed()
+    })
+    .await
+    .unwrap();
+
+    // The request that died is answered with an error, the status as ever, and then the
+    // connection ends.
+    let reply = |id: u64| came.iter().find(|value| value["id"] == id);
+    assert_eq!(reply(5).map(|value| &value["error"]["code"]), Some(&json!(code::INTERNAL)), "{came:?}");
+    assert!(reply(6).is_some_and(|value| value.get("result").is_some()), "{came:?}");
+    assert!(closed, "jawd kept the half-closed connection open: {came:?}");
 }

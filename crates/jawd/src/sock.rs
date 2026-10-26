@@ -236,7 +236,10 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
                 }
             }
             _ = state.stopping() => return Ok(()),
-            Some(reply) = answers.recv(), if open => {
+            reply = answers.recv(), if open => {
+                // A lane whose task has died answers nothing more, so its interface is to connect
+                // and ask again.
+                let reply = reply.context("the connection's lane stopped")?;
                 owed.answered();
                 send(&out, &reply, &mut owed, &mut session)?;
             }
@@ -355,8 +358,18 @@ fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::Unbo
 
 /// Answers `request` on a task of its own, its reply to `found` once it's done.
 fn apart(state: Arc<State>, request: Request, found: mpsc::UnboundedSender<Reply>) {
+    let id = request.id;
+    on_own_task(id, async move { answer_apart(&state, request).await }, found);
+}
+
+/// Runs `answering` on a task of its own and sends its reply to `found`, or an error if it panics:
+/// the connection counts every reply it's owed, and waits for them before it ends.
+fn on_own_task(id: u64, answering: impl Future<Output = Reply> + Send + 'static, found: mpsc::UnboundedSender<Reply>) {
     tokio::spawn(async move {
-        let _ = found.send(answer_apart(&state, request).await);
+        let reply = tokio::spawn(answering)
+            .await
+            .unwrap_or_else(|e| failed(id, Error::new(code::INTERNAL, format!("jawd failed while answering: {e}"))));
+        let _ = found.send(reply);
     });
 }
 
@@ -385,14 +398,14 @@ impl Finding {
         };
         let cancel = Arc::new(Cancel::default());
         self.0 = Some(cancel.clone());
-        tokio::spawn(async move {
-            let reply = match finder.find(find, cancel).await {
+        let finding = async move {
+            match finder.find(find, cancel).await {
                 Ok(result) => succeeded(id, &result),
                 Err(e) if e.is::<Cancelled>() => failed(id, Error::new(code::CANCELLED, e.to_string())),
                 Err(e) => failed(id, Error::new(code::INTERNAL, format!("jawd couldn't search: {e:#}"))),
-            };
-            let _ = found.send(reply);
-        });
+            }
+        };
+        on_own_task(id, finding, found);
     }
 }
 
@@ -451,9 +464,9 @@ enum Taken {
 
 /// Requests that can take long and that nothing needs in order, each answered on a task of its
 /// own: `media.save` waits for its file to be downloaded, for as long as the phone is away. In
-/// tests, `test.wait` stands in for one.
+/// tests, `test.wait` stands in for one, and `test.panic.apart` for one whose task dies.
 fn apart_method(method: &str) -> bool {
-    method == "media.save" || (cfg!(test) && method == "test.wait")
+    method == "media.save" || (cfg!(test) && (method == "test.wait" || method == "test.panic.apart"))
 }
 
 /// Takes one line from an interface: its windows, hello and focus are answered here, a find and
@@ -555,6 +568,8 @@ async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
 async fn answer(state: &State, request: Request) -> Reply {
     let id = request.id;
     match request.method.as_str() {
+        #[cfg(test)]
+        "test.panic" => panic!("the test made the lane's task panic"),
         "status" => {
             let mut status = state.status();
             status.engine.answer_us = state.ping().await;
@@ -599,6 +614,8 @@ async fn answer(state: &State, request: Request) -> Reply {
 async fn answer_apart(state: &State, request: Request) -> Reply {
     let id = request.id;
     match request.method.as_str() {
+        #[cfg(test)]
+        "test.panic.apart" => panic!("the test made a long request's task panic"),
         // A stand-in for a long request, which waits on jaw.db's writer.
         #[cfg(test)]
         "test.wait" => {
