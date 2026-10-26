@@ -44,6 +44,15 @@ pub enum Change {
         key: String,
         value: String,
     },
+    /// A frontend's settings changed together, in its domain, each as its key and its JSON, kept
+    /// as jaw's own in one step, so they're kept all or none; `at` is when they were chosen, which
+    /// a value already held doesn't change.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests keep settings until jawd serves them"))]
+    Settings {
+        domain: String,
+        values: Vec<(String, String)>,
+        at: i64,
+    },
     /// A raw row that couldn't be converted, kept in quarantine with why.
     Quarantined {
         source: &'static str,
@@ -502,6 +511,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<&[u8]>) {
         Some(Change::Members(m)) => ("members", m.chat.clone(), None),
         Some(Change::AppState { index, value }) => ("app_state", index.join(" "), Some(value.as_slice())),
         Some(Change::Remember { key, .. }) => ("remember", key.clone(), None),
+        Some(Change::Settings { domain, .. }) => ("settings", domain.clone(), None),
         Some(Change::Quarantined { source, reference, .. }) => (source, reference.clone(), None),
         Some(Change::Opened(o)) => ("opened", o.chat.clone(), None),
         Some(Change::DeleteMessage { chat, id }) => ("delete", format!("{chat} {id}"), None),
@@ -603,6 +613,17 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
             }
             db.prepare_cached("INSERT OR REPLACE INTO sync_state (key, value) VALUES (?1, ?2)")?
                 .execute(params![key, value])?;
+            Ok(false)
+        }
+        Change::Settings { domain, values, at } => {
+            let mut keep = db.prepare_cached(
+                "INSERT INTO settings (domain, key, value, at) VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT (domain, key) DO UPDATE SET value = excluded.value, at = excluded.at
+                WHERE value IS NOT excluded.value",
+            )?;
+            for (key, value) in values {
+                keep.execute(params![domain, key, value, at])?;
+            }
             Ok(false)
         }
         Change::Quarantined { source, reference, error } => {

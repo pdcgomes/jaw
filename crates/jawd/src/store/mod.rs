@@ -664,6 +664,16 @@ impl Store {
         Ok(db.query_row("SELECT value FROM sync_state WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }
 
+    /// What jaw.db holds for the setting `key` of `domain`, as its JSON, read on a connection of its
+    /// own.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read settings until jawd serves them"))]
+    pub fn setting(&self, domain: &str, key: &str) -> Result<Option<String>> {
+        let db = connect(&self.path, Role::Reader)?;
+        Ok(db
+            .query_row("SELECT value FROM settings WHERE domain = ?1 AND key = ?2", [domain, key], |r| r.get(0))
+            .optional()?)
+    }
+
     /// How many rows `table` holds, read on a connection of its own so the writer doesn't wait.
     pub fn count(&self, table: &str) -> Result<u64> {
         let db = connect(&self.path, Role::Reader)?;
@@ -3655,5 +3665,50 @@ mod tests {
         assert_eq!(store.remove_old_backups().unwrap(), 1);
         assert!(!backup.exists() && home.path().join("jaw.db").is_file());
         assert!(store.storage().backups.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_setting_is_kept_once_with_a_synced_commit_and_read_back_by_its_domain_and_key() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        assert_eq!(store.setting("jaw", "theme").unwrap(), None, "a fresh jaw.db holds no settings");
+        let keep = |domain: &str, value: &str, at| Change::Settings {
+            domain: domain.into(),
+            values: vec![("theme".into(), value.into())],
+            at,
+        };
+        let synced = store.storage().synced_commits;
+        store.apply_durable(vec![keep("jaw", "\"gruvbox\"", 1)]).await.unwrap();
+        assert_eq!(store.storage().synced_commits, synced + 1);
+        assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"gruvbox\""));
+        assert_eq!(store.setting("jaw-mac", "theme").unwrap(), None, "each domain is its own");
+        store.apply_durable(vec![keep("jaw", "\"gruvbox\"", 2)]).await.unwrap();
+        let at: i64 = query(&store, |db| {
+            Ok(db.query_row("SELECT at FROM settings WHERE domain = 'jaw' AND key = 'theme'", [], |r| r.get(0))?)
+        })
+        .await;
+        assert_eq!(at, 1, "the same value again changes nothing, not even when it was chosen");
+        store.apply_durable(vec![keep("jaw-mac", "\"nord\"", 3)]).await.unwrap();
+        assert_eq!(store.setting("jaw-mac", "theme").unwrap().as_deref(), Some("\"nord\""));
+        assert_eq!(
+            store.setting("jaw", "theme").unwrap().as_deref(),
+            Some("\"gruvbox\""),
+            "another domain's leaves it"
+        );
+        let refused = store.apply_durable(vec![keep("jaw", "not json", 4)]).await.unwrap();
+        assert_eq!(refused.quarantined, 1, "a value that isn't JSON is refused by the table's check");
+        assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"gruvbox\""));
+        let both = |messages: &str, at| Change::Settings {
+            domain: "jaw".into(),
+            values: vec![("theme".into(), "\"nord\"".into()), ("messages".into(), messages.into())],
+            at,
+        };
+        let refused = store.apply_durable(vec![both("not json", 5)]).await.unwrap();
+        assert_eq!(refused.quarantined, 1);
+        assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"gruvbox\""), "kept all or none");
+        assert_eq!(store.setting("jaw", "messages").unwrap(), None);
+        store.apply_durable(vec![both("\"irc\"", 6)]).await.unwrap();
+        assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"nord\""));
+        assert_eq!(store.setting("jaw", "messages").unwrap().as_deref(), Some("\"irc\""));
     }
 }

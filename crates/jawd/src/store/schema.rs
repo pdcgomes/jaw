@@ -728,6 +728,21 @@ pub(super) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (interface, key)
     ) STRICT, WITHOUT ROWID;
     ",
+    // 13, a schema step: each frontend's settings, one new table, which costs the same however big
+    // jaw.db is.
+    "
+    -- Class: jaw's own. Each frontend's settings, in a domain named by the client its hello gives, a
+    -- row for each setting chosen: never dropped or rebuilt, and copied as they are by any rebuild. A
+    -- setting without a row has its default. `value` is the setting's JSON, and `at` when it was
+    -- chosen, in milliseconds.
+    CREATE TABLE settings (
+        domain TEXT NOT NULL CHECK (octet_length(domain) BETWEEN 1 AND 64),
+        key TEXT NOT NULL CHECK (octet_length(key) BETWEEN 1 AND 64),
+        value TEXT NOT NULL CHECK (json_valid(value) AND octet_length(value) <= 4096),
+        at INTEGER NOT NULL,
+        PRIMARY KEY (domain, key)
+    ) STRICT, WITHOUT ROWID;
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.
