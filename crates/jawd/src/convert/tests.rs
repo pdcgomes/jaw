@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::web_message_info::StubType;
 
@@ -555,4 +557,59 @@ fn a_push_name_names_the_sender_and_a_live_lid_chat_goes_under_its_number() {
     assert_eq!(web.message_timestamp, Some((AT / 1000) as u64));
     let m = rows(&web, true).remove(0);
     assert_eq!((m.chat.as_str(), m.sender.as_deref()), (ANA, Some(ANA)));
+}
+
+/// A message row's own fields, as the protocol's fixture of one has them with a sender: a detail
+/// key named alike would come twice in the row, since its detail is flattened into it.
+fn row_fields() -> HashSet<String> {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../protocol/fixtures/messages.push.json")).unwrap();
+    let mut row: jaw_proto::windows::MessageRow =
+        serde_json::from_value(fixture["params"]["upsert"][0].clone()).unwrap();
+    row.detail.clear();
+    row.from = Some(jaw_proto::windows::From { id: "person:1".into(), name: "Ana".into(), colour: 1 });
+    serde_json::to_value(&row).unwrap().as_object().unwrap().keys().cloned().collect()
+}
+
+#[test]
+fn no_kind_of_message_has_a_detail_key_named_like_one_of_its_rows_own_fields() {
+    let fields = row_fields();
+    assert!(fields.contains("kind") && fields.contains("from") && fields.contains("status"), "{fields:?}");
+    let link = e2e::ExtendedTextMessage {
+        text: Some("see https://jaw.example".into()),
+        matched_text: Some("https://jaw.example".into()),
+        title: Some("jaw".into()),
+        ..Default::default()
+    };
+    let kinds = [
+        e2e::Message { extended_text_message: Some(Box::new(link)), ..Default::default() },
+        e2e::Message { image_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { video_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { ptv_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { audio_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { document_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { sticker_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { location_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { live_location_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { contact_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { contacts_array_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { poll_creation_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { event_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { group_invite_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { call_log_messsage: Some(Default::default()), ..Default::default() },
+        e2e::Message { album_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { keep_in_chat_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { pin_in_chat_message: Some(Default::default()), ..Default::default() },
+    ];
+    let mut with_detail = 0;
+    for m in kinds {
+        let Some(row) = rows(&info(ANA, m), true).into_iter().next() else { continue };
+        let Some(detail) = row.detail.as_deref() else { continue };
+        let detail: serde_json::Map<String, serde_json::Value> = serde_json::from_str(detail).unwrap();
+        with_detail += 1;
+        for key in detail.keys() {
+            assert!(!fields.contains(key), "a {} message's detail has {key}, which its row has of its own", row.kind);
+        }
+    }
+    assert!(with_detail >= 15, "only {with_detail} kinds came with a detail");
 }

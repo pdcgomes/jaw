@@ -138,9 +138,11 @@ fn scripted() -> Scripted {
     let (tell, told) = channel::<Told>();
     let kept = Arc::new(Mutex::new(Kept::default()));
     let (path, keeping) = (socket.clone(), kept.clone());
+    // Listening before it returns, so jaw never connects to a socket that isn't there yet.
+    let mut first = Some(UnixListener::bind(&socket).unwrap());
     std::thread::spawn(move || {
         loop {
-            let listener = UnixListener::bind(&path).unwrap();
+            let listener = first.take().unwrap_or_else(|| UnixListener::bind(&path).unwrap());
             listener.set_nonblocking(true).unwrap();
             let mut served = vec![];
             let gone = loop {
@@ -209,6 +211,14 @@ fn until(v: &mut View, rx: &Receiver<crate::run::Event>, said: &str) -> String {
         if screen.contains(said) || Instant::now() > end {
             return screen;
         }
+    }
+}
+
+#[test]
+fn the_scripted_jawd_listens_once_it_is_made() {
+    for _ in 0..20 {
+        let jawd = scripted();
+        assert!(UnixStream::connect(&jawd.socket).is_ok(), "jaw would find no jawd on {}", jawd.socket.display());
     }
 }
 
