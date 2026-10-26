@@ -779,13 +779,17 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let _instance = DemoEngine::new().start(tx).await.unwrap();
         let mut played = Vec::new();
-        while played.len() < 5 {
-            let incoming = rx.recv().await.unwrap();
-            if let Some(ack) = incoming.ack {
-                ack.send();
+        let playing = async {
+            while played.len() < 5 {
+                let incoming = rx.recv().await.unwrap();
+                if let Some(ack) = incoming.ack {
+                    ack.send();
+                }
+                played.push(incoming.event.kind.unwrap());
             }
-            played.push(incoming.event.kind.unwrap());
-        }
+        };
+        let whole = tokio::time::timeout(Duration::from_secs(10), playing).await;
+        assert!(whole.is_ok(), "the script played its five events: {played:?}");
         let messages = played.iter().filter(|kind| matches!(kind, pb::event::Kind::Message(_))).count();
         assert_eq!(messages, 3, "its messages first: {played:?}");
         let Some(pb::event::Kind::GroupChange(group)) = played.last() else { panic!("{played:?}") };

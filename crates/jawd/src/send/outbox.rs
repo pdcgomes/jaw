@@ -390,8 +390,10 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
         return Next::Done;
     }
     if row.withdrawn() {
-        settle(&inner, vec![Change::Outbox(Step::Withdrawn { outbox })]).await;
-        super::actions::withdrawn(&inner, &row.kind);
+        let applied = settle(&inner, vec![Change::Outbox(Step::Withdrawn { outbox })]).await;
+        if applied.changed > 0 {
+            super::actions::withdrawn(&inner, &row.kind);
+        }
         return Next::Done;
     }
     if row.held() {

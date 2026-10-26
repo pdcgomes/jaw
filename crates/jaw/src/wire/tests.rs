@@ -1100,8 +1100,8 @@ fn on_a_real_jawd_each_message_action_goes_with_its_chat_and_a_key_of_its_own_an
         assert!(mention, "the mention is marked: {answer}");
         answer["result"]["message"].as_str().unwrap().to_string()
     } else {
-        // jawd knows a group's members from WhatsApp's group info, which the demo engine doesn't
-        // send, so it refuses the mention, and the reply goes back to its box with jawd's reason.
+        // A jawd that doesn't know who's in the group, as one whose demo engine never says, refuses
+        // the mention, and the reply goes back to its box with jawd's reason.
         assert_eq!(answer["error"]["data"]["param"], "mentions", "{answer}");
         let screen = until(&mut v, &rx, "not sent");
         eprintln!("{screen}");

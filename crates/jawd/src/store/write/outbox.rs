@@ -2344,6 +2344,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn only_an_action_still_to_send_is_withdrawn_once_its_message_is_deleted_for_everyone() {
+        use crate::store::{Amend, Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        apply(vec![
+            Change::Remember { key: "me".into(), value: ME_JID.into() },
+            Change::Message(from_ana(ANA, "m1", 1_000)),
+        ])
+        .await
+        .unwrap();
+        apply(vec![acting(ANA, "m1", "r1", Amendment::React { emoji: "❤️".into() }, 2_000)]).await.unwrap();
+        apply(vec![acting(ANA, "m1", "r2", Amendment::React { emoji: "👍".into() }, 2_100)]).await.unwrap();
+        let outbox = |id: &'static str| {
+            store.reads().query(crate::work::Priority::Interactive, move |db| {
+                Ok(db.query_row("SELECT n FROM outbox WHERE id = ?1", [id], |r| r.get::<_, i64>(0)).optional()?)
+            })
+        };
+        let (queued, unconfirmed) = (outbox("r1").await.unwrap().unwrap(), outbox("r2").await.unwrap().unwrap());
+        // r2 may have gone: WhatsApp's answer was lost, so it waits for a receipt.
+        let waiting = Step::Unconfirmed { outbox: unconfirmed, error: "no answer".into(), until: now_ms() + 3_600_000 };
+        apply(vec![Change::Outbox(waiting)]).await.unwrap();
+        let revoke = Amend {
+            chat: ANA.into(),
+            target: "m1".into(),
+            sender: Some(ANA.into()),
+            mine: false,
+            at: 3_000,
+            what: Amendment::Revoke,
+            raw: None,
+        };
+        apply(vec![Change::Amend(revoke)]).await.unwrap();
+        let withdrawn = apply(vec![Change::Outbox(Step::Withdrawn { outbox: queued })]).await.unwrap();
+        let kept = apply(vec![Change::Outbox(Step::Withdrawn { outbox: unconfirmed })]).await.unwrap();
+        assert!(withdrawn.changed > 0 && outbox("r1").await.unwrap().is_none(), "the one still to send goes");
+        assert_eq!(kept.changed, 0, "one that may have gone isn't withdrawn");
+        assert_eq!(outbox("r2").await.unwrap(), Some(unconfirmed), "its row waits on for a receipt");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_reaction_whatsapp_has_before_jawd_knows_your_jid_waits_to_be_kept_under_it() {
         use crate::store::{Amend, Change, Lane, Store};
         let home = tempfile::tempdir().unwrap();

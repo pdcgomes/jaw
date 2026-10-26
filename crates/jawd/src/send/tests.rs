@@ -2098,28 +2098,40 @@ async fn an_outbox_full_of_messages_whatsapp_refuses_for_good_is_emptied_by_dele
         let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.busy_timeout(Duration::from_secs(5)).unwrap();
         let tx = db.transaction().unwrap();
-        for n in 0..1_000i64 {
+        // 998 messages of yours WhatsApp refused, one still to go and one waiting for a receipt.
+        let failed = (0..998).map(|n| (format!("w{n}"), "failed", "failed"));
+        let waiting =
+            [("queued".to_string(), "pending", "queued"), ("unconfirmed".to_string(), "pending", "unconfirmed")];
+        for (n, (id, status, state)) in failed.chain(waiting).enumerate() {
             tx.execute(
                 "INSERT INTO messages (chat, id, at, t, kind, mine, status, v)
-                VALUES ((SELECT n FROM chats WHERE id = ?3), ?1, ?2, ?2, 'text', 1, 'failed', 1)",
-                rusqlite::params![format!("w{n}"), n, ANA],
+                VALUES ((SELECT n FROM chats WHERE id = ?3), ?1, ?2, ?2, 'text', 1, ?4, 1)",
+                rusqlite::params![id, n as i64, ANA, status],
             )
             .unwrap();
             tx.execute(
                 "INSERT INTO outbox (message, jid, id, kind, raw, state, next_at, created_at)
-                VALUES (last_insert_rowid(), ?1, ?2, 'text', x'', 'failed', 0, 0)",
-                rusqlite::params![ANA, format!("w{n}")],
+                VALUES (last_insert_rowid(), ?1, ?2, 'text', x'', ?3, ?4, 0)",
+                rusqlite::params![ANA, id, state, now_ms() + 3_600_000],
             )
             .unwrap();
         }
         tx.commit().unwrap();
     }
-    let refused = running.call("delete", json!({ "message": "theirs", "for": "me" })).await.unwrap_err();
-    assert_eq!(refused.code, code::LIMIT, "a deletion for you that frees nothing still needs room");
+    assert_eq!(outbox_rows(&running).await.1, (1_000, 998));
+    // A deletion for you that frees nothing still needs a place: of someone else's message, which
+    // has no row, or of one of yours whose row stays, a queued one still to go as on the phone and
+    // an unconfirmed one to wait out its day.
+    for id in ["theirs", "queued", "unconfirmed"] {
+        let refused = running.call("delete", json!({ "message": id, "for": "me" })).await.unwrap_err();
+        assert_eq!(refused.code, code::LIMIT, "{id}");
+        assert_eq!(outbox_rows(&running).await.1, (1_000, 998), "{id}: no place taken");
+        assert!(row(&running, ANA, id).await.is_some(), "{id}: not deleted");
+    }
     running.call("delete", json!({ "message": "w5", "for": "me" })).await.unwrap();
     assert!(row(&running, ANA, "w5").await.is_none(), "one that frees a place is taken, full as it is");
     let (rows, waiting) = outbox_rows(&running).await;
-    assert_eq!(waiting, (1_000, 999), "its place goes to the patch that tells your other devices");
+    assert_eq!(waiting, (1_000, 997), "its place goes to the patch that tells your other devices");
     assert_eq!(rows.iter().filter(|(kind, _)| kind == "app_state").count(), 1);
     running.connection(Online);
     let told = |db: &Connection| {
@@ -2149,17 +2161,8 @@ async fn a_reaction_held_on_a_message_your_phone_then_deletes_for_everyone_isnt_
     let shown = row(&running, ANA, &id).await.unwrap();
     assert!(shown.deleted && shown.reactions.is_empty(), "nor kept on it: {:?}", shown.reactions);
     assert_eq!(stored_reactions(&running).await, 0);
-    let notice = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let push = pushes.recv().await.unwrap();
-            if push.method == "notice" {
-                return push.params["text"].as_str().unwrap().to_string();
-            }
-        }
-    })
-    .await
-    .expect("what wasn't sent is said");
-    assert_eq!(notice, "Your reaction wasn't sent: the message was deleted for everyone");
+    let said = notices(&mut pushes, Duration::from_millis(500)).await;
+    assert_eq!(said, ["Your reaction wasn't sent: the message was deleted for everyone"], "said once");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2181,6 +2184,27 @@ async fn a_reaction_on_its_way_to_a_message_deleted_for_everyone_before_it_goes_
     assert!(kinds_sent(&running).is_empty(), "{:?}", kinds_sent(&running));
     let shown = row(&running, ANA, "m1").await.unwrap();
     assert!(shown.deleted && shown.reactions.is_empty(), "{:?}", shown.reactions);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_on_its_way_to_a_message_your_phone_then_deletes_for_everyone_isnt_sent() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &id, "sent").await;
+    until_offline(&running).await;
+    running.call("edit", json!({ "message": id, "text": "chego às 21h" })).await.unwrap();
+    let mut pushes = running.pushes.subscribe();
+    running.store.apply(Lane::Live, vec![deleted_from_your_phone(&id)]).await.unwrap();
+    running.connection(Online);
+    until_stored(&running).await;
+    assert_eq!(kinds_sent(&running), ["chego às 20h"], "only the message went, not its edit");
+    let said = notices(&mut pushes, Duration::from_millis(500)).await;
+    assert_eq!(said, ["Your edit wasn't sent: the message was deleted for everyone"]);
+    let shown = row(&running, ANA, &id).await.unwrap();
+    assert!(shown.deleted && !shown.edited, "{shown:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2342,13 +2366,7 @@ async fn a_window_is_sent_the_message_again_as_an_action_on_it_is_queued_done_an
     assert_eq!(done["reactions"], thumbs);
     until_stored(&running).await;
     // WhatsApp can't be reached, so the next waits until it's seen on its way, and is refused then.
-    running.connection(jaw_proto::ConnectionState::Offline);
-    for _ in 0..500 {
-        if !*running.sending.inner.connected.borrow() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    until_offline(&running).await;
     running.call("react", json!({ "message": "m1", "emoji": "😂" })).await.unwrap();
     let laughing = json!([{ "emoji": "😂", "n": 1, "mine": true }]);
     let second = shown(&mut window, "m1", "with the next on its way", |row| row["reactions"] == laughing).await;
@@ -2466,6 +2484,31 @@ async fn until_held(running: &Running) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("no action was held for its message");
+}
+
+/// Takes WhatsApp out of reach, and waits until the sender sees it so.
+async fn until_offline(running: &Running) {
+    running.connection(jaw_proto::ConnectionState::Offline);
+    for _ in 0..500 {
+        if !*running.sending.inner.connected.borrow() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the sender never saw WhatsApp out of reach");
+}
+
+/// The notices pushed within `within`, in order.
+async fn notices(pushes: &mut broadcast::Receiver<Push>, within: Duration) -> Vec<String> {
+    let end = tokio::time::Instant::now() + within;
+    let mut said = Vec::new();
+    loop {
+        match tokio::time::timeout_at(end, pushes.recv()).await {
+            Ok(Ok(push)) if push.method == "notice" => said.push(push.params["text"].as_str().unwrap().to_string()),
+            Ok(Ok(_) | Err(broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => return said,
+        }
+    }
 }
 
 /// Message `id`'s text as its row holds it, whatever windows show over it.
