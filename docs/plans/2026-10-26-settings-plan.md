@@ -1306,12 +1306,25 @@ and these helpers and tests:
         (home, socket, store)
     }
 
+    /// The answer to a hello from `client` as jawd wrote it, since `Settings` reads an empty or
+    /// unknown value as the default.
+    fn raw_hello(socket: &Path, client: &str) -> Value {
+        let stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        let mut heard = BufReader::new(stream.try_clone().unwrap());
+        let hello = json!({"id": 1, "method": "hello", "params": {"protocol": 1, "client": client, "version": "0"}});
+        (&stream).write_all(format!("{hello}\n").as_bytes()).unwrap();
+        let mut line = String::new();
+        heard.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn hello_carries_a_domains_settings_and_each_change_is_pushed_to_its_connections_alone() {
         let (_home, socket, _store) = serving_settings().await;
         let checked = tokio::task::spawn_blocking(move || {
-            let (mut a, welcome) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
-            assert_eq!(welcome.settings, Some(Settings::default()));
+            let fresh = raw_hello(&socket, TERMINAL);
+            assert_eq!(fresh["result"]["settings"], json!({"theme": "tokyo-night", "messages": "bubbles"}));
+            let (mut a, _) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
             let (mut b, _) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
             // A client of no domain, read line by line, so a push to it would show.
             let other = std::os::unix::net::UnixStream::connect(&socket).unwrap();
