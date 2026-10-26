@@ -12,6 +12,11 @@ use tokio::sync::mpsc;
 
 use super::{Ack, BoxFuture, Commands, Engine, Incoming, Instance, Outgoing, PROTOCOL, Pending, frame, pb};
 
+/// The Go runtime's soft memory limit and garbage collection target for jaw-engine, unless jawd's
+/// own environment sets them: the engine has 80 MB steady and 200 MB during a full history sync,
+/// and the limit leaves room beside Go's heap for SQLite's memory, which Go doesn't count.
+const GO_MEMORY: [(&str, &str); 2] = [("GOMEMLIMIT", "160MiB"), ("GOGC", "50")];
+
 pub struct GoEngine {
     program: PathBuf,
     home: PathBuf,
@@ -21,6 +26,28 @@ pub struct GoEngine {
 impl GoEngine {
     pub fn new(program: PathBuf, home: PathBuf) -> GoEngine {
         GoEngine { program, home, log: "info".into() }
+    }
+
+    /// jaw-engine's command line and environment, its standard streams jawd's to read and write.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command
+            .arg("--home")
+            .arg(&self.home)
+            .arg("--log")
+            .arg(&self.log)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // Ctrl-C in jawd's terminal goes to its whole process group; jawd stops the engine.
+            .process_group(0)
+            .kill_on_drop(true);
+        for (name, value) in GO_MEMORY {
+            if std::env::var_os(name).is_none() {
+                command.env(name, value);
+            }
+        }
+        command
     }
 
     /// Where jaw-engine is: `JAW_ENGINE` if set, beside jawd as `make install` puts it, in
@@ -51,19 +78,8 @@ impl Engine for GoEngine {
 
     fn start(&self, events: mpsc::Sender<Incoming>) -> BoxFuture<'_, Result<Instance>> {
         Box::pin(async move {
-            let mut child = Command::new(&self.program)
-                .arg("--home")
-                .arg(&self.home)
-                .arg("--log")
-                .arg(&self.log)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                // Ctrl-C in jawd's terminal goes to its whole process group; jawd stops the engine.
-                .process_group(0)
-                .kill_on_drop(true)
-                .spawn()
-                .with_context(|| format!("can't start {}", self.program.display()))?;
+            let mut child =
+                self.command().spawn().with_context(|| format!("can't start {}", self.program.display()))?;
             let stdin = child.stdin.take().expect("a piped stdin");
             let stdout = child.stdout.take().expect("a piped stdout");
             let stderr = child.stderr.take().expect("a piped stderr");
@@ -189,6 +205,7 @@ async fn read(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::path::Path;
 
     use super::*;
@@ -203,6 +220,20 @@ mod tests {
         assert!(std::env::var_os("CI").is_none(), "make test builds jaw-engine before the Rust tests");
         eprintln!("skipped: {} isn't built; make engine builds it", program.display());
         None
+    }
+
+    #[test]
+    fn the_go_engine_runs_within_its_memory_unless_jawds_own_environment_says_otherwise() {
+        let engine = GoEngine::new("jaw-engine".into(), "/nowhere".into());
+        let command = engine.command();
+        let given: Vec<(&OsStr, Option<&OsStr>)> = command.as_std().get_envs().collect();
+        for (name, value) in GO_MEMORY {
+            let set = given.iter().find(|(n, _)| *n == name).and_then(|(_, v)| *v);
+            match std::env::var_os(name) {
+                None => assert_eq!(set, Some(OsStr::new(value)), "{name}"),
+                Some(_) => assert_eq!(set, None, "{name} is left as jawd's environment has it"),
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
