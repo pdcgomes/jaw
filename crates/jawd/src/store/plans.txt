@@ -132,6 +132,10 @@ SELECT j.jid FROM person_jids j JOIN group_members g ON g.chat = ?1 AND g.member
 SELECT name, push_name, verified_name FROM people WHERE n = ?1
     SEARCH people USING INTEGER PRIMARY KEY (rowid=?)
 
+-- src/send/quote.rs
+SELECT name FROM chats WHERE n = ?1
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
 -- src/send/reads.rs
 SELECT coalesce(m.keep, c.n) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n WHERE c.id = ?1
     SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
@@ -590,8 +594,8 @@ SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox WHERE NOT (state
     SCAN outbox
 
 -- src/store/write/outbox.rs
-SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target) FROM outbox o
-    (a part of a statement, planned with the rest: no such column: k.id in EXPLAIN QUERY PLAN SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target) FROM outbox o at offset 40)
+SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, 0) FROM outbox o
+    (a part of a statement, planned with the rest: no such column: k.id in EXPLAIN QUERY PLAN SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, 0) FROM outbox o at offset 40)
 
 -- src/store/write/outbox.rs
 INSERT INTO outbox (target, jid, id, kind, raw, effect, next_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING n
@@ -622,6 +626,14 @@ DELETE FROM outbox WHERE message = ?1 AND state IN ('unconfirmed', 'failed')
 -- src/store/write/outbox.rs
 DELETE FROM outbox WHERE message = ?1 AND state = 'failed'
     SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)
+
+-- src/store/write/outbox.rs
+SELECT 1 FROM outbox WHERE message = ?1 AND state = 'failed'
+    SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)
+
+-- src/store/write/outbox.rs
+SELECT 1 FROM outbox WHERE n = ?1 AND state = 'queued'
+    SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 DELETE FROM outbox WHERE message = ?1 AND state = 'failed' AND (EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.deleted) OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = ?1 AND a.kind = 'revoke' AND a.state = 'failed'))

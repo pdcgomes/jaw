@@ -395,6 +395,19 @@ async fn delete_for_me(inner: &Arc<Inner>, target: &Target, key: Option<String>)
     enqueue(inner, step, written, "delete it for you").await
 }
 
+/// Says to every interface that a reaction or an edit wasn't sent, its message having been deleted
+/// for everyone before it went.
+pub(super) fn withdrawn(inner: &Inner, kind: &str) {
+    let what = match kind {
+        "reaction" => "Your reaction",
+        "edit" => "Your edit",
+        _ => return,
+    };
+    let notice = Notice { text: format!("{what} wasn't sent: the message was deleted for everyone"), tone: Tone::Info };
+    let params = serde_json::to_value(notice).expect("jawd's own types serialize");
+    let _ = inner.pushes.send(Push { method: "notice".into(), params });
+}
+
 /// Says to every interface that WhatsApp refused an action, which the row it showed on is back as
 /// it was without; a message refused shows failed on its own row instead.
 pub(super) fn refused(inner: &Inner, kind: &str, why: &str) {

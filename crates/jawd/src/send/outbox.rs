@@ -159,6 +159,7 @@ struct Composed {
     keyed: Option<(String, String)>,
     me: Me,
     quote: Option<Quote>,
+    /// The people mentioned, as they're sent, or why one of them can't be.
     mentioned: Result<Mentioned, String>,
 }
 
@@ -221,7 +222,10 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
             quote = reply.map(|id| quote::quoted(db, *n, &id, &me)).transpose()?;
             // As WhatsApp's phones do, mentions outside a group are dropped.
             if has_members(kind) && !people.is_empty() {
-                mentioned = quote::mentioned(db, *n, &people, &text)?;
+                mentioned = match quote::mentioned(db, *n, &people, &text)? {
+                    Ok(mentioned) => Ok(mentioned),
+                    Err(person) => Err(quote::not_a_member(db, *n, &person)?),
+                };
             }
         }
         Ok(Composed { chat, keyed, me, quote, mentioned })
@@ -243,9 +247,7 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
         }
         Some(Quote::Deleted) => return Err(Error::new(code::NOT_ALLOWED, "a deleted message can't be replied to")),
     };
-    let mentioned = composed.mentioned.map_err(|person| {
-        bad_param("mentions", format!("{person} isn't in {}, so they can't be mentioned there", send.chat))
-    })?;
+    let mentioned = composed.mentioned.map_err(|why| bad_param("mentions", why))?;
     let id = message_id().map_err(|e| internal("make a message ID", e.into()))?;
     let at = now_ms();
     let raw = quote::text_message(&mentioned.text, ephemeral, quoted.as_ref(), &mentioned.jids);
@@ -385,6 +387,11 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
         }
     };
     if row.state != "queued" {
+        return Next::Done;
+    }
+    if row.withdrawn() {
+        settle(&inner, vec![Change::Outbox(Step::Withdrawn { outbox })]).await;
+        super::actions::withdrawn(&inner, &row.kind);
         return Next::Done;
     }
     if row.held() {

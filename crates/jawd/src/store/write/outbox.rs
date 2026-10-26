@@ -105,6 +105,9 @@ pub enum Step {
     /// The messages a forward sends, each a message of yours, all in one transaction or none; the
     /// interface's `key` names them all. What they came to is put in `written`.
     Forward { sending: Vec<Forwarding>, key: Option<String>, written: Written },
+    /// Action `outbox`, still to send, isn't sent, its message having been deleted for everyone
+    /// since (`Outboxed::withdrawn`): its row goes, as a refused one's does.
+    Withdrawn { outbox: i64 },
 }
 
 /// The outbox kind of an action with `effect`. An action's row, unlike a message's, is never left
@@ -208,10 +211,11 @@ const UNCONFIRMED_ROWS: &str = "SELECT n, next_at FROM outbox WHERE state = 'unc
 const WAITING: &str = "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox
     WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke'))";
 /// An outbox row as the sender takes it, with, for an action, the state of its message's own outbox
-/// row while that message is still to reach WhatsApp.
+/// row while that message is still to reach WhatsApp, and whether its message has been deleted for
+/// everyone.
 const OUTBOXED: &str = concat!(
     "SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind,
-        (SELECT w.state FROM outbox w WHERE w.message = o.target) FROM outbox o ",
+        (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, 0) FROM outbox o ",
     sent_where!()
 );
 const ACT: &str = "INSERT INTO outbox (target, jid, id, kind, raw, effect, next_at, created_at)
@@ -230,6 +234,10 @@ const ACTIONS_BY_ID: &str = "SELECT n FROM outbox WHERE id = ?1 AND kind IN ('re
 const CANCELLED: &str = "DELETE FROM outbox WHERE message = ?1 AND state IN ('unconfirmed', 'failed')";
 /// A message of yours deleted for you once it had failed has nothing left to retry.
 const FORGOTTEN: &str = "DELETE FROM outbox WHERE message = ?1 AND state = 'failed'";
+/// Whether a message of yours has a failed row, which a deletion for you of it removes.
+const FAILED_ROW: &str = "SELECT 1 FROM outbox WHERE message = ?1 AND state = 'failed'";
+/// Whether an outbox row is still to send.
+const STILL_QUEUED: &str = "SELECT 1 FROM outbox WHERE n = ?1 AND state = 'queued'";
 /// A failed message of yours that nothing can send again: deleted for everyone, or with your
 /// deletion of it kept for a late receipt.
 const UNRETRYABLE: &str = "DELETE FROM outbox WHERE message = ?1 AND state = 'failed'
@@ -344,7 +352,8 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
         | Step::Failed { outbox, .. }
         | Step::Unconfirmed { outbox, .. }
         | Step::NoReceipt { outbox, .. }
-        | Step::Retry { outbox } => ("outbox", outbox.to_string(), None),
+        | Step::Retry { outbox }
+        | Step::Withdrawn { outbox } => ("outbox", outbox.to_string(), None),
         Step::Told { chat, upto, .. } => ("told", format!("{chat} {} {}", upto.0, upto.1), None),
         Step::Regroup { chat, member } => ("regroup", format!("{chat} {member}"), None),
         Step::LetGo { message } => ("let go", message.to_string(), None),
@@ -390,6 +399,19 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
             delete_for_me(db, stamps, Forgetting { chat, target, id, raw }, key, written)
         }
         Step::Forward { sending, key, written } => forward(db, stamps, sending, key, written),
+        Step::Withdrawn { outbox } => withdrawn(db, stamps, *outbox),
+    }
+}
+
+/// An action still to send whose message was deleted for everyone goes, as a refused one does, and
+/// windows show its message without it; one that has gone to WhatsApp meanwhile stays.
+fn withdrawn(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
+    if !db.prepare_cached(STILL_QUEUED)?.exists([outbox])? {
+        return Ok(false);
+    }
+    match action(db, outbox)? {
+        Some(action) => acted(db, stamps, outbox, action, false),
+        None => Ok(false),
     }
 }
 
@@ -485,7 +507,7 @@ fn delete_for_me(
     written: &Written,
 ) -> Result<bool> {
     let Forgetting { chat, target, id, raw } = forgetting;
-    if keyed_before(db, key, written)? || full(db, written)? {
+    if keyed_before(db, key, written)? {
         return Ok(false);
     }
     let chat = chat_jid(db, chat)?;
@@ -503,6 +525,11 @@ fn delete_for_me(
         });
         return Ok(false);
     };
+    // One that removes its message's failed row takes no more room than it frees, so an outbox
+    // full of messages WhatsApp refuses for good can still be emptied.
+    if !db.prepare_cached(FAILED_ROW)?.exists([n])? && full(db, written)? {
+        return Ok(false);
+    }
     let now = now_ms();
     let outbox: i64 = db.prepare_cached(APP_STATE)?.query_row(params![chat, id, raw, now], |r| r.get(0))?;
     db.prepare_cached(PRUNE_KEYS)?.execute(params![now - KEY_KEPT_MS, KEYS_PRUNED])?;
@@ -1067,9 +1094,19 @@ pub struct Outboxed {
     /// For an action on a message of yours that's still to reach WhatsApp, the state of that
     /// message's own outbox row.
     pub behind: Option<String>,
+    /// For an action, whether its message has been deleted for everyone.
+    pub target_deleted: bool,
 }
 
 impl Outboxed {
+    /// Whether it's a reaction or an edit on a message deleted for everyone since it was asked,
+    /// which isn't sent: the phones show nothing of either on a deleted message, and jaw.db would
+    /// keep the reaction on the deleted row. Whoever deleted the message, you, your other devices,
+    /// history or whoever sent it, it's withdrawn as a refused one is.
+    pub fn withdrawn(&self) -> bool {
+        self.target_deleted && matches!(self.kind.as_str(), "reaction" | "edit")
+    }
+
     /// Whether it's an action that has to wait for its message to reach WhatsApp, so it never goes
     /// ahead of it: sent first and refused, the message would be sent again after it by
     /// `send.retry`, and its recipients left with what the action changed. A deletion for everyone
@@ -1115,6 +1152,7 @@ fn outboxed_row(r: &rusqlite::Row) -> rusqlite::Result<Outboxed> {
         status: r.get(6)?,
         kind: r.get(7)?,
         behind: r.get(8)?,
+        target_deleted: r.get(9)?,
     })
 }
 
@@ -1306,6 +1344,8 @@ mod tests {
             ("actions by ID", ACTIONS_BY_ID, "SEARCH outbox USING INDEX outbox_by_id (id=?)"),
             ("cancelled", CANCELLED, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
             ("forgotten", FORGOTTEN, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
+            ("a failed row", FAILED_ROW, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
+            ("still queued", STILL_QUEUED, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
             (
                 "unretryable",
                 UNRETRYABLE,
@@ -2556,7 +2596,9 @@ mod tests {
                 (1, 1, 'retryable', 1, 1, 'text', 1, 'failed', 1),
                 (2, 1, 'revoked', 2, 2, 'text', 1, 'failed', 1),
                 (3, 1, 'deleting', 3, 3, 'text', 1, 'failed', 1),
-                (4, 1, 'queued', 4, 4, 'text', 1, 'pending', 1);
+                (4, 1, 'queued', 4, 4, 'text', 1, 'pending', 1),
+                (5, 1, 'on its way', 5, 5, 'text', 1, 'failed', 1),
+                (6, 1, 'reacted', 6, 6, 'text', 1, 'failed', 1);
             UPDATE messages SET deleted = 1 WHERE n = 2;
             INSERT INTO outbox (message, jid, id, kind, raw, state, next_at, created_at) VALUES
                 (1, 'a@s.whatsapp.net', 'retryable', 'text', x'01', 'failed', 0, 0),
@@ -2564,9 +2606,13 @@ mod tests {
                 (2, 'a@s.whatsapp.net', 'revoked', 'text', x'03', 'failed', 0, 0),
                 (3, 'a@s.whatsapp.net', 'deleting', 'image', x'04', 'failed', 0, 0),
                 (4, 'a@s.whatsapp.net', 'queued', 'text', x'05', 'queued', 0, 0),
-                (NULL, 'a@s.whatsapp.net', 'still going', 'text', x'06', 'queued', 0, 0);
-            INSERT INTO outbox (target, jid, id, kind, raw, effect, state, next_at, created_at)
-                VALUES (3, 'a@s.whatsapp.net', 'its deletion', 'revoke', x'07', '{\"do\":\"revoke\"}', 'failed', 0, 0);",
+                (NULL, 'a@s.whatsapp.net', 'still going', 'text', x'06', 'queued', 0, 0),
+                (5, 'a@s.whatsapp.net', 'on its way', 'text', x'07', 'failed', 0, 0),
+                (6, 'a@s.whatsapp.net', 'reacted', 'text', x'08', 'failed', 0, 0);
+            INSERT INTO outbox (target, jid, id, kind, raw, effect, state, next_at, created_at) VALUES
+                (3, 'a@s.whatsapp.net', 'its deletion', 'revoke', x'09', '{\"do\":\"revoke\"}', 'failed', 0, 0),
+                (5, 'a@s.whatsapp.net', 'its deletion on its way', 'revoke', x'0a', '{\"do\":\"revoke\"}', 'queued', 0, 0),
+                (6, 'a@s.whatsapp.net', 'a kept reaction', 'reaction', x'0b', '{\"do\":\"react\",\"emoji\":\"👍\"}', 'failed', 0, 0);",
         )
         .unwrap();
         tx.pragma_update(None, "user_version", 9).unwrap();
@@ -2581,8 +2627,18 @@ mod tests {
             .unwrap();
         assert_eq!(
             left,
-            ["retryable", "queued", "still going", "its deletion"],
-            "what can still be sent or retried stays, with the deletion kept for a late receipt"
+            [
+                "retryable",
+                "queued",
+                "still going",
+                "on its way",
+                "reacted",
+                "its deletion",
+                "its deletion on its way",
+                "a kept reaction"
+            ],
+            "what can still be sent or retried stays: a message whose deletion is still on its way, one only a \
+            reaction is kept for, and the actions themselves"
         );
     }
 

@@ -57,8 +57,8 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     (
         "FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke')",
-        "the actions kept for a late receipt, pruned as one more is kept; the outbox holds at most 1,000 waiting, \
-        and 1,000 of these",
+        "the actions kept for a late receipt, pruned as one more is kept, as the writer starts and hourly; the \
+        outbox holds at most 1,000 waiting, and 1,000 of these",
     ),
     ("SELECT n FROM chats WHERE told_at IS NOT NULL", "the chats owing read receipts, once at start"),
     ("SELECT message FROM settled LIMIT", "stops at its limit"),

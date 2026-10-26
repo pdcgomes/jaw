@@ -23,6 +23,7 @@ pub(super) const MEMBER_JID: &str =
     "SELECT j.jid FROM person_jids j JOIN group_members g ON g.chat = ?1 AND g.member = j.n
     WHERE j.person = ?2 ORDER BY j.n LIMIT 1";
 pub(super) const NAMES: &str = "SELECT name, push_name, verified_name FROM people WHERE n = ?1";
+pub(super) const CHAT_NAME: &str = "SELECT name FROM chats WHERE n = ?1";
 
 /// The message a reply answers, as its quote goes to WhatsApp.
 #[derive(Clone, Debug)]
@@ -146,6 +147,28 @@ pub(super) fn mentioned(
         text = written_as(&text, &name, &user);
     }
     Ok(Ok(Mentioned { jids, text }))
+}
+
+/// Why `person`, as an interface named them, can't be mentioned in group `chat` (by n): said with
+/// their name, or their number, and the group's name, as jaw shows them, rather than IDs.
+pub(super) fn not_a_member(db: &Connection, chat: i64, person: &str) -> anyhow::Result<String> {
+    let mut who = None;
+    if let Some(n) = person.strip_prefix("person:").and_then(|n| n.parse::<i64>().ok()) {
+        let names: Option<(Option<String>, Option<String>, Option<String>)> =
+            db.prepare_cached(NAMES)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        who = names.and_then(|(name, push_name, verified)| name.or(push_name).or(verified));
+        if who.is_none() {
+            let jids: Vec<String> =
+                db.prepare_cached(PERSON_JIDS)?.query_map([n], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            who = jids.iter().find_map(|jid| jid.strip_suffix("@s.whatsapp.net")).map(|user| format!("+{user}"));
+        }
+    }
+    let group: Option<String> = db.prepare_cached(CHAT_NAME)?.query_row([chat], |r| r.get(0)).optional()?.flatten();
+    Ok(format!(
+        "{} isn't in {}, so they can't be mentioned there",
+        who.as_deref().unwrap_or(person),
+        group.as_deref().unwrap_or("this group")
+    ))
 }
 
 /// `text` with each `@name` that isn't part of a longer word written as `@user`.

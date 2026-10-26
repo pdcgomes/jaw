@@ -1484,6 +1484,23 @@ async fn mentions_go_as_whatsapp_writes_them_and_the_row_shows_each_by_name() {
         json!({ "chat": CLIMBING, "text": "@Ana olá", "mentions": [format!("person:{ana}")], "key": "compose-1" });
     let refused = running.call("send.text", stranger).await.unwrap_err();
     assert_eq!((refused.code, refused.data), (code::INVALID_PARAMS, Some(json!({ "param": "mentions" }))));
+    assert_eq!(refused.message, "Ana isn't in this group, so they can't be mentioned there", "named, not by ID");
+    let named_group = Chat { id: CLIMBING.into(), name: Some("Lisbon Climbing".into()), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(named_group)]).await.unwrap();
+    let unnamed = "351919999999@s.whatsapp.net";
+    running
+        .store
+        .apply(Lane::Live, vec![Change::Person(Person { jids: vec![unnamed.into()], ..Person::default() })])
+        .await
+        .unwrap();
+    let number = running
+        .query(move |db| {
+            Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [unnamed], |r| r.get::<_, i64>(0))?)
+        })
+        .await;
+    let params = json!({ "chat": CLIMBING, "text": "@x olá", "mentions": [format!("person:{number}")] });
+    let refused = running.call("send.text", params).await.unwrap_err();
+    assert_eq!(refused.message, "+351919999999 isn't in Lisbon Climbing, so they can't be mentioned there");
     running.chats(&[ANA]).await;
     let direct = json!({ "chat": ANA, "text": "@Ana olá", "mentions": [format!("person:{ana}")] });
     running.call("send.text", direct).await.unwrap();
@@ -2071,6 +2088,102 @@ async fn a_deletion_held_across_a_merge_goes_once_its_message_is_unconfirmed_wit
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_outbox_full_of_messages_whatsapp_refuses_for_good_is_emptied_by_deleting_them_for_you() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.chats(&[ANA]).await;
+    running.arrives(ANA, ANA, "theirs", now_ms()).await;
+    {
+        let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        let tx = db.transaction().unwrap();
+        for n in 0..1_000i64 {
+            tx.execute(
+                "INSERT INTO messages (chat, id, at, t, kind, mine, status, v)
+                VALUES ((SELECT n FROM chats WHERE id = ?3), ?1, ?2, ?2, 'text', 1, 'failed', 1)",
+                rusqlite::params![format!("w{n}"), n, ANA],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO outbox (message, jid, id, kind, raw, state, next_at, created_at)
+                VALUES (last_insert_rowid(), ?1, ?2, 'text', x'', 'failed', 0, 0)",
+                rusqlite::params![ANA, format!("w{n}")],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let refused = running.call("delete", json!({ "message": "theirs", "for": "me" })).await.unwrap_err();
+    assert_eq!(refused.code, code::LIMIT, "a deletion for you that frees nothing still needs room");
+    running.call("delete", json!({ "message": "w5", "for": "me" })).await.unwrap();
+    assert!(row(&running, ANA, "w5").await.is_none(), "one that frees a place is taken, full as it is");
+    let (rows, waiting) = outbox_rows(&running).await;
+    assert_eq!(waiting, (1_000, 999), "its place goes to the patch that tells your other devices");
+    assert_eq!(rows.iter().filter(|(kind, _)| kind == "app_state").count(), 1);
+    running.connection(Online);
+    let told = |db: &Connection| {
+        Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'app_state'", [], |r| r.get::<_, i64>(0))? == 0)
+    };
+    eventually(&running, "the patch to go", told).await;
+    running.send(ANA, "and this goes").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_held_on_a_message_your_phone_then_deletes_for_everyone_isnt_sent() {
+    let home = tempfile::tempdir().unwrap();
+    let id = crash(home.path(), "held").await;
+    let world = world();
+    world.refuse_next(1);
+    let running = Running::on(home.path(), world, true).await;
+    let unconfirmed = |db: &Connection| {
+        Ok(db.query_row("SELECT count(*) FROM outbox WHERE state = 'unconfirmed'", [], |r| r.get::<_, i64>(0))? == 1)
+    };
+    eventually(&running, "the resend's refusal", unconfirmed).await;
+    let mut pushes = running.pushes.subscribe();
+    running.call("react", json!({ "message": id, "emoji": "👍" })).await.unwrap();
+    until_held(&running).await;
+    running.store.apply(Lane::Live, vec![deleted_from_your_phone(&id)]).await.unwrap();
+    until_stored(&running).await;
+    assert_eq!(kinds_sent(&running), ["did it go?"], "the reaction isn't sent for a deleted message");
+    let shown = row(&running, ANA, &id).await.unwrap();
+    assert!(shown.deleted && shown.reactions.is_empty(), "nor kept on it: {:?}", shown.reactions);
+    assert_eq!(stored_reactions(&running).await, 0);
+    let notice = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let push = pushes.recv().await.unwrap();
+            if push.method == "notice" {
+                return push.params["text"].as_str().unwrap().to_string();
+            }
+        }
+    })
+    .await
+    .expect("what wasn't sent is said");
+    assert_eq!(notice, "Your reaction wasn't sent: the message was deleted for everyone");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_on_its_way_to_a_message_deleted_for_everyone_before_it_goes_isnt_sent() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    running.call("react", json!({ "message": "m1", "emoji": "❤️" })).await.unwrap();
+    // Ana deletes it for everyone before WhatsApp can be reached.
+    running
+        .store
+        .apply(Lane::Live, vec![Change::Amend(Amend { what: Amendment::Revoke, ..other_of(ANA, "m1") })])
+        .await
+        .unwrap();
+    running.connection(Online);
+    until_stored(&running).await;
+    assert!(kinds_sent(&running).is_empty(), "{:?}", kinds_sent(&running));
+    let shown = row(&running, ANA, "m1").await.unwrap();
+    assert!(shown.deleted && shown.reactions.is_empty(), "{:?}", shown.reactions);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_action_on_a_message_still_to_go_from_a_chat_being_merged_goes_after_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
@@ -2615,6 +2728,7 @@ fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
             "SEARCH j USING INDEX person_jids_by_person (person=?)\nSEARCH g USING COVERING INDEX group_members_by_member (member=? AND chat=?)",
         ),
         (quote::NAMES, "SEARCH people USING INTEGER PRIMARY KEY (rowid=?)"),
+        (quote::CHAT_NAME, "SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)"),
         (info::CHAT, "SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)"),
         (info::GROUP_MEMBERS, "SEARCH g USING PRIMARY KEY (chat=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?)"),
         (info::PERSON, "SEARCH people USING INTEGER PRIMARY KEY (rowid=?)"),

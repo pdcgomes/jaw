@@ -475,14 +475,14 @@ impl Real {
         }
     }
 
-    /// Whether jawd answers, linked, with the demo's two chats in its list.
+    /// Whether jawd answers, linked, with the demo's script played: its two chats in its list, the
+    /// group named, as the script's last event names it once its messages are in.
     fn ready(socket: &Path) -> bool {
         let Ok((mut connection, welcome)) = jaw_client::Connection::open(socket, "jaw-test", "0") else { return false };
         let watch = json!({ "folder": "all", "around": "top", "before": 0, "after": 10 });
+        let played = |rows: &Vec<Value>| rows.len() >= 2 && rows.iter().any(|row| row["name"] == "Lisbon Climbing");
         welcome.account.state == AccountState::Linked
-            && connection
-                .call("chats.watch", watch)
-                .is_ok_and(|v| v["rows"].as_array().is_some_and(|rows| rows.len() >= 2))
+            && connection.call("chats.watch", watch).is_ok_and(|v| v["rows"].as_array().is_some_and(played))
     }
 
     fn stop(&mut self) {

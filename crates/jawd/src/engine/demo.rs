@@ -237,6 +237,9 @@ impl DemoEngine {
             text(ana, ana, "3EB0DEMO00000001", now - 120_000, "did you get the photos from Sunday?"),
             text(climbing, "351913333333@s.whatsapp.net", "3EB0DEMO00000002", now - 60_000, "Saturday at 9?"),
             text(ana, ana, "3EB0DEMO00000003", now - 5_000, "the one at the lake"),
+            // You and the two whose phones answer what you send there, so a mention of one lands;
+            // told once the messages are in, so storing them holds none of the messages back.
+            group(climbing, "Lisbon Climbing", &[ME, MEMBERS[0], MEMBERS[1]]),
         ])
     }
 
@@ -287,6 +290,18 @@ impl Default for DemoEngine {
     fn default() -> Self {
         DemoEngine::new()
     }
+}
+
+/// Group `jid`'s name and who's in it, as WhatsApp tells of a change to a group.
+pub fn group(jid: &str, name: &str, members: &[&str]) -> pb::Event {
+    let change = pb::GroupChange {
+        jid: jid.into(),
+        timestamp_ms: now_ms(),
+        name: Some(name.into()),
+        join: members.iter().map(|member| member.to_string()).collect(),
+        ..Default::default()
+    };
+    pb::Event { seq: 0, kind: Some(pb::event::Kind::GroupChange(change)) }
 }
 
 /// A text message from `sender` in `chat`.
@@ -757,6 +772,25 @@ mod tests {
     fn download(notification: e2e::HistorySyncNotification, path: &Path) -> pb::command::Kind {
         let path = path.display().to_string();
         pb::command::Kind::HistoryDownload(pb::HistoryDownload { notification: notification.encode_to_vec(), path })
+    }
+
+    #[tokio::test]
+    async fn the_demo_says_who_is_in_its_group_once_its_messages_are_in_so_a_mention_of_one_lands() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let _instance = DemoEngine::new().start(tx).await.unwrap();
+        let mut played = Vec::new();
+        while played.len() < 5 {
+            let incoming = rx.recv().await.unwrap();
+            if let Some(ack) = incoming.ack {
+                ack.send();
+            }
+            played.push(incoming.event.kind.unwrap());
+        }
+        let messages = played.iter().filter(|kind| matches!(kind, pb::event::Kind::Message(_))).count();
+        assert_eq!(messages, 3, "its messages first: {played:?}");
+        let Some(pb::event::Kind::GroupChange(group)) = played.last() else { panic!("{played:?}") };
+        assert_eq!((group.jid.as_str(), group.name.as_deref()), ("120363012345678901@g.us", Some("Lisbon Climbing")));
+        assert_eq!(group.join, [ME, MEMBERS[0], MEMBERS[1]], "you, and the two whose phones answer what you send");
     }
 
     #[tokio::test]
