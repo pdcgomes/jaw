@@ -8,6 +8,10 @@ use crate::demo::{Clock, Demo, State};
 use crate::experiments::Experiments;
 use crate::run::{self, Event};
 use jaw_proto::layout as saved;
+use jaw_proto::settings::{Messages, Settings};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event as Input, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::sync::mpsc::Receiver;
 
@@ -39,6 +43,14 @@ fn view_kept(on: &str, width: u16, height: u16, layout: Option<(saved::Layout, u
 fn frame(v: &mut View) -> String {
     let (w, h) = v.size().unwrap();
     run::snapshot(v, w, h)
+}
+
+/// A frame's cells, each with its colours.
+fn drawn(v: &mut View) -> Buffer {
+    let (w, h) = v.size().unwrap();
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| v.draw(f)).unwrap();
+    term.backend().buffer().clone()
 }
 
 fn press(v: &mut View, rx: &Receiver<Event>, keys: &str) {
@@ -389,6 +401,22 @@ fn there_are_six_panes_at_most_and_each_needs_room() {
     press(&mut v, &rx, "<c-p>%<c-p>%");
     assert_eq!(v.panes_in_order().len(), 2, "no room for a third across");
     assert!(frame(&mut v).contains("no room to split this pane"));
+}
+
+#[test]
+fn a_theme_that_changes_draws_every_pane_again_in_its_colours() {
+    let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Bubbles };
+    let (mut v, rx, _) = view_with("panes", 160, 45);
+    press(&mut v, &rx, "<c-p>%");
+    frame(&mut v);
+    v.apply(Update::Settings(gruvbox.clone()));
+    let (mut all_along, rx, _) = view_with("panes", 160, 45);
+    all_along.apply(Update::Settings(gruvbox));
+    press(&mut all_along, &rx, "<c-p>%");
+    let (now, was) = (drawn(&mut v), drawn(&mut all_along));
+    let w = now.area.width as usize;
+    let first = now.content.iter().zip(&was.content).position(|(a, b)| a != b).map(|i| (i % w, i / w));
+    assert_eq!(first, None, "each pane as if Gruvbox had been kept all along:\n{}", frame(&mut v));
 }
 
 /// Pictures of two, three and four panes at 160 × 45 and 100 × 30, with and without the box along

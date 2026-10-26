@@ -6,6 +6,7 @@ use crate::data::{Chat, Hit, Kind, Media, Sender, Span, SpanKind};
 use crate::demo::{Clock, Demo, State};
 use crate::graphics::{Images, Protocol};
 use crate::run::{self, Event};
+use jaw_proto::settings::{Messages, Settings, SettingsSet};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{
@@ -456,7 +457,13 @@ fn once_logged_out_jaw_stays_there_whatever_the_connection_says_until_it_is_link
         assert!(screen.lines().next().unwrap().contains("jaw  logged out from another device"), "{state:?}:\n{screen}");
         assert!(screen.contains("⏎ link again") && !screen.contains("chats · All"), "{state:?}:\n{screen}");
     }
-    let hello = |connection| Update::Hello { root: String::new(), linked: false, me: vec![], connection };
+    let hello = |connection| Update::Hello {
+        root: String::new(),
+        linked: false,
+        me: vec![],
+        connection,
+        settings: Settings::default(),
+    };
     v.apply(hello(Connection::new(ConnectionState::Offline)));
     let screen = frame(&mut v);
     assert!(screen.contains("⏎ link again") && !screen.contains("It changes in"), "linking waits for Enter:\n{screen}");
@@ -570,6 +577,61 @@ fn jawds_hello_and_a_windows_rows_where_it_was_asked_to_be_are_awaited_and_pushe
     let pushed = jaw_client::Update { upsert: vec![theirs("m-new", "9", NOW, "chego já")], ..Default::default() };
     assert!(!Update::Messages { chat: open, update: pushed }.awaited());
     assert!(!Update::Chats(jaw_client::Update::default()).awaited());
+}
+
+#[test]
+fn nothing_is_drawn_before_jawd_answers_and_the_first_frame_is_in_the_theme_hello_brings() {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut v = View::new(Box::new(Demo::start(tx, Clock::Fixed(NOW), State::Online, false)));
+    v.tick();
+    assert!(!v.dirty, "nothing to draw before jawd says hello");
+    assert!(v.next_wake() <= v.born + PATIENCE, "but the loop wakes to draw once a quarter of a second has passed");
+    let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Irc };
+    v.apply(Update::Hello {
+        root: String::new(),
+        linked: true,
+        me: vec![],
+        connection: Connection::new(ConnectionState::Online),
+        settings: gruvbox.clone(),
+    });
+    assert!(v.dirty && v.awaited);
+    assert_eq!(v.theme, Theme::named("gruvbox", v.theme.truecolor));
+    assert_eq!(v.settings_shown(), &gruvbox);
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut quiet = View::new(Box::new(Demo::start(tx, Clock::Fixed(NOW), State::Online, false)));
+    quiet.born -= PATIENCE;
+    quiet.tick();
+    assert!(quiet.dirty, "a jawd that says nothing for a quarter of a second still gets a frame saying so");
+}
+
+#[test]
+fn a_change_shows_while_jawd_keeps_it_and_one_it_doesnt_keep_goes_back_and_says_why() {
+    let (mut v, _rx) = view(140, 40);
+    v.ask_settings(SettingsSet { theme: Some("nord".into()), messages: None });
+    assert_eq!(v.theme, Theme::named("nord", true), "shown at once");
+    v.apply(Update::SettingsRefused("jaw.db can't be written".into()));
+    assert_eq!(v.theme, Theme::with(true), "back to what jawd has");
+    assert!(frame(&mut v).lines().last().unwrap().contains("not kept: jaw.db can't be written"));
+    v.apply(Update::Settings(Settings { theme: "kanagawa".into(), messages: Messages::Bubbles }));
+    assert_eq!(v.theme, Theme::named("kanagawa", true), "another interface's change shows here too");
+}
+
+#[test]
+fn the_made_up_account_keeps_the_settings_asked_as_jawd_does_and_refuses_a_theme_it_doesnt_know() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let demo = Demo::start(tx, Clock::Fixed(NOW), State::Online, false);
+    let mut v = View::new(Box::new(demo.clone()));
+    v.clock = Some(NOW);
+    v.theme = Theme::with(true);
+    run::settle(&mut v, &rx);
+    let kept = Settings { theme: "gruvbox".into(), messages: Messages::Irc };
+    v.ask_settings(SettingsSet { theme: Some("gruvbox".into()), messages: Some(Messages::Irc) });
+    assert_eq!(came(&rx), [Update::Settings(kept.clone())], "answered with all of them");
+    assert_eq!(demo.settings(), kept);
+    v.ask_settings(SettingsSet { theme: Some("solarized".into()), messages: None });
+    let refused = came(&rx);
+    assert!(matches!(&refused[..], [Update::SettingsRefused(why)] if why.contains("solarized")), "{refused:?}");
+    assert_eq!(demo.settings(), kept, "and keeps what it had");
 }
 
 #[test]

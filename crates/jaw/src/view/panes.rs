@@ -614,6 +614,14 @@ impl View {
         }
     }
 
+    /// The panes without the keys forget the lines they laid out, so a new theme draws them again
+    /// in its colours.
+    pub(super) fn restyle_panes(&mut self) {
+        for parked in &mut self.panes.parked {
+            parked.laid.clear();
+        }
+    }
+
     /// A message jawd didn't take, for a chat a parked pane shows: back in that pane's box, and its
     /// draft saved with it; says whether a parked pane shows it.
     pub(super) fn give_back_in_pane(&mut self, chat: &str, key: &str, text: &str, why: &str) -> bool {

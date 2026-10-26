@@ -21,6 +21,7 @@ use crate::data::{
 use crate::fmt::{DAY, MINUTE};
 use crate::run::Event;
 use jaw_client::{Moved, Update as Window};
+use jaw_proto::settings::{Settings, SettingsSet};
 use jaw_proto::windows::Around;
 use jaw_proto::{Connection, ConnectionState, LinkStep};
 use std::collections::HashMap;
@@ -152,6 +153,8 @@ pub struct Account {
     layout: Option<(jaw_proto::layout::Layout, u64)>,
     asks: u32,
     keeps: u32,
+    /// The settings the made-up account keeps, as jawd would.
+    settings: Settings,
 }
 
 struct Shared {
@@ -220,6 +223,7 @@ impl Demo {
             layout: None,
             asks: 0,
             keeps: 0,
+            settings: Settings::default(),
         };
         let demo = Demo {
             shared: Arc::new(Shared {
@@ -338,6 +342,14 @@ impl Demo {
     }
 }
 
+#[cfg(test)]
+impl Demo {
+    /// The settings the made-up account keeps, for tests.
+    pub fn settings(&self) -> Settings {
+        self.lock().settings.clone()
+    }
+}
+
 fn live_thread(shared: &Shared) {
     let mut a = shared.account.lock().unwrap_or_else(|e| e.into_inner());
     loop {
@@ -439,7 +451,13 @@ impl Account {
     fn hello(&mut self) {
         let linked = self.state != State::Linking;
         let root = pictures::folder().display().to_string();
-        self.send(Update::Hello { root, linked, me: vec![ME.into()], connection: self.connection.clone() });
+        self.send(Update::Hello {
+            root,
+            linked,
+            me: vec![ME.into()],
+            connection: self.connection.clone(),
+            settings: self.settings.clone(),
+        });
     }
 
     fn unreachable(&mut self) {
@@ -789,6 +807,21 @@ impl Account {
             }
         }
     }
+
+    /// Keeps the settings asked, as jawd does: a theme it doesn't know is refused.
+    fn on_set_settings(&mut self, change: SettingsSet) {
+        if let Some(theme) = change.theme.as_deref().filter(|t| jaw_proto::themes::get(t).is_none()) {
+            self.send(Update::SettingsRefused(format!("jawd doesn't know the theme {theme}")));
+            return;
+        }
+        if let Some(theme) = change.theme {
+            self.settings.theme = theme;
+        }
+        if let Some(messages) = change.messages {
+            self.settings.messages = messages;
+        }
+        self.send(Update::Settings(self.settings.clone()));
+    }
 }
 
 impl Jawd for Demo {
@@ -975,6 +1008,11 @@ impl Jawd for Demo {
     fn typing(&mut self, _chat: &str, _state: Typing) {}
 
     fn focus(&mut self, _focused: bool) {}
+
+    fn set_settings(&mut self, change: &SettingsSet) {
+        let change = change.clone();
+        self.defer(move |a| a.on_set_settings(change));
+    }
 
     fn find(&mut self, id: u64, query: &str, kind: Option<FoundKind>, chat: Option<&str>, limit: usize) {
         self.ask(find::Ask { id, query: query.to_string(), kind, chat: chat.map(String::from), limit });

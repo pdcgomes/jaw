@@ -23,6 +23,7 @@ use crate::layout::{self, Shape};
 use crate::theme::Theme;
 use chrono::FixedOffset;
 use jaw_client::{Chats, Messages};
+use jaw_proto::settings::{Settings, SettingsSet};
 use jaw_proto::{Connection, ConnectionState, LinkStep};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -53,6 +54,9 @@ const LIST_ROWS: u32 = 100;
 pub const WINDOW: usize = 100;
 /// Ask for the window to move once the screen is this close to its edge.
 const EDGE: usize = 20;
+/// How long jaw waits for jawd's hello before drawing anything, so its first frame is in the
+/// theme jawd keeps rather than a flash of the default.
+pub const PATIENCE: i64 = 250;
 
 /// Whether jawd answers.
 #[derive(Clone, Debug, PartialEq)]
@@ -150,6 +154,14 @@ pub struct View {
     /// A clock that stands still, for frames that must come out the same.
     pub clock: Option<i64>,
     pub tz: FixedOffset,
+    /// jawd's settings, as hello, a push or an answer last said, and what was last asked of it
+    /// while its answer is on the way.
+    settings: Settings,
+    settings_asked: Option<Settings>,
+    /// The theme the screen is drawn in, by ID.
+    theme_id: String,
+    /// When the view was made, by the wall clock, so it draws even when jawd says nothing.
+    born: i64,
     jawd: Box<dyn Jawd>,
 
     reach: Reach,
@@ -294,6 +306,10 @@ impl View {
             no_color: crate::theme::no_color(),
             clock: None,
             tz: *chrono::Local::now().offset(),
+            settings: Settings::default(),
+            settings_asked: None,
+            theme_id: jaw_proto::themes::DEFAULT.to_string(),
+            born: chrono::Utc::now().timestamp_millis(),
             jawd,
             reach: Reach::Waiting,
             linked: None,
@@ -373,7 +389,7 @@ impl View {
             panes: panes::Panes::default(),
             layout_kept: panes::LayoutKept::default(),
             effects: vec![],
-            dirty: true,
+            dirty: false,
             awaited: false,
             quit: false,
         }
@@ -449,7 +465,7 @@ impl View {
         self.dirty = true;
         self.awaited |= update.awaited();
         match update {
-            Update::Hello { root, linked, me, connection } => {
+            Update::Hello { root, linked, me, connection, settings } => {
                 self.images.set_root(&root);
                 self.reach = Reach::Up;
                 self.linked = Some(linked);
@@ -459,6 +475,7 @@ impl View {
                 } else if linked {
                     self.logged_out = None;
                 }
+                self.settings_came(settings);
                 self.connection = connection;
                 // Connecting again, jawd's client watches every window again itself, where it was,
                 // so nothing moves.
@@ -485,6 +502,12 @@ impl View {
                     }
                 }
                 self.connection = c;
+            }
+            Update::Settings(settings) => self.settings_came(settings),
+            Update::SettingsRefused(why) => {
+                self.settings_asked = None;
+                self.restyle();
+                self.say(format!("not kept: {why}"));
             }
             Update::Link(step) => {
                 if let LinkStep::Done { phone } = &step {
@@ -679,6 +702,48 @@ impl View {
         self.link = None;
         self.link_asked = false;
         self.logged_out = Some(reason);
+    }
+
+    /// The settings the screen shows: what was last asked of jawd while its answer is on the way,
+    /// or what jawd last said.
+    pub fn settings_shown(&self) -> &Settings {
+        self.settings_asked.as_ref().unwrap_or(&self.settings)
+    }
+
+    /// jawd's settings came, in hello, a push or an answer; they're what the screen shows now.
+    fn settings_came(&mut self, settings: Settings) {
+        self.settings = settings;
+        self.settings_asked = None;
+        self.restyle();
+    }
+
+    /// Asks jawd to keep `change` for the terminal, showing it meanwhile.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests ask for a change until the settings panel does"))]
+    fn ask_settings(&mut self, change: SettingsSet) {
+        let mut asked = self.settings_shown().clone();
+        if let Some(theme) = &change.theme {
+            asked.theme = theme.clone();
+        }
+        if let Some(messages) = change.messages {
+            asked.messages = messages;
+        }
+        self.settings_asked = Some(asked);
+        self.jawd.set_settings(&change);
+        self.restyle();
+    }
+
+    /// Draws the screen in the theme it shows; a theme that changes lays every message and chat
+    /// row out again, in its colours.
+    fn restyle(&mut self) {
+        let id = self.settings_shown().theme.clone();
+        if id != self.theme_id {
+            self.theme = Theme::named(&id, self.theme.truecolor);
+            self.theme_id = id;
+            self.laid.clear();
+            self.rows_laid.clear();
+            self.restyle_panes();
+        }
+        self.dirty = true;
     }
 
     /// Opens a chat: its draft into the box, its window from the newest, typing in the box.
@@ -917,7 +982,9 @@ impl View {
     pub fn tick(&mut self) {
         let now = self.now();
         let (second, minute) = (now / 1_000, now / MINUTE);
-        if minute != self.drawn_at / 60 || (self.counting() && second != self.drawn_at) {
+        if self.reach == Reach::Waiting && self.drawn_at == 0 {
+            self.dirty |= now - self.born >= PATIENCE;
+        } else if minute != self.drawn_at / 60 || (self.counting() && second != self.drawn_at) {
             self.dirty = true;
         }
         if self.hold_until.is_some_and(|t| t <= now) {
@@ -972,6 +1039,9 @@ impl View {
         }
         if self.counting() {
             soon(Some((now / 1_000 + 1) * 1_000));
+        }
+        if self.reach == Reach::Waiting && self.drawn_at == 0 {
+            soon(Some(self.born + PATIENCE));
         }
         wake
     }

@@ -138,6 +138,14 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Value> {
             }
             json!({ "interface": "jaw", "v": kept.layout_v, "layout": kept.layout, "kept": now })
         }
+        "settings.set" if params["theme"] == "solarized" => {
+            let data = json!({ "param": "theme", "allowed": ["gruvbox", "nord"] });
+            return error(code::INVALID_PARAMS, "theme takes one of gruvbox, nord", data);
+        }
+        "settings.set" => json!({ "settings": {
+            "theme": params.get("theme").cloned().unwrap_or(json!("tokyo-night")),
+            "messages": params.get("messages").cloned().unwrap_or(json!("bubbles")),
+        } }),
         "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" => json!({}),
         _ => {
             kept.refused.push(method.clone());
@@ -447,6 +455,23 @@ fn drafts_and_read_positions_jawd_missed_are_asked_for_again_once_it_is_back_the
         [&Update::Notice("not sent again: jawd has nothing of yours waiting to send as 3EB0GONE".into())],
         "only the retry jawd turned down says so"
     );
+}
+
+#[test]
+fn the_settings_hello_brings_and_jawd_keeps_come_back_and_one_it_refuses_says_why() {
+    let jawd = scripted();
+    let (tx, rx) = channel();
+    let mut wire = Wire::connect(jawd.socket.clone(), tx);
+    let mut said = vec![];
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+    assert!(said.iter().any(|u| matches!(u, Update::Hello { settings, .. } if settings.theme == "tokyo-night")));
+    wire.set_settings(&SettingsSet { theme: Some("gruvbox".into()), messages: None });
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Settings(_))));
+    assert!(said.iter().any(|u| matches!(u, Update::Settings(s) if s.theme == "gruvbox")));
+    wire.set_settings(&SettingsSet { theme: Some("solarized".into()), messages: None });
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::SettingsRefused(_))));
+    assert!(said.iter().any(|u| matches!(u, Update::SettingsRefused(why) if why.contains("theme takes one of"))));
+    assert_eq!(jawd.asked("settings.set"), [json!({ "theme": "gruvbox" }), json!({ "theme": "solarized" })]);
 }
 
 #[test]

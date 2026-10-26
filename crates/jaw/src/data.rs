@@ -7,6 +7,7 @@
 pub use jaw_client::Place;
 use jaw_client::{Row, Update as Window};
 use jaw_proto::layout::{Layout, Saved};
+use jaw_proto::settings::{Settings, SettingsSet};
 use jaw_proto::{Connection, LinkStep};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -777,8 +778,15 @@ pub enum Update {
         /// Every identity of yours: your person ID, and the JID your number makes.
         me: Vec<String>,
         connection: Connection,
+        /// The terminal's settings, as jawd keeps them in the jaw domain, or the defaults when hello
+        /// brings none.
+        settings: Settings,
     },
     Connection(Connection),
+    /// jawd's settings, as a push or `settings.set`'s answer carries them: all of them.
+    Settings(Settings),
+    /// jawd didn't keep the settings asked, and why.
+    SettingsRefused(String),
     Link(LinkStep),
     /// The chat list's window: a watch's or a move's rows, or a push, as jaw-client's models take
     /// them.
@@ -898,12 +906,13 @@ pub enum Update {
 }
 
 impl Update {
-    /// Whether the screen is waiting for this: jawd's hello, or a window's rows where it was asked
-    /// to be, as when a chat opens. The loop draws it at once, as it does a key, rather than at the
-    /// next frame.
+    /// Whether the screen is waiting for this: jawd's hello, the settings, or a window's rows where
+    /// it was asked to be, as when a chat opens. The loop draws it at once, as it does a key, rather
+    /// than at the next frame.
     pub fn awaited(&self) -> bool {
         match self {
             Update::Hello { .. } | Update::Layout(_) => true,
+            Update::Settings(_) => true,
             Update::Chats(window) => window.moved.is_some(),
             Update::Messages { update, .. } | Update::QuickLook { update, .. } => update.moved.is_some(),
             Update::Folders { whole, .. } | Update::Roster { whole, .. } => *whole,
@@ -1033,6 +1042,9 @@ pub trait Jawd {
     fn typing(&mut self, chat: &str, state: Typing);
     /// Whether the terminal is in front, so jawd says you're online only while it is.
     fn focus(&mut self, focused: bool);
+    /// Asks jawd to keep these settings for the terminal; they come back as `Update::Settings`, or
+    /// `Update::SettingsRefused` with why.
+    fn set_settings(&mut self, change: &SettingsSet);
     /// Starts linking by QR code, or by a code typed on the phone for `phone`.
     fn link_start(&mut self, phone: Option<String>);
     /// The palette's search, numbered so only the answer to the latest is kept: one kind or all

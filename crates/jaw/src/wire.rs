@@ -12,6 +12,7 @@ use crate::run::Event;
 use jaw_client::{Client, Config, Event as From, Failure, WindowId};
 use jaw_proto::find::{Find, Kind};
 use jaw_proto::layout::{Layout, Saved};
+use jaw_proto::settings::{SettingsKept, SettingsSet};
 use jaw_proto::{AccountState, LinkStart, code};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -76,6 +77,8 @@ enum Asked {
     StartChat,
     /// Playing or recording a voice message, which the interface stops showing if it's refused.
     Voice,
+    /// A change to the settings, which the interface shows until jawd answers.
+    Settings,
     /// A message's receipts, for the sheet waiting for them.
     Info(String),
     /// A chat's members, for completing `@` names; refused, the interface uses who it's seen.
@@ -383,6 +386,7 @@ impl Wire {
             Asked::Did(what) => Some(Update::Notice(why_not(failure, what))),
             Asked::StartChat => Some(Update::NotStarted(failure.to_string())),
             Asked::Voice => Some(Update::VoiceRefused(why_not(failure, "voice"))),
+            Asked::Settings => Some(Update::SettingsRefused(why_not(failure, "settings"))),
             Asked::Info(message) => Some(Update::Info { message, info: Err(why_not(failure, "a message's info")) }),
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
             Asked::Folders | Asked::Roster(_) => None,
@@ -450,6 +454,7 @@ impl Wire {
                     linked: w.account.state == AccountState::Linked,
                     me,
                     connection: w.connection,
+                    settings: w.settings.unwrap_or_default(),
                 });
                 self.ask_again(out);
             }
@@ -512,6 +517,11 @@ impl Wire {
                             }
                         }
                     }
+                    (Asked::Settings, Ok(result)) => {
+                        if let Ok(kept) = serde_json::from_value::<SettingsKept>(result) {
+                            out.push(Update::Settings(kept.settings));
+                        }
+                    }
                     (asked, Err(failure)) => out.extend(self.refused(asked, &failure)),
                     _ => {}
                 }
@@ -545,6 +555,9 @@ impl Wire {
                 if let Some(text) = push.params["text"].as_str() {
                     out.push(Update::Notice(text.to_string()));
                 }
+            }
+            From::Push(push) if push.method == "settings" => {
+                out.extend(serde_json::from_value(push.params).ok().map(Update::Settings));
             }
             From::Push(push) if push.method == "library" => {
                 if let Some((ask, Some(w))) = &self.library
@@ -783,6 +796,11 @@ impl Jawd for Wire {
         if let Ok(id) = self.client.focus(focused) {
             self.asked.insert(id, Asked::Quiet);
         }
+    }
+
+    fn set_settings(&mut self, change: &SettingsSet) {
+        let params = serde_json::to_value(change).unwrap_or(Value::Null);
+        self.ask("settings.set", params, Asked::Settings);
     }
 
     fn link_start(&mut self, phone: Option<String>) {
