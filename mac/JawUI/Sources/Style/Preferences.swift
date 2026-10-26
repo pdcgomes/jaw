@@ -66,11 +66,17 @@ public final class Preferences {
     public var font: MessageFont { didSet { save() } }
     public var appearance: Appearance { didSet { save() } }
     public var theme: String { didSet { save() } }
+    /// How much panes without the keys are dimmed, 0 to 0.6.
+    public var paneDim: Double { didSet { save() } }
+    /// Whether the focused pane is outlined, and in what colour: nil for the theme's accent.
+    public var paneOutline: Bool { didSet { save() } }
+    public var paneOutlineColour: RGBA? { didSet { save() } }
 
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored public var changed: [() -> Void] = []
 
     public static let textSizes: ClosedRange<CGFloat> = 11 ... 17
+    public static let paneDims: ClosedRange<Double> = 0 ... 0.6
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -81,6 +87,9 @@ public final class Preferences {
         font = MessageFont(rawValue: defaults.string(forKey: "font") ?? "") ?? .system
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .system
         theme = defaults.string(forKey: "theme") ?? Catalog.jaw.id
+        paneDim = defaults.object(forKey: "paneDim") == nil ? 0.18 : min(max(defaults.double(forKey: "paneDim"), 0), 0.6)
+        paneOutline = defaults.object(forKey: "paneOutline") == nil ? true : defaults.bool(forKey: "paneOutline")
+        paneOutlineColour = defaults.object(forKey: "paneOutlineColour") == nil ? nil : RGBA(UInt32(truncatingIfNeeded: defaults.integer(forKey: "paneOutlineColour")))
     }
 
     func save() {
@@ -90,6 +99,9 @@ public final class Preferences {
         defaults.set(font.rawValue, forKey: "font")
         defaults.set(appearance.rawValue, forKey: "appearance")
         defaults.set(theme, forKey: "theme")
+        defaults.set(paneDim, forKey: "paneDim")
+        defaults.set(paneOutline, forKey: "paneOutline")
+        if let c = paneOutlineColour { defaults.set(Int(c.hex), forKey: "paneOutlineColour") } else { defaults.removeObject(forKey: "paneOutlineColour") }
         for change in changed {
             change()
         }
@@ -107,6 +119,11 @@ public final class Preferences {
     public func style(dark: Bool) -> Style {
         Style(roles: Catalog.family(theme).roles(dark: dark), look: look, density: density, textSize: textSize,
               font: font)
+    }
+
+    /// How the panes say which has the keys, in a theme's roles.
+    public func paneLook(_ roles: Roles) -> PaneLook {
+        PaneLook(dim: paneDim, outline: paneOutline ? paneOutlineColour ?? roles.accent : nil)
     }
 
     public var nsAppearance: NSAppearance? {

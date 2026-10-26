@@ -337,6 +337,7 @@ final class AppModel {
         let c = ConversationController(chat: chat, spec: spec, layouts: layouts, place: place)
         c.host = self
         c.notice = { [weak self] in self?.say($0) }
+        c.avatar = window?.chatList.avatar(for: chat)
         c.headerMenu = Menus.menu(["split.across", "split.down", "pane.close", "swap.left", "swap.right", "swap.up", "swap.down"]
             .compactMap(command))
         _ = c.view

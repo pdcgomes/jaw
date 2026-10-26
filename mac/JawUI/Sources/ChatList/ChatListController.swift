@@ -64,6 +64,7 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        Scrolling.style(scroll)
         scroll.drawsBackground = false
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification,
@@ -191,6 +192,11 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
     }
 
     // MARK: The table
+
+    /// A chat's picture, from the list's cache of jawd's avatars.
+    public func avatar(for chat: ChatRow) -> NSImage? {
+        avatars.image(chat.avatar, root: root)
+    }
 
     /// A chat dragged out of the list, onto a pane.
     public func tableView(_: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
@@ -339,6 +345,11 @@ final class ChatCell: NSView {
             badgeRight -= badge("@", right: badgeRight, fill: roles.mention, roles) + 4
         }
         line(chat, roles).draw(in: NSRect(x: x, y: 30, width: max(badgeRight - x - 4, 10), height: 17))
+        if chat.typing.isEmpty, chat.draft?.isEmpty ?? true, let last = chat.last, last.mine, let (count, colour) = Ticks.of(last.status, roles),
+           let ctx = NSGraphicsContext.current?.cgContext
+        {
+            Ticks.draw(count, x: x, baseline: 43, size: 12, colour: colour.cgColor, in: ctx)
+        }
     }
 
     var truncating: NSParagraphStyle {
@@ -366,14 +377,15 @@ final class ChatCell: NSView {
             return out
         }
         if last.mine, let status = last.status {
-            let (tick, colour): (String, RGBA) = switch status {
-            case .pending: ("◷ ", roles.tertiary)
-            case .sent: ("✓ ", roles.tertiary)
-            case .delivered: ("✓✓ ", roles.tertiary)
-            case .read, .played: ("✓✓ ", roles.accent)
-            case .failed: ("! ", roles.failed)
+            if let (count, _) = Ticks.of(status, roles) {
+                // Room for the ticks, drawn over it by `draw`.
+                let room = Ticks.width(count, size: 12) + 4
+                out.append(NSAttributedString(string: " ", attributes: quiet.merging([.kern: room - 3.4]) { $1 }))
+            } else if status == .pending {
+                out.append(NSAttributedString(string: "◷ ", attributes: quiet.merging([.foregroundColor: roles.tertiary.nsColor]) { $1 }))
+            } else {
+                out.append(NSAttributedString(string: "! ", attributes: quiet.merging([.foregroundColor: roles.failed.nsColor]) { $1 }))
             }
-            out.append(NSAttributedString(string: tick, attributes: quiet.merging([.foregroundColor: colour.nsColor, .kern: tick.hasPrefix("✓✓") ? -3 : 0]) { $1 }))
         }
         if chat.kind.isGroup, let from = last.from, !last.mine {
             out.append(NSAttributedString(string: "\(from): ", attributes: quiet.merging([.foregroundColor: roles.text.opacity(0.8).nsColor]) { $1 }))
@@ -406,33 +418,7 @@ final class ChatCell: NSView {
     }
 
     func drawAvatar(_ chat: ChatRow, in rect: NSRect, _ roles: Roles) {
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(ovalIn: rect).addClip()
-        if let avatar {
-            avatar.draw(in: rect)
-        } else {
-            let colour = roles.sender(Self.colour(chat.id))
-            colour.opacity(0.85).nsColor.setFill()
-            rect.fill()
-            let initials = Self.initials(chat.name)
-            let s = NSAttributedString(string: initials, attributes: [
-                .font: TextStyle.heading.nsFont,
-                .foregroundColor: (roles.isDark ? roles.ground : RGBA(0xFFFFFF)).nsColor,
-            ])
-            let size = s.size()
-            s.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
-        }
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    static func initials(_ name: String) -> String {
-        let words = name.split(separator: " ").filter { $0.first?.isLetter ?? false }
-        let letters = words.prefix(2).compactMap(\.first).map(String.init).joined()
-        return letters.isEmpty ? String(name.prefix(1)) : letters.uppercased()
-    }
-
-    static func colour(_ id: String) -> Int {
-        id.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF } % 8
+        Avatar.draw(chat.name, id: chat.id, image: avatar, in: rect, roles: roles)
     }
 }
 

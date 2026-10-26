@@ -9,9 +9,9 @@ import SwiftUI
 /// need you, three of each of at most four, from windows watched only while it's open, as the
 /// spike's are. Nothing is marked read; Enter goes to a chat, ⌘↩ opens it in a new pane.
 @MainActor
-final class Glance: NSObject, NSPopoverDelegate {
+final class Glance: NSObject {
     weak var model: AppModel?
-    var popover: NSPopover?
+    let panel = FloatingPanel()
     var windows: [WindowID: String] = [:]
     let state = GlanceState()
 
@@ -19,13 +19,14 @@ final class Glance: NSObject, NSPopoverDelegate {
     static let lines: UInt32 = 3
 
     var isOpen: Bool {
-        popover?.isShown ?? false
+        panel.isVisible
     }
 
-    func show(relativeTo anchor: NSView, roles: Roles) {
+    /// Shows the glance centred in `window`, or closes it when it's open.
+    func show(over window: NSWindow, roles: Roles) {
         guard let model else { return }
         if isOpen {
-            popover?.close()
+            panel.close()
             return
         }
         state.chats = Array(model.needs.prefix(Self.chats))
@@ -34,14 +35,24 @@ final class Glance: NSObject, NSPopoverDelegate {
         for chat in state.chats {
             windows[model.jawd.watchMessages(chat.id, .newest(Self.lines))] = chat.id
         }
+        let size = NSSize(width: GlanceView.width, height: GlanceView.height(state.chats.count))
         let view = GlanceView(state: state, roles: roles, go: { [weak self] chat, pane in self?.go(chat, newPane: pane) })
-        let host = NSHostingController(rootView: view)
-        let p = NSPopover()
-        p.contentViewController = host
-        p.behavior = .transient
-        p.delegate = self
-        p.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
-        popover = p
+        panel.keys = { [weak self] event in self?.key(event) ?? false }
+        panel.closed = { [weak self] in self?.closed() }
+        panel.show(NSHostingView(rootView: view), size: size, over: window)
+    }
+
+    /// ↑ and ↓ move, Return goes to the chat and ⌘Return opens it in a new pane.
+    func key(_ event: NSEvent) -> Bool {
+        switch event.keyCode {
+        case 125: state.index = min(state.index + 1, max(state.chats.count - 1, 0))
+        case 126: state.index = max(state.index - 1, 0)
+        case 36, 76:
+            guard state.index < state.chats.count else { return false }
+            go(state.chats[state.index], newPane: event.modifierFlags.contains(.command))
+        default: return false
+        }
+        return true
     }
 
     func apply(_ window: WindowID, _ update: Update<MessageRow>) {
@@ -61,7 +72,7 @@ final class Glance: NSObject, NSPopoverDelegate {
     }
 
     func go(_ chat: ChatRow, newPane: Bool) {
-        popover?.close()
+        panel.close()
         guard let model else { return }
         if newPane, model.grid != nil, model.panes[chat.id] == nil {
             model.split(.across, with: chat)
@@ -70,12 +81,11 @@ final class Glance: NSObject, NSPopoverDelegate {
         }
     }
 
-    func popoverDidClose(_: Notification) {
+    func closed() {
         for w in windows.keys {
             model?.jawd.unwatch(w)
         }
         windows.removeAll()
-        popover = nil
     }
 }
 
@@ -90,7 +100,6 @@ struct GlanceView: View {
     @Bindable var state: GlanceState
     let roles: Roles
     let go: (ChatRow, Bool) -> Void
-    @FocusState var focused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -102,20 +111,16 @@ struct GlanceView: View {
             }
             Text("↩ goes to it · ⌘↩ in a new pane · nothing is marked read").textStyle(.micro).foregroundStyle(roles.tertiary.color)
         }
-        .padding(14)
-        .frame(width: 460)
-        .background(roles.ground.color)
-        .focusable()
-        .focused($focused)
-        .onAppear { focused = true }
-        .onKeyPress(.downArrow) { state.index = min(state.index + 1, max(state.chats.count - 1, 0)); return .handled }
-        .onKeyPress(.upArrow) { state.index = max(state.index - 1, 0); return .handled }
-        .onKeyPress(.return, phases: .down) { press in
-            guard state.index < state.chats.count else { return .ignored }
-            go(state.chats[state.index], press.modifiers.contains(.command))
-            return .handled
-        }
-        .focusEffectDisabled()
+        .padding(Space.l + 2)
+        .frame(width: Self.width, height: Self.height(state.chats.count), alignment: .top)
+        .panel(roles)
+    }
+
+    static let width: CGFloat = 460
+
+    /// Room for each chat's card and its three latest lines, and the hint.
+    static func height(_ chats: Int) -> CGFloat {
+        CGFloat(max(chats, 1)) * 86 + 56
     }
 
     func card(_ chat: ChatRow, selected: Bool) -> some View {

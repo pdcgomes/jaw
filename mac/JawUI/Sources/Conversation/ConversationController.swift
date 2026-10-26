@@ -52,7 +52,16 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     var unreadAtOpen: Int
     var lastRead: (id: String, at: Date)?
     public var members: [ChatInfo.Member] = [] {
-        didSet { composer.members = members }
+        didSet {
+            composer.members = members
+            header.members = members.count
+            header.show(chat)
+        }
+    }
+
+    /// The chat's picture, from the chat list's cache.
+    public var avatar: NSImage? {
+        didSet { header.avatar.show(chat.name, id: chat.id, image: avatar, roles: spec.style.roles) }
     }
 
     let scroll = NSScrollView()
@@ -114,6 +123,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         table.style = .plain
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        Scrolling.style(scroll)
         scroll.drawsBackground = false
         scroll.automaticallyAdjustsContentInsets = false
         scroll.contentInsets = NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
@@ -130,7 +140,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             guard let self else { return }
             host?.conversationFocused(self)
         }
-        for v in [header, scroll, newPill] as [NSView] {
+        for v in [scroll, header, newPill] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -138,8 +148,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             header.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            header.heightAnchor.constraint(equalToConstant: 48),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor),
+            header.heightAnchor.constraint(equalToConstant: ConversationHeader.height),
+            scroll.topAnchor.constraint(equalTo: root.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -158,6 +168,12 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
 
     override public func viewDidLayout() {
         super.viewDidLayout()
+        // The transcript runs under the header, which floats over it, and under the toolbar.
+        let top = view.safeAreaInsets.top + ConversationHeader.height + Space.m
+        if abs(scroll.contentInsets.top - top) >= 0.5 {
+            scroll.contentInsets = NSEdgeInsets(top: top, left: 0, bottom: Space.m, right: 0)
+            scroll.scrollerInsets = NSEdgeInsets(top: top - Space.m, left: 0, bottom: 0, right: 0)
+        }
         let width = layoutWidth
         if abs(width - lastWidth) >= 1 {
             lastWidth = width
@@ -884,25 +900,57 @@ final class PillButton: NSButton {
     static let height: CGFloat = 26
 }
 
-/// The conversation's header: the chat's name, and how it is.
+/// The header's height, over the transcript.
+enum ConversationHeader {
+    static let height: CGFloat = 44
+}
+
+/// The conversation's header, floating over the transcript: the chat's picture, its name, and how
+/// it is (typing, online or last seen once jawd says presence, muted, a group's members), on a
+/// translucent bar the messages scroll under.
 final class HeaderView: NSView {
-    let name = Labels.make("", .heading)
+    let blur = NSVisualEffectView()
+    let tint = NSView()
+    let rule = NSView()
+    let avatar = AvatarView()
+    let name = Labels.make("", .body)
     let detail = Labels.make("", .caption)
+    var members = 0
+    /// What jawd says of the person's presence, "online" or "last seen 14:02", for a chat with one.
+    var presence: String?
     var roles: Roles? {
         didSet { colour() }
     }
 
     init() {
         super.init(frame: .zero)
+        name.font = TextStyle.body.emphasised
+        blur.blendingMode = .withinWindow
+        blur.material = .headerView
+        blur.state = .active
+        tint.wantsLayer = true
+        rule.wantsLayer = true
         let stack = NSStackView(views: [name, detail])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 1
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        stack.spacing = 0
+        for v in [blur, tint, rule, avatar, stack] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        let side: CGFloat = 28
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.xl),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Space.xl),
+            blur.topAnchor.constraint(equalTo: topAnchor), blur.bottomAnchor.constraint(equalTo: bottomAnchor),
+            blur.leadingAnchor.constraint(equalTo: leadingAnchor), blur.trailingAnchor.constraint(equalTo: trailingAnchor),
+            tint.topAnchor.constraint(equalTo: topAnchor), tint.bottomAnchor.constraint(equalTo: bottomAnchor),
+            tint.leadingAnchor.constraint(equalTo: leadingAnchor), tint.trailingAnchor.constraint(equalTo: trailingAnchor),
+            rule.leadingAnchor.constraint(equalTo: leadingAnchor), rule.trailingAnchor.constraint(equalTo: trailingAnchor),
+            rule.bottomAnchor.constraint(equalTo: bottomAnchor), rule.heightAnchor.constraint(equalToConstant: Stroke.hairline),
+            avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l + 2),
+            avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
+            avatar.widthAnchor.constraint(equalToConstant: side), avatar.heightAnchor.constraint(equalToConstant: side),
+            stack.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: Space.m + 2),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -(Space.xxl + Space.xl)),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -913,23 +961,29 @@ final class HeaderView: NSView {
     }
 
     var typing = false
+    var online = false
 
     func show(_ chat: ChatRow) {
         name.stringValue = chat.name
         typing = !chat.typing.isEmpty
+        online = !typing && presence == "online"
         var parts: [String] = []
         if typing { parts.append(chat.kind.isGroup ? "someone's typing…" : "typing…") }
+        if !typing, let presence { parts.append(presence) }
+        if chat.kind.isGroup, !typing { parts.append(members > 0 ? "\(members) members" : "group") }
         if chat.muted { parts.append("muted") }
-        if parts.isEmpty, chat.kind.isGroup { parts.append("group") }
         detail.stringValue = parts.joined(separator: " · ")
         detail.isHidden = parts.isEmpty
         setAccessibilityLabel("\(chat.name), \(detail.stringValue)")
+        if let roles { avatar.show(chat.name, id: chat.id, image: avatar.image, roles: roles) }
         colour()
     }
 
     func colour() {
         guard let roles else { return }
+        tint.layer?.backgroundColor = roles.ground.opacity(0.72).cgColor
+        rule.layer?.backgroundColor = roles.separator.opacity(0.7).cgColor
         name.textColor = roles.text.nsColor
-        detail.textColor = typing ? roles.online.nsColor : roles.secondary.nsColor
+        detail.textColor = typing || online ? roles.online.nsColor : roles.secondary.nsColor
     }
 }

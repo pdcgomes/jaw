@@ -73,8 +73,9 @@ public final class GridView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// Shows `grid`, each slot holding its chat's view, or the empty pane.
-    public func show(_ grid: PaneGrid, views: [Int: NSView], focused: Int?, roles: Roles) {
+    /// Shows `grid`, each slot holding its chat's view, or the empty pane, the focused one as
+    /// `look` says.
+    public func show(_ grid: PaneGrid, views: [Int: NSView], focused: Int?, roles: Roles, look: PaneLook = PaneLook()) {
         self.grid = grid
         self.focused = focused
         self.roles = roles
@@ -90,7 +91,7 @@ public final class GridView: NSView {
                 frames[slot.id] = f
                 return f
             }()
-            frame.show(views[slot.id], roles: roles, focused: many && slot.id == focused, closable: many)
+            frame.show(views[slot.id], roles: roles, focused: slot.id == focused, many: many, look: look)
         }
         for (id, frame) in frames where grid.slot(id) == nil {
             frame.removeFromSuperview()
@@ -143,10 +144,20 @@ public final class GridView: NSView {
     override public func layout() {
         super.layout()
         guard let grid else { return }
-        let half = Stroke.hairline / 2
         for (id, rect) in grid.frames(in: bounds) {
-            frames[id]?.frame = rect.insetBy(dx: half, dy: half).integral
+            frames[id]?.frame = Self.place(rect, in: bounds)
         }
+    }
+
+    /// A pane's frame: on whole points, a hairline short of each edge it shares with another pane,
+    /// so the gutter shows the grid's background, the theme's separator.
+    nonisolated static func place(_ rect: CGRect, in bounds: CGRect) -> CGRect {
+        var r = CGRect(x: rect.minX.rounded(), y: rect.minY.rounded(), width: 0, height: 0)
+        r.size.width = rect.maxX.rounded() - r.minX
+        r.size.height = rect.maxY.rounded() - r.minY
+        if r.maxX < bounds.maxX - 0.5 { r.size.width -= Stroke.hairline }
+        if r.maxY < bounds.maxY - 0.5 { r.size.height -= Stroke.hairline }
+        return r
     }
 
     override public func resetCursorRects() {
@@ -203,6 +214,7 @@ final class SlotFrame: NSView {
     let id: Int
     var content: NSView?
     let empty = EmptyPane()
+    let shade = Shade()
     lazy var closeButton = IconButton(symbol: "xmark", label: "Close Pane", shortcut: Shortcut("w"), size: .small) { [weak self] in
         self?.closing?()
     }
@@ -218,10 +230,16 @@ final class SlotFrame: NSView {
         wantsLayer = true
         empty.picked = { [weak self] in self?.picked?() }
         closeButton.isHidden = true
+        shade.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(shade)
         addSubview(closeButton)
         NSLayoutConstraint.activate([
+            shade.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
+            shade.bottomAnchor.constraint(equalTo: bottomAnchor),
+            shade.leadingAnchor.constraint(equalTo: leadingAnchor),
+            shade.trailingAnchor.constraint(equalTo: trailingAnchor),
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.l),
-            closeButton.centerYAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: Space.xxl),
+            closeButton.centerYAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: ConversationHeader.height / 2),
         ])
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
@@ -231,14 +249,15 @@ final class SlotFrame: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func show(_ view: NSView?, roles: Roles, focused: Bool, closable: Bool) {
+    func show(_ view: NSView?, roles: Roles, focused: Bool, many: Bool, look: PaneLook) {
+        let closable = many
         let shown = view ?? empty
         if content !== shown || shown.superview !== self {
             // A view another pane took in this same pass is that pane's now.
             if let content, content.superview === self { content.removeFromSuperview() }
             shown.removeFromSuperview()
             shown.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(shown, positioned: .below, relativeTo: closeButton)
+            addSubview(shown, positioned: .below, relativeTo: shade)
             NSLayoutConstraint.activate([
                 shown.topAnchor.constraint(equalTo: topAnchor),
                 shown.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -251,8 +270,7 @@ final class SlotFrame: NSView {
         closeButton.roles = roles
         self.closable = closable
         if !closable { closeButton.isHidden = true }
-        layer?.borderColor = focused ? roles.accent.cgColor : nil
-        layer?.borderWidth = focused ? Stroke.focus : 0
+        shade.show(roles: roles, focused: focused, many: many, look: look)
     }
 
     override func mouseEntered(with _: NSEvent) {
@@ -311,5 +329,57 @@ final class EmptyPane: NSView {
 
     override func mouseDown(with _: NSEvent) {
         picked?()
+    }
+}
+
+/// How the panes say which has the keys, as iTerm's settings have it: the others dimmed, and the
+/// focused one outlined inside its edge, both optional.
+public struct PaneLook: Hashable, Sendable {
+    /// How much the panes without the keys are dimmed, from 0 to 0.6.
+    public var dim: Double
+    /// The outline's colour, or nil for none.
+    public var outline: RGBA?
+
+    public init(dim: Double = 0.18, outline: RGBA? = nil) {
+        self.dim = dim
+        self.outline = outline
+    }
+}
+
+/// Over a pane and letting the pointer through: the dimming of a pane without the keys, and the
+/// focused pane's outline, drawn inside it with rounded corners.
+@MainActor
+final class Shade: NSView {
+    var roles: Roles?
+    var focused = false
+    var many = false
+    var look = PaneLook()
+
+    func show(roles: Roles, focused: Bool, many: Bool, look: PaneLook) {
+        guard roles != self.roles || focused != self.focused || many != self.many || look != self.look else { return }
+        self.roles = roles
+        self.focused = focused
+        self.many = many
+        self.look = look
+        needsDisplay = true
+    }
+
+    override func hitTest(_: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_: NSRect) {
+        guard let roles, many else { return }
+        if !focused, look.dim > 0 {
+            roles.ground.opacity(look.dim).nsColor.setFill()
+            bounds.fill()
+        }
+        if focused, let outline = look.outline {
+            let r = bounds.insetBy(dx: Space.xs, dy: Space.xs)
+            let path = NSBezierPath(roundedRect: r, xRadius: Radius.field, yRadius: Radius.field)
+            path.lineWidth = Stroke.hairline
+            outline.opacity(0.7).nsColor.setStroke()
+            path.stroke()
+        }
     }
 }

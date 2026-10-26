@@ -198,9 +198,10 @@ public struct StatusLine: View {
                 EmptyView()
             }
         }
-        .textStyle(.mono)
+        .textStyle(.caption)
+        .monospacedDigit()
         .lineLimit(1)
-        .padding(.horizontal, 12)
+        .padding(.horizontal, Space.l)
         .frame(height: 24)
         .background(roles.surface.color)
         .overlay(alignment: .top) { Rectangle().fill(roles.separator.color).frame(height: 1) }

@@ -150,7 +150,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         for slot in grid.slots {
             if let chat = slot.chat, let c = model.panes[chat] { views[slot.id] = c.view }
         }
-        detail.show(panes: grid, views: views, focused: model.focusedSlot, box: model.conversation?.composer.view, roles: model.roles)
+        detail.show(panes: grid, views: views, focused: model.focusedSlot, box: model.conversation?.composer.view, roles: model.roles,
+                    look: model.preferences.paneLook(model.roles))
     }
 
     func restyle() {
@@ -249,7 +250,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     // MARK: - The glance
 
     func showGlance() {
-        model.glance.show(relativeTo: status, roles: model.roles)
+        guard let window else { return }
+        model.glance.show(over: window, roles: model.roles)
     }
 
     // MARK: - Sheets
@@ -297,13 +299,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         w.makeKeyAndOrderFront(nil)
     }
 
+    /// Settings, in a sheet over the window: modal to it, centred, Done or Esc to close.
     func showSettings() {
-        let w = settings ?? NSWindow(contentViewController: NSHostingController(rootView: SettingsView(preferences: model.preferences)))
-        w.title = "Settings"
-        w.styleMask.remove(.resizable)
-        settings = w
-        w.center()
-        w.makeKeyAndOrderFront(nil)
+        guard let window, settings == nil else { return }
+        let view = SettingsView(preferences: model.preferences, accent: model.roles.accent) { [weak self] in
+            guard let self, let sheet = settings else { return }
+            window.endSheet(sheet)
+            settings = nil
+        }
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
+        settings = sheet
+        window.beginSheet(sheet)
     }
 
     // MARK: - The toolbar
@@ -491,19 +497,23 @@ final class DetailController: NSViewController {
         ])
     }
 
-    var drawn: (PaneGrid, Int?, [Int: ObjectIdentifier], ObjectIdentifier?, Roles)?
+    var drawn: (PaneGrid, Int?, [Int: ObjectIdentifier], ObjectIdentifier?, Roles, PaneLook)?
 
     /// Lays the panes out with the focused chat's box under them, unless they're already so.
-    func show(panes grid: PaneGrid, views: [Int: NSView], focused: Int?, box composer: NSView?, roles: Roles, force: Bool = false) {
+    func show(panes grid: PaneGrid, views: [Int: NSView], focused: Int?, box composer: NSView?, roles: Roles, look: PaneLook,
+              force: Bool = false)
+    {
         let ids = views.mapValues(ObjectIdentifier.init)
         let boxID = composer.map(ObjectIdentifier.init)
-        if !force, shown === panesArea, let drawn, drawn.0 == grid, drawn.1 == focused, drawn.2 == ids, drawn.3 == boxID, drawn.4 == roles {
+        if !force, shown === panesArea, let drawn, drawn.0 == grid, drawn.1 == focused, drawn.2 == ids, drawn.3 == boxID, drawn.4 == roles,
+           drawn.5 == look
+        {
             return
         }
         place(panesArea)
-        panes.show(grid, views: views, focused: focused, roles: roles)
+        panes.show(grid, views: views, focused: focused, roles: roles, look: look)
         box.show(composer, roles: roles)
-        drawn = (grid, focused, ids, boxID, roles)
+        drawn = (grid, focused, ids, boxID, roles, look)
     }
 
     func show(state kind: StateView.Kind, roles: Roles) {

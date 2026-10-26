@@ -1,3 +1,4 @@
+import AppKit
 import CoreText
 import Foundation
 
@@ -17,7 +18,7 @@ public final class FontSet: @unchecked Sendable {
     /// Labels around a message: 11 points.
     let small: CTFont
     let smallItalic: CTFont
-    /// Times, in SF Mono, a nod to the terminal.
+    /// Times, in the system font with digits of one width, so times line up.
     let time: CTFont
     let reaction: CTFont
     /// A message of one to three emoji alone.
@@ -38,7 +39,7 @@ public final class FontSet: @unchecked Sendable {
         name = Self.weighted(size - 1, 0.3)
         small = CTFontCreateUIFontForLanguage(.system, size - 2, nil)!
         smallItalic = CTFontCreateCopyWithSymbolicTraits(small, size - 2, nil, .traitItalic, .traitItalic) ?? small
-        time = Self.sfMono(size - 2) ?? small
+        time = NSFont.monospacedDigitSystemFont(ofSize: size - 2, weight: .regular) as CTFont
         reaction = CTFontCreateUIFontForLanguage(.system, size - 1, nil)!
         emoji = CTFontCreateUIFontForLanguage(.system, size * 3, nil)!
     }

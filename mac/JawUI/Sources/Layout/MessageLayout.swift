@@ -77,6 +77,8 @@ public final class Laid: @unchecked Sendable {
         case frame(CTFrame, CGRect)
         /// A line whose baseline sits at the point, measured from the top.
         case line(CTLine, CGPoint)
+        /// Your ticks, so many from the point on their baseline, at a text size.
+        case ticks(Int, CGPoint, CGColor, CGFloat)
     }
 
     init(height: CGFloat, body: CGRect, parts: [Part], regions: [(CGRect, Region)], text: (CTFrame, CGRect)?) {
@@ -111,6 +113,8 @@ public final class Laid: @unchecked Sendable {
                 ctx.textPosition = .zero
                 CTLineDraw(line, ctx)
                 ctx.restoreGState()
+            case let .ticks(count, point, colour, size):
+                Ticks.draw(count, x: point.x, baseline: point.y + y, size: size, colour: colour, in: ctx)
             }
         }
     }
@@ -438,15 +442,28 @@ public enum MessageLayout {
             return (made, size, last, folded)
         }
 
-        func ticks() -> (String, RGBA)? {
+        /// What's said for your message's state in text: pending and failed; ticks are drawn.
+        func stateMark() -> (String, RGBA)? {
             guard m.mine, let status = m.status else { return nil }
             switch status {
             case .pending: return ("◷", roles.tertiary)
-            case .sent: return ("✓", roles.tertiary)
-            case .delivered: return ("✓✓", roles.tertiary)
-            case .read, .played: return ("✓✓", roles.accent)
             case .failed: return ("!", roles.failed)
+            case .sent, .delivered, .read, .played: return nil
             }
+        }
+
+        var tickSize: CGFloat {
+            CTFontGetSize(fonts.time) + 1
+        }
+
+        /// A foot line drawn at a point, with the ticks drawn in the room it leaves for them.
+        func footParts(_ foot: CTLine, at point: CGPoint) -> [Laid.Part] {
+            var out: [Laid.Part] = [.line(foot, point)]
+            if m.mine, let (count, colour) = Ticks.of(m.status, roles) {
+                let w = Ticks.width(count, size: tickSize)
+                out.append(.ticks(count, CGPoint(x: point.x + width(of: foot) - w, y: point.y), colour.cgColor, tickSize))
+            }
+            return out
         }
 
         /// The time and what's said around it: a star, Edited, your ticks.
@@ -456,10 +473,16 @@ public enum MessageLayout {
             if m.starred { out.append(NSAttributedString(string: "★ ", attributes: quiet)) }
             if m.edited, !m.deleted { out.append(NSAttributedString(string: "Edited ", attributes: [.ctFont: fonts.smallItalic, .ctColour: roles.secondary.cgColor])) }
             if time { out.append(NSAttributedString(string: Format.clock(m.at), attributes: quiet)) }
-            if let (tick, colour) = ticks() {
-                out.append(NSAttributedString(string: " " + tick, attributes: [
-                    .ctFont: fonts.small, .ctColour: colour.cgColor, .kern: tick == "✓✓" ? -3 : 0,
-                ]))
+            if let (mark, colour) = stateMark() {
+                out.append(NSAttributedString(string: " " + mark, attributes: [.ctFont: fonts.small, .ctColour: colour.cgColor]))
+            } else if m.mine, let (count, _) = Ticks.of(m.status, roles) {
+                // Room for the ticks: an invisible x, kerned to their width, since trailing spaces
+                // aren't measured.
+                let x = NSAttributedString(string: "x", attributes: [.ctFont: fonts.time])
+                let xWidth = width(of: CTLineCreateWithAttributedString(x))
+                out.append(NSAttributedString(string: " ", attributes: [.ctFont: fonts.time]))
+                out.append(NSAttributedString(string: "x", attributes: [.ctFont: fonts.time, .ctColour: CGColor.clear,
+                                                                        .kern: Ticks.width(count, size: tickSize) - xWidth]))
             }
             return CTLineCreateWithAttributedString(out)
         }
@@ -559,7 +582,7 @@ public enum MessageLayout {
             cy = y + textTop + size.height
             if folded { cy += showMore(x: x + p, at: cy) }
             let footY = footInline ? cy - 4 - CTFontGetDescent(fonts.body) : cy + ascent(fonts.time)
-            parts.append(.line(foot, CGPoint(x: x + bw - p - footWidth, y: footY)))
+            parts.append(contentsOf: footParts(foot, at: CGPoint(x: x + bw - p - footWidth, y: footY)))
             y += h
             reactions(x: x + 6, alignRight: m.mine, right: x + bw - 6)
             failedLine(x: x + p, alignRight: m.mine, right: x + bw)
@@ -593,7 +616,7 @@ public enum MessageLayout {
             y += h
             let foot = footer()
             let fw = width(of: foot)
-            parts.append(.line(foot, CGPoint(x: m.mine ? width - metrics.margin - fw : x, y: y + ascent(fonts.time))))
+            parts.append(contentsOf: footParts(foot, at: CGPoint(x: m.mine ? width - metrics.margin - fw : x, y: y + ascent(fonts.time))))
             y += lineHeight(fonts.time)
             reactions(x: x, alignRight: m.mine, right: x + w)
             return Laid(height: ceil(y + 1), body: rect, parts: parts, regions: regions, text: nil)
@@ -637,7 +660,7 @@ public enum MessageLayout {
             let textRect = CGRect(x: x, y: y, width: most, height: size.height)
             parts.append(.frame(frame, textRect))
             text = (frame, textRect)
-            parts.append(.line(foot, CGPoint(x: width - m - footWidth, y: y + ascent(fonts.body))))
+            parts.append(contentsOf: footParts(foot, at: CGPoint(x: width - m - footWidth, y: y + ascent(fonts.body))))
             y += size.height
             if folded { y += showMore(x: x, at: y) }
             reactions(x: x, alignRight: false, right: 0)

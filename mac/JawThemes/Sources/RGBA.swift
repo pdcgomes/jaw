@@ -22,6 +22,14 @@ public struct RGBA: Sendable, Hashable {
                   b: Double(hex & 0xFF) / 255, a: alpha)
     }
 
+    /// As `0xRRGGBB`, its opacity left out.
+    public var hex: UInt32 {
+        func byte(_ v: Double) -> UInt32 {
+            UInt32((min(max(v, 0), 1) * 255).rounded())
+        }
+        return byte(r) << 16 | byte(g) << 8 | byte(b)
+    }
+
     public func opacity(_ a: Double) -> RGBA {
         RGBA(r: r, g: g, b: b, a: a)
     }

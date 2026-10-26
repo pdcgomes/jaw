@@ -30,6 +30,7 @@ public final class SidebarController: NSViewController, NSTableViewDataSource, N
         table.delegate = self
         table.setAccessibilityLabel("Folders")
         let scroll = NSScrollView()
+        Scrolling.style(scroll)
         scroll.documentView = table
         scroll.drawsBackground = false
         view = scroll

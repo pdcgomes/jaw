@@ -23,6 +23,8 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     var chat: ChatRow
     let textView = BoxTextView(usingTextLayoutManager: true)
     let scroll = NSScrollView()
+    /// The field's ground and border, behind the text.
+    let field = Surface(.field, radius: Radius.field)
     let bar = Labels.make("", .caption)
     lazy var barClose = IconButton(symbol: "xmark.circle.fill", label: "Drop it", shortcut: Shortcut("⎋", []), size: .small) { [weak self] in
         self?.dropMode()
@@ -94,12 +96,13 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         textView.setAccessibilityLabel("Message to \(chat.name)")
         scroll.documentView = textView
         scroll.hasVerticalScroller = true
+        Scrolling.style(scroll)
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
         completions.isHidden = true
         completions.picked = { [weak self] in self?.take($0) }
 
-        for v in [bar, barClose, scroll, placeholder, completions] as [NSView] {
+        for v in [bar, barClose, field, scroll, placeholder, completions] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -115,6 +118,10 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
             heightConstraint,
+            field.topAnchor.constraint(equalTo: scroll.topAnchor),
+            field.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
+            field.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            field.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
             placeholder.leadingAnchor.constraint(equalTo: scroll.leadingAnchor, constant: 9),
             placeholder.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
             completions.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
@@ -132,7 +139,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     func colour() {
         guard let roles else { return }
         view.layer?.backgroundColor = roles.ground.cgColor
-        Surface.dress(scroll, .field, roles: roles)
+        field.roles = roles
         textView.textColor = roles.text.nsColor
         textView.insertionPointColor = roles.accent.nsColor
         placeholder.textColor = roles.tertiary.nsColor

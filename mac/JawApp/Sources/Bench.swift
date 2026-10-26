@@ -73,7 +73,7 @@ enum Bench {
         guard let key = keys.first else { return then() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             NSApp.activate()
-            if model.window?.editorSheet == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
+            if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key.hasPrefix("size:") || key.hasPrefix("drop:")
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
@@ -115,7 +115,11 @@ enum Bench {
                 NSApp.sendEvent(event)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                let said = (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
+                let palette = (model.window?.palette.isVisible ?? false) ? " · palette at \(model.window?.palette.model.index ?? -1) of \(model.window?.palette.model.items.count ?? 0)" : ""
+                let glance = model.glance.isOpen ? model.window?.window.map { w in
+                    " · glance centre \(Int(model.glance.panel.frame.midX - w.frame.midX)),\(Int(model.glance.panel.frame.midY - w.frame.midY)) from the window's"
+                } ?? "" : ""
+                let said = palette + glance + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
                 let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
                 FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
                 press(Array(keys.dropFirst()), model: model, then: then)
@@ -125,7 +129,8 @@ enum Bench {
 
     static func draw(to path: String, model: AppModel) {
         // The window's frame view, so the toolbar is drawn too.
-        guard let view = model.window?.editorSheet?.contentView ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
+        let glance = model.glance.isOpen ? model.glance.panel.contentView : nil
+        guard let view = glance ?? model.window?.editorSheet?.contentView ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
         let rect = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }
         view.cacheDisplay(in: rect, to: rep)

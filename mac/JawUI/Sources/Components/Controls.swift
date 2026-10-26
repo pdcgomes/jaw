@@ -10,11 +10,11 @@ public final class IconButton: NSButton {
         case small, regular
 
         var side: CGFloat {
-            self == .small ? 20 : 24
+            self == .small ? 22 : 26
         }
 
         var point: CGFloat {
-            self == .small ? 10 : 12
+            self == .small ? 11 : 13
         }
     }
 
@@ -41,10 +41,11 @@ public final class IconButton: NSButton {
         self.pressed = pressed
         super.init(frame: NSRect(x: 0, y: 0, width: size.side, height: size.side))
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        symbolConfiguration = .init(pointSize: size.point, weight: .semibold)
+        // At the symbol's own size: a bezel style sets its own height and squeezes the symbol into it.
+        symbolConfiguration = NSImage.SymbolConfiguration(pointSize: size.point, weight: .medium, scale: .medium)
         isBordered = false
-        bezelStyle = .accessoryBarAction
         imagePosition = .imageOnly
+        imageScaling = .scaleNone
         toolTip = Self.tip(label, shortcut)
         setAccessibilityLabel(label)
         target = self
@@ -123,12 +124,14 @@ public final class Surface: NSView {
         didSet { colour() }
     }
 
+    let radius: CGFloat
+
     public init(_ kind: Kind, radius: CGFloat = Radius.control) {
         self.kind = kind
+        self.radius = radius
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = radius
-        layer?.borderWidth = Stroke.hairline
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
     }
 
     @available(*, unavailable)
@@ -137,9 +140,21 @@ public final class Surface: NSView {
     }
 
     func colour() {
-        guard let roles else { return }
-        layer?.backgroundColor = kind == .well ? nil : roles.surface.cgColor
-        layer?.borderColor = roles.separator.cgColor
+        needsDisplay = true
+    }
+
+    /// Its look is set each time it's drawn, so a layer AppKit makes again, when the view moves
+    /// to another window or parent, still has it.
+    override public var wantsUpdateLayer: Bool {
+        true
+    }
+
+    override public func updateLayer() {
+        guard let roles, let layer else { return }
+        layer.cornerRadius = radius
+        layer.borderWidth = Stroke.hairline
+        layer.backgroundColor = kind == .well ? nil : roles.surface.cgColor
+        layer.borderColor = roles.separator.cgColor
     }
 
     /// Gives a layer-backed view the same look, for one that can't be a `Surface`, such as the

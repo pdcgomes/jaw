@@ -1,15 +1,33 @@
+import AppKit
 import JawThemes
 import SwiftUI
 
-/// Settings, first form: Appearance, and Messages.
+/// Settings, in a sheet over the window: Appearance, Messages and Panes, and Done.
 public struct SettingsView: View {
     @Bindable var preferences: Preferences
+    /// The theme's accent, the outline's colour unless one's picked.
+    let accent: RGBA
+    let done: () -> Void
 
-    public init(preferences: Preferences) {
+    public init(preferences: Preferences, accent: RGBA, done: @escaping () -> Void) {
         self.preferences = preferences
+        self.accent = accent
+        self.done = done
     }
 
     public var body: some View {
+        VStack(spacing: 0) {
+            tabs
+            HStack {
+                Spacer()
+                Button("Done", action: done).keyboardShortcut(.defaultAction)
+            }
+            .padding(Space.l)
+        }
+        .focusEffectDisabled()
+    }
+
+    var tabs: some View {
         TabView {
             Form {
                 Picker("Appearance", selection: $preferences.appearance) {
@@ -53,8 +71,41 @@ public struct SettingsView: View {
             }
             .formStyle(.grouped)
             .tabItem { Label("Messages", systemImage: "text.bubble") }
+
+            Form {
+                LabeledContent("Dim the other panes") {
+                    HStack {
+                        Slider(value: $preferences.paneDim, in: Preferences.paneDims)
+                        Text("\(Int((preferences.paneDim * 100).rounded())) %").monospacedDigit().frame(width: 40, alignment: .trailing)
+                    }
+                }
+                Toggle("Outline the focused pane", isOn: $preferences.paneOutline)
+                LabeledContent("Outline colour") {
+                    HStack {
+                        ColorPicker("", selection: Binding(
+                            get: { (preferences.paneOutlineColour ?? accent).color },
+                            set: { preferences.paneOutlineColour = RGBA(NSColor($0)) }
+                        ), supportsOpacity: false)
+                        .labelsHidden()
+                        Button("The theme's accent") { preferences.paneOutlineColour = nil }
+                            .disabled(preferences.paneOutlineColour == nil)
+                    }
+                }
+                .disabled(!preferences.paneOutline)
+                Text("With more than one pane, the one with the keys is outlined inside its edge, and the others dimmed, as iTerm does.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            .formStyle(.grouped)
+            .tabItem { Label("Panes", systemImage: "rectangle.split.2x1") }
         }
-        .frame(width: 460, height: 340)
-        .focusEffectDisabled()
+        .frame(width: 480, height: 360)
+    }
+}
+
+extension RGBA {
+    /// From a colour picked, in sRGB.
+    init(_ colour: NSColor) {
+        let c = colour.usingColorSpace(.sRGB) ?? colour
+        self.init(r: Double(c.redComponent), g: Double(c.greenComponent), b: Double(c.blueComponent))
     }
 }

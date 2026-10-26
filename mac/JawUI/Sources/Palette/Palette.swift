@@ -587,6 +587,19 @@ public final class PalettePanel: NSPanel {
         true
     }
 
+    /// ↑ and ↓ move through the results before the field sees them: its text editor takes them to
+    /// move the caret, so SwiftUI's key handlers only got them some of the time.
+    override public func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, event.modifierFlags.intersection([.command, .option, .control]).isEmpty {
+            switch event.keyCode {
+            case 125: return model.move(1)
+            case 126: return model.move(-1)
+            default: break
+            }
+        }
+        super.sendEvent(event)
+    }
+
     /// Shows the palette over `window`, in a mode, with jawd's answers to what's typed.
     public func show(over window: NSWindow, roles: Roles, mode: PaletteModel.Mode = .find, kind: FindKind? = nil,
                      scope: (String, String)? = nil)
