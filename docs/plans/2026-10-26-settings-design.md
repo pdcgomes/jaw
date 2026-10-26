@@ -1,20 +1,22 @@
 # jaw: settings
 
-26 October 2026. Settled with the owner over the morning; nothing here is built yet. It adds to [the design](2026-10-16-jaw-design.md) and [the protocol](../../protocol/README.md), and the settings wireframes canvas draws it: every theme as jaw would map it, both layouts of your messages, and the panel.
+26 October 2026. Settled with the owner over the morning, and amended the same day so that each frontend keeps settings of its own; being built on the `settings` branch. It adds to [the design](2026-10-16-jaw-design.md) and [the protocol](../../protocol/README.md), and the settings wireframes canvas draws it: every theme as jaw would map it, both layouts of your messages, and the panel.
 
 ## What it is
 
-jaw gains settings, kept by jawd and shared by every interface. There are two to start with: the theme, one of Omarchy's 23, and where your messages sit, on the right as now or on the left under "You", as IRC clients put them. The terminal shows them in a panel in the chat list's place and previews each theme on the whole screen as you move through them. A change is kept by jawd, which pushes it to every interface, and `jaw settings` reads and changes them from the command line.
+jaw gains settings, kept by jawd in a domain for each frontend, so the terminal and a Mac app on one machine keep separate preferences. The terminal's has two to start with: the theme, one of Omarchy's 23, and where your messages sit, on the right as now or on the left under "You", as IRC clients put them. The terminal shows them in a panel in the chat list's place and previews each theme on the whole screen as you move through them. A change is kept by jawd, which pushes it to every connection of the same frontend, and `jaw settings` reads and changes them from the command line.
 
 ## Decisions
 
-- **One set of settings for every interface,** kept by jawd in jaw.db as jaw's own data, as drafts and folders are. An interface reads them in hello's answer, changes them with `settings.set` and hears every change as a `settings` push, so a desktop app later gets them as the terminal does. Overrides for one kind of interface can come later without changing what's stored.
-- **Typed, checked and served by jawd.** jaw-proto defines the settings and carries the themes. jawd refuses a setting or a value it doesn't know, and serves the themes with `themes`, so an interface in any language draws them without porting them again. Opaque values that interfaces define were set aside: nothing would check them, and every interface would carry the palettes again. A window on the feed was set aside too: two values don't need its machinery, and windows arrive after hello, so the first frame would flash.
+- **A domain of settings for each frontend** (owner, 26 October, replacing the one set for every interface decided that morning, once the Mac plan had given the Mac app looks and themes of its own), so a terminal and a Mac app on one machine keep separate preferences. A frontend's domain is named by the `client` its hello gives: the terminal's is `jaw`, which `jaw settings` and `jaw status` share, since they say hello as `jaw` too. jawd keeps every domain in jaw.db as jaw's own data, as drafts and folders are. A connection reads its own domain's settings in hello's answer, changes them with `settings.set` and hears every change to them as a `settings` push. Only the terminal's domain is defined so far; the Mac app's comes with the Mac app. The themes stay shared: `themes` serves them to any frontend.
+- **Typed, checked and served by jawd.** jaw-proto defines each domain's settings and carries the themes. jawd refuses a domain, a setting or a value it doesn't know, and serves the themes with `themes`, so an interface in any language draws them without porting them again. Opaque values that interfaces define were set aside: nothing would check them, and every interface would carry the palettes again. A window on the feed was set aside too: two values don't need its machinery, and windows arrive after hello, so the first frame would flash.
 - **Omarchy's 23 themes, as Omarchy wrote them,** at a pinned commit, mapped onto jaw's colour roles by one rule, with bands of contrast so that every theme reads. Tokyo Night stays the default and becomes Omarchy's own, its pill taking the accent as every theme's does.
 - **The IRC layout labels your messages "You"** and shows a name only when the sender changes, after half an hour or on a new day, as jaw does today.
 - **The panel opens in the chat list's place,** with Ctrl-, or "settings" in the palette, so the open conversation shows each change on real messages.
 
-## The settings
+## The terminal's settings
+
+In the `jaw` domain:
 
 | Setting | Values | Default |
 | --- | --- | --- |
@@ -34,18 +36,19 @@ protocol/README.md gains a "Settings" section, served from the start, and the ro
 {"id":21,"result":{"themes":[{"id":"catppuccin","name":"Catppuccin","mode":"dark","colors":{"accent":"#89b4fa","background":"#1e1e2e","…":"…"}}]}}
 ```
 
-- **`hello`'s answer** carries `settings`: every setting with the value in effect. An interface has them before it draws, and a reconnect brings them current again.
-- **`settings.set`** takes one setting or more and checks every one before changing any. A setting jawd doesn't know is -32602 with `data` `{"param": "<setting>"}`; a value it doesn't take, or one of the wrong JSON type, is -32602 with `data` `{"param": "<setting>", "allowed": [...]}`; no settings at all is -32602. It answers with `settings`, all of them as they now are, once the change is on disk, synced. A setting asked for with the value jaw.db already holds for it is answered at once and writes nothing. If jaw.db can't be written, it's -32603 saying why, and nothing changes.
-- **The `settings` push** goes to every greeted connection, the one that asked included, whenever the settings change, and carries all of them. A connection always ends on the latest settings: one change made while it's slow to read may be skipped, but never the last.
+- **`hello`'s answer** carries `settings`: every setting of the connection's own domain, the one its `client` names, with the value in effect. It's absent for a client jawd keeps no settings for. An interface has them before it draws, and a reconnect brings them current again.
+- **`settings.set`** changes the connection's own domain. A connection whose client has no domain is error 3, with `data` `{"client": "<client>"}`. It takes one setting or more and checks every one before changing any. A setting jawd doesn't know is -32602 with `data` `{"param": "<setting>"}`; a value it doesn't take, or one of the wrong JSON type, is -32602 with `data` `{"param": "<setting>", "allowed": [...]}`; no settings at all is -32602. It answers with `settings`, all of them as they now are, once the change is on disk, synced. A setting asked for with the value jaw.db already holds for it is answered at once and writes nothing. If jaw.db can't be written, it's -32603 saying why, and nothing changes.
+- **The `settings` push** goes to every greeted connection of the same domain, the one that asked included, whenever that domain's settings change, and carries all of them. A connection always ends on the latest settings: one change made while it's slow to read may be skipped, but never the last. Connections of other domains hear nothing of it.
 - **`themes`** answers with every theme, ordered by ID. Each has its `id`; a `name` to show, the ID in title case with "Rosé Pine" for `rose-pine`; its `mode`, `dark` or `light`; and `colors`, Omarchy's 25 colours by their keys as lowercase `#rrggbb`. Where a theme leaves them out, `orange` is its `yellow` and `brown` its `orange` mixed half with black, as Omarchy's own `omarchy-theme-color` resolves them. Keys a theme carries beyond those, such as Hyprland's borders, aren't served.
-- **`status`** gains `settings`, the settings in effect, and `settings_ignored`, each setting whose value in jaw.db this jawd doesn't take, with that value. `jawd status` and `jaw status` print them on a line of their own.
+- **`status`** gains `settings`, each domain's settings in effect by the domain's name (`{"jaw": {"messages": "bubbles", "theme": "tokyo-night"}}`), and `settings_ignored`, each setting whose value in jaw.db this jawd doesn't take, with its domain, its key and that value. `jawd status` and `jaw status` print them on a line of their own.
 - **Fixtures:** `hello.result.json` and `status.result.json` gain their fields, and `settings.set.request.json`, `settings.set.result.json`, `settings.push.json`, `themes.request.json` and `themes.result.json` (two themes, to pin the shape) are new.
 
 ## jawd
 
-- **A `settings` module** (`crates/jawd/src/settings.rs`) holds the settings in effect and what jaw.db holds for each, read at start, and publishes the settings in effect on a tokio `watch` channel, which always holds the latest value.
-- **One change at a time.** Under a lock, a change is checked, committed with a synced commit, published and answered, in that order. So what interfaces are sent is always what jaw.db holds, in the order the commits were made: two interfaces changing settings at once end on the later commit's values, in jaw.db and on every screen.
-- **No push is lost.** Each greeted connection watches the channel in its loop and sends the `settings` push when it changes, waiting for room in its queue as a reply does, so a full queue delays the push rather than dropping it. Pushes on the broadcast channel, such as `connection` and `notice`, can be dropped for a connection that falls behind; settings can't.
+- **A `settings` module** (`crates/jawd/src/settings.rs`) holds each domain's settings in effect and what jaw.db holds for each, read at start, and publishes each domain's settings in effect on a tokio `watch` channel of its own, which always holds the latest value.
+- **A connection's domain is settled at its hello,** from its `client`. Its receiver for that domain's channel is made then, and hello's answer carries the value that receiver has seen, so no change between the answer and the first push is missed.
+- **One change at a time.** Under a lock, a change is checked, committed with a synced commit, published and answered, in that order. So what interfaces are sent is always what jaw.db holds, in the order the commits were made: two interfaces of one frontend changing its settings at once end on the later commit's values, in jaw.db and on every screen.
+- **No push is lost.** Each greeted connection watches its domain's channel in its loop and sends the `settings` push when it changes, waiting for room in its queue as a reply does, so a full queue delays the push rather than dropping it. Pushes on the broadcast channel, such as `connection` and `notice`, can be dropped for a connection that falls behind; settings can't.
 - **A stop between the commit and the answer** leaves the interface without an answer, and its next hello carries what was committed. jaw takes hello's settings as the truth.
 - `settings.set` and `themes` are answered in `sock.rs`, beside `focus` and `chat.opened`.
 
@@ -54,20 +57,23 @@ protocol/README.md gains a "Settings" section, served from the start, and the ro
 Migration 11 is a schema step: one new table, which costs the same however big jaw.db is, so it runs at start with any other pending schema steps in one IMMEDIATE transaction.
 
 ```sql
--- Class: jaw's own. The settings every interface shares, a row for each setting chosen: never
--- dropped or rebuilt, and copied as they are by any rebuild. A setting without a row has its default.
+-- Class: jaw's own. Each frontend's settings, in a domain named by the client its hello gives, a
+-- row for each setting chosen: never dropped or rebuilt, and copied as they are by any rebuild. A
+-- setting without a row has its default.
 CREATE TABLE settings (
-    key TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    key TEXT NOT NULL,
     value TEXT NOT NULL CHECK (json_valid(value)),
-    at INTEGER NOT NULL
+    at INTEGER NOT NULL,
+    PRIMARY KEY (domain, key)
 ) STRICT, WITHOUT ROWID;
 ```
 
 - **Rows only for settings chosen.** A fresh jaw.db has none, so everyone starts on Tokyo Night with bubbles, and a default changed in a later jaw changes for whoever never chose.
-- **Written through the writer thread** as a new `Change`, an idempotent upsert (`INSERT … ON CONFLICT (key) DO UPDATE SET value = excluded.value, at = excluded.at WHERE value IS NOT excluded.value`), in a synced commit (`apply_durable`: `FULL`, and `fullfsync` on macOS) before the answer. `value` is the setting's JSON, such as `"gruvbox"`, and `at` is when it was chosen, in milliseconds.
-- **Read by key** at start: one search of the primary key for each setting jawd knows, so no statement scans the table. Its statements' plans are pinned in the plan test.
-- **Bounded.** jawd writes only settings it knows, so the table holds at most one row for each, two today; `jawd status` reports what's in effect and anything ignored.
-- **Kept when not understood.** A row whose value this jawd doesn't take, written by a newer jawd within the compatibility window or naming a theme a later Omarchy drops, is left as it is and read as the default, and `status` says so. A row for a setting this jawd doesn't know is left alone and not read. Being jaw's own, neither is ever dropped.
+- **Written through the writer thread** as a new `Change`, an idempotent upsert (`INSERT … ON CONFLICT (domain, key) DO UPDATE SET value = excluded.value, at = excluded.at WHERE value IS NOT excluded.value`), in a synced commit (`apply_durable`: `FULL`, and `fullfsync` on macOS) before the answer. `value` is the setting's JSON, such as `"gruvbox"`, and `at` is when it was chosen, in milliseconds.
+- **Read by key** at start: one search of the primary key for each setting of each domain jawd knows, so no statement scans the table. Its statements' plans are pinned in the plan test.
+- **Bounded.** jawd writes only domains and settings it knows, so the table holds at most one row for each, two today; `jawd status` reports what's in effect and anything ignored.
+- **Kept when not understood.** A row whose value this jawd doesn't take, written by a newer jawd within the compatibility window or naming a theme a later Omarchy drops, is left as it is and read as the default, and `status` says so. A row for a domain or a setting this jawd doesn't know is left alone and not read. Being jaw's own, neither is ever dropped.
 - **Not in the feed.** The feed keeps windows current, and settings aren't a window: hello and the push deliver them. So a change to the settings writes no `events` row; the rule that a change and its event commit together is about the feed's rows.
 - **A jaw.db that can't be written** publishes nothing, and the answer says why.
 - **Backups.** The design's daily backup of jaw's own tables, still to be built, includes `settings`.
@@ -106,7 +112,7 @@ CREATE TABLE settings (
 
 ### Applying them
 
-- The view takes the settings from hello's answer, from `settings` pushes and from `settings.set`'s answers, each carrying all of them. A theme or a value jaw doesn't know falls back to the default.
+- The view takes the terminal's settings, the `jaw` domain's, from hello's answer, from `settings` pushes and from `settings.set`'s answers, each carrying all of them. A theme or a value jaw doesn't know falls back to the default, and so does a hello without settings.
 - A change rebuilds the theme and clears every cached layout (messages, chat rows, the library's and the palette's), so the next frame draws every line again, within a keypress's 16 ms.
 - **The first frame waits** for hello, for jawd to say it can't answer (starting, unreachable) or for 250 ms, whichever comes first, so a light theme never flashes Tokyo Night first. When jawd isn't running, the "starting jawd" screen draws in Tokyo Night and changes once hello comes.
 - The made-up account behind `jaw demo`, `jaw snapshot --demo` and `jaw bench` keeps the settings in memory, answering and pushing as jawd does.
@@ -117,7 +123,7 @@ CREATE TABLE settings (
 - **Where it sits:** in the chat list's column, with the focused border, so the open conversation beside it shows each change on real messages. Below 90 columns it takes the screen, as the chat list does there; in the spike's focused mode, it unfolds into the chat list's place while it's open.
 - **Look › Theme:** Enter opens the list of the 23, each with its mode and a strip of its colours, the one kept marked. Moving through the list previews each theme on the whole screen at once, inside jaw only. Enter keeps the one previewed, sending `settings.set`, and Esc goes back to the one kept.
 - **Chat › Your messages:** "on the right" or "on the left, as IRC". ← → or Enter switches it, sending `settings.set` at once.
-- **What it says:** the footer shows the panel's keys while it's open. If jawd refuses a change or can't keep it, the footer says why and the screen goes back to what jawd has. A push from another interface while the panel is open changes the theme it shows as kept; a preview under way goes on, and Esc returns to the new one.
+- **What it says:** the footer shows the panel's keys while it's open. If jawd refuses a change or can't keep it, the footer says why and the screen goes back to what jawd has. A push from another jaw while the panel is open changes the theme it shows as kept; a preview under way goes on, and Esc returns to the new one.
 
 | Keys | In the panel | In the theme list |
 | --- | --- | --- |
@@ -139,7 +145,7 @@ CREATE TABLE settings (
 
 ### `jaw settings`
 
-- `jaw settings` prints each setting, its value and the values it takes.
+- `jaw settings` prints each of the terminal's settings, its value and the values it takes. It says hello as `jaw`, so it reads and changes the terminal's own domain.
 - `jaw settings theme=gruvbox messages=irc` changes them with one `settings.set` and prints them as they now are. A setting or value jawd refuses prints jawd's message, and jawd not running prints so, each exiting with 1, as `jaw status` does. So the owner's `dot theme` can keep jaw in step with Ghostty and Neovim.
 
 ## Testing
@@ -150,6 +156,7 @@ CREATE TABLE settings (
   - It answers only after a synced commit: no answer comes while jaw.db's write lock is held from outside, and the synced commits rise by one, as the logout test does.
   - The value jaw.db already holds is answered at once and writes nothing.
   - Two connections changing settings at once end with jaw.db, the answers' last state and every connection's last push agreeing.
+  - Each domain's settings reach only its own connections: a `jaw` connection is pushed a change to the terminal's settings, and a connection of another client gets no push, no `settings` in its hello's answer, and error 3 from `settings.set`.
   - A connection that leaves its queue full while changes come still ends on the latest settings.
   - Hello carries the settings; a jawd started again keeps them; a row with a value jawd doesn't take is kept, read as the default and named in `status`.
   - A jaw.db that can't be written publishes nothing and answers with why.
@@ -165,7 +172,7 @@ CREATE TABLE settings (
 ## Scope
 
 - **In:** the settings table and the protocol (hello, `settings.set`, the `settings` push, `themes`, `status`); Omarchy's 23 themes and their mapping; the panel; the IRC layout; `jaw settings`; the made-up account; and the docs: the protocol's "Settings", a "Settings" part in the design's jawd and terminal sections with Ctrl-, among its keys, and a line in the README with Omarchy's licence.
-- **Later:** overrides for one kind of interface; following the terminal's own colours; more chat options; and the spike's experimental switches, which `JAW_EXPERIMENTS` holds for now, kept as settings once they're settled.
+- **Later:** the Mac app's domain, with its own looks and Redlamp's themes, which comes with the Mac app; a `jawd` domain for what jawd itself does, such as the Mac plan's media and notifications; a frontend reading or changing another's domain, through an optional `domain` in `settings.set`; following the terminal's own colours; more chat options; and the spike's experimental switches, which `JAW_EXPERIMENTS` holds for now, kept as settings once they're settled.
 
 ## How it lands
 

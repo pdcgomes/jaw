@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Settings kept by jawd and shared by every interface (Omarchy's 23 themes, and where your messages sit), with a panel in jaw, the IRC layout and `jaw settings`, as `docs/plans/2026-10-26-settings-design.md` specifies.
+**Goal:** Settings kept by jawd in a domain for each frontend (the terminal's: Omarchy's 23 themes, and where your messages sit), with a panel in jaw, the IRC layout and `jaw settings`, as `docs/plans/2026-10-26-settings-design.md` specifies.
 
-**Architecture:** jaw-proto defines the settings and carries Omarchy's palettes, `protocol/themes/*.toml`, parsed once. jawd keeps the settings in a new table of jaw's own (migration 11), changes them one at a time with a synced commit, publishes them on a tokio `watch` channel that every connection pushes from, and sends them in hello's answer. jaw maps a palette onto its colour roles with bands of contrast, follows the settings from hello, answers and pushes, draws the panel in the chat list's place, and lays your messages out under "You" in the IRC layout.
+**Architecture:** jaw-proto defines the terminal's settings and carries Omarchy's palettes, `protocol/themes/*.toml`, parsed once. jawd keeps each frontend's settings in a new table of jaw's own (migration 11), keyed by domain and setting, the domain being the `client` a connection's hello gives; it changes them one at a time with a synced commit, publishes each domain's on a tokio `watch` channel that its connections push from, and sends a connection its domain's in hello's answer. jaw maps a palette onto its colour roles with bands of contrast, follows the settings from hello, answers and pushes, draws the panel in the chat list's place, and lays your messages out under "You" in the IRC layout.
 
 **Tech Stack:** Rust 2024 workspace (jaw-proto, jawd, jaw-client, jaw), rusqlite with SQLite bundled, tokio, ratatui and crossterm, serde; Python 3 for the theme script.
 
@@ -21,6 +21,7 @@
 - Theme IDs, in order: `catppuccin`, `catppuccin-latte`, `ethereal`, `everforest`, `flexoki-light`, `gruvbox`, `hackerman`, `kanagawa`, `last-horizon`, `lumon`, `lupine`, `matte-black`, `miasma`, `nord`, `osaka-jade`, `retro-82`, `ristretto`, `rose-pine`, `solitude`, `starship`, `tokyo-night`, `vantablack`, `white`. The default is `tokyo-night`.
 - Omarchy is `omacom/omarchy` at commit `4c1b4cb3a94447aff39af98e2fcc0490a9fb32e7`.
 - `messages` takes `bubbles` (the default) or `irc`.
+- Each frontend has a domain of settings of its own, named by the `client` its hello gives (owner, 26 October, after Tasks 1 and 2 had landed with one shared set; Task 2b moves them onto domains). The terminal's is `jaw`, `jaw_proto::settings::TERMINAL`, and it's the only domain jawd keeps so far; `jaw settings` and `jaw status` say hello as `jaw` too. A connection of a client with no domain gets no settings in hello's answer, no pushes, and error 3 from `settings.set`.
 - Run a crate's tests with `cargo test -p <crate> <filter>`; the gate is `make test` and `make lint` (`make test` builds the Go engine; without `go`, run `cargo test --workspace` and say so).
 
 ## File structure
@@ -646,13 +647,138 @@ git commit -m "The settings on the wire: hello's answer carries every setting wi
 
 ---
 
+### Task 2b: A domain for each frontend, on the wire
+
+Task 2 put one set of settings, shared by every interface, on the wire. The owner has since chosen a domain of settings for each frontend, named by the `client` its hello gives, so a terminal and a Mac app on one machine keep separate preferences. This task moves Task 2's types onto domains; the shapes of `settings.set`, its answer and the `settings` push don't change, since each is the connection's own domain's.
+
+**Files:**
+- Modify: `crates/jaw-proto/src/settings.rs`, `crates/jaw-proto/src/lib.rs` (`Welcome`, `Status`), `crates/jaw-proto/tests/fixtures.rs`, `protocol/fixtures/status.result.json`, `crates/jawd/src/state.rs`
+
+**Interfaces:**
+- Consumes: Task 2's `jaw_proto::settings::{Settings, Ignored}`, `Welcome.settings`, `Status.settings`.
+- Produces, in `jaw_proto::settings`: `pub const TERMINAL: &str = "jaw"`; `Ignored { domain: String, key: String, value: serde_json::Value }`.
+- Produces: `Welcome.settings: Option<Settings>`, the connection's own domain's settings, absent for a client jawd keeps none for; `Status.settings: BTreeMap<String, serde_json::Map<String, Value>>`, each domain's settings in effect by its name.
+
+- [ ] **Step 1: Write the fixture and the failing checks**
+
+Change `protocol/fixtures/status.result.json` so its last two fields read:
+
+```json
+"settings":{"jaw":{"messages":"irc","theme":"tokyo-night"}},"settings_ignored":[{"domain":"jaw","key":"theme","value":"rose-pine-moon"}]}}
+```
+
+(the rest of the line as it is). Add to the test module of `crates/jaw-proto/src/settings.rs`:
+
+```rust
+    #[test]
+    fn the_terminals_domain_is_the_client_its_hello_gives_and_a_hello_for_another_carries_no_settings() {
+        assert_eq!(TERMINAL, "jaw");
+        let hello: crate::Welcome = serde_json::from_str(
+            r#"{"protocol":1,"jawd":"0.1.0","root":"/r","seq":1,"account":{"state":"unlinked"},"connection":{"state":"offline"}}"#,
+        )
+        .unwrap();
+        assert_eq!(hello.settings, None);
+        let ignored = Ignored { domain: TERMINAL.into(), key: "theme".into(), value: serde_json::json!("x") };
+        assert_eq!(serde_json::to_value(ignored).unwrap()["domain"], "jaw");
+    }
+```
+
+And add to the end of `crates/jaw-proto/tests/fixtures.rs`:
+
+```rust
+/// Hello's answer carries the terminal's settings, and status every domain's by its name.
+#[test]
+fn hello_carries_its_domains_settings_and_status_every_domains() {
+    let read = |name: &str| -> Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../protocol/fixtures/{name}.json"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let hello: jaw_proto::Welcome = serde_json::from_value(read("hello.result")["result"].clone()).unwrap();
+    assert_eq!(hello.settings, Some(Settings::default()));
+    let status: jaw_proto::Status = serde_json::from_value(read("status.result")["result"].clone()).unwrap();
+    assert_eq!(status.settings["jaw"]["messages"], "irc");
+    assert_eq!(status.settings_ignored[0].domain, "jaw");
+}
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `cargo test -p jaw-proto`
+Expected: FAIL to compile: no `TERMINAL`, `Ignored` has no field `domain`, and `Welcome.settings` isn't an `Option`.
+
+- [ ] **Step 3: Move the types onto domains**
+
+In `crates/jaw-proto/src/settings.rs`, replace the module's doc with:
+
+```rust
+//! Each frontend's settings, which jawd keeps in jaw.db in a domain of its own, named by the
+//! `client` its hello gives. The terminal's, in the `jaw` domain, are the theme and where your
+//! messages sit. protocol/README.md's "Settings" says how they're read, changed and pushed.
+```
+
+add, after the `use` lines:
+
+```rust
+/// The terminal's domain: the `client` its hello gives, which `jaw settings` and `jaw status` give
+/// too.
+pub const TERMINAL: &str = "jaw";
+```
+
+change `Settings`' doc to `/// The terminal's settings, each with the value in effect, as hello's answer, settings.set's answer and the settings push carry them to a connection of the jaw domain.`, and replace `Ignored` with:
+
+```rust
+/// A setting whose value in jaw.db this jawd doesn't take, so its default is in effect: its domain,
+/// its key and that value.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Ignored {
+    pub domain: String,
+    pub key: String,
+    pub value: Value,
+}
+```
+
+In `crates/jaw-proto/src/lib.rs`, add `use std::collections::BTreeMap;` to the imports, replace `Welcome.settings` and its doc with:
+
+```rust
+    /// The settings of the connection's own domain, the one its `client` names, each with the
+    /// value in effect; absent for a client jawd keeps no settings for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<settings::Settings>,
+```
+
+and `Status.settings` and its doc with:
+
+```rust
+    /// Each domain's settings in effect, by the domain's name, and each setting whose value in
+    /// jaw.db this jawd doesn't take.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, serde_json::Map<String, Value>>,
+```
+
+leaving `settings_ignored` as it is. In `crates/jawd/src/state.rs`, so jawd still builds until Task 4: in `welcome()` make it `settings: None,` and in `status()` `settings: std::collections::BTreeMap::new(),`.
+
+- [ ] **Step 4: Run the tests to see them pass**
+
+Run: `cargo test -p jaw-proto && cargo build -p jawd -p jaw -p jaw-client`
+Expected: every jaw-proto test passes, the fixtures' included; the three crates build.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cargo fmt --all
+git add crates/jaw-proto protocol/fixtures crates/jawd/src/state.rs
+git commit -m "A domain of settings for each frontend, on the wire, as the owner chose so a terminal and a Mac app on one machine keep separate preferences: a frontend's domain is the client its hello gives, the terminal's jaw; hello's answer carries the connection's own domain's settings and none for a client jawd keeps none for; status says every domain's settings in effect by its name, and each setting jawd doesn't take with its domain; settings.set, its answer and the settings push keep their shapes, each being the connection's own domain's"
+```
+
+---
+
 ### Task 3: jaw.db keeps the settings (data layer)
 
 **Files:**
 - Modify: `crates/jawd/src/store/schema.rs` (migration 11), `crates/jawd/src/store/migrations.lock`, `crates/jawd/src/store/write.rs` (`Change::Setting`), `crates/jawd/src/store/mod.rs` (`Store::setting`, a test), `crates/jawd/src/store/plans.txt` (re-pinned)
 
 **Interfaces:**
-- Produces: `Change::Setting { key: String, value: String, at: i64 }`, where `value` is the setting's JSON text and `at` milliseconds since the epoch; `Store::setting(&self, key: &str) -> anyhow::Result<Option<String>>`, what jaw.db holds for `key` as its JSON.
+- Produces: `Change::Setting { domain: String, key: String, value: String, at: i64 }`, where `value` is the setting's JSON text and `at` milliseconds since the epoch; `Store::setting(&self, domain: &str, key: &str) -> anyhow::Result<Option<String>>`, what jaw.db holds for `key` in `domain` as its JSON.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -660,24 +786,33 @@ In `crates/jawd/src/store/mod.rs`'s test module (it has `query(&store, |db| …)
 
 ```rust
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_setting_is_kept_once_with_a_synced_commit_and_read_back_by_key() {
+    async fn a_setting_is_kept_once_with_a_synced_commit_and_read_back_by_its_domain_and_key() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
-        assert_eq!(store.setting("theme").unwrap(), None, "a fresh jaw.db holds no settings");
-        let keep = |value: &str, at| Change::Setting { key: "theme".into(), value: value.into(), at };
+        assert_eq!(store.setting("jaw", "theme").unwrap(), None, "a fresh jaw.db holds no settings");
+        let keep = |domain: &str, value: &str, at| Change::Setting {
+            domain: domain.into(),
+            key: "theme".into(),
+            value: value.into(),
+            at,
+        };
         let synced = store.storage().synced_commits;
-        store.apply_durable(vec![keep("\"gruvbox\"", 1)]).await.unwrap();
+        store.apply_durable(vec![keep("jaw", "\"gruvbox\"", 1)]).await.unwrap();
         assert_eq!(store.storage().synced_commits, synced + 1);
-        assert_eq!(store.setting("theme").unwrap().as_deref(), Some("\"gruvbox\""));
-        store.apply_durable(vec![keep("\"gruvbox\"", 2)]).await.unwrap();
-        let at: i64 =
-            query(&store, |db| Ok(db.query_row("SELECT at FROM settings WHERE key = 'theme'", [], |r| r.get(0))?)).await;
+        assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"gruvbox\""));
+        assert_eq!(store.setting("jaw-mac", "theme").unwrap(), None, "each domain is its own");
+        store.apply_durable(vec![keep("jaw", "\"gruvbox\"", 2)]).await.unwrap();
+        let at: i64 = query(&store, |db| {
+            Ok(db.query_row("SELECT at FROM settings WHERE domain = 'jaw' AND key = 'theme'", [], |r| r.get(0))?)
+        })
+        .await;
         assert_eq!(at, 1, "the same value again changes nothing, not even when it was chosen");
-        store.apply_durable(vec![keep("\"nord\"", 3)]).await.unwrap();
-        assert_eq!(store.setting("theme").unwrap().as_deref(), Some("\"nord\""));
-        let refused = store.apply_durable(vec![keep("not json", 4)]).await.unwrap();
+        store.apply_durable(vec![keep("jaw-mac", "\"nord\"", 3)]).await.unwrap();
+        assert_eq!(store.setting("jaw-mac", "theme").unwrap().as_deref(), Some("\"nord\""));
+        assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"gruvbox\""), "another domain's leaves it");
+        let refused = store.apply_durable(vec![keep("jaw", "not json", 4)]).await.unwrap();
         assert_eq!(refused.quarantined, 1, "a value that isn't JSON is refused by the table's check");
-        assert_eq!(store.setting("theme").unwrap().as_deref(), Some("\"nord\""));
+        assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"gruvbox\""));
     }
 ```
 
@@ -691,16 +826,19 @@ Expected: FAIL to compile: no variant `Change::Setting`, no method `setting`.
 Append to `MIGRATIONS` in `crates/jawd/src/store/schema.rs`, after migration 10's string:
 
 ```rust
-    // 11, a schema step: the settings every interface shares, one new table, which costs the same
-    // however big jaw.db is.
+    // 11, a schema step: each frontend's settings, one new table, which costs the same however big
+    // jaw.db is.
     "
-    -- Class: jaw's own. The settings every interface shares, a row for each setting chosen: never
-    -- dropped or rebuilt, and copied as they are by any rebuild. A setting without a row has its
-    -- default. `value` is the setting's JSON, and `at` when it was chosen, in milliseconds.
+    -- Class: jaw's own. Each frontend's settings, in a domain named by the client its hello gives, a
+    -- row for each setting chosen: never dropped or rebuilt, and copied as they are by any rebuild. A
+    -- setting without a row has its default. `value` is the setting's JSON, and `at` when it was
+    -- chosen, in milliseconds.
     CREATE TABLE settings (
-        key TEXT PRIMARY KEY,
+        domain TEXT NOT NULL,
+        key TEXT NOT NULL,
         value TEXT NOT NULL CHECK (json_valid(value)),
-        at INTEGER NOT NULL
+        at INTEGER NOT NULL,
+        PRIMARY KEY (domain, key)
     ) STRICT, WITHOUT ROWID;
     ",
 ```
@@ -713,9 +851,10 @@ Expected: FAIL with `migration 11 has no line in migrations.lock: add \`11 schem
 In `crates/jawd/src/store/write.rs`, add to `enum Change`, after `Remember`:
 
 ```rust
-    /// A setting every interface shares, as its JSON, kept as jaw's own; `at` is when it was
+    /// A frontend's setting, in its domain, as its JSON, kept as jaw's own; `at` is when it was
     /// chosen, which the same value asked again doesn't change.
     Setting {
+        domain: String,
         key: String,
         value: String,
         at: i64,
@@ -725,18 +864,19 @@ In `crates/jawd/src/store/write.rs`, add to `enum Change`, after `Remember`:
 In `provenance`, after the `Change::Remember` arm:
 
 ```rust
-        Some(Change::Setting { key, .. }) => ("setting", key.clone(), None),
+        Some(Change::Setting { domain, key, .. }) => ("setting", format!("{domain} {key}"), None),
 ```
 
 In `apply`, after the `Change::Remember` arm:
 
 ```rust
-        Change::Setting { key, value, at } => {
+        Change::Setting { domain, key, value, at } => {
             db.prepare_cached(
-                "INSERT INTO settings (key, value, at) VALUES (?1, ?2, ?3)
-                ON CONFLICT (key) DO UPDATE SET value = excluded.value, at = excluded.at WHERE value IS NOT excluded.value",
+                "INSERT INTO settings (domain, key, value, at) VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT (domain, key) DO UPDATE SET value = excluded.value, at = excluded.at
+                WHERE value IS NOT excluded.value",
             )?
-            .execute(params![key, value, at])?;
+            .execute(params![domain, key, value, at])?;
             Ok(false)
         }
 ```
@@ -744,17 +884,20 @@ In `apply`, after the `Change::Remember` arm:
 In `crates/jawd/src/store/mod.rs`, after `remembered`:
 
 ```rust
-    /// What jaw.db holds for the setting `key`, as its JSON, read on a connection of its own.
-    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+    /// What jaw.db holds for the setting `key` of `domain`, as its JSON, read on a connection of its
+    /// own.
+    pub fn setting(&self, domain: &str, key: &str) -> Result<Option<String>> {
         let db = connect(&self.path, Role::Reader)?;
-        Ok(db.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()?)
+        Ok(db
+            .query_row("SELECT value FROM settings WHERE domain = ?1 AND key = ?2", [domain, key], |r| r.get(0))
+            .optional()?)
     }
 ```
 
 - [ ] **Step 5: Pin the plans**
 
 Run: `JAW_PLANS=write cargo test -p jawd plans && git diff crates/jawd/src/store/plans.txt`
-Expected: the diff adds `SELECT value FROM settings WHERE key = ?1` planned as `SEARCH settings USING PRIMARY KEY (key=?)`, and the `INSERT INTO settings …` statement; nothing else changes. Then `cargo test -p jawd plans` passes.
+Expected: the diff adds `SELECT value FROM settings WHERE domain = ?1 AND key = ?2` planned as `SEARCH settings USING PRIMARY KEY (domain=? AND key=?)`, and the `INSERT INTO settings …` statement; nothing else changes. Then `cargo test -p jawd plans` passes.
 
 - [ ] **Step 6: Run the tests**
 
@@ -766,7 +909,7 @@ Expected: all pass, the migrations' tests included (upgrades from every earlier 
 ```bash
 cargo fmt --all
 git add crates/jawd/src/store
-git commit -m "jaw.db keeps the settings every interface shares: migration 11, a schema step, adds settings, a STRICT table of jaw's own with a row for each setting chosen, its value JSON by its check and when it was chosen; the writer keeps one as an upsert that changes nothing, not even when it was chosen, for the value already held, a value that isn't JSON quarantined, and jawd reads one back by its key, a search of the primary key, both statements' plans pinned"
+git commit -m "jaw.db keeps each frontend's settings: migration 11, a schema step, adds settings, a STRICT table of jaw's own with a row for each setting chosen in each domain, the domain being the client a frontend's hello gives, its value JSON by its check and when it was chosen; the writer keeps one as an upsert that changes nothing, not even when it was chosen, for the value already held, a value that isn't JSON quarantined, and jawd reads one back by its domain and key, a search of the primary key, both statements' plans pinned"
 ```
 
 ---
@@ -778,8 +921,8 @@ git commit -m "jaw.db keeps the settings every interface shares: migration 11, a
 - Modify: `crates/jawd/src/main.rs`, `crates/jawd/src/state.rs`, `crates/jawd/src/sock.rs`, `crates/jaw-client/src/lib.rs`, `scripts/check-data-audit.py`
 
 **Interfaces:**
-- Consumes: `Change::Setting` and `Store::setting` (Task 3); `jaw_proto::settings::*` and `jaw_proto::themes::*` (Tasks 1 and 2).
-- Produces: `crate::settings::Settings` with `load(store: Store) -> anyhow::Result<Settings>`, `current(&self) -> jaw_proto::settings::Settings`, `subscribe(&self) -> watch::Receiver<jaw_proto::settings::Settings>`, `ignored(&self) -> Vec<Ignored>`, `async set(&self, params: Value) -> Result<jaw_proto::settings::Settings, jaw_proto::Error>`; `State::with_settings(Arc<Settings>)` and `State::settings() -> Option<&Settings>`.
+- Consumes: `Change::Setting` and `Store::setting` (Task 3); `jaw_proto::settings::*` and `jaw_proto::themes::*` (Tasks 1, 2 and 2b).
+- Produces: `crate::settings::Settings` with `load(store: Store) -> anyhow::Result<Settings>`, `current(&self) -> jaw_proto::settings::Settings` (the terminal's), `subscribe(&self, client: &str) -> Option<watch::Receiver<jaw_proto::settings::Settings>>` (none for a client with no domain), `by_domain(&self) -> BTreeMap<String, serde_json::Map<String, Value>>`, `ignored(&self) -> Vec<Ignored>`, `async set(&self, client: &str, params: Value) -> Result<jaw_proto::settings::Settings, jaw_proto::Error>`; `State::with_settings(Arc<Settings>)` and `State::settings() -> Option<&Settings>`.
 
 - [ ] **Step 1: Write the module's failing tests**
 
@@ -789,7 +932,7 @@ Create `crates/jawd/src/settings.rs` holding only its test module for now, and a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jaw_proto::settings::Messages;
+    use jaw_proto::settings::{Messages, TERMINAL};
     use serde_json::json;
 
     fn opened() -> (tempfile::TempDir, Store, Settings) {
@@ -800,22 +943,34 @@ mod tests {
     }
 
     async fn refused(settings: &Settings, params: Value) -> Error {
-        settings.set(params).await.unwrap_err()
+        settings.set(TERMINAL, params).await.unwrap_err()
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_change_is_checked_kept_with_a_synced_commit_and_then_published() {
         let (_home, store, settings) = opened();
         assert_eq!(settings.current(), Shared::default());
-        let mut heard = settings.subscribe();
+        let mut heard = settings.subscribe(TERMINAL).unwrap();
         let synced = store.storage().synced_commits;
-        let now = settings.set(json!({"theme": "gruvbox"})).await.unwrap();
+        let now = settings.set(TERMINAL, json!({"theme": "gruvbox"})).await.unwrap();
         assert_eq!(now, Shared { theme: "gruvbox".into(), messages: Messages::Bubbles });
         assert_eq!(store.storage().synced_commits, synced + 1);
-        assert_eq!(store.setting("theme").unwrap().as_deref(), Some("\"gruvbox\""));
-        assert_eq!(store.setting("messages").unwrap(), None, "only what was asked is kept");
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap().as_deref(), Some("\"gruvbox\""));
+        assert_eq!(store.setting(TERMINAL, "messages").unwrap(), None, "only what was asked is kept");
         assert!(heard.has_changed().unwrap());
         assert_eq!(*heard.borrow_and_update(), now);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_without_a_domain_has_no_settings_and_cant_change_any() {
+        let (_home, store, settings) = opened();
+        assert!(settings.subscribe("test").is_none());
+        let e = settings.set("test", json!({"theme": "gruvbox"})).await.unwrap_err();
+        assert_eq!((e.code, e.data), (code::NOT_FOUND, Some(json!({"client": "test"}))));
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap(), None, "nothing kept");
+        let in_effect = settings.by_domain();
+        assert_eq!(in_effect.keys().collect::<Vec<_>>(), [TERMINAL], "the terminal's is the only domain");
+        assert_eq!(in_effect[TERMINAL]["theme"], "tokyo-night");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -835,17 +990,17 @@ mod tests {
         }
         let e = refused(&settings, json!({"theme": "gruvbox", "messages": "sideways"})).await;
         assert_eq!(e.data.unwrap()["param"], "messages");
-        assert_eq!(store.setting("theme").unwrap(), None, "a refused ask keeps none of its settings");
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap(), None, "a refused ask keeps none of its settings");
         assert_eq!(settings.current(), Shared::default());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_value_jaw_db_holds_already_is_answered_at_once_and_writes_nothing() {
         let (_home, store, settings) = opened();
-        settings.set(json!({"messages": "irc"})).await.unwrap();
+        settings.set(TERMINAL, json!({"messages": "irc"})).await.unwrap();
         let synced = store.storage().synced_commits;
-        let heard = settings.subscribe();
-        let now = settings.set(json!({"messages": "irc"})).await.unwrap();
+        let heard = settings.subscribe(TERMINAL).unwrap();
+        let now = settings.set(TERMINAL, json!({"messages": "irc"})).await.unwrap();
         assert_eq!(now.messages, Messages::Irc);
         assert_eq!(store.storage().synced_commits, synced, "nothing written");
         assert!(!heard.has_changed().unwrap(), "and nothing published");
@@ -856,7 +1011,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         {
             let settings = Settings::load(Store::open(home.path()).unwrap()).unwrap();
-            settings.set(json!({"theme": "nord", "messages": "irc"})).await.unwrap();
+            settings.set(TERMINAL, json!({"theme": "nord", "messages": "irc"})).await.unwrap();
         }
         {
             let settings = Settings::load(Store::open(home.path()).unwrap()).unwrap();
@@ -864,18 +1019,28 @@ mod tests {
             assert!(settings.ignored().is_empty());
         }
         let outside = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
-        outside.execute("UPDATE settings SET value = '\"rose-pine-moon\"' WHERE key = 'theme'", []).unwrap();
-        outside.execute("INSERT INTO settings (key, value, at) VALUES ('font', '\"Berkeley Mono\"', 1)", []).unwrap();
+        outside
+            .execute("UPDATE settings SET value = '\"rose-pine-moon\"' WHERE domain = 'jaw' AND key = 'theme'", [])
+            .unwrap();
+        outside
+            .execute(
+                "INSERT INTO settings (domain, key, value, at)
+                VALUES ('jaw', 'font', '\"Berkeley Mono\"', 1), ('jaw-mac', 'theme', '\"lumon\"', 1)",
+                [],
+            )
+            .unwrap();
         drop(outside);
         let store = Store::open(home.path()).unwrap();
         let settings = Settings::load(store.clone()).unwrap();
         assert_eq!(settings.current(), Shared { theme: themes::DEFAULT.into(), messages: Messages::Irc });
-        assert_eq!(settings.ignored(), vec![Ignored { key: "theme".into(), value: json!("rose-pine-moon") }]);
-        assert_eq!(store.setting("theme").unwrap().as_deref(), Some("\"rose-pine-moon\""), "kept as it was");
-        assert_eq!(store.count("settings").unwrap(), 3, "a setting jawd doesn't know is left alone");
-        settings.set(json!({"theme": "tokyo-night"})).await.unwrap();
+        let ignored = Ignored { domain: TERMINAL.into(), key: "theme".into(), value: json!("rose-pine-moon") };
+        assert_eq!(settings.ignored(), vec![ignored]);
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap().as_deref(), Some("\"rose-pine-moon\""), "kept as it was");
+        assert_eq!(store.count("settings").unwrap(), 4, "a setting or a domain jawd doesn't know is left alone");
+        assert_eq!(settings.by_domain().keys().collect::<Vec<_>>(), [TERMINAL], "and not read");
+        settings.set(TERMINAL, json!({"theme": "tokyo-night"})).await.unwrap();
         assert!(settings.ignored().is_empty(), "choosing the default replaces what wasn't understood");
-        assert_eq!(store.setting("theme").unwrap().as_deref(), Some("\"tokyo-night\""));
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap().as_deref(), Some("\"tokyo-night\""));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -885,26 +1050,26 @@ mod tests {
         outside
             .execute_batch("CREATE TRIGGER refused BEFORE INSERT ON settings BEGIN SELECT RAISE(ABORT, 'refused'); END")
             .unwrap();
-        let heard = settings.subscribe();
+        let heard = settings.subscribe(TERMINAL).unwrap();
         assert_eq!(refused(&settings, json!({"theme": "nord"})).await.code, code::INTERNAL);
         assert_eq!(settings.current(), Shared::default());
         assert!(!heard.has_changed().unwrap(), "nothing published");
-        assert_eq!(store.setting("theme").unwrap(), None);
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap(), None);
         outside.execute_batch("DROP TRIGGER refused").unwrap();
-        assert_eq!(settings.set(json!({"theme": "nord"})).await.unwrap().theme, "nord", "and it can be asked again");
+        assert_eq!(settings.set(TERMINAL, json!({"theme": "nord"})).await.unwrap().theme, "nord", "and it can be asked again");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn changes_from_many_interfaces_at_once_end_with_jaw_db_and_what_was_published_agreeing() {
         let (_home, store, settings) = opened();
         let settings = std::sync::Arc::new(settings);
-        let mut heard = settings.subscribe();
+        let mut heard = settings.subscribe(TERMINAL).unwrap();
         let asks: Vec<_> = (0..24)
             .map(|i| {
                 let settings = settings.clone();
                 let theme = themes::all()[i % 23].id.clone();
                 let messages = if i % 2 == 0 { "irc" } else { "bubbles" };
-                tokio::spawn(async move { settings.set(json!({"theme": theme, "messages": messages})).await.unwrap() })
+                tokio::spawn(async move { settings.set(TERMINAL, json!({"theme": theme, "messages": messages})).await.unwrap() })
             })
             .collect();
         for ask in asks {
@@ -912,8 +1077,8 @@ mod tests {
         }
         let now = settings.current();
         assert_eq!(*heard.borrow_and_update(), now, "the last published is the one in effect");
-        assert_eq!(store.setting("theme").unwrap().unwrap(), serde_json::to_string(&now.theme).unwrap());
-        assert_eq!(store.setting("messages").unwrap().unwrap(), serde_json::to_string(&now.messages).unwrap());
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap().unwrap(), serde_json::to_string(&now.theme).unwrap());
+        assert_eq!(store.setting(TERMINAL, "messages").unwrap().unwrap(), serde_json::to_string(&now.messages).unwrap());
     }
 }
 ```
@@ -923,43 +1088,47 @@ mod tests {
 Run: `cargo test -p jawd settings::tests`
 Expected: FAIL to compile: `cannot find type Settings`, `Shared`, and the like.
 
+The domain is a connection's `client`, which `sock.rs` passes to `set` and `subscribe`; jawd keeps only the terminal's domain so far, so the module holds one domain's settings, and another is another entry here when it comes.
+
 - [ ] **Step 3: Write the module**
 
 Put this above the test module in `crates/jawd/src/settings.rs`:
 
 ```rust
-//! The settings every interface shares, the theme and where your messages sit, kept in jaw.db as
-//! jaw's own. They're read once at start and changed one at a time: checked, kept with a synced
-//! commit, then published on a watch channel, which always holds the latest, for every
-//! connection to push.
+//! Each frontend's settings, kept in jaw.db as jaw's own in a domain named by the client its hello
+//! gives. The terminal's, in the `jaw` domain, are the only ones so far: the theme and where your
+//! messages sit. They're read once at start and changed one at a time: checked, kept with a synced
+//! commit, then published on the domain's watch channel, which always holds the latest, for each
+//! of its connections to push.
 
 use std::collections::BTreeMap;
 
-use jaw_proto::settings::{Ignored, Messages, Settings as Shared};
+use jaw_proto::settings::{Ignored, Messages, Settings as Shared, TERMINAL};
 use jaw_proto::{Error, code, themes};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, watch};
 
 use crate::store::{Change, Store};
 
-/// The settings jawd knows, by the names they're asked and kept by.
+/// The terminal's settings, by the names they're asked and kept by.
 const KNOWN: [&str; 2] = ["theme", "messages"];
 
 pub struct Settings {
     store: Store,
-    /// What jaw.db holds for each setting chosen, as its JSON. A change holds it from its check to
-    /// its publishing, so changes are made one at a time, in the order their commits are.
+    /// What jaw.db holds for each of the terminal's settings chosen, as its JSON. A change holds it
+    /// from its check to its publishing, so changes are made one at a time, in the order their
+    /// commits are.
     held: Mutex<BTreeMap<&'static str, String>>,
     published: watch::Sender<Shared>,
     ignored: std::sync::Mutex<Vec<Ignored>>,
 }
 
 impl Settings {
-    /// Reads what jaw.db holds for each setting jawd knows.
+    /// Reads what jaw.db holds for each setting of each domain jawd knows: the terminal's.
     pub fn load(store: Store) -> anyhow::Result<Settings> {
         let mut held = BTreeMap::new();
         for key in KNOWN {
-            if let Some(value) = store.setting(key)? {
+            if let Some(value) = store.setting(TERMINAL, key)? {
                 held.insert(key, value);
             }
         }
@@ -972,14 +1141,23 @@ impl Settings {
         })
     }
 
-    /// The settings in effect.
+    /// The terminal's settings in effect.
     pub fn current(&self) -> Shared {
         self.published.borrow().clone()
     }
 
-    /// A receiver that has seen the settings in effect now, and wakes for each later change.
-    pub fn subscribe(&self) -> watch::Receiver<Shared> {
-        self.published.subscribe()
+    /// A receiver for the settings of `client`'s domain, which has seen those in effect now and
+    /// wakes for each later change; none for a client jawd keeps no settings for.
+    pub fn subscribe(&self, client: &str) -> Option<watch::Receiver<Shared>> {
+        (client == TERMINAL).then(|| self.published.subscribe())
+    }
+
+    /// Each domain's settings in effect, by its name, as `status` says them.
+    pub fn by_domain(&self) -> BTreeMap<String, serde_json::Map<String, Value>> {
+        match serde_json::to_value(self.current()) {
+            Ok(Value::Object(terminal)) => BTreeMap::from([(TERMINAL.to_string(), terminal)]),
+            _ => BTreeMap::new(),
+        }
     }
 
     /// Each setting whose value in jaw.db this jawd doesn't take.
@@ -987,17 +1165,28 @@ impl Settings {
         self.ignored.lock().expect("the ignored settings").clone()
     }
 
-    /// `settings.set`: checks every setting asked before changing any, keeps those that differ from
-    /// what jaw.db holds in one synced commit, and only then publishes the settings in effect and
-    /// answers with them. What jaw.db holds already is answered at once, and written again never.
-    pub async fn set(&self, params: Value) -> Result<Shared, Error> {
+    /// `settings.set` from a connection of `client`: checks that its domain is one jawd keeps and
+    /// every setting asked before changing any, keeps those that differ from what jaw.db holds in
+    /// one synced commit, and only then publishes the domain's settings in effect and answers with
+    /// them. What jaw.db holds already is answered at once, and written again never.
+    pub async fn set(&self, client: &str, params: Value) -> Result<Shared, Error> {
+        if client != TERMINAL {
+            let mut error = Error::new(code::NOT_FOUND, format!("jawd keeps no settings for {client}"));
+            error.data = Some(json!({ "client": client }));
+            return Err(error);
+        }
         let asked = checked(params)?;
         let mut held = self.held.lock().await;
         let at = now_ms();
         let changes: Vec<Change> = asked
             .iter()
             .filter(|(key, value)| held.get(key) != Some(value))
-            .map(|(key, value)| Change::Setting { key: key.to_string(), value: value.clone(), at })
+            .map(|(key, value)| Change::Setting {
+                domain: TERMINAL.to_string(),
+                key: key.to_string(),
+                value: value.clone(),
+                at,
+            })
             .collect();
         if changes.is_empty() {
             return Ok(self.current());
@@ -1071,7 +1260,7 @@ fn in_effect(held: &BTreeMap<&'static str, String>) -> (Shared, Vec<Ignored>) {
             },
         };
         if !taken {
-            ignored.push(Ignored { key: key.to_string(), value });
+            ignored.push(Ignored { domain: TERMINAL.to_string(), key: key.to_string(), value });
         }
     }
     (shared, ignored)
@@ -1083,14 +1272,14 @@ fn now_ms() -> i64 {
 ```
 
 Run: `cargo test -p jawd settings::tests`
-Expected: 6 passed.
+Expected: 7 passed.
 
 - [ ] **Step 4: Write the socket's failing tests**
 
 In `crates/jawd/src/sock.rs`'s test module, add these imports beside the others:
 
 ```rust
-    use jaw_proto::settings::{Messages, Settings};
+    use jaw_proto::settings::{Messages, Settings, TERMINAL};
 ```
 
 and these helpers and tests:
@@ -1118,12 +1307,24 @@ and these helpers and tests:
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn hello_carries_the_settings_and_each_change_is_pushed_to_every_connection() {
+    async fn hello_carries_a_domains_settings_and_each_change_is_pushed_to_its_connections_alone() {
         let (_home, socket, _store) = serving_settings().await;
         let checked = tokio::task::spawn_blocking(move || {
-            let (mut a, welcome) = jaw_client::Connection::open(&socket, "a", "0").unwrap();
-            assert_eq!(welcome.settings, Settings::default());
-            let (mut b, _) = jaw_client::Connection::open(&socket, "b", "0").unwrap();
+            let (mut a, welcome) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
+            assert_eq!(welcome.settings, Some(Settings::default()));
+            let (mut b, _) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
+            // A client of no domain, read line by line, so a push to it would show.
+            let other = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            let mut heard = BufReader::new(other.try_clone().unwrap());
+            let mut line = String::new();
+            let mut say = |request: &str, line: &mut String| {
+                (&other).write_all(format!("{request}\n").as_bytes()).unwrap();
+                line.clear();
+                heard.read_line(line).map(|_| serde_json::from_str::<Value>(line).unwrap())
+            };
+            let hello = r#"{"id":1,"method":"hello","params":{"protocol":1,"client":"test","version":"0"}}"#;
+            let welcome = say(hello, &mut line).unwrap();
+            assert!(welcome["result"].get("settings").is_none(), "a client jawd keeps no settings for gets none");
             let kept = a.call("settings.set", json!({"theme": "gruvbox", "messages": "irc"})).unwrap();
             assert_eq!(kept, json!({"settings": {"theme": "gruvbox", "messages": "irc"}}));
             let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Irc };
@@ -1132,8 +1333,13 @@ and these helpers and tests:
                 assert_eq!(push.method, "settings");
                 assert_eq!(serde_json::from_value::<Settings>(push.params).unwrap(), gruvbox);
             }
-            let (_, later) = jaw_client::Connection::open(&socket, "c", "0").unwrap();
-            assert_eq!(later.settings, gruvbox, "a later hello carries them");
+            let asked = r#"{"id":2,"method":"settings.set","params":{"theme":"nord"}}"#;
+            let answer = say(asked, &mut line).unwrap();
+            assert_eq!(answer["id"], 2, "the next line it hears is its answer, not a push: {answer}");
+            assert_eq!(answer["error"]["code"], code::NOT_FOUND);
+            assert_eq!(answer["error"]["data"], json!({"client": "test"}));
+            let (_, later) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
+            assert_eq!(later.settings, Some(gruvbox), "a later hello carries them");
             let refused = a.call("settings.set", json!({"theme": "solarized"})).unwrap_err();
             assert!(refused.to_string().contains("theme takes one of"), "{refused}");
         });
@@ -1145,7 +1351,7 @@ and these helpers and tests:
         let (home, socket, store) = serving_settings().await;
         let path = socket.clone();
         let (mut connection, _) =
-            tokio::task::spawn_blocking(move || jaw_client::Connection::open(&path, "test", "0").unwrap()).await.unwrap();
+            tokio::task::spawn_blocking(move || jaw_client::Connection::open(&path, TERMINAL, "0").unwrap()).await.unwrap();
         // jaw.db's write lock, held from outside, so the setting can't be kept until it's let go.
         let holder = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -1160,7 +1366,7 @@ and these helpers and tests:
         let answer = tokio::time::timeout(Duration::from_secs(5), answer).await.expect("answered once it could").unwrap();
         assert_eq!(answer.unwrap()["settings"]["theme"], "nord");
         assert_eq!(store.storage().synced_commits - synced, 1, "kept with one synced commit");
-        assert_eq!(store.setting("theme").unwrap().as_deref(), Some("\"nord\""));
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap().as_deref(), Some("\"nord\""));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1170,9 +1376,9 @@ and these helpers and tests:
             let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
             let mut writer = stream.try_clone().unwrap();
             writer
-                .write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":1,\"client\":\"slow\",\"version\":\"0\"}}\n")
+                .write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":1,\"client\":\"jaw\",\"version\":\"0\"}}\n")
                 .unwrap();
-            let (mut fast, _) = jaw_client::Connection::open(&socket, "fast", "0").unwrap();
+            let (mut fast, _) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
             for i in 0..150 {
                 fast.call("settings.set", json!({"theme": ["gruvbox", "nord"][i % 2]})).unwrap();
             }
@@ -1216,7 +1422,7 @@ Expected: FAIL to compile: no method `with_settings`.
 In `crates/jawd/src/state.rs`, add the field `settings: Option<Arc<crate::settings::Settings>>,` to `State` (after `sending`), `settings: None,` in `State::new`, and:
 
 ```rust
-    /// Keeps the settings every interface shares in `settings`.
+    /// Keeps each frontend's settings in `settings`.
     pub fn with_settings(mut self, settings: Arc<crate::settings::Settings>) -> State {
         self.settings = Some(settings);
         self
@@ -1227,10 +1433,10 @@ In `crates/jawd/src/state.rs`, add the field `settings: Option<Arc<crate::settin
     }
 ```
 
-In `welcome()`, replace `settings: Default::default(),` with `settings: self.settings.as_ref().map(|s| s.current()).unwrap_or_default(),`. In `status()`, replace the two placeholders with:
+Leave `welcome()`'s `settings: None`: the socket fills it in with the connection's own domain's, at its hello. In `status()`, replace the two placeholders with:
 
 ```rust
-            settings: self.settings.as_ref().map(|s| s.current()),
+            settings: self.settings.as_ref().map(|s| s.by_domain()).unwrap_or_default(),
             settings_ignored: self.settings.as_ref().map(|s| s.ignored()).unwrap_or_default(),
 ```
 
@@ -1242,12 +1448,15 @@ In `crates/jawd/src/sock.rs`:
 - Add to `Session`:
 
 ```rust
-    /// The settings as this connection was last told them, made before its hello so no change
-    /// between its hello's answer and its first push is missed.
+    /// The client its hello gave, which names its domain of settings.
+    client: String,
+    /// Its domain's settings as this connection was last told them: made at its hello, whose
+    /// answer carries what this receiver has seen, so no change between that answer and its first
+    /// push is missed; none for a client jawd keeps no settings for.
     settings: Option<watch::Receiver<Shared>>,
 ```
 
-- In `one`, add `settings: state.settings().map(|s| s.subscribe()),` to the `Session` it makes, and a branch to its `select!`, after the `windows` branch:
+- In `one`, add `client: String::new(),` and `settings: None,` to the `Session` it makes, and a branch to its `select!`, after the `windows` branch:
 
 ```rust
             settings = changed(&mut session.settings, session.greeted) => {
@@ -1279,10 +1488,10 @@ async fn changed(settings: &mut Option<watch::Receiver<Shared>>, greeted: bool) 
 - In `answer`'s `"hello"` arm, replace `succeeded(id, &state.welcome())` with:
 
 ```rust
+                session.settings = state.settings().and_then(|s| s.subscribe(&hello.client));
+                session.client = hello.client;
                 let mut welcome = state.welcome();
-                if let Some(settings) = session.settings.as_mut() {
-                    welcome.settings = settings.borrow_and_update().clone();
-                }
+                welcome.settings = session.settings.as_mut().map(|s| s.borrow_and_update().clone());
                 succeeded(id, &welcome)
 ```
 
@@ -1290,7 +1499,7 @@ async fn changed(settings: &mut Option<watch::Receiver<Shared>>, greeted: bool) 
 
 ```rust
         "settings.set" => match state.settings() {
-            Some(settings) => match settings.set(request.params).await {
+            Some(settings) => match settings.set(&session.client, request.params).await {
                 Ok(settings) => succeeded(id, &SettingsKept { settings }),
                 Err(error) => failed(id, error),
             },
@@ -1304,9 +1513,13 @@ async fn changed(settings: &mut Option<watch::Receiver<Shared>>, greeted: bool) 
 In `crates/jaw-client/src/lib.rs`'s `describe`, after the `windows` block:
 
 ```rust
-    if let Some(settings) = &status.settings {
-        let mut line = format!("settings  theme {}, messages {}", settings.theme, settings.messages.name());
-        for ignored in &status.settings_ignored {
+    for (domain, settings) in &status.settings {
+        let said: Vec<String> = settings
+            .iter()
+            .map(|(key, value)| format!("{key} {}", value.as_str().map_or_else(|| value.to_string(), str::to_string)))
+            .collect();
+        let mut line = format!("settings  {domain}: {}", said.join(", "));
+        for ignored in status.settings_ignored.iter().filter(|i| &i.domain == domain) {
             line.push_str(&format!("; {} {} isn't one this jawd takes, so its default is used", ignored.key, ignored.value));
         }
         lines.push(line);
@@ -1324,7 +1537,7 @@ and to its test module:
         let said = super::describe(&status);
         assert!(
             said.contains(
-                "settings  theme tokyo-night, messages irc; theme \"rose-pine-moon\" isn't one this jawd takes, so its default is used"
+                "settings  jaw: messages irc, theme tokyo-night; theme \"rose-pine-moon\" isn't one this jawd takes, so its default is used"
             ),
             "{said}"
         );
@@ -1343,7 +1556,7 @@ Expected: all pass; `plans.txt` unchanged (the settings module holds no SQL).
 ```bash
 cargo fmt --all
 git add crates/jawd crates/jaw-client/src/lib.rs scripts/check-data-audit.py
-git commit -m "jawd serves the settings every interface shares: read from jaw.db at start, sent in every hello's answer from the connection's own receiver, made before the hello so no change between its answer and the first push is missed; settings.set checks every setting asked before changing any, refusing an unknown one or value with -32602 naming it and what it takes, keeps those that differ from jaw.db in one synced commit, one change at a time, and only then publishes them on a watch channel and answers, the value already held answered at once with nothing written; each greeted connection pushes the settings as they change, waiting for room as a reply does, so none is dropped; a value jaw.db holds that this jawd doesn't take is kept and read as its default, and status says so; themes answers with every theme's colours; and the module joins the data layer's paths"
+git commit -m "jawd serves each frontend's settings, the terminal's being the only domain so far: read from jaw.db at start, sent in a connection's hello's answer for the domain its client names, from a receiver made at that hello so no change between its answer and the first push is missed, and none for a client jawd keeps no settings for, whose settings.set is error 3; settings.set checks every setting asked before changing any, refusing an unknown one or value with -32602 naming it and what it takes, keeps those that differ from jaw.db in one synced commit, one change at a time, and only then publishes them on a watch channel and answers, the value already held answered at once with nothing written; each greeted connection of a domain pushes its settings as they change, waiting for room as a reply does, so none is dropped, and connections of other domains hear nothing; a value jaw.db holds that this jawd doesn't take is kept and read as its default, and status says every domain's settings and so; themes answers with every theme's colours; and the module joins the data layer's paths"
 ```
 
 ---
@@ -1820,7 +2033,7 @@ Expected: FAIL to compile: `Update::Hello` has no field `settings`, and the like
 
 In `crates/jaw/src/data.rs`:
 
-- Add `settings: jaw_proto::settings::Settings,` to `Update::Hello`, after `connection`, with the doc line `/// Every setting jawd keeps for the interfaces.`
+- Add `settings: jaw_proto::settings::Settings,` to `Update::Hello`, after `connection`, with the doc line `/// The terminal's settings, as jawd keeps them in the jaw domain, or the defaults when hello brings none.`
 - Add to `Update`, after `Connection(Connection)`:
 
 ```rust
@@ -1834,8 +2047,8 @@ In `crates/jaw/src/data.rs`:
 - Add to `trait Jawd`, after `focus`:
 
 ```rust
-    /// Asks jawd to keep these settings for every interface; they come back as `Update::Settings`,
-    /// or `Update::SettingsRefused` with why.
+    /// Asks jawd to keep these settings for the terminal; they come back as `Update::Settings`, or
+    /// `Update::SettingsRefused` with why.
     fn set_settings(&mut self, change: &jaw_proto::settings::SettingsSet);
 ```
 
@@ -1843,7 +2056,7 @@ In `crates/jaw/src/wire.rs`:
 
 - Add `Settings,` to `enum Asked`, with the doc line `/// A change to the settings, which the interface shows until jawd answers.`
 - In `refused`, add `Asked::Settings => Some(Update::SettingsRefused(why_not(failure, "settings"))),`.
-- In `event`'s `From::Connected(w)` arm, add `settings: w.settings,` to the `Update::Hello` it pushes.
+- In `event`'s `From::Connected(w)` arm, add `settings: w.settings.unwrap_or_default(),` to the `Update::Hello` it pushes; jaw says hello as `jaw`, the terminal's domain, so jawd sends them.
 - In `event`'s reply match, add before `(asked, Err(failure)) => …`:
 
 ```rust
@@ -1965,7 +2178,7 @@ pub const PATIENCE: i64 = 250;
         self.restyle();
     }
 
-    /// Asks jawd to keep `change` for every interface, showing it meanwhile.
+    /// Asks jawd to keep `change` for the terminal, showing it meanwhile.
     fn ask_settings(&mut self, change: jaw_proto::settings::SettingsSet) {
         let mut asked = self.settings_shown().clone();
         if let Some(theme) = &change.theme {
@@ -2748,7 +2961,7 @@ Expected: FAIL to compile: no `asked_settings`.
 In `crates/jaw/src/main.rs`, add to `enum Command`, after `Link`:
 
 ```rust
-    /// The settings every interface shares, or changes them: jaw settings theme=gruvbox messages=irc
+    /// The terminal's settings, or changes them: jaw settings theme=gruvbox messages=irc
     Settings {
         /// Settings to change, each as name=value
         changes: Vec<String>,
@@ -2761,7 +2974,7 @@ add `Some(Command::Settings { changes }) => settings(changes),` to `main`'s matc
 fn settings(changes: Vec<String>) -> Result<()> {
     let (mut connection, welcome) = connect()?;
     let now = if changes.is_empty() {
-        welcome.settings
+        welcome.settings.unwrap_or_default()
     } else {
         let kept = connection.call("settings.set", asked_settings(&changes)?)?;
         serde_json::from_value::<jaw_proto::settings::SettingsKept>(kept)?.settings
@@ -2814,14 +3027,14 @@ JAW_HOME=$JAW_TRY target/debug/jaw status | grep settings
 kill $(cat $JAW_TRY/pid)
 ```
 
-Expected: the defaults, then nord and irc, then jawd's "theme takes one of …" with `exit 1`, then `settings  theme nord, messages irc`. (Check `target/debug/jawd --help` for the engine flag's exact spelling first.) Stop only the PID started here.
+Expected: the defaults, then nord and irc, then jawd's "theme takes one of …" with `exit 1`, then `settings  jaw: messages irc, theme nord`. (Check `target/debug/jawd --help` for the engine flag's exact spelling first.) Stop only the PID started here.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cargo fmt --all
 git add crates/jaw/src/main.rs
-git commit -m "jaw settings shows the settings every interface shares with the values each takes, and jaw settings theme=nord messages=irc changes them through settings.set and prints them as they now are, a setting or value jawd refuses printing its reason and exiting with 1, so the owner's dot theme can keep jaw in step with Ghostty and Neovim"
+git commit -m "jaw settings shows the terminal's settings, its own domain's since it says hello as jaw, with the values each takes, and jaw settings theme=nord messages=irc changes them through settings.set and prints them as they now are, a setting or value jawd refuses printing its reason and exiting with 1, so the owner's dot theme can keep jaw in step with Ghostty and Neovim"
 ```
 
 ---
@@ -2835,13 +3048,13 @@ git commit -m "jaw settings shows the settings every interface shares with the v
 
 In `protocol/README.md`:
 
-- Add `,"settings":{"theme":"tokyo-night","messages":"bubbles"}` to the end of the hello result example, inside `result`, and a bullet after `connection.state`: `- \`settings\`: every setting with the value in effect, as "Settings" says.`
+- Add `,"settings":{"theme":"tokyo-night","messages":"bubbles"}` to the end of the hello result example, inside `result`, and a bullet after `connection.state`: `- \`settings\`: the settings of the connection's own domain, the one its \`client\` names, with the values in effect, as "Settings" says; absent for a client jawd keeps no settings for.`
 - Add a section before "## Focus and reading":
 
 ````markdown
 ## Settings
 
-The settings every interface shares, kept by jawd in jaw.db: one set for every interface, read in hello's answer, changed with `settings.set` and pushed to every connection as they change.
+Each frontend's settings, kept by jawd in jaw.db in a domain of its own, named by the `client` its hello gives, so a terminal and a Mac app on one machine keep separate preferences. A connection reads its own domain's settings in hello's answer, changes them with `settings.set` and is pushed each change to them. The terminal's domain, `jaw`, is the only one jawd keeps so far; `jaw settings` and `jaw status` share it, since they say hello as `jaw` too.
 
 ```json
 {"id":20,"method":"settings.set","params":{"theme":"gruvbox"}}
@@ -2851,11 +3064,11 @@ The settings every interface shares, kept by jawd in jaw.db: one set for every i
 {"id":21,"result":{"themes":[{"id":"catppuccin","name":"Catppuccin","mode":"dark","colors":{"accent":"#89b4fa","background":"#1e1e2e","…":"…"}}]}}
 ```
 
-- **`theme`** is one of Omarchy's themes by its ID, as `themes` lists them; `tokyo-night` by default. **`messages`** is where your messages sit: `bubbles`, in a column from a third of the way across, by default, or `irc`, on the left under "You" as everyone's are.
-- **`settings.set`** takes one setting or more and checks every one before changing any: a setting jawd doesn't know is -32602 with `data` `{"param": "<setting>"}`, a value it doesn't take or of the wrong type is -32602 with `data` `{"param": "<setting>", "allowed": [...]}`, and no settings at all is -32602. It answers with `settings`, all of them as they now are, once the change is on disk, synced; the value jaw.db already holds for a setting is answered at once and writes nothing. While jaw.db can't be written for a reason that passes, such as a full disk, the answer waits as every write's does; a change that can't be kept at all is -32603, and nothing changes.
-- **The `settings` push** goes to every connection that has said hello, the one that asked included, whenever the settings change, and carries all of them. A connection always ends on the latest: a change made while it's slow to read may be skipped, never the last.
+- **In the terminal's domain,** **`theme`** is one of Omarchy's themes by its ID, as `themes` lists them; `tokyo-night` by default. **`messages`** is where your messages sit: `bubbles`, in a column from a third of the way across, by default, or `irc`, on the left under "You" as everyone's are.
+- **`settings.set`** changes the connection's own domain; a connection whose client has no domain is error 3, with `data` `{"client": "<client>"}`. It takes one setting or more and checks every one before changing any: a setting jawd doesn't know is -32602 with `data` `{"param": "<setting>"}`, a value it doesn't take or of the wrong type is -32602 with `data` `{"param": "<setting>", "allowed": [...]}`, and no settings at all is -32602. It answers with `settings`, all of them as they now are, once the change is on disk, synced; the value jaw.db already holds for a setting is answered at once and writes nothing. While jaw.db can't be written for a reason that passes, such as a full disk, the answer waits as every write's does; a change that can't be kept at all is -32603, and nothing changes.
+- **The `settings` push** goes to every connection of the same domain that has said hello, the one that asked included, whenever that domain's settings change, and carries all of them. A connection always ends on the latest: a change made while it's slow to read may be skipped, never the last. Connections of other domains hear nothing of it.
 - **`themes`** answers with every theme, ordered by ID: its `id`, a `name` to show, its `mode` (`dark` or `light`) and `colors`, Omarchy's 25 colours by their keys as lowercase `#rrggbb`; where a theme leaves them out, `orange` is its `yellow` and `brown` its `orange` mixed half with black, as Omarchy resolves them. They're protocol/themes/, each theme's colors.toml as Omarchy wrote it (MIT, docs/licenses/omarchy.txt), which an interface in any language can read as well.
-- **`status`** says the settings in effect, and any whose value in jaw.db this jawd doesn't take, which has its default instead.
+- **`status`** says each domain's settings in effect, by the domain's name, and any whose value in jaw.db this jawd doesn't take, which has its default instead.
 ````
 
 - In the Methods table, add after the `status` row:
@@ -2865,8 +3078,8 @@ The settings every interface shares, kept by jawd in jaw.db: one set for every i
 | `themes` | | `themes`: every theme with its colours. See Settings |
 ```
 
-- In the Other pushes table, add: `| \`settings\` | every setting, as hello's \`settings\` |`.
-- In the `status` row of the Methods table, add `, and \`settings\`, the settings in effect, with \`settings_ignored\`, any jawd doesn't take` before the end of its result cell.
+- In the Other pushes table, add: `| \`settings\` | its domain's settings, as hello's \`settings\` |`.
+- In the `status` row of the Methods table, add `, and \`settings\`, each domain's settings in effect by its name, with \`settings_ignored\`, any jawd doesn't take` before the end of its result cell.
 
 - [ ] **Step 2: The design**
 
@@ -2875,7 +3088,7 @@ In `docs/plans/2026-10-16-jaw-design.md`, add under "## jawd", after "### Lifecy
 ```markdown
 ### Settings
 
-- **One set for every interface,** kept by jawd as jaw's own in the `settings` table: the theme, one of Omarchy's, and where your messages sit. Hello's answer carries them, `settings.set` changes them with a synced commit before it answers, and every connection is pushed each change. docs/plans/2026-10-26-settings-design.md has the whole design.
+- **A domain of settings for each frontend,** named by the client its hello gives, kept by jawd as jaw's own in the `settings` table, so a terminal and a Mac app on one machine keep separate preferences. The terminal's are the theme, one of Omarchy's, and where your messages sit. Hello's answer carries a connection's own, `settings.set` changes them with a synced commit before it answers, and each of the domain's connections is pushed each change. docs/plans/2026-10-26-settings-design.md has the whole design.
 - **Omarchy's themes, as data:** protocol/themes/ holds each theme's colors.toml as Omarchy wrote it, served with `themes`; each interface maps the palette onto what it draws, keeping every role readable.
 ```
 
