@@ -1,6 +1,6 @@
-//! Omarchy's themes, as Omarchy wrote them: protocol/themes/<id>.toml is each theme's colors.toml
-//! at the commit scripts/omarchy-themes pins (MIT, docs/licenses/omarchy.txt). jawd serves them
-//! with `themes`, and each interface maps their colours onto what it draws.
+//! Omarchy's themes, as Omarchy wrote them: `protocol/themes/<id>.toml` is each theme's
+//! colors.toml at the commit scripts/omarchy-themes pins (MIT, docs/licenses/omarchy.txt). jawd
+//! serves them with `themes`, and each interface maps their colours onto what it draws.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -62,7 +62,7 @@ impl Rgb {
 
 impl Serialize for Rgb {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&format!("#{:06x}", self.0))
+        s.serialize_str(&format!("#{:06x}", self.0 & 0xff_ffff))
     }
 }
 
@@ -130,6 +130,7 @@ pub fn all() -> &'static [Theme] {
     })
 }
 
+/// The theme `id` names, if it's one of them.
 pub fn get(id: &str) -> Option<&'static Theme> {
     all().iter().find(|t| t.id == id)
 }
@@ -154,7 +155,8 @@ pub fn name(id: &str) -> String {
 }
 
 /// A colors.toml read: its `key = "value"` lines, `mode` and the colours, with any other key left
-/// alone; `orange` and `brown` are `yellow` where it leaves them out, as Omarchy makes them.
+/// alone. Where it leaves them out, `orange` is `yellow` and `brown` is `orange` mixed half with
+/// black, each channel rounded half up, as Omarchy's omarchy-theme-color resolves them.
 pub fn parse(id: &str, text: &str) -> Result<Theme, String> {
     let mut values: HashMap<&str, &str> = HashMap::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
@@ -166,14 +168,17 @@ pub fn parse(id: &str, text: &str) -> Result<Theme, String> {
     let mode = match values.get("mode").copied() {
         Some("dark") => Mode::Dark,
         Some("light") => Mode::Light,
-        other => return Err(format!("its mode is {other:?}, not dark or light")),
+        Some(other) => return Err(format!("its mode is {other:?}, not dark or light")),
+        None => return Err("it has no mode".into()),
     };
     let colour = |key: &str| -> Result<Rgb, String> {
         let value = values.get(key).ok_or_else(|| format!("it has no {key}"))?;
         Rgb::parse(value).ok_or_else(|| format!("its {key} is {value:?}, not #rrggbb"))
     };
+    let colour_or = |key: &str, missing: Rgb| if values.contains_key(key) { colour(key) } else { Ok(missing) };
     let yellow = colour("yellow")?;
-    let or_yellow = |key: &str| if values.contains_key(key) { colour(key) } else { Ok(yellow) };
+    let orange = colour_or("orange", yellow)?;
+    let brown = colour_or("brown", mixed_half_with_black(orange))?;
     Ok(Theme {
         id: id.to_string(),
         name: name(id),
@@ -192,12 +197,12 @@ pub fn parse(id: &str, text: &str) -> Result<Theme, String> {
             bright_foreground: colour("bright_foreground")?,
             red: colour("red")?,
             yellow,
-            orange: or_yellow("orange")?,
+            orange,
             green: colour("green")?,
             cyan: colour("cyan")?,
             blue: colour("blue")?,
             magenta: colour("magenta")?,
-            brown: or_yellow("brown")?,
+            brown,
             bright_red: colour("bright_red")?,
             bright_yellow: colour("bright_yellow")?,
             bright_green: colour("bright_green")?,
@@ -206,6 +211,13 @@ pub fn parse(id: &str, text: &str) -> Result<Theme, String> {
             bright_magenta: colour("bright_magenta")?,
         },
     })
+}
+
+/// Each channel halved and rounded half up, as Omarchy's mix_color mixes a colour half with black.
+fn mixed_half_with_black(rgb: Rgb) -> Rgb {
+    let [_, r, g, b] = rgb.0.to_be_bytes();
+    let half = |c: u8| u32::from(c.div_ceil(2));
+    Rgb((half(r) << 16) | (half(g) << 8) | half(b))
 }
 
 #[cfg(test)]
@@ -255,13 +267,43 @@ mod tests {
     }
 
     #[test]
-    fn orange_and_brown_are_yellow_where_a_theme_leaves_them_out() {
-        for id in ["last-horizon", "solitude", "white"] {
+    fn orange_is_yellow_and_brown_is_orange_mixed_half_with_black_where_a_theme_leaves_them_out() {
+        for (id, brown) in [("last-horizon", Rgb(0x362f3a)), ("solitude", Rgb(0x6d6e6e)), ("white", Rgb(0x252525))] {
             let c = get(id).unwrap().colors;
-            assert_eq!((c.orange, c.brown), (c.yellow, c.yellow), "{id}");
+            assert_eq!((c.orange, c.brown), (c.yellow, brown), "{id}");
         }
         let gruvbox = get("gruvbox").unwrap().colors;
         assert_ne!(gruvbox.orange, gruvbox.yellow, "a theme's own orange is kept");
+        assert_eq!(gruvbox.brown, Rgb(0x70432e), "and its own brown");
+        let file = FILES.iter().find(|(id, _)| *id == "gruvbox").unwrap().1;
+        let without = parse("gruvbox", &file.replace("brown = \"#70432e\"", "")).unwrap();
+        assert_eq!(without.colors.brown, Rgb(0x71442e), "brown comes from its own orange, not yellow");
+    }
+
+    #[test]
+    fn every_theme_serves_25_colours_each_its_files_value_for_that_key() {
+        for (id, text) in FILES {
+            let file: HashMap<&str, String> = text
+                .lines()
+                .filter_map(|line| line.split_once(" = "))
+                .map(|(key, value)| (key, value.trim_matches('"').to_lowercase()))
+                .collect();
+            let orange = file.get("orange").unwrap_or(&file["yellow"]);
+            let half = |at: usize| u8::from_str_radix(&orange[at..at + 2], 16).unwrap().div_ceil(2);
+            let brown = format!("#{:02x}{:02x}{:02x}", half(1), half(3), half(5));
+            let served = serde_json::to_value(get(id).unwrap().colors).unwrap();
+            let served = served.as_object().unwrap();
+            assert_eq!(served.len(), 25, "{id}");
+            for (key, value) in served {
+                let wanted = match (file.get(key.as_str()), key.as_str()) {
+                    (Some(wanted), _) => wanted,
+                    (None, "orange") => orange,
+                    (None, "brown") => &brown,
+                    (None, _) => panic!("{id} serves {key}, which its file doesn't set"),
+                };
+                assert_eq!(value, wanted, "{id}'s {key}");
+            }
+        }
     }
 
     #[test]
@@ -271,7 +313,11 @@ mod tests {
         assert!(
             parse("x", &gruvbox.replace("accent = \"#7daea3\"", "accent = \"teal\"")).unwrap_err().contains("accent")
         );
-        assert!(parse("x", &gruvbox.replace("mode = \"dark\"", "mode = \"dim\"")).unwrap_err().contains("mode"));
+        assert_eq!(
+            parse("x", &gruvbox.replace("mode = \"dark\"", "mode = \"dim\"")).unwrap_err(),
+            "its mode is \"dim\", not dark or light"
+        );
+        assert_eq!(parse("x", &gruvbox.replace("mode = \"dark\"", "")).unwrap_err(), "it has no mode");
         let more = format!("{gruvbox}\nhyprland_active_border = \"rgba(26a269ee) 45deg\"\n");
         assert_eq!(parse("gruvbox", &more).unwrap(), *get("gruvbox").unwrap(), "a key it doesn't use is left alone");
     }
@@ -288,6 +334,7 @@ mod tests {
     #[test]
     fn colours_are_written_as_lowercase_hex() {
         assert_eq!(serde_json::to_value(Rgb(0x0b0c16)).unwrap(), "#0b0c16");
+        assert_eq!(serde_json::to_value(Rgb(0x1_0b0c16)).unwrap(), "#0b0c16", "only the colour's 24 bits");
         assert_eq!(serde_json::from_value::<Rgb>(serde_json::json!("#FFFCF0")).unwrap(), Rgb(0xfffcf0));
         assert!(serde_json::from_value::<Rgb>(serde_json::json!("fffcf0")).is_err());
         assert!(serde_json::from_value::<Rgb>(serde_json::json!("#fffcf")).is_err());
