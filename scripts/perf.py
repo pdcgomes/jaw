@@ -374,6 +374,8 @@ def main() -> int:
             "sent": numbers(r"it sent, once uploaded" + row, text),
             "acks_between": numbers(r"a text's ack, between photos" + row, text),
             "acks_during": numbers(r"a text's ack, while a photo went" + row, text),
+            "shown_between": numbers(r"a text shown to the interface, between photos" + row, text),
+            "shown_during": numbers(r"a text shown to the interface, while a photo went" + row, text),
         }
 
     started = time.monotonic()
@@ -487,11 +489,14 @@ def render(r: dict, steps: dict) -> str:
         row("", "in a catch-up", f"{timing(one_ack)}, {ms(one_ack['max'])} at worst",
             "the backlog acked one at a time, as jaw-engine acks it", "catch-up, one at a time", at_most(p(one_ack), 10))
     if "photo out" in r:
-        during, between = r["photo out"]["acks_during"], r["photo out"]["acks_between"]
+        got = r["photo out"]
+        during, between = got["acks_during"], got["acks_between"]
+        shown, shown_between = got["shown_during"], got["shown_between"]
         row("", "while photos of yours are sent", f"{during[1]:.1f} ms p99, {during[0]:.1f} ms p50, {during[2]:.1f} ms at worst",
             f"`jawd bench media-out`: a text through the demo engine every 50 ms, {during[3]:.0f} of them while {PHOTOS_OUT} 12-megapixel photos "
             f"went one at a time in SD and HD; {between[1]:.1f} ms p99 and {between[0]:.1f} ms p50 for the {between[3]:.0f} in the quiet spells "
-            f"between them", "photo out", during[1] <= 10)
+            f"between them. Shown to the interface, from the engine handing it over, at {shown[1]:.0f} ms p99 while a photo went and "
+            f"{shown_between[1]:.0f} ms between", "photo out", during[1] <= 10)
     ack = flood.get("demo", {}).get("ack")
     if ack:
         row("", "during the flood", timing(ack), f"each acked after its group's synced commit, with {grouped}", "flood", at_most(p(ack), 10))

@@ -3,9 +3,9 @@
 //! whose row shows its copy made and in the cache (ready to upload: its probe, its SD copy, and its
 //! HD one with `--hd`, made from one decode, hashed, synced and committed), and to the push whose
 //! row says it was sent (uploaded by the demo engine as jaw-engine streams one, then sent). All the
-//! while, texts arrive through the demo engine, each timed to its ack; a quiet spell comes before
-//! each photo, so what sending does to a message's arrival shows beside what it was without, under
-//! the same load.
+//! while, texts arrive through the demo engine, each timed to its ack and to the push that shows it
+//! to the interface; a quiet spell comes before each photo, so what sending does to a message's
+//! arrival shows beside what it was without, under the same load.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -41,8 +41,10 @@ const RUI: &str = "351913333333@s.whatsapp.net";
 /// How long texts arrive with no photo going, before each photo and after the last.
 const QUIET: Duration = Duration::from_millis(1_500);
 
-/// When a text arrived, and how long its ack took.
-type Ack = (Instant, Duration);
+/// A text that arrived: its ID, when, and how long its ack took.
+type Ack = (String, Instant, Duration);
+/// When the interface was shown each text, by ID.
+type Shown = Arc<std::sync::Mutex<std::collections::HashMap<String, Instant>>>;
 
 /// When the interface saw each step of one photo's send.
 #[derive(Default)]
@@ -113,8 +115,9 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         .with_sending(sending)
         .with_media(media);
     tokio::spawn(crate::sock::serve(Arc::new(state), listener));
-    let hello = demo::text(ANA, ANA, "3EB0BENCHOUTHELLO", now_ms(), "send me the photos");
-    world.deliver(hello).await.context("the demo engine took no message")?;
+    for (from, id, text) in [(ANA, "3EB0BENCHOUTHELLO", "send me the photos"), (RUI, "3EB0BENCHOUTRUI", "and to me")] {
+        world.deliver(demo::text(from, from, id, now_ms(), text)).await.context("the demo engine took no message")?;
+    }
     // Rui writes all along, each text timed to its ack.
     let stop = Arc::new(AtomicBool::new(false));
     let texts = {
@@ -125,10 +128,11 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
             while !stop.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_millis(plan.every)).await;
                 n += 1;
-                let text = demo::text(RUI, RUI, &format!("3EB0BENCHOUTTEXT{n:06}"), now_ms(), "and the lake?");
+                let id = format!("3EB0BENCHOUTTEXT{n:06}");
+                let text = demo::text(RUI, RUI, &id, now_ms(), "and the lake?");
                 let at = Instant::now();
                 if let Some(took) = world.deliver(text).await {
-                    acks.push((at, took));
+                    acks.push((id, at, took));
                 }
             }
             acks
@@ -137,9 +141,10 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
 
     let (timed_tx, timed) = std::sync::mpsc::channel::<(String, Seen)>();
     let (watching_tx, watching) = std::sync::mpsc::channel();
+    let shown: Shown = Arc::default();
     let reader = {
-        let socket = socket.clone();
-        std::thread::spawn(move || watch(&socket, watching_tx, timed_tx))
+        let (socket, shown) = (socket.clone(), shown.clone());
+        std::thread::spawn(move || watch(&socket, watching_tx, timed_tx, &shown))
     };
     watching.recv().context("the bench's interface couldn't watch")??;
     let mut asking = Asking::open(&socket)?;
@@ -173,7 +178,7 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         let at =
             |q: usize| took.get((took.len() * q / 100).min(took.len().saturating_sub(1))).copied().unwrap_or_default();
         println!(
-            "{what:<44} p50 {:.1} ms, p99 {:.1} ms, max {:.1} ms ({} {what_of})",
+            "{what:<52} p50 {:.1} ms, p99 {:.1} ms, max {:.1} ms ({} {what_of})",
             ms(at(50)),
             ms(at(99)),
             ms(took.last().copied().unwrap_or_default()),
@@ -191,9 +196,15 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
     row("its copy made and in the cache (ready)", times.iter().map(|t| t.1).collect(), "photos");
     row("it sent, once uploaded", times.iter().map(|t| t.2).collect(), "photos");
     let sending = |at: &Instant| sends.iter().any(|(from, to)| at >= from && at <= to);
-    let (during, quiet): (Vec<Ack>, Vec<Ack>) = acks.iter().partition(|(at, _)| sending(at));
-    row("a text's ack, between photos", quiet.into_iter().map(|(_, took)| took).collect(), "texts");
-    row("a text's ack, while a photo went", during.into_iter().map(|(_, took)| took).collect(), "texts");
+    let (during, quiet): (Vec<&Ack>, Vec<&Ack>) = acks.iter().partition(|(_, at, _)| sending(at));
+    let shown = shown.lock().expect("the texts shown").clone();
+    let arrived = |acks: &[&Ack]| -> Vec<Duration> {
+        acks.iter().filter_map(|(id, at, _)| Some(shown.get(id)?.saturating_duration_since(*at))).collect()
+    };
+    row("a text's ack, between photos", quiet.iter().map(|(_, _, took)| *took).collect(), "texts");
+    row("a text's ack, while a photo went", during.iter().map(|(_, _, took)| *took).collect(), "texts");
+    row("a text shown to the interface, between photos", arrived(&quiet), "texts");
+    row("a text shown to the interface, while a photo went", arrived(&during), "texts");
     Ok(())
 }
 
@@ -236,9 +247,14 @@ impl Asking {
     }
 }
 
-/// An interface on the socket watching Ana's chat, saying when each photo of yours first shows
-/// its copy made, and when it was sent.
-fn watch(socket: &Path, watching: std::sync::mpsc::Sender<Result<()>>, timed: std::sync::mpsc::Sender<(String, Seen)>) {
+/// An interface on the socket watching Ana's chat and Rui's, saying when each photo of yours first
+/// shows its copy made, and when it was sent, and keeping when each of Rui's texts was shown.
+fn watch(
+    socket: &Path,
+    watching: std::sync::mpsc::Sender<Result<()>>,
+    timed: std::sync::mpsc::Sender<(String, Seen)>,
+    shown: &Shown,
+) {
     let opened = (|| -> Result<(UnixStream, BufReader<UnixStream>)> {
         let mut stream = UnixStream::connect(socket)?;
         let mut reader = BufReader::new(stream.try_clone()?);
@@ -246,6 +262,7 @@ fn watch(socket: &Path, watching: std::sync::mpsc::Sender<Result<()>>, timed: st
         for request in [
             json!({ "id": 1, "method": "hello", "params": { "protocol": 1, "client": "bench", "version": "0" } }),
             json!({ "id": 2, "method": "messages.watch", "params": { "chat": ANA, "around": "newest", "before": 20 } }),
+            json!({ "id": 3, "method": "messages.watch", "params": { "chat": RUI, "around": "newest", "before": 20 } }),
         ] {
             stream.write_all(format!("{request}\n").as_bytes())?;
             loop {
@@ -279,6 +296,10 @@ fn watch(socket: &Path, watching: std::sync::mpsc::Sender<Result<()>>, timed: st
         let now = Instant::now();
         let Ok(push) = serde_json::from_str::<Value>(&line) else { continue };
         for row in push["params"]["upsert"].as_array().into_iter().flatten() {
+            if let Some(id) = row["id"].as_str().filter(|id| id.starts_with("3EB0BENCHOUTTEXT")) {
+                shown.lock().expect("the texts shown").entry(id.to_string()).or_insert(now);
+                continue;
+            }
             let (Some(id), true) = (row["id"].as_str(), row["mine"] == json!(true) && row["kind"] == "image") else {
                 continue;
             };
