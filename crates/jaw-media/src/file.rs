@@ -5,6 +5,10 @@
 //! name lasts. A hard link, unlike a rename, never replaces a file: a name that's taken is left
 //! as it is and the job says so, since a row may point to what's there. Folders made for a file
 //! are synced too, so a power cut can't take a new folder from under a synced file.
+//!
+//! A derived file, which can be made again from what jaw keeps (a preview), skips the two syncs:
+//! a crash or a kill still leaves it whole or not there, and a power cut may leave it missing,
+//! empty or cut short, which `whole_preview` tells, so whoever points to one checks it first.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -46,17 +50,35 @@ impl Drop for Claim {
     }
 }
 
+/// How a file is put in place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Durability {
+    /// Synced to the disk before its name, and its folder after, for what can't be made again: a
+    /// copy to send, a poster.
+    #[default]
+    Synced,
+    /// Put in place without waiting for the disk, for what can be made again: a preview. A power
+    /// cut may leave it missing, empty or cut short (`whole_preview`).
+    Derived,
+}
+
 /// A file on its way to `to`. Dropped before it's finished, it takes its partial file with it.
 pub(crate) struct Part {
     part: PathBuf,
     to: PathBuf,
     file: Option<File>,
+    durability: Durability,
 }
 
 impl Part {
     /// Claims a partial file for `to`, making `to`'s folder if it's missing. Refuses a name that's
     /// taken, and a name that is itself a partial file's.
     pub fn create(to: &Path) -> Result<Part> {
+        Part::create_as(to, Durability::Synced)
+    }
+
+    /// As `create`, put in place as `durability` says.
+    pub fn create_as(to: &Path, durability: Durability) -> Result<Part> {
         if to.as_os_str().to_string_lossy().ends_with(SUFFIX) {
             return Err(Error::Io {
                 path: to.into(),
@@ -75,7 +97,7 @@ impl Part {
         part.push(format!(".{}-{}{SUFFIX}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         let part = PathBuf::from(part);
         let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part).map_err(Error::io(&part))?;
-        Ok(Part { part, to: to.to_path_buf(), file: Some(file) })
+        Ok(Part { part, to: to.to_path_buf(), file: Some(file), durability })
     }
 
     /// Where the file is written until it's whole.
@@ -117,7 +139,10 @@ impl Part {
                 error: std::io::Error::other("the partial file was replaced while it was written"),
             });
         }
-        sync_file(file, &self.part)?;
+        let synced = self.durability == Durability::Synced;
+        if synced {
+            sync_file(file, &self.part)?;
+        }
         match std::fs::hard_link(&self.part, &self.to) {
             Ok(()) => record(|| format!("link {} {}", self.part.display(), self.to.display())),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -127,7 +152,7 @@ impl Part {
         }
         let placed = std::fs::remove_file(&self.part)
             .map_err(Error::io(&self.part))
-            .and_then(|()| sync_folder(self.to.parent().unwrap_or(Path::new(""))));
+            .and_then(|()| if synced { sync_folder(self.to.parent().unwrap_or(Path::new(""))) } else { Ok(()) });
         if let Err(e) = placed {
             let _ = std::fs::remove_file(&self.to);
             return Err(e);
@@ -275,6 +300,22 @@ mod tests {
                 "sync-folder /media/ab",
             ]
         );
+    }
+
+    #[test]
+    fn a_derived_file_is_put_in_place_whole_without_waiting_for_the_disk() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::create_dir(folder.path().join("previews")).unwrap();
+        let to = folder.path().join("previews/a.256.jpg");
+        let size = Part::create_as(&to, Durability::Derived)
+            .unwrap()
+            .write(|out| out.write_all(b"derived").map_err(Error::io(&to)))
+            .unwrap();
+        assert_eq!((size, std::fs::read(&to).unwrap()), (7, b"derived".to_vec()));
+        assert_eq!(events(folder.path()), ["link /previews/a.256.jpg.N.part /previews/a.256.jpg"]);
+        assert_eq!(std::fs::read_dir(folder.path().join("previews")).unwrap().count(), 1, "and no partial file");
+        let taken = Part::create_as(&to, Durability::Derived);
+        assert!(matches!(taken, Err(Error::Exists { .. })), "nor does it replace a name that's taken");
     }
 
     #[test]

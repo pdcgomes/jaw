@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use image::{DynamicImage, GenericImageView, Rgb, RgbImage, Rgba, RgbaImage};
 use jaw_media::{
-    Action, Cancel, Config, Destination, DocumentType, Error, Format, HD, Job, Kind, Lane, Media, Orientation,
-    PreviewFormat, Previews, Probe, Progress, Quality, SD, VideoEncoder, instant_preview, plan, previews_lane,
+    Action, Cancel, Config, Destination, DocumentType, Durability, Error, Format, HD, Job, Kind, Lane, Media,
+    Orientation, PreviewFormat, Previews, Probe, Progress, Quality, SD, VideoEncoder, instant_preview, plan,
+    previews_lane, whole_preview,
 };
 use tempfile::TempDir;
 
@@ -237,9 +238,46 @@ fn a_messages_thumbnail_is_scaled_up_to_stand_in_for_the_preview() {
     jpeg_encoder::Encoder::new(&mut thumbnail, 50)
         .encode(&RgbImage::from_pixel(32, 24, Rgb([10, 200, 10])).into_raw(), 32, 24, jpeg_encoder::ColorType::Rgb)
         .unwrap();
-    let preview = instant_preview(&thumbnail, &dir.path().join("m")).unwrap();
+    let preview = instant_preview(&thumbnail, &dir.path().join("m"), Durability::Synced).unwrap();
     assert_eq!((preview.width, preview.height, preview.format), (256, 192, PreviewFormat::Jpeg));
     assert!(image::open(&preview.path).unwrap().get_pixel(128, 96).0[1] > 150);
+}
+
+#[test]
+fn a_preview_a_power_cut_left_missing_empty_or_cut_short_reads_as_not_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = media_with(Config { previews: Durability::Derived, ..Config::default() });
+    let photo = jpeg(&dir, "photo.jpg", 1600, 1200, 0, true);
+    let Previews::Pictures { small, large } =
+        media.previews(&photo, &probe_of(&photo), &dir.path().join("p"), &Cancel::new()).unwrap()
+    else {
+        panic!("a photo has pictures")
+    };
+    let sticker = media.previews(
+        &fixture("animated-sticker.webp"),
+        &probe_of(&fixture("animated-sticker.webp")),
+        &dir.path().join("s"),
+        &Cancel::new(),
+    );
+    let Ok(Previews::Pictures { small: png, .. }) = sticker else { panic!("a sticker has pictures") };
+    assert_eq!(png.format, PreviewFormat::Png);
+    for whole in [&small.path, &large.path, &png.path] {
+        assert!(whole_preview(whole), "{} is whole", whole.display());
+    }
+    assert!(!whole_preview(&dir.path().join("missing.256.jpg")));
+    for (n, preview) in [&large.path, &png.path].into_iter().enumerate() {
+        let bytes = std::fs::read(preview).unwrap();
+        let ext = preview.extension().unwrap().to_str().unwrap();
+        let cut = dir.path().join(format!("cut{n}.{ext}"));
+        std::fs::write(&cut, &bytes[..bytes.len() * 2 / 3]).unwrap();
+        assert!(!whole_preview(&cut), "{ext} cut short");
+        let empty = dir.path().join(format!("empty{n}.{ext}"));
+        std::fs::write(&empty, b"").unwrap();
+        assert!(!whole_preview(&empty), "{ext} empty");
+        let zeroes = dir.path().join(format!("zeroes{n}.{ext}"));
+        std::fs::write(&zeroes, vec![0; bytes.len()]).unwrap();
+        assert!(!whole_preview(&zeroes), "{ext} written as zeroes");
+    }
 }
 
 #[test]

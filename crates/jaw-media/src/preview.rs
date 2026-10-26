@@ -6,13 +6,15 @@
 //! draw, except where there's transparency to keep (stickers, mostly), which go as PNG, as the
 //! protocol says and as kitty's graphics take them without decoding.
 
+use std::fs::File;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
 
 use crate::Media;
 use crate::error::{Error, Result};
-use crate::file::{Claim, Part};
+use crate::file::{Claim, Durability, Part};
 use crate::job::Cancel;
 use crate::plan::Lane;
 use crate::probe::{Format, Kind, Probe};
@@ -135,9 +137,10 @@ pub(crate) fn previews(media: &Media, source: &Path, probe: &Probe, stem: &Path,
     let large = raster::decode(media, source, probe, LARGE, poster_at(probe), cancel)?;
     let small = raster::fit(large.clone(), SMALL);
     let alpha = large.color().has_alpha();
-    let large = write(&large, stem, "768", alpha)?;
+    let durability = media.config().previews;
+    let large = write(&large, stem, "768", alpha, durability)?;
     // A failed or cancelled call leaves nothing, and the large preview's name is this call's own.
-    match cancel.check().and_then(|()| write(&small, stem, "256", alpha)) {
+    match cancel.check().and_then(|()| write(&small, stem, "256", alpha, durability)) {
         Ok(small) => Ok(Previews::Pictures { small, large }),
         Err(e) => {
             let _ = std::fs::remove_file(&large.path);
@@ -147,21 +150,29 @@ pub(crate) fn previews(media: &Media, source: &Path, probe: &Probe, stem: &Path,
 }
 
 /// A preview's name beside `stem`: `<stem>.<label>.jpg`, or `.png` when it keeps transparency.
+pub fn preview_name(stem: &Path, label: &str, alpha: bool) -> PathBuf {
+    name(stem, label, alpha)
+}
+
 fn name(stem: &Path, label: &str, alpha: bool) -> PathBuf {
     let mut name = stem.as_os_str().to_owned();
     name.push(format!(".{label}.{}", if alpha { "png" } else { "jpg" }));
     PathBuf::from(name)
 }
 
-fn write(image: &DynamicImage, stem: &Path, label: &str, alpha: bool) -> Result<Preview> {
-    write_to(image, &name(stem, label, alpha), alpha)
+fn write(image: &DynamicImage, stem: &Path, label: &str, alpha: bool, durability: Durability) -> Result<Preview> {
+    write_as(image, &name(stem, label, alpha), alpha, durability)
 }
 
-/// Writes `image` to `path`, as PNG if `alpha`, as JPEG otherwise.
+/// Writes `image` to `path`, synced, as PNG if `alpha`, as JPEG otherwise.
 pub(crate) fn write_to(image: &DynamicImage, path: &Path, alpha: bool) -> Result<Preview> {
+    write_as(image, path, alpha, Durability::Synced)
+}
+
+fn write_as(image: &DynamicImage, path: &Path, alpha: bool, durability: Durability) -> Result<Preview> {
     let format = if alpha { PreviewFormat::Png } else { PreviewFormat::Jpeg };
     let path = path.to_path_buf();
-    let part = Part::create(&path)?;
+    let part = Part::create_as(&path, durability)?;
     let written = part.path().to_path_buf();
     let size = part.write(|out| {
         if alpha { raster::png(image, out) } else { raster::jpeg(image, QUALITY, out) }.map_err(Error::io(&written))
@@ -171,7 +182,7 @@ pub(crate) fn write_to(image: &DynamicImage, path: &Path, alpha: bool) -> Result
 
 /// Writes the thumbnail a message carries (a small JPEG), scaled up to SMALL and softened so its
 /// blocks don't show, as `<stem>.instant.jpg`: what's shown until the file itself is downloaded.
-pub fn instant_preview(thumbnail: &[u8], stem: &Path) -> Result<Preview> {
+pub fn instant_preview(thumbnail: &[u8], stem: &Path, durability: Durability) -> Result<Preview> {
     let path = name(stem, "instant", false);
     let _claim = Claim::take([path.as_path()])?;
     let image = image::load_from_memory(thumbnail).map_err(|e| Error::unreadable(stem, e))?;
@@ -184,5 +195,35 @@ pub fn instant_preview(thumbnail: &[u8], stem: &Path) -> Result<Preview> {
     } else {
         raster::fit(image, SMALL)
     };
-    write_to(&image, &path, false)
+    write_as(&image, &path, false, durability)
+}
+
+/// The end of a PNG: its IEND chunk, empty, with its CRC.
+const PNG_END: [u8; 12] = [0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82];
+const PNG_START: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
+
+/// Whether the preview at `path` is whole: there, not empty, and starting and ending as its format
+/// must, a JPEG with its start and end of image, a PNG with its signature and its IEND chunk. A
+/// derived preview that a power cut left missing, empty or cut short isn't, so it's made again; one
+/// whose first and last blocks reached the disk and some between didn't would pass, and show with
+/// a damaged stretch until it's made again.
+pub fn whole_preview(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else { return false };
+    let Ok(len) = file.metadata().map(|m| m.len()) else { return false };
+    let read = |at: u64, out: &mut [u8]| file.read_exact_at(out, at).is_ok();
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("jpg") => {
+            let (mut start, mut end) = ([0; 3], [0; 2]);
+            len >= 5
+                && read(0, &mut start)
+                && read(len - 2, &mut end)
+                && start == [0xFF, 0xD8, 0xFF]
+                && end == [0xFF, 0xD9]
+        }
+        Some("png") => {
+            let (mut start, mut end) = ([0; 8], [0; 12]);
+            len >= 20 && read(0, &mut start) && read(len - 12, &mut end) && start == PNG_START && end == PNG_END
+        }
+        _ => len > 0,
+    }
 }

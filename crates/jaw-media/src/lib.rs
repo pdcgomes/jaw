@@ -8,7 +8,8 @@
 //! image pool; videos, GIFs and audio are encoded by an ffmpeg child at a lower OS priority, on the
 //! transcode pool, streaming between paths so a 2 GB video never sits in memory. A job is
 //! cancelled through its [`Cancel`], which kills its ffmpeg at once, and a file appears under its
-//! final name only once it's whole and synced.
+//! final name only once it's whole and synced, or, for a preview its caller takes as derived,
+//! whole ([`Durability`]).
 
 mod error;
 mod file;
@@ -26,13 +27,14 @@ mod tools;
 mod webp;
 
 pub use error::{Error, Result};
-pub use file::remove_partial;
+pub use file::{Durability, remove_partial};
 pub use job::{Cancel, Job, Progress};
 pub use limits::{HD, Limits, SD, THUMBNAIL_LONG_EDGE, THUMBNAIL_QUALITY};
 pub use plan::{Action, Lane, Plan, Plans, Quality, plan};
 pub use prepare::{Destination, Prepared};
 pub use preview::{
-    DocumentType, LARGE, Preview, PreviewFormat, Previews, SMALL, document_type, instant_preview, previews_lane,
+    DocumentType, LARGE, Preview, PreviewFormat, Previews, SMALL, document_type, instant_preview, preview_name,
+    previews_lane, whole_preview,
 };
 pub use probe::{Format, Kind, Orientation, Probe};
 pub use tools::{Status, Tools, VideoEncoder};
@@ -50,12 +52,15 @@ pub struct Config {
     pub threads: usize,
     /// The video encoder to use, or None for the best one this machine has.
     pub video_encoder: Option<VideoEncoder>,
+    /// How `previews` puts its files in place: synced, or derived, for a caller that checks each
+    /// with `whole_preview` before pointing to it and makes it again when it isn't.
+    pub previews: Durability,
 }
 
 impl Default for Config {
     fn default() -> Config {
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        Config { nice: 10, threads: (cores / 2).clamp(2, 8), video_encoder: None }
+        Config { nice: 10, threads: (cores / 2).clamp(2, 8), video_encoder: None, previews: Durability::Synced }
     }
 }
 
@@ -98,7 +103,8 @@ impl Media {
 
     /// Writes `source`'s display-ready previews, at most SMALL and LARGE pixels on their longest
     /// side, beside `stem` (`<stem>.256.jpg` and `<stem>.768.jpg`, or `.png` for images with
-    /// transparency); a document that has no cheap first page gets an icon instead.
+    /// transparency), as `Config::previews` says; a document that has no cheap first page gets an
+    /// icon instead.
     pub fn previews(&self, source: &Path, probe: &Probe, stem: &Path, cancel: &Cancel) -> Result<Previews> {
         preview::previews(self, source, probe, stem, cancel)
     }
