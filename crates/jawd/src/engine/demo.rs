@@ -759,6 +759,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_history_blob_is_renamed_into_place_whole_and_never_written_into_the_file_at_its_path() {
+        let (tx, _rx) = mpsc::channel(8);
+        let instance = DemoEngine::for_account(Vec::new(), Arc::new(Tiny)).start(tx).await.unwrap();
+        let spool = tempfile::tempdir().unwrap();
+        let path = spool.path().join("3EB0HISTORY.pb");
+        std::fs::write(&path, b"a blob cut short").unwrap();
+        // A second name for the file at the blob's path, which sees anything written into that file.
+        let other = spool.path().join("other name");
+        std::fs::hard_link(&path, &other).unwrap();
+        let offered = e2e::HistorySyncNotification { chunk_order: Some(1), ..Default::default() };
+        let reply = instance.commands.call(download(offered, &path)).await;
+        assert!(matches!(reply, Ok(pb::reply::Kind::HistoryFile(_))), "{reply:?}");
+        assert_eq!(
+            std::fs::read(&other).unwrap(),
+            b"a blob cut short",
+            "the blob was written into the file at its path"
+        );
+        let written = HistorySync::decode(std::fs::read(&path).unwrap().as_slice()).unwrap();
+        assert_eq!(written.conversations.len(), 1, "the path holds the whole blob");
+        let mut names: Vec<_> = std::fs::read_dir(spool.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        assert_eq!(names, ["3EB0HISTORY.pb", "other name"], "no .part file is left beside it");
+    }
+
+    #[tokio::test]
     async fn events_delivered_from_outside_the_script_each_wait_for_their_own_ack_several_at_once() {
         let engine = DemoEngine::with(Vec::new());
         let world = engine.world();

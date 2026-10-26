@@ -210,7 +210,7 @@ async fn serve(plan: Plan, shape: Shape, history: bool, ended: Option<i64>) -> R
         state: started.state.clone(),
         store,
         socket: socket.clone(),
-        sampler: Sampler::start(),
+        sampler: Sampler::start(folder.join("jaw.db-wal")),
         expected: Arc::default(),
         commits: Arc::default(),
         report: Mutex::new(serde_json::Map::new()),
@@ -283,6 +283,11 @@ fn line(what: &str, timings: &[Duration]) -> String {
 
 fn mb(bytes: u64) -> f64 {
     bytes as f64 / 1e6
+}
+
+/// Bytes in MiB, as the WAL's bound is set.
+fn mib(bytes: u64) -> f64 {
+    bytes as f64 / (1 << 20) as f64
 }
 
 impl Demo {
@@ -421,18 +426,19 @@ impl Demo {
         let (came, missing) = self.expected.take();
         let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
         let from_commit = self.since_commit(&came);
-        let (footprint, resident) = self.sampler.most();
+        let most = self.sampler.most();
         let after = usage::now().footprint;
         let storage = self.store.storage();
         let messages = self.store.count("messages")?;
         let rate = self.account.shape.messages as f64 / stored.as_secs_f64();
         println!(
-            "history: {messages} messages stored in {:.1} s, {rate:.0} a second, then indexed for search in {:.1} s; the WAL held {} frames at most; jawd's memory at most {:.0} MB ({:.0} MB resident), and {:.0} MB once it was in",
+            "history: {messages} messages stored in {:.1} s, {rate:.0} a second, then indexed for search in {:.1} s; the WAL held {} frames at most and reached {:.0} MiB on disk; jawd's memory at most {:.0} MB ({:.0} MB resident), and {:.0} MB once it was in",
             stored.as_secs_f64(),
             indexed.as_secs_f64(),
             storage.wal_peak_frames,
-            mb(footprint),
-            mb(resident),
+            mib(most.wal),
+            mb(most.footprint),
+            mb(most.resident),
             mb(after)
         );
         println!("{}", line(&format!("a live message every {} ms, acked", LIVE_EVERY.as_millis()), &acks));
@@ -452,8 +458,9 @@ impl Demo {
                 "rate": rate,
                 "indexed_seconds": indexed.as_secs_f64(),
                 "wal_peak_frames": storage.wal_peak_frames,
-                "peak_mb": mb(footprint),
-                "peak_resident_mb": mb(resident),
+                "wal_peak_mib": mib(most.wal),
+                "peak_mb": mb(most.footprint),
+                "peak_resident_mb": mb(most.resident),
                 "lifetime_peak_mb": mb(usage::now().peak),
                 "after_mb": mb(after),
                 "ack": summary(&acks),
@@ -626,15 +633,17 @@ impl Demo {
         let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
         let from_commit = self.since_commit(&came);
         let acks = std::mem::take(&mut *acks.lock().expect("the acks"));
-        let (footprint, resident) = self.sampler.most();
+        let most = self.sampler.most();
+        let wal_frames = self.store.storage().wal_peak_frames;
         let achieved = handed as f64 / took.as_secs_f64();
         let share = (cpu.saturating_sub(watcher_cpu)).as_secs_f64() / took.as_secs_f64() * 100.0;
         println!(
-            "flood: {handed} messages in {:.1} s, {achieved:.0} a second of {rate} asked, at most {in_flight} waiting for acks at once, all converted {:.0} ms after the last ack; jawd's memory at most {:.0} MB ({:.0} MB resident), its CPU {share:.0}% of a core with the demo engine's",
+            "flood: {handed} messages in {:.1} s, {achieved:.0} a second of {rate} asked, at most {in_flight} waiting for acks at once, all converted {:.0} ms after the last ack; the WAL reached {:.0} MiB on disk ({wal_frames} frames at most since jawd started); jawd's memory at most {:.0} MB ({:.0} MB resident), its CPU {share:.0}% of a core with the demo engine's",
             took.as_secs_f64(),
             ms(converted_after),
-            mb(footprint),
-            mb(resident)
+            mib(most.wal),
+            mb(most.footprint),
+            mb(most.resident)
         );
         println!("{}", line("a message, acked", &acks));
         println!("{}", line("  the open chat's, from hand-over to the interface", &arrivals));
@@ -661,8 +670,10 @@ impl Demo {
                 "commit_to_interface": summary(&from_commit),
                 "open": summary(&opens),
                 "cpu_percent": share,
-                "peak_mb": mb(footprint),
-                "peak_resident_mb": mb(resident),
+                "wal_peak_mib": mib(most.wal),
+                "wal_peak_frames": wal_frames,
+                "peak_mb": mb(most.footprint),
+                "peak_resident_mb": mb(most.resident),
                 "lifetime_peak_mb": mb(usage::now().peak),
                 "pushes_per_second": (pushed - pushes) as f64 / seconds_taken,
                 "list_pushes_per_second": (listed - lists) as f64 / seconds_taken,
@@ -740,14 +751,16 @@ impl Demo {
         let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
         let from_commit = self.since_commit(&came);
         let acks = std::mem::take(&mut *acks.lock().expect("the acks"));
-        let (footprint, resident) = self.sampler.most();
+        let most = self.sampler.most();
+        let wal_frames = self.store.storage().wal_peak_frames;
         let rate = f64::from(backlog + receipts) / drained.as_secs_f64();
         println!(
-            "catch-up: {backlog} messages and {receipts} receipts waiting, all acked in {:.1} s, {rate:.0} a second with at most {in_flight} waiting for acks at once, and all converted in {:.1} s; jawd's memory at most {:.0} MB ({:.0} MB resident)",
+            "catch-up: {backlog} messages and {receipts} receipts waiting, all acked in {:.1} s, {rate:.0} a second with at most {in_flight} waiting for acks at once, and all converted in {:.1} s; the WAL reached {:.0} MiB on disk ({wal_frames} frames at most since jawd started); jawd's memory at most {:.0} MB ({:.0} MB resident)",
             drained.as_secs_f64(),
             all_in.as_secs_f64(),
-            mb(footprint),
-            mb(resident)
+            mib(most.wal),
+            mb(most.footprint),
+            mb(most.resident)
         );
         println!("{}", line("a message or receipt, acked", &acks));
         println!("{}", line("  the open chat's, from hand-over to the interface", &arrivals));
@@ -771,8 +784,10 @@ impl Demo {
                 "ack": summary(&acks),
                 "arrival": summary(&arrivals),
                 "commit_to_interface": summary(&from_commit),
-                "peak_mb": mb(footprint),
-                "peak_resident_mb": mb(resident),
+                "wal_peak_mib": mib(most.wal),
+                "wal_peak_frames": wal_frames,
+                "peak_mb": mb(most.footprint),
+                "peak_resident_mb": mb(most.resident),
                 "lifetime_peak_mb": mb(usage::now().peak),
                 "pushes_per_second": (pushed - pushes) as f64 / seconds,
                 "list_pushes_per_second": (listed - lists) as f64 / seconds,

@@ -47,6 +47,13 @@ FLOOD = 2_000
 FLOOD_SECONDS = 15 if SMALL else 60
 LAUNCHES = 5 if SMALL else 20
 IDLE = 40 if SMALL else 60
+# The engine's round trips: as many as the writer keeps transactions' times (1,024), so the two
+# cover the same messages.
+TRIPS = 1_000
+# Acks the demo engine's flood and second catch-up wait for at once; jaw-engine waits for each.
+IN_FLIGHT = 256
+# The WAL's bound, in MiB.
+WAL_LIMIT = 64
 
 
 def load() -> float:
@@ -270,7 +277,7 @@ def main() -> int:
         return {"demo": report, "launches": launches, "walk": walked, "idle": quiet}
 
     def flood():
-        args = ["--flood", str(FLOOD), "--seconds", str(FLOOD_SECONDS), "--after", "8"]
+        args = ["--flood", str(FLOOD), "--seconds", str(FLOOD_SECONDS), "--in-flight", str(IN_FLIGHT), "--after", "8"]
         demo = Demo(folder, raw, "flood", args, env)
         sock = str(demo.socket())
         jaw = Jaw(raw, "flood", ["--socket", sock, "--keys", "typing", "--warm", "10", "--seconds", str(FLOOD_SECONDS - 5)], env)
@@ -296,16 +303,12 @@ def main() -> int:
             "own": numbers(r"jawd's own work in a round trip is about (\d+) µs at p50: (\d+) µs outside the inbox's transaction, and (\d+) µs", text),
         }
 
-    # As many round trips as the writer keeps transactions' times (1,024), so the two cover the
-    # same messages.
-    trips = "1000"
-
     def link_demo():
-        text, _ = link(raw, "link-demo", ["--engine", "demo", "bench", "link", "--commit", "--count", trips], env)
+        text, _ = link(raw, "link-demo", ["--engine", "demo", "bench", "link", "--commit", "--count", str(TRIPS)], env)
         return round_trip(text)
 
     def link_go():
-        text, rss = link(raw, "link-go", ["--engine", "go", "bench", "link", "--commit", "--count", trips], env)
+        text, rss = link(raw, "link-go", ["--engine", "go", "bench", "link", "--commit", "--count", str(TRIPS)], env)
         alone, alone_rss = link(raw, "link-go-alone", ["--engine", "go", "bench", "link", "--count", "20000"], env)
         samples = rss + alone_rss
         return {
@@ -353,7 +356,7 @@ def main() -> int:
         step("steady", steady)
         step("flood", flood)
         step("catch-up, one at a time", catch_up(500 if SMALL else 3_000, 1, 12))
-        step("catch-up, in groups", catch_up(3_000 if SMALL else 30_000, 256, 8))
+        step("catch-up, in groups", catch_up(3_000 if SMALL else 30_000, IN_FLIGHT, 8))
         step("link, demo engine", link_demo)
         step("link, Go engine", link_go)
         step("feed", feed)
@@ -403,9 +406,13 @@ def render(r: dict, steps: dict) -> str:
     demo_steady = steady.get("demo", {}).get("steady", {})
     idle = steady.get("demo", {}).get("idle", {})
 
+    # The demo engine's flood and grouped catch-up hand over IN_FLIGHT messages before their acks
+    # come, as no engine does today: jaw-engine waits for each, so a real burst drains at the
+    # one-at-a-time catch-up's rate.
+    grouped = f"the demo engine's {IN_FLIGHT} waiting for their acks at once; jaw-engine waits for each"
     keys = flood.get("jaw", {}).get("keys")
     row("A keypress drawn", "16 ms p99 while 2,000 messages a second arrive", timing(keys),
-        f"jaw attached to `jawd demo --flood {FLOOD}`, {flood.get('demo', {}).get('achieved', 0):,.0f} a second achieved", "flood", at_most(p(keys), 16))
+        f"jaw attached to `jawd demo --flood {FLOOD}`, {flood.get('demo', {}).get('achieved', 0):,.0f} a second achieved with {grouped}", "flood", at_most(p(keys), 16))
     for name, label in (("history", "while the history goes in"), ("catch-up, in groups", "while 30,000 messages catch up")):
         keys = r.get(name, {}).get("jaw", {}).get("keys")
         if keys:
@@ -441,18 +448,26 @@ def render(r: dict, steps: dict) -> str:
     row("An incoming message durable and acknowledged", "10 ms p99", timing(lone), "lone messages through the demo engine, each acked after its synced commit", "steady", at_most(p(lone), 10))
     if "link, Go engine" in r:
         trip = r["link, Go engine"]["trip"]
-        row("", "", f"{trip[1] / 1000:.1f} ms p99, {trip[0] / 1000:.1f} ms p50", "`jawd bench link --commit` through jaw-engine (Go), 3,000 one at a time", "link, Go engine", trip[1] / 1000 <= 10)
+        row("", "", f"{trip[1] / 1000:.1f} ms p99, {trip[0] / 1000:.1f} ms p50", f"`jawd bench link --commit` through jaw-engine (Go), {TRIPS:,} one at a time", "link, Go engine", trip[1] / 1000 <= 10)
+    history_ack = history.get("demo", {}).get("ack")
+    if history_ack and history_ack.get("n"):
+        row("", "while the history goes in", f"{timing(history_ack)}, {ms(history_ack['max'])} at worst",
+            "a live message every 100 ms through the demo engine during the full history sync", "history", at_most(p(history_ack), 10))
+    one_ack = one.get("demo", {}).get("ack")
+    if one_ack and one_ack.get("n"):
+        row("", "in a catch-up", f"{timing(one_ack)}, {ms(one_ack['max'])} at worst",
+            "the backlog acked one at a time, as jaw-engine acks it", "catch-up, one at a time", at_most(p(one_ack), 10))
     ack = flood.get("demo", {}).get("ack")
     if ack:
-        row("", "during the flood", timing(ack), "acks released after each group's synced commit", "flood", at_most(p(ack), 10))
+        row("", "during the flood", timing(ack), f"each acked after its group's synced commit, with {grouped}", "flood", at_most(p(ack), 10))
     if one.get("demo"):
         rate = one["demo"]["rate"]
         row("", "a backlog drains at 200 a second, each ack waiting for its own flush", f"{rate:,.0f} a second",
-            f"{one['demo']['messages']:,} messages one at a time, as whatsmeow acks them", "catch-up, one at a time", rate >= 200)
+            f"{one['demo']['messages']:,} messages one at a time, as jaw-engine acks them, so as a real account's backlog drains", "catch-up, one at a time", rate >= 200)
     if groups.get("demo"):
         rate = groups["demo"]["rate"]
         row("", "5,000 a second or more once acks are released in groups", f"{rate:,.0f} a second",
-            f"{groups['demo']['messages']:,} messages, 256 waiting for their acks at once", "catch-up, in groups", rate >= 5000)
+            f"{groups['demo']['messages']:,} messages with {grouped}", "catch-up, in groups", rate >= 5000)
 
     commit = demo_steady.get("commit_to_interface")
     row("An incoming message on its way to interfaces, once committed", "5 ms p99", timing(commit), "lone messages, from the conversion's commit to the demo's interface", "steady", at_most(p(commit), 5))
@@ -464,7 +479,8 @@ def render(r: dict, steps: dict) -> str:
     if flood_commit:
         row("", "during the flood", timing(flood_commit), "the open chat's messages, coalesced up to 50 ms by design", "flood", None)
         lag = flood["demo"].get("converted_after_ms", 0) / 1000
-        row("", "", f"{timing(flood['demo']['arrival'])} from hand-over", f"the conversions, after the inbox's commits, ended {lag:.1f} s after the last ack", "flood", None)
+        row("", "", f"{timing(flood['demo']['arrival'])} from hand-over",
+            f"the conversions, after the inbox's commits, ended {lag:.1f} s after the last ack, with {grouped}", "flood", None)
 
     if "link, demo engine" in r:
         d = r["link, demo engine"]
@@ -510,8 +526,19 @@ def render(r: dict, steps: dict) -> str:
     if "link, Go engine" in r:
         go = r["link, Go engine"]
         row("jaw-engine's memory", "under 80 MB steady", f"{go['rss_first'] / 1e6:.0f} MB at start, {go['rss_most'] / 1e6:.0f} MB at most",
-            "jaw-engine unlinked (no account, so nothing reaches WhatsApp) through 23,000 round trips; resident memory", "link, Go engine", go["rss_most"] < 80e6)
+            f"jaw-engine unlinked (no account, so nothing reaches WhatsApp) through {TRIPS + 20_000:,} round trips; resident memory", "link, Go engine", go["rss_most"] < 80e6)
         row("", "200 MB during a full history sync", "not measured", "it needs a linked account; see the notes", "link, Go engine", None)
+
+    phases = (
+        ("history", "during the history"),
+        ("flood", "during the flood"),
+        ("catch-up, one at a time", "in the catch-up one at a time"),
+        ("catch-up, in groups", "in the catch-up in groups"),
+    )
+    walls = [(name, label, r.get(name, {}).get("demo", {})) for name, label in phases]
+    for n, (name, label, d) in enumerate((w for w in walls if "wal_peak_mib" in w[2])):
+        budget, target = ("The WAL", f"under {WAL_LIMIT} MiB, as Data integrity bounds it") if n == 0 else ("", "")
+        row(budget, target, f"{d['wal_peak_mib']:.0f} MiB {label}", "jaw.db-wal's size on disk at most, ten times a second", name, d["wal_peak_mib"] <= WAL_LIMIT)
 
     if "photo" in r:
         for n, (name, size, took) in enumerate(r["photo"]["photos"]):
