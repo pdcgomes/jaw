@@ -8,8 +8,14 @@
 //! The pane with the keys has the open chat, as ever, so all that works on the open chat works
 //! there. The others keep their chat's state parked (its window, where it's scrolled to, its box
 //! with what's typed in it) and are drawn by taking that out for a moment; only the pane with the
-//! keys reads what it shows. Hopping leaves a chat as switching chats does, its draft saved.
+//! keys reads what it shows. Hopping leaves a chat as switching chats does, its draft saved. jawd
+//! keeps the layout for jaw, so jaw opens with the panes it was left with (`kept`).
 
+mod kept;
+
+#[cfg(test)]
+pub use self::kept::KEEP_AFTER;
+pub use self::kept::LayoutKept;
 use super::actions::{Editing, Replying, Taken};
 use super::{Focus, Laid, Placed, Scroll, View};
 use crate::composer::Composer;

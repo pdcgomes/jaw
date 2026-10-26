@@ -38,9 +38,12 @@ struct Kept {
     keyed: HashMap<String, String>,
     /// Each action it did, by key, with its answer.
     acted: HashMap<String, Value>,
-    /// Whether to take the next message or action and drop the connection before answering, as a
-    /// jawd killed between its commit and its answer does.
+    /// Whether to take the next message, action or layout and drop the connection before
+    /// answering, as a jawd killed between its commit and its answer does.
     swallow: bool,
+    /// The panes' layout it keeps for jaw, and its version.
+    layout: Option<Value>,
+    layout_v: u64,
 }
 
 /// A jawd that answers hello, the windows and find with the protocol's fixtures, takes messages
@@ -123,6 +126,18 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Value> {
             return error(code::NOT_FOUND, "+999 123 456 isn't on WhatsApp", Value::Null);
         }
         "chat.start" => fixture("chat.start.result")["result"].clone(),
+        "layout.get" => json!({ "interface": "jaw", "v": kept.layout_v, "layout": kept.layout }),
+        "layout.set" => {
+            let v = params["v"].as_u64().unwrap_or_default();
+            if v > kept.layout_v {
+                (kept.layout, kept.layout_v) = (Some(params["layout"].clone()), v);
+            }
+            let now = kept.layout_v == v && kept.layout.as_ref() == Some(&params["layout"]);
+            if std::mem::take(&mut kept.swallow) {
+                return None;
+            }
+            json!({ "interface": "jaw", "v": kept.layout_v, "layout": kept.layout, "kept": now })
+        }
         "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" => json!({}),
         _ => {
             kept.refused.push(method.clone());
@@ -186,8 +201,14 @@ fn scripted() -> Scripted {
 }
 
 fn view_on(socket: PathBuf, width: u16, height: u16) -> (View, Receiver<crate::run::Event>) {
+    view_with(socket, width, height, "")
+}
+
+/// jaw on `socket` with the experiments `on`, as JAW_EXPERIMENTS sets them before it says hello.
+fn view_with(socket: PathBuf, width: u16, height: u16, on: &str) -> (View, Receiver<crate::run::Event>) {
     let (tx, rx) = channel();
     let mut v = View::new(Box::new(Wire::connect(socket, tx)));
+    v.experiments = crate::experiments::Experiments::parse(on);
     v.clock = Some(NOW);
     v.tz = FixedOffset::east_opt(0).unwrap();
     v.theme = Theme::with(true);
@@ -1349,4 +1370,71 @@ fn on_a_real_jawd_each_pane_has_a_window_and_closing_one_lets_jawd_forget_it() {
     run::press_live(&mut v, &rx, "<c-p>x").unwrap();
     assert!(until_true(&mut v, &rx, |_| windows_watched(&socket) == before), "and jawd lets it go");
     assert!(!frame(&mut v).contains("╭ 2 "));
+}
+
+/// The view's clock moved past the time a layout waits before it's kept, a tick at a time.
+fn layout_settles(v: &mut View, rx: &Receiver<crate::run::Event>) {
+    for later in [3_000, 6_000] {
+        v.clock = Some(NOW + later);
+        v.tick();
+        run::settle_live(v, rx, Duration::from_millis(100));
+    }
+}
+
+/// With panes on, jaw opens with the layout jawd keeps for it, and keeps its own once it settles:
+/// a layout whose answer the connection lost is asked for again as it was, its version too.
+#[test]
+fn with_panes_jaw_opens_with_the_layout_jawd_keeps_and_asks_again_for_one_whose_answer_was_lost() {
+    let jawd = scripted();
+    let two = json!({ "format": 1, "focused": 1, "tree": { "split": {
+        "how": "across", "first": 600, "a": { "chat": ANA }, "b": { "chat": CLIMBING } } } });
+    {
+        let mut kept = jawd.kept.lock().unwrap();
+        (kept.layout, kept.layout_v) = (Some(two), 7);
+    }
+    let (mut v, rx) = view_with(jawd.socket.clone(), 140, 30, "panes");
+    assert!(until_true(&mut v, &rx, |v| v.opened() == Some(CLIMBING)), "{}", frame(&mut v));
+    let screen = frame(&mut v);
+    let titles = screen.lines().nth(1).unwrap_or_default();
+    assert!(titles.contains("╭ 1 Ana Ribeiro") && titles.contains("╭ 2  Lisbon Climbing"), "{screen}");
+    assert_eq!(jawd.asked("layout.get").len(), 1);
+    jawd.kept.lock().unwrap().swallow = true;
+    run::press_live(&mut v, &rx, "<c-p>x").unwrap();
+    layout_settles(&mut v, &rx);
+    assert!(until_true(&mut v, &rx, |_| jawd.asked("layout.set").len() == 2), "{:?}", jawd.asked("layout.set"));
+    let sets = jawd.asked("layout.set");
+    assert_eq!(sets[0], sets[1], "asked again as it was");
+    assert_eq!(sets[0]["layout"], json!({ "format": 1, "focused": 0, "tree": { "chat": ANA } }), "Ana's pane, alone");
+    assert!(sets[0]["v"].as_u64().unwrap() > 7, "newer than the one it replaces");
+    assert_eq!(jawd.kept.lock().unwrap().layout, Some(sets[0]["layout"].clone()));
+    assert_eq!(jawd.asked("layout.get").len(), 1, "asked for once, at start");
+}
+
+fn layouts_kept(socket: &Path) -> u64 {
+    let (mut connection, _) = jaw_client::Connection::open(socket, "jaw-test", "0").unwrap();
+    let status: jaw_proto::Status = serde_json::from_value(connection.call("status", Value::Null).unwrap()).unwrap();
+    status.layouts.map_or(0, |l| l.kept)
+}
+
+/// On a real jawd, panes kept by one jaw open in the next.
+#[test]
+fn on_a_real_jawd_jaw_keeps_its_panes_and_the_next_jaw_opens_with_them() {
+    let Some(jawd) = real() else {
+        eprintln!("JAWD isn't set to a jawd binary, so this ran on no real jawd");
+        return;
+    };
+    let socket = jaw_proto::local::socket(jawd.home.path());
+    let (mut v, rx) = view_with(socket.clone(), 140, 30, "panes");
+    assert!(until_true(&mut v, &rx, |v| frame(v).contains("Lisbon Climbing")), "{}", frame(&mut v));
+    run::press_live(&mut v, &rx, "<c-p>%").unwrap();
+    until(&mut v, &rx, "╭ 2 ");
+    assert_eq!(layouts_kept(&socket), 0, "not kept at the key");
+    layout_settles(&mut v, &rx);
+    assert!(until_true(&mut v, &rx, |_| layouts_kept(&socket) == 1), "kept once it settled");
+    let keys = v.opened().map(str::to_string);
+    drop(v);
+    let (mut next, rx) = view_with(socket, 140, 30, "panes");
+    let screen = until(&mut next, &rx, "╭ 2 ");
+    assert!(screen.contains("╭ 1 ") && screen.contains("╭ 2 "), "{screen}");
+    assert_eq!(next.opened().map(str::to_string), keys, "the keys where they were");
 }

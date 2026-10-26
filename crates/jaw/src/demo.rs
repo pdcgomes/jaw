@@ -147,6 +147,11 @@ pub struct Account {
     quick_look: Vec<(String, usize)>,
     /// The windows of the panes that don't have the keys.
     parked: Vec<Open>,
+    /// The panes' layout kept, with its version, as jawd keeps it for jaw, and how often jaw has
+    /// asked for it and asked to keep one.
+    layout: Option<(jaw_proto::layout::Layout, u64)>,
+    asks: u32,
+    keeps: u32,
 }
 
 struct Shared {
@@ -212,6 +217,9 @@ impl Demo {
             library: None,
             quick_look: vec![],
             parked: vec![],
+            layout: None,
+            asks: 0,
+            keeps: 0,
         };
         let demo = Demo {
             shared: Arc::new(Shared {
@@ -864,6 +872,15 @@ impl Jawd for Demo {
     fn unwatch_parked(&mut self, chat: &str) {
         let chat = chat.to_string();
         self.defer(move |a| a.on_unwatch_parked(&chat));
+    }
+
+    fn ask_layout(&mut self) {
+        self.defer(|a| a.on_ask_layout());
+    }
+
+    fn keep_layout(&mut self, layout: &jaw_proto::layout::Layout, v: u64) {
+        let layout = layout.clone();
+        self.defer(move |a| a.on_keep_layout(layout, v));
     }
 
     fn send_text(&mut self, chat: &str, text: &str, key: &str, reply: Option<&str>, mentions: &[String]) {

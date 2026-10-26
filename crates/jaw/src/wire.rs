@@ -11,6 +11,7 @@ use crate::data::{Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, Mes
 use crate::run::Event;
 use jaw_client::{Client, Config, Event as From, Failure, WindowId};
 use jaw_proto::find::{Find, Kind};
+use jaw_proto::layout::{Layout, Saved};
 use jaw_proto::{AccountState, LinkStart, code};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -87,6 +88,9 @@ enum Asked {
     FolderMade,
     /// The library's window, for the ask the interface numbered so.
     Library(u64),
+    /// The panes' layout: asked for with `None`, or kept with these params. Either is owed until
+    /// jawd answers, as a draft is.
+    Layout(Option<Value>),
     /// Background work that says nothing either way.
     Quiet,
 }
@@ -341,7 +345,12 @@ impl Wire {
         }
         let owed: Vec<_> = self.owed.iter().map(|((m, c), p)| (*m, c.clone(), p.clone())).collect();
         for (method, chat, params) in owed {
-            self.ask(method, params.clone(), Asked::Owed(method, chat, params));
+            let asked = match method {
+                "layout.get" => Asked::Layout(None),
+                "layout.set" => Asked::Layout(Some(params.clone())),
+                _ => Asked::Owed(method, chat, params.clone()),
+            };
+            self.ask(method, params, asked);
         }
     }
 
@@ -379,6 +388,18 @@ impl Wire {
             Asked::Folders | Asked::Roster(_) => None,
             Asked::Library(_) => Some(Update::LibraryRefused(why_not(failure, "the library"))),
             Asked::FolderMade => Some(Update::Notice(why_not(failure, "making folders"))),
+            Asked::Layout(kept) => match failure {
+                Failure::Jawd(e) => {
+                    let (method, params) = match &kept {
+                        Some(params) => ("layout.set", params.clone()),
+                        None => ("layout.get", json!({})),
+                    };
+                    self.settle(method, String::new(), &params);
+                    (kept.is_some() && e.code != code::UNKNOWN_METHOD)
+                        .then(|| Update::Notice(format!("the panes' layout wasn't kept: {}", e.message)))
+                }
+                _ => None,
+            },
             Asked::Quiet => None,
         }
     }
@@ -478,6 +499,19 @@ impl Wire {
                             out.push(Update::FolderMade(Box::new(folder)));
                         }
                     }
+                    (Asked::Layout(kept), Ok(result)) => {
+                        let saved = serde_json::from_value::<Saved>(result).ok().map(Box::new);
+                        match kept {
+                            Some(params) => {
+                                self.settle("layout.set", String::new(), &params);
+                                out.extend(saved.map(Update::LayoutKept));
+                            }
+                            None => {
+                                self.settle("layout.get", String::new(), &json!({}));
+                                out.extend(saved.map(Update::Layout));
+                            }
+                        }
+                    }
                     (asked, Err(failure)) => out.extend(self.refused(asked, &failure)),
                     _ => {}
                 }
@@ -542,6 +576,11 @@ impl Wire {
             }
             From::Push(push) if push.method == "playback" => {
                 out.extend(serde_json::from_value(push.params).ok().map(Update::Playback));
+            }
+            From::Push(push) if push.method == "layout" => {
+                out.extend(
+                    serde_json::from_value::<Saved>(push.params).ok().map(|saved| Update::LayoutKept(Box::new(saved))),
+                );
             }
             From::Push(push) if push.method == "recording" => {
                 out.extend(serde_json::from_value(push.params).ok().map(Update::Recorded));
@@ -663,6 +702,17 @@ impl Jawd for Wire {
         if let Some(at) = self.parked.iter().position(|(_, c)| c == chat) {
             self.client.unwatch(self.parked.remove(at).0);
         }
+    }
+
+    fn ask_layout(&mut self) {
+        self.owed.insert(("layout.get", String::new()), json!({}));
+        self.ask("layout.get", json!({}), Asked::Layout(None));
+    }
+
+    fn keep_layout(&mut self, layout: &Layout, v: u64) {
+        let params = json!({ "v": v, "layout": layout });
+        self.owed.insert(("layout.set", String::new()), params.clone());
+        self.ask("layout.set", params.clone(), Asked::Layout(Some(params)));
     }
 
     fn opened(&mut self, chat: &str) {

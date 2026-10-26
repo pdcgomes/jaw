@@ -6,6 +6,7 @@
 
 pub use jaw_client::Place;
 use jaw_client::{Row, Update as Window};
+use jaw_proto::layout::{Layout, Saved};
 use jaw_proto::{Connection, LinkStep};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -890,6 +891,10 @@ pub enum Update {
         message: String,
         info: Result<MessageInfo, String>,
     },
+    /// The panes' layout jawd keeps for jaw, as `ask_layout` asked for it.
+    Layout(Box<Saved>),
+    /// The layout jawd keeps for jaw now, as it answered `keep_layout`, or as another jaw kept it.
+    LayoutKept(Box<Saved>),
 }
 
 impl Update {
@@ -898,7 +903,7 @@ impl Update {
     /// next frame.
     pub fn awaited(&self) -> bool {
         match self {
-            Update::Hello { .. } => true,
+            Update::Hello { .. } | Update::Layout(_) => true,
             Update::Chats(window) => window.moved.is_some(),
             Update::Messages { update, .. } | Update::QuickLook { update, .. } => update.moved.is_some(),
             Update::Folders { whole, .. } | Update::Roster { whole, .. } => *whole,
@@ -998,6 +1003,11 @@ pub trait Jawd {
     fn unpark_messages(&mut self, chat: &str);
     /// The window kept for `chat`'s pane let go, as the pane closes.
     fn unwatch_parked(&mut self, chat: &str);
+    /// The panes' layout jawd keeps for jaw; it comes as `Update::Layout`.
+    fn ask_layout(&mut self);
+    /// Keeps the panes' layout in jawd for jaw, with its version, which must be newer than any
+    /// jawd has kept for it; jawd's answer comes as `Update::LayoutKept`.
+    fn keep_layout(&mut self, layout: &Layout, v: u64);
     /// You opened a chat yourself, which the palette ranks by; passing through it doesn't count.
     fn opened(&mut self, chat: &str);
     /// Sends text to a chat, as a reply to `reply` and mentioning the people in `mentions`. `key`

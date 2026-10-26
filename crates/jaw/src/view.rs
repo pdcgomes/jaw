@@ -270,6 +270,8 @@ pub struct View {
     /// The panes once the conversation is split, each other than the one with the keys holding
     /// its chat's state.
     panes: panes::Panes,
+    /// Their layout, as jawd keeps it for jaw.
+    layout_kept: panes::LayoutKept,
     effects: Vec<Effect>,
     /// Something on screen changed since the last frame.
     pub dirty: bool,
@@ -363,6 +365,7 @@ impl View {
             focus_mode: false,
             quick_look: None,
             panes: panes::Panes::default(),
+            layout_kept: panes::LayoutKept::default(),
             effects: vec![],
             dirty: true,
             awaited: false,
@@ -454,10 +457,7 @@ impl View {
                 // Connecting again, jawd's client watches every window again itself, where it was,
                 // so nothing moves.
                 if linked && !self.watching {
-                    self.watching = true;
-                    self.jawd.watch_chats(&self.folder, Place::top(LIST_ROWS));
-                    self.jawd.watch_folders();
-                    self.jawd.watch_roster(&self.folder);
+                    self.start_watching();
                 } else if !linked && self.logged_out.is_none() {
                     self.start_linking();
                 }
@@ -475,10 +475,7 @@ impl View {
                     self.logged_out = None;
                     self.link = None;
                     if !self.watching {
-                        self.watching = true;
-                        self.jawd.watch_chats(&self.folder, Place::top(LIST_ROWS));
-                        self.jawd.watch_folders();
-                        self.jawd.watch_roster(&self.folder);
+                        self.start_watching();
                     }
                 }
                 self.connection = c;
@@ -490,10 +487,7 @@ impl View {
                     self.logged_out = None;
                     self.connection = Connection::new(ConnectionState::CatchingUp);
                     if !self.watching {
-                        self.watching = true;
-                        self.jawd.watch_chats(&self.folder, Place::top(LIST_ROWS));
-                        self.jawd.watch_folders();
-                        self.jawd.watch_roster(&self.folder);
+                        self.start_watching();
                     }
                 }
                 self.link = Some(step);
@@ -608,6 +602,8 @@ impl View {
                 self.say(why);
             }
             Update::Info { message, info } => self.on_info(message, info),
+            Update::Layout(saved) => self.layout_came(*saved),
+            Update::LayoutKept(saved) => self.layout_kept_now(*saved),
             Update::Starting { failed } => self.reach = Reach::Starting { failed },
             Update::Unreachable { why, retry_in } => {
                 let retry_at = self.now() + retry_in;
@@ -652,6 +648,16 @@ impl View {
                 self.list_top = i + 1 - rows;
             }
         }
+    }
+
+    /// The account is linked: the chat list, the folders and the roster are watched, and the
+    /// panes' layout asked for.
+    fn start_watching(&mut self) {
+        self.watching = true;
+        self.jawd.watch_chats(&self.folder, Place::top(LIST_ROWS));
+        self.jawd.watch_folders();
+        self.jawd.watch_roster(&self.folder);
+        self.ask_layout();
     }
 
     fn start_linking(&mut self) {
@@ -923,6 +929,7 @@ impl View {
         if self.read_due.is_some_and(|t| t <= now) {
             self.send_read();
         }
+        self.keep_layout_when_due(now);
         if self.notice.as_ref().is_some_and(|(_, until)| *until <= now) {
             self.notice = None;
             self.dirty = true;
@@ -949,6 +956,7 @@ impl View {
         soon(self.hold_until);
         soon(self.draft_due);
         soon(self.read_due);
+        soon(self.layout_due());
         soon(self.notice.as_ref().map(|(_, t)| *t));
         if self.chomp_until.is_some() {
             soon(Some(now + 100));
