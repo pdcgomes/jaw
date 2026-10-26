@@ -974,6 +974,411 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- names the message, the message's own row says.
     ALTER TABLE outbox ADD COLUMN target_deleted INTEGER NOT NULL DEFAULT 0 CHECK (target_deleted IN (0, 1));
     ",
+    // 19, a data step: folders and the roster. Migration 2's folders and folder_items, which nothing
+    // ever wrote to, are rebuilt as STRICT tables with every row copied, folders with AUTOINCREMENT
+    // since interfaces hold their IDs; the built-in folders and the three smart ones jaw starts
+    // with are rows of it; favourites hold folders or chats; and each folder's unread messages,
+    // mentions and count are kept by triggers through the chats and people each holds, so a
+    // message arriving counts in every folder it's in without any folder's chats being walked.
+    // People gain their presence, which rosters sort by, and how many chats are theirs. It's a
+    // data step because it rebuilds folders, which other tables refer to, so its foreign keys are
+    // checked before it commits; it reads each chat and person a few times, measured with the rest
+    // of the step's cost beside the migration's test.
+    "
+    -- Class: jaw's own, never dropped or rebuilt from anything else, copied as it is by any rebuild
+    -- of jaw.db and kept in the daily backup. The folder tree: the five built-in folders (builtin),
+    -- smart ones (rule) and yours, each a row so their counts are kept alike. Interfaces name a
+    -- folder by its n, so it's never used again once the folder is deleted.
+    CREATE TABLE folders_rebuilt (
+        n INTEGER PRIMARY KEY AUTOINCREMENT,
+        builtin TEXT UNIQUE CHECK (builtin IN ('all', 'unread', 'groups', 'communities', 'archived')),
+        -- The folder it's in, NULL at the top. A folder goes only once nothing is in it
+        -- (folders_emptied): its subfolders moved up and its items unfiled first, so nothing cascades.
+        parent INTEGER REFERENCES folders (n),
+        name TEXT NOT NULL CHECK (trim(name) <> ''),
+        -- Its place among its siblings of the same kind.
+        position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+        -- A smart folder's rule: a JSON object, every field of which must hold.
+        rule TEXT CHECK (json_valid(rule) AND json_type(rule) = 'object'),
+        v INTEGER NOT NULL,
+        CHECK (builtin IS NULL OR rule IS NULL),
+        -- Only your folders nest, and only in yours, which the writer checks as they move.
+        CHECK (parent IS NULL OR builtin IS NULL AND rule IS NULL)
+    ) STRICT;
+    INSERT INTO folders_rebuilt (n, parent, name, position, rule, v)
+        SELECT n, parent, name, max(position, 0), smart, v FROM folders ORDER BY n;
+    INSERT INTO folders_rebuilt (builtin, name, position, v) VALUES ('all', 'All', 0, 0), ('unread', 'Unread', 1, 0),
+        ('groups', 'Groups', 2, 0), ('communities', 'Communities', 3, 0), ('archived', 'Archived', 4, 0);
+    INSERT INTO folders_rebuilt (name, position, rule, v) VALUES ('Waiting on me', 0, '{\"waiting\":86400}', 0),
+        ('Mentions me', 1, '{\"mentions\":true}', 0), ('Muted, unread', 2, '{\"muted\":true,\"unread\":true}', 0);
+
+    -- Class: jaw's own, as folders. What Alt-1 to Alt-9 go to: a folder or a chat, in one slot at most.
+    CREATE TABLE favourites (
+        slot INTEGER PRIMARY KEY CHECK (slot BETWEEN 1 AND 9),
+        folder INTEGER UNIQUE REFERENCES folders (n) ON DELETE CASCADE,
+        chat INTEGER UNIQUE REFERENCES chats (n) ON DELETE CASCADE,
+        CHECK ((folder IS NULL) <> (chat IS NULL))
+    ) STRICT;
+    INSERT INTO favourites (slot, folder) SELECT favourite, n FROM folders WHERE favourite BETWEEN 1 AND 9;
+
+    -- Class: jaw's own, as folders. What's filed in your folders: someone, who stands for their
+    -- one-to-one chat in chat lists and for themselves in rosters, or a chat that isn't anyone's
+    -- one-to-one chat, such as a group; filing someone's chat files them. An item can sit in any
+    -- number of folders.
+    CREATE TABLE folder_items_rebuilt (
+        n INTEGER PRIMARY KEY,
+        folder INTEGER NOT NULL REFERENCES folders (n) ON DELETE CASCADE,
+        chat INTEGER REFERENCES chats (n) ON DELETE CASCADE,
+        person INTEGER REFERENCES people (n) ON DELETE CASCADE,
+        CHECK ((chat IS NULL) <> (person IS NULL))
+    ) STRICT;
+    INSERT INTO folder_items_rebuilt (folder, chat, person)
+        SELECT DISTINCT i.folder, iif(c.person IS NULL, i.chat, NULL), coalesce(i.person, c.person)
+        FROM folder_items i LEFT JOIN chats c ON c.n = i.chat;
+    DROP TABLE folder_items;
+    DROP TABLE folders;
+    ALTER TABLE folders_rebuilt RENAME TO folders;
+    ALTER TABLE folder_items_rebuilt RENAME TO folder_items;
+    CREATE INDEX folders_by_parent ON folders (parent, position);
+    -- Two of your folders side by side never share a name, whatever its case.
+    CREATE UNIQUE INDEX folders_named ON folders (coalesce(parent, 0), lower(name)) WHERE builtin IS NULL AND rule IS NULL;
+    CREATE UNIQUE INDEX folder_items_chats ON folder_items (folder, chat) WHERE chat IS NOT NULL;
+    CREATE UNIQUE INDEX folder_items_people ON folder_items (folder, person) WHERE person IS NOT NULL;
+    -- Each folder's items, for its foreign key too.
+    CREATE INDEX folder_items_by_folder ON folder_items (folder);
+    CREATE INDEX folder_items_by_chat ON folder_items (chat) WHERE chat IS NOT NULL;
+    CREATE INDEX folder_items_by_person ON folder_items (person) WHERE person IS NOT NULL;
+
+    -- Class: derived from chats, kept by the triggers below: how many chats are this person's
+    -- one-to-one chat, two while a merge joins them.
+    ALTER TABLE people ADD COLUMN direct_chats INTEGER NOT NULL DEFAULT 0;
+    UPDATE people SET direct_chats = (SELECT count(*) FROM chats WHERE person = people.n)
+        WHERE n IN (SELECT person FROM chats WHERE person IS NOT NULL);
+    -- Class: fetched from WhatsApp while jawd follows them: online, typing or recording, or NULL
+    -- when they're not around or jawd can't know, as whenever WhatsApp can't be reached.
+    ALTER TABLE people ADD COLUMN presence TEXT CHECK (presence IN ('online', 'typing', 'recording'));
+    -- Class: jaw's own, as it runs, cleared at every start: whether jawd follows their presence now.
+    ALTER TABLE people ADD COLUMN followed INTEGER NOT NULL DEFAULT 0 CHECK (followed IN (0, 1));
+    -- Where they sort in a roster: around first, by name; then by when they were last seen, the
+    -- most recent first; then those who hide it or whom WhatsApp hasn't told jawd about, by name.
+    ALTER TABLE people ADD COLUMN roster_sort TEXT GENERATED ALWAYS AS (
+        iif(presence IS NOT NULL, '0~',
+            iif(last_seen > 0, '1~' || printf('%019d', 9223372036854775807 - last_seen) || '~', '2~'))
+        || lower(coalesce(name, push_name, verified_name, ''))) VIRTUAL;
+    -- The roster: your contacts on WhatsApp, and anyone with a one-to-one chat with you.
+    CREATE INDEX people_roster ON people (roster_sort, n) WHERE name IS NOT NULL OR direct_chats > 0;
+    -- Whose about text is due, the longest unasked first.
+    CREATE INDEX people_about_due ON people (about_at) WHERE name IS NOT NULL OR direct_chats > 0;
+    -- Who's around or followed, all cleared when presence can't be known.
+    CREATE INDEX people_present ON people (n) WHERE presence IS NOT NULL OR followed <> 0;
+
+    -- Chat lists other than All and Archived, each read by keyset on an index of its own, as All is.
+    CREATE INDEX chats_unread ON chats (sort, n) WHERE archived = 0 AND (unread > 0 OR marked_unread <> 0);
+    CREATE INDEX chats_groups ON chats (sort, n) WHERE archived = 0 AND kind IN ('group', 'announcement');
+    CREATE INDEX chats_communities ON chats (sort, n)
+        WHERE archived = 0 AND (kind = 'community' OR community IS NOT NULL);
+    CREATE INDEX chats_mentioned ON chats (sort, n) WHERE archived = 0 AND mentions > 0;
+    -- A community's groups, the latest written in first. A community sorts by the newest of its
+    -- groups' messages, which chats_community_followed keeps in its last_at.
+    CREATE INDEX chats_by_community ON chats (community, last_at) WHERE community IS NOT NULL;
+    UPDATE chats SET last_at = (SELECT max(g.last_at) FROM chats g WHERE g.community = chats.id)
+        WHERE kind = 'community' AND last_at < (SELECT max(g.last_at) FROM chats g WHERE g.community = chats.id);
+
+    -- Class: derived from folders, and rebuilt from them: each of your folders with every folder
+    -- it's in, itself too, so what's in a folder and under it is found without walking the tree.
+    CREATE TABLE folder_paths (
+        folder INTEGER NOT NULL REFERENCES folders (n) ON DELETE CASCADE,
+        ancestor INTEGER NOT NULL REFERENCES folders (n) ON DELETE CASCADE,
+        PRIMARY KEY (folder, ancestor)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX folder_paths_by_ancestor ON folder_paths (ancestor, folder);
+
+    -- Class: derived from folder_items, folder_paths and chats, and rebuilt from them. The chats in
+    -- each of your folders and under it, each once: filed there, or the one-to-one chat of someone
+    -- filed there. paths counts the ways, so a chat goes when the last does. Its sort, unread
+    -- messages and mentions are the chat's, kept as they change, so a folder's chat list pages by
+    -- its own index and a chat that goes takes out what it brought, even once it's gone.
+    CREATE TABLE folder_chats (
+        folder INTEGER NOT NULL REFERENCES folders (n) ON DELETE CASCADE,
+        chat INTEGER NOT NULL REFERENCES chats (n) ON DELETE CASCADE,
+        paths INTEGER NOT NULL CHECK (paths > 0),
+        sort TEXT NOT NULL,
+        unread INTEGER NOT NULL,
+        mentions INTEGER NOT NULL,
+        PRIMARY KEY (folder, chat)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX folder_chats_by_chat ON folder_chats (chat);
+    CREATE INDEX folder_chats_by_sort ON folder_chats (folder, sort, chat);
+
+    -- Class: derived from folder_items, folder_paths and people, and rebuilt from them. The people
+    -- filed in each of your folders and under it, each once, for its roster: lone while they have
+    -- no chat of their own, so the folder counts them beside its chats; and where they sort, the
+    -- person's, kept as it changes.
+    CREATE TABLE folder_people (
+        folder INTEGER NOT NULL REFERENCES folders (n) ON DELETE CASCADE,
+        person INTEGER NOT NULL REFERENCES people (n) ON DELETE CASCADE,
+        paths INTEGER NOT NULL CHECK (paths > 0),
+        lone INTEGER NOT NULL CHECK (lone IN (0, 1)),
+        roster_sort TEXT NOT NULL,
+        PRIMARY KEY (folder, person)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX folder_people_by_person ON folder_people (person);
+    CREATE INDEX folder_people_by_sort ON folder_people (folder, roster_sort, person);
+
+    -- Class: derived, kept by the triggers below and checked against what it's derived from in
+    -- the background. For each built-in folder and each of yours: its chats' unread messages and
+    -- mentions, each chat counted once, how many chats it holds, and how many people with no chat
+    -- of their own. Smart folders are counted as they're read.
+    CREATE TABLE folder_counts (
+        folder INTEGER PRIMARY KEY REFERENCES folders (n) ON DELETE CASCADE,
+        unread INTEGER NOT NULL DEFAULT 0,
+        mentions INTEGER NOT NULL DEFAULT 0,
+        chats INTEGER NOT NULL DEFAULT 0,
+        lone INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+
+    WITH RECURSIVE up (folder, ancestor) AS (
+        SELECT n, n FROM folders WHERE builtin IS NULL AND rule IS NULL
+        UNION SELECT up.folder, f.parent FROM up JOIN folders f ON f.n = up.ancestor WHERE f.parent IS NOT NULL)
+    INSERT INTO folder_paths (folder, ancestor) SELECT folder, ancestor FROM up;
+    INSERT INTO folder_chats (folder, chat, paths, sort, unread, mentions)
+        SELECT r.folder, c.n, r.paths, c.sort, c.unread, c.mentions FROM (
+            SELECT folder, chat, count(*) AS paths FROM (
+                SELECT p.ancestor AS folder, i.chat AS chat FROM folder_items i JOIN folder_paths p ON p.folder = i.folder
+                    WHERE i.chat IS NOT NULL
+                UNION ALL
+                SELECT p.ancestor, c.n FROM folder_items i JOIN folder_paths p ON p.folder = i.folder
+                    JOIN chats c ON c.person = i.person WHERE i.person IS NOT NULL)
+            GROUP BY folder, chat) r JOIN chats c ON c.n = r.chat;
+    INSERT INTO folder_people (folder, person, paths, lone, roster_sort)
+        SELECT p.ancestor, i.person, count(*), x.direct_chats = 0, x.roster_sort
+        FROM folder_items i JOIN folder_paths p ON p.folder = i.folder JOIN people x ON x.n = i.person
+        WHERE i.person IS NOT NULL GROUP BY p.ancestor, i.person;
+    INSERT INTO folder_counts (folder, unread, mentions, chats, lone)
+        SELECT f.n, (SELECT coalesce(sum(unread), 0) FROM folder_chats WHERE folder = f.n),
+            (SELECT coalesce(sum(mentions), 0) FROM folder_chats WHERE folder = f.n),
+            (SELECT count(*) FROM folder_chats WHERE folder = f.n),
+            (SELECT count(*) FROM folder_people WHERE folder = f.n AND lone)
+        FROM folders f WHERE f.builtin IS NULL AND f.rule IS NULL;
+    INSERT INTO folder_counts (folder, unread, mentions, chats)
+        SELECT f.n, coalesce(sum(c.unread), 0), coalesce(sum(c.mentions), 0), count(c.n)
+        FROM folders f LEFT JOIN chats c ON CASE f.builtin
+            WHEN 'all' THEN c.archived = 0
+            WHEN 'unread' THEN c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0)
+            WHEN 'groups' THEN c.archived = 0 AND c.kind IN ('group', 'announcement')
+            WHEN 'communities' THEN c.archived = 0 AND (c.kind = 'community' OR c.community IS NOT NULL)
+            ELSE c.archived <> 0 END
+        WHERE f.builtin IS NOT NULL GROUP BY f.n;
+
+    -- The triggers that keep folder_paths, folder_chats, folder_people, folder_counts and
+    -- people.direct_chats derived. Each change to a source row adds or takes out only what that
+    -- row brings: a folder's ancestors, its items, a chat's person and counts.
+
+    -- A folder of yours placed in the tree takes every folder above its parent as its own.
+    CREATE TRIGGER folders_placed AFTER INSERT ON folders WHEN new.builtin IS NULL AND new.rule IS NULL BEGIN
+        INSERT INTO folder_counts (folder) VALUES (new.n);
+        INSERT INTO folder_paths (folder, ancestor) VALUES (new.n, new.n);
+        INSERT INTO folder_paths (folder, ancestor) SELECT new.n, ancestor FROM folder_paths WHERE folder = new.parent;
+    END;
+    -- Moved, everything under it leaves the folders it was under and joins those it's under now.
+    CREATE TRIGGER folders_moved AFTER UPDATE OF parent ON folders WHEN new.parent IS NOT old.parent BEGIN
+        DELETE FROM folder_paths WHERE folder IN (SELECT folder FROM folder_paths WHERE ancestor = new.n)
+            AND ancestor IN (SELECT ancestor FROM folder_paths WHERE folder = new.n AND ancestor <> new.n);
+        INSERT INTO folder_paths (folder, ancestor)
+            SELECT below.folder, above.ancestor FROM folder_paths below JOIN folder_paths above
+            WHERE below.ancestor = new.n AND above.folder = new.parent;
+    END;
+    CREATE TRIGGER folders_emptied BEFORE DELETE ON folders
+    WHEN EXISTS (SELECT 1 FROM folders WHERE parent = old.n) OR EXISTS (SELECT 1 FROM folder_items WHERE folder = old.n)
+    BEGIN
+        SELECT RAISE(ABORT, 'a folder goes only once its subfolders have moved and its items are unfiled');
+    END;
+
+    -- A folder gains a folder above it, which takes what's filed in it; or loses one.
+    CREATE TRIGGER folder_paths_added AFTER INSERT ON folder_paths BEGIN
+        INSERT INTO folder_chats (folder, chat, paths, sort, unread, mentions)
+            SELECT new.ancestor, c.n, 1, c.sort, c.unread, c.mentions FROM folder_items i JOIN chats c ON c.n = i.chat
+            WHERE i.folder = new.folder AND i.chat IS NOT NULL
+            ON CONFLICT (folder, chat) DO UPDATE SET paths = paths + 1;
+        INSERT INTO folder_chats (folder, chat, paths, sort, unread, mentions)
+            SELECT new.ancestor, c.n, 1, c.sort, c.unread, c.mentions FROM folder_items i JOIN chats c ON c.person = i.person
+            WHERE i.folder = new.folder AND i.person IS NOT NULL
+            ON CONFLICT (folder, chat) DO UPDATE SET paths = paths + 1;
+        INSERT INTO folder_people (folder, person, paths, lone, roster_sort)
+            SELECT new.ancestor, x.n, 1, x.direct_chats = 0, x.roster_sort FROM folder_items i JOIN people x ON x.n = i.person
+            WHERE i.folder = new.folder AND i.person IS NOT NULL
+            ON CONFLICT (folder, person) DO UPDATE SET paths = paths + 1;
+    END;
+    CREATE TRIGGER folder_paths_removed AFTER DELETE ON folder_paths BEGIN
+        DELETE FROM folder_chats WHERE folder = old.ancestor AND paths = 1
+            AND chat IN (SELECT chat FROM folder_items WHERE folder = old.folder AND chat IS NOT NULL);
+        UPDATE folder_chats SET paths = paths - 1 WHERE folder = old.ancestor
+            AND chat IN (SELECT chat FROM folder_items WHERE folder = old.folder AND chat IS NOT NULL);
+        DELETE FROM folder_chats WHERE folder = old.ancestor AND paths = 1 AND chat IN
+            (SELECT c.n FROM folder_items i JOIN chats c ON c.person = i.person WHERE i.folder = old.folder AND i.person IS NOT NULL);
+        UPDATE folder_chats SET paths = paths - 1 WHERE folder = old.ancestor AND chat IN
+            (SELECT c.n FROM folder_items i JOIN chats c ON c.person = i.person WHERE i.folder = old.folder AND i.person IS NOT NULL);
+        DELETE FROM folder_people WHERE folder = old.ancestor AND paths = 1
+            AND person IN (SELECT person FROM folder_items WHERE folder = old.folder AND person IS NOT NULL);
+        UPDATE folder_people SET paths = paths - 1 WHERE folder = old.ancestor
+            AND person IN (SELECT person FROM folder_items WHERE folder = old.folder AND person IS NOT NULL);
+    END;
+
+    -- An item filed or unfiled counts in its folder and every folder above it.
+    CREATE TRIGGER folder_items_filed AFTER INSERT ON folder_items BEGIN
+        INSERT INTO folder_chats (folder, chat, paths, sort, unread, mentions)
+            SELECT p.ancestor, c.n, 1, c.sort, c.unread, c.mentions FROM folder_paths p JOIN chats c ON c.n = new.chat
+            WHERE p.folder = new.folder
+            ON CONFLICT (folder, chat) DO UPDATE SET paths = paths + 1;
+        INSERT INTO folder_chats (folder, chat, paths, sort, unread, mentions)
+            SELECT p.ancestor, c.n, 1, c.sort, c.unread, c.mentions FROM folder_paths p JOIN chats c ON c.person = new.person
+            WHERE p.folder = new.folder
+            ON CONFLICT (folder, chat) DO UPDATE SET paths = paths + 1;
+        INSERT INTO folder_people (folder, person, paths, lone, roster_sort)
+            SELECT p.ancestor, x.n, 1, x.direct_chats = 0, x.roster_sort FROM folder_paths p JOIN people x ON x.n = new.person
+            WHERE p.folder = new.folder
+            ON CONFLICT (folder, person) DO UPDATE SET paths = paths + 1;
+    END;
+    CREATE TRIGGER folder_items_unfiled AFTER DELETE ON folder_items BEGIN
+        DELETE FROM folder_chats WHERE paths = 1 AND chat = old.chat
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        UPDATE folder_chats SET paths = paths - 1 WHERE chat = old.chat
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        DELETE FROM folder_chats WHERE paths = 1 AND chat IN (SELECT n FROM chats WHERE person = old.person)
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        UPDATE folder_chats SET paths = paths - 1 WHERE chat IN (SELECT n FROM chats WHERE person = old.person)
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        DELETE FROM folder_people WHERE paths = 1 AND person = old.person
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        UPDATE folder_people SET paths = paths - 1 WHERE person = old.person
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+    END;
+    CREATE TRIGGER folder_items_refiled AFTER UPDATE OF folder, chat, person ON folder_items BEGIN
+        DELETE FROM folder_chats WHERE paths = 1 AND chat = old.chat
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        UPDATE folder_chats SET paths = paths - 1 WHERE chat = old.chat
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        DELETE FROM folder_chats WHERE paths = 1 AND chat IN (SELECT n FROM chats WHERE person = old.person)
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        UPDATE folder_chats SET paths = paths - 1 WHERE chat IN (SELECT n FROM chats WHERE person = old.person)
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        DELETE FROM folder_people WHERE paths = 1 AND person = old.person
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        UPDATE folder_people SET paths = paths - 1 WHERE person = old.person
+            AND folder IN (SELECT ancestor FROM folder_paths WHERE folder = old.folder);
+        INSERT INTO folder_chats (folder, chat, paths, sort, unread, mentions)
+            SELECT p.ancestor, c.n, 1, c.sort, c.unread, c.mentions FROM folder_paths p JOIN chats c ON c.n = new.chat
+            WHERE p.folder = new.folder
+            ON CONFLICT (folder, chat) DO UPDATE SET paths = paths + 1;
+        INSERT INTO folder_chats (folder, chat, paths, sort, unread, mentions)
+            SELECT p.ancestor, c.n, 1, c.sort, c.unread, c.mentions FROM folder_paths p JOIN chats c ON c.person = new.person
+            WHERE p.folder = new.folder
+            ON CONFLICT (folder, chat) DO UPDATE SET paths = paths + 1;
+        INSERT INTO folder_people (folder, person, paths, lone, roster_sort)
+            SELECT p.ancestor, x.n, 1, x.direct_chats = 0, x.roster_sort FROM folder_paths p JOIN people x ON x.n = new.person
+            WHERE p.folder = new.folder
+            ON CONFLICT (folder, person) DO UPDATE SET paths = paths + 1;
+    END;
+
+    -- What a folder's chats and people bring to its counts.
+    CREATE TRIGGER folder_chats_added AFTER INSERT ON folder_chats BEGIN
+        UPDATE folder_counts SET chats = chats + 1, unread = unread + new.unread, mentions = mentions + new.mentions
+        WHERE folder = new.folder;
+    END;
+    CREATE TRIGGER folder_chats_removed AFTER DELETE ON folder_chats BEGIN
+        UPDATE folder_counts SET chats = chats - 1, unread = unread - old.unread, mentions = mentions - old.mentions
+        WHERE folder = old.folder;
+    END;
+    CREATE TRIGGER folder_chats_recounted AFTER UPDATE OF unread, mentions ON folder_chats BEGIN
+        UPDATE folder_counts SET unread = unread + new.unread - old.unread, mentions = mentions + new.mentions - old.mentions
+        WHERE folder = new.folder;
+    END;
+    CREATE TRIGGER folder_people_added AFTER INSERT ON folder_people WHEN new.lone BEGIN
+        UPDATE folder_counts SET lone = lone + 1 WHERE folder = new.folder;
+    END;
+    CREATE TRIGGER folder_people_removed AFTER DELETE ON folder_people WHEN old.lone BEGIN
+        UPDATE folder_counts SET lone = lone - 1 WHERE folder = old.folder;
+    END;
+    CREATE TRIGGER folder_people_recounted AFTER UPDATE OF lone ON folder_people WHEN new.lone IS NOT old.lone BEGIN
+        UPDATE folder_counts SET lone = lone + new.lone - old.lone WHERE folder = new.folder;
+    END;
+
+    -- Someone's first chat of their own, or their last going, and where they sort.
+    CREATE TRIGGER people_chatted AFTER UPDATE OF direct_chats ON people
+    WHEN (new.direct_chats = 0) IS NOT (old.direct_chats = 0) BEGIN
+        UPDATE folder_people SET lone = new.direct_chats = 0 WHERE person = new.n;
+    END;
+    CREATE TRIGGER people_resorted AFTER UPDATE OF presence, last_seen, name, push_name, verified_name ON people
+    WHEN new.roster_sort IS NOT old.roster_sort BEGIN
+        UPDATE folder_people SET roster_sort = new.roster_sort WHERE person = new.n;
+    END;
+
+    -- A chat in the built-in folders it belongs to, in the folders its person is filed in, and in
+    -- its person's count.
+    CREATE TRIGGER chats_counted AFTER INSERT ON chats BEGIN
+        UPDATE people SET direct_chats = direct_chats + 1 WHERE n = new.person;
+        INSERT INTO folder_chats (folder, chat, paths, sort, unread, mentions)
+            SELECT folder, new.n, paths, new.sort, new.unread, new.mentions FROM folder_people WHERE person = new.person
+            ON CONFLICT (folder, chat) DO UPDATE SET paths = paths + excluded.paths;
+        UPDATE folder_counts SET chats = chats + 1, unread = unread + new.unread, mentions = mentions + new.mentions
+        WHERE folder IN (SELECT n FROM folders WHERE builtin IN (iif(new.archived = 0, 'all', NULL),
+            iif(new.archived = 0 AND (new.unread > 0 OR new.marked_unread <> 0), 'unread', NULL),
+            iif(new.archived = 0 AND new.kind IN ('group', 'announcement'), 'groups', NULL),
+            iif(new.archived = 0 AND (new.kind = 'community' OR new.community IS NOT NULL), 'communities', NULL),
+            iif(new.archived <> 0, 'archived', NULL)));
+    END;
+    -- Gone, as a chat merged into another goes: its folder_chats rows go with it.
+    CREATE TRIGGER chats_uncounted AFTER DELETE ON chats BEGIN
+        UPDATE people SET direct_chats = direct_chats - 1 WHERE n = old.person;
+        UPDATE folder_counts SET chats = chats - 1, unread = unread - old.unread, mentions = mentions - old.mentions
+        WHERE folder IN (SELECT n FROM folders WHERE builtin IN (iif(old.archived = 0, 'all', NULL),
+            iif(old.archived = 0 AND (old.unread > 0 OR old.marked_unread <> 0), 'unread', NULL),
+            iif(old.archived = 0 AND old.kind IN ('group', 'announcement'), 'groups', NULL),
+            iif(old.archived = 0 AND (old.kind = 'community' OR old.community IS NOT NULL), 'communities', NULL),
+            iif(old.archived <> 0, 'archived', NULL)));
+    END;
+    -- Someone else's now, as joining a person's number and LID makes it: out of the folders its
+    -- person was filed in, into those its new person is.
+    CREATE TRIGGER chats_repersoned AFTER UPDATE OF person ON chats WHEN new.person IS NOT old.person BEGIN
+        UPDATE people SET direct_chats = direct_chats - 1 WHERE n = old.person;
+        UPDATE people SET direct_chats = direct_chats + 1 WHERE n = new.person;
+        DELETE FROM folder_chats WHERE chat = new.n
+            AND paths = (SELECT f.paths FROM folder_people f WHERE f.person = old.person AND f.folder = folder_chats.folder);
+        UPDATE folder_chats
+            SET paths = paths - (SELECT f.paths FROM folder_people f WHERE f.person = old.person AND f.folder = folder_chats.folder)
+            WHERE chat = new.n AND folder IN (SELECT folder FROM folder_people WHERE person = old.person);
+        INSERT INTO folder_chats (folder, chat, paths, sort, unread, mentions)
+            SELECT folder, new.n, paths, new.sort, new.unread, new.mentions FROM folder_people WHERE person = new.person
+            ON CONFLICT (folder, chat) DO UPDATE SET paths = paths + excluded.paths;
+    END;
+    CREATE TRIGGER chats_recounted AFTER UPDATE OF archived, kind, community, unread, mentions, marked_unread ON chats
+    WHEN old.archived IS NOT new.archived OR old.kind IS NOT new.kind OR old.community IS NOT new.community
+        OR old.unread IS NOT new.unread OR old.mentions IS NOT new.mentions OR old.marked_unread IS NOT new.marked_unread
+    BEGIN
+        UPDATE folder_chats SET unread = new.unread, mentions = new.mentions
+        WHERE chat = new.n AND (unread IS NOT new.unread OR mentions IS NOT new.mentions);
+        UPDATE folder_counts SET chats = chats - 1, unread = unread - old.unread, mentions = mentions - old.mentions
+        WHERE folder IN (SELECT n FROM folders WHERE builtin IN (iif(old.archived = 0, 'all', NULL),
+            iif(old.archived = 0 AND (old.unread > 0 OR old.marked_unread <> 0), 'unread', NULL),
+            iif(old.archived = 0 AND old.kind IN ('group', 'announcement'), 'groups', NULL),
+            iif(old.archived = 0 AND (old.kind = 'community' OR old.community IS NOT NULL), 'communities', NULL),
+            iif(old.archived <> 0, 'archived', NULL)));
+        UPDATE folder_counts SET chats = chats + 1, unread = unread + new.unread, mentions = mentions + new.mentions
+        WHERE folder IN (SELECT n FROM folders WHERE builtin IN (iif(new.archived = 0, 'all', NULL),
+            iif(new.archived = 0 AND (new.unread > 0 OR new.marked_unread <> 0), 'unread', NULL),
+            iif(new.archived = 0 AND new.kind IN ('group', 'announcement'), 'groups', NULL),
+            iif(new.archived = 0 AND (new.kind = 'community' OR new.community IS NOT NULL), 'communities', NULL),
+            iif(new.archived <> 0, 'archived', NULL)));
+    END;
+    CREATE TRIGGER chats_resorted AFTER UPDATE OF last_at, pinned ON chats WHEN new.sort IS NOT old.sort BEGIN
+        UPDATE folder_chats SET sort = new.sort WHERE chat = new.n;
+    END;
+    -- A community sorts by the newest of its groups' messages.
+    CREATE TRIGGER chats_community_followed AFTER UPDATE OF last_at, community ON chats WHEN new.community IS NOT NULL
+    BEGIN
+        UPDATE chats SET last_at = new.last_at WHERE id = new.community AND last_at < new.last_at;
+    END;
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.
@@ -1653,6 +2058,56 @@ mod tests {
         migrate(&mut db).unwrap();
         let id: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0)).unwrap();
         assert_eq!(id, APPLICATION_ID);
+    }
+
+    #[test]
+    fn migration_12_keeps_the_folders_from_before_it_files_a_persons_chat_as_them_and_counts_what_they_hold() {
+        let mut db = at(None, 11);
+        db.execute_batch(
+            "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 1);
+            INSERT INTO person_jids (n, jid, person) VALUES (1, 'ana@s.whatsapp.net', 1);
+            INSERT INTO chats (n, id, kind, person, unread, mentions, last_at, v)
+                VALUES (1, 'ana@s.whatsapp.net', 'direct', 1, 2, 1, 50, 1), (2, 'g@g.us', 'group', NULL, 3, 0, 40, 1);
+            INSERT INTO folders (n, parent, name, position, favourite, v) VALUES (7, NULL, 'Family', 0, 4, 1),
+                (8, 7, 'Cousins', 0, NULL, 1);
+            INSERT INTO folder_items (folder, chat, person) VALUES (7, 1, NULL), (8, 2, NULL), (8, NULL, 1);",
+        )
+        .unwrap();
+        migrate(&mut db).unwrap();
+        let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(count("SELECT count(*) FROM folders WHERE n IN (7, 8) AND builtin IS NULL AND rule IS NULL"), 2);
+        assert_eq!(count("SELECT folder FROM favourites WHERE slot = 4"), 7, "the slot Family had");
+        assert_eq!(
+            count("SELECT count(*) FROM folder_items WHERE chat IS NOT NULL AND chat = 1"),
+            0,
+            "Ana's chat files Ana"
+        );
+        assert_eq!(count("SELECT count(*) FROM folder_items WHERE folder = 7 AND person = 1"), 1);
+        for folder in [7, 8] {
+            let counts: (i64, i64, i64) = db
+                .query_row(
+                    "SELECT unread, mentions, chats + lone FROM folder_counts WHERE folder = ?1",
+                    [folder],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(counts, (5, 1, 2), "folder {folder}: Ana's chat once, and the group");
+        }
+        assert_eq!(
+            count("SELECT chats FROM folder_counts k JOIN folders f ON f.n = k.folder WHERE f.builtin = 'all'"),
+            2
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM folders WHERE rule IS NOT NULL"),
+            3,
+            "the three smart folders jaw starts with"
+        );
+        assert!(
+            super::super::lists::drift(&db).unwrap().is_empty(),
+            "counted as what they're derived from counts them"
+        );
+        db.execute("INSERT INTO folders (name, v) VALUES ('Later', 1)", []).unwrap();
+        assert!(count("SELECT max(n) FROM folders") > 8 + 8, "a folder made later takes an n past every one before");
     }
 
     #[test]

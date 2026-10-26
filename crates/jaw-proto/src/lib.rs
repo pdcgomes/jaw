@@ -283,6 +283,12 @@ pub struct Status {
     /// Each setting whose value in jaw.db this jawd doesn't take.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settings_ignored: Vec<settings::Ignored>,
+    /// Whose presence jawd follows, within its limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<PresenceStatus>,
+    /// The folders' counts, as the background check last found them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folders: Option<FoldersStatus>,
 }
 
 /// The layouts jawd keeps for interfaces (`layout.set`), and the most it keeps.
@@ -305,6 +311,32 @@ pub struct Layouts {
     pub book_bytes_most: u64,
     /// Layouts refused since jawd started for being past one of their limits.
     pub refused: u64,
+}
+
+/// Whose presence jawd follows: those followed on this connection to WhatsApp, at most `most`
+/// and `per_minute` newly; those the windows show (`wanted`) and of them those the limits leave
+/// out; presence heard, and dropped for coming faster than it could be written; and the batches
+/// of about texts asked for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceStatus {
+    pub followed: u64,
+    pub most: u64,
+    pub per_minute: u64,
+    pub wanted: u64,
+    pub waiting: u64,
+    pub heard: u64,
+    pub dropped: u64,
+    pub about_asked: u64,
+}
+
+/// The background check of the folders' counts against what they're derived from: how many
+/// times it ran, how many found them drifted and built them again, and the last drift found.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FoldersStatus {
+    pub checks: u64,
+    pub drifted: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_drift: Option<String>,
 }
 
 /// The interfaces connected to jawd, and where its notifications go.

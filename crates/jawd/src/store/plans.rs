@@ -44,7 +44,10 @@ const ALLOWED: &[(&str, &str)] = &[
         "the palette's numbers, read once at start",
     ),
     ("SELECT folder, chat, person FROM folder_items", "the palette's folders, read once at start"),
-    ("SELECT n, parent, name FROM folders", "the palette's folders, read once at start"),
+    (
+        "SELECT n, builtin, rule IS NOT NULL, parent, name FROM folders",
+        "the palette's folders, read whole at start and when one changes: tens of rows",
+    ),
     ("FROM sqlite_schema", "the schema's fingerprint, read at start and after each migration step"),
     (
         "FROM outbox WHERE state = 'unconfirmed'",
@@ -71,6 +74,52 @@ const ALLOWED: &[(&str, &str)] = &[
         "SELECT count(*), coalesce(max(octet_length(value)) FILTER (WHERE value ->> '$.format' IS NOT 2), 0)",
         "jawd status, on a table of 16 rows at most",
     ),
+    (
+        "FROM folders f LEFT JOIN folder_counts k ON k.folder = f.n",
+        "the folder tree's window, read whole: the five built-in folders, the smart ones and yours, tens of rows",
+    ),
+    ("SELECT s.slot, s.folder, f.builtin", "the favourite slots, nine at most"),
+    ("FROM favourites s CROSS JOIN folder_people p", "the favourite slots, nine at most, and whom they hold"),
+    (
+        "SELECT count(*), coalesce(sum(unread), 0), coalesce(sum(mentions), 0) FROM",
+        "a smart folder counted as it's read: its rule's index walked, stopping at a thousand",
+    ),
+    ("FROM folders WHERE rule IS NOT NULL AND n <> ?1", "the smart folders, a handful, put in order"),
+    (
+        "WHERE (name IS NOT NULL OR direct_chats > 0) AND (about_at IS NULL OR about_at < ?1) ORDER BY about_at LIMIT",
+        "people_about_due from the longest unasked, stopping at its limit; what's due comes first",
+    ),
+    (
+        "SELECT n, followed FROM people WHERE presence IS NOT NULL OR followed <> 0",
+        "people_present whole: those followed, two hundred at most, and those heard of since",
+    ),
+    (
+        "WHEN 'communities' THEN c.archived = 0 AND (c.kind = 'community' OR c.community IS NOT NULL) ELSE c.archived <> 0 END",
+        "the folders' background check, hourly, and the rebuild it asks for when they've drifted: each chat once \
+        for each built-in folder",
+    ),
+    ("EXCEPT SELECT", "the folders' background check, hourly, against a fresh derivation of the tree and what's filed"),
+    ("WHERE f.sort IS NOT c.sort OR f.unread IS NOT c.unread", "the folders' background check, hourly"),
+    ("p.direct_chats IS NOT (SELECT count(*)", "the folders' background check, hourly, and the rebuild it asks for"),
+    (
+        "direct_chats IS NOT (SELECT count(*) FROM chats c",
+        "the rebuild the folders' check asks for when they've drifted",
+    ),
+    ("NOT EXISTS (SELECT 1 FROM folder_counts WHERE folder = f.n)", "the folders' background check, hourly"),
+    ("DELETE FROM folder_chats", "the rebuild the folders' check asks for when they've drifted"),
+    ("DELETE FROM folder_people", "the rebuild the folders' check asks for when they've drifted"),
+    ("DELETE FROM folder_paths", "the rebuild the folders' check asks for when they've drifted"),
+    ("DELETE FROM folder_counts WHERE folder IN", "the rebuild the folders' check asks for when they've drifted"),
+    ("INSERT OR IGNORE INTO folder_counts (folder) SELECT n FROM folders", "the rebuild the folders' check asks for"),
+    (
+        "UPDATE folder_counts SET unread = 0, mentions = 0, chats = 0, lone = 0",
+        "the rebuild the folders' check asks for",
+    ),
+    (
+        "INSERT INTO folder_paths (folder, ancestor) SELECT folder, ancestor FROM up",
+        "the rebuild the folders' check asks for",
+    ),
+    ("SELECT n AS rebuilt FROM folders", "the rebuild the folders' check asks for, every folder once"),
     (
         "FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1",
         "an action naming a message by its ID alone looks for it in each chat, a search of messages_by_id each; \
@@ -221,7 +270,8 @@ fn is_statement(text: &str) -> bool {
             | "UPDATE"
             | "DELETE"
             | "WITH"
-            | "{CHAT_COLUMNS}"
+            | "{CHAT_SELECT}"
+            | "{PERSON_SELECT}"
             | "{MESSAGE_COLUMNS}"
             | "{from}"
             | "{CHAT}"
@@ -254,9 +304,14 @@ fn snapshot() -> (String, Vec<String>) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut out = String::new();
     let mut broken = Vec::new();
+    // A file's own names first, then those of the files it reads them from, as store::lists does
+    // store::read's.
+    let everywhere: HashMap<String, String> =
+        sources().iter().flat_map(|path| fragments(&std::fs::read_to_string(path).unwrap())).collect();
     for path in sources() {
         let source = std::fs::read_to_string(&path).unwrap();
-        let names = names(&source);
+        let mut names = everywhere.clone();
+        names.extend(self::names(&source));
         // A fragment is planned in the statements it's part of, unless it's also used on its own.
         let parts: Vec<String> = fragments(&source)
             .into_iter()
@@ -347,6 +402,58 @@ fn planned(db: &Connection, file: &str, sql: &str, out: &mut String, broken: &mu
         }
     }
     out.push('\n');
+}
+
+/// The triggers whose statements may sort, and why. ALLOWED's texts let through any statement that
+/// contains them, so one written for the folders' rebuild would let a trigger's statement through
+/// too; a trigger's needs its own line here.
+const TRIGGERS_SORTING: &[(&str, &str)] = &[(
+    "links_derived_insert",
+    "one message's links, each place counting the distinct URLs its spans mark before it, a handful",
+)];
+
+/// Each trigger's statements but those that only raise, as the plan test pins them.
+fn trigger_statements(db: &Connection) -> Vec<(String, String)> {
+    let triggers: Vec<(String, String)> = db
+        .prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let mut out = Vec::new();
+    for (name, trigger) in triggers {
+        let body = trigger.split_once("BEGIN").map_or("", |(_, body)| body);
+        let body = body.rsplit_once("END").map_or(body, |(body, _)| body);
+        for statement in body.split(';').map(str::trim).filter(|s| !s.is_empty() && !s.contains("RAISE(")) {
+            out.push((name.clone(), row_values(statement).split_whitespace().collect::<Vec<_>>().join(" ")));
+        }
+    }
+    out
+}
+
+#[test]
+fn every_triggers_statements_plan_without_scanning_a_table_or_sorting_in_a_temporary_b_tree() {
+    let mut db = Connection::open_in_memory().unwrap();
+    super::schema::migrate(&mut db).unwrap();
+    let statements = trigger_statements(&db);
+    assert!(statements.iter().any(|(name, _)| name == "chats_recounted"), "the folder counts' triggers are planned");
+    let mut broken = Vec::new();
+    for (name, sql) in statements {
+        let lines = plan(&db, &sql).unwrap_or_else(|e| panic!("{name}: {sql}\n    doesn't plan: {e}"));
+        for line in lines {
+            let scan = line.trim_start().starts_with("SCAN ")
+                && !line.contains("VIRTUAL TABLE")
+                && !line.contains("CONSTANT ROW")
+                && !line.contains("(subquery");
+            let sorts =
+                line.contains("USE TEMP B-TREE") && TRIGGERS_SORTING.iter().all(|(trigger, _)| *trigger != name);
+            if scan || sorts {
+                broken.push(format!("{name}: {sql}\n    {}", line.trim()));
+            }
+        }
+    }
+    assert!(broken.is_empty(), "trigger statements that scan or sort:\n{}", broken.join("\n"));
 }
 
 #[test]

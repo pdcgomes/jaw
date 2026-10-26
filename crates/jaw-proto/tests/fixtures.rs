@@ -15,8 +15,8 @@ use jaw_proto::settings::{Messages, Settings, SettingsKept, SettingsSet};
 use jaw_proto::sync::{HistoryMore, Notice};
 use jaw_proto::themes::Themes;
 use jaw_proto::windows::{
-    ChatRow, ChatsPush, ChatsWatch, ChatsWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, Watch,
-    WatchMove,
+    ChatRow, ChatsPush, ChatsWatch, ChatsWatched, FolderRow, FoldersPush, FoldersWatch, FoldersWatched, MessageRow,
+    MessagesPush, MessagesWatch, MessagesWatched, RosterRow, RosterWatch, Watch, WatchMove,
 };
 use jaw_proto::{Connection, Focus, FromJawd, Hello, Outcome, Push, Reply, Request, Status, Welcome};
 use serde::Serialize;
@@ -117,6 +117,11 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "layout.get" => params::<LayoutGet>(&name, &request.params),
                     "layout.set" if book => params::<LayoutSet<Book>>(&name, &request.params),
                     "layout.set" => params::<LayoutSet>(&name, &request.params),
+                    "folders.watch" => params::<FoldersWatch>(&name, &request.params),
+                    "roster.watch" => params::<RosterWatch>(&name, &request.params),
+                    "folder.create" | "folder.add" | "favourite.set" => {
+                        assert!(request.params.is_object(), "{name}'s params")
+                    }
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -138,7 +143,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                         }
                     }
                     "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
-                    | "typing" | "react" | "edit" | "delete" | "poll.vote" => {
+                    | "typing" | "react" | "edit" | "delete" | "poll.vote" | "folder.add" | "favourite.set" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
                     "send.text" | "send.poll" => params::<Sent>(&name, result),
@@ -149,6 +154,9 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "layout.get" | "layout.set" if book => params::<Saved<Book>>(&name, result),
                     "layout.get" | "layout.set" => params::<Saved>(&name, result),
                     "chats.watch" => params::<ChatsWatched>(&name, result),
+                    "folders.watch" => params::<FoldersWatched>(&name, result),
+                    "roster.watch" => params::<ChatsWatched<RosterRow>>(&name, result),
+                    "folder.create" => params::<FolderRow>(&name, &result["folder"]),
                     // A move's result is its window's; this fixture moves a messages window.
                     "messages.watch" | "watch.move" => params::<MessagesWatched>(&name, result),
                     "settings.set" => params::<SettingsKept>(&name, result),
@@ -163,6 +171,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "connection" => params::<Connection>(&name, &push.params),
                     "chats" => params::<ChatsPush>(&name, &push.params),
                     "messages" => params::<MessagesPush>(&name, &push.params),
+                    "folders" => params::<FoldersPush>(&name, &push.params),
+                    "roster" => params::<ChatsPush<RosterRow>>(&name, &push.params),
                     "resync" => params::<Watch>(&name, &push.params),
                     "notice" => params::<Notice>(&name, &push.params),
                     "layout" if book => params::<Saved<Book>>(&name, &push.params),

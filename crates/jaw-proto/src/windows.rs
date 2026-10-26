@@ -179,6 +179,135 @@ pub struct ChatRow {
     /// For a community, its groups' unread total.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub children_unread: Option<u64>,
+    /// The IDs of your folders it sits in directly, or its person does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
+    /// Its favourite slot, 1 to 9.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favourite: Option<u8>,
+}
+
+/// `folders.watch`'s params: the whole tree, so only what watching again needs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FoldersWatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub have: Vec<String>,
+}
+
+/// A folder in the tree: built in (`all`, `unread`, `groups`, `communities`, `archived`), smart
+/// (`smart:` and a number) or yours (`folder:` and a number).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FolderRow {
+    pub id: String,
+    #[serde(default)]
+    pub v: u64,
+    /// Null at the top.
+    pub parent: Option<String>,
+    pub name: String,
+    /// Its place among its siblings of its kind.
+    pub position: u32,
+    /// A smart folder's rule; null for the rest.
+    pub smart: Option<Value>,
+    /// Its chats' and its subfolders' chats' unread messages and mentions, each chat counted once.
+    pub unread: u64,
+    pub mentions: u64,
+    /// The chats and people in it and under it, each once, a person with a chat of their own as
+    /// that chat. A smart folder's are counted up to 1,000.
+    pub count: u64,
+    /// Its favourite slot, 1 to 9.
+    pub favourite: Option<u8>,
+}
+
+/// A favourite slot and what Alt and its number go to: a folder, or a chat with its name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Favourite {
+    pub slot: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// What `folders.watch` returns: every folder, and the favourite slots.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FoldersWatched<R = FolderRow> {
+    pub watch: String,
+    pub seq: u64,
+    pub rows: Vec<R>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
+    #[serde(default)]
+    pub favourites: Vec<Favourite>,
+}
+
+/// The `folders` push: the folders that changed, and the favourite slots whole when they did.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FoldersPush<R = FolderRow> {
+    pub watch: String,
+    pub seq: u64,
+    #[serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")]
+    pub upsert: Vec<R>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favourites: Option<Vec<Favourite>>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `roster.watch`'s params.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RosterWatch {
+    #[serde(default = "all")]
+    pub folder: String,
+    pub around: Around,
+    #[serde(default)]
+    pub before: u32,
+    #[serde(default)]
+    pub after: u32,
+    /// False leaves out people who aren't online, typing or recording.
+    #[serde(default = "yes")]
+    pub offline: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub have: Vec<String>,
+}
+
+/// Someone in a roster. A roster reads from the smallest `sort` up: around first, then by when
+/// last seen, then by name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RosterRow {
+    /// `person:` and a number.
+    pub id: String,
+    pub v: u64,
+    pub sort: String,
+    pub name: String,
+    pub phone: Option<String>,
+    pub about: Option<String>,
+    pub avatar: Option<String>,
+    pub presence: Presence,
+    /// Their one-to-one chat's `id`, if there is one.
+    pub chat: Option<String>,
+    /// The IDs of your folders they're filed in.
+    #[serde(default)]
+    pub folders: Vec<String>,
+}
+
+/// Someone's presence: `online`, `typing`, `recording`, `seen` (with `at`) or `hidden`, and
+/// `known` false when jawd isn't following them now, so it's what was last known.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Presence {
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
+    pub known: bool,
 }
 
 /// A chat's newest message, for its line in the chat list.

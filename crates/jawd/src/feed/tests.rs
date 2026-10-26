@@ -196,7 +196,7 @@ impl Watcher {
                 self.windows.remove(&watch);
                 self.resynced.push(watch);
             }
-            "chats" | "messages" => {
+            "chats" | "messages" | "roster" | "folders" => {
                 *self.batches.entry(watch.clone()).or_default() += 1;
                 let model = self.windows.get_mut(&watch).expect("a push for a window it watches");
                 // A window never goes back to an older read than its interface holds.
@@ -3745,4 +3745,251 @@ async fn a_half_closed_connection_whose_long_request_dies_is_told_and_still_ends
     assert_eq!(reply(5).map(|value| &value["error"]["code"]), Some(&json!(code::INTERNAL)), "{came:?}");
     assert!(reply(6).is_some_and(|value| value.get("result").is_some()), "{came:?}");
     assert!(closed, "jawd kept the half-closed connection open: {came:?}");
+}
+
+mod folders {
+    use super::*;
+    use crate::store::folders::{Done, Item, Outcome, Presence, Step, Target};
+    use crate::store::lists::{self, List};
+
+    const ANA: &str = "351910000002@s.whatsapp.net";
+    const RUI: &str = "351910000003@s.whatsapp.net";
+    const INES: &str = "351910000004@s.whatsapp.net";
+    const CLIMBING: &str = "120363000000000001@g.us";
+    const AT: i64 = 1_792_000_000_000;
+
+    async fn step(bed: &Bed, make: impl FnOnce(Done) -> Step) -> (Outcome, i64) {
+        let done = Done::default();
+        let applied = bed.store.apply_durable(vec![Change::Folders(make(done.clone()))]).await.unwrap();
+        (done.take().unwrap(), applied.seq)
+    }
+
+    async fn create(bed: &Bed, name: &str, parent: Option<i64>) -> i64 {
+        match step(bed, |done| Step::Create { name: name.into(), parent, rule: None, done }).await.0 {
+            Outcome::Done(Some(n)) => n,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A folder's chat list as a fresh read gives it, whole, as its window should hold it.
+    async fn listed(bed: &Bed, list: List, after: usize) -> Model {
+        let rows = bed
+            .store
+            .reads()
+            .query(crate::work::Priority::Interactive, move |db| {
+                let total = lists::chat_count(db, &list, AT)?;
+                Ok((lists::chats(db, &list, None, after, AT)?, total))
+            })
+            .await
+            .unwrap();
+        let (rows, total) = rows;
+        let rows = rows.into_iter().map(|row| (row.id.clone(), serde_json::to_value(chat_row(row)).unwrap()));
+        Model { chats: true, rows: rows.collect(), total, ..Model::default() }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_folders_chat_list_is_what_a_fresh_read_gives_as_it_is_filed_written_to_and_moved() {
+        let bed = Bed::new(brisk());
+        let seq = bed
+            .apply(vec![
+                Change::Person(Person { jids: vec![ANA.into()], name: Some("Ana".into()), ..Person::default() }),
+                Change::Message(text(ANA, "a1", AT, Some(ANA), "olá")),
+                Change::Message(text(RUI, "r1", AT + 1, Some(RUI), "boas")),
+                Change::Message(text(CLIMBING, "c1", AT + 2, Some(RUI), "sábado?")),
+            ])
+            .await;
+        let family = create(&bed, "Family", None).await;
+        let cousins = create(&bed, "Cousins", Some(family)).await;
+        let mut watcher = bed.watcher(64);
+        let list = watcher
+            .watch("chats.watch", json!({"folder": format!("folder:{family}"), "around": "top", "after": 10}))
+            .await;
+        let tree = watcher.watch("folders.watch", json!({})).await;
+        watcher.settle(seq).await;
+        let ana = bed
+            .store
+            .reads()
+            .query(crate::work::Priority::Interactive, |db| {
+                Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [ANA], |r| r.get::<_, i64>(0))?)
+            })
+            .await
+            .unwrap();
+        let steps: Vec<Box<dyn Fn(Done) -> Step>> = vec![
+            Box::new(move |done| Step::File { folder: family, item: Item::Person(ana), done }),
+            Box::new(move |done| Step::File { folder: cousins, item: Item::Chat(CLIMBING.into()), done }),
+            Box::new(move |done| Step::File { folder: cousins, item: Item::Chat(RUI.into()), done }),
+            Box::new(move |done| Step::Move { folder: cousins, parent: None, position: None, done }),
+            Box::new(move |done| Step::Move { folder: cousins, parent: Some(family), position: Some(0), done }),
+            Box::new(move |done| Step::Unfile { folder: cousins, item: Item::Chat(RUI.into()), done }),
+        ];
+        for (i, make) in steps.into_iter().enumerate() {
+            let (outcome, seq) = step(&bed, make).await;
+            assert_eq!(outcome, Outcome::Done(None), "step {i}");
+            let seq = bed
+                .apply(vec![Change::Message(text(CLIMBING, &format!("x{i}"), AT + 10 + i as i64, Some(RUI), "e"))])
+                .await
+                .max(seq);
+            watcher.settle(seq).await;
+            let fresh = listed(&bed, List::Folder(family), 10).await;
+            watcher.windows[&list].assert_matches(&fresh, &format!("Family after step {i}"));
+            let now = crate::feed::now_ms();
+            let folders = bed
+                .store
+                .reads()
+                .query(crate::work::Priority::Interactive, move |db| lists::folders(db, now))
+                .await
+                .unwrap();
+            let shown = &watcher.windows[&tree];
+            for row in folders {
+                let held = &shown.rows[&row.id];
+                assert_eq!(
+                    (held["unread"].as_i64(), held["count"].as_i64()),
+                    (Some(row.unread), Some(row.count)),
+                    "{} after step {i}",
+                    row.id
+                );
+            }
+        }
+        let row = &watcher.windows[&list].rows[ANA];
+        assert_eq!(row["folders"], json!([format!("folder:{family}")]), "her chat says where she's filed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_trees_window_sends_favourites_whole_when_they_change_and_a_deleted_folder_goes() {
+        let bed = Bed::new(brisk());
+        let seq = bed.apply(vec![Change::Message(text(ANA, "a1", AT, Some(ANA), "olá"))]).await;
+        let family = create(&bed, "Family", None).await;
+        let mut watcher = bed.watcher(64);
+        let tree = watcher.watch("folders.watch", json!({})).await;
+        let watched = watcher.call("folders.watch", json!({})).await.unwrap();
+        assert_eq!(watched["favourites"], json!([]));
+        watcher.settle(seq).await;
+        let (_, seq) =
+            step(&bed, |done| Step::Favourite { slot: 3, target: Some(Target::Chat(ANA.into())), done }).await;
+        watcher.settle(seq).await;
+        let (_, seq) = step(&bed, |done| Step::Favourite { slot: 1, target: Some(Target::Folder(family)), done }).await;
+        watcher.settle(seq).await;
+        assert_eq!(watcher.windows[&tree].rows[&format!("folder:{family}")]["favourite"], json!(1));
+        let (_, seq) = step(&bed, |done| Step::Delete { folder: family, done }).await;
+        watcher.settle(seq).await;
+        assert!(!watcher.windows[&tree].rows.contains_key(&format!("folder:{family}")), "gone from the tree");
+        assert!(watcher.windows[&tree].rows.contains_key("all") && watcher.windows[&tree].rows.contains_key("unread"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_roster_puts_whos_around_first_then_by_last_seen_and_follows_what_whatsapp_says() {
+        let bed = Bed::new(brisk());
+        let person = |jid: &str, name: &str| {
+            Change::Person(Person { jids: vec![jid.into()], name: Some(name.into()), ..Person::default() })
+        };
+        let seq = bed.apply(vec![person(ANA, "Ana"), person(RUI, "Rui"), person(INES, "Inês")]).await;
+        let mut watcher = bed.watcher(64);
+        let roster = watcher.watch("roster.watch", json!({"folder": "all", "around": "top", "after": 10})).await;
+        watcher.settle(seq).await;
+        let order = |watcher: &Watcher| {
+            let mut rows: Vec<&Value> = watcher.windows[&roster].rows.values().collect();
+            rows.sort_by(|a, b| a["sort"].as_str().cmp(&b["sort"].as_str()));
+            rows.iter().map(|row| row["name"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(order(&watcher), ["Ana", "Inês", "Rui"], "by name while nobody's known");
+        let said = |jid: &str, state| Change::Folders(Step::Presence { jid: jid.into(), state });
+        let seq = bed
+            .apply(vec![
+                said(RUI, Presence::Online),
+                said(INES, Presence::Away(Some(AT))),
+                said(ANA, Presence::Away(Some(AT + 5))),
+            ])
+            .await;
+        watcher.settle(seq).await;
+        assert_eq!(order(&watcher), ["Rui", "Ana", "Inês"], "around, then the most recently seen");
+        let rui = watcher.windows[&roster].rows.values().find(|row| row["name"] == "Rui").unwrap().clone();
+        assert_eq!(rui["presence"], json!({"state": "online", "known": false}), "heard, but not followed now");
+        let mut offline = bed.watcher(64);
+        let around = offline
+            .watch("roster.watch", json!({"folder": "all", "around": "top", "after": 10, "offline": false}))
+            .await;
+        assert_eq!(offline.windows[&around].rows.len(), 1, "only who's around");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_communitys_groups_come_with_it_sorted_under_it_its_announcement_group_first() {
+        let bed = Bed::new(brisk());
+        let community = "120363000000000010@g.us";
+        let (news, party) = ("120363000000000011@g.us", "120363000000000012@g.us");
+        let mut changes = vec![
+            Change::Chat(Chat {
+                id: community.into(),
+                kind: Some("community"),
+                name: Some("Bairro".into()),
+                ..Chat::default()
+            }),
+            Change::Chat(Chat {
+                id: news.into(),
+                kind: Some("announcement"),
+                community: Some(community.into()),
+                ..Chat::default()
+            }),
+            Change::Chat(Chat {
+                id: party.into(),
+                kind: Some("group"),
+                community: Some(community.into()),
+                ..Chat::default()
+            }),
+            Change::Message(Message { live: true, ..text(news, "n1", AT, Some(RUI), "avisos") }),
+        ];
+        // Chats newer than the announcement group, so it would fall out of a window of three.
+        for i in 0..4 {
+            changes.push(Change::Message(text(
+                &format!("35191000010{i}@s.whatsapp.net"),
+                &format!("m{i}"),
+                AT + 10 + i,
+                Some(RUI),
+                "x",
+            )));
+        }
+        changes.push(Change::Message(Message { live: true, ..text(party, "p1", AT + 100, Some(RUI), "festa") }));
+        let seq = bed.apply(changes).await;
+        let mut watcher = bed.watcher(64);
+        let list = watcher.watch("chats.watch", json!({"folder": "all", "around": "top", "after": 3})).await;
+        watcher.settle(seq).await;
+        let ids = watcher.windows[&list].ids();
+        assert_eq!(
+            &ids[..3],
+            [community, news, party],
+            "the community, then its announcement group, then its others: {ids:?}"
+        );
+        assert_eq!(watcher.windows[&list].rows[community]["children_unread"], json!(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whose_presence_the_windows_show_is_an_open_chats_person_first_then_a_rosters_people() {
+        let bed = Bed::new(brisk());
+        let person = |jid: &str, name: &str| {
+            Change::Person(Person { jids: vec![jid.into()], name: Some(name.into()), ..Person::default() })
+        };
+        let seq = bed
+            .apply(vec![
+                person(ANA, "Ana"),
+                person(RUI, "Rui"),
+                Change::Message(text(INES, "i1", AT, Some(INES), "olá")),
+            ])
+            .await;
+        let mut watcher = bed.watcher(64);
+        let roster = watcher.watch("roster.watch", json!({"folder": "all", "around": "top", "after": 10})).await;
+        watcher.watch("messages.watch", json!({"chat": INES, "around": "newest", "before": 10})).await;
+        watcher.settle(seq).await;
+        let showing = bed.feed.showing();
+        let ines = bed
+            .store
+            .reads()
+            .query(crate::work::Priority::Interactive, |db| {
+                Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [INES], |r| r.get::<_, i64>(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(showing.first(), Some(&ines), "the open chat's person first: {showing:?}");
+        assert_eq!(showing.len(), 3, "and the roster's, each once");
+        watcher.call("unwatch", json!({"watch": roster})).await.unwrap();
+        assert_eq!(bed.feed.showing(), [ines], "a window unwatched shows nobody");
+    }
 }

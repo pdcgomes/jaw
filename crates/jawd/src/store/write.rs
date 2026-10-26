@@ -3,6 +3,7 @@
 //! it last changed: interfaces converge however updates arrive, and a client that saw seq S needs
 //! only the rows whose `v` is past S.
 
+pub mod folders;
 pub mod kinds;
 pub mod layout;
 pub mod links;
@@ -92,6 +93,8 @@ pub enum Change {
         chat: String,
         id: String,
     },
+    /// Folders and favourites, and presence and about texts.
+    Folders(folders::Step),
 }
 
 /// A merge of one chat into another, as a merge step names it.
@@ -551,6 +554,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
         Some(Change::Layout(keep)) => layout::provenance(keep),
         Some(Change::Backfill(name)) => ("backfill", name.to_string(), None),
         Some(Change::Thumbnail { sha256, chat, id, .. }) => ("thumbnail", format!("{chat} {id} {sha256}"), None),
+        Some(Change::Folders(step)) => folders::provenance(step),
         None => ("nothing", String::new(), None),
     };
     (source, reference, raw.map(Cow::Borrowed))
@@ -690,6 +694,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         Change::Layout(keep) => layout::apply(db, keep),
         Change::Backfill(name) => links::backfill(db, stamps, name),
         Change::Thumbnail { sha256, bytes, chat, id } => links::thumbnail(db, stamps, sha256, *bytes, chat, id),
+        Change::Folders(step) => folders::apply(db, stamps, step),
     }
 }
 
@@ -832,7 +837,27 @@ pub(super) fn settle(db: &Connection, stamps: &mut Stamps) -> Result<()> {
     for keep in chats {
         merging.extend(chats_merging_into(db, keep)?.into_iter().map(|gone| (gone, Unsettled::default())));
     }
-    settle_each(db, stamps, merging)
+    settle_each(db, stamps, merging)?;
+    communities_follow(db, stamps)
+}
+
+/// A community shows the newest of its groups' messages and their unread total, and sorts by the
+/// newest (chats_community_followed), so it changes with each of its groups the transaction
+/// changed.
+fn communities_follow(db: &Connection, stamps: &mut Stamps) -> Result<()> {
+    let groups: Vec<i64> = stamps.order.iter().filter(|(kind, _)| *kind == CHAT).map(|(_, n)| *n).collect();
+    for group in groups {
+        let community: Option<i64> = db
+            .prepare_cached("SELECT k.n FROM chats c JOIN chats k ON k.id = c.community WHERE c.n = ?1")?
+            .query_row([group], |r| r.get(0))
+            .optional()?;
+        if let Some(community) = community.filter(|k| !stamps.touched.contains_key(&(CHAT, *k))) {
+            let seq = stamps.seq(CHAT, Some(community));
+            db.prepare_cached("UPDATE chats SET v = ?2 WHERE n = ?1")?.execute(params![community, seq])?;
+            stamps.record(db, CHAT, community, Some(community), seq)?;
+        }
+    }
+    Ok(())
 }
 
 fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsettled)>) -> Result<()> {
@@ -1357,9 +1382,22 @@ fn join(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64) -> Result<()
         db.prepare_cached("UPDATE chats SET v = ?2 WHERE n = ?1")?.execute(params![chat, seq])?;
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
     }
-    db.prepare_cached("UPDATE OR IGNORE folder_items SET person = ?1 WHERE person = ?2")?
-        .execute(params![keep, gone])?;
-    db.prepare_cached("DELETE FROM folder_items WHERE person = ?1")?.execute([gone])?;
+    let refiled = db
+        .prepare_cached("UPDATE OR IGNORE folder_items SET person = ?1 WHERE person = ?2")?
+        .execute(params![keep, gone])?
+        + db.prepare_cached("DELETE FROM folder_items WHERE person = ?1")?.execute([gone])?;
+    // Their chats show where they're filed, which may now be where the other was.
+    if refiled > 0 {
+        let chats: Vec<i64> = db
+            .prepare_cached("SELECT n FROM chats WHERE person = ?1")?
+            .query_map([keep], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for chat in chats {
+            let seq = stamps.seq(CHAT, Some(chat));
+            db.prepare_cached("UPDATE chats SET v = ?2 WHERE n = ?1")?.execute(params![chat, seq])?;
+            stamps.record(db, CHAT, chat, Some(chat), seq)?;
+        }
+    }
     db.prepare_cached("DELETE FROM people WHERE n = ?1")?.execute([gone])?;
     let seq = stamps.seq(PERSON, Some(gone));
     stamps.record(db, PERSON, gone, None, seq)?;
@@ -1409,17 +1447,37 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     carry(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
     db.prepare_cached("UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
     db.prepare_cached("DELETE FROM folder_items WHERE chat = ?1")?.execute([gone])?;
+    // Its favourite slot comes too, unless the chat kept has one of its own.
+    let slots: Vec<i64> = db
+        .prepare_cached("SELECT slot FROM favourites WHERE chat = ?1")?
+        .query_map([gone], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    db.prepare_cached("UPDATE OR IGNORE favourites SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
+    db.prepare_cached("DELETE FROM favourites WHERE chat = ?1")?.execute([gone])?;
+    for slot in slots {
+        let seq = stamps.seq(folders::FAVOURITE, Some(slot));
+        stamps.record(db, folders::FAVOURITE, slot, None, seq)?;
+    }
+    // Each chat's opens decayed to the later of their last opens, so the older ones count as much
+    // as they do now and no more.
+    let opens = |n: i64| -> Result<(f64, Option<i64>)> {
+        Ok(db
+            .prepare_cached("SELECT frecency, opened_at FROM chats WHERE n = ?1")?
+            .query_row([n], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    };
+    let ((kept, kept_at), (went, went_at)) = (opens(*keep)?, opens(*gone)?);
+    let latest = kept_at.max(went_at);
+    let opened = latest.map_or(kept + went, |at| frecency(kept, kept_at, at) + frecency(went, went_at, at));
     let seq = stamps.seq(CHAT, Some(*keep));
     db.prepare_cached(
         "UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived),
             muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread),
             draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar),
             avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral),
-            frecency = k.frecency + g.frecency, opened_at = max(coalesce(k.opened_at, 0), coalesce(g.opened_at, 0)),
-            v = ?3
+            frecency = ?4, opened_at = ?5, v = ?3
         FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1",
     )?
-    .execute(params![keep, gone, seq])?;
+    .execute(params![keep, gone, seq, opened, latest])?;
     stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
     merge_reads(db, stamps, *keep, *gone)
 }
@@ -2055,7 +2113,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     let seq = stamps.seq(CHAT, Some(chat));
     let moved = db
         .prepare_cached(
-            "UPDATE chats SET last_at = ?2, last_message = ?3, v = ?4
+            "UPDATE chats SET last_at = max(last_at, ?2), last_message = ?3, v = ?4
             WHERE n = ?1 AND (last_message IS NULL OR last_message = ?3
                 OR ?5 > (SELECT t FROM messages WHERE n = last_message))",
         )?

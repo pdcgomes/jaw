@@ -283,6 +283,7 @@ pub async fn run(
     pushes: broadcast::Sender<Push>,
     engine: Option<Supervisor>,
     home: PathBuf,
+    following: crate::presence::Following,
 ) {
     let (offered, offers) = mpsc::unbounded_channel();
     let avatars = Avatars::new();
@@ -367,6 +368,9 @@ pub async fn run(
                 heard_from(&live, &receipt.sender);
                 kept("receipt", receipt.encode_to_vec(), ack)
             }
+            // Fire and forget: what's around now, written as it comes and gone by the next start.
+            Some(pb::event::Kind::Presence(presence)) => following.heard(crate::presence::Heard::Presence(presence)),
+            Some(pb::event::Kind::Typing(typing)) => following.heard(crate::presence::Heard::Typing(typing)),
             Some(pb::event::Kind::Connection(connection)) => {
                 let (pushed, me, account) = {
                     let mut live = live.lock().expect("live state");

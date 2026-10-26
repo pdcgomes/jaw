@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, watch};
 
 pub use self::client::{Client, Ready};
-pub(crate) use self::window::{chat_row, message_row};
+pub(crate) use self::window::{chat_row, folder_row, message_row, now_ms};
 use crate::store::{Store, read};
 use crate::work::Priority;
 
@@ -44,6 +44,8 @@ pub struct Changes {
     /// name them by. Whoever comes to have a JID, by a new person or a number and a LID found to
     /// be one, is among the people changed, so a row naming it is told the name it now shows.
     pub jids: HashSet<u64>,
+    /// Whether a folder or a favourite slot changed.
+    pub folders: bool,
 }
 
 /// A JID as `Changes` and windows hold it, in a word rather than its text: two JIDs that hash
@@ -143,6 +145,17 @@ impl Feed {
         self.shared.windows()
     }
 
+    /// Whose presence the windows show now, by person n: open one-to-one chats' first, then
+    /// rosters', each in its roster's order.
+    pub fn showing(&self) -> Vec<i64> {
+        self.shared.showing()
+    }
+
+    /// Changes each time whose presence the windows show does.
+    pub fn shown(&self) -> watch::Receiver<u64> {
+        self.shared.shown()
+    }
+
     /// Makes every window read fail on its reader, or read again.
     #[cfg(test)]
     pub(super) fn fail_reads(&self, failing: bool) {
@@ -210,6 +223,7 @@ async fn follow(store: Store, mut committed: watch::Receiver<i64>, changes: broa
                 messages: HashSet::new(),
                 people: HashSet::new(),
                 jids: jids.iter().map(|jid| hashed(jid)).collect(),
+                folders: false,
             };
             for event in &events {
                 match (event.kind.as_str(), event.chat) {
@@ -222,6 +236,7 @@ async fn follow(store: Store, mut committed: watch::Receiver<i64>, changes: broa
                     ("person", _) => {
                         batch.people.insert(event.key);
                     }
+                    ("folder" | "favourite", _) => batch.folders = true,
                     _ => {}
                 }
             }

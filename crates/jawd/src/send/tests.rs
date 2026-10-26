@@ -80,8 +80,15 @@ impl Running {
         let connect = connect && engine.is_some();
         let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
         let mut connected = pushes.subscribe();
-        let sync =
-            crate::sync::run(incoming, store.clone(), live.clone(), pushes.clone(), supervisor.clone(), home.into());
+        let sync = crate::sync::run(
+            incoming,
+            store.clone(),
+            live.clone(),
+            pushes.clone(),
+            supervisor.clone(),
+            home.into(),
+            Default::default(),
+        );
         tokio::spawn(sync);
         let attention = Arc::new(crate::attention::Attention::default());
         let sending = Sending::start(

@@ -51,6 +51,7 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         pushes.clone(),
         Some(supervisor.clone()),
         home.to_path_buf(),
+        Default::default(),
     );
     tokio::spawn(sync);
     let chats: Vec<Change> =

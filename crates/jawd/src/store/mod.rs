@@ -19,6 +19,7 @@
 //! stays under 64 MiB however fast history or messages come.
 
 pub mod bench;
+pub mod lists;
 mod overlay;
 #[cfg(test)]
 mod plans;
@@ -51,6 +52,7 @@ pub use self::read::Reads;
 pub(crate) use self::tests::index_against_text;
 pub use self::thumbnails::Thumbnails;
 use self::write::Stamps;
+pub use self::write::folders;
 pub use self::write::layout;
 pub use self::write::unpack;
 #[cfg(test)]

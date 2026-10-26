@@ -86,14 +86,17 @@ struct FolderEntry {
     name: Name,
 }
 
-/// The folders every account has.
-const BUILT_IN: [(&str, &str); 5] = [
-    ("all", "All"),
-    ("unread", "Unread"),
-    ("groups", "Groups"),
-    ("communities", "Communities"),
-    ("archived", "Archived"),
-];
+/// A folder as jaw.db has it: its n, its built-in name, whether it's smart, its parent and name.
+type FolderRecord = (i64, Option<String>, bool, Option<i64>, String);
+
+const FOLDERS: &str = "SELECT n, builtin, rule IS NOT NULL, parent, name FROM folders";
+
+fn folders(db: &Connection) -> Result<Vec<FolderRecord>> {
+    Ok(db
+        .prepare_cached(FOLDERS)?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
 
 #[derive(Default)]
 pub struct Index {
@@ -110,6 +113,8 @@ pub struct Index {
 pub struct Changes {
     chats: Vec<(i64, Option<ChatRecord>)>,
     people: Vec<(i64, Option<PersonRecord>)>,
+    /// The whole tree, when a folder changed.
+    folders: Option<Vec<FolderRecord>>,
 }
 
 struct ChatRecord {
@@ -191,15 +196,18 @@ pub fn load(db: &Connection) -> Result<(Index, i64)> {
             _ => {}
         }
     }
-    let folders: Vec<(i64, Option<i64>, String)> = tx
-        .prepare("SELECT n, parent, name FROM folders")?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+    // Someone's one-to-one chat is filed where they are.
+    for chat in chats.values_mut() {
+        if let Some(person) = chat.person.and_then(|n| people.get(&n)) {
+            chat.folders.extend(person.folders.iter().copied());
+        }
+    }
+    let folders = folders(&tx)?;
     let mut index = Index::default();
-    index.set_folders(folders);
     index.apply(Changes {
         people: people.into_iter().map(|(n, person)| (n, Some(person))).collect(),
         chats: chats.into_iter().map(|(n, chat)| (n, Some(chat))).collect(),
+        folders: Some(folders),
     });
     Ok((index, seq))
 }
@@ -210,22 +218,31 @@ pub fn changes(db: &Connection, since: i64, upto: i64) -> Result<Changes> {
     let mut chats = HashSet::new();
     let mut people = HashSet::new();
     let mut events = tx.prepare_cached(
-        "SELECT type, key FROM events WHERE seq > ?1 AND seq <= ?2 AND type IN ('chat', 'person') ORDER BY seq",
+        "SELECT type, key FROM events WHERE seq > ?1 AND seq <= ?2 AND type IN ('chat', 'person', 'folder') ORDER BY seq",
     )?;
+    let mut tree = false;
     for row in events.query_map(params![since, upto], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
         match row? {
             (kind, key) if kind == "chat" => chats.insert(key),
-            (_, key) => people.insert(key),
+            (kind, key) if kind == "person" => people.insert(key),
+            _ => {
+                tree = true;
+                false
+            }
         };
     }
-    let mut changes = Changes { chats: Vec::new(), people: Vec::new() };
+    let mut changes =
+        Changes { chats: Vec::new(), people: Vec::new(), folders: tree.then(|| folders(&tx)).transpose()? };
     for n in chats {
         let chat = tx.prepare_cached(&format!("{CHAT} WHERE n = ?1"))?.query_row([n], chat_record).optional()?;
         let chat = match chat {
             Some((_, mut chat)) => {
                 chat.folders = tx
-                    .prepare_cached("SELECT folder FROM folder_items WHERE chat = ?1")?
-                    .query_map([n], |r| r.get(0))?
+                    .prepare_cached(
+                        "SELECT folder FROM folder_items WHERE chat = ?1
+                        UNION ALL SELECT folder FROM folder_items WHERE person = ?2",
+                    )?
+                    .query_map(params![n, chat.person], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?;
                 Some(chat)
             }
@@ -372,25 +389,29 @@ fn best(query: &Query, names: &[Name], matcher: &mut Matcher) -> Option<(usize, 
 }
 
 impl Index {
-    fn set_folders(&mut self, folders: Vec<(i64, Option<i64>, String)>) {
-        self.folders = BUILT_IN
-            .iter()
-            .map(|(id, name)| FolderEntry { id: id.to_string(), parent: None, name: Name::new(Field::Name, name) })
-            .collect();
+    fn set_folders(&mut self, mut folders: Vec<FolderRecord>) {
+        // The built-in folders first, as the tree has them.
+        folders.sort_by_key(|(n, builtin, ..)| (builtin.is_none(), *n));
+        self.folders.clear();
         self.folder_names.clear();
-        for (n, parent, name) in folders {
+        for (n, builtin, smart, parent, name) in folders {
             self.folders.push(FolderEntry {
-                id: format!("folder:{n}"),
+                id: crate::store::lists::folder_id(n, builtin.as_deref(), smart),
                 parent: parent.map(|parent| format!("folder:{parent}")),
                 name: Name::new(Field::Name, &name),
             });
-            self.folder_names.insert(n, name);
+            if builtin.is_none() && !smart {
+                self.folder_names.insert(n, name);
+            }
         }
     }
 
     /// Takes in rows as they are now: people first, since a one-to-one chat is matched by its
     /// person's names.
     pub fn apply(&mut self, changes: Changes) {
+        if let Some(folders) = changes.folders {
+            self.set_folders(folders);
+        }
         let mut touched: HashSet<i64> = HashSet::new();
         for (n, person) in changes.people {
             match person {
@@ -685,7 +706,7 @@ mod tests {
     fn people(names: &[&str]) -> Index {
         let mut index = Index::default();
         let people = names.iter().enumerate().map(|(n, name)| person(n as i64 + 1, name)).collect();
-        index.apply(Changes { people, chats: Vec::new() });
+        index.apply(Changes { people, chats: Vec::new(), folders: None });
         index
     }
 
@@ -694,6 +715,7 @@ mod tests {
         index.apply(Changes {
             people: Vec::new(),
             chats: chats.into_iter().enumerate().map(|(n, chat)| (n as i64 + 1, Some(chat))).collect(),
+            folders: None,
         });
         index
     }
@@ -759,7 +781,7 @@ mod tests {
         let (_, rui) = person(2, "Rui");
         let ana = PersonRecord { phones: vec!["+351912345678".into()], ..ana.unwrap() };
         let rui = PersonRecord { phones: vec!["+351961111111".into()], ..rui.unwrap() };
-        index.apply(Changes { people: vec![(1, Some(ana)), (2, Some(rui))], chats: Vec::new() });
+        index.apply(Changes { people: vec![(1, Some(ana)), (2, Some(rui))], chats: Vec::new(), folders: None });
         let hits = hits(&index, "912 34");
         assert_eq!(hits.len(), 1);
         assert_eq!((hits[0].text.as_str(), hits[0].field), ("+351912345678", Some(Field::Phone)));
@@ -782,6 +804,7 @@ mod tests {
         index.apply(Changes {
             people: vec![(1, ana), person(2, "Artur Reis"), (3, Some(rui))],
             chats: vec![(10, Some(direct(1, 1))), (11, Some(direct(3, 3)))],
+            folders: None,
         });
         let hits = hits(&index, "ar");
         let kinds: Vec<(Kind, &str)> = hits.iter().map(|hit| (hit.kind, hit.text.as_str())).collect();
@@ -828,10 +851,15 @@ mod tests {
     #[test]
     fn folders_are_found_by_name_and_chats_say_which_they_are_in() {
         let mut index = groups(vec![ChatRecord { folders: vec![1], ..group(1, "Primos e primas") }]);
-        index.set_folders(vec![(1, None, "Família".into()), (2, Some(1), "Primos".into())]);
+        index.set_folders(vec![
+            (1, None, false, None, "Família".into()),
+            (2, None, false, Some(1), "Primos".into()),
+            (3, Some("archived".into()), false, None, "Archived".into()),
+        ]);
         index.apply(Changes {
             people: Vec::new(),
             chats: vec![(1, Some(ChatRecord { folders: vec![2], ..group(1, "Primos e primas") }))],
+            folders: None,
         });
         let hits = hits(&index, "fam");
         assert_eq!((hits[0].kind, hits[0].row.as_ref().unwrap()["id"].as_str()), (Kind::Folder, Some("folder:1")));

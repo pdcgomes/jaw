@@ -642,7 +642,10 @@ async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
         },
         "find" => return Taken::Find(request),
         method if apart_method(method) => return Taken::Apart(request),
-        "chats.watch" | "messages.watch" | "watch.move" | "unwatch" => match session.windows.as_mut() {
+        "chats.watch" | "messages.watch" | "folders.watch" | "roster.watch" | "watch.move" | "unwatch" => match session
+            .windows
+            .as_mut()
+        {
             Some(windows) => {
                 let chat = match request.method.as_str() {
                     "messages.watch" => request.params.get("chat").and_then(Value::as_str).map(str::to_string),
@@ -707,6 +710,13 @@ async fn answer(state: &State, request: Request) -> Reply {
         },
         "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
         "history.more" => history_more(state, id, request.params).await,
+        method if crate::organise::METHODS.contains(&method) => match state.store() {
+            Some(store) => match crate::organise::call(store, method, request.params).await {
+                Ok(result) => succeeded(id, &result),
+                Err(error) => failed(id, error),
+            },
+            None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it has no folders")),
+        },
         method if crate::send::Sending::METHODS.contains(&method) => match state.sending() {
             Some(sending) => match sending.call(&request.method, request.params).await {
                 Ok(result) => succeeded(id, &result),
@@ -1186,6 +1196,70 @@ mod tests {
         );
         assert_eq!(replies[2]["error"]["code"], code::INVALID_PARAMS);
         assert_eq!(replies[3]["result"], json!({}));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_folder_methods_answer_with_the_folder_made_and_refuse_as_the_protocol_says() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let message = Message {
+            chat: "351910000002@s.whatsapp.net".into(),
+            id: "m1".into(),
+            at: 1_000,
+            sender: Some("351910000002@s.whatsapp.net".into()),
+            kind: "text",
+            summary: "olá".into(),
+            ..Message::default()
+        };
+        store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+        let state = State::new(
+            home.path(),
+            Err(("go", "no engine in this test".into())),
+            Vec::new(),
+            Arc::default(),
+            Some(store),
+            broadcast::channel(16).0,
+        )
+        .unwrap();
+        tokio::spawn(serve(Arc::new(state), listener));
+        let replies = tokio::task::spawn_blocking(move || {
+            exchange(
+                &socket,
+                &[
+                    r#"{"id":1,"method":"hello","params":{"protocol":1,"client":"test","version":"0"}}"#,
+                    r#"{"id":2,"method":"folder.create","params":{"name":"  Family "}}"#,
+                    r#"{"id":3,"method":"folder.create","params":{"name":"   "}}"#,
+                    r#"{"id":4,"method":"folder.rename","params":{"folder":"all","name":"Everything"}}"#,
+                    r#"{"id":5,"method":"folder.add","params":{"folder":"folder:999","item":"351910000002@s.whatsapp.net"}}"#,
+                    r#"{"id":6,"method":"folder.smart","params":{"name":"Odd","rule":{"sunny":true}}}"#,
+                    r#"{"id":7,"method":"favourite.set","params":{"slot":10,"target":"all"}}"#,
+                    r#"{"id":8,"method":"favourite.set","params":{"slot":2,"target":"unread"}}"#,
+                    r#"{"id":9,"method":"folder.add","params":{"folder":"unread","item":"351910000002@s.whatsapp.net"}}"#,
+                    r#"{"id":10,"method":"folder.create","params":{"name":"family"}}"#,
+                    r#"{"id":11,"method":"folder.add","params":{"folder":"folder:9","item":"person:12345"}}"#,
+                ],
+            )
+        })
+        .await
+        .unwrap();
+        let folder = &replies[1]["result"]["folder"];
+        assert_eq!(
+            (folder["name"].as_str(), &folder["parent"], folder["count"].as_u64()),
+            (Some("Family"), &json!(null), Some(0))
+        );
+        assert!(folder["id"].as_str().unwrap().starts_with("folder:"), "{folder}");
+        assert_eq!(replies[2]["error"]["code"], code::INVALID_PARAMS, "a name of spaces");
+        assert_eq!(replies[2]["error"]["data"]["param"], "name");
+        assert_eq!(replies[3]["error"]["code"], code::NOT_ALLOWED, "renaming a built-in folder");
+        assert_eq!(replies[4]["error"]["code"], code::NOT_FOUND, "a folder jawd doesn't have");
+        assert_eq!(replies[5]["error"]["code"], code::INVALID_PARAMS, "a rule's field jawd doesn't know");
+        assert_eq!(replies[6]["error"]["code"], code::INVALID_PARAMS, "a slot past nine");
+        assert_eq!(replies[7]["result"], json!({}), "a built-in folder can be a favourite");
+        assert_eq!(replies[8]["error"]["code"], code::NOT_ALLOWED, "filing into a built-in folder");
+        assert_eq!(replies[9]["error"]["code"], code::NOT_ALLOWED, "a name a sibling has, whatever its case");
+        assert_eq!(replies[10]["error"]["code"], code::NOT_FOUND, "a person jawd doesn't have");
     }
 
     #[tokio::test(flavor = "multi_thread")]

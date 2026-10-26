@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Instant;
 
 use jaw_proto::windows::{
-    Around, ChatRow, ChatsPush, ChatsWatch, ChatsWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched,
-    Watch, WatchMove,
+    Around, ChatRow, ChatsPush, ChatsWatch, ChatsWatched, Favourite, FolderRow, FoldersPush, FoldersWatch,
+    FoldersWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, RosterRow, RosterWatch, Watch, WatchMove,
 };
 use jaw_proto::{Error, Windows, code};
 use rusqlite::Connection;
@@ -38,8 +38,11 @@ use serde_json::value::RawValue;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::{mpsc, watch};
 
-use super::window::{self, ChatAnchor, ChatSpec, MessageAnchor, MessageSpec, Rows, Snapshot, Spec};
+use super::window::{
+    self, ChatAnchor, ChatSpec, MessageAnchor, MessageSpec, PersonAnchor, RosterSpec, Rows, Snapshot, Spec,
+};
 use super::{CatchingUp, Changes, Timing};
+use crate::store::lists::{self, List};
 use crate::store::{Store, read};
 use crate::work::Priority;
 
@@ -100,6 +103,10 @@ pub(super) struct Shared {
     /// Orders kept reads, so the oldest are let go first.
     stamps: AtomicU64,
     slots: Mutex<HashMap<Spec, Weak<Slot>>>,
+    /// Whose presence each window shows, by the window's own number, and a count of the changes.
+    showing: Mutex<HashMap<u64, Showing>>,
+    shown: watch::Sender<u64>,
+    windows_made: AtomicU64,
     /// Makes every window read fail on its reader, as a broken row would.
     #[cfg(test)]
     pub(super) failing: std::sync::atomic::AtomicBool,
@@ -127,6 +134,9 @@ impl Default for Shared {
             let_go: AtomicU64::default(),
             stamps: AtomicU64::default(),
             slots: Mutex::default(),
+            showing: Mutex::default(),
+            shown: watch::channel(0).0,
+            windows_made: AtomicU64::default(),
             #[cfg(test)]
             failing: Default::default(),
             #[cfg(test)]
@@ -208,6 +218,10 @@ struct Found {
     chat: Option<i64>,
     senders: HashSet<i64>,
     named: HashSet<u64>,
+    /// A folder tree's favourite slots, as they're sent, and their hash.
+    favourites: Option<(u64, Box<RawValue>)>,
+    /// Whose presence it shows.
+    people: Vec<i64>,
     /// The window as it was read, its anchor where the read found it.
     spec: Spec,
     /// The bytes it holds, about.
@@ -238,9 +252,46 @@ impl Line {
     }
 }
 
+/// Whose presence a window shows: an open one-to-one chat's person, ahead of a roster's people,
+/// which come in the roster's order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Showing {
+    pub chat: bool,
+    pub people: Vec<i64>,
+}
+
 impl Shared {
     pub(super) fn reads(&self) -> u64 {
         self.reads.load(Ordering::Relaxed)
+    }
+
+    /// Whose presence the windows show, open chats' people first, each once.
+    pub(super) fn showing(&self) -> Vec<i64> {
+        let showing = self.showing.lock().expect("the windows' people");
+        let mut seen = HashSet::new();
+        let (chats, rosters): (Vec<&Showing>, Vec<&Showing>) = showing.values().partition(|s| s.chat);
+        let mut out = Vec::new();
+        for showing in chats.into_iter().chain(rosters) {
+            out.extend(showing.people.iter().copied().filter(|n| seen.insert(*n)));
+        }
+        out
+    }
+
+    pub(super) fn shown(&self) -> watch::Receiver<u64> {
+        self.shown.subscribe()
+    }
+
+    fn show(&self, window: u64, now: Showing) {
+        let mut showing = self.showing.lock().expect("the windows' people");
+        let changed = if now.people.is_empty() {
+            showing.remove(&window).is_some()
+        } else {
+            showing.insert(window, now.clone()).as_ref() != Some(&now)
+        };
+        drop(showing);
+        if changed {
+            self.shown.send_modify(|n| *n += 1);
+        }
     }
 
     /// The windows watched, and the reads kept for them.
@@ -348,6 +399,17 @@ fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
     let rows: Vec<Line> = match &snapshot.rows {
         Rows::Chats(rows) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
         Rows::Messages(rows) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
+        Rows::Folders(rows, _) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
+        Rows::People(rows) => rows.iter().map(|(n, row)| Line::of(*n, row)).collect(),
+    };
+    let favourites = match &snapshot.rows {
+        Rows::Folders(_, favourites) => {
+            let json = serde_json::value::to_raw_value(favourites).expect("jawd's own types serialize");
+            let mut hasher = DefaultHasher::new();
+            hasher.write(json.get().as_bytes());
+            Some((hasher.finish(), json))
+        }
+        _ => None,
     };
     let bytes = size_of::<Found>()
         + rows.iter().map(Line::bytes).sum::<usize>()
@@ -363,6 +425,8 @@ fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
         chat: snapshot.chat,
         senders: snapshot.senders,
         named: snapshot.named,
+        favourites,
+        people: snapshot.people,
         spec,
         bytes: bytes as u64,
     }
@@ -372,6 +436,8 @@ struct Window {
     spec: Spec,
     slot: Arc<Slot>,
     _watched: Watched,
+    /// Its own number, for whose presence it shows.
+    number: u64,
     state: State,
     /// When the first and the latest changes waiting to be sent came, if any are, and the newest
     /// one's seq.
@@ -404,6 +470,12 @@ impl Drop for Watched {
     }
 }
 
+impl Drop for Window {
+    fn drop(&mut self) {
+        self._watched.0.show(self.number, Showing::default());
+    }
+}
+
 /// What a window's interface holds, and what jawd needs to know which changes touch it.
 #[derive(Default)]
 struct State {
@@ -418,6 +490,9 @@ struct State {
     senders: HashSet<i64>,
     /// The JIDs its rows mention or quote someone by, as the read it was settled from has them.
     named: HashSet<u64>,
+    /// The hash of the favourite slots a folder tree's interface holds.
+    favourites: Option<u64>,
+    people: Vec<i64>,
 }
 
 /// A row as its interface holds it.
@@ -430,13 +505,34 @@ struct Held {
 
 /// What an interface needs to go from what it holds to a read, the rows as the read keeps them.
 struct Update<'a> {
-    chats: bool,
+    kind: Kind,
     seq: u64,
     total: u64,
     older: bool,
     newer: u64,
     upsert: Vec<&'a RawValue>,
     remove: Vec<String>,
+    favourites: Option<&'a RawValue>,
+}
+
+/// What kind of window an update is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Chats,
+    Messages,
+    Folders,
+    Roster,
+}
+
+impl Kind {
+    fn of(spec: &Spec) -> Kind {
+        match spec {
+            Spec::Chats(_) => Kind::Chats,
+            Spec::Messages(_) => Kind::Messages,
+            Spec::Folders => Kind::Folders,
+            Spec::Roster(_) => Kind::Roster,
+        }
+    }
 }
 
 trait Row: Serialize {
@@ -458,6 +554,30 @@ impl Row for ChatRow {
 }
 
 impl Row for MessageRow {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn sort(&self) -> &str {
+        &self.sort
+    }
+    fn v(&self) -> u64 {
+        self.v
+    }
+}
+
+impl Row for FolderRow {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn sort(&self) -> &str {
+        &self.id
+    }
+    fn v(&self) -> u64 {
+        self.v
+    }
+}
+
+impl Row for RosterRow {
     fn id(&self) -> &str {
         &self.id
     }
@@ -500,16 +620,25 @@ fn changed<'a>(
 }
 
 /// What an interface holding `held` needs to hold what `found` found, and what it holds then.
-fn settle<'a>(held: &HashMap<String, Held>, found: &'a Found, since: Option<i64>) -> (Update<'a>, State) {
+/// The folder tree's rows have no versions its counts keep, so it's always compared row by row.
+fn settle<'a>(
+    held: &HashMap<String, Held>,
+    favourites: Option<u64>,
+    found: &'a Found,
+    since: Option<i64>,
+) -> (Update<'a>, State) {
+    let kind = Kind::of(&found.spec);
+    let since = since.filter(|_| kind != Kind::Folders);
     let (upsert, remove, held) = changed(held, &found.rows, since);
     let update = Update {
-        chats: matches!(found.spec, Spec::Chats(_)),
+        kind,
         seq: found.seq.max(0) as u64,
         total: found.total,
         older: found.older,
         newer: found.newer,
         upsert,
         remove,
+        favourites: found.favourites.as_ref().filter(|(hash, _)| favourites != Some(*hash)).map(|(_, json)| &**json),
     };
     let state = State {
         held,
@@ -520,29 +649,48 @@ fn settle<'a>(held: &HashMap<String, Held>, found: &'a Found, since: Option<i64>
         chat: found.chat,
         senders: found.senders.clone(),
         named: found.named.clone(),
+        favourites: found.favourites.as_ref().map(|(hash, _)| *hash),
+        people: found.people.clone(),
     };
     (update, state)
 }
 
 /// `update` as a watch's or a move's result.
 fn result(watch: String, update: Update) -> Value {
-    let Update { chats, seq, total, older, newer, upsert: rows, remove } = update;
-    let value = match chats {
-        true => serde_json::to_value(ChatsWatched { watch, seq, total, rows, remove }),
-        false => serde_json::to_value(MessagesWatched { watch, seq, total, older, newer, rows, remove }),
+    let Update { kind, seq, total, older, newer, upsert: rows, remove, favourites } = update;
+    let value = match kind {
+        Kind::Chats | Kind::Roster => serde_json::to_value(ChatsWatched { watch, seq, total, rows, remove }),
+        Kind::Messages => serde_json::to_value(MessagesWatched { watch, seq, total, older, newer, rows, remove }),
+        Kind::Folders => {
+            let favourites: Vec<Favourite> =
+                favourites.map(|json| serde_json::from_str(json.get()).unwrap_or_default()).unwrap_or_default();
+            serde_json::to_value(FoldersWatched { watch, seq, rows, remove, favourites })
+        }
     };
     value.expect("jawd's own types serialize")
 }
 
 /// `update` as a push to an interface holding `was`, unless nothing in it changed.
 fn push(watch: String, update: Update, was: &State) -> Option<Vec<u8>> {
-    let Update { chats, seq, total, older, newer, upsert, remove } = update;
+    let Update { kind, seq, total, older, newer, upsert, remove, favourites } = update;
     let total = (total != was.total).then_some(total);
-    if chats {
-        if upsert.is_empty() && remove.is_empty() && total.is_none() {
-            return None;
+    match kind {
+        Kind::Chats | Kind::Roster => {
+            if upsert.is_empty() && remove.is_empty() && total.is_none() {
+                return None;
+            }
+            let method = if kind == Kind::Chats { "chats" } else { "roster" };
+            return Some(line(method, ChatsPush { watch, seq, total, upsert, remove }));
         }
-        return Some(line("chats", ChatsPush { watch, seq, total, upsert, remove }));
+        Kind::Folders => {
+            if upsert.is_empty() && remove.is_empty() && favourites.is_none() {
+                return None;
+            }
+            let favourites: Option<Vec<Favourite>> =
+                favourites.map(|json| serde_json::from_str(json.get()).unwrap_or_default());
+            return Some(line("folders", FoldersPush { watch, seq, upsert, remove, favourites }));
+        }
+        Kind::Messages => {}
     }
     let older = (older != was.older).then_some(older);
     let newer = (newer != was.newer).then_some(newer);
@@ -581,15 +729,12 @@ fn sides(before: u32, after: u32) -> Result<(usize, usize), Error> {
     Ok((before as usize, after as usize))
 }
 
-fn archived(folder: &str) -> Result<bool, Error> {
-    match folder {
-        "all" => Ok(false),
-        "archived" => Ok(true),
-        _ => Err(Error::new(
-            code::INVALID_PARAMS,
-            format!("jawd can watch the all and archived folders so far, not {folder}"),
-        )),
-    }
+fn list(folder: &str) -> Result<List, Error> {
+    List::parse(folder).ok_or_else(|| {
+        let mut error = Error::new(code::INVALID_PARAMS, format!("{folder} isn't a folder's ID"));
+        error.data = Some(serde_json::json!({ "param": "folder" }));
+        error
+    })
 }
 
 fn unknown(watch: &str) -> Error {
@@ -639,6 +784,7 @@ impl Window {
             spec,
             slot,
             _watched: Watched::new(shared),
+            number: shared.windows_made.fetch_add(1, Ordering::Relaxed),
             state: State::default(),
             first: None,
             last: None,
@@ -681,7 +827,9 @@ impl Window {
 
     fn touched_by(&self, changes: &Changes) -> bool {
         match (&self.spec, self.state.chat) {
-            (Spec::Chats(_), _) => !changes.chats.is_empty() || !changes.people.is_empty(),
+            (Spec::Chats(_) | Spec::Folders | Spec::Roster(_), _) => {
+                !changes.chats.is_empty() || !changes.people.is_empty() || changes.folders
+            }
             (Spec::Messages(_), Some(chat)) => {
                 changes.messages.contains(&chat)
                     || changes.chats.contains(&chat)
@@ -712,6 +860,8 @@ impl Window {
     /// Takes what its interface now holds, from a read that succeeded; `reordered` says when, if
     /// it took a new order.
     fn keep(&mut self, state: State, reordered: Option<Instant>) {
+        let showing = Showing { chat: matches!(self.spec, Spec::Messages(_)), people: state.people.clone() };
+        self._watched.0.show(self.number, showing);
         self.state = state;
         self.first = None;
         self.last = None;
@@ -771,10 +921,24 @@ impl Client {
         match method {
             "chats.watch" => {
                 let watch: ChatsWatch = params_of(method, params)?;
-                let archived = archived(&watch.folder)?;
+                let list = list(&watch.folder)?;
                 self.room_for_another()?;
-                let spec = self.chat_spec(archived, watch.around, watch.before, watch.after).await?;
+                self.folder_there(&list, &watch.folder).await?;
+                let spec = self.chat_spec(list, watch.around, watch.before, watch.after).await?;
                 self.watch(Spec::Chats(spec), watch.since, watch.have).await
+            }
+            "folders.watch" => {
+                let watch: FoldersWatch = params_of(method, params)?;
+                self.room_for_another()?;
+                self.watch(Spec::Folders, watch.since, watch.have).await
+            }
+            "roster.watch" => {
+                let watch: RosterWatch = params_of(method, params)?;
+                let list = list(&watch.folder)?;
+                self.room_for_another()?;
+                self.folder_there(&list, &watch.folder).await?;
+                let spec = self.roster_spec(list, watch.offline, watch.around, watch.before, watch.after).await?;
+                self.watch(Spec::Roster(spec), watch.since, watch.have).await
             }
             "messages.watch" => {
                 let watch: MessagesWatch = params_of(method, params)?;
@@ -786,8 +950,16 @@ impl Client {
                 let moving: WatchMove = params_of(method, params)?;
                 let spec = match self.windows.get(&moving.watch).map(|window| &window.spec) {
                     Some(Spec::Chats(chats)) => {
-                        let archived = chats.archived;
-                        Spec::Chats(self.chat_spec(archived, moving.around, moving.before, moving.after).await?)
+                        let list = chats.list.clone();
+                        Spec::Chats(self.chat_spec(list, moving.around, moving.before, moving.after).await?)
+                    }
+                    Some(Spec::Roster(roster)) => {
+                        let (list, offline) = (roster.list.clone(), roster.offline);
+                        let (around, before, after) = (moving.around, moving.before, moving.after);
+                        Spec::Roster(self.roster_spec(list, offline, around, before, after).await?)
+                    }
+                    Some(Spec::Folders) => {
+                        return Err(Error::new(code::INVALID_PARAMS, "the folder tree is one window, whole"));
                     }
                     Some(Spec::Messages(messages)) => {
                         let chat = messages.chat.clone();
@@ -826,7 +998,16 @@ impl Client {
         read_on(&self.store, query).await
     }
 
-    async fn chat_spec(&self, archived: bool, around: Around, before: u32, after: u32) -> Result<ChatSpec, Error> {
+    /// Refuses a folder jawd doesn't have, error 3.
+    async fn folder_there(&self, list: &List, folder: &str) -> Result<(), Error> {
+        let asked = list.clone();
+        if self.read(move |db| lists::exists(db, &asked)).await? {
+            return Ok(());
+        }
+        Err(Error::new(code::NOT_FOUND, format!("jawd has no folder {folder}")))
+    }
+
+    async fn chat_spec(&self, list: List, around: Around, before: u32, after: u32) -> Result<ChatSpec, Error> {
         let (before, after) = sides(before, after)?;
         let anchor = match around {
             Around::Top => None,
@@ -841,7 +1022,35 @@ impl Client {
                 return Err(Error::new(code::INVALID_PARAMS, "a chat list is anchored at top or on a chat's id"));
             }
         };
-        Ok(ChatSpec { archived, anchor, before, after })
+        Ok(ChatSpec { list, anchor, before, after })
+    }
+
+    async fn roster_spec(
+        &self,
+        list: List,
+        offline: bool,
+        around: Around,
+        before: u32,
+        after: u32,
+    ) -> Result<RosterSpec, Error> {
+        let (before, after) = sides(before, after)?;
+        let anchor = match around {
+            Around::Top => None,
+            Around::Row(id) => {
+                let n = id.strip_prefix("person:").and_then(|n| n.parse::<i64>().ok());
+                let Some(n) = n else {
+                    return Err(Error::new(code::INVALID_PARAMS, format!("{id} isn't a person's ID")));
+                };
+                match self.read(move |db| lists::person_place(db, n)).await? {
+                    Some(cursor) => Some(PersonAnchor { n, cursor }),
+                    None => return Err(Error::new(code::NOT_FOUND, format!("jawd has no {id}"))),
+                }
+            }
+            Around::Newest | Around::Unread => {
+                return Err(Error::new(code::INVALID_PARAMS, "a roster is anchored at top or on a person's id"));
+            }
+        };
+        Ok(RosterSpec { list, offline, anchor, before, after })
     }
 
     async fn message_spec(&self, chat: String, around: Around, before: u32, after: u32) -> Result<MessageSpec, Error> {
@@ -942,7 +1151,7 @@ impl Client {
             .filter(|&since| since >= snapshot.oldest - 1 && since <= snapshot.seq);
         let have = have.into_iter().map(|id| (id, Held { hash: 0, sort: String::new(), n: 0 })).collect();
         let found = found(snapshot, spec.clone(), from);
-        let (update, state) = settle(&have, &found, since);
+        let (update, state) = settle(&have, None, &found, since);
         let watch = format!("w{}", self.next);
         self.next += 1;
         let slot = self.shared.slot(&spec);
@@ -957,7 +1166,7 @@ impl Client {
         let slot = self.shared.slot(&spec);
         let window = self.windows.get_mut(&watch).ok_or_else(|| unknown(&watch))?;
         let found = found(snapshot, spec.clone(), from);
-        let (update, state) = settle(&window.state.held, &found, None);
+        let (update, state) = settle(&window.state.held, window.state.favourites, &found, None);
         window.spec = spec;
         window.slot = slot;
         window.keep(state, Some(Instant::now()));
@@ -1117,7 +1326,7 @@ impl Client {
             window.spec = found.spec.clone();
             window.slot = self.shared.slot(&window.spec);
         }
-        let (update, state) = settle(&window.state.held, &found, None);
+        let (update, state) = settle(&window.state.held, window.state.favourites, &found, None);
         match push(watch, update, &window.state) {
             None => window.keep(state, reordered),
             Some(line) => match self.out.try_send(line) {

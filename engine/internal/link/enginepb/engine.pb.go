@@ -202,7 +202,7 @@ func (x ChatPresence_State) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ChatPresence_State.Descriptor instead.
 func (ChatPresence_State) EnumDescriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{25, 0}
+	return file_engine_proto_rawDescGZIP(), []int{27, 0}
 }
 
 type AvatarFile_State int32
@@ -257,7 +257,7 @@ func (x AvatarFile_State) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AvatarFile_State.Descriptor instead.
 func (AvatarFile_State) EnumDescriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{50, 0}
+	return file_engine_proto_rawDescGZIP(), []int{56, 0}
 }
 
 // One message on the link. A command's reply carries the command's id; nothing else needs one.
@@ -482,6 +482,8 @@ type Event struct {
 	//	*Event_GroupChange
 	//	*Event_Picture
 	//	*Event_AppStateSynced
+	//	*Event_Presence
+	//	*Event_Typing
 	Kind          isEvent_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -648,6 +650,24 @@ func (x *Event) GetAppStateSynced() *AppStateSynced {
 	return nil
 }
 
+func (x *Event) GetPresence() *PresenceUpdate {
+	if x != nil {
+		if x, ok := x.Kind.(*Event_Presence); ok {
+			return x.Presence
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetTyping() *Typing {
+	if x != nil {
+		if x, ok := x.Kind.(*Event_Typing); ok {
+			return x.Typing
+		}
+	}
+	return nil
+}
+
 type isEvent_Kind interface {
 	isEvent_Kind()
 }
@@ -704,6 +724,14 @@ type Event_AppStateSynced struct {
 	AppStateSynced *AppStateSynced `protobuf:"bytes,14,opt,name=app_state_synced,json=appStateSynced,proto3,oneof"`
 }
 
+type Event_Presence struct {
+	Presence *PresenceUpdate `protobuf:"bytes,15,opt,name=presence,proto3,oneof"`
+}
+
+type Event_Typing struct {
+	Typing *Typing `protobuf:"bytes,16,opt,name=typing,proto3,oneof"`
+}
+
 func (*Event_Connection) isEvent_Kind() {}
 
 func (*Event_Link) isEvent_Kind() {}
@@ -729,6 +757,10 @@ func (*Event_GroupChange) isEvent_Kind() {}
 func (*Event_Picture) isEvent_Kind() {}
 
 func (*Event_AppStateSynced) isEvent_Kind() {}
+
+func (*Event_Presence) isEvent_Kind() {}
+
+func (*Event_Typing) isEvent_Kind() {}
 
 type Connection struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -2207,6 +2239,130 @@ func (x *Picture) GetPictureId() string {
 	return ""
 }
 
+// Someone's presence, which WhatsApp sends, for those SubscribePresence asked for, while the
+// account is online: around, or away and when they were last seen, unless they hide it.
+type PresenceUpdate struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Jid         string                 `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	Unavailable bool                   `protobuf:"varint,2,opt,name=unavailable,proto3" json:"unavailable,omitempty"`
+	// 0 when they hide it, or WhatsApp didn't say.
+	LastSeenMs    int64 `protobuf:"varint,3,opt,name=last_seen_ms,json=lastSeenMs,proto3" json:"last_seen_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PresenceUpdate) Reset() {
+	*x = PresenceUpdate{}
+	mi := &file_engine_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PresenceUpdate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PresenceUpdate) ProtoMessage() {}
+
+func (x *PresenceUpdate) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PresenceUpdate.ProtoReflect.Descriptor instead.
+func (*PresenceUpdate) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *PresenceUpdate) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+func (x *PresenceUpdate) GetUnavailable() bool {
+	if x != nil {
+		return x.Unavailable
+	}
+	return false
+}
+
+func (x *PresenceUpdate) GetLastSeenMs() int64 {
+	if x != nil {
+		return x.LastSeenMs
+	}
+	return 0
+}
+
+// Someone typing or recording in a chat, or stopping, as WhatsApp tells it.
+type Typing struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Chat          string                 `protobuf:"bytes,1,opt,name=chat,proto3" json:"chat,omitempty"`
+	Sender        string                 `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
+	State         ChatPresence_State     `protobuf:"varint,3,opt,name=state,proto3,enum=jaw.engine.ChatPresence_State" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Typing) Reset() {
+	*x = Typing{}
+	mi := &file_engine_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Typing) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Typing) ProtoMessage() {}
+
+func (x *Typing) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Typing.ProtoReflect.Descriptor instead.
+func (*Typing) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *Typing) GetChat() string {
+	if x != nil {
+		return x.Chat
+	}
+	return ""
+}
+
+func (x *Typing) GetSender() string {
+	if x != nil {
+		return x.Sender
+	}
+	return ""
+}
+
+func (x *Typing) GetState() ChatPresence_State {
+	if x != nil {
+		return x.State
+	}
+	return ChatPresence_STATE_UNSPECIFIED
+}
+
 // A made-up message for measuring the link, sent with a seq like a real one.
 type Bench struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2217,7 +2373,7 @@ type Bench struct {
 
 func (x *Bench) Reset() {
 	*x = Bench{}
-	mi := &file_engine_proto_msgTypes[19]
+	mi := &file_engine_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2229,7 +2385,7 @@ func (x *Bench) String() string {
 func (*Bench) ProtoMessage() {}
 
 func (x *Bench) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[19]
+	mi := &file_engine_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2242,7 +2398,7 @@ func (x *Bench) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Bench.ProtoReflect.Descriptor instead.
 func (*Bench) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{19}
+	return file_engine_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Bench) GetPayload() []byte {
@@ -2262,7 +2418,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_engine_proto_msgTypes[20]
+	mi := &file_engine_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2274,7 +2430,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[20]
+	mi := &file_engine_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2287,7 +2443,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{20}
+	return file_engine_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Ack) GetSeq() uint64 {
@@ -2320,6 +2476,8 @@ type Command struct {
 	//	*Command_OnWhatsapp
 	//	*Command_AppStatePatch
 	//	*Command_PollVote
+	//	*Command_SubscribePresence
+	//	*Command_UserInfo
 	Kind          isCommand_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2327,7 +2485,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_engine_proto_msgTypes[21]
+	mi := &file_engine_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2339,7 +2497,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[21]
+	mi := &file_engine_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2352,7 +2510,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{21}
+	return file_engine_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *Command) GetKind() isCommand_Kind {
@@ -2533,6 +2691,24 @@ func (x *Command) GetPollVote() *PollVote {
 	return nil
 }
 
+func (x *Command) GetSubscribePresence() *SubscribePresence {
+	if x != nil {
+		if x, ok := x.Kind.(*Command_SubscribePresence); ok {
+			return x.SubscribePresence
+		}
+	}
+	return nil
+}
+
+func (x *Command) GetUserInfo() *UserInfo {
+	if x != nil {
+		if x, ok := x.Kind.(*Command_UserInfo); ok {
+			return x.UserInfo
+		}
+	}
+	return nil
+}
+
 type isCommand_Kind interface {
 	isCommand_Kind()
 }
@@ -2613,6 +2789,14 @@ type Command_PollVote struct {
 	PollVote *PollVote `protobuf:"bytes,19,opt,name=poll_vote,json=pollVote,proto3,oneof"`
 }
 
+type Command_SubscribePresence struct {
+	SubscribePresence *SubscribePresence `protobuf:"bytes,20,opt,name=subscribe_presence,json=subscribePresence,proto3,oneof"`
+}
+
+type Command_UserInfo struct {
+	UserInfo *UserInfo `protobuf:"bytes,21,opt,name=user_info,json=userInfo,proto3,oneof"`
+}
+
 func (*Command_Ping) isCommand_Kind() {}
 
 func (*Command_LinkStart) isCommand_Kind() {}
@@ -2651,6 +2835,10 @@ func (*Command_AppStatePatch) isCommand_Kind() {}
 
 func (*Command_PollVote) isCommand_Kind() {}
 
+func (*Command_SubscribePresence) isCommand_Kind() {}
+
+func (*Command_UserInfo) isCommand_Kind() {}
+
 // Sends a message with the ID jawd made for it, which WhatsApp then knows it by; answered with Sent
 // once the server has it. Sending the same ID again is the same message to WhatsApp.
 type Send struct {
@@ -2665,7 +2853,7 @@ type Send struct {
 
 func (x *Send) Reset() {
 	*x = Send{}
-	mi := &file_engine_proto_msgTypes[22]
+	mi := &file_engine_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2677,7 +2865,7 @@ func (x *Send) String() string {
 func (*Send) ProtoMessage() {}
 
 func (x *Send) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[22]
+	mi := &file_engine_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2690,7 +2878,7 @@ func (x *Send) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Send.ProtoReflect.Descriptor instead.
 func (*Send) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{22}
+	return file_engine_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *Send) GetChat() string {
@@ -2736,7 +2924,7 @@ type PollVote struct {
 
 func (x *PollVote) Reset() {
 	*x = PollVote{}
-	mi := &file_engine_proto_msgTypes[23]
+	mi := &file_engine_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2748,7 +2936,7 @@ func (x *PollVote) String() string {
 func (*PollVote) ProtoMessage() {}
 
 func (x *PollVote) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[23]
+	mi := &file_engine_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2761,7 +2949,7 @@ func (x *PollVote) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PollVote.ProtoReflect.Descriptor instead.
 func (*PollVote) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{23}
+	return file_engine_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *PollVote) GetChat() string {
@@ -2828,7 +3016,7 @@ type MarkRead struct {
 
 func (x *MarkRead) Reset() {
 	*x = MarkRead{}
-	mi := &file_engine_proto_msgTypes[24]
+	mi := &file_engine_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2840,7 +3028,7 @@ func (x *MarkRead) String() string {
 func (*MarkRead) ProtoMessage() {}
 
 func (x *MarkRead) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[24]
+	mi := &file_engine_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2853,7 +3041,7 @@ func (x *MarkRead) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MarkRead.ProtoReflect.Descriptor instead.
 func (*MarkRead) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{24}
+	return file_engine_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *MarkRead) GetChat() string {
@@ -2895,7 +3083,7 @@ type ChatPresence struct {
 
 func (x *ChatPresence) Reset() {
 	*x = ChatPresence{}
-	mi := &file_engine_proto_msgTypes[25]
+	mi := &file_engine_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2907,7 +3095,7 @@ func (x *ChatPresence) String() string {
 func (*ChatPresence) ProtoMessage() {}
 
 func (x *ChatPresence) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[25]
+	mi := &file_engine_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2920,7 +3108,7 @@ func (x *ChatPresence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatPresence.ProtoReflect.Descriptor instead.
 func (*ChatPresence) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{25}
+	return file_engine_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ChatPresence) GetChat() string {
@@ -2947,7 +3135,7 @@ type Presence struct {
 
 func (x *Presence) Reset() {
 	*x = Presence{}
-	mi := &file_engine_proto_msgTypes[26]
+	mi := &file_engine_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2959,7 +3147,7 @@ func (x *Presence) String() string {
 func (*Presence) ProtoMessage() {}
 
 func (x *Presence) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[26]
+	mi := &file_engine_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2972,7 +3160,7 @@ func (x *Presence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Presence.ProtoReflect.Descriptor instead.
 func (*Presence) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{26}
+	return file_engine_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *Presence) GetAvailable() bool {
@@ -3000,7 +3188,7 @@ type AppStatePatch struct {
 
 func (x *AppStatePatch) Reset() {
 	*x = AppStatePatch{}
-	mi := &file_engine_proto_msgTypes[27]
+	mi := &file_engine_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3012,7 +3200,7 @@ func (x *AppStatePatch) String() string {
 func (*AppStatePatch) ProtoMessage() {}
 
 func (x *AppStatePatch) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[27]
+	mi := &file_engine_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3025,7 +3213,7 @@ func (x *AppStatePatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppStatePatch.ProtoReflect.Descriptor instead.
 func (*AppStatePatch) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{27}
+	return file_engine_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *AppStatePatch) GetName() string {
@@ -3057,6 +3245,98 @@ func (x *AppStatePatch) GetValue() []byte {
 }
 
 // Which of these phone numbers (digits only) are on WhatsApp; answered with OnWhatsAppList.
+// Asks WhatsApp to send someone's presence while the account is online, for as long as the
+// connection lasts; jawd keeps to its limits.
+type SubscribePresence struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Jid           string                 `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SubscribePresence) Reset() {
+	*x = SubscribePresence{}
+	mi := &file_engine_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubscribePresence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubscribePresence) ProtoMessage() {}
+
+func (x *SubscribePresence) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubscribePresence.ProtoReflect.Descriptor instead.
+func (*SubscribePresence) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *SubscribePresence) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+// Asks WhatsApp what these people say of themselves, at most 50 at a time; answered with
+// UserInfoList, which leaves out those it doesn't answer for.
+type UserInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Jids          []string               `protobuf:"bytes,1,rep,name=jids,proto3" json:"jids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UserInfo) Reset() {
+	*x = UserInfo{}
+	mi := &file_engine_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UserInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UserInfo) ProtoMessage() {}
+
+func (x *UserInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UserInfo.ProtoReflect.Descriptor instead.
+func (*UserInfo) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *UserInfo) GetJids() []string {
+	if x != nil {
+		return x.Jids
+	}
+	return nil
+}
+
 type OnWhatsApp struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Phones        []string               `protobuf:"bytes,1,rep,name=phones,proto3" json:"phones,omitempty"`
@@ -3066,7 +3346,7 @@ type OnWhatsApp struct {
 
 func (x *OnWhatsApp) Reset() {
 	*x = OnWhatsApp{}
-	mi := &file_engine_proto_msgTypes[28]
+	mi := &file_engine_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3078,7 +3358,7 @@ func (x *OnWhatsApp) String() string {
 func (*OnWhatsApp) ProtoMessage() {}
 
 func (x *OnWhatsApp) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[28]
+	mi := &file_engine_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3091,7 +3371,7 @@ func (x *OnWhatsApp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OnWhatsApp.ProtoReflect.Descriptor instead.
 func (*OnWhatsApp) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{28}
+	return file_engine_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *OnWhatsApp) GetPhones() []string {
@@ -3110,7 +3390,7 @@ type Groups struct {
 
 func (x *Groups) Reset() {
 	*x = Groups{}
-	mi := &file_engine_proto_msgTypes[29]
+	mi := &file_engine_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3122,7 +3402,7 @@ func (x *Groups) String() string {
 func (*Groups) ProtoMessage() {}
 
 func (x *Groups) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[29]
+	mi := &file_engine_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3135,7 +3415,7 @@ func (x *Groups) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Groups.ProtoReflect.Descriptor instead.
 func (*Groups) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{29}
+	return file_engine_proto_rawDescGZIP(), []int{33}
 }
 
 // The contacts and push names whatsmeow keeps, with the LID of each phone number it knows, read
@@ -3148,7 +3428,7 @@ type Contacts struct {
 
 func (x *Contacts) Reset() {
 	*x = Contacts{}
-	mi := &file_engine_proto_msgTypes[30]
+	mi := &file_engine_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3160,7 +3440,7 @@ func (x *Contacts) String() string {
 func (*Contacts) ProtoMessage() {}
 
 func (x *Contacts) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[30]
+	mi := &file_engine_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3173,7 +3453,7 @@ func (x *Contacts) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Contacts.ProtoReflect.Descriptor instead.
 func (*Contacts) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{30}
+	return file_engine_proto_rawDescGZIP(), []int{34}
 }
 
 // The phone number whatsmeow's LID map has for each of these LIDs; answered with LidPairs.
@@ -3186,7 +3466,7 @@ type LidLookup struct {
 
 func (x *LidLookup) Reset() {
 	*x = LidLookup{}
-	mi := &file_engine_proto_msgTypes[31]
+	mi := &file_engine_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3198,7 +3478,7 @@ func (x *LidLookup) String() string {
 func (*LidLookup) ProtoMessage() {}
 
 func (x *LidLookup) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[31]
+	mi := &file_engine_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3211,7 +3491,7 @@ func (x *LidLookup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LidLookup.ProtoReflect.Descriptor instead.
 func (*LidLookup) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{31}
+	return file_engine_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *LidLookup) GetLids() []string {
@@ -3233,7 +3513,7 @@ type AppStateResync struct {
 
 func (x *AppStateResync) Reset() {
 	*x = AppStateResync{}
-	mi := &file_engine_proto_msgTypes[32]
+	mi := &file_engine_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3245,7 +3525,7 @@ func (x *AppStateResync) String() string {
 func (*AppStateResync) ProtoMessage() {}
 
 func (x *AppStateResync) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[32]
+	mi := &file_engine_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3258,7 +3538,7 @@ func (x *AppStateResync) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppStateResync.ProtoReflect.Descriptor instead.
 func (*AppStateResync) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{32}
+	return file_engine_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *AppStateResync) GetNames() []string {
@@ -3282,7 +3562,7 @@ type Avatar struct {
 
 func (x *Avatar) Reset() {
 	*x = Avatar{}
-	mi := &file_engine_proto_msgTypes[33]
+	mi := &file_engine_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3294,7 +3574,7 @@ func (x *Avatar) String() string {
 func (*Avatar) ProtoMessage() {}
 
 func (x *Avatar) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[33]
+	mi := &file_engine_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3307,7 +3587,7 @@ func (x *Avatar) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Avatar.ProtoReflect.Descriptor instead.
 func (*Avatar) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{33}
+	return file_engine_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *Avatar) GetJid() string {
@@ -3353,7 +3633,7 @@ type HistoryRequest struct {
 
 func (x *HistoryRequest) Reset() {
 	*x = HistoryRequest{}
-	mi := &file_engine_proto_msgTypes[34]
+	mi := &file_engine_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3365,7 +3645,7 @@ func (x *HistoryRequest) String() string {
 func (*HistoryRequest) ProtoMessage() {}
 
 func (x *HistoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[34]
+	mi := &file_engine_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3378,7 +3658,7 @@ func (x *HistoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryRequest.ProtoReflect.Descriptor instead.
 func (*HistoryRequest) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{34}
+	return file_engine_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *HistoryRequest) GetChat() string {
@@ -3424,7 +3704,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_engine_proto_msgTypes[35]
+	mi := &file_engine_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3436,7 +3716,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[35]
+	mi := &file_engine_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3449,7 +3729,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{35}
+	return file_engine_proto_rawDescGZIP(), []int{39}
 }
 
 // Links an account: by QR code, or by a code typed on the phone when `phone` is given.
@@ -3463,7 +3743,7 @@ type LinkStart struct {
 
 func (x *LinkStart) Reset() {
 	*x = LinkStart{}
-	mi := &file_engine_proto_msgTypes[36]
+	mi := &file_engine_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3475,7 +3755,7 @@ func (x *LinkStart) String() string {
 func (*LinkStart) ProtoMessage() {}
 
 func (x *LinkStart) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[36]
+	mi := &file_engine_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3488,7 +3768,7 @@ func (x *LinkStart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LinkStart.ProtoReflect.Descriptor instead.
 func (*LinkStart) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{36}
+	return file_engine_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *LinkStart) GetPhone() string {
@@ -3506,7 +3786,7 @@ type LinkCancel struct {
 
 func (x *LinkCancel) Reset() {
 	*x = LinkCancel{}
-	mi := &file_engine_proto_msgTypes[37]
+	mi := &file_engine_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3518,7 +3798,7 @@ func (x *LinkCancel) String() string {
 func (*LinkCancel) ProtoMessage() {}
 
 func (x *LinkCancel) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[37]
+	mi := &file_engine_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3531,7 +3811,7 @@ func (x *LinkCancel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LinkCancel.ProtoReflect.Descriptor instead.
 func (*LinkCancel) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{37}
+	return file_engine_proto_rawDescGZIP(), []int{41}
 }
 
 type Logout struct {
@@ -3542,7 +3822,7 @@ type Logout struct {
 
 func (x *Logout) Reset() {
 	*x = Logout{}
-	mi := &file_engine_proto_msgTypes[38]
+	mi := &file_engine_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3554,7 +3834,7 @@ func (x *Logout) String() string {
 func (*Logout) ProtoMessage() {}
 
 func (x *Logout) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[38]
+	mi := &file_engine_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3567,7 +3847,7 @@ func (x *Logout) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Logout.ProtoReflect.Descriptor instead.
 func (*Logout) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{38}
+	return file_engine_proto_rawDescGZIP(), []int{42}
 }
 
 // Downloads one history blob, from the HistorySyncNotification inside a message jawd stored, and
@@ -3583,7 +3863,7 @@ type HistoryDownload struct {
 
 func (x *HistoryDownload) Reset() {
 	*x = HistoryDownload{}
-	mi := &file_engine_proto_msgTypes[39]
+	mi := &file_engine_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3595,7 +3875,7 @@ func (x *HistoryDownload) String() string {
 func (*HistoryDownload) ProtoMessage() {}
 
 func (x *HistoryDownload) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[39]
+	mi := &file_engine_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3608,7 +3888,7 @@ func (x *HistoryDownload) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryDownload.ProtoReflect.Descriptor instead.
 func (*HistoryDownload) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{39}
+	return file_engine_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *HistoryDownload) GetNotification() []byte {
@@ -3636,7 +3916,7 @@ type BenchRun struct {
 
 func (x *BenchRun) Reset() {
 	*x = BenchRun{}
-	mi := &file_engine_proto_msgTypes[40]
+	mi := &file_engine_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3648,7 +3928,7 @@ func (x *BenchRun) String() string {
 func (*BenchRun) ProtoMessage() {}
 
 func (x *BenchRun) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[40]
+	mi := &file_engine_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3661,7 +3941,7 @@ func (x *BenchRun) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BenchRun.ProtoReflect.Descriptor instead.
 func (*BenchRun) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{40}
+	return file_engine_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *BenchRun) GetCount() uint32 {
@@ -3693,6 +3973,7 @@ type Reply struct {
 	//	*Reply_AvatarFile
 	//	*Reply_Sent
 	//	*Reply_OnWhatsappList
+	//	*Reply_UserInfoList
 	Kind          isReply_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3700,7 +3981,7 @@ type Reply struct {
 
 func (x *Reply) Reset() {
 	*x = Reply{}
-	mi := &file_engine_proto_msgTypes[41]
+	mi := &file_engine_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3712,7 +3993,7 @@ func (x *Reply) String() string {
 func (*Reply) ProtoMessage() {}
 
 func (x *Reply) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[41]
+	mi := &file_engine_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3725,7 +4006,7 @@ func (x *Reply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Reply.ProtoReflect.Descriptor instead.
 func (*Reply) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{41}
+	return file_engine_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *Reply) GetKind() isReply_Kind {
@@ -3834,6 +4115,15 @@ func (x *Reply) GetOnWhatsappList() *OnWhatsAppList {
 	return nil
 }
 
+func (x *Reply) GetUserInfoList() *UserInfoList {
+	if x != nil {
+		if x, ok := x.Kind.(*Reply_UserInfoList); ok {
+			return x.UserInfoList
+		}
+	}
+	return nil
+}
+
 type isReply_Kind interface {
 	isReply_Kind()
 }
@@ -3882,6 +4172,10 @@ type Reply_OnWhatsappList struct {
 	OnWhatsappList *OnWhatsAppList `protobuf:"bytes,11,opt,name=on_whatsapp_list,json=onWhatsappList,proto3,oneof"`
 }
 
+type Reply_UserInfoList struct {
+	UserInfoList *UserInfoList `protobuf:"bytes,12,opt,name=user_info_list,json=userInfoList,proto3,oneof"`
+}
+
 func (*Reply_Failure) isReply_Kind() {}
 
 func (*Reply_Done) isReply_Kind() {}
@@ -3904,6 +4198,130 @@ func (*Reply_Sent) isReply_Kind() {}
 
 func (*Reply_OnWhatsappList) isReply_Kind() {}
 
+func (*Reply_UserInfoList) isReply_Kind() {}
+
+type UserInfoList struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Users         []*User                `protobuf:"bytes,1,rep,name=users,proto3" json:"users,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UserInfoList) Reset() {
+	*x = UserInfoList{}
+	mi := &file_engine_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UserInfoList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UserInfoList) ProtoMessage() {}
+
+func (x *UserInfoList) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UserInfoList.ProtoReflect.Descriptor instead.
+func (*UserInfoList) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *UserInfoList) GetUsers() []*User {
+	if x != nil {
+		return x.Users
+	}
+	return nil
+}
+
+// What WhatsApp says of someone: their about text (empty when they have none or hide it), their
+// picture's ID, a business's verified name, and their LID.
+type User struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Jid           string                 `protobuf:"bytes,1,opt,name=jid,proto3" json:"jid,omitempty"`
+	About         string                 `protobuf:"bytes,2,opt,name=about,proto3" json:"about,omitempty"`
+	PictureId     string                 `protobuf:"bytes,3,opt,name=picture_id,json=pictureId,proto3" json:"picture_id,omitempty"`
+	VerifiedName  string                 `protobuf:"bytes,4,opt,name=verified_name,json=verifiedName,proto3" json:"verified_name,omitempty"`
+	Lid           string                 `protobuf:"bytes,5,opt,name=lid,proto3" json:"lid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *User) Reset() {
+	*x = User{}
+	mi := &file_engine_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *User) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*User) ProtoMessage() {}
+
+func (x *User) ProtoReflect() protoreflect.Message {
+	mi := &file_engine_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use User.ProtoReflect.Descriptor instead.
+func (*User) Descriptor() ([]byte, []int) {
+	return file_engine_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *User) GetJid() string {
+	if x != nil {
+		return x.Jid
+	}
+	return ""
+}
+
+func (x *User) GetAbout() string {
+	if x != nil {
+		return x.About
+	}
+	return ""
+}
+
+func (x *User) GetPictureId() string {
+	if x != nil {
+		return x.PictureId
+	}
+	return ""
+}
+
+func (x *User) GetVerifiedName() string {
+	if x != nil {
+		return x.VerifiedName
+	}
+	return ""
+}
+
+func (x *User) GetLid() string {
+	if x != nil {
+		return x.Lid
+	}
+	return ""
+}
+
 // The server has a message Send sent.
 type Sent struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3918,7 +4336,7 @@ type Sent struct {
 
 func (x *Sent) Reset() {
 	*x = Sent{}
-	mi := &file_engine_proto_msgTypes[42]
+	mi := &file_engine_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3930,7 +4348,7 @@ func (x *Sent) String() string {
 func (*Sent) ProtoMessage() {}
 
 func (x *Sent) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[42]
+	mi := &file_engine_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3943,7 +4361,7 @@ func (x *Sent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Sent.ProtoReflect.Descriptor instead.
 func (*Sent) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{42}
+	return file_engine_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *Sent) GetId() string {
@@ -3976,7 +4394,7 @@ type OnWhatsAppList struct {
 
 func (x *OnWhatsAppList) Reset() {
 	*x = OnWhatsAppList{}
-	mi := &file_engine_proto_msgTypes[43]
+	mi := &file_engine_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3988,7 +4406,7 @@ func (x *OnWhatsAppList) String() string {
 func (*OnWhatsAppList) ProtoMessage() {}
 
 func (x *OnWhatsAppList) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[43]
+	mi := &file_engine_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4001,7 +4419,7 @@ func (x *OnWhatsAppList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OnWhatsAppList.ProtoReflect.Descriptor instead.
 func (*OnWhatsAppList) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{43}
+	return file_engine_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *OnWhatsAppList) GetUsers() []*OnWhatsAppUser {
@@ -4026,7 +4444,7 @@ type OnWhatsAppUser struct {
 
 func (x *OnWhatsAppUser) Reset() {
 	*x = OnWhatsAppUser{}
-	mi := &file_engine_proto_msgTypes[44]
+	mi := &file_engine_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4038,7 +4456,7 @@ func (x *OnWhatsAppUser) String() string {
 func (*OnWhatsAppUser) ProtoMessage() {}
 
 func (x *OnWhatsAppUser) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[44]
+	mi := &file_engine_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4051,7 +4469,7 @@ func (x *OnWhatsAppUser) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OnWhatsAppUser.ProtoReflect.Descriptor instead.
 func (*OnWhatsAppUser) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{44}
+	return file_engine_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *OnWhatsAppUser) GetQuery() string {
@@ -4098,7 +4516,7 @@ type GroupList struct {
 
 func (x *GroupList) Reset() {
 	*x = GroupList{}
-	mi := &file_engine_proto_msgTypes[45]
+	mi := &file_engine_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4110,7 +4528,7 @@ func (x *GroupList) String() string {
 func (*GroupList) ProtoMessage() {}
 
 func (x *GroupList) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[45]
+	mi := &file_engine_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4123,7 +4541,7 @@ func (x *GroupList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GroupList.ProtoReflect.Descriptor instead.
 func (*GroupList) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{45}
+	return file_engine_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *GroupList) GetGroups() []*GroupInfo {
@@ -4142,7 +4560,7 @@ type ContactList struct {
 
 func (x *ContactList) Reset() {
 	*x = ContactList{}
-	mi := &file_engine_proto_msgTypes[46]
+	mi := &file_engine_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4154,7 +4572,7 @@ func (x *ContactList) String() string {
 func (*ContactList) ProtoMessage() {}
 
 func (x *ContactList) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[46]
+	mi := &file_engine_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4167,7 +4585,7 @@ func (x *ContactList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContactList.ProtoReflect.Descriptor instead.
 func (*ContactList) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{46}
+	return file_engine_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ContactList) GetContacts() []*Contact {
@@ -4193,7 +4611,7 @@ type Contact struct {
 
 func (x *Contact) Reset() {
 	*x = Contact{}
-	mi := &file_engine_proto_msgTypes[47]
+	mi := &file_engine_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4205,7 +4623,7 @@ func (x *Contact) String() string {
 func (*Contact) ProtoMessage() {}
 
 func (x *Contact) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[47]
+	mi := &file_engine_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4218,7 +4636,7 @@ func (x *Contact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Contact.ProtoReflect.Descriptor instead.
 func (*Contact) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{47}
+	return file_engine_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *Contact) GetJid() string {
@@ -4272,7 +4690,7 @@ type LidPairs struct {
 
 func (x *LidPairs) Reset() {
 	*x = LidPairs{}
-	mi := &file_engine_proto_msgTypes[48]
+	mi := &file_engine_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4284,7 +4702,7 @@ func (x *LidPairs) String() string {
 func (*LidPairs) ProtoMessage() {}
 
 func (x *LidPairs) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[48]
+	mi := &file_engine_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4297,7 +4715,7 @@ func (x *LidPairs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LidPairs.ProtoReflect.Descriptor instead.
 func (*LidPairs) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{48}
+	return file_engine_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *LidPairs) GetPairs() []*LidPair {
@@ -4317,7 +4735,7 @@ type LidPair struct {
 
 func (x *LidPair) Reset() {
 	*x = LidPair{}
-	mi := &file_engine_proto_msgTypes[49]
+	mi := &file_engine_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4329,7 +4747,7 @@ func (x *LidPair) String() string {
 func (*LidPair) ProtoMessage() {}
 
 func (x *LidPair) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[49]
+	mi := &file_engine_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4342,7 +4760,7 @@ func (x *LidPair) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LidPair.ProtoReflect.Descriptor instead.
 func (*LidPair) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{49}
+	return file_engine_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *LidPair) GetLid() string {
@@ -4370,7 +4788,7 @@ type AvatarFile struct {
 
 func (x *AvatarFile) Reset() {
 	*x = AvatarFile{}
-	mi := &file_engine_proto_msgTypes[50]
+	mi := &file_engine_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4382,7 +4800,7 @@ func (x *AvatarFile) String() string {
 func (*AvatarFile) ProtoMessage() {}
 
 func (x *AvatarFile) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[50]
+	mi := &file_engine_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4395,7 +4813,7 @@ func (x *AvatarFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AvatarFile.ProtoReflect.Descriptor instead.
 func (*AvatarFile) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{50}
+	return file_engine_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *AvatarFile) GetState() AvatarFile_State {
@@ -4431,7 +4849,7 @@ type Failure struct {
 
 func (x *Failure) Reset() {
 	*x = Failure{}
-	mi := &file_engine_proto_msgTypes[51]
+	mi := &file_engine_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4443,7 +4861,7 @@ func (x *Failure) String() string {
 func (*Failure) ProtoMessage() {}
 
 func (x *Failure) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[51]
+	mi := &file_engine_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4456,7 +4874,7 @@ func (x *Failure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Failure.ProtoReflect.Descriptor instead.
 func (*Failure) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{51}
+	return file_engine_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *Failure) GetMessage() string {
@@ -4481,7 +4899,7 @@ type Done struct {
 
 func (x *Done) Reset() {
 	*x = Done{}
-	mi := &file_engine_proto_msgTypes[52]
+	mi := &file_engine_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4493,7 +4911,7 @@ func (x *Done) String() string {
 func (*Done) ProtoMessage() {}
 
 func (x *Done) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[52]
+	mi := &file_engine_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4506,7 +4924,7 @@ func (x *Done) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Done.ProtoReflect.Descriptor instead.
 func (*Done) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{52}
+	return file_engine_proto_rawDescGZIP(), []int{58}
 }
 
 type Pong struct {
@@ -4518,7 +4936,7 @@ type Pong struct {
 
 func (x *Pong) Reset() {
 	*x = Pong{}
-	mi := &file_engine_proto_msgTypes[53]
+	mi := &file_engine_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4530,7 +4948,7 @@ func (x *Pong) String() string {
 func (*Pong) ProtoMessage() {}
 
 func (x *Pong) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[53]
+	mi := &file_engine_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4543,7 +4961,7 @@ func (x *Pong) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pong.ProtoReflect.Descriptor instead.
 func (*Pong) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{53}
+	return file_engine_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *Pong) GetAtMs() int64 {
@@ -4568,7 +4986,7 @@ type HistoryFile struct {
 
 func (x *HistoryFile) Reset() {
 	*x = HistoryFile{}
-	mi := &file_engine_proto_msgTypes[54]
+	mi := &file_engine_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4580,7 +4998,7 @@ func (x *HistoryFile) String() string {
 func (*HistoryFile) ProtoMessage() {}
 
 func (x *HistoryFile) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[54]
+	mi := &file_engine_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4593,7 +5011,7 @@ func (x *HistoryFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryFile.ProtoReflect.Descriptor instead.
 func (*HistoryFile) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{54}
+	return file_engine_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *HistoryFile) GetPath() string {
@@ -4652,7 +5070,7 @@ type BenchResult struct {
 
 func (x *BenchResult) Reset() {
 	*x = BenchResult{}
-	mi := &file_engine_proto_msgTypes[55]
+	mi := &file_engine_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4664,7 +5082,7 @@ func (x *BenchResult) String() string {
 func (*BenchResult) ProtoMessage() {}
 
 func (x *BenchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_engine_proto_msgTypes[55]
+	mi := &file_engine_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4677,7 +5095,7 @@ func (x *BenchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BenchResult.ProtoReflect.Descriptor instead.
 func (*BenchResult) Descriptor() ([]byte, []int) {
-	return file_engine_proto_rawDescGZIP(), []int{55}
+	return file_engine_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *BenchResult) GetCount() uint32 {
@@ -4732,7 +5150,7 @@ const file_engine_proto_rawDesc = "" +
 	"\x05Hello\x12\x1a\n" +
 	"\bprotocol\x18\x01 \x01(\rR\bprotocol\x12\x18\n" +
 	"\aprogram\x18\x02 \x01(\tR\aprogram\x12\x1c\n" +
-	"\twhatsmeow\x18\x03 \x01(\tR\twhatsmeow\"\xe5\x05\n" +
+	"\twhatsmeow\x18\x03 \x01(\tR\twhatsmeow\"\xcd\x06\n" +
 	"\x05Event\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x128\n" +
 	"\n" +
@@ -4750,7 +5168,9 @@ const file_engine_proto_rawDesc = "" +
 	"\x05group\x18\v \x01(\v2\x15.jaw.engine.GroupInfoH\x00R\x05group\x12<\n" +
 	"\fgroup_change\x18\f \x01(\v2\x17.jaw.engine.GroupChangeH\x00R\vgroupChange\x12/\n" +
 	"\apicture\x18\r \x01(\v2\x13.jaw.engine.PictureH\x00R\apicture\x12F\n" +
-	"\x10app_state_synced\x18\x0e \x01(\v2\x1a.jaw.engine.AppStateSyncedH\x00R\x0eappStateSyncedB\x06\n" +
+	"\x10app_state_synced\x18\x0e \x01(\v2\x1a.jaw.engine.AppStateSyncedH\x00R\x0eappStateSynced\x128\n" +
+	"\bpresence\x18\x0f \x01(\v2\x1a.jaw.engine.PresenceUpdateH\x00R\bpresence\x12,\n" +
+	"\x06typing\x18\x10 \x01(\v2\x12.jaw.engine.TypingH\x00R\x06typingB\x06\n" +
 	"\x04kind\"\x8c\x03\n" +
 	"\n" +
 	"Connection\x122\n" +
@@ -4903,11 +5323,20 @@ const file_engine_proto_rawDesc = "" +
 	"\ftimestamp_ms\x18\x03 \x01(\x03R\vtimestampMs\x12\x18\n" +
 	"\aremoved\x18\x04 \x01(\bR\aremoved\x12\x1d\n" +
 	"\n" +
-	"picture_id\x18\x05 \x01(\tR\tpictureId\"!\n" +
+	"picture_id\x18\x05 \x01(\tR\tpictureId\"f\n" +
+	"\x0ePresenceUpdate\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\x12 \n" +
+	"\vunavailable\x18\x02 \x01(\bR\vunavailable\x12 \n" +
+	"\flast_seen_ms\x18\x03 \x01(\x03R\n" +
+	"lastSeenMs\"j\n" +
+	"\x06Typing\x12\x12\n" +
+	"\x04chat\x18\x01 \x01(\tR\x04chat\x12\x16\n" +
+	"\x06sender\x18\x02 \x01(\tR\x06sender\x124\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x1e.jaw.engine.ChatPresence.StateR\x05state\"!\n" +
 	"\x05Bench\x12\x18\n" +
 	"\apayload\x18\x01 \x01(\fR\apayload\"\x17\n" +
 	"\x03Ack\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\"\xb7\b\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\"\xbc\t\n" +
 	"\aCommand\x12&\n" +
 	"\x04ping\x18\x01 \x01(\v2\x10.jaw.engine.PingH\x00R\x04ping\x126\n" +
 	"\n" +
@@ -4932,7 +5361,9 @@ const file_engine_proto_rawDesc = "" +
 	"\von_whatsapp\x18\x11 \x01(\v2\x16.jaw.engine.OnWhatsAppH\x00R\n" +
 	"onWhatsapp\x12C\n" +
 	"\x0fapp_state_patch\x18\x12 \x01(\v2\x19.jaw.engine.AppStatePatchH\x00R\rappStatePatch\x123\n" +
-	"\tpoll_vote\x18\x13 \x01(\v2\x14.jaw.engine.PollVoteH\x00R\bpollVoteB\x06\n" +
+	"\tpoll_vote\x18\x13 \x01(\v2\x14.jaw.engine.PollVoteH\x00R\bpollVote\x12N\n" +
+	"\x12subscribe_presence\x18\x14 \x01(\v2\x1d.jaw.engine.SubscribePresenceH\x00R\x11subscribePresence\x123\n" +
+	"\tuser_info\x18\x15 \x01(\v2\x14.jaw.engine.UserInfoH\x00R\buserInfoB\x06\n" +
 	"\x04kind\"<\n" +
 	"\x04Send\x12\x12\n" +
 	"\x04chat\x18\x01 \x01(\tR\x04chat\x12\x0e\n" +
@@ -4968,7 +5399,11 @@ const file_engine_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05index\x18\x02 \x03(\tR\x05index\x12\x18\n" +
 	"\aversion\x18\x03 \x01(\x05R\aversion\x12\x14\n" +
-	"\x05value\x18\x04 \x01(\fR\x05value\"$\n" +
+	"\x05value\x18\x04 \x01(\fR\x05value\"%\n" +
+	"\x11SubscribePresence\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\"\x1e\n" +
+	"\bUserInfo\x12\x12\n" +
+	"\x04jids\x18\x01 \x03(\tR\x04jids\"$\n" +
 	"\n" +
 	"OnWhatsApp\x12\x16\n" +
 	"\x06phones\x18\x01 \x03(\tR\x06phones\"\b\n" +
@@ -5002,7 +5437,7 @@ const file_engine_proto_rawDesc = "" +
 	"\x04path\x18\x02 \x01(\tR\x04path\"4\n" +
 	"\bBenchRun\x12\x14\n" +
 	"\x05count\x18\x01 \x01(\rR\x05count\x12\x12\n" +
-	"\x04size\x18\x02 \x01(\rR\x04size\"\xe2\x04\n" +
+	"\x04size\x18\x02 \x01(\rR\x04size\"\xa4\x05\n" +
 	"\x05Reply\x12/\n" +
 	"\afailure\x18\x01 \x01(\v2\x13.jaw.engine.FailureH\x00R\afailure\x12&\n" +
 	"\x04done\x18\x02 \x01(\v2\x10.jaw.engine.DoneH\x00R\x04done\x12&\n" +
@@ -5017,8 +5452,18 @@ const file_engine_proto_rawDesc = "" +
 	"avatarFile\x12&\n" +
 	"\x04sent\x18\n" +
 	" \x01(\v2\x10.jaw.engine.SentH\x00R\x04sent\x12F\n" +
-	"\x10on_whatsapp_list\x18\v \x01(\v2\x1a.jaw.engine.OnWhatsAppListH\x00R\x0eonWhatsappListB\x06\n" +
-	"\x04kind\"?\n" +
+	"\x10on_whatsapp_list\x18\v \x01(\v2\x1a.jaw.engine.OnWhatsAppListH\x00R\x0eonWhatsappList\x12@\n" +
+	"\x0euser_info_list\x18\f \x01(\v2\x18.jaw.engine.UserInfoListH\x00R\fuserInfoListB\x06\n" +
+	"\x04kind\"6\n" +
+	"\fUserInfoList\x12&\n" +
+	"\x05users\x18\x01 \x03(\v2\x10.jaw.engine.UserR\x05users\"\x84\x01\n" +
+	"\x04User\x12\x10\n" +
+	"\x03jid\x18\x01 \x01(\tR\x03jid\x12\x14\n" +
+	"\x05about\x18\x02 \x01(\tR\x05about\x12\x1d\n" +
+	"\n" +
+	"picture_id\x18\x03 \x01(\tR\tpictureId\x12#\n" +
+	"\rverified_name\x18\x04 \x01(\tR\fverifiedName\x12\x10\n" +
+	"\x03lid\x18\x05 \x01(\tR\x03lid\"?\n" +
 	"\x04Sent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x13\n" +
 	"\x05at_ms\x18\x02 \x01(\x03R\x04atMs\x12\x12\n" +
@@ -5097,134 +5542,147 @@ func file_engine_proto_rawDescGZIP() []byte {
 }
 
 var file_engine_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_engine_proto_msgTypes = make([]protoimpl.MessageInfo, 56)
+var file_engine_proto_msgTypes = make([]protoimpl.MessageInfo, 62)
 var file_engine_proto_goTypes = []any{
-	(Version)(0),            // 0: jaw.engine.Version
-	(Connection_State)(0),   // 1: jaw.engine.Connection.State
-	(ChatPresence_State)(0), // 2: jaw.engine.ChatPresence.State
-	(AvatarFile_State)(0),   // 3: jaw.engine.AvatarFile.State
-	(*Frame)(nil),           // 4: jaw.engine.Frame
-	(*Hello)(nil),           // 5: jaw.engine.Hello
-	(*Event)(nil),           // 6: jaw.engine.Event
-	(*Connection)(nil),      // 7: jaw.engine.Connection
-	(*Link)(nil),            // 8: jaw.engine.Link
-	(*QrCode)(nil),          // 9: jaw.engine.QrCode
-	(*Linked)(nil),          // 10: jaw.engine.Linked
-	(*Message)(nil),         // 11: jaw.engine.Message
-	(*MessageInfo)(nil),     // 12: jaw.engine.MessageInfo
-	(*Receipt)(nil),         // 13: jaw.engine.Receipt
-	(*OfflinePreview)(nil),  // 14: jaw.engine.OfflinePreview
-	(*OfflineDone)(nil),     // 15: jaw.engine.OfflineDone
-	(*AppState)(nil),        // 16: jaw.engine.AppState
-	(*AppStateSynced)(nil),  // 17: jaw.engine.AppStateSynced
-	(*PushName)(nil),        // 18: jaw.engine.PushName
-	(*GroupInfo)(nil),       // 19: jaw.engine.GroupInfo
-	(*Participant)(nil),     // 20: jaw.engine.Participant
-	(*GroupChange)(nil),     // 21: jaw.engine.GroupChange
-	(*Picture)(nil),         // 22: jaw.engine.Picture
-	(*Bench)(nil),           // 23: jaw.engine.Bench
-	(*Ack)(nil),             // 24: jaw.engine.Ack
-	(*Command)(nil),         // 25: jaw.engine.Command
-	(*Send)(nil),            // 26: jaw.engine.Send
-	(*PollVote)(nil),        // 27: jaw.engine.PollVote
-	(*MarkRead)(nil),        // 28: jaw.engine.MarkRead
-	(*ChatPresence)(nil),    // 29: jaw.engine.ChatPresence
-	(*Presence)(nil),        // 30: jaw.engine.Presence
-	(*AppStatePatch)(nil),   // 31: jaw.engine.AppStatePatch
-	(*OnWhatsApp)(nil),      // 32: jaw.engine.OnWhatsApp
-	(*Groups)(nil),          // 33: jaw.engine.Groups
-	(*Contacts)(nil),        // 34: jaw.engine.Contacts
-	(*LidLookup)(nil),       // 35: jaw.engine.LidLookup
-	(*AppStateResync)(nil),  // 36: jaw.engine.AppStateResync
-	(*Avatar)(nil),          // 37: jaw.engine.Avatar
-	(*HistoryRequest)(nil),  // 38: jaw.engine.HistoryRequest
-	(*Ping)(nil),            // 39: jaw.engine.Ping
-	(*LinkStart)(nil),       // 40: jaw.engine.LinkStart
-	(*LinkCancel)(nil),      // 41: jaw.engine.LinkCancel
-	(*Logout)(nil),          // 42: jaw.engine.Logout
-	(*HistoryDownload)(nil), // 43: jaw.engine.HistoryDownload
-	(*BenchRun)(nil),        // 44: jaw.engine.BenchRun
-	(*Reply)(nil),           // 45: jaw.engine.Reply
-	(*Sent)(nil),            // 46: jaw.engine.Sent
-	(*OnWhatsAppList)(nil),  // 47: jaw.engine.OnWhatsAppList
-	(*OnWhatsAppUser)(nil),  // 48: jaw.engine.OnWhatsAppUser
-	(*GroupList)(nil),       // 49: jaw.engine.GroupList
-	(*ContactList)(nil),     // 50: jaw.engine.ContactList
-	(*Contact)(nil),         // 51: jaw.engine.Contact
-	(*LidPairs)(nil),        // 52: jaw.engine.LidPairs
-	(*LidPair)(nil),         // 53: jaw.engine.LidPair
-	(*AvatarFile)(nil),      // 54: jaw.engine.AvatarFile
-	(*Failure)(nil),         // 55: jaw.engine.Failure
-	(*Done)(nil),            // 56: jaw.engine.Done
-	(*Pong)(nil),            // 57: jaw.engine.Pong
-	(*HistoryFile)(nil),     // 58: jaw.engine.HistoryFile
-	(*BenchResult)(nil),     // 59: jaw.engine.BenchResult
+	(Version)(0),              // 0: jaw.engine.Version
+	(Connection_State)(0),     // 1: jaw.engine.Connection.State
+	(ChatPresence_State)(0),   // 2: jaw.engine.ChatPresence.State
+	(AvatarFile_State)(0),     // 3: jaw.engine.AvatarFile.State
+	(*Frame)(nil),             // 4: jaw.engine.Frame
+	(*Hello)(nil),             // 5: jaw.engine.Hello
+	(*Event)(nil),             // 6: jaw.engine.Event
+	(*Connection)(nil),        // 7: jaw.engine.Connection
+	(*Link)(nil),              // 8: jaw.engine.Link
+	(*QrCode)(nil),            // 9: jaw.engine.QrCode
+	(*Linked)(nil),            // 10: jaw.engine.Linked
+	(*Message)(nil),           // 11: jaw.engine.Message
+	(*MessageInfo)(nil),       // 12: jaw.engine.MessageInfo
+	(*Receipt)(nil),           // 13: jaw.engine.Receipt
+	(*OfflinePreview)(nil),    // 14: jaw.engine.OfflinePreview
+	(*OfflineDone)(nil),       // 15: jaw.engine.OfflineDone
+	(*AppState)(nil),          // 16: jaw.engine.AppState
+	(*AppStateSynced)(nil),    // 17: jaw.engine.AppStateSynced
+	(*PushName)(nil),          // 18: jaw.engine.PushName
+	(*GroupInfo)(nil),         // 19: jaw.engine.GroupInfo
+	(*Participant)(nil),       // 20: jaw.engine.Participant
+	(*GroupChange)(nil),       // 21: jaw.engine.GroupChange
+	(*Picture)(nil),           // 22: jaw.engine.Picture
+	(*PresenceUpdate)(nil),    // 23: jaw.engine.PresenceUpdate
+	(*Typing)(nil),            // 24: jaw.engine.Typing
+	(*Bench)(nil),             // 25: jaw.engine.Bench
+	(*Ack)(nil),               // 26: jaw.engine.Ack
+	(*Command)(nil),           // 27: jaw.engine.Command
+	(*Send)(nil),              // 28: jaw.engine.Send
+	(*PollVote)(nil),          // 29: jaw.engine.PollVote
+	(*MarkRead)(nil),          // 30: jaw.engine.MarkRead
+	(*ChatPresence)(nil),      // 31: jaw.engine.ChatPresence
+	(*Presence)(nil),          // 32: jaw.engine.Presence
+	(*AppStatePatch)(nil),     // 33: jaw.engine.AppStatePatch
+	(*SubscribePresence)(nil), // 34: jaw.engine.SubscribePresence
+	(*UserInfo)(nil),          // 35: jaw.engine.UserInfo
+	(*OnWhatsApp)(nil),        // 36: jaw.engine.OnWhatsApp
+	(*Groups)(nil),            // 37: jaw.engine.Groups
+	(*Contacts)(nil),          // 38: jaw.engine.Contacts
+	(*LidLookup)(nil),         // 39: jaw.engine.LidLookup
+	(*AppStateResync)(nil),    // 40: jaw.engine.AppStateResync
+	(*Avatar)(nil),            // 41: jaw.engine.Avatar
+	(*HistoryRequest)(nil),    // 42: jaw.engine.HistoryRequest
+	(*Ping)(nil),              // 43: jaw.engine.Ping
+	(*LinkStart)(nil),         // 44: jaw.engine.LinkStart
+	(*LinkCancel)(nil),        // 45: jaw.engine.LinkCancel
+	(*Logout)(nil),            // 46: jaw.engine.Logout
+	(*HistoryDownload)(nil),   // 47: jaw.engine.HistoryDownload
+	(*BenchRun)(nil),          // 48: jaw.engine.BenchRun
+	(*Reply)(nil),             // 49: jaw.engine.Reply
+	(*UserInfoList)(nil),      // 50: jaw.engine.UserInfoList
+	(*User)(nil),              // 51: jaw.engine.User
+	(*Sent)(nil),              // 52: jaw.engine.Sent
+	(*OnWhatsAppList)(nil),    // 53: jaw.engine.OnWhatsAppList
+	(*OnWhatsAppUser)(nil),    // 54: jaw.engine.OnWhatsAppUser
+	(*GroupList)(nil),         // 55: jaw.engine.GroupList
+	(*ContactList)(nil),       // 56: jaw.engine.ContactList
+	(*Contact)(nil),           // 57: jaw.engine.Contact
+	(*LidPairs)(nil),          // 58: jaw.engine.LidPairs
+	(*LidPair)(nil),           // 59: jaw.engine.LidPair
+	(*AvatarFile)(nil),        // 60: jaw.engine.AvatarFile
+	(*Failure)(nil),           // 61: jaw.engine.Failure
+	(*Done)(nil),              // 62: jaw.engine.Done
+	(*Pong)(nil),              // 63: jaw.engine.Pong
+	(*HistoryFile)(nil),       // 64: jaw.engine.HistoryFile
+	(*BenchResult)(nil),       // 65: jaw.engine.BenchResult
 }
 var file_engine_proto_depIdxs = []int32{
 	5,  // 0: jaw.engine.Frame.hello:type_name -> jaw.engine.Hello
 	6,  // 1: jaw.engine.Frame.event:type_name -> jaw.engine.Event
-	24, // 2: jaw.engine.Frame.ack:type_name -> jaw.engine.Ack
-	25, // 3: jaw.engine.Frame.command:type_name -> jaw.engine.Command
-	45, // 4: jaw.engine.Frame.reply:type_name -> jaw.engine.Reply
+	26, // 2: jaw.engine.Frame.ack:type_name -> jaw.engine.Ack
+	27, // 3: jaw.engine.Frame.command:type_name -> jaw.engine.Command
+	49, // 4: jaw.engine.Frame.reply:type_name -> jaw.engine.Reply
 	7,  // 5: jaw.engine.Event.connection:type_name -> jaw.engine.Connection
 	8,  // 6: jaw.engine.Event.link:type_name -> jaw.engine.Link
 	11, // 7: jaw.engine.Event.message:type_name -> jaw.engine.Message
 	13, // 8: jaw.engine.Event.receipt:type_name -> jaw.engine.Receipt
 	14, // 9: jaw.engine.Event.offline_preview:type_name -> jaw.engine.OfflinePreview
 	15, // 10: jaw.engine.Event.offline_done:type_name -> jaw.engine.OfflineDone
-	23, // 11: jaw.engine.Event.bench:type_name -> jaw.engine.Bench
+	25, // 11: jaw.engine.Event.bench:type_name -> jaw.engine.Bench
 	16, // 12: jaw.engine.Event.app_state:type_name -> jaw.engine.AppState
 	18, // 13: jaw.engine.Event.push_name:type_name -> jaw.engine.PushName
 	19, // 14: jaw.engine.Event.group:type_name -> jaw.engine.GroupInfo
 	21, // 15: jaw.engine.Event.group_change:type_name -> jaw.engine.GroupChange
 	22, // 16: jaw.engine.Event.picture:type_name -> jaw.engine.Picture
 	17, // 17: jaw.engine.Event.app_state_synced:type_name -> jaw.engine.AppStateSynced
-	1,  // 18: jaw.engine.Connection.state:type_name -> jaw.engine.Connection.State
-	9,  // 19: jaw.engine.Link.qr:type_name -> jaw.engine.QrCode
-	10, // 20: jaw.engine.Link.done:type_name -> jaw.engine.Linked
-	12, // 21: jaw.engine.Message.info:type_name -> jaw.engine.MessageInfo
-	20, // 22: jaw.engine.GroupInfo.participants:type_name -> jaw.engine.Participant
-	39, // 23: jaw.engine.Command.ping:type_name -> jaw.engine.Ping
-	40, // 24: jaw.engine.Command.link_start:type_name -> jaw.engine.LinkStart
-	41, // 25: jaw.engine.Command.link_cancel:type_name -> jaw.engine.LinkCancel
-	42, // 26: jaw.engine.Command.logout:type_name -> jaw.engine.Logout
-	43, // 27: jaw.engine.Command.history_download:type_name -> jaw.engine.HistoryDownload
-	44, // 28: jaw.engine.Command.bench_run:type_name -> jaw.engine.BenchRun
-	33, // 29: jaw.engine.Command.groups:type_name -> jaw.engine.Groups
-	34, // 30: jaw.engine.Command.contacts:type_name -> jaw.engine.Contacts
-	35, // 31: jaw.engine.Command.lid_lookup:type_name -> jaw.engine.LidLookup
-	36, // 32: jaw.engine.Command.app_state_resync:type_name -> jaw.engine.AppStateResync
-	37, // 33: jaw.engine.Command.avatar:type_name -> jaw.engine.Avatar
-	38, // 34: jaw.engine.Command.history_request:type_name -> jaw.engine.HistoryRequest
-	26, // 35: jaw.engine.Command.send:type_name -> jaw.engine.Send
-	28, // 36: jaw.engine.Command.mark_read:type_name -> jaw.engine.MarkRead
-	29, // 37: jaw.engine.Command.chat_presence:type_name -> jaw.engine.ChatPresence
-	30, // 38: jaw.engine.Command.presence:type_name -> jaw.engine.Presence
-	32, // 39: jaw.engine.Command.on_whatsapp:type_name -> jaw.engine.OnWhatsApp
-	31, // 40: jaw.engine.Command.app_state_patch:type_name -> jaw.engine.AppStatePatch
-	27, // 41: jaw.engine.Command.poll_vote:type_name -> jaw.engine.PollVote
-	2,  // 42: jaw.engine.ChatPresence.state:type_name -> jaw.engine.ChatPresence.State
-	55, // 43: jaw.engine.Reply.failure:type_name -> jaw.engine.Failure
-	56, // 44: jaw.engine.Reply.done:type_name -> jaw.engine.Done
-	57, // 45: jaw.engine.Reply.pong:type_name -> jaw.engine.Pong
-	58, // 46: jaw.engine.Reply.history_file:type_name -> jaw.engine.HistoryFile
-	59, // 47: jaw.engine.Reply.bench_result:type_name -> jaw.engine.BenchResult
-	49, // 48: jaw.engine.Reply.group_list:type_name -> jaw.engine.GroupList
-	50, // 49: jaw.engine.Reply.contact_list:type_name -> jaw.engine.ContactList
-	52, // 50: jaw.engine.Reply.lid_pairs:type_name -> jaw.engine.LidPairs
-	54, // 51: jaw.engine.Reply.avatar_file:type_name -> jaw.engine.AvatarFile
-	46, // 52: jaw.engine.Reply.sent:type_name -> jaw.engine.Sent
-	47, // 53: jaw.engine.Reply.on_whatsapp_list:type_name -> jaw.engine.OnWhatsAppList
-	48, // 54: jaw.engine.OnWhatsAppList.users:type_name -> jaw.engine.OnWhatsAppUser
-	19, // 55: jaw.engine.GroupList.groups:type_name -> jaw.engine.GroupInfo
-	51, // 56: jaw.engine.ContactList.contacts:type_name -> jaw.engine.Contact
-	53, // 57: jaw.engine.LidPairs.pairs:type_name -> jaw.engine.LidPair
-	3,  // 58: jaw.engine.AvatarFile.state:type_name -> jaw.engine.AvatarFile.State
-	59, // [59:59] is the sub-list for method output_type
-	59, // [59:59] is the sub-list for method input_type
-	59, // [59:59] is the sub-list for extension type_name
-	59, // [59:59] is the sub-list for extension extendee
-	0,  // [0:59] is the sub-list for field type_name
+	23, // 18: jaw.engine.Event.presence:type_name -> jaw.engine.PresenceUpdate
+	24, // 19: jaw.engine.Event.typing:type_name -> jaw.engine.Typing
+	1,  // 20: jaw.engine.Connection.state:type_name -> jaw.engine.Connection.State
+	9,  // 21: jaw.engine.Link.qr:type_name -> jaw.engine.QrCode
+	10, // 22: jaw.engine.Link.done:type_name -> jaw.engine.Linked
+	12, // 23: jaw.engine.Message.info:type_name -> jaw.engine.MessageInfo
+	20, // 24: jaw.engine.GroupInfo.participants:type_name -> jaw.engine.Participant
+	2,  // 25: jaw.engine.Typing.state:type_name -> jaw.engine.ChatPresence.State
+	43, // 26: jaw.engine.Command.ping:type_name -> jaw.engine.Ping
+	44, // 27: jaw.engine.Command.link_start:type_name -> jaw.engine.LinkStart
+	45, // 28: jaw.engine.Command.link_cancel:type_name -> jaw.engine.LinkCancel
+	46, // 29: jaw.engine.Command.logout:type_name -> jaw.engine.Logout
+	47, // 30: jaw.engine.Command.history_download:type_name -> jaw.engine.HistoryDownload
+	48, // 31: jaw.engine.Command.bench_run:type_name -> jaw.engine.BenchRun
+	37, // 32: jaw.engine.Command.groups:type_name -> jaw.engine.Groups
+	38, // 33: jaw.engine.Command.contacts:type_name -> jaw.engine.Contacts
+	39, // 34: jaw.engine.Command.lid_lookup:type_name -> jaw.engine.LidLookup
+	40, // 35: jaw.engine.Command.app_state_resync:type_name -> jaw.engine.AppStateResync
+	41, // 36: jaw.engine.Command.avatar:type_name -> jaw.engine.Avatar
+	42, // 37: jaw.engine.Command.history_request:type_name -> jaw.engine.HistoryRequest
+	28, // 38: jaw.engine.Command.send:type_name -> jaw.engine.Send
+	30, // 39: jaw.engine.Command.mark_read:type_name -> jaw.engine.MarkRead
+	31, // 40: jaw.engine.Command.chat_presence:type_name -> jaw.engine.ChatPresence
+	32, // 41: jaw.engine.Command.presence:type_name -> jaw.engine.Presence
+	36, // 42: jaw.engine.Command.on_whatsapp:type_name -> jaw.engine.OnWhatsApp
+	33, // 43: jaw.engine.Command.app_state_patch:type_name -> jaw.engine.AppStatePatch
+	29, // 44: jaw.engine.Command.poll_vote:type_name -> jaw.engine.PollVote
+	34, // 45: jaw.engine.Command.subscribe_presence:type_name -> jaw.engine.SubscribePresence
+	35, // 46: jaw.engine.Command.user_info:type_name -> jaw.engine.UserInfo
+	2,  // 47: jaw.engine.ChatPresence.state:type_name -> jaw.engine.ChatPresence.State
+	61, // 48: jaw.engine.Reply.failure:type_name -> jaw.engine.Failure
+	62, // 49: jaw.engine.Reply.done:type_name -> jaw.engine.Done
+	63, // 50: jaw.engine.Reply.pong:type_name -> jaw.engine.Pong
+	64, // 51: jaw.engine.Reply.history_file:type_name -> jaw.engine.HistoryFile
+	65, // 52: jaw.engine.Reply.bench_result:type_name -> jaw.engine.BenchResult
+	55, // 53: jaw.engine.Reply.group_list:type_name -> jaw.engine.GroupList
+	56, // 54: jaw.engine.Reply.contact_list:type_name -> jaw.engine.ContactList
+	58, // 55: jaw.engine.Reply.lid_pairs:type_name -> jaw.engine.LidPairs
+	60, // 56: jaw.engine.Reply.avatar_file:type_name -> jaw.engine.AvatarFile
+	52, // 57: jaw.engine.Reply.sent:type_name -> jaw.engine.Sent
+	53, // 58: jaw.engine.Reply.on_whatsapp_list:type_name -> jaw.engine.OnWhatsAppList
+	50, // 59: jaw.engine.Reply.user_info_list:type_name -> jaw.engine.UserInfoList
+	51, // 60: jaw.engine.UserInfoList.users:type_name -> jaw.engine.User
+	54, // 61: jaw.engine.OnWhatsAppList.users:type_name -> jaw.engine.OnWhatsAppUser
+	19, // 62: jaw.engine.GroupList.groups:type_name -> jaw.engine.GroupInfo
+	57, // 63: jaw.engine.ContactList.contacts:type_name -> jaw.engine.Contact
+	59, // 64: jaw.engine.LidPairs.pairs:type_name -> jaw.engine.LidPair
+	3,  // 65: jaw.engine.AvatarFile.state:type_name -> jaw.engine.AvatarFile.State
+	66, // [66:66] is the sub-list for method output_type
+	66, // [66:66] is the sub-list for method input_type
+	66, // [66:66] is the sub-list for extension type_name
+	66, // [66:66] is the sub-list for extension extendee
+	0,  // [0:66] is the sub-list for field type_name
 }
 
 func init() { file_engine_proto_init() }
@@ -5253,6 +5711,8 @@ func file_engine_proto_init() {
 		(*Event_GroupChange)(nil),
 		(*Event_Picture)(nil),
 		(*Event_AppStateSynced)(nil),
+		(*Event_Presence)(nil),
+		(*Event_Typing)(nil),
 	}
 	file_engine_proto_msgTypes[4].OneofWrappers = []any{
 		(*Link_Qr)(nil),
@@ -5261,7 +5721,7 @@ func file_engine_proto_init() {
 		(*Link_Failed)(nil),
 	}
 	file_engine_proto_msgTypes[17].OneofWrappers = []any{}
-	file_engine_proto_msgTypes[21].OneofWrappers = []any{
+	file_engine_proto_msgTypes[23].OneofWrappers = []any{
 		(*Command_Ping)(nil),
 		(*Command_LinkStart)(nil),
 		(*Command_LinkCancel)(nil),
@@ -5281,8 +5741,10 @@ func file_engine_proto_init() {
 		(*Command_OnWhatsapp)(nil),
 		(*Command_AppStatePatch)(nil),
 		(*Command_PollVote)(nil),
+		(*Command_SubscribePresence)(nil),
+		(*Command_UserInfo)(nil),
 	}
-	file_engine_proto_msgTypes[41].OneofWrappers = []any{
+	file_engine_proto_msgTypes[45].OneofWrappers = []any{
 		(*Reply_Failure)(nil),
 		(*Reply_Done)(nil),
 		(*Reply_Pong)(nil),
@@ -5294,6 +5756,7 @@ func file_engine_proto_init() {
 		(*Reply_AvatarFile)(nil),
 		(*Reply_Sent)(nil),
 		(*Reply_OnWhatsappList)(nil),
+		(*Reply_UserInfoList)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -5301,7 +5764,7 @@ func file_engine_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_engine_proto_rawDesc), len(file_engine_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   56,
+			NumMessages:   62,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

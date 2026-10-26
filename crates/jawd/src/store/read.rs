@@ -144,6 +144,12 @@ pub struct ChatRow {
     pub marked_unread: bool,
     pub draft: Option<String>,
     pub community: Option<String>,
+    /// The folders of yours it's filed in, or its person is, by n.
+    pub folders: Vec<i64>,
+    /// Its favourite slot.
+    pub favourite: Option<i64>,
+    /// For a community, its groups' unread messages.
+    pub children_unread: Option<i64>,
 }
 
 /// A chat's newest message, for its line in the chat list.
@@ -160,8 +166,8 @@ pub struct Last {
 /// Where a page of the chat list starts: after this chat.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ChatCursor {
-    sort: String,
-    n: i64,
+    pub(super) sort: String,
+    pub(super) n: i64,
 }
 
 impl ChatRow {
@@ -243,7 +249,9 @@ pub(crate) fn shown(
     })
 }
 
-const CHAT_COLUMNS: &str = "
+/// What chat_row reads of chat `c`, before the FROM that names it. A community shows the newest of
+/// its groups' messages, which it sorts by.
+pub(super) const CHAT_SELECT: &str = "
     SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until,
         c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name,
         m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name,
@@ -255,14 +263,22 @@ const CHAT_COLUMNS: &str = "
         m.edited_at,
         (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect)))
             FROM (SELECT created_at, effect FROM outbox
-                WHERE target = c.last_message AND effect IS NOT NULL AND state <> 'failed' ORDER BY n))
-    FROM chats c
+                WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)),
+        (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n
+            UNION ALL SELECT folder FROM folder_items WHERE person = c.person)),
+        (SELECT slot FROM favourites WHERE chat = c.n),
+        iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL)";
+
+/// The rest of what chat_row reads, after the FROM that names chat `c`.
+pub(super) const CHAT_JOINS: &str = "
     LEFT JOIN people p ON p.n = c.person
-    LEFT JOIN messages m ON m.n = c.last_message
+    LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g
+        WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message),
+        c.last_message)
     LEFT JOIN person_jids mj ON mj.n = m.sender
     LEFT JOIN people mp ON mp.n = mj.person";
 
-fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
+pub(super) fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
     let id: String = r.get(1)?;
     // A group without a subject goes by its members' names, as the phone shows it.
     let name = match (r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(29)?) {
@@ -282,6 +298,10 @@ fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
         None => None,
     };
     let muted_until: i64 = r.get(11)?;
+    let mut folders: Vec<i64> =
+        serde_json::from_str(&r.get::<_, Option<String>>(32)?.unwrap_or_default()).unwrap_or_default();
+    folders.sort_unstable();
+    folders.dedup();
     Ok(ChatRow {
         n: r.get(0)?,
         id,
@@ -300,6 +320,9 @@ fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
         draft: r.get(14)?,
         community: r.get(15)?,
         last,
+        folders,
+        favourite: r.get(33)?,
+        children_unread: r.get(34)?,
     })
 }
 
@@ -308,7 +331,7 @@ fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
 pub fn chats(db: &Connection, archived: bool, after: Option<&ChatCursor>, limit: usize) -> Result<Vec<ChatRow>> {
     let (sort, n) = after.map_or(("2", i64::MAX), |after| (after.sort.as_str(), after.n));
     let sql = format!(
-        "{CHAT_COLUMNS} WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4"
+        "{CHAT_SELECT} FROM chats c {CHAT_JOINS} WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4"
     );
     let rows = db
         .prepare_cached(&sql)?
@@ -319,7 +342,7 @@ pub fn chats(db: &Connection, archived: bool, after: Option<&ChatCursor>, limit:
 
 /// A chat by its n, as the chat list shows it.
 pub fn chat(db: &Connection, n: i64) -> Result<Option<ChatRow>> {
-    let sql = format!("{CHAT_COLUMNS} WHERE c.n = ?1");
+    let sql = format!("{CHAT_SELECT} FROM chats c {CHAT_JOINS} WHERE c.n = ?1");
     Ok(db.prepare_cached(&sql)?.query_row([n], chat_row).optional()?)
 }
 
@@ -870,37 +893,17 @@ pub fn chat_place(db: &Connection, id: &str) -> Result<Option<(i64, ChatCursor, 
         .optional()?)
 }
 
-/// Up to `limit` chats just above `cursor` in the list, in the list's order, so the nearest is
-/// last.
-pub fn chats_above(db: &Connection, archived: bool, cursor: &ChatCursor, limit: usize) -> Result<Vec<ChatRow>> {
-    let sql =
-        format!("{CHAT_COLUMNS} WHERE c.archived = ?1 AND (c.sort, c.n) > (?2, ?3) ORDER BY c.sort, c.n LIMIT ?4");
-    let mut rows: Vec<ChatRow> = db
-        .prepare_cached(&sql)?
-        .query_map(params![archived, cursor.sort, cursor.n, limit as i64], chat_row)?
-        .collect::<rusqlite::Result<_>>()?;
-    rows.reverse();
-    Ok(rows)
-}
-
-/// Up to `limit` chats from `cursor` down the list, the chat at it first if it's in this list.
-pub fn chats_from(db: &Connection, archived: bool, cursor: &ChatCursor, limit: usize) -> Result<Vec<ChatRow>> {
-    chats(db, archived, Some(&ChatCursor { sort: cursor.sort.clone(), n: cursor.n.saturating_add(1) }), limit)
-}
-
 /// The chats with these n that are still there, in no particular order.
 pub fn chats_by_n(db: &Connection, ns: &[i64]) -> Result<Vec<ChatRow>> {
-    let sql = format!("{CHAT_COLUMNS} WHERE c.n IN (SELECT value FROM json_each(?1))");
+    let sql = format!("{CHAT_SELECT} FROM chats c {CHAT_JOINS} WHERE c.n IN (SELECT value FROM json_each(?1))");
     let ns = serde_json::to_string(ns)?;
     let rows = db.prepare_cached(&sql)?.query_map([ns], chat_row)?.collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
 
-/// How many chats the list has.
-pub fn chat_count(db: &Connection, archived: bool) -> Result<u64> {
-    let count: i64 =
-        db.prepare_cached("SELECT count(*) FROM chats WHERE archived = ?1")?.query_row([archived], |r| r.get(0))?;
-    Ok(count.max(0) as u64)
+/// The person whose one-to-one chat this is.
+pub fn chat_person(db: &Connection, id: &str) -> Result<Option<i64>> {
+    Ok(db.prepare_cached("SELECT person FROM chats WHERE id = ?1")?.query_row([id], |r| r.get(0)).optional()?.flatten())
 }
 
 /// A chat's n by its JID.

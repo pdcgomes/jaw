@@ -58,6 +58,8 @@ message Event {
     GroupChange group_change = 12;
     Picture picture = 13;
     AppStateSynced app_state_synced = 14;
+    PresenceUpdate presence = 15;
+    Typing typing = 16;
   }
 }
 
@@ -262,6 +264,22 @@ message Picture {
   string picture_id = 5;
 }
 
+// Someone's presence, which WhatsApp sends, for those SubscribePresence asked for, while the
+// account is online: around, or away and when they were last seen, unless they hide it.
+message PresenceUpdate {
+  string jid = 1;
+  bool unavailable = 2;
+  // 0 when they hide it, or WhatsApp didn't say.
+  int64 last_seen_ms = 3;
+}
+
+// Someone typing or recording in a chat, or stopping, as WhatsApp tells it.
+message Typing {
+  string chat = 1;
+  string sender = 2;
+  ChatPresence.State state = 3;
+}
+
 // A made-up message for measuring the link, sent with a seq like a real one.
 message Bench {
   bytes payload = 1;
@@ -295,6 +313,8 @@ message Command {
     OnWhatsApp on_whatsapp = 17;
     AppStatePatch app_state_patch = 18;
     PollVote poll_vote = 19;
+    SubscribePresence subscribe_presence = 20;
+    UserInfo user_info = 21;
   }
 }
 
@@ -365,6 +385,18 @@ message AppStatePatch {
 }
 
 // Which of these phone numbers (digits only) are on WhatsApp; answered with OnWhatsAppList.
+// Asks WhatsApp to send someone's presence while the account is online, for as long as the
+// connection lasts; jawd keeps to its limits.
+message SubscribePresence {
+  string jid = 1;
+}
+
+// Asks WhatsApp what these people say of themselves, at most 50 at a time; answered with
+// UserInfoList, which leaves out those it doesn't answer for.
+message UserInfo {
+  repeated string jids = 1;
+}
+
 message OnWhatsApp {
   repeated string phones = 1;
 }
@@ -446,7 +478,22 @@ message Reply {
     AvatarFile avatar_file = 9;
     Sent sent = 10;
     OnWhatsAppList on_whatsapp_list = 11;
+    UserInfoList user_info_list = 12;
   }
+}
+
+message UserInfoList {
+  repeated User users = 1;
+}
+
+// What WhatsApp says of someone: their about text (empty when they have none or hide it), their
+// picture's ID, a business's verified name, and their LID.
+message User {
+  string jid = 1;
+  string about = 2;
+  string picture_id = 3;
+  string verified_name = 4;
+  string lid = 5;
 }
 
 // The server has a message Send sent.

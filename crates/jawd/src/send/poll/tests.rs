@@ -29,8 +29,15 @@ async fn sending(home: &Path) -> (Store, Sending, Arc<World>) {
     let engine = DemoEngine::sharing(vec![demo::connected()], world.clone());
     let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
     let mut connected = pushes.subscribe();
-    let sync =
-        crate::sync::run(incoming, store.clone(), live.clone(), pushes.clone(), Some(supervisor.clone()), home.into());
+    let sync = crate::sync::run(
+        incoming,
+        store.clone(),
+        live.clone(),
+        pushes.clone(),
+        Some(supervisor.clone()),
+        home.into(),
+        Default::default(),
+    );
     tokio::spawn(sync);
     let attention = Arc::new(crate::attention::Attention::default());
     let timing =

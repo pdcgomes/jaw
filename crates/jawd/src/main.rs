@@ -9,6 +9,8 @@ mod feed;
 mod find;
 mod layout;
 mod notify;
+mod organise;
+mod presence;
 mod send;
 mod settings;
 mod sock;
@@ -518,11 +520,20 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
     let (pushes, _) = tokio::sync::broadcast::channel(256);
     tokio::spawn(trouble(store.trouble(), pushes.clone()));
     let engine = supervisor.as_ref().ok().cloned();
-    tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine.clone(), home.to_path_buf()));
+    let following = presence::Following::default();
+    tokio::spawn(sync::run(
+        incoming,
+        store.clone(),
+        live.clone(),
+        pushes.clone(),
+        engine.clone(),
+        home.to_path_buf(),
+        following.clone(),
+    ));
     let attention = Arc::new(attention::Attention::default());
     let sending = send::Sending::start(
         store.clone(),
-        engine,
+        engine.clone(),
         live.clone(),
         &pushes,
         attention.focus(),
@@ -534,6 +545,14 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         vec![Arc::new(store.clone()), Arc::new(store.reads().clone()), sending.lane()];
     let finder = find::Finder::start(store.clone()).await?;
     let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
+    let online = matches!(
+        live.lock().expect("live state").connection.state,
+        jaw_proto::ConnectionState::Online | jaw_proto::ConnectionState::CatchingUp
+    );
+    let looking = presence::Looking { focused: attention.focus(), pushes: pushes.subscribe(), online };
+    following.start(store.clone(), engine.clone(), feed.clone(), looking, Default::default());
+    let checks = Arc::new(organise::Checks::default());
+    tokio::spawn(organise::check(store.clone(), checks.clone()));
     let notifier = notify::chosen(options.no_notify);
     let says = match &notifier {
         Ok(notifier) => notifier.name().to_string(),
@@ -547,6 +566,7 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         .with_sending(sending)
         .with_layouts(layout::Layouts::new(store.clone()))
         .with_settings(settings)
+        .with_following(following, checks)
         .with_notifications(says)
         .without(&options.without);
     let state = Arc::new(state);

@@ -588,6 +588,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_palette_follows_folders_made_renamed_and_filed_in_and_a_chat_shows_where_its_person_is() {
+        use crate::store::folders::{Done, Item, Outcome, Step};
+        let (_home, store, finder) = finder().await;
+        let ana = Person { jids: vec![ANA.into()], name: Some("Ana Ribeiro".into()), ..Person::default() };
+        apply(&store, &finder, vec![Change::Person(ana), Change::Chat(Chat { id: ANA.into(), ..Chat::default() })])
+            .await;
+        let step = |make: Box<dyn FnOnce(Done) -> Step + Send>| {
+            let (store, finder) = (store.clone(), finder.clone());
+            async move {
+                let done = Done::default();
+                let applied = store.apply_durable(vec![Change::Folders(make(done.clone()))]).await.unwrap();
+                finder.caught_up(applied.seq).await;
+                done.take().unwrap()
+            }
+        };
+        let Outcome::Done(Some(family)) =
+            step(Box::new(|done| Step::Create { name: "Família".into(), parent: None, rule: None, done })).await
+        else {
+            panic!("no folder made")
+        };
+        let found = find(&finder, "fam", &[Kind::Folder]).await;
+        assert_eq!(found.results[0].row["id"], format!("folder:{family}"));
+        step(Box::new(move |done| Step::Rename { folder: family, name: "Primos".into(), done })).await;
+        assert_eq!(found_names(&find(&finder, "prim", &[Kind::Folder]).await), ["Primos"]);
+        assert!(find(&finder, "fam", &[Kind::Folder]).await.results.is_empty(), "the old name's gone");
+        step(Box::new(move |done| Step::File { folder: family, item: Item::Chat(ANA.into()), done })).await;
+        let chat = find(&finder, "ana", &[Kind::Chat]).await;
+        assert_eq!(chat.results[0].folders, ["Primos"], "her chat is where she's filed");
+        let smart = find(&finder, "mentions", &[Kind::Folder]).await;
+        assert!(smart.results[0].row["id"].as_str().unwrap().starts_with("smart:"));
+    }
+
+    fn found_names(found: &Found) -> Vec<String> {
+        found.results.iter().map(shown).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn messages_come_after_the_names_newest_first_with_their_chat() {
         let (_home, store, finder) = finder().await;
         let familia = "120363000000000004@g.us";

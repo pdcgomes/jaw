@@ -45,6 +45,7 @@ pub struct State {
     sending: Option<Sending>,
     layouts: Option<Layouts>,
     settings: Option<Arc<Settings>>,
+    following: Option<(crate::presence::Following, Arc<crate::organise::Checks>)>,
 }
 
 impl State {
@@ -77,6 +78,7 @@ impl State {
             sending: None,
             layouts: None,
             settings: None,
+            following: None,
         })
     }
 
@@ -151,6 +153,16 @@ impl State {
     }
 
     /// Serves windows from `feed`.
+    /// Whose presence it follows, and the folders' checks, for `status`.
+    pub fn with_following(
+        mut self,
+        following: crate::presence::Following,
+        checks: Arc<crate::organise::Checks>,
+    ) -> State {
+        self.following = Some((following, checks));
+        self
+    }
+
     pub fn with_feed(mut self, feed: Feed) -> State {
         self.feed = Some(feed);
         self
@@ -272,6 +284,8 @@ impl State {
             layouts: self.layouts.as_ref().map(Layouts::status),
             settings: self.settings.as_ref().map(|s| s.by_domain()).unwrap_or_default(),
             settings_ignored: self.settings.as_ref().map(|s| s.ignored()).unwrap_or_default(),
+            presence: self.following.as_ref().map(|(following, _)| following.status()),
+            folders: self.following.as_ref().map(|(_, checks)| checks.status()),
         }
     }
 

@@ -122,6 +122,8 @@ pub struct World {
     fetched: Mutex<Vec<Fetched>>,
     /// The running engine's half of the link, for events delivered from outside its script.
     link: Mutex<Option<WeakLink>>,
+    /// Whose presence jawd follows, in the order it asked.
+    subscribed: Mutex<Vec<String>>,
 }
 
 impl World {
@@ -513,6 +515,54 @@ fn action_of(raw: &[u8]) -> Option<Action> {
         .then_some(Action::Other)
 }
 
+/// What the made-up people say of themselves.
+const ABOUT: [&str; 6] = ["", "Disponível", "a escalar, não ligar", "Lisboa ⇄ Porto", "at the studio", "🌊"];
+
+/// A number of its own for each JID, the same every run.
+fn seed(jid: &str) -> u64 {
+    jid.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
+}
+
+/// `jid` around, or away and last seen a while ago.
+fn presence(jid: &str, around: bool) -> pb::Event {
+    let ago = 60_000 * (1 + seed(jid) % 600) as i64;
+    let update = pb::PresenceUpdate {
+        jid: jid.into(),
+        unavailable: !around,
+        last_seen_ms: if around { 0 } else { now_ms() - ago },
+    };
+    pb::Event { seq: 0, kind: Some(pb::event::Kind::Presence(update)) }
+}
+
+/// How often one of the people followed comes or goes.
+const COMINGS: Duration = Duration::from_secs(5);
+
+/// The people jawd follows come and go, one every few seconds, each sometimes typing first, for as
+/// long as jawd is there to hear it.
+async fn comings_and_goings(sender: Sender) {
+    let mut around: HashMap<String, bool> = HashMap::new();
+    for turn in 0u64.. {
+        tokio::time::sleep(COMINGS).await;
+        let subscribed = sender.world.subscribed.lock().expect("the demo world").clone();
+        let Some(jid) = subscribed.get(turn as usize % subscribed.len().max(1)).cloned() else { continue };
+        let now = !around.get(&jid).copied().unwrap_or(seed(&jid).is_multiple_of(3));
+        around.insert(jid.clone(), now);
+        if now && turn % 3 == 0 && jid.ends_with("@s.whatsapp.net") {
+            let typing = pb::Typing {
+                chat: jid.clone(),
+                sender: jid.clone(),
+                state: pb::chat_presence::State::Composing as i32,
+            };
+            if !sender.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::Typing(typing)) }).await {
+                return;
+            }
+        }
+        if !sender.send(presence(&jid, now)).await {
+            return;
+        }
+    }
+}
+
 /// Every number is on the made-up WhatsApp but those starting 999, each known by a LID as well.
 fn on_whatsapp(asked: &pb::OnWhatsApp) -> pb::OnWhatsAppList {
     let users = asked
@@ -593,6 +643,7 @@ impl Engine for DemoEngine {
                     }
                 }
             });
+            tokio::spawn(comings_and_goings(sender.clone()));
             let serving = tokio::spawn(async move {
                 while let Some(out) = outgoing.recv().await {
                     match out {
@@ -710,6 +761,29 @@ impl Sender {
             | pb::command::Kind::AppStatePatch(_)) => {
                 self.world.ask(kind);
                 done
+            }
+            pb::command::Kind::SubscribePresence(asked) => {
+                self.world.ask(pb::command::Kind::SubscribePresence(asked.clone()));
+                let mut subscribed = self.world.subscribed.lock().expect("the demo world");
+                if !subscribed.contains(&asked.jid) {
+                    subscribed.push(asked.jid.clone());
+                    let (sender, jid) = (self.clone(), asked.jid.clone());
+                    tokio::spawn(async move { sender.send(presence(&jid, seed(&jid).is_multiple_of(3))).await });
+                }
+                Ok(pb::reply::Kind::Done(pb::Done {}))
+            }
+            pb::command::Kind::UserInfo(asked) => {
+                self.world.ask(pb::command::Kind::UserInfo(asked.clone()));
+                let users = asked
+                    .jids
+                    .iter()
+                    .map(|jid| pb::User {
+                        jid: jid.clone(),
+                        about: ABOUT[seed(jid) as usize % ABOUT.len()].into(),
+                        ..Default::default()
+                    })
+                    .collect();
+                Ok(pb::reply::Kind::UserInfoList(pb::UserInfoList { users }))
             }
             pb::command::Kind::Contacts(_) => Ok(pb::reply::Kind::ContactList(self.account()?.contacts())),
             pb::command::Kind::Groups(_) => Ok(pb::reply::Kind::GroupList(self.account()?.groups())),

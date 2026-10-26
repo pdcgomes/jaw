@@ -307,6 +307,10 @@ func (e *Engine) say(evt any) {
 			Name:    string(v.Name),
 			Version: v.Version,
 		}}})
+	case *events.Presence:
+		e.send(&enginepb.Event{Kind: &enginepb.Event_Presence{Presence: presenceUpdate(v)}})
+	case *events.ChatPresence:
+		e.send(&enginepb.Event{Kind: &enginepb.Event_Typing{Typing: typing(v)}})
 	case *events.Connected:
 		e.connection(enginepb.Connection_CONNECTED, "")
 	case *events.Disconnected:
@@ -500,6 +504,10 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 		return e.avatar(c.Avatar)
 	case *enginepb.Command_HistoryRequest:
 		return e.historyRequest(c.HistoryRequest)
+	case *enginepb.Command_SubscribePresence:
+		return e.subscribePresence(c.SubscribePresence)
+	case *enginepb.Command_UserInfo:
+		return e.userInfo(c.UserInfo)
 	}
 	if reply := e.sending(cmd); reply != nil {
 		return reply

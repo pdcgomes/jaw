@@ -341,6 +341,7 @@ mod sending {
             pushes.clone(),
             Some(supervisor.clone()),
             home.into(),
+            Default::default(),
         );
         tokio::spawn(sync);
         let attention = Arc::new(crate::attention::Attention::default());
