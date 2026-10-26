@@ -786,6 +786,60 @@ async fn a_failed_send_deleted_for_you_takes_its_rows_and_jaws_copy_of_your_file
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_copy_on_its_way_stays_in_a_full_cache_even_once_its_message_is_deleted_for_you() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let wait = Duration::from_secs(2);
+    let rig =
+        Rig::with(home.path(), world(), Config { cache_bytes: 1, retry_first: wait, retry_most: wait, ..quick() })
+            .await;
+    // Its first upload fails, so it waits to be uploaded again with no job holding its file.
+    rig.world.fail_uploads(1);
+    let path = yours(picked.path(), "a.jpg", &Picture::lake(640, 480));
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    rig.until(&id, "its copy made", |row| row["media"]["state"] == "local").await;
+    let failed_once = tokio::time::timeout(Duration::from_secs(10), async {
+        while rig.world.uploads().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    failed_once.await.expect("an upload was tried");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // As on the phone, deleting it for you doesn't stop it going, so nothing but the copy on its way
+    // names its file.
+    rig.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+    let path: String = rig
+        .query(|db| {
+            Ok(db.query_row("SELECT f.path FROM outgoing g JOIN media_files f ON f.sha256 = g.sha256", [], |r| {
+                r.get(0)
+            })?)
+        })
+        .await;
+    let file = home.path().join(path);
+    for _ in 0..5 {
+        rig.media.inner.clean.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(rig.world.uploads().len(), 1, "still waiting to be uploaded again");
+    assert!(file.exists(), "the cache is over its size, and the copy on its way stays: {:?}", rig.media.status());
+    let went = tokio::time::timeout(Duration::from_secs(30), async {
+        while rig.sent(&id).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    went.await.expect("it went");
+    for _ in 0..300 {
+        rig.media.inner.clean.notify_one();
+        if !file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!file.exists(), "once it has gone, nothing names its file, and the cache drops it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn status_reports_the_lanes_and_whats_on_its_way() {
     let home = tempfile::tempdir().unwrap();
     let picked = tempfile::tempdir().unwrap();
