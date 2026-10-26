@@ -725,7 +725,11 @@ async fn status_reports_the_cache_and_what_waits() {
     rig.world.expire(&lake.direct_path);
     rig.world.phone(Phone::Silent);
     rig.photo(&lake, ANA, ANA, "3EB0WAIT").await;
-    rig.until(ANA, "3EB0WAIT", "waiting for the phone", |row| row["media"]["state"] == "waiting_for_phone").await;
+    // Its thumbnail is drawn while its file is looked for.
+    rig.until(ANA, "3EB0WAIT", "waiting for the phone, with its thumbnail", |row| {
+        row["media"]["state"] == "waiting_for_phone" && row["media"]["thumbnail"].is_string()
+    })
+    .await;
     let status = rig.media.status();
     assert_eq!(
         (status.waiting_for_phone, status.cache_limit, status.auto_bytes),

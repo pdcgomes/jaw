@@ -246,63 +246,27 @@ pub(super) fn downloads_by_itself(inner: &Inner, copy: &Wanted) -> bool {
     }
 }
 
-/// Does one copy: its thumbnail, its file if it's to be downloaded, its previews, then settles it.
+/// Does one copy: its thumbnail while its file downloads, if it's to be, then its previews, then
+/// settles it.
 async fn job(inner: &Arc<Inner>, copy: Wanted) {
     let priority = if copy.asked { Priority::Interactive } else { Priority::Background };
     let key = (copy.message, copy.variant);
-    let settle = |state: &'static str, error: Option<String>| {
-        Change::Media(Step::Settled { message: copy.message, variant: copy.variant, wanted: copy.wanted, state, error })
-    };
     // A view-once message's file, and its thumbnail, are never kept.
     if copy.view_once {
-        let _ = inner.store.apply(Lane::Live, vec![settle(leave(&copy.state), None)]).await;
+        let _ = inner.store.apply(Lane::Live, vec![settled(&copy, leave(&copy.state), None)]).await;
         return;
     }
-    if copy.variant == "sd"
-        && copy.has_thumbnail
-        && !copy.thumbnail
-        && let Drawn::Failed(why) = previews::thumbnail(inner, &copy, priority).await
-    {
-        eprintln!("jawd: no instant preview for message {} this time: {why}", copy.message);
-    }
-    // A copy left downloading is one whose download, shared with another message's copy, was
-    // cancelled for that one, and is downloaded again.
-    let fresh = matches!(copy.state.as_str(), "remote" | "downloading");
-    let fetching = copy.local.is_none() && (copy.asked || (fresh && downloads_by_itself(inner, &copy)));
-    let path = match (&copy.local, fetching) {
-        (Some(path), _) => Some(path.clone()),
-        (None, false) => None,
-        (None, true) => {
-            let downloading = Step::Downloading { message: copy.message, variant: copy.variant };
-            let _ = inner.store.apply(Lane::Live, vec![Change::Media(downloading)]).await;
-            match fetch::file(inner, &copy, priority).await {
-                Fetched::Placed { path, .. } => Some(path),
-                Fetched::Gone(why) => {
-                    if fetch::gone(inner, &copy, why.clone()).await {
-                        later(inner, &copy, why).await;
-                    }
-                    return;
-                }
-                Fetched::BadHash(why) => {
-                    let _ = inner.store.apply(Lane::Live, vec![settle("expired", Some(why))]).await;
-                    return;
-                }
-                Fetched::NoSpace(why) if copy.asked => {
-                    let _ = inner.store.apply(Lane::Live, vec![settle("remote", Some(why))]).await;
-                    return;
-                }
-                Fetched::NoSpace(why) | Fetched::Later(why) => {
-                    later(inner, &copy, why).await;
-                    return;
-                }
-                Fetched::Never(why) => {
-                    let _ = inner.store.apply(Lane::Live, vec![settle("remote", Some(why))]).await;
-                    return;
-                }
-                Fetched::Cancelled => return,
-            }
+    let thumbnail = async {
+        if copy.variant == "sd"
+            && copy.has_thumbnail
+            && !copy.thumbnail
+            && let Drawn::Failed(why) = previews::thumbnail(inner, &copy, priority).await
+        {
+            eprintln!("jawd: no instant preview for message {} this time: {why}", copy.message);
         }
     };
+    let (_, path) = tokio::join!(thumbnail, file(inner, &copy, priority));
+    let Some(path) = path else { return };
     inner.schedule.later.lock().expect("schedule").remove(&key);
     if let Some(path) = &path
         && copy.variant == "sd"
@@ -312,7 +276,45 @@ async fn job(inner: &Arc<Inner>, copy: Wanted) {
         eprintln!("jawd: no previews for message {} this time: {why}", copy.message);
     }
     let state = if path.is_some() || copy.state == "downloading" { "remote" } else { leave(&copy.state) };
-    let _ = inner.store.apply(Lane::Live, vec![settle(state, None)]).await;
+    let _ = inner.store.apply(Lane::Live, vec![settled(&copy, state, None)]).await;
+}
+
+/// The copy's file: the one in place, or the one downloaded now if it's to be; None if the job
+/// ends here, having said why or left the copy to be tried again.
+async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) -> Option<Option<String>> {
+    // A copy left downloading is one whose download, shared with another message's copy, was
+    // cancelled for that one, and is downloaded again.
+    let fresh = matches!(copy.state.as_str(), "remote" | "downloading");
+    let fetching = copy.local.is_none() && (copy.asked || (fresh && downloads_by_itself(inner, copy)));
+    match (&copy.local, fetching) {
+        (Some(path), _) => return Some(Some(path.clone())),
+        (None, false) => return Some(None),
+        (None, true) => {}
+    }
+    let downloading = Step::Downloading { message: copy.message, variant: copy.variant };
+    let _ = inner.store.apply(Lane::Live, vec![Change::Media(downloading)]).await;
+    let settle = |state: &'static str, why: String| async move {
+        let _ = inner.store.apply(Lane::Live, vec![settled(copy, state, Some(why))]).await;
+    };
+    match fetch::file(inner, copy, priority).await {
+        Fetched::Placed { path, .. } => return Some(Some(path)),
+        Fetched::Gone(why) => {
+            if fetch::gone(inner, copy, why.clone()).await {
+                later(inner, copy, why).await;
+            }
+        }
+        Fetched::BadHash(why) => settle("expired", why).await,
+        Fetched::NoSpace(why) if copy.asked => settle("remote", why).await,
+        Fetched::NoSpace(why) | Fetched::Later(why) => later(inner, copy, why).await,
+        Fetched::Never(why) => settle("remote", why).await,
+        Fetched::Cancelled => {}
+    }
+    None
+}
+
+/// The change that leaves `copy` in `state`, done with for now, unless it was wanted again since.
+fn settled(copy: &Wanted, state: &'static str, error: Option<String>) -> Change {
+    Change::Media(Step::Settled { message: copy.message, variant: copy.variant, wanted: copy.wanted, state, error })
 }
 
 /// The state a copy jawd had nothing more to do for keeps.
