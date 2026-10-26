@@ -194,6 +194,8 @@ pub struct MessageRow {
     pub view_once: bool,
     /// Each emoji, how many reacted with it, and whether you did, in the order they first came.
     pub reactions: Box<RawValue>,
+    /// The JID of whoever wrote the message it quotes, which `reply` shows as their name.
+    pub quoted: Option<String>,
 }
 
 /// Who sent a message: the person and the name to show.
@@ -347,10 +349,11 @@ const MESSAGE_COLUMNS: &str = "
             FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed'
                 ORDER BY n)),
         iif(instr(m.detail, '\"thumbnail\":\"') > 0, (SELECT h.sha256 FROM thumbnails h
-            WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL)";
+            WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL),
+        m.reply ->> 'from'";
 
 /// How many columns MESSAGE_COLUMNS has, for queries that select more after them.
-const MESSAGE_COLUMN_COUNT: usize = 28;
+const MESSAGE_COLUMN_COUNT: usize = 29;
 
 /// What a poll's tallies are counted from as a window reads it, each a range of the poll's own
 /// rows: its options, each voter's latest vote with the person their JID is, and what each chose.
@@ -570,6 +573,7 @@ fn message_row(r: &Row, polls: &mut Polls) -> rusqlite::Result<MessageRow> {
         view_once: r.get(18)?,
         reactions: json(Some(reactions))?.expect("reactions are always there"),
         from,
+        quoted: r.get(28)?,
     })
 }
 
@@ -817,6 +821,16 @@ pub fn events(db: &Connection, since: i64, limit: usize) -> Result<Vec<Event>> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(events)
+}
+
+/// Every JID `people` have now, the ones rows name them by.
+pub fn jids_of(db: &Connection, people: &[i64]) -> Result<Vec<String>> {
+    let people = serde_json::to_string(people)?;
+    let jids = db
+        .prepare_cached("SELECT jid FROM person_jids WHERE person IN (SELECT value FROM json_each(?1))")?
+        .query_map([people], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(jids)
 }
 
 /// The oldest seq the feed keeps and its last, or zeros before anything changed. Each is its own

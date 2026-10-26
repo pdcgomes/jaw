@@ -15,6 +15,8 @@ mod tests;
 mod window;
 
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,6 +40,18 @@ pub struct Changes {
     /// Chats with messages changed or removed, by n.
     pub messages: HashSet<i64>,
     pub people: HashSet<i64>,
+    /// Every JID the people changed have now, `hashed`, which the rows that mention or quote them
+    /// name them by. Whoever comes to have a JID, by a new person or a number and a LID found to
+    /// be one, is among the people changed, so a row naming it is told the name it now shows.
+    pub jids: HashSet<u64>,
+}
+
+/// A JID as `Changes` and windows hold it, in a word rather than its text: two JIDs that hash
+/// alike only mark a window that didn't need it.
+pub(super) fn hashed(jid: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    jid.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// How a client's windows are paced.
@@ -171,10 +185,18 @@ async fn follow(store: Store, mut committed: watch::Receiver<i64>, changes: broa
         let last = *committed.borrow_and_update();
         while seen < last {
             let since = seen;
-            let events =
-                store.reads().query(Priority::Interactive, move |db| read::events(db, since, EVENTS_AT_ONCE)).await;
-            let events = match events {
-                Ok(events) => events,
+            let read = store
+                .reads()
+                .query(Priority::Interactive, move |db| {
+                    let events = read::events(db, since, EVENTS_AT_ONCE)?;
+                    let people: Vec<i64> =
+                        events.iter().filter(|event| event.kind == "person").map(|event| event.key).collect();
+                    let jids = if people.is_empty() { Vec::new() } else { read::jids_of(db, &people)? };
+                    Ok((events, jids))
+                })
+                .await;
+            let (events, jids) = match read {
+                Ok(read) => read,
                 Err(e) => {
                     eprintln!("jawd: the feed can't read what changed: {e:#}");
                     break;
@@ -187,6 +209,7 @@ async fn follow(store: Store, mut committed: watch::Receiver<i64>, changes: broa
                 chats: HashSet::new(),
                 messages: HashSet::new(),
                 people: HashSet::new(),
+                jids: jids.iter().map(|jid| hashed(jid)).collect(),
             };
             for event in &events {
                 match (event.kind.as_str(), event.chat) {

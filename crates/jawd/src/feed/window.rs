@@ -10,6 +10,7 @@ use jaw_proto::windows as proto;
 use rusqlite::Connection;
 use serde_json::{Map, Value};
 
+use super::hashed;
 use crate::store::read::{self, Around, ChatCursor, MessageCursor};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -69,6 +70,9 @@ pub(super) struct Snapshot {
     pub chat: Option<i64>,
     /// The people who sent a messages window's rows.
     pub senders: HashSet<i64>,
+    /// The JIDs a messages window's rows mention or quote someone by, `hashed`, whether or not
+    /// jaw knows whose they are yet.
+    pub named: HashSet<u64>,
 }
 
 pub(super) enum Rows {
@@ -90,6 +94,7 @@ pub(super) fn query(db: &Connection, mut spec: Spec, only: Option<Vec<i64>>) -> 
         rows: Rows::Chats(Vec::new()),
         chat: None,
         senders: HashSet::new(),
+        named: HashSet::new(),
     };
     match &mut spec {
         Spec::Chats(spec) => {
@@ -146,10 +151,23 @@ pub(super) fn query(db: &Connection, mut spec: Spec, only: Option<Vec<i64>>) -> 
                 }
             };
             snapshot.senders = rows.iter().filter_map(|row| row.from.as_ref().map(|from| from.id)).collect();
-            snapshot.rows = Rows::Messages(rows.into_iter().map(|row| (row.n, message_row(row))).collect());
+            snapshot.named = rows.iter().filter_map(|row| row.quoted.as_deref().map(hashed)).collect();
+            let rows: Vec<(i64, proto::MessageRow)> = rows.into_iter().map(|row| (row.n, message_row(row))).collect();
+            snapshot.named.extend(rows.iter().flat_map(|(_, row)| mentioned(&row.spans)).map(hashed));
+            snapshot.rows = Rows::Messages(rows);
         }
     }
     Ok((snapshot, spec))
+}
+
+/// The JIDs a row's spans mention someone by.
+fn mentioned(spans: &Value) -> impl Iterator<Item = &str> {
+    spans
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|span| span["t"] == "mention")
+        .filter_map(|span| span["person"].as_str())
 }
 
 /// A chat's sort on the wire: the store's, then its n, so no two chats share one.

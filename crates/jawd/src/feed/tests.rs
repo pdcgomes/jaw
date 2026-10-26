@@ -78,6 +78,23 @@ fn text(chat: &str, id: &str, at: i64, sender: Option<&str>, words: &str) -> Mes
     }
 }
 
+/// A message from `sender` mentioning `whom` by their JID, as WhatsApp sends one.
+fn mentioning(chat: &str, id: &str, at: i64, sender: &str, whom: &str) -> Message {
+    let number = whom.split('@').next().unwrap_or(whom);
+    let spans = json!([{"t": "text", "s": "ask "}, {"t": "mention", "s": format!("@{number}"), "person": whom}]);
+    Message { spans: Some(spans.to_string()), ..text(chat, id, at, Some(sender), &format!("ask @{number}")) }
+}
+
+/// A message from `sender` quoting `quoted`, which `whom` wrote.
+fn quoting(chat: &str, id: &str, at: i64, sender: &str, quoted: &str, whom: &str) -> Message {
+    let reply = json!({"id": quoted, "from": whom, "summary": "Saturday at 9?"});
+    Message { reply: Some(reply.to_string()), ..text(chat, id, at, Some(sender), "works for me") }
+}
+
+fn named(jid: &str, name: &str) -> Person {
+    Person { jids: vec![jid.into()], name: Some(name.into()), ..Person::default() }
+}
+
 /// A window as an interface holds it, built only from results and pushes.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Model {
@@ -362,7 +379,23 @@ impl World {
             _ if chat.ends_with("@g.us") => Some(person(DIRECT + self.rng.below(4))),
             _ => Some(chat.clone()),
         };
-        let message = text(&chat, &id, at, sender.as_deref(), &format!("words {}", self.rng.next() % 1000));
+        let mut message = text(&chat, &id, at, sender.as_deref(), &format!("words {}", self.rng.next() % 1000));
+        // Now and then one mentions someone or quotes an earlier message, so windows name people
+        // who wrote none of their rows, and see them renamed.
+        match self.rng.below(8) {
+            0 if chat.ends_with("@g.us") => {
+                let whom = person(self.rng.below(DIRECT + 4));
+                message.spans = Some(json!([{"t": "mention", "s": "@someone", "person": whom}]).to_string());
+            }
+            1 if !self.messages.is_empty() => {
+                let quoted = self.rng.pick(&self.messages).clone();
+                if let Some(from) = quoted.sender {
+                    let reply = json!({"id": quoted.id, "from": from, "summary": quoted.summary});
+                    message.reply = Some(reply.to_string());
+                }
+            }
+            _ => {}
+        }
         self.messages.push(message.clone());
         message
     }
@@ -1527,6 +1560,163 @@ async fn a_connection_takes_another_ones_read_only_if_it_has_every_change_heard_
     check(&bed, &waiting, &waiting_watched, "the connection that waited for its read").await;
     reading.settle(seq).await;
     check(&bed, &reading, &reading_watched, "the connection that read first").await;
+}
+
+/// The newest `before` messages in the group.
+fn group(before: usize) -> Want {
+    Want::Messages { chat: GROUP.into(), anchor: None, before, after: 0 }
+}
+
+// The tests of names make their connections before they write, so settling waits for what was
+// written to come to them, and only the change a test makes next can mark a window.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_is_told_the_new_name_of_someone_its_rows_only_mention() {
+    let bed = Bed::new(brisk());
+    let (writer, mentioned) = (person(DIRECT), person(DIRECT + 1));
+    let mut watcher = bed.watcher(64);
+    let seq = bed
+        .apply(vec![
+            Change::Person(named(&mentioned, "Bea Lopes")),
+            Change::Message(mentioning(GROUP, "g1", 1_000, &writer, &mentioned)),
+        ])
+        .await;
+    let watched = watch_all(&mut watcher, &[group(10)]).await;
+    watcher.settle(seq).await;
+    assert_eq!(watcher.windows[&watched[0].0].rows["g1"]["spans"][1]["s"], "@Bea Lopes");
+
+    let seq = bed.apply(vec![Change::Person(named(&mentioned, "Bea Martins"))]).await;
+    watcher.settle(seq).await;
+    assert_eq!(watcher.windows[&watched[0].0].rows["g1"]["spans"][1]["s"], "@Bea Martins");
+    check(&bed, &watcher, &watched, "once someone only mentioned is renamed").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_is_told_the_new_name_of_someone_its_rows_only_quote() {
+    let bed = Bed::new(brisk());
+    let (writer, quoted) = (person(DIRECT), person(DIRECT + 1));
+    let mut watcher = bed.watcher(64);
+    let seq = bed
+        .apply(vec![
+            Change::Person(named(&quoted, "Bea Lopes")),
+            Change::Message(text(GROUP, "q1", 1_000, Some(&quoted), "Saturday at 9?")),
+            Change::Message(quoting(GROUP, "g1", 2_000, &writer, "q1", &quoted)),
+            Change::Message(text(GROUP, "g2", 3_000, Some(&writer), "or Sunday")),
+        ])
+        .await;
+    // The window holds the two newest, so whoever is quoted wrote none of its rows.
+    let watched = watch_all(&mut watcher, &[group(2)]).await;
+    watcher.settle(seq).await;
+    assert!(!watcher.windows[&watched[0].0].rows.contains_key("q1"));
+    assert_eq!(watcher.windows[&watched[0].0].rows["g1"]["reply"]["from"], "Bea Lopes");
+
+    let seq = bed.apply(vec![Change::Person(named(&quoted, "Bea Martins"))]).await;
+    watcher.settle(seq).await;
+    assert_eq!(watcher.windows[&watched[0].0].rows["g1"]["reply"]["from"], "Bea Martins");
+    check(&bed, &watcher, &watched, "once someone only quoted is renamed").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_is_told_the_name_of_someone_its_rows_mention_once_jaw_learns_who_they_are() {
+    let bed = Bed::new(brisk());
+    let (writer, stranger) = (person(DIRECT), person(DIRECT + 1));
+    let mut watcher = bed.watcher(64);
+    let seq = bed.apply(vec![Change::Message(mentioning(GROUP, "g1", 1_000, &writer, &stranger))]).await;
+    let watched = watch_all(&mut watcher, &[group(10)]).await;
+    watcher.settle(seq).await;
+    assert_eq!(watcher.windows[&watched[0].0].rows["g1"]["spans"][1]["s"], "@351910000009");
+
+    // No one had that JID, so the person jaw makes for it is one no window could have known of.
+    let seq = bed.apply(vec![Change::Person(named(&stranger, "Cris Neves"))]).await;
+    watcher.settle(seq).await;
+    assert_eq!(watcher.windows[&watched[0].0].rows["g1"]["spans"][1]["s"], "@Cris Neves");
+    check(&bed, &watcher, &watched, "once someone mentioned is someone jaw knows").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_is_told_the_name_its_mention_takes_when_a_number_and_a_lid_turn_out_one_person() {
+    let bed = Bed::new(brisk());
+    let (writer, number, lid) = (person(DIRECT), person(DIRECT + 1), "84726193520417@lid".to_string());
+    let mut watcher = bed.watcher(64);
+    let seq = bed
+        .apply(vec![
+            Change::Person(Person { jids: vec![lid.clone()], ..Person::default() }),
+            Change::Person(named(&number, "Dora Reis")),
+            Change::Message(mentioning(GROUP, "g1", 1_000, &writer, &lid)),
+        ])
+        .await;
+    let watched = watch_all(&mut watcher, &[group(10)]).await;
+    watcher.settle(seq).await;
+    assert_eq!(watcher.windows[&watched[0].0].rows["g1"]["spans"][1]["s"], "@84726193520417");
+
+    let joined = Person { jids: vec![number.clone(), lid.clone()], ..Person::default() };
+    let seq = bed.apply(vec![Change::Person(joined)]).await;
+    watcher.settle(seq).await;
+    assert_eq!(watcher.windows[&watched[0].0].rows["g1"]["spans"][1]["s"], "@Dora Reis");
+    check(&bed, &watcher, &watched, "once the LID mentioned is joined to a named number").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_holding_a_name_since_changed_is_not_taken_by_a_connection_that_heard_of_the_change() {
+    // Reads 400 ms apart, so one connection's window waits for its next read while another's reads.
+    let timing = Timing { quiet: ms(1), burst: ms(400), ..brisk() };
+    let bed = Bed::new(timing);
+    let (writer, mentioned) = (person(DIRECT), person(DIRECT + 1));
+    let (mut waiting, mut reading) = (bed.watcher(64), bed.watcher(64));
+    bed.apply(vec![
+        Change::Person(named(&mentioned, "Bea Lopes")),
+        Change::Message(text(GROUP, "g1", 1_000, Some(&writer), "hi")),
+    ])
+    .await;
+    let waiting_watched = watch_all(&mut waiting, &[group(10)]).await;
+    let reading_watched = watch_all(&mut reading, &[group(10)]).await;
+
+    // One connection reads the group, and a burst later the other takes that read, which keeps it
+    // from reading again for a burst.
+    let seq = bed.apply(vec![Change::Message(text(GROUP, "g2", 2_000, Some(&writer), "again"))]).await;
+    reading.settle(seq).await;
+    tokio::time::sleep(timing.burst + ms(50)).await;
+    waiting.settle(seq).await;
+
+    // A message mentions her, and the connection free to read reads it with her old name. She's
+    // renamed a moment later, which doesn't touch the group as the waiting connection holds it,
+    // since none of its rows name her; the read with her old name is no use to it all the same.
+    let seq = bed.apply(vec![Change::Message(mentioning(GROUP, "g3", 3_000, &writer, &mentioned))]).await;
+    reading.settle(seq).await;
+    assert_eq!(reading.windows[&reading_watched[0].0].rows["g3"]["spans"][1]["s"], "@Bea Lopes");
+    let seq = bed.apply(vec![Change::Person(named(&mentioned, "Bea Martins"))]).await;
+    waiting.settle(seq).await;
+    assert_eq!(waiting.windows[&waiting_watched[0].0].rows["g3"]["spans"][1]["s"], "@Bea Martins");
+    check(&bed, &waiting, &waiting_watched, "the connection that waited for its read").await;
+    reading.settle(seq).await;
+    check(&bed, &reading, &reading_watched, "the connection that read the old name").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_reads_again_only_the_windows_whose_rows_name_whoever_was_renamed() {
+    let bed = Bed::new(brisk());
+    let (writer, mentioned, other) = (person(DIRECT), person(DIRECT + 1), person(DIRECT + 2));
+    let mut watcher = bed.watcher(64);
+    let seq = bed
+        .apply(vec![
+            Change::Person(named(&mentioned, "Bea Lopes")),
+            Change::Person(named(&other, "Rui Lopes")),
+            Change::Message(mentioning(GROUP, "g1", 1_000, &writer, &mentioned)),
+            Change::Message(text(OPEN, "o1", 1_000, Some(OPEN), "hello")),
+        ])
+        .await;
+    let open = Want::Messages { chat: OPEN.into(), anchor: None, before: 10, after: 0 };
+    let watched = watch_all(&mut watcher, &[group(10), open]).await;
+    watcher.settle(seq).await;
+    let before = bed.feed.reads();
+
+    let seq = bed.apply(vec![Change::Person(named(&other, "Rui Martins"))]).await;
+    watcher.settle(seq).await;
+    assert_eq!(bed.feed.reads(), before, "no window's rows name him");
+    let seq = bed.apply(vec![Change::Person(named(&mentioned, "Bea Martins"))]).await;
+    watcher.settle(seq).await;
+    assert_eq!(bed.feed.reads(), before + 1, "only the group's rows name her");
+    check(&bed, &watcher, &watched, "once she's renamed").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

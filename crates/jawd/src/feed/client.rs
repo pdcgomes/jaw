@@ -19,7 +19,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -207,6 +207,7 @@ struct Found {
     rows: Vec<Line>,
     chat: Option<i64>,
     senders: HashSet<i64>,
+    named: HashSet<u64>,
     /// The window as it was read, its anchor where the read found it.
     spec: Spec,
     /// The bytes it holds, about.
@@ -350,7 +351,8 @@ fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
     };
     let bytes = size_of::<Found>()
         + rows.iter().map(Line::bytes).sum::<usize>()
-        + snapshot.senders.capacity() * size_of::<i64>();
+        + snapshot.senders.capacity() * size_of::<i64>()
+        + snapshot.named.capacity() * size_of::<u64>();
     Found {
         fresh: from.max(snapshot.seq),
         seq: snapshot.seq,
@@ -360,6 +362,7 @@ fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
         rows,
         chat: snapshot.chat,
         senders: snapshot.senders,
+        named: snapshot.named,
         spec,
         bytes: bytes as u64,
     }
@@ -413,6 +416,8 @@ struct State {
     /// A messages window's chat, by n, once it exists.
     chat: Option<i64>,
     senders: HashSet<i64>,
+    /// The JIDs its rows mention or quote someone by, as the read it was settled from has them.
+    named: HashSet<u64>,
 }
 
 /// A row as its interface holds it.
@@ -464,6 +469,12 @@ impl Row for MessageRow {
     }
 }
 
+/// Whether two sets have anything in common, looking up the smaller's in the larger.
+fn meet<T: Eq + Hash>(a: &HashSet<T>, b: &HashSet<T>) -> bool {
+    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    small.iter().any(|item| large.contains(item))
+}
+
 /// The rows of `rows` an interface holding `held` lacks or holds otherwise, leaving out those it
 /// holds that haven't changed since `since`; the ids it holds that aren't in `rows`; and what it
 /// holds afterwards.
@@ -508,6 +519,7 @@ fn settle<'a>(held: &HashMap<String, Held>, found: &'a Found, since: Option<i64>
         newer: found.newer,
         chat: found.chat,
         senders: found.senders.clone(),
+        named: found.named.clone(),
     };
     (update, state)
 }
@@ -673,7 +685,8 @@ impl Window {
             (Spec::Messages(_), Some(chat)) => {
                 changes.messages.contains(&chat)
                     || changes.chats.contains(&chat)
-                    || self.state.senders.iter().any(|sender| changes.people.contains(sender))
+                    || meet(&self.state.senders, &changes.people)
+                    || meet(&self.state.named, &changes.jids)
             }
             (Spec::Messages(_), None) => !changes.chats.is_empty(),
         }
