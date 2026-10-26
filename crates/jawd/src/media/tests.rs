@@ -617,6 +617,18 @@ async fn a_view_once_photo_is_never_kept_and_a_deleted_ones_file_cant_be_fetched
     assert_eq!(row["view_once"], json!(true));
     let refused = rig.call("media.fetch", json!({ "message": "3EB0ONCE" })).await.unwrap_err();
     assert_eq!(refused.code, jaw_proto::code::NOT_ALLOWED);
+    // Wanted however it came to be, its job settles it without downloading or drawing anything.
+    let n: i64 = rig.query(|db| Ok(db.query_row("SELECT message FROM media", [], |r| r.get(0))?)).await;
+    let wanted = Change::Media(Step::Want { message: n, variant: "sd", at: now_ms(), asked: true });
+    rig.store.apply(Lane::Live, vec![wanted]).await.unwrap();
+    for _ in 0..500 {
+        let settled: bool =
+            rig.query(|db| Ok(db.query_row("SELECT wanted IS NULL FROM media", [], |r| r.get(0))?)).await;
+        if settled {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.world.downloads(), 0);
     assert!(rig.row(ANA, "3EB0ONCE").await["media"]["thumbnail"].is_null());
