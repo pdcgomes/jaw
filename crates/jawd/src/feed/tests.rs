@@ -4004,6 +4004,38 @@ mod folders {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_change_to_the_open_chat_reaches_its_conversation_before_the_tree_and_the_roster() {
+        let bed = Bed::new(brisk());
+        bed.apply(vec![Change::Message(text(ANA, "a0", AT, Some(ANA), "olá"))]).await;
+        let mut watcher = bed.watcher(64);
+        // Watched first, so they'd be read first if the order of watching decided.
+        let tree = watcher.watch("folders.watch", json!({})).await;
+        let roster = watcher.watch("roster.watch", json!({"folder": "all", "around": "top", "after": 20})).await;
+        let messages = watcher.watch("messages.watch", json!({"chat": ANA, "around": "newest", "before": 50})).await;
+        // Her message counts in the tree, and a contact comes into the roster with it.
+        let said = Message { live: true, ..text(ANA, "a1", AT + 1, Some(ANA), "e agora?") };
+        let contact = Person { jids: vec![INES.into()], name: Some("Inês".into()), ..Person::default() };
+        let seq = bed.apply(vec![Change::Message(said), Change::Person(contact)]).await;
+        while watcher.seen < seq || watcher.client.pending() {
+            let ready =
+                tokio::time::timeout(Duration::from_secs(10), watcher.client.ready()).await.expect("nothing happened");
+            if let Ready::Changes(Ok(changes)) = &ready {
+                watcher.seen = watcher.seen.max(changes.seq);
+            }
+            watcher.client.handle(ready).await;
+        }
+        let mut order = Vec::new();
+        while let Ok(line) = watcher.lines.try_recv() {
+            let FromJawd::Push(push) = serde_json::from_slice(&line).unwrap() else {
+                panic!("a reply among the pushes")
+            };
+            order.push(push.params["watch"].as_str().unwrap().to_string());
+        }
+        assert_eq!(order.first(), Some(&messages), "{order:?}");
+        assert!(order.contains(&tree) && order.contains(&roster), "all three changed: {order:?}");
+    }
+
     /// A folder's chat list as a fresh read gives it, whole, as its window should hold it.
     async fn listed(bed: &Bed, list: List, after: usize) -> Model {
         let rows = bed

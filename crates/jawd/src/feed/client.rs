@@ -1261,10 +1261,10 @@ impl Client {
                     .flatten()
                     .any(|due| due <= now)
             })
-            .map(|(watch, window)| (matches!(window.spec, Spec::Chats(_)), watch.clone()))
+            .map(|(watch, window)| (!matches!(window.spec, Spec::Messages(_)), watch.clone()))
             .collect();
-        // Conversations first: a lone message shows there, and the chat list can wait a read.
-        due.sort_by_key(|(chats, _)| *chats);
+        // Conversations first: a lone message shows there, and the lists can wait a read.
+        due.sort_by_key(|(list, _)| *list);
         #[cfg(test)]
         if !due.is_empty() {
             self.shared.pause().await;
