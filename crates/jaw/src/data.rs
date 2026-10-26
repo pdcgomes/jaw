@@ -68,6 +68,34 @@ pub struct Chat {
     /// The IDs of your folders it sits in directly.
     #[serde(default)]
     pub folders: Vec<String>,
+    /// For a community, its groups' unread total, which its row shows.
+    #[serde(default)]
+    pub children_unread: Option<u32>,
+    /// Its Alt slot, 1 to 9.
+    #[serde(default)]
+    pub favourite: Option<u8>,
+}
+
+impl Chat {
+    /// The unread count its row shows: a community's is its groups'.
+    pub fn shown_unread(&self) -> u32 {
+        match self.kind {
+            ChatKind::Community => self.children_unread.unwrap_or(self.unread),
+            _ => self.unread,
+        }
+    }
+}
+
+/// What Alt and a number go to: a folder, or a chat by its ID with its name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Favourite {
+    pub slot: u8,
+    #[serde(default)]
+    pub folder: Option<String>,
+    #[serde(default)]
+    pub chat: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// A folder in the tree, as `folders.watch` sends it: built in, smart or yours.
@@ -888,11 +916,13 @@ pub enum Update {
     Recorded(Recorded),
     /// jawd turned down something asked of voice, and why.
     VoiceRefused(String),
-    /// The folder tree: rows changed or gone, or with `whole` every row.
+    /// The folder tree: rows changed or gone, or with `whole` every row; and the favourite slots
+    /// whole, when they changed.
     Folders {
         upsert: Vec<FolderRow>,
         remove: Vec<String>,
         whole: bool,
+        favourites: Option<Vec<Favourite>>,
     },
     /// The roster for `folder`: rows changed or gone, or with `whole` every row.
     Roster {
@@ -1025,6 +1055,8 @@ pub trait Jawd {
     /// Files a chat or a person into a folder, or takes it out.
     fn folder_add(&mut self, folder: &str, item: &str);
     fn folder_remove(&mut self, folder: &str, item: &str);
+    /// Puts a folder or a chat on Alt and `slot`, or empties the slot with `None`.
+    fn favourite_set(&mut self, slot: u8, target: Option<&str>);
     /// The open chat's messages: a new window, or the same one moved.
     fn watch_messages(&mut self, chat: &str, place: Place);
     /// The newest `newest` messages of each of `chats`, for the quick look, in windows of their

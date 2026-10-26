@@ -510,11 +510,11 @@ impl View {
                 Style::new().fg(t.mention).add_modifier(Modifier::BOLD),
             ));
         }
-        if chat.unread > 0 {
+        if chat.shown_unread() > 0 {
             right.push(Span::raw(" "));
             let style =
                 if muted { Style::new().fg(t.comment) } else { Style::new().fg(t.unread).add_modifier(Modifier::BOLD) };
-            right.push(Span::styled(chat.unread.to_string(), style));
+            right.push(Span::styled(chat.shown_unread().to_string(), style));
         }
         let right_w: usize = right.iter().map(|s| s.width()).sum();
         let typing = !chat.typing.is_empty();

@@ -3,7 +3,7 @@
 //! counted once, a chat list for any of them, and people whose presence changes as time goes by.
 
 use super::{Account, Later};
-use crate::data::{Chat, ChatKind, FolderRow, Presence, PresenceState, RosterRow, Update};
+use crate::data::{Chat, ChatKind, Favourite, FolderRow, Presence, PresenceState, RosterRow, Update};
 use crate::fmt::{DAY, MINUTE};
 use jaw_client::Update as Window;
 use serde_json::json;
@@ -78,6 +78,8 @@ pub struct Folders {
     pub watched: bool,
     /// The folder rows last sent, to send only those that changed.
     sent: HashMap<String, FolderRow>,
+    /// What Alt-1 to Alt-9 go to.
+    pub favourites: Vec<Favourite>,
 }
 
 impl Folders {
@@ -130,6 +132,16 @@ impl Folders {
             roster: None,
             watched: false,
             sent: HashMap::new(),
+            favourites: vec![
+                Favourite { slot: 1, folder: Some("folder:1".into()), ..Favourite::default() },
+                Favourite {
+                    slot: 2,
+                    chat: Some("ana".into()),
+                    name: Some("Ana Ribeiro".into()),
+                    ..Favourite::default()
+                },
+                Favourite { slot: 3, folder: Some("folder:5".into()), ..Favourite::default() },
+            ],
         }
     }
 
@@ -219,14 +231,15 @@ impl Account {
         for r in &changed {
             self.folders.sent.insert(r.id.clone(), r.clone());
         }
-        self.send(Update::Folders { upsert: changed, remove: vec![], whole: false });
+        self.send(Update::Folders { upsert: changed, remove: vec![], whole: false, favourites: None });
     }
 
     pub(super) fn on_watch_folders(&mut self) {
         self.folders.watched = true;
         let rows = self.folder_rows();
         self.folders.sent = rows.iter().map(|r| (r.id.clone(), r.clone())).collect();
-        self.send(Update::Folders { upsert: rows, remove: vec![], whole: true });
+        let favourites = Some(self.folders.favourites.clone());
+        self.send(Update::Folders { upsert: rows, remove: vec![], whole: true, favourites });
     }
 
     /// The people in a folder, sorted as jawd sorts them: around first, then by when last seen,
@@ -430,7 +443,9 @@ impl Account {
         self.folders.items.remove(folder);
         self.folders.sent.remove(folder);
         if self.folders.watched {
-            self.send(Update::Folders { upsert: vec![], remove: vec![folder.to_string()], whole: false });
+            self.folders.favourites.retain(|f| f.folder.as_deref() != Some(folder));
+            let favourites = Some(self.folders.favourites.clone());
+            self.send(Update::Folders { upsert: vec![], remove: vec![folder.to_string()], whole: false, favourites });
         }
         self.refiled();
     }
@@ -444,6 +459,30 @@ impl Account {
             items.push(item.to_string());
         }
         self.refiled();
+    }
+
+    /// Puts a folder or a chat on a slot, moving it off any other, or empties the slot.
+    pub(super) fn on_favourite_set(&mut self, slot: u8, target: Option<&str>) {
+        let favourites = &mut self.folders.favourites;
+        favourites.retain(|f| {
+            f.slot != slot && (target.is_none() || f.folder.as_deref() != target && f.chat.as_deref() != target)
+        });
+        if let Some(target) = target {
+            let folder = self.folders.rows.iter().find(|r| r.id == target).map(|r| r.id.clone());
+            let name = self.threads.iter().find(|t| t.chat.id == target).map(|t| t.chat.name.clone());
+            let chat = folder.is_none().then(|| target.to_string());
+            self.folders.favourites.push(Favourite { slot, folder, chat, name });
+            self.folders.favourites.sort_by_key(|f| f.slot);
+        }
+        for row in &mut self.folders.rows {
+            row.favourite =
+                self.folders.favourites.iter().find(|f| f.folder.as_deref() == Some(&row.id)).map(|f| f.slot);
+        }
+        if self.folders.watched {
+            let favourites = Some(self.folders.favourites.clone());
+            self.send(Update::Folders { upsert: vec![], remove: vec![], whole: false, favourites });
+        }
+        self.folders_changed();
     }
 
     pub(super) fn on_folder_remove(&mut self, folder: &str, item: &str) {

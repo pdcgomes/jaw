@@ -619,6 +619,40 @@ impl View {
         out
     }
 
+    /// Alt and a number: the folder on it becomes the chat list, or the chat on it opens.
+    pub(super) fn go_favourite(&mut self, slot: u8) {
+        let Some(favourite) = self.favourites.iter().find(|f| f.slot == slot).cloned() else {
+            self.say(format!("nothing is on alt-{slot}; the palette puts a folder or a chat there"));
+            return;
+        };
+        match (favourite.folder, favourite.chat) {
+            (Some(folder), _) => self.pick_folder(&folder),
+            (None, Some(chat)) => {
+                self.open_chat(&chat);
+                self.jawd.opened(&chat);
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// What Alt and `slot` go to now, as the palette names it.
+    pub(super) fn favourite_name(&self, slot: u8) -> Option<String> {
+        let favourite = self.favourites.iter().find(|f| f.slot == slot)?;
+        match (&favourite.folder, &favourite.chat) {
+            (Some(folder), _) => Some(self.folder_name(folder)),
+            (None, Some(chat)) => Some(favourite.name.clone().unwrap_or_else(|| chat.clone())),
+            (None, None) => None,
+        }
+    }
+
+    /// The slot a folder or a chat is on.
+    pub(super) fn favourite_of(&self, target: &str) -> Option<u8> {
+        self.favourites
+            .iter()
+            .find(|f| f.folder.as_deref() == Some(target) || f.chat.as_deref() == Some(target))
+            .map(|f| f.slot)
+    }
+
     /// Opens a community to show its groups, or closes it; says whether `id` was one.
     pub(super) fn toggle_community(&mut self, id: &str) -> bool {
         if self.chats.get(id).is_none_or(|c| c.kind != crate::data::ChatKind::Community) {

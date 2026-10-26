@@ -885,6 +885,11 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_folder_remove(&folder, &item));
     }
 
+    fn favourite_set(&mut self, slot: u8, target: Option<&str>) {
+        let target = target.map(String::from);
+        self.defer(move |a| a.on_favourite_set(slot, target.as_deref()));
+    }
+
     fn watch_messages(&mut self, chat: &str, place: Place) {
         let chat = chat.to_string();
         self.defer(move |a| a.on_watch_messages(&chat, place));
@@ -1171,6 +1176,8 @@ impl Writing {
             typing: vec![],
             community: None,
             folders: vec![],
+            children_unread: None,
+            favourite: None,
         };
         Writing { thread: Thread { chat, messages: vec![] }, now, seq: 0 }
     }
@@ -1481,6 +1488,7 @@ fn made_up(now: i64) -> Vec<Thread> {
     w.theirs(11.0 * days, &junta, "Recolha de monos na quinta-feira");
     let mut community = w.done(0, 0);
     community.chat.unread = unread;
+    community.chat.children_unread = Some(unread);
     community.messages.clear();
     threads.push(community);
 

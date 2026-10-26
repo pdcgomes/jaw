@@ -229,6 +229,8 @@ pub struct View {
     pub folder: String,
     folders: Vec<crate::data::FolderRow>,
     roster: Vec<crate::data::RosterRow>,
+    /// What Alt-1 to Alt-9 go to.
+    favourites: Vec<crate::data::Favourite>,
     sidebar: sidebar::Sidebar,
     /// Communities opened in the chat list to show their groups.
     communities_open: HashSet<String>,
@@ -360,6 +362,7 @@ impl View {
             folder: "all".into(),
             folders: sidebar::built_in(),
             roster: vec![],
+            favourites: vec![],
             sidebar: sidebar::Sidebar::default(),
             communities_open: HashSet::new(),
             unsure: vec![],
@@ -644,7 +647,12 @@ impl View {
             Update::Recorded(r) => self.on_recorded(r),
             Update::VoiceRefused(why) => self.voice_refused(why),
             Update::Members { chat, members } => self.on_members(chat, members),
-            Update::Folders { upsert, remove, whole } => self.on_folders(upsert, remove, whole),
+            Update::Folders { upsert, remove, whole, favourites } => {
+                self.on_folders(upsert, remove, whole);
+                if let Some(favourites) = favourites {
+                    self.favourites = favourites;
+                }
+            }
             Update::Roster { folder, upsert, remove, whole } => self.on_roster(folder, upsert, remove, whole),
             Update::FolderMade(row) => self.folder_made(*row),
             Update::Library { asked, window } => self.on_library(asked, window),

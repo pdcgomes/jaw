@@ -2568,3 +2568,36 @@ fn the_palette_opens_the_library() {
     press(&mut v, &rx, "<c-k>library\n");
     assert!(v.library.as_ref().is_some_and(|l| l.chat.is_none()));
 }
+
+#[test]
+fn alt_and_a_number_go_to_the_folder_or_chat_on_it_and_the_palette_puts_one_there() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<a-1>");
+    assert_eq!(v.folder, "folder:1", "Family is on alt-1");
+    press(&mut v, &rx, "<a-3>");
+    assert_eq!(v.folder, "folder:5", "Climbing on alt-3");
+    press(&mut v, &rx, "<a-2>");
+    assert_eq!(v.open.as_deref(), Some("ana"), "Ana's chat on alt-2");
+    press(&mut v, &rx, "<a-7>");
+    assert!(frame(&mut v).contains("nothing is on alt-7"), "an empty slot says so");
+    // The open chat onto alt-7 from the palette.
+    press(&mut v, &rx, "<c-k>put this chat\n");
+    let screen = frame(&mut v);
+    assert!(screen.contains("Alt-7") && screen.contains("nothing"), "the slots, and what's on each:\n{screen}");
+    press(&mut v, &rx, "<down><down><down><down><down><down>\n");
+    assert_eq!(v.favourite_of("ana"), Some(7), "moved from alt-2 to alt-7");
+    assert!(v.favourites.iter().all(|f| f.slot != 2), "a chat sits on one slot");
+    press(&mut v, &rx, "<a-1><a-7>");
+    assert_eq!(v.open.as_deref(), Some("ana"));
+}
+
+#[test]
+fn a_communitys_row_shows_its_groups_unread_total() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-b><down><down><down>\n");
+    assert_eq!(v.folder, "communities");
+    let screen = frame(&mut v);
+    let row = screen.lines().find(|l| l.contains("Bairro de Alvalade")).expect("the community's row");
+    let list = row.split("││").nth(1).unwrap_or_default();
+    assert!(list.trim_end().ends_with(" 3"), "its groups' 3 unread:\n{screen}");
+}

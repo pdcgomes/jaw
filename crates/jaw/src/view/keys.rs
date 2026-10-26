@@ -140,6 +140,12 @@ impl View {
             self.step_chat(if k.code == KeyCode::Up { -1 } else { 1 });
             return;
         }
+        if let KeyCode::Char(digit @ '1'..='9') = k.code
+            && alt
+        {
+            self.go_favourite(digit as u8 - b'0');
+            return;
+        }
         if self.sidebar.keys.is_some() {
             self.on_sidebar_key(k);
             return;

@@ -85,6 +85,10 @@ pub enum Does {
     Tick(String),
     /// Takes a chat out of a folder.
     Unfile(String, String),
+    /// Asks which Alt slot to put a folder or a chat on: its ID and name.
+    Favourite(String, String),
+    /// Puts a folder or a chat on Alt and the slot, or with `None` takes it off its slot.
+    FavouriteTo(String, Option<u8>),
     /// Ctrl-B's sidebar.
     Sidebar,
     /// Ctrl-L's library, across all chats.
@@ -203,6 +207,8 @@ pub struct Palette {
     pub scope: Option<(String, String)>,
     /// Mute asks how long: the chat and its name.
     pub muting: Option<(String, String)>,
+    /// Which Alt slot asks for a folder or a chat: its ID and name.
+    pub favouring: Option<(String, String)>,
     pub mode: Mode,
     /// The emoji found for what's typed while reacting, found once each time it changes.
     reactions: Vec<Action>,
@@ -227,6 +233,7 @@ impl Palette {
             narrow: Narrow::All,
             scope: None,
             muting: None,
+            favouring: None,
             mode: Mode::Find,
             reactions: vec![],
             asked: 0,
@@ -607,6 +614,12 @@ impl View {
                 ));
             }
         }
+        if let Some(f) = self.folder(&self.folder) {
+            let (id, name) = (f.id.clone(), f.name.clone());
+            let detail =
+                self.favourite_of(&id).map_or("alt and a number go to it".into(), |slot| format!("alt-{slot} now"));
+            all.push(Action::new(format!("Put {name} on alt-…"), detail, Does::Favourite(id, name)));
+        }
         let shown = if self.sidebar_shown() { "Fold the sidebar" } else { "Show the sidebar" };
         all.push(Action::new(shown, "the folders and the roster", Does::Sidebar).key("ctrl-b"));
         // "This chat" is the one open, or the one selected while the list has the screen.
@@ -627,6 +640,9 @@ impl View {
             all.push(Action::new(format!("{verb} this chat"), name.clone(), Does::Archive(id.clone(), archived)));
             let (verb, pinned) = if c.pinned { ("Unpin", false) } else { ("Pin", true) };
             all.push(Action::new(format!("{verb} this chat"), name.clone(), Does::Pin(id.clone(), pinned)));
+            let detail =
+                self.favourite_of(&id).map_or("alt and a number open it".into(), |slot| format!("alt-{slot} now"));
+            all.push(Action::new("Put this chat on alt-…", detail, Does::Favourite(id.clone(), name.clone())));
             let unread = c.unread > 0 || c.marked_unread;
             let verb = if unread { "Mark this chat read" } else { "Mark this chat unread" };
             all.push(Action::new(verb, name, Does::MarkUnread(id, !unread)));
@@ -749,6 +765,20 @@ impl View {
                 return items;
             }
             _ => {}
+        }
+        if let Some((id, name)) = &p.favouring {
+            let mut items = vec![Item::Heading("alt and a number", name.clone())];
+            for slot in 1..=9u8 {
+                let now = self.favourite_name(slot).unwrap_or_else(|| "nothing".into());
+                const KEYS: [&str; 9] =
+                    ["alt-1", "alt-2", "alt-3", "alt-4", "alt-5", "alt-6", "alt-7", "alt-8", "alt-9"];
+                let a = Action::new(format!("Alt-{slot}"), now, Does::FavouriteTo(id.clone(), Some(slot)));
+                items.push(Item::Action(a.key(KEYS[slot as usize - 1])));
+            }
+            if self.favourite_of(id).is_some() {
+                items.push(Item::Action(Action::new("Off its alt key", "", Does::FavouriteTo(id.clone(), None))));
+            }
+            return items;
         }
         if let Some((id, name)) = &p.muting {
             let now = self.now();
@@ -1134,6 +1164,26 @@ impl View {
                 if let Some(p) = self.palette.as_mut() {
                     p.muting = Some((id, name));
                     p.selected = 0;
+                }
+            }
+            Does::Favourite(id, name) => {
+                if let Some(p) = self.palette.as_mut() {
+                    p.favouring = Some((id, name));
+                    p.selected = 0;
+                }
+            }
+            Does::FavouriteTo(id, slot) => {
+                close(self);
+                match slot.or_else(|| self.favourite_of(&id)) {
+                    Some(on) if slot.is_some() => {
+                        self.jawd.favourite_set(on, Some(&id));
+                        self.say(format!("alt-{on} goes to it"));
+                    }
+                    Some(on) => {
+                        self.jawd.favourite_set(on, None);
+                        self.say(format!("alt-{on} is free"));
+                    }
+                    None => {}
                 }
             }
             Does::MuteFor(id, until, said) => {

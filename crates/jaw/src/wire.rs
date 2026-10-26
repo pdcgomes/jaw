@@ -521,7 +521,8 @@ impl Wire {
                     (Asked::Folders, Ok(result)) => {
                         self.folders = Some(result["watch"].as_str().map(String::from));
                         let upsert = serde_json::from_value(result["rows"].clone()).unwrap_or_default();
-                        out.push(Update::Folders { upsert, remove: vec![], whole: true });
+                        let favourites = serde_json::from_value(result["favourites"].clone()).ok();
+                        out.push(Update::Folders { upsert, remove: vec![], whole: true, favourites });
                     }
                     (Asked::Roster(folder), Ok(result)) => {
                         if self.roster.as_ref().is_some_and(|(f, _)| *f == folder) {
@@ -605,7 +606,8 @@ impl Wire {
             From::Push(push) if push.method == "folders" => {
                 let upsert = serde_json::from_value(push.params["upsert"].clone()).unwrap_or_default();
                 let remove = serde_json::from_value(push.params["remove"].clone()).unwrap_or_default();
-                out.push(Update::Folders { upsert, remove, whole: false });
+                let favourites = serde_json::from_value(push.params["favourites"].clone()).ok();
+                out.push(Update::Folders { upsert, remove, whole: false, favourites });
             }
             From::Push(push) if push.method == "roster" => {
                 let watch = push.params["watch"].as_str();
@@ -706,6 +708,10 @@ impl Jawd for Wire {
 
     fn folder_remove(&mut self, folder: &str, item: &str) {
         self.ask("folder.remove", json!({ "folder": folder, "item": item }), Asked::Did("filing into folders"));
+    }
+
+    fn favourite_set(&mut self, slot: u8, target: Option<&str>) {
+        self.ask("favourite.set", json!({ "slot": slot, "target": target }), Asked::Did("favourites"));
     }
 
     fn watch_messages(&mut self, chat: &str, place: Place) {
