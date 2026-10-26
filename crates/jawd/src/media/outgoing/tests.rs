@@ -504,7 +504,12 @@ async fn a_send_cancelled_while_its_copy_is_made_or_uploaded_fails_until_retried
     rig.media.call("media.cancel", json!({ "message": second })).await.unwrap();
     let row = rig.until(&second, "failed", failed).await;
     assert_eq!(row["media"]["error"], "you cancelled it");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    for _ in 0..500 {
+        if rig.files("media/uploads").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(
         rig.files("media/uploads").is_empty(),
         "the cancelled upload's partial file went: {:?}",
