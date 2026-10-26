@@ -991,6 +991,119 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // foreign_key_check, fingerprint and commit included, on the reference Mac at a load of 78 to
     // 99; the backup before it took 2.1 to 4.0 s (`measure_the_folders_migration`).
     FOLDERS_AND_THE_ROSTER,
+    // 20, a schema step: media in. `media` is rebuilt as a STRICT table with what downloading a copy
+    // needs, and three tables join it: the cache's files by content hash, the cache's size, and the
+    // files no copy names any more. No jawd before this one wrote a row to `media`, so the copy reads
+    // an empty table and costs the same however big jaw.db is; nothing refers to `media`, so dropping
+    // the old table leaves no row elsewhere pointing at nothing.
+    "
+    -- Class: fetched from WhatsApp, for each copy of a message's file as WhatsApp describes it, with
+    -- the keys to download it, kept here since an HD copy's come in a message of its own that isn't
+    -- kept as a row; and jaw's own columns, for what jawd is doing with it: `state`, `progress`,
+    -- `error`, `wanted` (when it was given something to do: an arrival's thumbnail and download, an
+    -- interface asking), `asked` (an interface asked), `retried_at` (when the phone was asked to
+    -- upload it again), `cancelled`, and `direct_path` once the phone has. Its file and previews are
+    -- the cache's, by `sha256` (media_files).
+    CREATE TABLE media_rebuilt (
+        message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
+        variant TEXT NOT NULL CHECK (variant IN ('sd', 'hd')),
+        -- Which of WhatsApp's keys it's encrypted with; a sticker's are a photo's.
+        keys TEXT NOT NULL DEFAULT 'document' CHECK (keys IN ('image', 'video', 'audio', 'document')),
+        mime TEXT,
+        bytes INTEGER CHECK (bytes >= 0),
+        w INTEGER CHECK (w >= 0),
+        h INTEGER CHECK (h >= 0),
+        seconds REAL CHECK (seconds >= 0),
+        name TEXT,
+        sha256 BLOB CHECK (length(sha256) = 32),
+        enc_sha256 BLOB CHECK (length(enc_sha256) = 32),
+        media_key BLOB CHECK (length(media_key) = 32),
+        direct_path TEXT,
+        -- Whether its message carries a thumbnail to draw until the file comes.
+        thumbnail INTEGER NOT NULL DEFAULT 0 CHECK (thumbnail IN (0, 1)),
+        state TEXT NOT NULL DEFAULT 'remote'
+            CHECK (state IN ('remote', 'downloading', 'expired', 'waiting_for_phone', 'gone')),
+        progress REAL CHECK (progress BETWEEN 0 AND 1),
+        error TEXT,
+        wanted INTEGER,
+        asked INTEGER NOT NULL DEFAULT 0 CHECK (asked IN (0, 1)),
+        retried_at INTEGER,
+        -- An interface cancelled its download, so it's fetched again only when asked for.
+        cancelled INTEGER NOT NULL DEFAULT 0 CHECK (cancelled IN (0, 1)),
+        PRIMARY KEY (message, variant),
+        -- A copy downloading is one jawd was given to do, so a start finds those a stop left by
+        -- `wanted`; one waiting for the phone says since when.
+        CHECK (state <> 'downloading' OR wanted IS NOT NULL),
+        CHECK (state <> 'waiting_for_phone' OR retried_at IS NOT NULL)
+    ) STRICT, WITHOUT ROWID;
+    INSERT INTO media_rebuilt (message, variant, mime, bytes, w, h, seconds, name, sha256, state)
+    SELECT message, variant, mime, bytes, w, h, seconds, name, iif(length(sha256) = 32, sha256, NULL),
+        iif(state IN ('expired', 'gone'), state, 'remote')
+    FROM media WHERE variant IN ('sd', 'hd');
+
+    -- Class: jaw's own. Each file the cache holds, by the SHA-256 of its content, which names it and
+    -- every file made from it: the file once it's whole and synced in the cache, and its previews and
+    -- its message's thumbnail drawn as one, which can be made again. `stored` counts every byte of
+    -- them on disk; `used_at` is when one was last placed, asked for, saved or shown, so the cache
+    -- drops what was used longest ago first. A row's paths, relative to jaw's folder, name files that
+    -- are there; a file goes only after a synced commit has removed its path.
+    CREATE TABLE media_files (
+        sha256 BLOB PRIMARY KEY CHECK (length(sha256) = 32),
+        path TEXT,
+        bytes INTEGER CHECK (bytes >= 0),
+        small TEXT,
+        large TEXT,
+        previews_bytes INTEGER CHECK (previews_bytes >= 0),
+        thumbnail TEXT,
+        thumbnail_bytes INTEGER CHECK (thumbnail_bytes >= 0),
+        stored INTEGER NOT NULL
+            GENERATED ALWAYS AS (coalesce(bytes, 0) + coalesce(previews_bytes, 0) + coalesce(thumbnail_bytes, 0)) STORED,
+        used_at INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX media_files_by_use ON media_files (used_at);
+    -- What the old table knew of a downloaded file, by its content, where it had a hash.
+    INSERT OR IGNORE INTO media_files (sha256, path, bytes, small, large, used_at)
+    SELECT sha256, path, iif(path IS NULL, NULL, bytes), preview_small, preview_large, coalesce(opened_at, 0) FROM media
+    WHERE length(sha256) = 32 AND coalesce(path, preview_small, preview_large) IS NOT NULL;
+
+    DROP TABLE media;
+    ALTER TABLE media_rebuilt RENAME TO media;
+    CREATE INDEX media_by_hash ON media (sha256) WHERE sha256 IS NOT NULL;
+    CREATE INDEX media_wanted ON media (wanted) WHERE wanted IS NOT NULL;
+    CREATE INDEX media_waiting ON media (retried_at) WHERE state = 'waiting_for_phone';
+
+    -- Class: derived from media_files, kept by its triggers: the cache's bytes on disk and its files.
+    CREATE TABLE media_cache (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        bytes INTEGER NOT NULL DEFAULT 0 CHECK (bytes >= 0),
+        files INTEGER NOT NULL DEFAULT 0 CHECK (files >= 0)
+    ) STRICT;
+    INSERT INTO media_cache (id, bytes, files) SELECT 1, coalesce(sum(stored), 0), count(*) FROM media_files;
+    CREATE TRIGGER media_files_added AFTER INSERT ON media_files BEGIN
+        UPDATE media_cache SET bytes = bytes + new.stored, files = files + 1 WHERE id = 1;
+    END;
+    CREATE TRIGGER media_files_removed AFTER DELETE ON media_files BEGIN
+        UPDATE media_cache SET bytes = bytes - old.stored, files = files - 1 WHERE id = 1;
+    END;
+    CREATE TRIGGER media_files_resized AFTER UPDATE ON media_files WHEN new.stored IS NOT old.stored BEGIN
+        UPDATE media_cache SET bytes = bytes - old.stored + new.stored WHERE id = 1;
+    END;
+
+    -- Class: jaw's own. Files in the cache that no copy names any more, as a message deleted for you
+    -- or for everyone leaves them, each removed with its files once a synced commit has dropped it.
+    CREATE TABLE media_drop (sha256 BLOB PRIMARY KEY CHECK (length(sha256) = 32)) STRICT, WITHOUT ROWID;
+    CREATE TRIGGER media_unnamed AFTER DELETE ON media
+    WHEN old.sha256 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM media WHERE sha256 = old.sha256) BEGIN
+        INSERT OR IGNORE INTO media_drop (sha256)
+            SELECT old.sha256 WHERE EXISTS (SELECT 1 FROM media_files WHERE sha256 = old.sha256);
+    END;
+    CREATE TRIGGER media_named AFTER INSERT ON media WHEN new.sha256 IS NOT NULL BEGIN
+        DELETE FROM media_drop WHERE sha256 = new.sha256;
+    END;
+    CREATE TRIGGER media_renamed AFTER UPDATE OF sha256 ON media WHEN new.sha256 IS NOT NULL BEGIN
+        DELETE FROM media_drop WHERE sha256 = new.sha256;
+    END;
+    ",
 ];
 
 /// Migration 19's text, named so the tests that check and measure it find it whatever number it

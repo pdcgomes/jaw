@@ -15,6 +15,7 @@ use crate::engine::supervisor::Supervisor;
 use crate::feed::Feed;
 use crate::find::Finder;
 use crate::layout::Layouts;
+use crate::media::Media;
 use crate::send::Sending;
 use crate::settings::Settings;
 use crate::sock::{APART_MOST, LANE_MOST, Lanes};
@@ -46,6 +47,7 @@ pub struct State {
     layouts: Option<Layouts>,
     settings: Option<Arc<Settings>>,
     following: Option<(crate::presence::Following, Arc<crate::organise::Checks>)>,
+    media: Option<Media>,
 }
 
 impl State {
@@ -79,7 +81,18 @@ impl State {
             layouts: None,
             settings: None,
             following: None,
+            media: None,
         })
+    }
+
+    /// Fetches, saves and keeps media through `media`.
+    pub fn with_media(mut self, media: Media) -> State {
+        self.media = Some(media);
+        self
+    }
+
+    pub fn media(&self) -> Option<&Media> {
+        self.media.as_ref()
     }
 
     /// What each interface is looking at: whether one is in front, and which chats they read.
@@ -286,6 +299,7 @@ impl State {
             settings_ignored: self.settings.as_ref().map(|s| s.ignored()).unwrap_or_default(),
             presence: self.following.as_ref().map(|(following, _)| following.status()),
             folders: self.following.as_ref().map(|(_, checks)| checks.status()),
+            media: self.media.as_ref().map(Media::status),
         }
     }
 

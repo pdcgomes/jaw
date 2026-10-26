@@ -364,6 +364,36 @@ pub fn describe(status: &Status) -> String {
         }
         lines.push(kept);
     }
+    if let Some(media) = &status.media {
+        let mut cache = format!(
+            "media     {} files, {:.1} MB of {:.0} MB; videos and documents download by themselves up to {:.0} MB",
+            media.cache_files,
+            media.cache_bytes as f64 / 1e6,
+            media.cache_limit as f64 / 1e6,
+            media.auto_bytes as f64 / 1e6
+        );
+        let counts: Vec<String> = [
+            (media.wanted, "waiting"),
+            (media.downloading, "being done"),
+            (media.waiting_for_phone, "waiting for the phone"),
+            (media.unnamed, "no message names, to remove"),
+            (media.partial_removed, "partial files removed at start"),
+            (media.orphans_removed, "files no message named removed at start"),
+            (media.evicted, "dropped to keep to its size"),
+            (media.remade, "previews found broken and made again"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
+        if !counts.is_empty() {
+            cache.push_str(&format!("; {}", counts.join(", ")));
+        }
+        lines.push(cache);
+        if let Some(paused) = &media.paused {
+            lines.push(format!("paused    background downloads: {paused}"));
+        }
+    }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));
     }

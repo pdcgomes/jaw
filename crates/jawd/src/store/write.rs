@@ -7,6 +7,7 @@ pub mod folders;
 pub mod kinds;
 pub mod layout;
 pub mod links;
+pub mod media;
 pub mod outbox;
 pub mod polls;
 
@@ -95,6 +96,8 @@ pub enum Change {
     },
     /// Folders and favourites, and presence and about texts.
     Folders(folders::Step),
+    /// Media: downloads, previews, the phone asked again, and the cache.
+    Media(media::Step),
 }
 
 /// A merge of one chat into another, as a merge step names it.
@@ -181,6 +184,10 @@ pub enum Amendment {
         options: Vec<String>,
         id: String,
     },
+    /// The HD copy of a photo or video, sent as a message of its own that names this one.
+    Hd {
+        copy: Box<media::MediaCopy>,
+    },
 }
 
 impl Amendment {
@@ -194,6 +201,7 @@ impl Amendment {
             Amendment::Status { .. } => "receipt",
             Amendment::Keep { kind } => kind,
             Amendment::Vote { .. } => "vote",
+            Amendment::Hd { .. } => "hd",
         }
     }
 }
@@ -319,6 +327,9 @@ pub struct Message {
     pub envelope: Option<Packed>,
     /// A poll's options, by name, in their order: a vote names each by the SHA-256 of its name.
     pub poll: Vec<String>,
+    /// Its file, for a photo, a video, a voice message, a document or a sticker: its SD copy, or the
+    /// only one.
+    pub media: Option<Box<media::MediaCopy>>,
 }
 
 /// Where a message of yours was sent from.
@@ -555,6 +566,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
         Some(Change::Backfill(name)) => ("backfill", name.to_string(), None),
         Some(Change::Thumbnail { sha256, chat, id, .. }) => ("thumbnail", format!("{chat} {id} {sha256}"), None),
         Some(Change::Folders(step)) => folders::provenance(step),
+        Some(Change::Media(step)) => media::provenance(step),
         None => ("nothing", String::new(), None),
     };
     (source, reference, raw.map(Cow::Borrowed))
@@ -695,6 +707,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         Change::Backfill(name) => links::backfill(db, stamps, name),
         Change::Thumbnail { sha256, bytes, chat, id } => links::thumbnail(db, stamps, sha256, *bytes, chat, id),
         Change::Folders(step) => folders::apply(db, stamps, step),
+        Change::Media(step) => media::apply(db, stamps, step),
     }
 }
 
@@ -1932,13 +1945,7 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
             WHERE (excluded.at, excluded.id) > (poll_voters.at, poll_voters.id)",
     )?
     .execute([kept, gone])?;
-    // A file downloaded for either copy is kept over one the other only knows how to fetch.
-    db.prepare_cached(
-        "DELETE FROM media WHERE message = ?1 AND path IS NULL
-            AND variant IN (SELECT variant FROM media WHERE message = ?2 AND path IS NOT NULL)",
-    )?
-    .execute([kept, gone])?;
-    db.prepare_cached("UPDATE OR IGNORE media SET message = ?1 WHERE message = ?2")?.execute([kept, gone])?;
+    media::fold(db, kept, gone)?;
     outbox::folded(db, kept, gone)?;
     let revoked: bool =
         db.prepare_cached("SELECT deleted FROM messages WHERE n = ?1")?.query_row([gone], |r| r.get(0))?;
@@ -2139,10 +2146,21 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
             .query_row(fields, |r| r.get(0))?,
         )
     };
-    let Some(n) = changed else { return Ok(false) };
+    // A copy that arrives live is given to jawd at once, for its thumbnail and perhaps its download;
+    // one from history waits until it's shown or asked for, and a view-once one is never kept.
+    let wanted = (message.live && !message.view_once).then(now_ms);
+    let Some(n) = changed else {
+        return match (&message.media, &existing) {
+            (Some(copy), Some(kept)) => media::upsert(db, stamps, kept.n, chat, "sd", copy, wanted),
+            _ => Ok(false),
+        };
+    };
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
     if !message.poll.is_empty() {
         polls::options(db, n, &message.poll)?;
+    }
+    if let Some(copy) = &message.media {
+        media::upsert(db, stamps, n, chat, "sd", copy, wanted)?;
     }
     // The chat's newest message sets its sort; older history never moves it.
     let seq = stamps.seq(CHAT, Some(chat));
@@ -2326,6 +2344,7 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
             .execute(params![n, text, spans, summary, at, seq])?,
         Amendment::Revoke => {
             outbox::deleted_for_everyone(db, n)?;
+            media::revoked(db, n)?;
             db.prepare_cached(
                 "UPDATE messages SET deleted = 1, text = NULL, spans = NULL,
                     summary = iif(mine, 'You deleted this message', 'This message was deleted'),
@@ -2393,6 +2412,11 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
                 db.prepare_cached("UPDATE messages SET v = ?2 WHERE n = ?1")?.execute([n, seq])?;
             }
             changed
+        }
+        Amendment::Hd { copy } => {
+            let deleted: bool =
+                db.prepare_cached("SELECT deleted FROM messages WHERE n = ?1")?.query_row([n], |r| r.get(0))?;
+            usize::from(!deleted && media::upsert(db, stamps, n, chat, "hd", copy, None)?)
         }
         Amendment::DeleteForMe | Amendment::Keep { .. } => 0,
     };

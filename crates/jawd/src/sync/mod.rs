@@ -58,6 +58,8 @@ pub struct Live {
     more_on_phone: HashSet<String>,
     pub phone_patience: Duration,
     pub phone_give_up: Duration,
+    /// Where the engine's word on how far each download has got goes, once media has started.
+    pub media_progress: Option<mpsc::Sender<pb::MediaProgress>>,
 }
 
 impl Default for Live {
@@ -76,6 +78,7 @@ impl Default for Live {
             more_on_phone: HashSet::new(),
             phone_patience: PHONE_PATIENCE,
             phone_give_up: PHONE_GIVE_UP,
+            media_progress: None,
         }
     }
 }
@@ -379,6 +382,13 @@ pub async fn run(
             // Who's typing is never written to jaw.db: the presence and typing step (presence-typing)
             // keeps it in jawd's memory and pushes it as `typing`. Until it lands, it goes no further.
             Some(pb::event::Kind::Typing(_)) => {}
+            Some(pb::event::Kind::MediaRetried(answer)) => kept("media_retry", answer.encode_to_vec(), ack),
+            // Progress is said again a moment later, so one that finds no room is let go.
+            Some(pb::event::Kind::MediaProgress(progress)) => {
+                if let Some(media) = live.lock().expect("live state").media_progress.as_ref() {
+                    let _ = media.try_send(progress);
+                }
+            }
             Some(pb::event::Kind::Connection(connection)) => {
                 let (pushed, me, account) = {
                     let mut live = live.lock().expect("live state");

@@ -50,6 +50,49 @@ SELECT jid FROM person_jids WHERE person = ?1 ORDER BY n
 SELECT folder FROM folder_items WHERE person = ?1
     SEARCH folder_items USING INDEX folder_items_by_person (person=?)
 
+-- src/media/cache.rs
+SELECT bytes, files FROM media_cache WHERE id = 1
+    SEARCH media_cache USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/media/cache.rs
+SELECT path, small, large, thumbnail FROM media_files WHERE sha256 = ?1
+    SEARCH media_files USING PRIMARY KEY (sha256=?)
+
+-- src/media/cache.rs
+SELECT sha256 FROM media_drop LIMIT ?1
+    SCAN media_drop
+
+-- src/media/cache.rs
+SELECT bytes FROM media_cache WHERE id = 1
+    SEARCH media_cache USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/media/cache.rs
+SELECT used_at, sha256, stored FROM media_files WHERE (used_at, sha256) > (?1, ?2) ORDER BY used_at, sha256 LIMIT ?3
+    SEARCH media_files USING INDEX media_files_by_use ((used_at,sha256)>(?,?))
+
+-- src/media/fetch.rs
+SELECT envelope, raw FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/media/fetch.rs
+SELECT message, variant, retried_at FROM media WHERE state = 'waiting_for_phone' ORDER BY retried_at LIMIT 64
+    SCAN media USING COVERING INDEX media_waiting
+
+-- src/media/previews.rs
+SELECT raw FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/media/save.rs
+SELECT f.path, md.state, md.error, md.wanted IS NOT NULL FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = ?1 AND md.variant = ?2
+    SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+    SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+
+-- src/media/schedule.rs
+SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256, md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once, m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL, md.cancelled FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.wanted IS NOT NULL ORDER BY md.wanted LIMIT ?1
+    SEARCH md USING INDEX media_wanted (wanted>?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+
 -- src/organise.rs
 SELECT n FROM folders WHERE builtin = ?1
     SEARCH folders USING COVERING INDEX sqlite_autoindex_folders_1 (builtin=?)
@@ -1518,11 +1561,11 @@ SELECT value FROM sync_state WHERE key = 'me'
     SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from' FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) ORDER BY m.at DESC, m.n DESC LIMIT ?2
+SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from', (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress, 'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail, 'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256), 'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256 WHERE h.message = m.n AND h.variant = 'hd')) FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd') FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) ORDER BY m.at DESC, m.n DESC LIMIT ?2
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
-    SCALAR SUBQUERY 9
+    SCALAR SUBQUERY 11
       SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    REUSE SUBQUERY 9
+    REUSE SUBQUERY 11
     SEARCH m USING INDEX messages_by_time (chat=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1548,13 +1591,19 @@ SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.m
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 8
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+      SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+      CORRELATED SCALAR SUBQUERY 9
+        SEARCH h USING PRIMARY KEY (message=? AND variant=?)
+        SEARCH hf USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from' FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) < (?2, ?3) ORDER BY m.at DESC, m.n DESC LIMIT ?4
+SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from', (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress, 'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail, 'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256), 'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256 WHERE h.message = m.n AND h.variant = 'hd')) FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd') FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) < (?2, ?3) ORDER BY m.at DESC, m.n DESC LIMIT ?4
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
-    SCALAR SUBQUERY 9
+    SCALAR SUBQUERY 11
       SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    REUSE SUBQUERY 9
+    REUSE SUBQUERY 11
     SEARCH m USING INDEX messages_by_time (chat=? AND at<?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1580,13 +1629,19 @@ SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.m
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 8
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+      SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+      CORRELATED SCALAR SUBQUERY 9
+        SEARCH h USING PRIMARY KEY (message=? AND variant=?)
+        SEARCH hf USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from' FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) > (?2, ?3) ORDER BY m.at, m.n LIMIT ?4
+SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from', (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress, 'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail, 'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256), 'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256 WHERE h.message = m.n AND h.variant = 'hd')) FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd') FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND (m.at, m.n) > (?2, ?3) ORDER BY m.at, m.n LIMIT ?4
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
-    SCALAR SUBQUERY 9
+    SCALAR SUBQUERY 11
       SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    REUSE SUBQUERY 9
+    REUSE SUBQUERY 11
     SEARCH m USING INDEX messages_by_time (chat=? AND at>?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1612,13 +1667,19 @@ SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.m
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 8
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+      SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+      CORRELATED SCALAR SUBQUERY 9
+        SEARCH h USING PRIMARY KEY (message=? AND variant=?)
+        SEARCH hf USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from' FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND m.id = ?2
+SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from', (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress, 'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail, 'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256), 'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256 WHERE h.message = m.n AND h.variant = 'hd')) FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd') FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND m.id = ?2
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
-    SCALAR SUBQUERY 9
+    SCALAR SUBQUERY 11
       SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
-    REUSE SUBQUERY 9
+    REUSE SUBQUERY 11
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1644,13 +1705,19 @@ SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.m
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 8
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+      SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+      CORRELATED SCALAR SUBQUERY 9
+        SEARCH h USING PRIMARY KEY (message=? AND variant=?)
+        SEARCH hf USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/store/read.rs
 SELECT raw FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from', messages_fts.rowid, highlight(messages_fts, 0, char(2), char(3)) FROM messages_fts CROSS JOIN messages m ON m.t = messages_fts.rowid JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE messages_fts MATCH ?1 AND messages_fts.rowid < ?2 AND (?3 IS NULL OR c.id = ?3) ORDER BY messages_fts.rowid DESC LIMIT ?4
+SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from', (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress, 'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail, 'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256), 'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256 WHERE h.message = m.n AND h.variant = 'hd')) FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd'), messages_fts.rowid, highlight(messages_fts, 0, char(2), char(3)) FROM messages_fts CROSS JOIN messages m ON m.t = messages_fts.rowid JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE messages_fts MATCH ?1 AND messages_fts.rowid < ?2 AND (?3 IS NULL OR c.id = ?3) ORDER BY messages_fts.rowid DESC LIMIT ?4
     SCAN messages_fts VIRTUAL TABLE INDEX 192:M1<
     SEARCH m USING INDEX sqlite_autoindex_messages_1 (t=?)
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
@@ -1678,6 +1745,12 @@ SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.m
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 8
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+      SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+      CORRELATED SCALAR SUBQUERY 9
+        SEARCH h USING PRIMARY KEY (message=? AND variant=?)
+        SEARCH hf USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/store/read.rs
 SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1 ORDER BY rowid DESC LIMIT ?2
@@ -1710,7 +1783,7 @@ SELECT m.id, l.place, c.id, l.at, l.mine, p.n, p.name, p.push_name, p.verified_n
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
 
 -- src/store/read.rs
-SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from' FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.t = ?1
+SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''), iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce( iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ', ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL), rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))), m.detail, m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once, p.n, p.name, p.push_name, p.verified_name, j.jid, (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false')))) FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions WHERE message = m.n GROUP BY emoji ORDER BY first)), iif(instr(m.spans, '"t":"mention"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person', coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v)) FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person WHERE e.value ->> 't' = 'mention'), NULL), (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect), 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), iif(instr(m.detail, '"thumbnail":"') > 0, (SELECT h.sha256 FROM thumbnails h WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL), m.reply ->> 'from', (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress, 'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail, 'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256), 'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256 WHERE h.message = m.n AND h.variant = 'hd')) FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd') FROM messages m JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from' LEFT JOIN people rp ON rp.n = rj.person WHERE m.t = ?1
     SEARCH m USING INDEX sqlite_autoindex_messages_1 (t=?)
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1737,6 +1810,12 @@ SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.m
         SEARCH r USING PRIMARY KEY (message=?)
     CORRELATED SCALAR SUBQUERY 8
       SEARCH h USING PRIMARY KEY (sha256=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+      SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+      CORRELATED SCALAR SUBQUERY 9
+        SEARCH h USING PRIMARY KEY (message=? AND variant=?)
+        SEARCH hf USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/store/read.rs
 SELECT seq, at, type, key, chat FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2
@@ -2231,6 +2310,141 @@ UPDATE messages SET v = ?2 WHERE n = ?1
 UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
+-- src/store/write/media.rs
+INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail, wanted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) ON CONFLICT (message, variant) DO UPDATE SET keys = excluded.keys, mime = coalesce(excluded.mime, mime), bytes = coalesce(excluded.bytes, bytes), w = coalesce(excluded.w, w), h = coalesce(excluded.h, h), seconds = coalesce(excluded.seconds, seconds), name = coalesce(excluded.name, name), sha256 = coalesce(sha256, excluded.sha256), enc_sha256 = coalesce(enc_sha256, excluded.enc_sha256), media_key = coalesce(media_key, excluded.media_key), direct_path = coalesce(direct_path, excluded.direct_path), thumbnail = max(thumbnail, excluded.thumbnail), wanted = coalesce(wanted, excluded.wanted) WHERE keys IS NOT excluded.keys OR coalesce(excluded.mime, mime) IS NOT mime OR coalesce(excluded.bytes, bytes) IS NOT bytes OR coalesce(excluded.w, w) IS NOT w OR coalesce(excluded.h, h) IS NOT h OR coalesce(excluded.seconds, seconds) IS NOT seconds OR coalesce(excluded.name, name) IS NOT name OR coalesce(sha256, excluded.sha256) IS NOT sha256 OR coalesce(enc_sha256, excluded.enc_sha256) IS NOT enc_sha256 OR coalesce(media_key, excluded.media_key) IS NOT media_key OR coalesce(direct_path, excluded.direct_path) IS NOT direct_path OR max(thumbnail, excluded.thumbnail) IS NOT thumbnail OR coalesce(wanted, excluded.wanted) IS NOT wanted
+
+-- src/store/write/media.rs
+SELECT md.message, m.chat FROM media md JOIN messages m ON m.n = md.message WHERE md.sha256 = ?1
+    SEARCH md USING COVERING INDEX media_by_hash (sha256=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/media.rs
+SELECT chat FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/media.rs
+UPDATE messages SET v = ?2 WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/media.rs
+UPDATE media SET state = 'downloading', progress = 0, error = NULL WHERE message = ?1 AND variant = ?2 AND wanted IS NOT NULL AND state IS NOT 'downloading'
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media SET progress = ?2 WHERE sha256 = ?1 AND state = 'downloading' AND progress IS NOT ?2 RETURNING message
+    SEARCH media USING INDEX media_by_hash (sha256=?)
+
+-- src/store/write/media.rs
+UPDATE media SET state = iif(state = 'downloading', 'remote', state), progress = NULL, error = ?3 WHERE message = ?1 AND variant = ?2 AND wanted IS NOT NULL
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media SET state = 'expired', error = ?4 WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone' AND retried_at <= ?3
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+INSERT INTO media_files (sha256, path, bytes, used_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (sha256) DO UPDATE SET path = excluded.path, bytes = excluded.bytes, used_at = max(used_at, excluded.used_at) WHERE path IS NULL
+
+-- src/store/write/media.rs
+UPDATE media SET state = 'remote', progress = NULL, error = NULL WHERE sha256 = ?1 AND (state IS NOT 'remote' OR progress IS NOT NULL OR error IS NOT NULL)
+    SEARCH media USING INDEX media_by_hash (sha256=?)
+
+-- src/store/write/media.rs
+UPDATE media_files SET small = ?2, large = ?3, previews_bytes = ?4, used_at = max(used_at, ?5) WHERE sha256 = ?1 AND small IS NULL AND large IS NULL
+    SEARCH media_files USING PRIMARY KEY (sha256=?)
+
+-- src/store/write/media.rs
+INSERT INTO media_files (sha256, thumbnail, thumbnail_bytes, used_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (sha256) DO UPDATE SET thumbnail = excluded.thumbnail, thumbnail_bytes = excluded.thumbnail_bytes WHERE thumbnail IS NULL
+
+-- src/store/write/media.rs
+UPDATE media SET wanted = NULL, asked = 0, state = ?4, progress = NULL, error = iif(?5 IS NULL AND state = ?4, error, ?5) WHERE message = ?1 AND variant = ?2 AND wanted IS ?3
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media SET wanted = NULL, asked = 0, state = 'waiting_for_phone', retried_at = ?4, progress = NULL, error = NULL WHERE message = ?1 AND variant = ?2 AND wanted IS ?3
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media SET direct_path = ?2, state = 'remote', error = NULL, wanted = coalesce(wanted, ?3), asked = 1 WHERE message = ?1 AND variant = 'sd' AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.sha256 = media.sha256 AND f.path IS NOT NULL)
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH f USING PRIMARY KEY (sha256=?)
+
+-- src/store/write/media.rs
+UPDATE media SET state = ?2, error = ?3 WHERE message = ?1 AND variant = 'sd' AND state = 'waiting_for_phone'
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media SET wanted = iif(wanted IS NULL OR ?4 > asked, ?3, wanted), asked = max(asked, ?4), error = iif(?4, NULL, error), cancelled = iif(?4, 0, cancelled) WHERE message = ?1 AND variant = ?2 AND (wanted IS NULL OR ?4 > asked)
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media SET wanted = NULL, asked = 0, progress = NULL, cancelled = 1, state = iif(state = 'downloading', 'remote', state) WHERE message = ?1 AND variant = ?2 AND (wanted IS NOT NULL OR state = 'downloading' OR cancelled = 0)
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media_files SET used_at = ?2 WHERE sha256 = ?1 AND used_at < ?2
+    SEARCH media_files USING PRIMARY KEY (sha256=?)
+
+-- src/store/write/media.rs
+UPDATE media_files SET small = NULL, large = NULL, previews_bytes = NULL WHERE sha256 = ?1 AND ?2 IN (small, large)
+    SEARCH media_files USING PRIMARY KEY (sha256=?)
+
+-- src/store/write/media.rs
+UPDATE media_files SET thumbnail = NULL, thumbnail_bytes = NULL WHERE sha256 = ?1 AND thumbnail = ?2
+    SEARCH media_files USING PRIMARY KEY (sha256=?)
+
+-- src/store/write/media.rs
+SELECT EXISTS (SELECT 1 FROM media WHERE sha256 = ?1)
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 1
+      SEARCH media USING COVERING INDEX media_by_hash (sha256=?)
+
+-- src/store/write/media.rs
+SELECT EXISTS (SELECT 1 FROM media md JOIN messages m ON m.n = md.message WHERE md.sha256 = ?1 AND (m.starred OR EXISTS (SELECT 1 FROM outbox o WHERE o.message = m.n)))
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 2
+      SEARCH md USING COVERING INDEX media_by_hash (sha256=?)
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+      CORRELATED SCALAR SUBQUERY 1
+        SEARCH o USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?)
+
+-- src/store/write/media.rs
+SELECT path, small, large, thumbnail FROM media_files WHERE sha256 = ?1
+    SEARCH media_files USING PRIMARY KEY (sha256=?)
+
+-- src/store/write/media.rs
+DELETE FROM media_files WHERE sha256 = ?1
+    SEARCH media_files USING PRIMARY KEY (sha256=?)
+
+-- src/store/write/media.rs
+DELETE FROM media_drop WHERE sha256 = ?1
+    SEARCH media_drop USING PRIMARY KEY (sha256=?)
+
+-- src/store/write/media.rs
+SELECT message, variant FROM media WHERE state = 'downloading' AND wanted IS NOT NULL LIMIT 1000
+    SEARCH media USING INDEX media_wanted (wanted>?)
+
+-- src/store/write/media.rs
+UPDATE media SET state = 'remote', progress = NULL WHERE message = ?1 AND variant = ?2 AND state = 'downloading'
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+SELECT message, variant FROM media WHERE state = 'waiting_for_phone' LIMIT 1000
+    SCAN media USING COVERING INDEX media_waiting
+
+-- src/store/write/media.rs
+UPDATE media SET state = 'remote', wanted = coalesce(wanted, ?3), asked = 1 WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone'
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+DELETE FROM media WHERE message = ?1
+    SEARCH media USING PRIMARY KEY (message=?)
+
+-- src/store/write/media.rs
+INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail, state, progress, error, wanted, asked, retried_at, cancelled) SELECT ?1, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail, iif(state = 'downloading', 'remote', state), NULL, error, wanted, asked, retried_at, cancelled FROM media WHERE message = ?2 ON CONFLICT (message, variant) DO UPDATE SET mime = coalesce(mime, excluded.mime), bytes = coalesce(bytes, excluded.bytes), w = coalesce(w, excluded.w), h = coalesce(h, excluded.h), seconds = coalesce(seconds, excluded.seconds), name = coalesce(name, excluded.name), sha256 = coalesce(sha256, excluded.sha256), enc_sha256 = coalesce(enc_sha256, excluded.enc_sha256), media_key = coalesce(media_key, excluded.media_key), direct_path = coalesce(direct_path, excluded.direct_path), thumbnail = max(thumbnail, excluded.thumbnail), wanted = coalesce(min(wanted, excluded.wanted), wanted, excluded.wanted), asked = max(asked, excluded.asked), cancelled = max(cancelled, excluded.cancelled)
+    SEARCH media USING PRIMARY KEY (message=?)
+
 -- src/store/write/outbox.rs
 SELECT k.message, k.id, coalesce(c.id, k.jid), c.n, o.n FROM send_keys k LEFT JOIN messages m ON m.n = k.message LEFT JOIN chats c ON c.n = m.chat LEFT JOIN outbox o ON o.message = m.n WHERE k.key = ?1
     SEARCH k USING PRIMARY KEY (key=?)
@@ -2723,6 +2937,7 @@ INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM message
 -- src/store/write.rs
 DELETE FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH media USING PRIMARY KEY (message=?)
     SEARCH poll_voters USING PRIMARY KEY (message=?)
     SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
     SEARCH send_keys USING INDEX send_keys_by_message (message=?)
@@ -2734,7 +2949,6 @@ DELETE FROM messages WHERE n = ?1
     SEARCH poll_options USING PRIMARY KEY (message=?)
     SEARCH receipts USING PRIMARY KEY (message=?)
     SEARCH reactions USING PRIMARY KEY (message=?)
-    SEARCH media USING PRIMARY KEY (message=?)
 
 -- src/store/write.rs
 UPDATE chats SET v = ?3, last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1) WHERE n = ?1 AND last_message = ?2
@@ -3081,16 +3295,6 @@ INSERT INTO poll_voters (message, voter, at, id) SELECT ?1, voter, at, id FROM p
     SEARCH poll_voters USING PRIMARY KEY (message=?)
 
 -- src/store/write.rs
-DELETE FROM media WHERE message = ?1 AND path IS NULL AND variant IN (SELECT variant FROM media WHERE message = ?2 AND path IS NOT NULL)
-    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
-    LIST SUBQUERY 1
-      SEARCH media USING PRIMARY KEY (message=?)
-
--- src/store/write.rs
-UPDATE OR IGNORE media SET message = ?1 WHERE message = ?2
-    SEARCH media USING PRIMARY KEY (message=?)
-
--- src/store/write.rs
 SELECT deleted FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -3117,6 +3321,7 @@ UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, tex
 
 -- src/store/write.rs
 INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, reply, detail, forwarded, edited_at, deleted, expires_at, starred, view_once, raw, v, n, mentions_me, envelope, chat, id, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) RETURNING n
+    SEARCH media USING PRIMARY KEY (message=?)
     SEARCH poll_voters USING PRIMARY KEY (message=?)
     SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
     SEARCH send_keys USING INDEX send_keys_by_message (message=?)
@@ -3128,7 +3333,6 @@ INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, repl
     SEARCH poll_options USING PRIMARY KEY (message=?)
     SEARCH receipts USING PRIMARY KEY (message=?)
     SEARCH reactions USING PRIMARY KEY (message=?)
-    SEARCH media USING PRIMARY KEY (message=?)
 
 -- src/store/write.rs
 UPDATE chats SET last_at = max(last_at, ?2), last_message = ?3, v = ?4 WHERE n = ?1 AND (last_message IS NULL OR last_message = ?3 OR ?5 > (SELECT t FROM messages WHERE n = last_message))
@@ -3590,6 +3794,30 @@ INSERT INTO links_fts (rowid, text) SELECT t, text FROM message_link_text WHERE 
       SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
     CORRELATED SCALAR SUBQUERY 4
       SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+
+-- trigger media_files_added
+UPDATE media_cache SET bytes = bytes + ?, files = files + 1 WHERE id = 1
+    SEARCH media_cache USING INTEGER PRIMARY KEY (rowid=?)
+
+-- trigger media_files_removed
+UPDATE media_cache SET bytes = bytes - ?, files = files - 1 WHERE id = 1
+    SEARCH media_cache USING INTEGER PRIMARY KEY (rowid=?)
+
+-- trigger media_files_resized
+UPDATE media_cache SET bytes = bytes - ? + ? WHERE id = 1
+    SEARCH media_cache USING INTEGER PRIMARY KEY (rowid=?)
+
+-- trigger media_named
+DELETE FROM media_drop WHERE sha256 = ?
+    SEARCH media_drop USING PRIMARY KEY (sha256=?)
+
+-- trigger media_renamed
+DELETE FROM media_drop WHERE sha256 = ?
+    SEARCH media_drop USING PRIMARY KEY (sha256=?)
+
+-- trigger media_unnamed
+INSERT OR IGNORE INTO media_drop (sha256) SELECT ? WHERE EXISTS (SELECT 1 FROM media_files WHERE sha256 = ?)
+    SEARCH media_files EXISTS USING PRIMARY KEY (sha256=?)
 
 -- trigger messages_counted
 UPDATE chats SET message_count = message_count + 1 WHERE n = ?

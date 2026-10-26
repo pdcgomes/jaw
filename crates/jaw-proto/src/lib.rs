@@ -10,6 +10,7 @@ use serde_json::Value;
 pub mod find;
 pub mod layout;
 pub mod local;
+pub mod media;
 pub mod send;
 pub mod settings;
 pub mod sync;
@@ -289,6 +290,9 @@ pub struct Status {
     /// The folders' counts, as the background check last found them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folders: Option<FoldersStatus>,
+    /// The media cache, and what's downloading and waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<media::MediaStatus>,
 }
 
 /// The layouts jawd keeps for interfaces (`layout.set`), and the most it keeps.

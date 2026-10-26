@@ -16,6 +16,7 @@ use prost::Message as _;
 use serde_json::json;
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
+use wa_proto::wa_web_protobufs_e2e::message_association::AssociationType;
 use wa_proto::wa_web_protobufs_web::{PollUpdate, WebMessageInfo, web_message_info};
 
 use crate::engine::pb;
@@ -261,37 +262,7 @@ struct Wrapped {
 fn unwrap(mut message: &e2e::Message) -> (&e2e::Message, Wrapped) {
     let mut wrapped = Wrapped::default();
     for _ in 0..8 {
-        let inner = if let Some(sent) = message.device_sent_message.as_deref() {
-            sent.message.as_deref()
-        } else if let Some(m) = message.ephemeral_message.as_deref() {
-            m.message.as_deref()
-        } else if let Some(m) = message
-            .view_once_message
-            .as_deref()
-            .or(message.view_once_message_v2.as_deref())
-            .or(message.view_once_message_v2_extension.as_deref())
-        {
-            wrapped.view_once = true;
-            m.message.as_deref()
-        } else if let Some(m) = message.comment_message.as_deref() {
-            wrapped.comment_on = m.target_message_key.clone();
-            m.message.as_deref()
-        } else if let Some(m) = message
-            .document_with_caption_message
-            .as_deref()
-            .or(message.edited_message.as_deref())
-            .or(message.group_mentioned_message.as_deref())
-            .or(message.lottie_sticker_message.as_deref())
-            .or(message.associated_child_message.as_deref())
-            .or(message.bot_invoke_message.as_deref())
-            .or(message.group_status_message.as_deref())
-            .or(message.group_status_message_v2.as_deref())
-        {
-            m.message.as_deref()
-        } else {
-            None
-        };
-        match inner {
+        match inner(message, &mut wrapped) {
             Some(inner) => message = inner,
             None => break,
         }
@@ -299,8 +270,68 @@ fn unwrap(mut message: &e2e::Message) -> (&e2e::Message, Wrapped) {
     (message, wrapped)
 }
 
+/// The message one wrapper in, noting in `wrapped` what that wrapper says of it.
+fn inner<'a>(message: &'a e2e::Message, wrapped: &mut Wrapped) -> Option<&'a e2e::Message> {
+    if let Some(sent) = message.device_sent_message.as_deref() {
+        return sent.message.as_deref();
+    }
+    if let Some(m) = message.ephemeral_message.as_deref() {
+        return m.message.as_deref();
+    }
+    if let Some(m) = message
+        .view_once_message
+        .as_deref()
+        .or(message.view_once_message_v2.as_deref())
+        .or(message.view_once_message_v2_extension.as_deref())
+    {
+        wrapped.view_once = true;
+        return m.message.as_deref();
+    }
+    if let Some(m) = message.comment_message.as_deref() {
+        wrapped.comment_on = m.target_message_key.clone();
+        return m.message.as_deref();
+    }
+    let m = message
+        .document_with_caption_message
+        .as_deref()
+        .or(message.edited_message.as_deref())
+        .or(message.group_mentioned_message.as_deref())
+        .or(message.lottie_sticker_message.as_deref())
+        .or(message.associated_child_message.as_deref())
+        .or(message.bot_invoke_message.as_deref())
+        .or(message.group_status_message.as_deref())
+        .or(message.group_status_message_v2.as_deref())?;
+    m.message.as_deref()
+}
+
+/// The message an HD copy is the HD copy of, if this message is one. WhatsApp's dual upload sends
+/// the HD copy of a photo or video as a message of its own, whose association, on it or inside
+/// one of its wrappers, names the SD one; anything else is a message of its own.
+fn hd_of(mut message: &e2e::Message) -> Option<&MessageKey> {
+    for _ in 0..8 {
+        let association = message.message_context_info.as_ref().and_then(|c| c.message_association.as_ref());
+        if let Some(association) = association
+            && matches!(
+                association.association_type.and_then(|t| AssociationType::try_from(t).ok()),
+                Some(AssociationType::HdImageDualUpload | AssociationType::HdVideoDualUpload)
+            )
+            && let Some(parent) = association.parent_message_key.as_ref().filter(|k| k.id.is_some())
+        {
+            return Some(parent);
+        }
+        message = inner(message, &mut Wrapped::default())?;
+    }
+    None
+}
+
 fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut Vec<Change>) {
+    let parent = hd_of(message);
     let (message, wrapped) = unwrap(message);
+    if let (Some(parent), Some(copy)) = (parent, kinds::copy(message)) {
+        changes.extend(amend(envelope, parent, Amendment::Hd { copy: Box::new(copy) }, me).map(Change::Amend));
+        changes.extend(own_action(envelope));
+        return;
+    }
     if let Some(protocol) = message.protocol_message.as_deref() {
         protocol_message(envelope, protocol, me, changes);
         return;
@@ -384,6 +415,7 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         mentions_me,
         raw: Some(Packed::new(&info.encode_to_vec())),
         poll: body.poll,
+        media: kinds::copy(message).map(Box::new),
         ..Message::default()
     }));
 }
@@ -426,6 +458,39 @@ pub fn link_thumbnail(message: &e2e::Message) -> Option<&[u8]> {
     let preview = message.extended_text_message.as_deref()?;
     preview.matched_text.as_deref().filter(|url| !url.trim().is_empty())?;
     preview.jpeg_thumbnail.as_deref().filter(|thumbnail| !thumbnail.is_empty())
+}
+
+/// The thumbnail the message in `raw`, a WebMessageInfo, carries to draw until its file comes.
+pub fn thumbnail_in(raw: &[u8]) -> Option<Vec<u8>> {
+    let info = WebMessageInfo::decode(raw).ok()?;
+    let message = info.message.as_ref()?;
+    kinds::thumbnail(unwrap(message).0).map(<[u8]>::to_vec)
+}
+
+/// A message's key as WhatsApp named it, which asking the phone for its file again must use: its
+/// chat, its sender in a group, whether it's yours, and its ID. A live message's comes from the
+/// engine's event, `envelope`; history's from its WebMessageInfo, `raw`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Key {
+    pub chat: String,
+    pub sender: String,
+    pub from_me: bool,
+    pub id: String,
+}
+
+pub fn key_in(envelope: Option<&[u8]>, raw: Option<&[u8]>) -> Option<Key> {
+    if let Some(info) = envelope.and_then(|e| pb::Message::decode(e).ok()).and_then(|m| m.info) {
+        let sender = if info.group { info.sender } else { String::new() };
+        return Some(Key { chat: info.chat, sender, from_me: info.from_me, id: info.id });
+    }
+    let info = WebMessageInfo::decode(raw?).ok()?;
+    let chat = info.key.remote_jid.clone()?;
+    let sender = if is_person(&chat) {
+        String::new()
+    } else {
+        info.key.participant.clone().or(info.participant.clone()).unwrap_or_default()
+    };
+    Some(Key { chat, sender, from_me: info.key.from_me.unwrap_or(false), id: info.key.id.clone()? })
 }
 
 /// What a message says, out of its wrappers and without the quote, mentions, forwarding and timer

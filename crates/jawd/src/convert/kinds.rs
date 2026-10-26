@@ -8,6 +8,7 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 
 use super::spans::{self, Span};
 use super::{SUMMARY, user_jid};
+use crate::store::media::{Keys, MediaCopy};
 use crate::store::thumbnails;
 
 /// What a message that isn't a row converts to.
@@ -167,6 +168,84 @@ fn is_only_plumbing(m: &e2e::Message) -> bool {
     bare.fast_ratchet_key_sender_key_distribution_message = None;
     bare.message_context_info = None;
     bare == e2e::Message::default()
+}
+
+/// The file a message carries, as WhatsApp describes it, with the keys to download it: a photo's,
+/// a video's or video message's, a voice message's or an audio file's, a document's or a sticker's.
+pub fn copy(m: &e2e::Message) -> Option<MediaCopy> {
+    let present = |bytes: &Option<Vec<u8>>| bytes.as_ref().is_some_and(|b| !b.is_empty());
+    let copy =
+        |keys, mime: &Option<String>, sha: &Option<Vec<u8>>, enc: &Option<Vec<u8>>, key: &Option<Vec<u8>>| MediaCopy {
+            keys,
+            mime: mime.clone().filter(|m| !m.is_empty()),
+            sha256: sha.clone().filter(|s| s.len() == 32),
+            enc_sha256: enc.clone().filter(|s| s.len() == 32),
+            media_key: key.clone().filter(|k| k.len() == 32),
+            ..MediaCopy::default()
+        };
+    let positive = |n: Option<u32>| n.filter(|&n| n > 0);
+    if let Some(x) = m.image_message.as_deref().or(m.instant_image_message.as_deref()) {
+        return Some(MediaCopy {
+            bytes: x.file_length,
+            w: positive(x.width),
+            h: positive(x.height),
+            direct_path: x.direct_path.clone(),
+            thumbnail: present(&x.jpeg_thumbnail),
+            ..copy(Keys::Image, &x.mimetype, &x.file_sha256, &x.file_enc_sha256, &x.media_key)
+        });
+    }
+    if let Some(x) = m.video_message.as_deref().or(m.ptv_message.as_deref()) {
+        return Some(MediaCopy {
+            bytes: x.file_length,
+            w: positive(x.width),
+            h: positive(x.height),
+            seconds: positive(x.seconds).map(f64::from),
+            direct_path: x.direct_path.clone(),
+            thumbnail: present(&x.jpeg_thumbnail),
+            ..copy(Keys::Video, &x.mimetype, &x.file_sha256, &x.file_enc_sha256, &x.media_key)
+        });
+    }
+    if let Some(x) = m.audio_message.as_deref() {
+        return Some(MediaCopy {
+            bytes: x.file_length,
+            seconds: positive(x.seconds).map(f64::from),
+            direct_path: x.direct_path.clone(),
+            ..copy(Keys::Audio, &x.mimetype, &x.file_sha256, &x.file_enc_sha256, &x.media_key)
+        });
+    }
+    if let Some(x) = m.document_message.as_deref() {
+        return Some(MediaCopy {
+            bytes: x.file_length,
+            name: x.file_name.clone().or(x.title.clone()).filter(|n| !n.is_empty()),
+            direct_path: x.direct_path.clone(),
+            thumbnail: present(&x.jpeg_thumbnail),
+            ..copy(Keys::Document, &x.mimetype, &x.file_sha256, &x.file_enc_sha256, &x.media_key)
+        });
+    }
+    if let Some(x) = m.sticker_message.as_deref() {
+        return Some(MediaCopy {
+            bytes: x.file_length,
+            w: positive(x.width),
+            h: positive(x.height),
+            direct_path: x.direct_path.clone(),
+            thumbnail: present(&x.png_thumbnail),
+            ..copy(Keys::Image, &x.mimetype, &x.file_sha256, &x.file_enc_sha256, &x.media_key)
+        });
+    }
+    None
+}
+
+/// The small picture a message carries to draw until its file comes, if it has one.
+pub fn thumbnail(m: &e2e::Message) -> Option<&[u8]> {
+    let bytes = m
+        .image_message
+        .as_deref()
+        .or(m.instant_image_message.as_deref())
+        .and_then(|x| x.jpeg_thumbnail.as_deref())
+        .or_else(|| m.video_message.as_deref().or(m.ptv_message.as_deref()).and_then(|x| x.jpeg_thumbnail.as_deref()))
+        .or_else(|| m.document_message.as_deref().and_then(|x| x.jpeg_thumbnail.as_deref()))
+        .or_else(|| m.sticker_message.as_deref().and_then(|x| x.png_thumbnail.as_deref()))?;
+    (!bytes.is_empty()).then_some(bytes)
 }
 
 fn media(mime: Option<&str>, bytes: Option<u64>, w: Option<u32>, h: Option<u32>, seconds: Option<u32>) -> Value {

@@ -41,6 +41,9 @@ type Engine struct {
 	// once the account is logged out (renew); retired is the last one replaced so.
 	client  atomic.Pointer[whatsmeow.Client]
 	retired atomic.Pointer[whatsmeow.Client]
+	media   media
+	// What downloads files instead of the client, in the tests.
+	mediaDownloader mediaDownloader
 }
 
 // cli is the client running now, nil until the session is open.
@@ -299,6 +302,8 @@ func (e *Engine) kept(evt any) (*enginepb.Event, bool) {
 		return &enginepb.Event{Kind: &enginepb.Event_Picture{Picture: picture(v)}}, true
 	case *events.Receipt:
 		return &enginepb.Event{Kind: &enginepb.Event_Receipt{Receipt: receipt(v)}}, true
+	case *events.MediaRetry:
+		return &enginepb.Event{Kind: &enginepb.Event_MediaRetried{MediaRetried: e.mediaRetried(v)}}, true
 	}
 	return nil, false
 }
@@ -471,6 +476,9 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 		return &enginepb.Reply{Kind: &enginepb.Reply_Pong{Pong: &enginepb.Pong{AtMs: time.Now().UnixMilli()}}}
 	case *enginepb.Command_BenchRun:
 		return e.bench(c.BenchRun.Count, c.BenchRun.Size)
+	case *enginepb.Command_MediaCancel:
+		e.media.cancel(c.MediaCancel.Id)
+		return done()
 	}
 	client := e.cli()
 	if client == nil {
@@ -515,6 +523,10 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 		return e.subscribePresence(c.SubscribePresence)
 	case *enginepb.Command_UserInfo:
 		return e.userInfo(c.UserInfo)
+	case *enginepb.Command_MediaDownload:
+		return e.mediaDownload(c.MediaDownload)
+	case *enginepb.Command_MediaRetry:
+		return e.mediaRetry(c.MediaRetry)
 	}
 	if reply := e.sending(cmd); reply != nil {
 		return reply

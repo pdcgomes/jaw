@@ -576,7 +576,7 @@ fn apart_method(method: &str) -> bool {
 /// the requests that can take long each on a task of its own, and the rest down the lane. A
 /// request is answered here only if it's quick and needs nothing but memory, as `themes` is; one
 /// that writes jaw.db, asks the engine or must follow those sent before it takes the lane, as
-/// `settings.set` does and `media.fetch` and `media.cancel` will.
+/// `settings.set`, `media.fetch` and `media.cancel` do.
 async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -724,17 +724,30 @@ async fn answer(state: &State, request: Request) -> Reply {
             },
             None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it can't send")),
         },
+        method if crate::media::Media::METHODS.contains(&method) => match state.media() {
+            Some(media) => match media.call(&request.method, request.params).await {
+                Ok(result) => succeeded(id, &result),
+                Err(error) => failed(id, error),
+            },
+            None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it keeps no media")),
+        },
         method => failed(id, Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
     }
 }
 
 /// The answer to a request on a task of its own: whatever can take long.
-#[cfg_attr(not(test), allow(unused_variables))]
 async fn answer_apart(state: &State, request: Request) -> Reply {
     let id = request.id;
     match request.method.as_str() {
         #[cfg(test)]
         "test.panic.apart" => panic!("the test made a long request's task panic"),
+        "media.save" => match state.media() {
+            Some(media) => match media.call(&request.method, request.params).await {
+                Ok(result) => succeeded(id, &result),
+                Err(error) => failed(id, error),
+            },
+            None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it keeps no media")),
+        },
         // A stand-in for a long request, which waits on jaw.db's writer.
         #[cfg(test)]
         "test.wait" => {

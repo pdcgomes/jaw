@@ -19,6 +19,7 @@
 //! stays under 64 MiB however fast history or messages come.
 
 pub mod bench;
+pub mod files;
 pub mod lists;
 mod overlay;
 #[cfg(test)]
@@ -61,9 +62,21 @@ pub use self::write::{
     Amend, Amendment, Change, Chat, Drained, Members, Merging, Message, Opened, Packed, Person, Read, frecency,
     merge_reference,
 };
-pub use self::write::{kinds, links, outbox, polls};
+pub use self::write::{kinds, links, media, outbox, polls};
 use crate::engine::Ack;
 use crate::work::{Report, Samples};
+
+/// jaw.db's migrations, for tests that build a database at an earlier version.
+#[cfg(test)]
+pub fn schema_for_tests() -> &'static [&'static str] {
+    schema::MIGRATIONS
+}
+
+/// Brings a database up to date, as opening a store does.
+#[cfg(test)]
+pub fn migrate_for_tests(db: &mut Connection) -> Result<()> {
+    schema::migrate(db)
+}
 
 /// How a batch of changes went into the database.
 #[derive(Clone, Debug, Default)]
@@ -282,6 +295,7 @@ pub struct Store {
     thumbnails: Arc<Thumbnails>,
     /// Whether barriers fence jaw.db's checkpoints, rather than full flushes.
     fenced: bool,
+    files: Arc<files::Files>,
 }
 
 const BATCH_ROWS: usize = 1_000;
@@ -598,6 +612,8 @@ impl Store {
         let fenced = vfs::fenced(&db);
         pragma(&db, "busy_timeout", limits.busy_ms)?;
         schema::migrate(&mut db)?;
+        // The read path finds its store's files by the name SQLite gives jaw.db, symlinks resolved.
+        let files = files::Files::open(db.path().map_or(path.as_path(), Path::new));
         let mut stamps = Stamps::load(&db)?;
         flatten(&mut db, &mut stamps)?;
         let reads = Reads::open(&path)?;
@@ -663,12 +679,18 @@ impl Store {
             trouble: troubled,
             thumbnails,
             fenced,
+            files,
         })
     }
 
     /// The thumbnails of link previews, kept as files beside jaw.db.
     pub fn thumbnails(&self) -> &Arc<Thumbnails> {
         &self.thumbnails
+    }
+
+    /// What the read path knows of the files rows name, and whom it tells of the copies it shows.
+    pub fn files(&self) -> &Arc<files::Files> {
+        &self.files
     }
 
     /// The feed's last committed seq, which changes as each transaction with events commits.
@@ -763,6 +785,12 @@ impl Store {
         Ok(db
             .query_row("SELECT value FROM settings WHERE domain = ?1 AND key = ?2", [domain, key], |r| r.get(0))
             .optional()?)
+    }
+
+    /// The two numbers `sql` reads, on a connection of its own so the writer doesn't wait.
+    pub fn pair(&self, sql: &str) -> Result<(i64, i64)> {
+        let db = connect(&self.path, Role::Reader)?;
+        Ok(db.query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?)))?)
     }
 
     /// How many rows `table` holds, read on a connection of its own so the writer doesn't wait.

@@ -27,6 +27,10 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 use super::{Ack, BoxFuture, Commands, Engine, EngineError, Incoming, Instance, Outgoing, PROTOCOL, pb};
 use crate::store::polls::option_hash;
 
+mod pictures;
+
+pub use pictures::Picture;
+
 pub const ME: &str = "351910000001@s.whatsapp.net";
 
 /// Two made-up members of every group the demo sends to, besides you.
@@ -124,6 +128,35 @@ pub struct World {
     link: Mutex<Option<WeakLink>>,
     /// Whose presence jawd follows, in the order it asked.
     subscribed: Mutex<Vec<String>>,
+    /// The media server: each file by its direct path, as it decrypts.
+    files: Mutex<HashMap<String, Arc<Vec<u8>>>>,
+    /// Direct paths the server no longer has a file for.
+    expired: Mutex<HashSet<String>>,
+    /// How the phone answers when asked to send a file again.
+    phone: Mutex<Phone>,
+    /// Whether downloads wait, partly written, until it opens.
+    downloads_gated: AtomicBool,
+    downloads_opened: Notify,
+    /// The downloads running, by id, to cancel.
+    running: Mutex<HashMap<String, Arc<Notify>>>,
+    /// Numbers the partial files downloads write.
+    parts: AtomicU64,
+    /// Each photo's direct path, by its message's ID, for the phone to send it again.
+    photos: Mutex<HashMap<String, String>>,
+}
+
+/// How the made-up phone answers when asked to send a file again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Phone {
+    /// It uploads the file again, a moment later, to a new direct path.
+    #[default]
+    Uploads,
+    /// It no longer has the file.
+    #[cfg(test)]
+    Lost,
+    /// It never answers, as when it's off.
+    #[cfg(test)]
+    Silent,
 }
 
 impl World {
@@ -150,6 +183,69 @@ impl World {
     /// The full fetches of the account's app state played so far.
     pub fn fetched(&self) -> Vec<Fetched> {
         self.fetched.lock().expect("the demo world").clone()
+    }
+
+    /// Has the media server hold `data` at `direct_path`.
+    pub fn serve(&self, direct_path: &str, data: Arc<Vec<u8>>) {
+        self.files.lock().expect("the demo world").insert(direct_path.to_string(), data);
+    }
+
+    /// A photo from `sender` in `chat`, `picture`, which the media server then holds and the phone
+    /// can send again.
+    pub fn photo(&self, picture: &Picture, chat: &str, sender: &str, id: &str, at_ms: i64, caption: &str) -> pb::Event {
+        self.serve(&picture.direct_path, picture.data.clone());
+        self.photos.lock().expect("the demo world").insert(id.to_string(), picture.direct_path.clone());
+        let key: Vec<u8> = (0..32u8).map(|n| n ^ id.bytes().fold(0u8, |a, b| a.wrapping_add(b))).collect();
+        let image = e2e::ImageMessage {
+            mimetype: Some("image/jpeg".into()),
+            caption: (!caption.is_empty()).then(|| caption.to_string()),
+            file_sha256: Some(picture.sha256.clone()),
+            file_length: Some(picture.data.len() as u64),
+            width: Some(picture.width),
+            height: Some(picture.height),
+            media_key: Some(key),
+            file_enc_sha256: Some(picture.sha256.iter().rev().copied().collect()),
+            direct_path: Some(picture.direct_path.clone()),
+            jpeg_thumbnail: Some(picture.thumbnail.clone()),
+            ..Default::default()
+        };
+        let raw = e2e::Message { image_message: Some(Box::new(image)), ..Default::default() };
+        let Some(pb::event::Kind::Message(mut message)) = text(chat, sender, id, at_ms, "").kind else {
+            unreachable!("a text is a message")
+        };
+        message.raw = raw.encode_to_vec();
+        if let Some(info) = message.info.as_mut() {
+            info.r#type = "media".into();
+            info.media_type = "image".into();
+        }
+        pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(message)) }
+    }
+
+    /// Has the media server answer 404 for `direct_path`, as WhatsApp's does for old media.
+    #[cfg(test)]
+    pub fn expire(&self, direct_path: &str) {
+        self.expired.lock().expect("the demo world").insert(direct_path.to_string());
+    }
+
+    /// Sets how the phone answers when asked to send a file again.
+    #[cfg(test)]
+    pub fn phone(&self, phone: Phone) {
+        *self.phone.lock().expect("the demo world") = phone;
+    }
+
+    /// Holds downloads partly written while `gated`, letting them go on once it opens.
+    #[cfg(test)]
+    pub fn gate_downloads(&self, gated: bool) {
+        self.downloads_gated.store(gated, Ordering::SeqCst);
+        if !gated {
+            self.downloads_opened.notify_waiters();
+        }
+    }
+
+    /// How many downloads it was asked for.
+    #[cfg(test)]
+    pub fn downloads(&self) -> usize {
+        self.asked().iter().filter(|kind| matches!(kind, pb::command::Kind::MediaDownload(_))).count()
     }
 
     /// Fails the next `n` sends with a connection that's down.
@@ -263,16 +359,19 @@ impl World {
 }
 
 impl DemoEngine {
-    /// The made-up account: connected, then a few messages arriving.
+    /// The made-up account: connected, then a few messages arriving, a photo among them.
     pub fn new() -> DemoEngine {
         let now = now_ms();
         let ana = "351912345678@s.whatsapp.net";
         let climbing = "120363012345678901@g.us";
         let rui = "351913333333@s.whatsapp.net";
-        DemoEngine::with(vec![
+        let world = Arc::new(World::default());
+        let lake = Picture::lake(1600, 1200);
+        let script = vec![
             connected(),
             text(ana, ana, "3EB0DEMO00000001", now - 120_000, "did you get the photos from Sunday?"),
             text(climbing, rui, "3EB0DEMO00000002", now - 60_000, "Saturday at 9?"),
+            world.photo(&lake, ana, ana, "3EB0DEMO00000008", now - 30_000, "Sunday, at the lake"),
             text(ana, ana, "3EB0DEMO00000003", now - 5_000, "the one at the lake"),
             // Earlier than the rest, so each chat's newest stays as it was.
             link(
@@ -309,7 +408,8 @@ impl DemoEngine {
             // told once the messages are in, so storing them holds none of the messages back, and
             // last, so an interface that sees the group named has the whole script.
             group(climbing, "Lisbon Climbing", &[ME, MEMBERS[0], MEMBERS[1]]),
-        ])
+        ];
+        DemoEngine { script, world, pause: Duration::ZERO }
     }
 
     /// The made-up account's engine finding no device in its session.db, as after the account was
@@ -699,6 +799,7 @@ impl Sender {
                     | pb::event::Kind::Receipt(_)
                     | pb::event::Kind::AppState(_)
                     | pb::event::Kind::Bench(_)
+                    | pb::event::Kind::MediaRetried(_)
             )
         );
         if !durable {
@@ -812,8 +913,160 @@ impl Sender {
                 pb::reply::Kind::AvatarFile(none)
             }),
             pb::command::Kind::HistoryDownload(download) => self.history(download).await,
+            pb::command::Kind::MediaDownload(download) => {
+                self.world.ask(pb::command::Kind::MediaDownload(download.clone()));
+                self.download(download).await
+            }
+            pb::command::Kind::MediaCancel(cancel) => {
+                if let Some(stop) = self.world.running.lock().expect("the demo world").get(&cancel.id) {
+                    stop.notify_one();
+                }
+                done
+            }
+            pb::command::Kind::MediaRetry(retry) => {
+                self.world.ask(pb::command::Kind::MediaRetry(retry.clone()));
+                self.send_again(retry);
+                done
+            }
             _ => Err(EngineError::Failed { message: "the demo engine doesn't do that".into(), retry: false }),
         }
+    }
+
+    fn progress(&self, id: &str, bytes: u64, size: u64) {
+        let progress = pb::MediaProgress { id: id.to_string(), bytes, size };
+        let _ = self.events.try_send(Incoming {
+            event: pb::Event { seq: 0, kind: Some(pb::event::Kind::MediaProgress(progress)) },
+            ack: None,
+        });
+    }
+
+    /// Writes the file a download names where jawd asked, as jaw-engine does once it has decrypted
+    /// it: through a partial file, checked against its hash, synced, and linked in under its name,
+    /// never over a file there; half way, it waits while downloads are gated, and can be cancelled.
+    async fn download(&self, download: pb::MediaDownload) -> Result<pb::reply::Kind, EngineError> {
+        use pb::media_file::State;
+        let file = |state: State, bytes: u64, message: &str| {
+            Ok(pb::reply::Kind::MediaFile(pb::MediaFile { state: state as i32, bytes, message: message.into() }))
+        };
+        let path = PathBuf::from(&download.path);
+        if let Ok(there) = std::fs::symlink_metadata(&path) {
+            return file(State::Exists, there.len(), "");
+        }
+        let world = &self.world;
+        let data = {
+            let expired = world.expired.lock().expect("the demo world").contains(&download.direct_path);
+            world.files.lock().expect("the demo world").get(&download.direct_path).cloned().filter(|_| !expired)
+        };
+        let Some(data) = data else { return file(State::Gone, 0, "the server answered 404") };
+        let stop = Arc::new(Notify::new());
+        world.running.lock().expect("the demo world").insert(download.id.clone(), stop.clone());
+        let part = PathBuf::from(format!(
+            "{}.{}-{}.part",
+            download.path,
+            std::process::id(),
+            world.parts.fetch_add(1, Ordering::Relaxed)
+        ));
+        let half = data.len() / 2;
+        let first = {
+            let (part, data) = (part.clone(), data.clone());
+            tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+                let mut out = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part)?;
+                out.write_all(&data[..half])?;
+                Ok(out)
+            })
+            .await
+        };
+        let out = match first {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                world.running.lock().expect("the demo world").remove(&download.id);
+                return Err(EngineError::Failed { message: format!("can't write the file: {e}"), retry: true });
+            }
+            Err(e) => return Err(EngineError::Failed { message: format!("writing stopped: {e}"), retry: true }),
+        };
+        self.progress(&download.id, half as u64, download.size);
+        let cancelled = loop {
+            let opened = world.downloads_opened.notified();
+            if !world.downloads_gated.load(Ordering::SeqCst) {
+                break false;
+            }
+            tokio::select! {
+                () = opened => {}
+                () = stop.notified() => break true,
+            }
+        };
+        world.running.lock().expect("the demo world").remove(&download.id);
+        if cancelled {
+            drop(out);
+            let _ = std::fs::remove_file(&part);
+            return file(State::Cancelled, 0, "the download was cancelled");
+        }
+        let (sha256, total) = (download.file_sha256.clone(), data.len() as u64);
+        let finished = tokio::task::spawn_blocking(move || -> std::io::Result<State> {
+            let mut out = out;
+            let placed = (|| {
+                out.write_all(&data[half..])?;
+                if <sha2::Sha256 as sha2::Digest>::digest(data.as_slice()).as_slice() != sha256.as_slice() {
+                    return Ok(State::BadHash);
+                }
+                out.sync_all()?;
+                match std::fs::hard_link(&part, &path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(State::Exists),
+                    Err(e) => return Err(e),
+                }
+                std::fs::remove_file(&part)?;
+                std::fs::File::open(path.parent().unwrap_or(Path::new(".")))?.sync_all()?;
+                Ok(State::Placed)
+            })();
+            let _ = std::fs::remove_file(&part);
+            placed
+        })
+        .await;
+        match finished {
+            Ok(Ok(State::Placed)) => {
+                self.progress(&download.id, total, download.size);
+                file(State::Placed, total, "")
+            }
+            Ok(Ok(State::BadHash)) => file(State::BadHash, 0, "the file doesn't match its message's hash"),
+            Ok(Ok(state)) => file(state, total, ""),
+            Ok(Err(e)) => Err(EngineError::Failed { message: format!("can't write the file: {e}"), retry: true }),
+            Err(e) => Err(EngineError::Failed { message: format!("writing stopped: {e}"), retry: true }),
+        }
+    }
+
+    /// The phone, asked to send a message's file again, answers as the world says, a moment later:
+    /// uploading it to a new direct path, saying it no longer has it, or not at all.
+    fn send_again(&self, retry: pb::MediaRetry) {
+        let (sender, phone) = (self.clone(), *self.world.phone.lock().expect("the demo world"));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let world = &sender.world;
+            let was = world.photos.lock().expect("the demo world").get(&retry.id).cloned();
+            let (result, direct_path) = match (phone, was) {
+                #[cfg(test)]
+                (Phone::Silent, _) => return,
+                (Phone::Uploads, Some(was)) => {
+                    let again = format!("{was}&again={}", world.parts.fetch_add(1, Ordering::Relaxed));
+                    let data = world.files.lock().expect("the demo world").get(&was).cloned();
+                    if let Some(data) = data {
+                        world.serve(&again, data);
+                    }
+                    (pb::media_retried::Result::Success, again)
+                }
+                _ => (pb::media_retried::Result::NotFound, String::new()),
+            };
+            let answer = pb::MediaRetried {
+                id: retry.id,
+                chat: retry.chat,
+                sender: retry.sender,
+                from_me: retry.from_me,
+                result: result as i32,
+                direct_path,
+                timestamp_ms: now_ms(),
+            };
+            sender.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::MediaRetried(answer)) }).await;
+        });
     }
 
     fn account(&self) -> Result<Arc<dyn Account>, EngineError> {

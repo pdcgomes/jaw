@@ -16,7 +16,8 @@ use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 use super::{Avatars, Merges, Shared, fetch};
 use crate::convert::{self, Me, app_state, people};
 use crate::engine::pb;
-use crate::store::{Amend, Amendment, Change, Chat, Drained, Lane, Packed, Read, Store, thumbnails};
+use crate::engine::pb::media_retried::Result as Phone;
+use crate::store::{Amend, Amendment, Change, Chat, Drained, Lane, Packed, Read, Store, media, thumbnails};
 use crate::work::Priority;
 
 /// Inbox rows read and converted at once.
@@ -118,6 +119,13 @@ pub fn convert_rows(rows: &[Row], me: &Me) -> Converted {
                 }
                 Err(e) => undecodable(row, e),
             },
+            "media_retry" => match pb::MediaRetried::decode(row.payload.as_slice()) {
+                Ok(answer) => {
+                    out.changes.extend(media_answer(&answer));
+                    true
+                }
+                Err(e) => undecodable(row, e),
+            },
             "bench" => true,
             _ => false,
         };
@@ -169,6 +177,29 @@ pub fn receipt_changes(receipt: &pb::Receipt) -> Vec<Change> {
             })
         })
         .collect()
+}
+
+/// What the phone's answer to a media retry changes: the copy it names is downloaded again from
+/// where the phone uploaded it, or says why it can't be.
+pub fn media_answer(answer: &pb::MediaRetried) -> Option<Change> {
+    if answer.id.is_empty() || answer.chat.is_empty() {
+        return None;
+    }
+    let said = match answer.result() {
+        Phone::Success if !answer.direct_path.is_empty() => media::Answer::Uploaded(answer.direct_path.clone()),
+        Phone::NotFound => media::Answer::NotFound,
+        Phone::DecryptionError => media::Answer::Failed("your phone couldn't read jaw's request for this file".into()),
+        Phone::Unreadable => media::Answer::Failed(
+            "your phone answered after jaw's engine started again, so its answer couldn't be read; ask again".into(),
+        ),
+        _ => media::Answer::Failed("your phone couldn't send this file again".into()),
+    };
+    Some(Change::Media(media::Step::Answered {
+        chat: convert::user_jid(&answer.chat),
+        id: answer.id.clone(),
+        answer: said,
+        at: super::now_ms(),
+    }))
 }
 
 /// A row that can't be decoded is kept, and said once.

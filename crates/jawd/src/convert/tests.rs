@@ -4,6 +4,7 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::web_message_info::StubType;
 
 use super::*;
+use crate::store::media::{Keys, MediaCopy};
 
 const ANA: &str = "351910000002@s.whatsapp.net";
 const GROUP: &str = "120363000000000001@g.us";
@@ -1187,4 +1188,113 @@ fn no_kind_of_message_has_a_detail_key_named_like_one_of_its_rows_own_fields() {
         }
     }
     assert!(with_detail >= 15, "only {with_detail} kinds came with a detail");
+}
+
+#[test]
+fn a_file_a_message_carries_is_described_for_downloading_with_only_whole_hashes_and_keys() {
+    let photo = row(e2e::Message {
+        image_message: Some(Box::new(e2e::ImageMessage {
+            mimetype: Some("image/jpeg".into()),
+            width: Some(1600),
+            height: Some(1200),
+            file_length: Some(204_800),
+            file_sha256: Some(vec![1; 32]),
+            file_enc_sha256: Some(vec![2; 31]),
+            media_key: Some(vec![3; 32]),
+            direct_path: Some("/v/t62.7118-24/photo.enc".into()),
+            jpeg_thumbnail: Some(vec![0xFF, 0xD8, 0xFF, 0xD9]),
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+    assert_eq!(
+        photo.media.as_deref(),
+        Some(&MediaCopy {
+            keys: Keys::Image,
+            mime: Some("image/jpeg".into()),
+            bytes: Some(204_800),
+            w: Some(1600),
+            h: Some(1200),
+            sha256: Some(vec![1; 32]),
+            media_key: Some(vec![3; 32]),
+            direct_path: Some("/v/t62.7118-24/photo.enc".into()),
+            thumbnail: true,
+            ..Default::default()
+        }),
+        "a hash that isn't 32 bytes is no hash"
+    );
+    let note = row(e2e::Message {
+        ptv_message: Some(Box::new(e2e::VideoMessage {
+            seconds: Some(9),
+            jpeg_thumbnail: Some(Vec::new()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+    let note = note.media.unwrap();
+    assert_eq!(
+        (note.keys, note.seconds, note.thumbnail),
+        (Keys::Video, Some(9.0), false),
+        "an empty thumbnail is none"
+    );
+    let voice = row(e2e::Message {
+        audio_message: Some(Box::new(e2e::AudioMessage { ptt: Some(true), seconds: Some(14), ..Default::default() })),
+        ..Default::default()
+    });
+    assert_eq!(voice.media.map(|m| (m.keys, m.seconds)), Some((Keys::Audio, Some(14.0))));
+    let document = row(e2e::Message {
+        document_message: Some(Box::new(e2e::DocumentMessage { title: Some("Rent".into()), ..Default::default() })),
+        ..Default::default()
+    });
+    let document = document.media.unwrap();
+    assert_eq!((document.keys, document.name.as_deref()), (Keys::Document, Some("Rent")), "named by its title");
+    let sticker = row(e2e::Message {
+        sticker_message: Some(Box::new(e2e::StickerMessage { png_thumbnail: Some(vec![0x89]), ..Default::default() })),
+        ..Default::default()
+    });
+    let sticker = sticker.media.unwrap();
+    assert_eq!((sticker.keys, sticker.thumbnail), (Keys::Image, true), "a sticker is encrypted as a photo is");
+    assert!(row(e2e::Message { conversation: Some("no file".into()), ..Default::default() }).media.is_none());
+}
+
+#[test]
+fn an_hd_copy_amends_the_message_it_names_and_is_no_row_of_its_own() {
+    let child = |association: AssociationType| e2e::Message {
+        associated_child_message: Some(Box::new(e2e::FutureProofMessage {
+            message: Some(Box::new(e2e::Message {
+                image_message: Some(Box::new(e2e::ImageMessage {
+                    width: Some(4032),
+                    height: Some(3024),
+                    file_sha256: Some(vec![9; 32]),
+                    ..Default::default()
+                })),
+                message_context_info: Some(e2e::MessageContextInfo {
+                    message_association: Some(e2e::MessageAssociation {
+                        association_type: Some(association as i32),
+                        parent_message_key: Some(MessageKey {
+                            remote_jid: Some(ANA.into()),
+                            from_me: Some(false),
+                            id: Some("3EB0SD".into()),
+                            participant: None,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        })),
+        ..Default::default()
+    };
+    let hd = info(ANA, child(AssociationType::HdImageDualUpload));
+    assert!(rows(&hd, true).is_empty(), "the HD copy is no message of its own");
+    let [amend] = amends(&hd).try_into().unwrap();
+    assert_eq!((amend.chat.as_str(), amend.target.as_str()), (ANA, "3EB0SD"));
+    let Amendment::Hd { copy } = &amend.what else { panic!("{:?}", amend.what) };
+    assert_eq!((copy.keys, copy.w, copy.sha256.as_deref()), (Keys::Image, Some(4032), Some(&[9; 32][..])));
+
+    let album = info(ANA, child(AssociationType::MediaAlbum));
+    let [photo] = rows(&album, true).try_into().unwrap();
+    assert_eq!((photo.id.as_str(), photo.kind), ("3EB0AA", "image"), "any other association leaves a photo of its own");
+    assert!(amends(&album).is_empty());
 }

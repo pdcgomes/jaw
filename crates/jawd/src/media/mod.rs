@@ -1,0 +1,393 @@
+//! Media in: each message's file, downloaded through the engine straight into the cache, where it's
+//! named by its content's SHA-256; the thumbnail its message brought, drawn at once as its instant
+//! preview, and its 256 and 768 pixel previews once the file is there, made with jaw-media; the
+//! phone asked to send a file again that WhatsApp's server no longer has; and the cache kept to its
+//! size.
+//!
+//! jaw.db is the queue. A copy arriving live is written `wanted`, with its message; one from history
+//! becomes wanted when a window shows it (`store::files`), and any copy when an interface asks for it
+//! (`media.fetch`). The scheduler (`schedule`) takes what's wanted and does it on two lanes, each a
+//! pool with what an interface shows or asks for ahead of the rest: downloads, six at a time, and
+//! image work, half the cores, so a flood of photos never holds up a message or a keypress, which
+//! never wait on either. Photos, stickers, GIFs and voice messages download by themselves; videos and
+//! documents only when asked, or below `Config::auto_bytes`.
+//!
+//! The files follow the media-files audit's rules (J1 to J9): every name is built one way, absolute
+//! and from jaw's folder, and named by content, so a file already there is the one wanted; a row
+//! names a file only once it's whole and synced, by the engine for a download; a file goes only
+//! after a synced commit has stopped naming it, while no job may be writing it (`cache::Claims`);
+//! the folders are made and synced, and a stopped jawd's partial files removed, before anything
+//! starts; free space is checked before a download. Previews and thumbnails are derived, put in
+//! place without waiting for the disk, and checked before a row carries them (`store::files`).
+
+mod cache;
+mod fetch;
+mod previews;
+mod save;
+mod schedule;
+
+#[cfg(test)]
+mod tests;
+
+pub mod bench;
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use jaw_proto::media::{MediaCancel, MediaFetch, MediaSave, MediaStatus, Variant};
+use jaw_proto::{Error, Push, code};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use tokio::sync::{Notify, broadcast, mpsc};
+
+use crate::engine::supervisor::Supervisor;
+use crate::engine::{EngineError, pb};
+use crate::store::media::{Step, to_hex};
+use crate::store::{Change, Store};
+use crate::sync::Shared;
+use crate::work::{Pool, Priority, Report};
+
+/// What jawd may change about media; the defaults suit a laptop.
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// The cache's size, previews included; past it, what was used longest ago goes first.
+    pub cache_bytes: u64,
+    /// Videos and documents download by themselves up to this size; photos, stickers, GIFs and voice
+    /// messages always do.
+    pub auto_bytes: u64,
+    /// How long the phone has to answer when asked to send a file again.
+    pub phone_wait: Duration,
+    /// How many times a minute the phone may be asked.
+    pub retries_per_minute: u32,
+    /// Downloads at once.
+    pub downloads: usize,
+    /// Background downloads wait while the disk has less than this free.
+    pub keep_free: u64,
+    /// How long a download that couldn't be done waits before it's tried again, at first and at most.
+    pub retry_first: Duration,
+    pub retry_most: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        let mb = |n: u64| n * 1_000_000;
+        let from_env = |name: &str, default: u64| {
+            std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok()).map(mb).unwrap_or(default)
+        };
+        Config {
+            cache_bytes: from_env("JAW_MEDIA_CACHE_MB", mb(5_000)),
+            auto_bytes: from_env("JAW_MEDIA_AUTO_MB", mb(16)),
+            phone_wait: Duration::from_secs(120),
+            retries_per_minute: 20,
+            downloads: 6,
+            keep_free: mb(512),
+            retry_first: Duration::from_secs(2),
+            retry_most: Duration::from_secs(300),
+        }
+    }
+}
+
+/// Where the cache keeps files and what's made of them, under jaw's folder.
+const FILES: &str = "media/files";
+const PREVIEWS: &str = "media/previews";
+
+/// Media in, running.
+#[derive(Clone)]
+pub struct Media {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    store: Store,
+    engine: Option<Supervisor>,
+    home: PathBuf,
+    pipeline: jaw_media::Media,
+    config: Config,
+    downloads: Arc<Pool<fetch::Fetched>>,
+    images: Arc<Pool<previews::Drawn>>,
+    claims: cache::Claims,
+    schedule: schedule::Schedule,
+    /// Wakes the cleaner, which drops unnamed files and keeps the cache to its size.
+    clean: Notify,
+    /// Wakes whatever waits for a copy waiting for the phone to be over.
+    asked_phone: Notify,
+    stats: Mutex<Stats>,
+    /// Why background downloads are paused, while they are.
+    paused: Mutex<Option<String>>,
+}
+
+#[derive(Default)]
+struct Stats {
+    partial_removed: u64,
+    orphans_removed: u64,
+    evicted: u64,
+    remade: u64,
+}
+
+impl Media {
+    /// Starts media: the cache's folders are made and synced, and a stopped jawd's partial files
+    /// removed, before the lanes start; then what a stopped jawd left half done is taken up again,
+    /// files no row names are swept, and what's wanted is done. Call it once jaw.lock is held and a
+    /// synced commit has made jaw.db's state durable (`sync::running`), since the sweep removes
+    /// what that state doesn't name.
+    pub async fn start(
+        store: Store,
+        engine: Option<Supervisor>,
+        home: &Path,
+        live: &Shared,
+        pushes: &broadcast::Sender<Push>,
+        config: Config,
+    ) -> anyhow::Result<Media> {
+        let pipeline = jaw_media::Media::new(jaw_media::Config {
+            previews: jaw_media::Durability::Derived,
+            ..jaw_media::Config::default()
+        });
+        Media::start_with(store, engine, home, live, pushes, config, pipeline).await
+    }
+
+    pub(crate) async fn start_with(
+        store: Store,
+        engine: Option<Supervisor>,
+        home: &Path,
+        live: &Shared,
+        pushes: &broadcast::Sender<Push>,
+        config: Config,
+        pipeline: jaw_media::Media,
+    ) -> anyhow::Result<Media> {
+        let partial = tokio::task::spawn_blocking({
+            let home = home.to_path_buf();
+            move || cache::prepare(&home)
+        })
+        .await??;
+        if partial > 0 {
+            eprintln!("jawd: removed {partial} partial media files a stopped jawd left");
+        }
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let inner = Arc::new(Inner {
+            store,
+            engine,
+            home: home.to_path_buf(),
+            pipeline,
+            downloads: Pool::new("downloads", config.downloads, 1_000),
+            images: Pool::new("images", (cores / 2).max(1), 1_000),
+            config,
+            claims: cache::Claims::default(),
+            schedule: schedule::Schedule::default(),
+            clean: Notify::new(),
+            asked_phone: Notify::new(),
+            stats: Mutex::new(Stats { partial_removed: partial as u64, ..Stats::default() }),
+            paused: Mutex::new(None),
+        });
+        let (progress, progressing) = mpsc::channel(256);
+        live.lock().expect("live state").media_progress = Some(progress);
+        let (seen, seeing) = mpsc::channel(1_024);
+        inner.store.files().watch(seen);
+        let restarted = Change::Media(Step::Restarted { at: now_ms() });
+        inner.store.apply(crate::store::Lane::Live, vec![restarted]).await?;
+        schedule::start(&inner, progressing, seeing, pushes.subscribe());
+        cache::start(&inner);
+        fetch::start(&inner);
+        Ok(Media { inner })
+    }
+
+    /// The download and image lanes, for `status`.
+    pub fn lanes(&self) -> Vec<Arc<dyn Report>> {
+        vec![self.inner.downloads.clone(), self.inner.images.clone()]
+    }
+
+    /// The cache and what's waiting, for `status`.
+    pub fn status(&self) -> MediaStatus {
+        let inner = &self.inner;
+        let count = |what: &str| inner.store.count(what).unwrap_or(0);
+        let (cache_bytes, cache_files) = cache::size(&inner.store).unwrap_or((0, 0));
+        let stats = inner.stats.lock().expect("media stats");
+        MediaStatus {
+            cache_bytes,
+            cache_files,
+            cache_limit: inner.config.cache_bytes,
+            auto_bytes: inner.config.auto_bytes,
+            wanted: count("media WHERE wanted IS NOT NULL"),
+            downloading: inner.schedule.running() as u64,
+            waiting_for_phone: count("media WHERE state = 'waiting_for_phone'"),
+            unnamed: count("media_drop"),
+            partial_removed: stats.partial_removed,
+            orphans_removed: stats.orphans_removed,
+            evicted: stats.evicted,
+            remade: stats.remade,
+            paused: inner.paused.lock().expect("paused").clone(),
+        }
+    }
+
+    /// Answers `media.fetch`, `media.save` and `media.cancel`.
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
+        let inner = &self.inner;
+        match method {
+            "media.fetch" => fetch(inner, params_of::<MediaFetch>(method, params)?).await,
+            "media.save" => save::save(inner, params_of::<MediaSave>(method, params)?).await,
+            "media.cancel" => cancel(inner, params_of::<MediaCancel>(method, params)?).await,
+            _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
+        }
+    }
+
+    /// The methods `call` answers.
+    pub const METHODS: &[&str] = &["media.fetch", "media.save", "media.cancel"];
+}
+
+fn params_of<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, Error> {
+    let params = if params.is_null() { Value::Object(Default::default()) } else { params };
+    serde_json::from_value(params).map_err(|e| Error::new(code::INVALID_PARAMS, format!("{method}'s params: {e}")))
+}
+
+fn internal(what: &str, e: impl std::fmt::Display) -> Error {
+    Error::new(code::INTERNAL, format!("jawd couldn't {what}: {e:#}"))
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
+}
+
+fn variant_name(variant: Variant) -> &'static str {
+    match variant {
+        Variant::Sd => "sd",
+        Variant::Hd => "hd",
+    }
+}
+
+/// A copy of a message's file an interface named, as jaw.db has it.
+#[derive(Clone, Debug)]
+struct Named {
+    message: i64,
+    variant: &'static str,
+    sha256: Option<Vec<u8>>,
+    local: Option<String>,
+    name: Option<String>,
+    id: String,
+}
+
+/// Finds copy `variant` of message `id`, in `chat` or in any chat, as an interface names it: error
+/// 3 for a message or a copy jawd doesn't have, 4 for one deleted or view-once, whose file jaw
+/// doesn't keep, and -32602 for an ID in more than one chat.
+async fn named(inner: &Inner, id: &str, chat: Option<&str>, variant: Variant) -> Result<Named, Error> {
+    let (id, chat, variant) = (id.to_string(), chat.map(str::to_string), variant_name(variant));
+    inner
+        .store
+        .reads()
+        .query(Priority::Interactive, move |db| find(db, &id, chat.as_deref(), variant))
+        .await
+        .map_err(|e| internal("read jaw.db", e))?
+}
+
+/// A message an interface named and its copy: its n, whether it's deleted or view-once, the copy's
+/// hash, its file if it's in the cache, its name, and its variant if it has one.
+type Found = (i64, bool, bool, Option<Vec<u8>>, Option<String>, Option<String>, Option<String>);
+
+const NAMED_IN_CHAT: &str = "SELECT m.n, m.deleted, m.view_once, md.sha256, f.path, md.name, md.variant
+    FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2
+    LEFT JOIN media md ON md.message = m.n AND md.variant = ?3 LEFT JOIN media_files f ON f.sha256 = md.sha256
+    WHERE c.id = ?1";
+const NAMED_ANYWHERE: &str = "SELECT m.n, m.deleted, m.view_once, md.sha256, f.path, md.name, md.variant
+    FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1
+    LEFT JOIN media md ON md.message = m.n AND md.variant = ?2 LEFT JOIN media_files f ON f.sha256 = md.sha256 LIMIT 2";
+
+fn find(db: &Connection, id: &str, chat: Option<&str>, variant: &'static str) -> anyhow::Result<Result<Named, Error>> {
+    let row = |r: &rusqlite::Row| -> rusqlite::Result<Found> {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+    };
+    let found: Vec<Found> = match chat {
+        Some(chat) => db
+            .prepare_cached(NAMED_IN_CHAT)?
+            .query_row(params![chat, id, variant], row)
+            .optional()?
+            .into_iter()
+            .collect(),
+        None => {
+            db.prepare_cached(NAMED_ANYWHERE)?.query_map(params![id, variant], row)?.collect::<rusqlite::Result<_>>()?
+        }
+    };
+    let (message, deleted, view_once, sha256, local, name, copy) = match found.as_slice() {
+        [] => return Ok(Err(Error::new(code::NOT_FOUND, format!("jawd has no message {id}")))),
+        [one] => one.clone(),
+        _ => {
+            let mut error =
+                Error::new(code::INVALID_PARAMS, format!("message {id} is in more than one chat; say which"));
+            error.data = Some(serde_json::json!({ "param": "chat" }));
+            return Ok(Err(error));
+        }
+    };
+    if deleted {
+        return Ok(Err(Error::new(code::NOT_ALLOWED, "that message was deleted, so jaw doesn't keep its file")));
+    }
+    if view_once {
+        return Ok(Err(Error::new(code::NOT_ALLOWED, "jaw doesn't keep the file of a message you can view once")));
+    }
+    if copy.is_none() {
+        let what = if variant == "hd" { "an HD copy" } else { "a file" };
+        return Ok(Err(Error::new(code::NOT_FOUND, format!("message {id} has no {what}"))));
+    }
+    Ok(Ok(Named { message, variant, sha256, local, name, id: id.to_string() }))
+}
+
+/// `media.fetch`: the copy is wanted now, ahead of what downloads by itself, synced before it's
+/// answered, so however jawd stops it's fetched; its progress and its file come as upserts to its
+/// message.
+async fn fetch(inner: &Arc<Inner>, fetch: MediaFetch) -> Result<Value, Error> {
+    let named = named(inner, &fetch.message, fetch.chat.as_deref(), fetch.variant.unwrap_or_default()).await?;
+    let want = Change::Media(Step::Want { message: named.message, variant: named.variant, at: now_ms(), asked: true });
+    durably(inner, vec![want], "keep that the file was asked for").await?;
+    if let Some(sha256) = &named.sha256 {
+        inner.downloads.promote(&fetch::key(sha256));
+    }
+    inner.schedule.wake();
+    Ok(Value::Object(Default::default()))
+}
+
+/// `media.cancel`: nothing more is done for the message's copies, synced before it's answered; a
+/// download running is stopped and leaves nothing.
+async fn cancel(inner: &Arc<Inner>, cancel: MediaCancel) -> Result<Value, Error> {
+    let mut changes = Vec::new();
+    let mut running = Vec::new();
+    for variant in [Variant::Sd, Variant::Hd] {
+        match named(inner, &cancel.message, cancel.chat.as_deref(), variant).await {
+            Ok(named) => {
+                changes.push(Change::Media(Step::Cancel { message: named.message, variant: named.variant }));
+                running.extend(named.sha256);
+            }
+            Err(e) if e.code == code::NOT_FOUND && variant == Variant::Hd => {}
+            Err(e) => return Err(e),
+        }
+    }
+    inner.schedule.cancel(changes.iter().filter_map(|c| match c {
+        Change::Media(Step::Cancel { message, variant }) => Some((*message, *variant)),
+        _ => None,
+    }));
+    durably(inner, changes, "keep that the download was cancelled").await?;
+    for sha256 in running {
+        let key = fetch::key(&sha256);
+        if !inner.downloads.cancel(&key)
+            && let Some(engine) = &inner.engine
+        {
+            let _ = engine.call(pb::command::Kind::MediaCancel(pb::MediaCancel { id: to_hex(&sha256) })).await;
+        }
+    }
+    Ok(Value::Object(Default::default()))
+}
+
+/// Makes `changes` in one transaction synced before it returns, as what an interface is told is
+/// done must be.
+async fn durably(inner: &Inner, changes: Vec<Change>, what: &str) -> Result<(), Error> {
+    let applied = inner.store.apply_durable(changes).await.map_err(|e| internal(what, e))?;
+    if applied.quarantined > 0 {
+        return Err(Error::new(code::INTERNAL, format!("jawd couldn't {what}; what failed is kept in quarantine")));
+    }
+    Ok(())
+}
+
+/// Whether what the engine said means trying again later might work.
+fn retryable(e: &EngineError) -> bool {
+    match e {
+        EngineError::Gone | EngineError::Unavailable(_) => true,
+        EngineError::Failed { retry, .. } => *retry,
+    }
+}

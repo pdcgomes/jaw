@@ -60,6 +60,8 @@ message Event {
     AppStateSynced app_state_synced = 14;
     PresenceUpdate presence = 15;
     Typing typing = 16;
+    MediaProgress media_progress = 17;
+    MediaRetried media_retried = 18;
   }
 }
 
@@ -282,6 +284,39 @@ message Typing {
   ChatPresence.State state = 3;
 }
 
+// How far a MediaDownload has got: `bytes` of the `size` its message gave. Sent without a seq, at
+// most four times a second for each download, and once more when it's whole.
+message MediaProgress {
+  string id = 1;
+  uint64 bytes = 2;
+  uint64 size = 3;
+}
+
+// The phone's answer to a MediaRetry, read with the key it was asked with. Sent with a seq, since
+// the phone won't upload the file again unasked.
+message MediaRetried {
+  enum Result {
+    RESULT_UNSPECIFIED = 0;
+    // Uploaded again: `direct_path` is where WhatsApp's server has it now.
+    SUCCESS = 1;
+    // The phone no longer has the file.
+    NOT_FOUND = 2;
+    // The phone couldn't read what it was asked.
+    DECRYPTION_ERROR = 3;
+    GENERAL_ERROR = 4;
+    // The engine has no key to read the answer with, as when it was started again after asking.
+    UNREADABLE = 5;
+  }
+  // The message's ID, chat, sender in a group, and whether it's yours, as the answer names them.
+  string id = 1;
+  string chat = 2;
+  string sender = 3;
+  bool from_me = 4;
+  Result result = 5;
+  string direct_path = 6;
+  int64 timestamp_ms = 7;
+}
+
 // A made-up message for measuring the link, sent with a seq like a real one.
 message Bench {
   bytes payload = 1;
@@ -317,7 +352,52 @@ message Command {
     PollVote poll_vote = 19;
     SubscribePresence subscribe_presence = 20;
     UserInfo user_info = 21;
+    MediaDownload media_download = 22;
+    MediaCancel media_cancel = 23;
+    MediaRetry media_retry = 24;
   }
+}
+
+// Downloads and decrypts one file to `path`, which jawd names, and answers with MediaFile. It's
+// streamed to a partial file beside `path` and never held in memory, its plaintext checked against
+// `file_sha256`, synced, and put in place under `path` only once it's whole, never over a file
+// already there. MediaProgress events say how far it has got, and MediaCancel stops it.
+message MediaDownload {
+  // Which of WhatsApp's keys it's encrypted with: a sticker's are a photo's.
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    IMAGE = 1;
+    VIDEO = 2;
+    AUDIO = 3;
+    DOCUMENT = 4;
+  }
+  // Names the download for MediaCancel and MediaProgress.
+  string id = 1;
+  Kind kind = 2;
+  string direct_path = 3;
+  bytes media_key = 4;
+  bytes file_sha256 = 5;
+  bytes file_enc_sha256 = 6;
+  // The file's size as its message gives it, for progress and the room it needs.
+  uint64 size = 7;
+  string path = 8;
+}
+
+// Stops download `id`, which answers CANCELLED; Done whether it was running or not.
+message MediaCancel {
+  string id = 1;
+}
+
+// Asks the phone to upload a message's file again, once WhatsApp's server no longer has it (the
+// download answered GONE); Done once it's asked. The answer comes as a MediaRetried event, which
+// the engine reads with `media_key`, kept until then.
+message MediaRetry {
+  // The message's chat and ID as WhatsApp named them, its sender in a group, and whether it's yours.
+  string chat = 1;
+  string sender = 2;
+  bool from_me = 3;
+  string id = 4;
+  bytes media_key = 5;
 }
 
 // Sends a message with the ID jawd made for it, which WhatsApp then knows it by; answered with Sent
@@ -481,6 +561,7 @@ message Reply {
     Sent sent = 10;
     OnWhatsAppList on_whatsapp_list = 11;
     UserInfoList user_info_list = 12;
+    MediaFile media_file = 13;
   }
 }
 
@@ -496,6 +577,30 @@ message User {
   string picture_id = 3;
   string verified_name = 4;
   string lid = 5;
+}
+
+// What became of a MediaDownload. A failure that may pass (the network, the server) is a Failure
+// with `retry` instead.
+message MediaFile {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    // Written to the path asked for, whole and synced.
+    PLACED = 1;
+    // A file was already at the path, and, named by its content, it's this one.
+    EXISTS = 2;
+    // WhatsApp's server no longer has it (403, 404 or 410): the phone can be asked (MediaRetry).
+    GONE = 3;
+    // What came doesn't match the message's hashes or its MAC.
+    BAD_HASH = 4;
+    // The disk is full, or too full for the file.
+    NO_SPACE = 5;
+    CANCELLED = 6;
+  }
+  State state = 1;
+  // The file's size, once it's in place.
+  uint64 bytes = 2;
+  // What happened, as a sentence jawd can pass on.
+  string message = 3;
 }
 
 // The server has a message Send sent.

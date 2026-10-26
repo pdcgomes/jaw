@@ -608,20 +608,30 @@ async fn two_copies_of_a_message_folded_into_one_keep_the_file_downloaded_for_ei
         let db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
         db.execute_batch(&format!(
-            "INSERT INTO media (message, variant, state) SELECT m.n, 'sd', 'remote' FROM messages m
+            "INSERT INTO media (message, variant, keys, sha256) SELECT m.n, 'sd', 'image', zeroblob(32) FROM messages m
                 JOIN chats c ON c.n = m.chat WHERE c.id = '{ANA}';
-            INSERT INTO media (message, variant, path, state) SELECT m.n, 'sd', 'media/both.jpg', 'here' FROM messages m
-                JOIN chats c ON c.n = m.chat WHERE c.id = '{ANA_LID}';"
+            INSERT INTO media (message, variant, keys, sha256, direct_path, wanted) SELECT m.n, 'sd', 'image',
+                zeroblob(32), '/v/both', 5 FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = '{ANA_LID}';
+            INSERT INTO media_files (sha256, path, bytes, used_at) VALUES (zeroblob(32), 'media/files/both.jpg', 9, 1);"
         ))
         .unwrap();
     }
     joined(&store).await;
     merged(&store).await;
-    let kept: (i64, Option<String>) = query(&store, |db| {
-        Ok(db.query_row("SELECT count(*), max(path) FROM media", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+    let kept: (i64, Option<String>, Option<i64>, String, i64) = query(&store, |db| {
+        Ok(db.query_row(
+            "SELECT count(*), max(md.direct_path), max(md.wanted), max(f.path), (SELECT count(*) FROM media_drop)
+            FROM media md JOIN media_files f ON f.sha256 = md.sha256",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?)
     })
     .await;
-    assert_eq!(kept, (1, Some("media/both.jpg".into())));
+    assert_eq!(
+        kept,
+        (1, Some("/v/both".into()), Some(5), "media/files/both.jpg".into(), 0),
+        "one copy, with what either knew of how to fetch it, still naming the file in the cache"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

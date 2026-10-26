@@ -17,6 +17,8 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::sync::oneshot;
 
+use super::files::{Files, Seen};
+use super::media::{Made, from_hex};
 use crate::work::{Priority, Report, Samples};
 
 /// The most readers, whatever the cores.
@@ -375,10 +377,16 @@ const MESSAGE_COLUMNS: &str = "
                 ORDER BY n)),
         iif(instr(m.detail, '\"thumbnail\":\"') > 0, (SELECT h.sha256 FROM thumbnails h
             WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL),
-        m.reply ->> 'from'";
+        m.reply ->> 'from',
+        (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress,
+                'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail,
+                'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256),
+                'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256
+                    WHERE h.message = m.n AND h.variant = 'hd'))
+            FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd')";
 
 /// How many columns MESSAGE_COLUMNS has, for queries that select more after them.
-const MESSAGE_COLUMN_COUNT: usize = 29;
+const MESSAGE_COLUMN_COUNT: usize = 30;
 
 /// What a poll's tallies are counted from as a window reads it, each a range of the poll's own
 /// rows: its options, each voter's latest vote with the person their JID is, and what each chose.
@@ -543,7 +551,100 @@ fn tallied(detail: &str, tally: Tally) -> String {
     serde_json::to_string(&parsed).unwrap_or_else(|_| detail.to_string())
 }
 
-fn message_row(r: &Row, polls: &mut Polls) -> rusqlite::Result<MessageRow> {
+/// What MESSAGE_COLUMNS reads of a message's SD copy and the file it names.
+#[derive(Deserialize)]
+struct Copy {
+    state: String,
+    progress: Option<f64>,
+    error: Option<String>,
+    path: Option<String>,
+    small: Option<String>,
+    large: Option<String>,
+    thumbnail: Option<String>,
+    has_thumbnail: i64,
+    sha256: Option<String>,
+    hd: Option<Hd>,
+}
+
+#[derive(Deserialize)]
+struct Hd {
+    path: Option<String>,
+}
+
+/// Kinds whose file has a picture to preview.
+const PICTURED: [&str; 5] = ["image", "sticker", "gif", "video", "video_note"];
+
+/// `detail`'s `media` as message `n`'s copy and its file are now: its state, its file once it's in
+/// the cache, and its previews and thumbnail where they're whole, checked through `files`; what the
+/// row lacked is told to media.
+fn with_media(
+    detail: &mut Option<String>,
+    n: i64,
+    kind: &str,
+    view_once: bool,
+    copy: Option<String>,
+    files: Option<&Files>,
+) {
+    let (Some(text), Some(copy)) = (detail.as_deref(), copy) else { return };
+    let (Ok(copy), Ok(mut parsed)) =
+        (serde_json::from_str::<Copy>(&copy), serde_json::from_str::<serde_json::Map<String, Value>>(text))
+    else {
+        return;
+    };
+    let whole = |path: &Option<String>| path.clone().filter(|path| files.is_none_or(|files| files.whole(path)));
+    let mut broken = Vec::new();
+    let previews = match (whole(&copy.small), whole(&copy.large)) {
+        (Some(small), Some(large)) => Some((small, large)),
+        _ => {
+            broken.extend(copy.small.clone().or(copy.large.clone()).map(|path| (Made::Previews, path)));
+            None
+        }
+    };
+    let thumbnail = whole(&copy.thumbnail);
+    if thumbnail.is_none() {
+        broken.extend(copy.thumbnail.clone().map(|path| (Made::Thumbnail, path)));
+    }
+    if let Value::Object(media) = parsed.entry("media").or_insert_with(|| Value::Object(Default::default())) {
+        media.insert("state".into(), copy.state.clone().into());
+        if copy.state == "downloading" {
+            media.insert("progress".into(), copy.progress.unwrap_or(0.0).into());
+        }
+        if let Some(error) = &copy.error {
+            media.insert("error".into(), error.clone().into());
+        }
+        if let Some(path) = &copy.path {
+            media.insert("path".into(), path.clone().into());
+        }
+        if let Some((small, large)) = &previews {
+            media.insert("previews".into(), serde_json::json!({ "256": small, "768": large }));
+        }
+        if let Some(thumbnail) = &thumbnail {
+            media.insert("thumbnail".into(), thumbnail.clone().into());
+        }
+        if let Some(hd) = &copy.hd {
+            media.insert("hd".into(), true.into());
+            if let Some(path) = &hd.path {
+                media.insert("hd_path".into(), path.clone().into());
+            }
+        }
+    }
+    *detail = Some(Value::Object(parsed).to_string());
+    // A view-once message's file is never kept, so there's nothing to tell.
+    let (Some(files), Some(sha256), false) =
+        (files, copy.sha256.as_deref().and_then(|hex| from_hex(&hex.to_lowercase())), view_once)
+    else {
+        return;
+    };
+    let local = copy.path.is_some();
+    let no_thumbnail = copy.has_thumbnail != 0 && thumbnail.is_none();
+    let unpreviewed = local && previews.is_none() && PICTURED.contains(&kind);
+    let unfetched = !local && copy.state == "remote";
+    if no_thumbnail || unpreviewed || unfetched || !broken.is_empty() {
+        files.seen(Seen { message: n, sha256, local, no_thumbnail, state: copy.state, broken });
+    }
+}
+
+fn message_row(r: &Row, polls: &mut Polls, files: Option<&Files>) -> rusqlite::Result<MessageRow> {
     let text: Option<String> = r.get(8)?;
     let mentioned: Option<Mentioned> = r
         .get::<_, Option<String>>(25)?
@@ -587,6 +688,8 @@ fn message_row(r: &Row, polls: &mut Polls) -> rusqlite::Result<MessageRow> {
     if deleted {
         reactions = "[]".into();
     }
+    let kind: String = r.get(6)?;
+    with_media(&mut detail, r.get(0)?, &kind, r.get(18)?, r.get(29)?, files);
     let from = match r.get::<_, Option<i64>>(19)? {
         Some(id) => {
             let jid: Option<String> = r.get(23)?;
@@ -601,7 +704,7 @@ fn message_row(r: &Row, polls: &mut Polls) -> rusqlite::Result<MessageRow> {
         v: r.get::<_, i64>(3)?.max(mentioned.and_then(|mentioned| mentioned.v).unwrap_or(0)),
         at: r.get(4)?,
         mine: r.get(5)?,
-        kind: r.get(6)?,
+        kind,
         status: r.get(7)?,
         spans: json(Some(spans))?.expect("spans are always there"),
         summary,
@@ -626,24 +729,25 @@ pub fn messages(db: &Connection, chat: &str, around: Around, limit: usize) -> Re
         format!("{MESSAGE_COLUMNS} FROM messages m {MESSAGE_JOINS} WHERE m.chat = (SELECT n FROM chats WHERE id = ?1)");
     let limit = limit as i64;
     let mut polls = Polls::new(db);
+    let files = Files::of(db);
     let mut rows: Vec<MessageRow> = match around {
         Around::Newest => {
             let sql = format!("{from} ORDER BY m.at DESC, m.n DESC LIMIT ?2");
             db.prepare_cached(&sql)?
-                .query_map(params![chat, limit], |r| message_row(r, &mut polls))?
+                .query_map(params![chat, limit], |r| message_row(r, &mut polls, files.as_deref()))?
                 .collect::<rusqlite::Result<_>>()?
         }
         Around::Before(cursor) => {
             let sql = format!("{from} AND (m.at, m.n) < (?2, ?3) ORDER BY m.at DESC, m.n DESC LIMIT ?4");
             db.prepare_cached(&sql)?
-                .query_map(params![chat, cursor.at, cursor.n, limit], |r| message_row(r, &mut polls))?
+                .query_map(params![chat, cursor.at, cursor.n, limit], |r| message_row(r, &mut polls, files.as_deref()))?
                 .collect::<rusqlite::Result<_>>()?
         }
         Around::After(cursor) => {
             let sql = format!("{from} AND (m.at, m.n) > (?2, ?3) ORDER BY m.at, m.n LIMIT ?4");
             return Ok(db
                 .prepare_cached(&sql)?
-                .query_map(params![chat, cursor.at, cursor.n, limit], |r| message_row(r, &mut polls))?
+                .query_map(params![chat, cursor.at, cursor.n, limit], |r| message_row(r, &mut polls, files.as_deref()))?
                 .collect::<rusqlite::Result<_>>()?);
         }
     };
@@ -657,7 +761,11 @@ pub fn message(db: &Connection, chat: &str, id: &str) -> Result<Option<(MessageR
         "{MESSAGE_COLUMNS} FROM messages m {MESSAGE_JOINS} WHERE m.chat = (SELECT n FROM chats WHERE id = ?1) AND m.id = ?2"
     );
     let mut polls = Polls::new(db);
-    let Some(row) = db.prepare_cached(&sql)?.query_row(params![chat, id], |r| message_row(r, &mut polls)).optional()?
+    let files = Files::of(db);
+    let Some(row) = db
+        .prepare_cached(&sql)?
+        .query_row(params![chat, id], |r| message_row(r, &mut polls, files.as_deref()))
+        .optional()?
     else {
         return Ok(None);
     };
@@ -724,12 +832,18 @@ pub fn search(db: &Connection, typed: &str, chat: Option<&str>, before: Option<i
         ORDER BY messages_fts.rowid DESC LIMIT ?4"
     );
     let mut polls = Polls::new(db);
+    let files = Files::of(db);
     let hits: Vec<Hit> = db
         .prepare_cached(&sql)?
         .query_map(params![query, before.unwrap_or(i64::MAX), chat, limit as i64], |r| {
             let marked: String = r.get(MESSAGE_COLUMN_COUNT + 1)?;
             let (text, marks) = unmark(&marked);
-            Ok(Hit { message: message_row(r, &mut polls)?, text, marks, t: r.get(MESSAGE_COLUMN_COUNT)? })
+            Ok(Hit {
+                message: message_row(r, &mut polls, files.as_deref())?,
+                text,
+                marks,
+                t: r.get(MESSAGE_COLUMN_COUNT)?,
+            })
         })?
         .collect::<rusqlite::Result<_>>()?;
     let cursor = (hits.len() == limit).then(|| hits.last().map(|hit| hit.t)).flatten();
@@ -834,10 +948,13 @@ pub fn messages_by_t(db: &Connection, ts: &[i64]) -> Result<Vec<(MessageRow, Str
     let sql = format!("{MESSAGE_COLUMNS} FROM messages m {MESSAGE_JOINS} WHERE m.t = ?1");
     let mut select = db.prepare_cached(&sql)?;
     let mut polls = Polls::new(db);
+    let files = Files::of(db);
     let mut rows = Vec::with_capacity(ts.len());
     for &t in ts {
         let row = select
-            .query_row([t], |r| Ok((message_row(r, &mut polls)?, r.get::<_, Option<String>>(8)?.unwrap_or_default())))
+            .query_row([t], |r| {
+                Ok((message_row(r, &mut polls, files.as_deref())?, r.get::<_, Option<String>>(8)?.unwrap_or_default()))
+            })
             .optional()?;
         rows.extend(row);
     }

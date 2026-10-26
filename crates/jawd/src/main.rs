@@ -8,6 +8,7 @@ mod engine;
 mod feed;
 mod find;
 mod layout;
+mod media;
 mod notify;
 mod organise;
 mod presence;
@@ -218,6 +219,16 @@ enum Bench {
         #[arg(long, default_value_t = 0)]
         far: u32,
     },
+    /// Media in: a photo's arrival through the demo engine to its 256-pixel preview on the socket
+    Media {
+        #[arg(long, default_value_t = 10)]
+        count: u32,
+        /// The photo's size in pixels, a 12-megapixel phone photo's by default
+        #[arg(long, default_value_t = 4032)]
+        width: u32,
+        #[arg(long, default_value_t = 3024)]
+        height: u32,
+    },
     /// Sending: send.text answered with its synced commit, and sends there and back through the demo engine
     Send {
         #[arg(long, default_value_t = 1_000)]
@@ -308,6 +319,9 @@ fn jawd(cli: Cli) -> Result<()> {
         Some(Command::Bench(Bench::Send { count, trips, chats })) => {
             bench_send(send::bench::Plan { count, trips, chats })
         }
+        Some(Command::Bench(Bench::Media { count, width, height })) => {
+            bench_media(media::bench::Plan { count, width, height })
+        }
         None => run(&home, cli.engine, cli.fail, &options),
     }
 }
@@ -317,6 +331,15 @@ fn bench_send(plan: send::bench::Plan) -> Result<()> {
     let scratch = std::env::temp_dir().join(format!("jaw-bench-send-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;
     let outcome = runtime()?.block_on(send::bench::run(&scratch, plan));
+    let _ = std::fs::remove_dir_all(&scratch);
+    outcome
+}
+
+/// Times a photo's arrival to its preview on a jaw.db in a folder of its own, removed afterwards.
+fn bench_media(plan: media::bench::Plan) -> Result<()> {
+    let scratch = std::env::temp_dir().join(format!("jaw-bench-media-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let outcome = runtime()?.block_on(media::bench::run(&scratch, plan));
     let _ = std::fs::remove_dir_all(&scratch);
     outcome
 }
@@ -531,6 +554,8 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         following.clone(),
     ));
     let attention = Arc::new(attention::Attention::default());
+    let media =
+        media::Media::start(store.clone(), engine.clone(), home, &live, &pushes, media::Config::default()).await?;
     let sending = send::Sending::start(
         store.clone(),
         engine.clone(),
@@ -541,8 +566,9 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         send::link::Previews::default(),
     )
     .await?;
-    let pools: Vec<Arc<dyn work::Report>> =
+    let mut pools: Vec<Arc<dyn work::Report>> =
         vec![Arc::new(store.clone()), Arc::new(store.reads().clone()), sending.lane()];
+    pools.extend(media.lanes());
     let finder = find::Finder::start(store.clone()).await?;
     let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
     let connection = live.clone();
@@ -570,6 +596,7 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         .with_layouts(layout::Layouts::new(store.clone()))
         .with_settings(settings)
         .with_following(following, checks)
+        .with_media(media)
         .with_notifications(says)
         .without(&options.without);
     let state = Arc::new(state);

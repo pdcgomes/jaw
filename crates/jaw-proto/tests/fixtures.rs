@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use jaw_proto::find::{ChatOpened, Find, Found, Kind};
 use jaw_proto::layout::{Book, LayoutGet, LayoutSet, Saved};
+use jaw_proto::media::{MediaCancel, MediaFetch, MediaSave, Saved as MediaSaved};
 use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
     PollVote, React, Read, SendPoll, SendRetry, SendText, Sent, Typing,
@@ -122,6 +123,9 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "folder.create" | "folder.add" | "favourite.set" => {
                         assert!(request.params.is_object(), "{name}'s params")
                     }
+                    "media.fetch" => params::<MediaFetch>(&name, &request.params),
+                    "media.save" => params::<MediaSave>(&name, &request.params),
+                    "media.cancel" => params::<MediaCancel>(&name, &request.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -143,9 +147,11 @@ fn every_fixture_reads_and_writes_back_the_same() {
                         }
                     }
                     "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
-                    | "typing" | "react" | "edit" | "delete" | "poll.vote" | "folder.add" | "favourite.set" => {
+                    | "typing" | "react" | "edit" | "delete" | "poll.vote" | "folder.add" | "favourite.set"
+                    | "media.fetch" | "media.cancel" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
+                    "media.save" => params::<MediaSaved>(&name, result),
                     "send.text" | "send.poll" => params::<Sent>(&name, result),
                     "chat.start" => params::<ChatStarted>(&name, result),
                     "forward" => params::<Forwarded>(&name, result),
