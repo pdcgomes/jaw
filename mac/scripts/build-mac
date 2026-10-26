@@ -1,0 +1,61 @@
+#!/bin/sh
+# Builds and tests jaw for the Mac on the build Mac, so this Mac stays free for other work (the
+# owner's rule, as Redlamp's scripts/build-mac.py keeps it). The checkout is copied as it is, new and
+# changed files included, to ~/src/build-mac/jaw/<checkout> there, and the job runs there:
+#
+#   mac/scripts/build-mac test <Scheme> [xcodebuild options]   # JawKit, JawThemes, JawUITests
+#   mac/scripts/build-mac build [<Scheme>]                       # jaw by default
+#   mac/scripts/build-mac snapshot <out.png> [app options]       # jaw.app --demo drawn into a picture
+#   mac/scripts/build-mac references                             # the snapshot tests' pictures, back here
+#
+# The build Mac has no Rust or Go, so jawd is built here (cargo build -p jawd) and its binary goes
+# with the checkout, for the live tests and --demo. When the build Mac doesn't answer, the job runs here.
+set -eu
+here="$(cd "$(dirname "$0")/../.." && pwd)"
+host="${JAW_BUILD_MAC:-build-mac}"
+remote="src/build-mac/jaw/$(basename "$here")"
+what="${1:-}"; [ $# -gt 0 ] && shift
+
+ssh_() { ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" "$@"; }
+
+if ! ssh_ true 2>/dev/null; then
+    echo "==> $host doesn't answer; running here" >&2
+    case "$what" in
+        test) exec "$here/mac/scripts/check" test "$@" ;;
+        build) exec "$here/mac/scripts/check" build "$@" ;;
+        *) echo "$what needs $host" >&2; exit 1 ;;
+    esac
+fi
+
+echo "==> copying $(basename "$here") to $host:~/$remote" >&2
+ssh_ "mkdir -p ~/$remote"
+rsync -a --delete \
+    --exclude .git --exclude '/target/*' --include '/target/debug/jawd' --exclude 'build/' --exclude '*.xcodeproj' \
+    --exclude '*.xcworkspace' --exclude Derived --exclude .DS_Store --exclude __pycache__ --exclude /.work \
+    --exclude '/marketing/*.mp4' --exclude '/marketing/*.gif' \
+    -e "ssh -o BatchMode=yes" "$here/" "$host:$remote/"
+if [ -x "$here/target/debug/jawd" ]; then
+    ssh_ "mkdir -p ~/$remote/target/debug"
+    rsync -a -e "ssh -o BatchMode=yes" "$here/target/debug/jawd" "$host:$remote/target/debug/jawd"
+fi
+
+run() { ssh_ "cd ~/$remote/mac && export PATH=/opt/homebrew/bin:\$PATH && mise trust -q . >/dev/null 2>&1; mise exec -- tuist generate --no-open >/dev/null && caffeinate -i $*"; }
+
+case "$what" in
+    test|build)
+        scheme="${1:-jaw}"; [ $# -gt 0 ] && shift
+        run "scripts/check $what $scheme $*"
+        ;;
+    snapshot)
+        out="$1"; shift
+        run "scripts/check build jaw >/dev/null; rm -rf \\\$TMPDIR/jaw-mac-demo; build/DerivedData/Build/Products/Debug/jaw.app/Contents/MacOS/jaw --demo --snapshot /tmp/jaw-mac-snapshot.png $* > /tmp/jaw-mac-snapshot.log 2>&1; cat /tmp/jaw-mac-snapshot.log | tail -3"
+        scp -q -o BatchMode=yes "$host:/tmp/jaw-mac-snapshot.png" "$out" && echo "==> $out"
+        ;;
+    references)
+        rsync -a -e "ssh -o BatchMode=yes" "$host:$remote/mac/Tests/JawUITests/References/" "$here/mac/Tests/JawUITests/References/"
+        ;;
+    *)
+        echo "usage: mac/scripts/build-mac test|build|snapshot|references" >&2
+        exit 2
+        ;;
+esac

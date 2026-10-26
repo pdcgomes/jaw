@@ -1,0 +1,11 @@
+#!/bin/sh
+# Builds a scheme (or tests it, with `test`) and prints only jaw's own diagnostics and the result.
+set -u
+cd "$(dirname "$0")/.."
+action=build
+[ "${1:-}" = test ] && { action=test; shift; }
+scheme="${1:-jaw}"; shift 2>/dev/null || true
+xcodebuild "$action" -workspace Jaw.xcworkspace -scheme "$scheme" -destination 'platform=macOS,arch=arm64' \
+    -derivedDataPath build/DerivedData "$@" 2>&1 \
+    | grep -E "/mac/[^ ]+:[0-9]+:[0-9]+: (error|warning)|swiftmacro.*error|✘|Test run with|\*\* (BUILD|TEST)" \
+    | grep -v "xctoolchain" | sort -u | head -80

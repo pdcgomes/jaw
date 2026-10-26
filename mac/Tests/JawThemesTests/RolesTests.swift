@@ -1,0 +1,24 @@
+@testable import JawThemes
+import Testing
+
+@Test func `jaw's theme is the terminal's Tokyo Night by role`() {
+    let dark = Catalog.jaw.dark
+    #expect(dark.ground == RGBA(0x1A1B26) && dark.text == RGBA(0xC0CAF5) && dark.accent == RGBA(0x7AA2F7))
+    #expect(dark.senders.count == 8, "eight senders' colours, as theme.rs has them")
+    #expect(dark.sender(9) == dark.sender(1) && dark.sender(-1) == dark.sender(7), "jawd's index wraps")
+}
+
+@Test func `text reads on every ground it's drawn on, dark and light`() {
+    for roles in [Catalog.jaw.dark, Catalog.jaw.light] {
+        for ground in [roles.ground, roles.surface, roles.yours, roles.selection] {
+            #expect(roles.text.contrast(with: ground) >= 4.5, "text on \(ground), dark \(roles.isDark)")
+        }
+        #expect(roles.secondary.contrast(with: roles.ground) >= 3, "secondary text, dark \(roles.isDark)")
+    }
+}
+
+@Test func `a colour over another is what the eye sees`() {
+    let half = RGBA(r: 1, g: 1, b: 1, a: 0.5).over(RGBA(r: 0, g: 0, b: 0))
+    #expect(abs(half.r - 0.5) < 1e-9 && half.a == 1)
+    #expect(RGBA(0xFFFFFF).contrast(with: RGBA(0x000000)) > 20.9)
+}
