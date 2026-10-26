@@ -845,14 +845,36 @@ fn a_history_blob_keeps_each_chat_as_the_phone_has_it() {
         }],
         ..Default::default()
     };
-    let parts = convert::history::blob(&history, &me());
-    let chat = parts[0].iter().find_map(|c| if let Change::Chat(chat) = c { Some(chat) } else { None }).unwrap();
+    let changes = walked(&history.encode_to_vec());
+    let chat = changes.iter().find_map(|c| if let Change::Chat(chat) = c { Some(chat) } else { None }).unwrap();
     assert_eq!((chat.id.as_str(), chat.pinned, chat.muted_until), (ANA, Some(AT), Some(AT + 3_600_000)));
-    let read = parts[0].iter().find_map(|c| if let Change::Read(read) = c { Some(read) } else { None }).unwrap();
+    let read = changes.iter().find_map(|c| if let Change::Read(read) = c { Some(read) } else { None }).unwrap();
     assert_eq!(read.phone, Some((4, 0)), "the phone counts four unread, more than the blob carries");
-    let message = parts[0].iter().find_map(|c| if let Change::Message(m) = c { Some(m) } else { None }).unwrap();
+    let message = changes.iter().find_map(|c| if let Change::Message(m) = c { Some(m) } else { None }).unwrap();
     assert_eq!((message.chat.as_str(), message.live), (ANA, false));
-    assert_eq!(parts[1].len(), 2, "the blob's LID map and push names");
+    let last: Vec<&[String]> = changes[changes.len() - 2..]
+        .iter()
+        .filter_map(|c| if let Change::Person(person) = c { Some(person.jids.as_slice()) } else { None })
+        .collect();
+    assert_eq!(
+        last,
+        [
+            &["351910000003@s.whatsapp.net".to_string(), "100000000003@lid".to_string()][..],
+            &["351910000003@s.whatsapp.net".to_string()][..]
+        ],
+        "the blob's LID map and push names come last"
+    );
+}
+
+/// Every change a history blob gives, in order.
+fn walked(data: &[u8]) -> Vec<Change> {
+    let mut changes = Vec::new();
+    convert::history::walk(data, &me(), 2_000, |chunk| {
+        changes.extend(chunk);
+        true
+    })
+    .expect("the blob walks");
+    changes
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1413,10 +1435,7 @@ async fn a_restart_before_a_blobs_drain_uses_the_blob_in_the_spool_again_without
     let file = spool.join("offer-here.pb");
     std::fs::write(&file, blob("h1")).unwrap();
     // The run before stored the blob's rows and stopped before the commit that drains it.
-    let history = wa_proto::wa_web_protobufs_history_sync::HistorySync::decode(blob("h1").as_slice()).unwrap();
-    for part in convert::history::blob(&history, &me()) {
-        store.apply(Lane::Background, part).await.unwrap();
-    }
+    store.apply(Lane::Background, walked(&blob("h1"))).await.unwrap();
     assert!(file.exists(), "the blob stays until its drain is committed");
     let engine = Scripted::default();
     let (supervisor, _incoming) = supervised(&engine);

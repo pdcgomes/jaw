@@ -1,20 +1,21 @@
-//! History blobs, fetched a blob at a time as the phone offers them and converted in the
-//! background lane a conversation at a time. The message that offered a blob stays in the inbox
-//! until the blob's rows are in, and a blob already downloaded to the spool is used again, so a
-//! restart in the middle of history loses nothing and fetches nothing twice. What a blob carries
-//! besides the messages kept as rows is kept raw in `history_kept` before the blob goes.
+//! History blobs, fetched a blob at a time as the phone offers them, converted a message at a time
+//! as they're encoded and stored in the background lane while they're converted. The message that
+//! offered a blob stays in the inbox until the blob's rows are in, and a blob already downloaded to
+//! the spool is used again, so a restart in the middle of history loses nothing and fetches nothing
+//! twice. What a blob carries besides the messages kept as rows is kept raw in `history_kept`
+//! before the blob goes.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use jaw_proto::HistoryProgress;
-use prost::Message as _;
 use tokio::sync::mpsc;
-use wa_proto::wa_web_protobufs_history_sync::{HistorySync, history_sync::HistorySyncType};
+use wa_proto::wa_web_protobufs_history_sync::history_sync::HistorySyncType;
 
 use super::{Merges, Shared};
 use crate::convert;
+use crate::convert::history::{Unwalked, Walked};
 use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, pb};
 use crate::store::{Change, Drained, Lane, Packed, Store};
@@ -39,6 +40,8 @@ pub struct Offer {
 
 /// Changes handed to the writer at once, so a big conversation doesn't wait as one batch.
 const CHUNK: usize = 2_000;
+/// Chunks converted and waiting for the writer, at most.
+const HANDED: usize = 2;
 /// How long to wait before asking the engine again after it couldn't fetch, at first and at most.
 const RETRY_FIRST: Duration = Duration::from_secs(2);
 const RETRY_MOST: Duration = Duration::from_secs(60);
@@ -172,40 +175,39 @@ async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, s
         tokio::fs::read(&path).await.map_err(|e| Failed::Later(format!("can't read {}: {e}", path.display())))?;
     let bytes = data.len() as u64;
     let me = super::stored_me(live, "history from the phone").await;
-    let decoded = tokio::task::spawn_blocking(move || {
-        let history = HistorySync::decode(data.as_slice())?;
-        let parts = convert::history::blob(&history, &me);
-        let rest = Packed::new(&convert::history::remainder(&history, &parts).encode_to_vec());
-        Ok::<_, prost::DecodeError>((
-            history.sync_type,
-            history.chunk_order,
-            history.progress,
-            history.conversations.len(),
-            parts,
-            rest,
-        ))
-    })
-    .await
-    .map_err(|e| Failed::Later(format!("converting it stopped: {e}")))?;
-    let (kind, chunk, progress, conversations, parts, rest) = match decoded {
-        Ok(decoded) => decoded,
-        Err(e) => {
+    let storing = Instant::now();
+    // The blob is converted on a thread of its own while its changes are stored, a chunk at a
+    // time; storing ahead of the conversion keeps only HANDED chunks waiting.
+    let (handing, mut handed) = mpsc::channel(HANDED);
+    let walking = tokio::task::spawn_blocking(move || {
+        let mut walked = convert::history::walk(&data, &me, CHUNK, |changes| handing.blocking_send(changes).is_ok())?;
+        let rest = Packed::new(&std::mem::take(&mut walked.rest));
+        Ok::<_, Unwalked>((walked, rest))
+    });
+    let mut transactions = 0;
+    let mut failed = None;
+    while let Some(changes) = handed.recv().await {
+        match store.apply(Lane::Background, changes).await {
+            Ok(applied) => transactions += applied.transactions,
+            Err(e) => {
+                failed = Some(format!("{e:#}"));
+                break;
+            }
+        }
+    }
+    drop(handed);
+    let walked = walking.await.map_err(|e| Failed::Later(format!("converting it stopped: {e}")))?;
+    if let Some(e) = failed {
+        return Err(Failed::Later(e));
+    }
+    let (walked, rest) = match walked {
+        Ok(walked) => walked,
+        Err(Unwalked::Undecodable(e)) => {
             let _ = tokio::fs::remove_file(&path).await;
             return Err(Failed::Later(format!("the blob doesn't decode, so it's fetched again: {e}")));
         }
+        Err(Unwalked::Stopped) => return Err(Failed::Later("its conversion stopped before its end".into())),
     };
-    let messages: usize = parts.iter().flatten().filter(|c| matches!(c, Change::Message(_))).count();
-    let storing = Instant::now();
-    let mut transactions = 0;
-    for part in parts {
-        let mut part = part;
-        while !part.is_empty() {
-            let rest = part.split_off(part.len().min(CHUNK));
-            let applied = store.apply(Lane::Background, part).await.map_err(|e| Failed::Later(format!("{e:#}")))?;
-            transactions += applied.transactions;
-            part = rest;
-        }
-    }
     // The blob goes only once what it carried besides its messages, and the notification's removal,
     // are on disk; a power cut before that brings the notification back, and the blob is still
     // there for it.
@@ -218,10 +220,11 @@ async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, s
         .map_err(|e| Failed::Later(format!("{e:#}")))?;
     let stored = storing.elapsed();
     let _ = tokio::fs::remove_file(&path).await;
-    let kind = HistorySyncType::try_from(kind).map(|t| t.as_str_name()).unwrap_or("?");
+    let Walked { sync_type, chunk_order, progress, conversations, messages, .. } = walked;
+    let kind = HistorySyncType::try_from(sync_type).map(|t| t.as_str_name()).unwrap_or("?");
     eprintln!(
         "jawd: history {kind} chunk {}: {conversations} chats, {messages} messages, {:.1} MB, fetched in {:.2} s and stored in {:.2} s ({:.0} a second, {transactions} transactions); the phone says {}%",
-        chunk.unwrap_or_default(),
+        chunk_order.unwrap_or_default(),
         bytes as f64 / 1e6,
         downloaded.as_secs_f64(),
         stored.as_secs_f64(),
