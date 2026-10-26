@@ -3771,6 +3771,239 @@ mod folders {
         }
     }
 
+    /// A window as an interface holds it, and how it watched it.
+    struct Held {
+        method: &'static str,
+        params: Value,
+        model: Model,
+    }
+
+    impl Held {
+        async fn watch(watcher: &mut Watcher, method: &'static str, params: Value) -> Held {
+            let result = watcher.call(method, params.clone()).await.unwrap();
+            watcher.call("unwatch", json!({"watch": result["watch"]})).await.unwrap();
+            let mut model = Model { chats: true, ..Model::default() };
+            model.take(&result, "rows");
+            Held { method, params, model }
+        }
+
+        /// Watches again as an interface coming back does, from the seq it held and with the ids of
+        /// the rows it holds, and takes what comes: it must then hold what a fresh watch gives, so
+        /// every row it held whose content changed since took a new version.
+        async fn come_back(&mut self, watcher: &mut Watcher, what: &str) {
+            let mut params = self.params.clone();
+            params["since"] = self.model.seq.into();
+            params["have"] = json!(self.model.ids());
+            let result = watcher.call(self.method, params).await.unwrap();
+            watcher.call("unwatch", json!({"watch": result["watch"]})).await.unwrap();
+            self.model.take(&result, "rows");
+            let fresh = Held::watch(watcher, self.method, self.params.clone()).await;
+            self.model.assert_matches(&fresh.model, what);
+        }
+
+        fn row(&self, id: &str) -> &Value {
+            self.model.rows.get(id).unwrap_or_else(|| panic!("no row {id}: {:?}", self.model.ids()))
+        }
+    }
+
+    async fn person_n(bed: &Bed, jid: &'static str) -> i64 {
+        bed.store
+            .reads()
+            .query(crate::work::Priority::Interactive, move |db| {
+                Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [jid], |r| r.get::<_, i64>(0))?)
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn done(bed: &Bed, make: impl FnOnce(Done) -> Step) {
+        assert_eq!(step(bed, make).await.0, Outcome::Done(None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_chat_list_watched_again_from_since_is_sent_every_row_whose_content_changed() {
+        let bed = Bed::new(brisk());
+        let (bairro, party) = ("120363000000000010@g.us", "120363000000000012@g.us");
+        let ana_lid = "100000000002@lid";
+        let person = |jid: &str| {
+            Change::Person(Person { jids: vec![jid.into()], name: Some("Ana".into()), ..Person::default() })
+        };
+        bed.apply(vec![
+            person(ANA),
+            // Her LID, someone else to jaw until WhatsApp says they're one.
+            person(ana_lid),
+            Change::Message(text(ANA, "a1", AT, Some(ANA), "olá")),
+            Change::Message(text(RUI, "r1", AT + 1, Some(RUI), "boas")),
+            Change::Message(Message { live: true, ..text(CLIMBING, "c1", AT + 2, Some(RUI), "sábado?") }),
+            Change::Chat(Chat {
+                id: bairro.into(),
+                kind: Some("community"),
+                name: Some("Bairro".into()),
+                ..Chat::default()
+            }),
+            Change::Chat(Chat {
+                id: party.into(),
+                kind: Some("group"),
+                community: Some(bairro.into()),
+                ..Chat::default()
+            }),
+            Change::Message(Message { live: true, ..text(party, "p1", AT + 3, Some(RUI), "festa") }),
+        ])
+        .await;
+        let (ana, lid) = (person_n(&bed, ANA).await, person_n(&bed, ana_lid).await);
+        let family = create(&bed, "Family", None).await;
+        let work = create(&bed, "Work", None).await;
+        done(&bed, |done| Step::File { folder: work, item: Item::Person(lid), done }).await;
+        let mut watcher = bed.watcher(64);
+        let mut all =
+            Held::watch(&mut watcher, "chats.watch", json!({"folder": "all", "around": "top", "after": 20})).await;
+        let in_family = json!({"folder": format!("folder:{family}"), "around": "top", "after": 20});
+        let mut filed = Held::watch(&mut watcher, "chats.watch", in_family).await;
+        let (family_id, work_id) = (format!("folder:{family}"), format!("folder:{work}"));
+
+        bed.apply(vec![Change::Message(Message { live: true, ..text(party, "p2", AT + 10, Some(RUI), "às 9") })]).await;
+        all.come_back(&mut watcher, "a message in a community's group").await;
+        assert_eq!(all.row(bairro)["children_unread"], json!(2));
+
+        bed.apply(vec![Change::Chat(Chat { id: party.into(), community: Some(String::new()), ..Chat::default() })])
+            .await;
+        all.come_back(&mut watcher, "a group leaving its community").await;
+        assert_eq!(all.row(bairro)["children_unread"], json!(0), "Party's no longer Bairro's");
+
+        bed.apply(vec![Change::Chat(Chat { id: CLIMBING.into(), community: Some(bairro.into()), ..Chat::default() })])
+            .await;
+        all.come_back(&mut watcher, "a group joining a community").await;
+        assert_eq!(all.row(bairro)["children_unread"], json!(1));
+
+        done(&bed, |done| Step::File { folder: family, item: Item::Chat(CLIMBING.into()), done }).await;
+        all.come_back(&mut watcher, "a chat filed").await;
+        filed.come_back(&mut watcher, "a chat filed, in its folder").await;
+        assert_eq!(all.row(CLIMBING)["folders"], json!([family_id]));
+
+        done(&bed, |done| Step::File { folder: family, item: Item::Person(ana), done }).await;
+        all.come_back(&mut watcher, "someone filed").await;
+        filed.come_back(&mut watcher, "someone filed, in their folder").await;
+        assert_eq!(all.row(ANA)["folders"], json!([family_id]), "her chat says where she's filed");
+
+        done(&bed, |done| Step::Unfile { folder: family, item: Item::Chat(CLIMBING.into()), done }).await;
+        all.come_back(&mut watcher, "a chat unfiled").await;
+        filed.come_back(&mut watcher, "a chat unfiled, from its folder").await;
+        assert_eq!(all.row(CLIMBING)["folders"], Value::Null, "filed nowhere");
+
+        let slot = |slot: u8, chat: Option<&str>| {
+            let target = chat.map(|chat| Target::Chat(chat.into()));
+            move |done| Step::Favourite { slot, target, done }
+        };
+        done(&bed, slot(2, Some(RUI))).await;
+        all.come_back(&mut watcher, "a favourite").await;
+        assert_eq!(all.row(RUI)["favourite"], json!(2));
+        done(&bed, slot(3, Some(RUI))).await;
+        all.come_back(&mut watcher, "a favourite moved to another slot").await;
+        assert_eq!(all.row(RUI)["favourite"], json!(3));
+        done(&bed, slot(3, Some(ANA))).await;
+        all.come_back(&mut watcher, "a favourite's slot given to another chat").await;
+        assert_eq!((all.row(RUI)["favourite"].clone(), all.row(ANA)["favourite"].clone()), (Value::Null, json!(3)));
+        done(&bed, slot(3, None)).await;
+        all.come_back(&mut watcher, "a favourite's slot emptied").await;
+        assert_eq!(all.row(ANA)["favourite"], Value::Null);
+
+        // Her LID has no chat, so only where she's filed changes for her chat.
+        bed.apply(vec![Change::Person(Person { jids: vec![ANA.into(), ana_lid.into()], ..Person::default() })]).await;
+        all.come_back(&mut watcher, "her number and LID joined").await;
+        filed.come_back(&mut watcher, "her number and LID joined, in her folder").await;
+        assert_eq!(all.row(ANA)["folders"], json!([family_id, work_id]), "filed where her LID was too");
+
+        done(&bed, |done| Step::Delete { folder: work, done }).await;
+        all.come_back(&mut watcher, "a folder deleted").await;
+        filed.come_back(&mut watcher, "a folder deleted, beside this one").await;
+        assert_eq!(all.row(ANA)["folders"], json!([family_id]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_roster_watched_again_from_since_is_sent_every_row_whose_content_changed() {
+        let bed = Bed::new(brisk());
+        let (ze, ze_lid) = ("351910000005@s.whatsapp.net", "100000000005@lid");
+        let person = |jid: &str, name: &str| {
+            Change::Person(Person { jids: vec![jid.into()], name: Some(name.into()), ..Person::default() })
+        };
+        let avatar = |chat: &str| {
+            let file = format!("media/avatars/{}.jpg", chat.replace('@', "_"));
+            Change::Chat(Chat { id: chat.into(), avatar: Some(file), avatar_id: Some("1".into()), ..Chat::default() })
+        };
+        bed.apply(vec![
+            person(ANA, "Ana"),
+            person(RUI, "Rui"),
+            person(INES, "Inês"),
+            Change::Message(text(ANA, "a1", AT, Some(ANA), "olá")),
+            // Zé's chat under his LID comes first, then one under his number, each with its picture.
+            person(ze_lid, "Zé"),
+            Change::Message(text(ze_lid, "z1", AT + 1, Some(ze_lid), "viva")),
+            avatar(ze_lid),
+            person(ze, "Zé"),
+            Change::Message(text(ze, "z2", AT + 2, Some(ze), "então")),
+            avatar(ze),
+        ])
+        .await;
+        let (ana, rui, ines) = (person_n(&bed, ANA).await, person_n(&bed, RUI).await, person_n(&bed, INES).await);
+        let family = create(&bed, "Family", None).await;
+        let mut watcher = bed.watcher(64);
+        let mut all =
+            Held::watch(&mut watcher, "roster.watch", json!({"folder": "all", "around": "top", "after": 20})).await;
+        let in_family = json!({"folder": format!("folder:{family}"), "around": "top", "after": 20});
+        let mut filed = Held::watch(&mut watcher, "roster.watch", in_family).await;
+        let id = |n: i64| format!("person:{n}");
+
+        bed.apply(vec![avatar(ANA)]).await;
+        all.come_back(&mut watcher, "the avatar of someone's chat").await;
+        assert_eq!(all.row(&id(ana))["avatar"], json!("media/avatars/351910000002_s.whatsapp.net.jpg"));
+
+        bed.apply(vec![Change::Message(text(RUI, "r1", AT + 3, Some(RUI), "boas"))]).await;
+        all.come_back(&mut watcher, "someone's first chat").await;
+        assert_eq!(all.row(&id(rui))["chat"], json!(RUI));
+
+        done(&bed, |done| Step::File { folder: family, item: Item::Person(ines), done }).await;
+        all.come_back(&mut watcher, "someone filed").await;
+        filed.come_back(&mut watcher, "someone filed, in their folder").await;
+        done(&bed, |done| Step::File { folder: family, item: Item::Chat(ANA.into()), done }).await;
+        all.come_back(&mut watcher, "someone's chat filed").await;
+        filed.come_back(&mut watcher, "someone's chat filed, in their folder").await;
+        assert_eq!(all.row(&id(ana))["folders"], json!([format!("folder:{family}")]));
+
+        let said = |jid: &str, state| Change::Folders(Step::Presence { jid: jid.into(), state });
+        bed.apply(vec![said(RUI, Presence::Online), said(INES, Presence::Away(Some(AT + 5)))]).await;
+        all.come_back(&mut watcher, "presence heard").await;
+        filed.come_back(&mut watcher, "presence heard, in a folder").await;
+        assert_eq!(all.row(&id(rui))["presence"]["state"], json!("online"));
+        bed.apply(vec![Change::Folders(Step::Following { people: vec![rui] })]).await;
+        all.come_back(&mut watcher, "someone followed").await;
+        assert_eq!(all.row(&id(rui))["presence"]["known"], json!(true));
+        bed.apply(vec![Change::Folders(Step::Following { people: Vec::new() })]).await;
+        all.come_back(&mut watcher, "someone no longer followed").await;
+        assert_eq!(all.row(&id(rui))["presence"]["known"], json!(false));
+        bed.apply(vec![Change::Folders(Step::Unknown)]).await;
+        all.come_back(&mut watcher, "nobody's presence known").await;
+        assert_eq!(all.row(&id(rui))["presence"]["state"], json!("hidden"));
+
+        let about = vec![(ANA.to_string(), "Lisboa".to_string())];
+        bed.apply(vec![Change::Folders(Step::About { asked: vec![ANA.into()], about, at: AT + 6 })]).await;
+        all.come_back(&mut watcher, "an about text").await;
+        filed.come_back(&mut watcher, "an about text, in a folder").await;
+        assert_eq!(all.row(&id(ana))["about"], json!("Lisboa"));
+
+        // His chat under his number is kept, with its own picture, and the LID one merged into it.
+        bed.apply(vec![Change::Person(Person { jids: vec![ze.into(), ze_lid.into()], ..Person::default() })]).await;
+        all.come_back(&mut watcher, "his number and LID joined").await;
+        while bed.store.count("chat_merges").unwrap() > 0 {
+            bed.store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+        }
+        all.come_back(&mut watcher, "his chats merged").await;
+        let his = all.model.rows.values().find(|row| row["name"] == "Zé").unwrap();
+        assert_eq!(
+            (&his["chat"], &his["avatar"]),
+            (&json!(ze), &json!("media/avatars/351910000005_s.whatsapp.net.jpg"))
+        );
+    }
+
     /// A folder's chat list as a fresh read gives it, whole, as its window should hold it.
     async fn listed(bed: &Bed, list: List, after: usize) -> Model {
         let rows = bed

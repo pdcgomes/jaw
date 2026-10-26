@@ -1059,171 +1059,191 @@ SELECT person FROM person_jids WHERE jid IN (SELECT value FROM json_each(?1))
       SCAN json_each VIRTUAL TABLE INDEX 1:
 
 -- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) > (?1, ?2) AND p.roster_sort < ?3 AND p.n NOT IN (SELECT value FROM json_each(?5)) ORDER BY p.roster_sort, p.n LIMIT ?4
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) > (?1, ?2) AND p.roster_sort < ?3 AND p.n NOT IN (SELECT value FROM json_each(?5)) ORDER BY p.roster_sort, p.n LIMIT ?4
     SEARCH p USING INDEX people_roster (roster_sort>? AND roster_sort<?)
-    LIST SUBQUERY 6
+    LIST SUBQUERY 7
       SCAN json_each VIRTUAL TABLE INDEX 1:
       CREATE BLOOM FILTER
-    CORRELATED SCALAR SUBQUERY 1
+    CORRELATED SCALAR SUBQUERY 2
       SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
+      CORRELATED SCALAR SUBQUERY 1
         SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 4
-      SEARCH j USING INDEX person_jids_by_person (person=?)
+      SEARCH d USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 5
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 6
       SEARCH i USING INDEX folder_items_by_person (person=?)
 
 -- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) < (?1, ?2) AND ?3 <> '' AND p.n NOT IN (SELECT value FROM json_each(?5)) ORDER BY p.roster_sort DESC, p.n DESC LIMIT ?4
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) < (?1, ?2) AND ?3 <> '' AND p.n NOT IN (SELECT value FROM json_each(?5)) ORDER BY p.roster_sort DESC, p.n DESC LIMIT ?4
     SEARCH p USING INDEX people_roster (roster_sort<?)
-    LIST SUBQUERY 6
+    LIST SUBQUERY 7
       SCAN json_each VIRTUAL TABLE INDEX 1:
       CREATE BLOOM FILTER
-    CORRELATED SCALAR SUBQUERY 1
+    CORRELATED SCALAR SUBQUERY 2
       SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
+      CORRELATED SCALAR SUBQUERY 1
         SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 4
-      SEARCH j USING INDEX person_jids_by_person (person=?)
+      SEARCH d USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 5
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 6
       SEARCH i USING INDEX folder_items_by_person (person=?)
 
 -- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM folder_people fp CROSS JOIN people p ON p.n = fp.person WHERE fp.folder = ?5 AND (fp.roster_sort, fp.person) > (?1, ?2) AND fp.roster_sort < ?3 ORDER BY fp.roster_sort, fp.person LIMIT ?4
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM folder_people fp CROSS JOIN people p ON p.n = fp.person WHERE fp.folder = ?5 AND (fp.roster_sort, fp.person) > (?1, ?2) AND fp.roster_sort < ?3 ORDER BY fp.roster_sort, fp.person LIMIT ?4
     SEARCH fp USING COVERING INDEX folder_people_by_sort (folder=? AND (roster_sort,person)>(?,?) AND roster_sort<?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?)
-    CORRELATED SCALAR SUBQUERY 1
+    CORRELATED SCALAR SUBQUERY 2
       SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
+      CORRELATED SCALAR SUBQUERY 1
         SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 4
-      SEARCH j USING INDEX person_jids_by_person (person=?)
+      SEARCH d USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 5
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 6
       SEARCH i USING INDEX folder_items_by_person (person=?)
 
 -- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM folder_people fp CROSS JOIN people p ON p.n = fp.person WHERE fp.folder = ?5 AND (fp.roster_sort, fp.person) < (?1, ?2) AND ?3 <> '' ORDER BY fp.roster_sort DESC, fp.person DESC LIMIT ?4
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM folder_people fp CROSS JOIN people p ON p.n = fp.person WHERE fp.folder = ?5 AND (fp.roster_sort, fp.person) < (?1, ?2) AND ?3 <> '' ORDER BY fp.roster_sort DESC, fp.person DESC LIMIT ?4
     SEARCH fp USING COVERING INDEX folder_people_by_sort (folder=? AND (roster_sort,person)<(?,?))
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?)
-    CORRELATED SCALAR SUBQUERY 1
+    CORRELATED SCALAR SUBQUERY 2
       SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
+      CORRELATED SCALAR SUBQUERY 1
         SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 4
-      SEARCH j USING INDEX person_jids_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 5
-      SEARCH i USING INDEX folder_items_by_person (person=?)
-
--- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) < (?1, ?2) AND ?3 <> '' AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived <> 0) ORDER BY p.roster_sort DESC, p.n DESC LIMIT ?4
-    SEARCH p USING INDEX people_roster (roster_sort<?)
-    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 1
-      SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
       SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
+      CORRELATED SCALAR SUBQUERY 3
         SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
-    CORRELATED SCALAR SUBQUERY 4
-      SEARCH j USING INDEX person_jids_by_person (person=?)
     CORRELATED SCALAR SUBQUERY 5
-      SEARCH i USING INDEX folder_items_by_person (person=?)
-
--- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) > (?1, ?2) AND p.roster_sort < ?3 AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived <> 0) ORDER BY p.roster_sort, p.n LIMIT ?4
-    SEARCH p USING INDEX people_roster (roster_sort>? AND roster_sort<?)
-    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 1
-      SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
-        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
-    CORRELATED SCALAR SUBQUERY 4
       SEARCH j USING INDEX person_jids_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 5
-      SEARCH i USING INDEX folder_items_by_person (person=?)
-
--- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) < (?1, ?2) AND ?3 <> '' AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0)) ORDER BY p.roster_sort DESC, p.n DESC LIMIT ?4
-    SEARCH p USING INDEX people_roster (roster_sort<?)
-    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 1
-      SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
-        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
-    CORRELATED SCALAR SUBQUERY 4
-      SEARCH j USING INDEX person_jids_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 5
-      SEARCH i USING INDEX folder_items_by_person (person=?)
-
--- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) > (?1, ?2) AND p.roster_sort < ?3 AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0)) ORDER BY p.roster_sort, p.n LIMIT ?4
-    SEARCH p USING INDEX people_roster (roster_sort>? AND roster_sort<?)
-    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 1
-      SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
-        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
-    CORRELATED SCALAR SUBQUERY 4
-      SEARCH j USING INDEX person_jids_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 5
-      SEARCH i USING INDEX folder_items_by_person (person=?)
-
--- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) < (?1, ?2) AND ?3 <> '' AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n))) ORDER BY p.roster_sort DESC, p.n DESC LIMIT ?4
-    SEARCH p USING INDEX people_roster (roster_sort<?)
-    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
     CORRELATED SCALAR SUBQUERY 6
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
+      SEARCH i USING INDEX folder_items_by_person (person=?)
+
+-- src/store/lists.rs
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) < (?1, ?2) AND ?3 <> '' AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived <> 0) ORDER BY p.roster_sort DESC, p.n DESC LIMIT ?4
+    SEARCH p USING INDEX people_roster (roster_sort<?)
+    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH a USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 1
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      SEARCH d USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 5
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 6
+      SEARCH i USING INDEX folder_items_by_person (person=?)
+
+-- src/store/lists.rs
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) > (?1, ?2) AND p.roster_sort < ?3 AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived <> 0) ORDER BY p.roster_sort, p.n LIMIT ?4
+    SEARCH p USING INDEX people_roster (roster_sort>? AND roster_sort<?)
+    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH a USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 1
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      SEARCH d USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 5
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 6
+      SEARCH i USING INDEX folder_items_by_person (person=?)
+
+-- src/store/lists.rs
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) < (?1, ?2) AND ?3 <> '' AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0)) ORDER BY p.roster_sort DESC, p.n DESC LIMIT ?4
+    SEARCH p USING INDEX people_roster (roster_sort<?)
+    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH a USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 1
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      SEARCH d USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 5
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 6
+      SEARCH i USING INDEX folder_items_by_person (person=?)
+
+-- src/store/lists.rs
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) > (?1, ?2) AND p.roster_sort < ?3 AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0)) ORDER BY p.roster_sort, p.n LIMIT ?4
+    SEARCH p USING INDEX people_roster (roster_sort>? AND roster_sort<?)
+    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH a USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 1
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      SEARCH d USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 5
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 6
+      SEARCH i USING INDEX folder_items_by_person (person=?)
+
+-- src/store/lists.rs
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) < (?1, ?2) AND ?3 <> '' AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n))) ORDER BY p.roster_sort DESC, p.n DESC LIMIT ?4
+    SEARCH p USING INDEX people_roster (roster_sort<?)
+    SEARCH c EXISTS USING INDEX chats_by_person (person=?)
     CORRELATED SCALAR SUBQUERY 7
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 8
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 9
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
-    CORRELATED SCALAR SUBQUERY 1
+    CORRELATED SCALAR SUBQUERY 2
       SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
+      CORRELATED SCALAR SUBQUERY 1
         SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 4
-      SEARCH j USING INDEX person_jids_by_person (person=?)
+      SEARCH d USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 5
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 6
       SEARCH i USING INDEX folder_items_by_person (person=?)
 
 -- src/store/lists.rs
-SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) > (?1, ?2) AND p.roster_sort < ?3 AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n))) ORDER BY p.roster_sort, p.n LIMIT ?4
+SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed, coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)), (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n) LIMIT 1), (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1), (SELECT json_group_array(i.folder) FROM folder_items i WHERE i.person = p.n) FROM people p WHERE (p.name IS NOT NULL OR p.direct_chats > 0) AND (p.roster_sort, p.n) > (?1, ?2) AND p.roster_sort < ?3 AND EXISTS (SELECT 1 FROM chats c WHERE c.person = p.n AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n))) ORDER BY p.roster_sort, p.n LIMIT ?4
     SEARCH p USING INDEX people_roster (roster_sort>? AND roster_sort<?)
     SEARCH c EXISTS USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 6
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 7
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 8
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 9
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
-    CORRELATED SCALAR SUBQUERY 1
+    CORRELATED SCALAR SUBQUERY 2
       SEARCH a USING INDEX chats_by_person (person=?)
-    CORRELATED SCALAR SUBQUERY 3
-      SEARCH d USING INDEX chats_by_person (person=?)
-      CORRELATED SCALAR SUBQUERY 2
+      CORRELATED SCALAR SUBQUERY 1
         SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 4
-      SEARCH j USING INDEX person_jids_by_person (person=?)
+      SEARCH d USING INDEX chats_by_person (person=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 5
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 6
       SEARCH i USING INDEX folder_items_by_person (person=?)
 
 -- src/store/lists.rs
@@ -1932,14 +1952,6 @@ UPDATE folders SET parent = ?2, position = ?3, v = ?4 WHERE n = ?1 AND (parent I
 -- src/store/write/folders.rs
 UPDATE folders SET v = ?2 WHERE n = ?1
     SEARCH folders USING INTEGER PRIMARY KEY (rowid=?)
-
--- src/store/write/folders.rs
-UPDATE chats SET v = ?2 WHERE n = ?1
-    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
-
--- src/store/write/folders.rs
-UPDATE people SET v = ?2 WHERE n = ?1
-    SEARCH people USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/folders.rs
 SELECT n FROM chats WHERE person = ?1
@@ -2786,11 +2798,15 @@ INSERT INTO person_jids (jid, person) VALUES (?1, ?2) RETURNING n
     SEARCH reactions USING INDEX reactions_by_sender (sender=?)
 
 -- src/store/write.rs
-SELECT n, kind FROM chats WHERE id = ?1
+UPDATE people SET v = ?2 WHERE n = ?1
+    SEARCH people USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+SELECT n, kind, community, avatar, person FROM chats WHERE id = ?1
     SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
 
 -- src/store/write.rs
-INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread, community, ephemeral, draft, v, avatar, avatar_id) VALUES (?1, coalesce(?2, ?13), ?3, ?4, coalesce(?5, 0), coalesce(?6, 0), coalesce(?7, 0), coalesce(?8, 0), nullif(?9, ''), coalesce(?10, 0), nullif(?11, ''), ?12, nullif(?14, ''), nullif(?15, '')) ON CONFLICT (id) DO UPDATE SET kind = coalesce(?2, kind), person = coalesce(?3, person), name = coalesce(?4, name), pinned = coalesce(?5, pinned), archived = coalesce(?6, archived), muted_until = coalesce(?7, muted_until), marked_unread = coalesce(?8, marked_unread), community = iif(?9 IS NULL, community, nullif(?9, '')), ephemeral = coalesce(?10, ephemeral), draft = iif(?11 IS NULL, draft, nullif(?11, '')), v = ?12, avatar = iif(?14 IS NULL, avatar, nullif(?14, '')), avatar_id = iif(?15 IS NULL, avatar_id, nullif(?15, '')) WHERE coalesce(?2, kind) IS NOT kind OR coalesce(?3, person) IS NOT person OR coalesce(?4, name) IS NOT name OR coalesce(?5, pinned) IS NOT pinned OR coalesce(?6, archived) IS NOT archived OR coalesce(?7, muted_until) IS NOT muted_until OR coalesce(?8, marked_unread) IS NOT marked_unread OR iif(?9 IS NULL, community, nullif(?9, '')) IS NOT community OR coalesce(?10, ephemeral) IS NOT ephemeral OR iif(?11 IS NULL, draft, nullif(?11, '')) IS NOT draft OR iif(?14 IS NULL, avatar, nullif(?14, '')) IS NOT avatar OR iif(?15 IS NULL, avatar_id, nullif(?15, '')) IS NOT avatar_id RETURNING n
+INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread, community, ephemeral, draft, v, avatar, avatar_id) VALUES (?1, coalesce(?2, ?13), ?3, ?4, coalesce(?5, 0), coalesce(?6, 0), coalesce(?7, 0), coalesce(?8, 0), nullif(?9, ''), coalesce(?10, 0), nullif(?11, ''), ?12, nullif(?14, ''), nullif(?15, '')) ON CONFLICT (id) DO UPDATE SET kind = coalesce(?2, kind), person = coalesce(?3, person), name = coalesce(?4, name), pinned = coalesce(?5, pinned), archived = coalesce(?6, archived), muted_until = coalesce(?7, muted_until), marked_unread = coalesce(?8, marked_unread), community = iif(?9 IS NULL, community, nullif(?9, '')), ephemeral = coalesce(?10, ephemeral), draft = iif(?11 IS NULL, draft, nullif(?11, '')), v = ?12, avatar = iif(?14 IS NULL, avatar, nullif(?14, '')), avatar_id = iif(?15 IS NULL, avatar_id, nullif(?15, '')) WHERE coalesce(?2, kind) IS NOT kind OR coalesce(?3, person) IS NOT person OR coalesce(?4, name) IS NOT name OR coalesce(?5, pinned) IS NOT pinned OR coalesce(?6, archived) IS NOT archived OR coalesce(?7, muted_until) IS NOT muted_until OR coalesce(?8, marked_unread) IS NOT marked_unread OR iif(?9 IS NULL, community, nullif(?9, '')) IS NOT community OR coalesce(?10, ephemeral) IS NOT ephemeral OR iif(?11 IS NULL, draft, nullif(?11, '')) IS NOT draft OR iif(?14 IS NULL, avatar, nullif(?14, '')) IS NOT avatar OR iif(?15 IS NULL, avatar_id, nullif(?15, '')) IS NOT avatar_id RETURNING n, community, avatar, person
     SEARCH folder_chats USING INDEX folder_chats_by_chat (chat=?)
     SEARCH folder_items USING COVERING INDEX folder_items_by_chat (chat=?)
     SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)

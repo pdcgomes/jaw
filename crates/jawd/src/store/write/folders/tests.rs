@@ -543,6 +543,109 @@ async fn the_background_check_finds_counts_changed_by_hand_and_a_rebuild_mends_t
     assert_eq!(yours(&store, family).await, right);
 }
 
+/// Every row of what folders keep their counts through, and of people's counts of their chats.
+async fn derivations(store: &Store) -> Vec<String> {
+    query(store, |db| {
+        let mut rows = Vec::new();
+        for sql in [
+            "SELECT folder, ancestor FROM folder_paths ORDER BY folder, ancestor",
+            "SELECT folder, chat, paths, sort, unread, mentions FROM folder_chats ORDER BY folder, chat",
+            "SELECT folder, person, paths, lone, roster_sort FROM folder_people ORDER BY folder, person",
+            "SELECT folder, unread, mentions, chats, lone FROM folder_counts ORDER BY folder",
+            "SELECT n, direct_chats FROM people ORDER BY n",
+        ] {
+            let mut statement = db.prepare(sql)?;
+            let columns = statement.column_count();
+            let found = statement.query_map([], |r| {
+                (0..columns).map(|i| r.get::<_, rusqlite::types::Value>(i)).collect::<rusqlite::Result<Vec<_>>>()
+            })?;
+            for row in found {
+                rows.push(format!("{sql}: {:?}", row?));
+            }
+        }
+        Ok(rows)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hourly_check_names_each_derived_table_drifted_alone_and_the_mend_derives_it_again() {
+    let (home, store) = open().await;
+    apply(
+        &store,
+        vec![
+            person(ANA, "Ana Ribeiro"),
+            person(INES, "Inês Gomes"),
+            message(ANA, ANA, "a1", AT),
+            mention(ANA, ANA, "a2", AT + 1),
+            message(RUI, RUI, "r1", AT + 2),
+            message(CLIMBING, RUI, "c1", AT + 3),
+        ],
+    )
+    .await;
+    let (ana, ines, climbing) =
+        (person_n(&store, ANA).await, person_n(&store, INES).await, chat_n(&store, CLIMBING).await);
+    let family = create(&store, "Family", None).await;
+    let cousins = create(&store, "Cousins", Some(family)).await;
+    let work = create(&store, "Work", None).await;
+    file(&store, family, Item::Person(ana)).await;
+    file(&store, cousins, Item::Chat(CLIMBING.into())).await;
+    file(&store, cousins, Item::Person(ines)).await;
+    file(&store, work, Item::Chat(RUI.into())).await;
+    derived(&store, "filed").await;
+    let right = derivations(&store).await;
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let checks = crate::organise::Checks::default();
+    let kept = "of what folders keep of their chats and people isn't as they are";
+    let yours = "of your folders' counts aren't what they hold";
+    // Each drift is made by hand with the triggers firing as they do, so only the part of the
+    // check that compares what it changed with what that's derived from can see it.
+    let drifts = [
+        (
+            "built-in folders' counts aren't their chats'",
+            "UPDATE folder_counts SET chats = chats + 1 WHERE folder = (SELECT n FROM folders WHERE builtin = 'all')"
+                .to_string(),
+        ),
+        (
+            "of the folders' places in the tree aren't the tree's",
+            format!("INSERT INTO folder_paths (folder, ancestor) VALUES ({cousins}, {work})"),
+        ),
+        (
+            "of the chats folders hold aren't those filed in them",
+            format!("DELETE FROM folder_chats WHERE folder = {family} AND chat = {climbing}"),
+        ),
+        (
+            "of the people folders hold aren't those filed in them",
+            format!("DELETE FROM folder_people WHERE folder = {family} AND person = {ana}"),
+        ),
+        (kept, format!("UPDATE folder_chats SET sort = '0~0' WHERE folder = {cousins} AND chat = {climbing}")),
+        (kept, format!("UPDATE folder_chats SET unread = unread + 1 WHERE folder = {cousins} AND chat = {climbing}")),
+        (
+            kept,
+            format!("UPDATE folder_chats SET mentions = mentions + 1 WHERE folder = {family} AND chat = {climbing}"),
+        ),
+        (kept, format!("UPDATE folder_people SET roster_sort = '9~' WHERE folder = {cousins} AND person = {ines}")),
+        (kept, format!("UPDATE folder_people SET lone = 1 - lone WHERE folder = {cousins} AND person = {ines}")),
+        (
+            "people's counts of their chats aren't their chats",
+            format!("UPDATE people SET direct_chats = 2 WHERE n = {ana}"),
+        ),
+        (yours, format!("UPDATE folder_counts SET unread = unread + 3 WHERE folder = {work}")),
+        (yours, format!("DELETE FROM folder_counts WHERE folder = {work}")),
+    ];
+    for (said, drift) in &drifts {
+        db.execute_batch(drift).unwrap();
+        let found = crate::organise::check_once(&store, &checks).await.unwrap();
+        assert!(found.len() == 1 && found[0].ends_with(said), "{drift}: only \"{said}\" should be found: {found:?}");
+        derived(&store, drift).await;
+        assert_eq!(derivations(&store).await, right, "{drift}: the mend derives it all again as it was");
+    }
+    let status = checks.status();
+    assert_eq!((status.checks, status.drifted), (drifts.len() as u64, drifts.len() as u64));
+    assert!(status.last_drift.is_some_and(|last| last.ends_with(yours)), "jawd status says what it found last");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn presence_and_about_texts_said_again_or_late_change_nothing() {
     let (_home, store) = open().await;

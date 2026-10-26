@@ -13,7 +13,7 @@ use anyhow::Result;
 use jaw_proto::code;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{CHAT, PERSON, Stamps, chat_jid, user_jid};
+use super::{PERSON, Stamps, chat_jid, touch_chat, touch_person, user_jid};
 
 /// The feed's event type for a folder row, and for a favourite slot, keyed by the slot.
 pub(in crate::store) const FOLDER: &str = "folder";
@@ -296,18 +296,6 @@ fn touch_folder(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
     let seq = stamps.seq(FOLDER, Some(n));
     db.prepare_cached("UPDATE folders SET v = ?2 WHERE n = ?1")?.execute(params![n, seq])?;
     stamps.record(db, FOLDER, n, None, seq)
-}
-
-fn touch_chat(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
-    let seq = stamps.seq(CHAT, Some(n));
-    db.prepare_cached("UPDATE chats SET v = ?2 WHERE n = ?1")?.execute(params![n, seq])?;
-    stamps.record(db, CHAT, n, Some(n), seq)
-}
-
-fn touch_person(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
-    let seq = stamps.seq(PERSON, Some(n));
-    db.prepare_cached("UPDATE people SET v = ?2 WHERE n = ?1")?.execute(params![n, seq])?;
-    stamps.record(db, PERSON, n, None, seq)
 }
 
 /// What filing or unfiling `item` changes the rows of: the chat filed, or the person and their

@@ -976,22 +976,29 @@ pub(super) const MIGRATIONS: &[&str] = &[
     ",
     // 19, a data step: folders and the roster. Migration 2's folders and folder_items, which nothing
     // ever wrote to, are rebuilt as STRICT tables with every row copied, folders with AUTOINCREMENT
-    // since interfaces hold their IDs; the built-in folders and the three smart ones jaw starts
-    // with are rows of it; favourites hold folders or chats; and each folder's unread messages,
-    // mentions and count are kept by triggers through the chats and people each holds, so a
-    // message arriving counts in every folder it's in without any folder's chats being walked.
-    // People gain their presence, which rosters sort by, and how many chats are theirs. It's a
-    // data step because it rebuilds folders, which other tables refer to, so its foreign keys are
+    // since interfaces hold their IDs, and folder_items without its position, which nothing wrote
+    // either; the built-in folders and the three smart ones jaw starts with are rows of it;
+    // favourites hold folders or chats; and each folder's unread messages, mentions and count are
+    // kept by triggers through the chats and people each holds, so a message arriving counts in
+    // every folder it's in without any folder's chats being walked. People gain their presence,
+    // which rosters sort by, and how many chats are theirs. Communities, whose rows now show their
+    // groups', and the chats filed, whose rows say where, take new versions with their events. It's
+    // a data step because it rebuilds folders, which other tables refer to, so its foreign keys are
     // checked before it commits. It reads each chat and person a few times and no message:
-    // measured as jawd runs it, on its writer's connection, at 0.30 s beside a million messages,
-    // 3,000 chats and 5,000 people with 30 folders holding 600 of them, its foreign_key_check,
-    // fingerprint and commit included, on the reference Mac at a load of 57 to 65; the backup
-    // before it took 3.1 s (`measure_migration_12`).
-    "
-    -- Class: jaw's own, never dropped or rebuilt from anything else, copied as it is by any rebuild
-    -- of jaw.db and kept in the daily backup. The folder tree: the five built-in folders (builtin),
-    -- smart ones (rule) and yours, each a row so their counts are kept alike. Interfaces name a
-    -- folder by its n, so it's never used again once the folder is deleted.
+    // measured as jawd runs it, on its writer's connection, at 0.37 to 0.49 s beside a million
+    // messages, 3,000 chats and 5,000 people with 30 folders holding 600 of them, its
+    // foreign_key_check, fingerprint and commit included, on the reference Mac at a load of 78 to
+    // 99; the backup before it took 2.1 to 4.0 s (`measure_the_folders_migration`).
+    FOLDERS_AND_THE_ROSTER,
+];
+
+/// Migration 19's text, named so the tests that check and measure it find it whatever number it
+/// takes when it merges.
+const FOLDERS_AND_THE_ROSTER: &str = "
+    -- Class: jaw's own, never dropped or rebuilt from anything else, and copied as it is by any
+    -- rebuild of jaw.db. The folder tree: the five built-in folders (builtin), smart ones (rule)
+    -- and yours, each a row so their counts are kept alike. Interfaces name a folder by its n, so
+    -- it's never used again once the folder is deleted.
     CREATE TABLE folders_rebuilt (
         n INTEGER PRIMARY KEY AUTOINCREMENT,
         builtin TEXT UNIQUE CHECK (builtin IN ('all', 'unread', 'groups', 'communities', 'archived')),
@@ -1027,7 +1034,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- Class: jaw's own, as folders. What's filed in your folders: someone, who stands for their
     -- one-to-one chat in chat lists and for themselves in rosters, or a chat that isn't anyone's
     -- one-to-one chat, such as a group; filing someone's chat files them. An item can sit in any
-    -- number of folders.
+    -- number of folders. Migration 2's position goes, as nothing ever wrote it: a folder's chats
+    -- sort by their newest message, and its people as rosters do.
     CREATE TABLE folder_items_rebuilt (
         n INTEGER PRIMARY KEY,
         folder INTEGER NOT NULL REFERENCES folders (n) ON DELETE CASCADE,
@@ -1086,6 +1094,20 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE INDEX chats_by_community ON chats (community, last_at) WHERE community IS NOT NULL;
     UPDATE chats SET last_at = (SELECT max(g.last_at) FROM chats g WHERE g.community = chats.id)
         WHERE kind = 'community' AND last_at < (SELECT max(g.last_at) FROM chats g WHERE g.community = chats.id);
+    -- A community's row shows its groups' unread messages and newest message now, and a filed
+    -- chat's row says where it's filed, so each takes a new version with its event, as the writer
+    -- gives a row it changes, and an interface watching again from before the upgrade is sent it.
+    -- Both statements number the same rows alike, after the feed's last seq.
+    UPDATE chats SET v = bumped.seq FROM (
+        SELECT n, (SELECT coalesce(max(seq), 0) FROM events) + row_number() OVER (ORDER BY n) AS seq FROM chats
+        WHERE kind = 'community' OR n IN (SELECT chat FROM folder_items WHERE chat IS NOT NULL)
+            OR person IN (SELECT person FROM folder_items WHERE person IS NOT NULL)) AS bumped
+    WHERE chats.n = bumped.n;
+    INSERT INTO events (seq, at, type, key, chat)
+        SELECT (SELECT coalesce(max(seq), 0) FROM events) + row_number() OVER (ORDER BY n),
+            CAST(unixepoch('subsec') * 1000 AS INTEGER), 'chat', n, n FROM chats
+        WHERE kind = 'community' OR n IN (SELECT chat FROM folder_items WHERE chat IS NOT NULL)
+            OR person IN (SELECT person FROM folder_items WHERE person IS NOT NULL);
 
     -- Class: derived from folders, and rebuilt from them: each of your folders with every folder
     -- it's in, itself too, so what's in a folder and under it is found without walking the tree.
@@ -1381,8 +1403,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     BEGIN
         UPDATE chats SET last_at = new.last_at WHERE id = new.community AND last_at < new.last_at;
     END;
-    ",
-];
+";
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.
 pub(super) const APPLICATION_ID: i64 = 0x6A61_7701;
@@ -1718,6 +1739,9 @@ fn free_space(folder: &Path) -> Result<u64> {
 }
 
 #[cfg(test)]
+mod kept;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1855,6 +1879,11 @@ mod tests {
 
     fn user_version(db: &Connection) -> usize {
         db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap() as usize
+    }
+
+    /// The number of the migration whose text is `migration`.
+    pub(super) fn number(migration: &str) -> usize {
+        MIGRATIONS.iter().position(|text| *text == migration).expect("one of MIGRATIONS") + 1
     }
 
     fn rows(db: &Connection) -> (i64, i64) {
@@ -2014,18 +2043,20 @@ mod tests {
         assert!((beside as f64) < before as f64 * DATA_STEP_ROOM, "the data steps took more room than is asked for");
     }
 
-    /// Measures migration 12 on an account the size of `jawd demo`'s: 5,000 people, 3,000 chats
-    /// (2,400 of them people's, 600 groups, 60 of those in communities), as many messages as asked,
-    /// and 30 folders from before it holding 600 chats and people; its backup, its transaction and
-    /// its check of every foreign key included, as jawd runs it on its writer's connection:
-    /// `JAW_MEASURE_MESSAGES=1000000 cargo test --release -p jawd measure_migration_12 -- --ignored --nocapture`.
+    /// Measures the folders' migration on an account the size of `jawd demo`'s: 5,000 people, 3,000
+    /// chats (2,400 of them people's, 600 groups, 60 of those in communities), as many messages as
+    /// asked, and 30 folders from before it holding 600 chats and people; its backup, its
+    /// transaction and its check of every foreign key included, as jawd runs it on its writer's
+    /// connection:
+    /// `JAW_MEASURE_MESSAGES=1000000 cargo test --release -p jawd measure_the_folders_migration -- --ignored --nocapture`.
     #[test]
     #[ignore = "a measurement, a minute long at a million messages"]
-    fn measure_migration_12() {
+    fn measure_the_folders_migration() {
         let messages: i64 = std::env::var("JAW_MEASURE_MESSAGES").ok().and_then(|n| n.parse().ok()).unwrap_or(200_000);
+        let migration = number(FOLDERS_AND_THE_ROSTER);
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("jaw.db");
-        let mut db = at(Some(&path), 11);
+        let mut db = at(Some(&path), migration - 1);
         db.pragma_update(None, "journal_mode", "WAL").unwrap();
         // jawd's writer's connection: no checkpoint in a commit, and its cache.
         db.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
@@ -2057,25 +2088,25 @@ mod tests {
         ))
         .unwrap();
         let began = std::time::Instant::now();
-        back_up(&db, &path, 11, None).unwrap();
+        back_up(&db, &path, migration - 1, None).unwrap();
         let backup = began.elapsed();
         // The data step as Runner runs it: its statements, its check of every foreign key, the
         // schema's fingerprint and the commit.
         let began = std::time::Instant::now();
         db.pragma_update(None, "foreign_keys", false).unwrap();
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-        Runner::default().execute(&tx, MIGRATIONS[11]).unwrap();
+        Runner::default().execute(&tx, FOLDERS_AND_THE_ROSTER).unwrap();
         let dangling: Option<String> =
             tx.prepare("PRAGMA foreign_key_check").unwrap().query_row([], |r| r.get(0)).optional().unwrap();
         assert_eq!(dangling, None);
-        tx.pragma_update(None, "user_version", 12).unwrap();
-        assert_eq!(fingerprint(&tx).unwrap(), expected(12).unwrap());
+        tx.pragma_update(None, "user_version", migration as i64).unwrap();
+        assert_eq!(fingerprint(&tx).unwrap(), expected(migration).unwrap());
         tx.commit().unwrap();
         let took = began.elapsed();
         let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
         eprintln!(
             "{messages} messages in 3,000 chats with 5,000 people and 30 folders holding {} chats and people: \
-             migration 12 took {:.2} s, its check of every foreign key, fingerprint and commit included, \
+             migration {migration} took {:.2} s, its check of every foreign key, fingerprint and commit included, \
              and the backup before it {:.2} s",
             count("SELECT count(*) FROM folder_items"),
             took.as_secs_f64(),
@@ -2134,8 +2165,8 @@ mod tests {
     }
 
     #[test]
-    fn migration_12_keeps_the_folders_from_before_it_files_a_persons_chat_as_them_and_counts_what_they_hold() {
-        let mut db = at(None, 11);
+    fn the_folders_migration_keeps_the_folders_from_before_it_files_a_persons_chat_as_them_and_counts_what_they_hold() {
+        let mut db = at(None, number(FOLDERS_AND_THE_ROSTER) - 1);
         db.execute_batch(
             "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 1);
             INSERT INTO person_jids (n, jid, person) VALUES (1, 'ana@s.whatsapp.net', 1);
@@ -2181,6 +2212,45 @@ mod tests {
         );
         db.execute("INSERT INTO folders (name, v) VALUES ('Later', 1)", []).unwrap();
         assert!(count("SELECT max(n) FROM folders") > 8 + 8, "a folder made later takes an n past every one before");
+    }
+
+    #[test]
+    fn the_folders_migration_gives_the_chat_rows_it_changes_new_versions_with_their_events() {
+        let mut db = at(None, number(FOLDERS_AND_THE_ROSTER) - 1);
+        db.execute_batch(
+            "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 1);
+            INSERT INTO chats (n, id, kind, person, community, last_at, v) VALUES
+                (1, 'ana@s.whatsapp.net', 'direct', 1, NULL, 10, 4), (2, 'bairro@g.us', 'community', NULL, NULL, 20, 5),
+                (3, 'festa@g.us', 'group', NULL, 'bairro@g.us', 50, 6), (4, 'escalada@g.us', 'group', NULL, NULL, 30, 7),
+                (5, 'rui@s.whatsapp.net', 'direct', NULL, NULL, 40, 8);
+            INSERT INTO folders (n, name, v) VALUES (7, 'Family', 1);
+            INSERT INTO folder_items (folder, chat, person) VALUES (7, 4, NULL), (7, NULL, 1);
+            INSERT INTO events (seq, at, type, key, chat) VALUES (8, 0, 'chat', 5, 5);",
+        )
+        .unwrap();
+        migrate(&mut db).unwrap();
+        // An interface holding every row as of seq 8 is sent again those with a version past it.
+        let versions: Vec<(i64, i64)> = db
+            .prepare("SELECT n, v FROM chats ORDER BY n")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            versions,
+            [(1, 9), (2, 10), (3, 6), (4, 11), (5, 8)],
+            "Ana's chat, as she's filed; Bairro, which shows its groups now; Escalada, filed"
+        );
+        let events: Vec<(i64, String, i64, i64)> = db
+            .prepare("SELECT seq, type, key, chat FROM events WHERE seq > 8 ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let chat = |seq: i64, n: i64| (seq, "chat".to_string(), n, n);
+        assert_eq!(events, [chat(9, 1), chat(10, 2), chat(11, 4)], "each new version is its event's seq");
     }
 
     #[test]

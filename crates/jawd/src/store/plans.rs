@@ -147,7 +147,7 @@ fn sources() -> Vec<PathBuf> {
             if path.is_dir() {
                 walk(&path, out);
             } else if name.ends_with(".rs")
-                && !matches!(name.as_str(), "tests.rs" | "rules.rs" | "plans.rs" | "bench.rs")
+                && !matches!(name.as_str(), "tests.rs" | "rules.rs" | "plans.rs" | "bench.rs" | "kept.rs")
             {
                 out.push(path);
             }

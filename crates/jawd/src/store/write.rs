@@ -1211,6 +1211,27 @@ const CHAT: &str = "chat";
 const PERSON: &str = "person";
 const MESSAGE: &str = "message";
 
+/// Bumps chat `n`'s version, as what its row shows changed.
+fn touch_chat(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
+    let seq = stamps.seq(CHAT, Some(n));
+    db.prepare_cached("UPDATE chats SET v = ?2 WHERE n = ?1")?.execute(params![n, seq])?;
+    stamps.record(db, CHAT, n, Some(n), seq)
+}
+
+/// Bumps person `n`'s version, as what their roster row shows changed.
+fn touch_person(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
+    let seq = stamps.seq(PERSON, Some(n));
+    db.prepare_cached("UPDATE people SET v = ?2 WHERE n = ?1")?.execute(params![n, seq])?;
+    stamps.record(db, PERSON, n, None, seq)
+}
+
+/// What a chat's row held before an upsert, of what other rows show of it.
+struct Shown {
+    community: Option<String>,
+    avatar: Option<String>,
+    person: Option<i64>,
+}
+
 fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool> {
     let resolved;
     let chat = match chat_jid(db, &chat.id)? {
@@ -1220,19 +1241,21 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
             &resolved
         }
     };
-    let existing: Option<(i64, String)> = db
-        .prepare_cached("SELECT n, kind FROM chats WHERE id = ?1")?
-        .query_row([&chat.id], |r| Ok((r.get(0)?, r.get(1)?)))
+    let existing: Option<(i64, String, Shown)> = db
+        .prepare_cached("SELECT n, kind, community, avatar, person FROM chats WHERE id = ?1")?
+        .query_row([&chat.id], |r| {
+            Ok((r.get(0)?, r.get(1)?, Shown { community: r.get(2)?, avatar: r.get(3)?, person: r.get(4)? }))
+        })
         .optional()?;
-    let was = existing.as_ref().map_or(kind_of(&chat.id), |(_, kind)| kind.as_str());
+    let was = existing.as_ref().map_or(kind_of(&chat.id), |(_, kind, _)| kind.as_str());
     let person = match chat.kind.unwrap_or(was) {
         "direct" if is_person(&chat.id) && (existing.is_none() || was != "direct") => {
             Some(person_of(db, stamps, &chat.id)?)
         }
         _ => None,
     };
-    let seq = stamps.seq(CHAT, existing.as_ref().map(|(n, _)| *n));
-    let changed: Option<i64> = db
+    let seq = stamps.seq(CHAT, existing.as_ref().map(|(n, _, _)| *n));
+    let changed: Option<(i64, Shown)> = db
         .prepare_cached(
             "INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread,
                 community, ephemeral, draft, v, avatar, avatar_id)
@@ -1253,7 +1276,7 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
                 OR coalesce(?10, ephemeral) IS NOT ephemeral OR iif(?11 IS NULL, draft, nullif(?11, '')) IS NOT draft
                 OR iif(?14 IS NULL, avatar, nullif(?14, '')) IS NOT avatar
                 OR iif(?15 IS NULL, avatar_id, nullif(?15, '')) IS NOT avatar_id
-            RETURNING n",
+            RETURNING n, community, avatar, person",
         )?
         .query_row(
             params![
@@ -1273,23 +1296,33 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
                 chat.avatar,
                 chat.avatar_id
             ],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, Shown { community: r.get(1)?, avatar: r.get(2)?, person: r.get(3)? })),
         )
         .optional()?;
-    match changed {
-        Some(n) => {
-            stamps.record(db, CHAT, n, Some(n), seq)?;
-            // Marked unread or not is part of what settle writes, for it and the chats merging into it.
-            if chat.marked_unread.is_some() {
-                stamps.unsettle(n);
-            }
-            if let Some(person) = person {
-                rehome(db, stamps, person)?;
-            }
-            Ok(true)
-        }
-        None => Ok(false),
+    let Some((n, now)) = changed else { return Ok(false) };
+    stamps.record(db, CHAT, n, Some(n), seq)?;
+    // Marked unread or not is part of what settle writes, for it and the chats merging into it.
+    if chat.marked_unread.is_some() {
+        stamps.unsettle(n);
     }
+    if let Some(person) = person {
+        rehome(db, stamps, person)?;
+    }
+    let before = existing.map_or(Shown { community: None, avatar: None, person: None }, |(_, _, shown)| shown);
+    // A community shows its groups' unread messages and newest message, so the one a group leaves
+    // changes too; communities_follow has the one it's in now.
+    if let Some(left) = before.community.filter(|left| now.community.as_ref() != Some(left)) {
+        let community: Option<i64> =
+            db.prepare_cached("SELECT n FROM chats WHERE id = ?1")?.query_row([left], |r| r.get(0)).optional()?;
+        if let Some(community) = community {
+            touch_chat(db, stamps, community)?;
+        }
+    }
+    // Someone's roster row shows their one-to-one chat and its avatar.
+    if let Some(person) = now.person.filter(|_| now.person != before.person || now.avatar != before.avatar) {
+        touch_person(db, stamps, person)?;
+    }
+    Ok(true)
 }
 
 /// The person a JID belongs to, making one if needed.

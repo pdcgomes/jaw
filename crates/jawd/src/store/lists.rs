@@ -624,10 +624,13 @@ impl PersonRow {
     }
 }
 
-/// What person_row reads of person `p`.
+/// What person_row reads of person `p`. Their chat and its avatar are the one-to-one chat not being
+/// merged into another, which a merge gives the other's avatar if it had none, so a merge ending
+/// changes neither.
 const PERSON_SELECT: &str = "
     SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed,
-        coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n AND a.avatar IS NOT NULL LIMIT 1)),
+        coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n
+            AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)),
         (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n)
             LIMIT 1),
         (SELECT j.jid FROM person_jids j WHERE j.person = p.n AND j.jid LIKE '%@s.whatsapp.net' LIMIT 1),
