@@ -56,6 +56,7 @@ enum Bench {
             if let first = model.window?.chatList.all.first(where: { $0.kind != .community && $0.last != nil }) {
                 model.open(first, opened: false)
             }
+            if CommandLine.arguments.contains("--split") { model.split(.across) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 guard let view = model.window?.window?.contentView else { return finish(["error": 2]) }
                 let rect = view.bounds

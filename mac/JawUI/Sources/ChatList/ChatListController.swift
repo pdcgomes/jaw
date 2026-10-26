@@ -169,8 +169,8 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
     }
 
     /// ⌥↑ and ⌥↓: the chat before or after the open one, holding the order meanwhile.
-    public func step(_ by: Int) {
-        let pickable = shown.filter { $0.kind != .community }
+    public func step(_ by: Int, skipping others: Set<String> = []) {
+        let pickable = shown.filter { $0.kind != .community && !others.contains($0.id) }
         guard !pickable.isEmpty else { return }
         chats.hold()
         releaseSoon()

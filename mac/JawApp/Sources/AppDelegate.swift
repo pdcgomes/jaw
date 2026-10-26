@@ -62,6 +62,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.jawd.status()
     }
 
+    @objc func searchChat(_: Any?) {
+        guard let c = model.conversation else { return window.showPalette(kind: .message) }
+        window.showPalette(kind: .message, scope: (c.chat.id, c.chat.name))
+    }
+
+    @objc func searchAll(_: Any?) {
+        window.showPalette(kind: .message)
+    }
+
+    @objc func glance(_: Any?) {
+        window.showGlance()
+    }
+
+    @objc func focusMode(_: Any?) {
+        model.toggleFocusMode()
+    }
+
+    @objc func keys(_: Any?) {
+        window.showKeys()
+    }
+
+    @objc func splitAcross(_: Any?) {
+        model.split(.across)
+    }
+
+    @objc func splitDown(_: Any?) {
+        model.split(.down)
+    }
+
+    @objc func closePane(_: Any?) {
+        model.closeFocusedPane()
+    }
+
+    @objc func paneMove(_ item: NSMenuItem) {
+        model.move(Self.direction(item.tag))
+    }
+
+    @objc func paneSwap(_ item: NSMenuItem) {
+        model.swap(Self.direction(item.tag))
+    }
+
+    @objc func paneGo(_ item: NSMenuItem) {
+        model.goToPane(item.tag)
+    }
+
+    static func direction(_ tag: Int) -> PaneLayout.Direction {
+        [.left, .right, .up, .down][max(0, min(tag, 3))]
+    }
+
     @objc func nextChat(_: Any?) {
         model.step(1)
     }
@@ -129,6 +178,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case #selector(lookBubbles(_:)): item.state = model.preferences.look == .bubbles ? .on : .off
         case #selector(lookLines(_:)): item.state = model.preferences.look == .lines ? .on : .off
         case #selector(toggleCompact(_:)): item.state = model.preferences.density == .compact ? .on : .off
+        case #selector(focusMode(_:)): item.state = model.focusMode ? .on : .off
+        case #selector(paneMove(_:)), #selector(paneSwap(_:)): return model.panes.count > 1
+        case #selector(paneGo(_:)): return item.tag <= model.panes.count && model.panes.count > 1
         default: break
         }
         return true
@@ -173,10 +225,43 @@ enum Menus {
         ])
         menu("File", [
             item("New Chat", #selector(AppDelegate.showPalette(_:)), "n", target: target),
-            item("Find…", #selector(AppDelegate.showPalette(_:)), "k", target: target),
             item("Find", #selector(AppDelegate.showPalette(_:)), "k", .control, target: target),
             .separator(),
-            item("Close Window", #selector(NSWindow.performClose(_:)), "w"),
+            item("Close Pane", #selector(AppDelegate.closePane(_:)), "w", target: target),
+            item("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift]),
+        ])
+        let arrows = [NSLeftArrowFunctionKey, NSRightArrowFunctionKey, NSUpArrowFunctionKey, NSDownArrowFunctionKey]
+            .map { String(UnicodeScalar($0)!) }
+        let ways = ["Left", "Right", "Up", "Down"]
+        var paneItems = [
+            item("Split Across", #selector(AppDelegate.splitAcross(_:)), "d", target: target),
+            item("Split Down", #selector(AppDelegate.splitDown(_:)), "d", [.command, .shift], target: target),
+            .separator(),
+        ]
+        for (i, way) in ways.enumerated() {
+            let m = item("Pane \(way)", #selector(AppDelegate.paneMove(_:)), arrows[i], [.command, .option], target: target)
+            m.tag = i
+            paneItems.append(m)
+        }
+        paneItems.append(.separator())
+        for (i, way) in ways.enumerated() {
+            // ⌘⇧ and an arrow select to a line's end in the box, so swapping takes ⌃⌘.
+            let m = item("Swap \(way)", #selector(AppDelegate.paneSwap(_:)), arrows[i], [.command, .control], target: target)
+            m.tag = i
+            paneItems.append(m)
+        }
+        paneItems.append(.separator())
+        for n in 1 ... 9 {
+            let m = item("Pane \(n)", #selector(AppDelegate.paneGo(_:)), "\(n)", [.command, .option], target: target)
+            m.tag = n
+            paneItems.append(m)
+        }
+        menu("Panes", paneItems)
+        menu("Find", [
+            item("Palette", #selector(AppDelegate.showPalette(_:)), "k", target: target),
+            item("Search This Chat", #selector(AppDelegate.searchChat(_:)), "f", target: target),
+            item("Search Every Chat", #selector(AppDelegate.searchAll(_:)), "f", [.command, .shift], target: target),
+            item("The Glance", #selector(AppDelegate.glance(_:)), "j", target: target),
         ])
         menu("Edit", [
             item("Undo", Selector(("undo:")), "z"),
@@ -204,6 +289,7 @@ enum Menus {
             .separator(),
             item("Sidebar", #selector(AppDelegate.toggleSidebarFolders(_:)), "b", target: target),
             item("Chat List", #selector(AppDelegate.showChatList(_:)), "l", [.command, .shift], target: target),
+            item("Focus on This Chat", #selector(AppDelegate.focusMode(_:)), "\r", [.command, .shift], target: target),
             .separator(),
             item("Previous Chat", #selector(AppDelegate.previousChat(_:)), up, .option, target: target),
             item("Next Chat", #selector(AppDelegate.nextChat(_:)), down, .option, target: target),
@@ -215,6 +301,7 @@ enum Menus {
             item("Zoom", #selector(NSWindow.performZoom(_:))),
         ])
         menu("Help", [
+            item("The Keys", #selector(AppDelegate.keys(_:)), "/", target: target),
             item("jawd's Status", #selector(AppDelegate.showStatus(_:)), target: target),
         ])
         NSApp.windowsMenu = main.item(withTitle: "Window")?.submenu

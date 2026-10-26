@@ -99,6 +99,14 @@ public final class Jawd {
         return key
     }
 
+    /// Pins, archives, mutes or marks a chat (`chat.pin`, `chat.archive`, `chat.mute`,
+    /// `chat.mark_unread`); one jawd doesn't serve yet is said to come with its next step.
+    public func chatAction(_ method: String, chat: String, _ fields: [String: JSONValue], what: String) {
+        var params = fields
+        params["chat"] = .string(chat)
+        ask(method, JSONValue.object(params), .did(what))
+    }
+
     public func retry(message: String) {
         ask("send.retry", MessageRef(message: message, chat: nil), .retry)
     }

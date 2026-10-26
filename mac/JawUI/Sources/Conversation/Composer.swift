@@ -168,7 +168,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         colour()
     }
 
-    static func summary(_ m: MessageRow) -> String {
+    public static func summary(_ m: MessageRow) -> String {
         let s = m.plain.isEmpty ? (MessageLayout.Builder.kindLine(m) ?? "") : m.plain
         return s.split(whereSeparator: \.isNewline).joined(separator: " ")
     }
@@ -447,8 +447,12 @@ final class BoxTextView: NSTextView {
         super.keyDown(with: event)
     }
 
+    var focused: (() -> Void)?
+
     override func becomeFirstResponder() -> Bool {
-        super.becomeFirstResponder()
+        let took = super.becomeFirstResponder()
+        if took { focused?() }
+        return took
     }
 }
 

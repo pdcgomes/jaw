@@ -83,6 +83,8 @@ public struct StateView: View {
         case asleep(why: String, retryIn: Int)
         case loggedOut(reason: String?)
         case unlinked
+        /// Linking in the app, drawn by `LinkingView`.
+        case linking(step: LinkStep?, loggedOut: String?)
     }
 
     public var kind: Kind
@@ -134,7 +136,7 @@ public struct StateView: View {
         case .starting: "jawd didn't start"
         case .asleep: "jawd isn't answering"
         case .loggedOut: "Logged out"
-        case .unlinked: "Not linked yet"
+        case .unlinked, .linking: "Not linked yet"
         }
     }
 
@@ -147,43 +149,103 @@ public struct StateView: View {
         case let .asleep(why, retryIn): "\(why). jaw tries again by itself\(retryIn > 0 ? " in \(retryIn) s" : ""); jaw status says more."
         case let .loggedOut(reason):
             "\(reason.map { $0.prefix(1).uppercased() + $0.dropFirst() + "." } ?? "Your phone logged jaw out.") jawd has deleted the session and kept your messages. Link again with jaw in the terminal: run jaw and scan the code with your phone. Linking comes to this app later."
+        case .linking: nil
         case .unlinked: "Link this Mac with jaw in the terminal: run jaw and scan the code with your phone (WhatsApp › Settings › Linked devices › Link a device). Linking comes to this app later."
         }
     }
 }
 
-/// The status line along the bottom of the window, in SF Mono: jawd's state when it isn't online,
-/// and how the focused chat is, without its name, which its box and header already say.
+/// The status line along the bottom of the window, in SF Mono: on the left, jawd's state when it
+/// isn't online and how the focused chat is, without its name, which its box and header already
+/// say; on the right, what needs you elsewhere, as the spike's has it: mentions and people by name,
+/// groups counted, the count shortening before a name goes, then the glance's key.
 public struct StatusLine: View {
     public var state: String?
     public var warn: Bool
     public var chat: String?
+    public var needs: [ChatRow]
     public var roles: Roles
+    public var open: (ChatRow) -> Void
+    public var glance: () -> Void
 
-    public init(state: String?, warn: Bool, chat: String?, roles: Roles) {
+    public init(state: String?, warn: Bool, chat: String?, needs: [ChatRow] = [], roles: Roles,
+                open: @escaping (ChatRow) -> Void = { _ in }, glance: @escaping () -> Void = {})
+    {
         self.state = state
         self.warn = warn
         self.chat = chat
+        self.needs = needs
         self.roles = roles
+        self.open = open
+        self.glance = glance
     }
 
     public var body: some View {
         HStack(spacing: 10) {
             if let state {
-                Text(state).foregroundStyle(Color(nsColor: (warn ? roles.mention : roles.accent).nsColor))
+                Text(state).foregroundStyle(colour(warn ? roles.mention : roles.accent))
             }
             if let chat {
-                Text(chat).foregroundStyle(Color(nsColor: roles.secondary.nsColor))
+                Text(chat).foregroundStyle(colour(roles.secondary))
             }
-            Spacer()
+            Spacer(minLength: 12)
+            ViewThatFits(in: .horizontal) {
+                right(names: 3, count: .long)
+                right(names: 2, count: .long)
+                right(names: 2, count: .short)
+                right(names: 1, count: .short)
+                right(names: 0, count: .tiny)
+                EmptyView()
+            }
         }
         .font(.system(size: 11, design: .monospaced))
         .lineLimit(1)
         .padding(.horizontal, 12)
         .frame(height: 24)
-        .background(Color(nsColor: roles.surface.nsColor))
-        .overlay(alignment: .top) { Rectangle().fill(Color(nsColor: roles.separator.nsColor)).frame(height: 1) }
+        .background(colour(roles.surface))
+        .overlay(alignment: .top) { Rectangle().fill(colour(roles.separator)).frame(height: 1) }
         .focusEffectDisabled()
+    }
+
+    enum Count { case long, short, tiny }
+
+    /// Mentions and people named, up to `names`, and the rest counted.
+    @ViewBuilder func right(names: Int, count: Count) -> some View {
+        let named = Array(needs.filter { $0.mentions > 0 || !$0.kind.isGroup }.prefix(names))
+        let rest = needs.filter { c in !named.contains { $0.id == c.id } }
+        HStack(spacing: 10) {
+            ForEach(named, id: \.id) { c in
+                Button { open(c) } label: {
+                    if c.mentions > 0 {
+                        Text("@ \(c.name)").foregroundStyle(colour(roles.mention)).bold()
+                    } else {
+                        HStack(spacing: 4) {
+                            if !c.typing.isEmpty { Circle().fill(colour(roles.online)).frame(width: 6, height: 6) }
+                            Text("\(c.name) · \(c.unread)").foregroundStyle(colour(roles.text))
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            if !rest.isEmpty {
+                let unread = rest.reduce(0) { $0 + $1.unread }
+                let s = rest.count == 1 ? "" : "s"
+                let text = switch count {
+                case .long: "\(rest.count) more chat\(s) · \(Format.num(unread)) unread"
+                case .short: "\(rest.count) more chat\(s)"
+                case .tiny: "+\(rest.count)"
+                }
+                Button(action: glance) { Text(text).foregroundStyle(colour(roles.secondary)) }.buttonStyle(.plain)
+            }
+            if !needs.isEmpty {
+                Button(action: glance) { Text("⌘J glance").foregroundStyle(colour(roles.tertiary)) }.buttonStyle(.plain)
+            }
+        }
+        .fixedSize()
+    }
+
+    func colour(_ c: RGBA) -> Color {
+        Color(nsColor: c.nsColor)
     }
 }
 

@@ -59,11 +59,9 @@ final class Agent {
     func ensure() -> String? {
         if Self.answers(launch.socket) { return nil }
         if launch.demo { return startDemo() }
-        #if DEBUG
-            return "nothing answers on \(launch.socket); start jawd, or open the app with --demo"
-        #else
-            return registerAgent()
-        #endif
+        // jawd at login is registered only when the owner asks, with jaw › jawd at Login…: doing it
+        // by itself on his Mac would replace his jawd with a build in progress.
+        return "nothing answers on \(launch.socket): jaw › jawd at Login… starts jaw's own, jaw agent install the terminal's, and --demo a made-up account"
     }
 
     /// `jawd --engine demo` on the demo folder: a made-up account, with no WhatsApp behind it.

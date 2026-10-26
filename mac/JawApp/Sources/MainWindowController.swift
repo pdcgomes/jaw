@@ -5,9 +5,9 @@ import JawUI
 import QuartzCore
 import SwiftUI
 
-/// The window: the sidebar, the chat list and the conversation on macOS 26's split view, the
-/// status line along the bottom of the whole window. Below 960 points the sidebar folds away, and
-/// below 740 the chat list does too, as the terminal folds.
+/// The window: the sidebar, the chat list and the panes on macOS 26's split view, the status line
+/// along the bottom of the whole window. Below 960 points the sidebar folds away, and below 740 the
+/// chat list does too, as the terminal folds.
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
     let model: AppModel
@@ -21,6 +21,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     var listItem: NSSplitViewItem!
     var displayLink: CADisplayLink?
     var settings: NSWindow?
+    /// The sidebar's and the chat list's folding before focus mode, to put back.
+    var beforeFocus: (Bool, Bool)?
 
     init(model: AppModel) {
         self.model = model
@@ -79,8 +81,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
         sidebar.picked = { [weak model] folder in model?.pick(folder: folder.id) }
         chatList.host = model
-        palette.model.find = { [weak model] id, query in model?.jawd.find(id: id, query: query, limit: 10) }
-        palette.model.picked = { [weak self] pick in self?.picked(pick) }
+        palette.model.find = { [weak model] id, query, kinds, chat, limit in
+            model?.jawd.find(id: id, query: query, kinds: kinds, chat: chat, limit: limit)
+        }
+        palette.model.chose = { [weak self] pick in self?.picked(pick) }
+        palette.model.actions = { [weak model] in model?.actions() ?? [] }
+        palette.goTo = { [weak self] m in
+            self?.palette.close()
+            self?.goTo(m)
+        }
+        detail.panes.resized = { [weak model] pane, axis, share in model?.resized(pane, axis, share) }
 
         let link = content.displayLink(target: self, selector: #selector(frame(_:)))
         link.isPaused = true
@@ -111,18 +121,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     func refresh() {
         let state = model.stateLine
-        status.rootView = StatusLine(state: state?.0, warn: state?.1 ?? false, chat: model.chatLine, roles: model.roles)
-        if let kind = model.stateView {
+        status.rootView = StatusLine(state: state?.0, warn: state?.1 ?? false, chat: model.chatLine, needs: model.needs, roles: model.roles,
+                                     open: { [weak model] c in model?.open(c, opened: true) },
+                                     glance: { [weak self] in self?.showGlance() })
+        if case let .linking(step, loggedOut) = model.stateView {
+            detail.showLinking(step: step, loggedOut: loggedOut, roles: model.roles,
+                               start: { [weak model] phone in model?.jawd.linkStart(phone: phone) },
+                               cancel: { [weak model] in model?.jawd.linkCancel() })
+        } else if let kind = model.stateView {
             detail.show(state: kind, roles: model.roles)
-        } else if let c = model.conversation {
-            detail.show(conversation: c)
+        } else {
+            showPanes()
         }
     }
 
-    func show(conversation c: ConversationController) {
-        detail.show(conversation: c)
-        refresh()
-        c.focusBox()
+    /// Lays the panes out as the model's layout has them, the focused one outlined.
+    func showPanes() {
+        guard let layout = model.layout, !model.panes.isEmpty, model.stateView == nil else { return }
+        let views = model.panes.mapValues(\.view)
+        detail.show(panes: layout, views: views, focused: model.focusedChat, roles: model.roles)
     }
 
     func restyle() {
@@ -132,8 +149,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         refresh()
     }
 
+    func toggleSidebar() {
+        sidebarItem.animator().isCollapsed.toggle()
+    }
+
+    /// Focus mode: the sidebar and the chat list fold away for the focused pane, and come back.
+    func focusMode(_ on: Bool) {
+        if on {
+            beforeFocus = (sidebarItem.isCollapsed, listItem.isCollapsed)
+            sidebarItem.animator().isCollapsed = true
+            listItem.animator().isCollapsed = true
+        } else {
+            sidebarItem.animator().isCollapsed = beforeFocus?.0 ?? false
+            listItem.animator().isCollapsed = beforeFocus?.1 ?? false
+        }
+    }
+
     func windowDidResize(_: Notification) {
-        guard let width = window?.frame.width else { return }
+        guard let width = window?.frame.width, !model.focusMode else { return }
         sidebarItem.animator().isCollapsed = width < 960
         listItem.animator().isCollapsed = width < 740 && model.conversation != nil
     }
@@ -158,15 +191,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         model.updateFocus()
     }
 
-    func windowDidChangeEffectiveAppearance() {
-        model.restyle()
-    }
-
     // MARK: - The palette
 
     @objc func showPalette(_: Any?) {
+        showPalette(mode: .find)
+    }
+
+    func showPalette(mode: PaletteModel.Mode = .find, kind: FindKind? = nil, scope: (String, String)? = nil) {
         guard let window else { return }
-        palette.show(over: window, roles: model.roles)
+        palette.show(over: window, roles: model.roles, mode: mode, kind: kind, scope: scope)
+    }
+
+    func goTo(_ m: MessageRow) {
+        if let chat = chatList.row(m.chat) ?? model.panes[m.chat]?.chat {
+            model.open(chat, opened: true, around: m.id)
+        } else {
+            model.say("that chat isn't in the list yet")
+        }
     }
 
     func picked(_ pick: PaletteModel.Pick) {
@@ -175,17 +216,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         case let .chat(row): model.open(row, opened: true)
         case let .person(p): model.jawd.startChat(person: p.id)
         case let .number(n): model.jawd.startChat(phone: n)
-        case let .message(m):
-            if let chat = chatList.row(m.chat) {
-                model.open(chat, opened: true, around: m.id)
-            } else {
-                model.say("that chat isn't in the list yet")
-            }
+        case let .message(m): goTo(m)
         case let .folder(f):
             if SidebarController.folders.contains(where: { $0.id == f.id }) { model.pick(folder: f.id) } else {
                 model.say("folders come with jawd's next step")
             }
+        case let .action(action): action.run()
+        case let .emoji(message, emoji):
+            if let c = model.panes.values.first(where: { $0.window.get(message) != nil }) {
+                model.jawd.react(chat: c.chat.id, message: message, emoji: emoji)
+            }
+        case let .forward(messages, from, to):
+            model.jawd.forward(chat: from, messages: messages, to: to)
         }
+    }
+
+    // MARK: - The glance
+
+    func showGlance() {
+        model.glance.show(relativeTo: status, roles: model.roles)
     }
 
     // MARK: - Sheets
@@ -204,6 +253,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         }
         let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
         infoSheet = sheet
+        window?.beginSheet(sheet)
+    }
+
+    var keysSheet: NSWindow?
+
+    func showKeys() {
+        guard keysSheet == nil else { return }
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: KeysView { [weak self] in
+            guard let self, let sheet = keysSheet else { return }
+            window?.endSheet(sheet)
+            keysSheet = nil
+        }))
+        keysSheet = sheet
         window?.beginSheet(sheet)
     }
 
@@ -233,9 +295,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     static let find = NSToolbarItem.Identifier("find")
     static let newChat = NSToolbarItem.Identifier("newChat")
+    static let splitAcross = NSToolbarItem.Identifier("split")
 
     func toolbarDefaultItemIdentifiers(_: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.find, Self.newChat]
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.find, Self.splitAcross, Self.newChat]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -253,6 +316,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             item.view = button
             item.label = "Find"
             return item
+        case Self.splitAcross:
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.image = NSImage(systemSymbolName: "rectangle.split.2x1", accessibilityDescription: "Split")
+            item.label = "Split"
+            item.toolTip = "Another chat beside this one (⌘D)"
+            item.target = self
+            item.action = #selector(splitAcross)
+            return item
         case Self.newChat:
             let item = NSToolbarItem(itemIdentifier: id)
             item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Chat")
@@ -265,6 +336,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             return nil
         }
     }
+
+    @objc func splitAcross() {
+        model.split(.across)
+    }
 }
 
 extension JSONEncoder {
@@ -275,45 +350,65 @@ extension JSONEncoder {
     }
 }
 
-/// The conversation's place: a chat, or what's there instead.
+/// The panes' place: the panes, or what's there instead.
 @MainActor
 final class DetailController: NSViewController {
-    var current: NSViewController?
+    let panes = PaneView()
     var stateHost: NSHostingController<StateView>?
+    var linkingHost: NSHostingController<LinkingView>?
+    var shown: NSView?
 
     override func loadView() {
         view = NSView()
     }
 
-    func show(conversation c: ConversationController) {
-        guard current !== c else { return }
-        place(c)
+    var drawn: (PaneLayout, String?, [String: ObjectIdentifier], Roles)?
+
+    /// Lays the panes out, unless they're already laid out this way.
+    func show(panes layout: PaneLayout, views: [String: NSView], focused: String?, roles: Roles, force: Bool = false) {
+        let ids = views.mapValues(ObjectIdentifier.init)
+        if !force, shown === panes, let drawn, drawn.0 == layout, drawn.1 == focused, drawn.2 == ids, drawn.3 == roles { return }
+        place(panes)
+        panes.show(layout, views: views, focused: focused, roles: roles)
+        drawn = (layout, focused, ids, roles)
     }
 
     func show(state kind: StateView.Kind, roles: Roles) {
         let view = StateView(kind: kind, roles: roles)
-        if let host = stateHost, current === host {
+        if let host = stateHost {
             host.rootView = view
-            return
+        } else {
+            let host = NSHostingController(rootView: view)
+            host.sizingOptions = []
+            stateHost = host
         }
-        let host = NSHostingController(rootView: view)
-        host.sizingOptions = []
-        stateHost = host
-        place(host)
+        place(stateHost!.view)
     }
 
-    func place(_ vc: NSViewController) {
-        current?.view.removeFromSuperview()
-        current?.removeFromParent()
-        addChild(vc)
-        vc.view.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(vc.view)
+    func showLinking(step: LinkStep?, loggedOut: String?, roles: Roles, start: @escaping (String?) -> Void, cancel: @escaping () -> Void) {
+        let view = LinkingView(step: step, loggedOut: loggedOut, roles: roles, start: start, cancel: cancel)
+        if let host = linkingHost {
+            host.rootView = view
+        } else {
+            let host = NSHostingController(rootView: view)
+            host.sizingOptions = []
+            linkingHost = host
+        }
+        place(linkingHost!.view)
+    }
+
+    func place(_ v: NSView) {
+        guard shown !== v else { return }
+        shown?.removeFromSuperview()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(v)
         NSLayoutConstraint.activate([
-            vc.view.topAnchor.constraint(equalTo: view.topAnchor),
-            vc.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            vc.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            vc.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            v.topAnchor.constraint(equalTo: view.topAnchor),
+            v.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            v.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            v.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
-        current = vc
+        shown = v
+        if v !== linkingHost?.view { linkingHost = nil }
     }
 }

@@ -17,6 +17,11 @@ public protocol ConversationHost: AnyObject {
     func conversation(_ c: ConversationController, typing state: TypingState)
     func conversation(_ c: ConversationController, draft text: String)
     func conversationWantsHistory(_ c: ConversationController)
+    /// `f` and `+`: the palette, to pick the chats to forward to or the reaction.
+    func conversation(_ c: ConversationController, forward message: MessageRow)
+    func conversation(_ c: ConversationController, reactTo message: MessageRow)
+    /// The pane was clicked or typed in: it takes the keys.
+    func conversationFocused(_ c: ConversationController)
     func conversation(_ c: ConversationController, open url: String)
     /// Whether what's on screen counts as read now: the app active and the window key.
     func conversationIsRead(_ c: ConversationController) -> Bool
@@ -116,6 +121,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         newPill.action = #selector(toNewest)
 
         composer.delegate = self
+        composer.textView.focused = { [weak self] in
+            guard let self else { return }
+            host?.conversationFocused(self)
+        }
         addChild(composer)
 
         for v in [header, scroll, newPill, composer.view] as [NSView] {
@@ -411,6 +420,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     }
 
     func clicked(_ view: MessageView, _ point: CGPoint, _ clicks: Int) {
+        host?.conversationFocused(self)
         guard let m = message(of: view), let laid = view.laid else { return }
         if let region = laid.region(at: point) {
             switch region {
@@ -454,7 +464,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         guard let row = hoveredRow, row < rows.count else { return }
         let m = rows[row]
         switch action {
-        case .react: showReactions(for: m, from: hover)
+        case .react: host?.conversation(self, reactTo: m)
         case .reply: reply(to: m)
         }
     }
@@ -502,7 +512,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         }
     }
 
-    func go(to id: String) {
+    /// Goes to a message, moving the window around it when it isn't held, and selects it.
+    public func go(to id: String) {
         if rows.contains(where: { $0.id == id }) {
             select(id)
         } else {
@@ -552,12 +563,12 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         case "r": reply(to: m)
         case "e": edit(m)
         case "d": deleteAsked(m)
-        case "+", "=": showReactions(for: m, from: nil)
+        case "+", "=": host?.conversation(self, reactTo: m)
         case "y": copy(m)
         case "i": host?.conversation(self, info: m.id)
         case "1", "2", "3", "4", "5", "6":
             toggle(Self.quick[Int(chars)! - 1], on: m)
-        case "f": NSSound.beep()
+        case "f": forward(m)
         default:
             select(nil)
             return false
@@ -576,6 +587,47 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         host?.conversation(self, react: m.id, emoji: mine ? "" : emoji)
     }
 
+    func forward(_ m: MessageRow) {
+        if let why = Self.notForwardable(m) {
+            say("can't forward this: \(why)")
+            return
+        }
+        host?.conversation(self, forward: m)
+    }
+
+    /// Why a message can't be forwarded, as jawd refuses: deleted, view-once, a line about the chat, or
+    /// a kind WhatsApp doesn't forward.
+    public static func notForwardable(_ m: MessageRow) -> String? {
+        if m.deleted { return "it's been deleted" }
+        if m.viewOnce { return "it's view-once" }
+        switch m.kind {
+        case .system, .call: return "it's a line about the chat"
+        case .poll, .event, .liveLocation, .album: return "WhatsApp doesn't forward these"
+        default: return nil
+        }
+    }
+
+    /// The selected message, for the palette's actions on it.
+    public var selectedRow: MessageRow? {
+        selectedMessage
+    }
+
+    /// Does what a key on the selected message does, for the palette and the menus.
+    public func act(_ key: Character) {
+        guard let m = selectedMessage else { return }
+        switch key {
+        case "r": reply(to: m)
+        case "e": edit(m)
+        case "d": deleteAsked(m)
+        case "+": host?.conversation(self, reactTo: m)
+        case "f": forward(m)
+        case "y": copy(m)
+        case "i": host?.conversation(self, info: m.id)
+        case "\n": open(m)
+        default: break
+        }
+    }
+
     func reply(to m: MessageRow) {
         guard !m.deleted, m.kind != .system, m.kind != .call else {
             say("there's nothing to reply to in this one")
@@ -586,7 +638,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     }
 
     /// Why a message can't be edited, if it can't: yours, text, not deleted, within 15 minutes.
-    static func notEditable(_ m: MessageRow, now: Int64 = Format.now()) -> String? {
+    public static func notEditable(_ m: MessageRow, now: Int64 = Format.now()) -> String? {
         if !m.mine { return "only your own messages can be edited" }
         if m.deleted { return "it's been deleted" }
         if m.kind != .text { return "only text can be edited" }
@@ -595,7 +647,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         return nil
     }
 
-    static func notForEveryone(_ m: MessageRow, now: Int64 = Format.now()) -> String? {
+    public static func notForEveryone(_ m: MessageRow, now: Int64 = Format.now()) -> String? {
         if !m.mine { return "only your own messages can be deleted for everyone" }
         if m.deleted { return "it's deleted already" }
         if m.status == .failed { return "it didn't go, so delete it for you" }
@@ -687,6 +739,9 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             react.submenu = sub
             menu.addItem(react)
             item("Copy", "y") { [weak self] in self?.copy(m) }
+            if Self.notForwardable(m) == nil {
+                item("Forward…", "f") { [weak self] in self?.forward(m) }
+            }
         }
         if Self.notEditable(m) == nil {
             item("Edit", "e") { [weak self] in self?.edit(m) }
