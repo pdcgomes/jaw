@@ -26,33 +26,37 @@ pub const MOST: usize = 200;
 pub const PER_MINUTE: usize = 20;
 
 /// Whether someone's looking: an interface's focus, and the connection to WhatsApp as the
-/// `connection` pushes tell, `online` until the first.
+/// `connection` pushes tell. `online` says how it is now, read once the pushes are subscribed to
+/// and again whenever some were missed, so no change of it goes unseen.
 pub struct Looking {
     pub focused: watch::Receiver<bool>,
     pub pushes: broadcast::Receiver<Push>,
-    pub online: bool,
+    pub online: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 /// Whom presence is followed within: at most `most` on a connection, `per_minute` newly in each
-/// `minute`, which tests make shorter.
+/// `minute`; and the longest about texts wait to be asked for when none is due, `about_idle`.
+/// Tests make the times shorter.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub most: usize,
     pub per_minute: usize,
     pub minute: Duration,
+    pub about_idle: Duration,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { most: MOST, per_minute: PER_MINUTE, minute: Duration::from_secs(60) }
+        Limits { most: MOST, per_minute: PER_MINUTE, minute: Duration::from_secs(60), about_idle: ABOUT_IDLE }
     }
 }
 /// The most people one UserInfo asks about, and how often about texts are asked again.
 const ABOUT_AT_ONCE: usize = 50;
 const ABOUT_KEPT_MS: i64 = 24 * 3600 * 1000;
-/// How long between two asks while some are due, and the longest wait when none is.
+/// How long between two asks while some are due, and the longest wait when none is: people who
+/// come later, a new contact or a first sync's, are asked about within it.
 const ABOUT_PACE: Duration = Duration::from_secs(10);
-const ABOUT_IDLE: Duration = Duration::from_secs(3600);
+const ABOUT_IDLE: Duration = Duration::from_secs(60);
 /// What WhatsApp said, waiting to be written; past it, the oldest is dropped, as presence is.
 const HEARD_MOST: usize = 1_024;
 
@@ -96,15 +100,15 @@ impl Following {
     pub fn start(&self, store: Store, engine: Option<Supervisor>, feed: Feed, looking: Looking, limits: Limits) {
         let Looking { focused, pushes, online } = looking;
         let Some(hearing) = self.hearing.lock().expect("presence heard").take() else { return };
-        let (connected, connection) = watch::channel(online);
+        let (connected, connection) = watch::channel(online());
         tokio::spawn(write_heard(store.clone(), hearing));
-        tokio::spawn(connection_of(pushes, connected));
+        tokio::spawn(connection_of(pushes, connected, online));
         if let Some(engine) = engine {
             let stats = self.stats.clone();
             let following =
                 follow(store.clone(), engine.clone(), feed, focused, connection.clone(), stats.clone(), limits);
             tokio::spawn(following);
-            tokio::spawn(about(store, engine, connection, stats));
+            tokio::spawn(about(store, engine, connection, stats, limits.about_idle));
         }
     }
 
@@ -138,18 +142,22 @@ fn now_ms() -> i64 {
     crate::feed::now_ms()
 }
 
-/// Says when WhatsApp can be reached, from the `connection` pushes.
-async fn connection_of(mut pushes: broadcast::Receiver<Push>, connected: watch::Sender<bool>) {
+/// Says when WhatsApp can be reached, from the `connection` pushes, and from how it is now when
+/// some of them were missed.
+async fn connection_of(
+    mut pushes: broadcast::Receiver<Push>,
+    connected: watch::Sender<bool>,
+    online: Box<dyn Fn() -> bool + Send + Sync>,
+) {
     loop {
-        match pushes.recv().await {
-            Ok(push) if push.method == "connection" => {
-                let now = serde_json::from_value::<Connection>(push.params)
-                    .is_ok_and(|c| matches!(c.state, ConnectionState::Online | ConnectionState::CatchingUp));
-                connected.send_if_modified(|was| std::mem::replace(was, now) != now);
-            }
-            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+        let now = match pushes.recv().await {
+            Ok(push) if push.method == "connection" => serde_json::from_value::<Connection>(push.params)
+                .is_ok_and(|c| matches!(c.state, ConnectionState::Online | ConnectionState::CatchingUp)),
+            Ok(_) => continue,
+            Err(broadcast::error::RecvError::Lagged(_)) => online(),
             Err(broadcast::error::RecvError::Closed) => return,
-        }
+        };
+        connected.send_if_modified(|was| std::mem::replace(was, now) != now);
     }
 }
 
@@ -346,7 +354,14 @@ async fn follow(
 
 /// Asks WhatsApp what the roster's people say of themselves, the longest unasked first, 50 at a
 /// time, each at most once a day, while WhatsApp can be reached.
-async fn about(store: Store, engine: Supervisor, mut connected: watch::Receiver<bool>, stats: Arc<Mutex<Stats>>) {
+async fn about(
+    store: Store,
+    engine: Supervisor,
+    mut connected: watch::Receiver<bool>,
+    stats: Arc<Mutex<Stats>>,
+    idle: Duration,
+) {
+    let idle_ms = idle.as_millis().max(1) as i64;
     loop {
         if !*connected.borrow_and_update() {
             if connected.changed().await.is_err() {
@@ -393,7 +408,7 @@ async fn about(store: Store, engine: Supervisor, mut connected: watch::Receiver<
                     }
                     Ok(other) => {
                         eprintln!("jawd: the engine answered who people are with {other:?}");
-                        ABOUT_IDLE
+                        idle
                     }
                     Err(e) => {
                         eprintln!("jawd: can't ask WhatsApp what people say of themselves: {e}");
@@ -401,10 +416,10 @@ async fn about(store: Store, engine: Supervisor, mut connected: watch::Receiver<
                     }
                 }
             }
-            Ok((_, Some(next))) => Duration::from_millis(
-                (next + ABOUT_KEPT_MS - now_ms()).clamp(1_000, ABOUT_IDLE.as_millis() as i64) as u64,
-            ),
-            Ok(_) => ABOUT_IDLE,
+            Ok((_, Some(next))) => {
+                Duration::from_millis((next + ABOUT_KEPT_MS - now_ms()).clamp(1_000.min(idle_ms), idle_ms) as u64)
+            }
+            Ok(_) => idle,
             Err(e) => {
                 eprintln!("jawd: can't read whose about text is due: {e:#}");
                 ABOUT_PACE * 6
@@ -453,6 +468,68 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn the_connection_is_read_again_when_its_pushes_were_missed() {
+        let (pushes, heard) = broadcast::channel(1);
+        let (connected, mut connection) = watch::channel(false);
+        let online = Arc::new(AtomicBool::new(false));
+        let now = online.clone();
+        tokio::spawn(connection_of(heard, connected, Box::new(move || now.load(Ordering::Relaxed))));
+        // Two pushes into room for one, before it reads: the connection push is missed.
+        online.store(true, Ordering::Relaxed);
+        pushes.send(Push { method: "connection".into(), params: serde_json::json!({"state": "online"}) }).unwrap();
+        pushes
+            .send(Push { method: "notice".into(), params: serde_json::json!({"text": "x", "tone": "info"}) })
+            .unwrap();
+        let seen = tokio::time::timeout(Duration::from_secs(5), connection.wait_for(|&up| up)).await;
+        assert!(seen.is_ok(), "a missed push is made up for by how the connection is now");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn someone_who_comes_once_nobody_is_due_is_asked_about_within_the_idle_wait() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let engine = DemoEngine::with(vec![crate::engine::demo::connected()]);
+        let world = engine.world();
+        let (events, _incoming) = mpsc::channel(1024);
+        let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
+        let feed = Feed::start(store.clone(), Arc::new(|| false), crate::feed::Timing::default());
+        let (_focus, focused) = watch::channel(false);
+        let (pushes, _) = broadcast::channel(16);
+        let limits = Limits { about_idle: Duration::from_millis(200), ..Limits::default() };
+        let looking = Looking { focused, pushes: pushes.subscribe(), online: Box::new(|| true) };
+        Following::default().start(store.clone(), Some(supervisor), feed, looking, limits);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let ana = Person { jids: vec![jid(1)], name: Some("Ana".into()), ..Person::default() };
+        store.apply(Lane::Live, vec![Change::Person(ana)]).await.unwrap();
+        let asked_about = |world: &crate::engine::demo::World| {
+            world
+                .asked()
+                .into_iter()
+                .any(|kind| matches!(kind, pb::command::Kind::UserInfo(u) if u.jids.contains(&jid(1))))
+        };
+        until("Ana asked about", || asked_about(&world)).await;
+        let began = Instant::now();
+        loop {
+            let about = store
+                .reads()
+                .query(crate::work::Priority::Interactive, |db| {
+                    Ok(db.query_row(
+                        "SELECT p.about FROM people p JOIN person_jids j ON j.person = p.n WHERE j.jid = ?1",
+                        [jid(1)],
+                        |r| r.get::<_, Option<String>>(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            if about.is_some() {
+                break;
+            }
+            assert!(began.elapsed() < Duration::from_secs(20), "her about text was never kept");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn presence_is_followed_within_its_limits_favourites_first_and_only_while_someone_looks() {
         let home = tempfile::tempdir().unwrap();
@@ -495,9 +572,9 @@ mod tests {
             .unwrap();
         let (focus, focused) = watch::channel(false);
         let (pushes, _) = broadcast::channel(16);
-        let limits = Limits { most: 200, per_minute: 20, minute: Duration::from_millis(400) };
+        let limits = Limits { most: 200, per_minute: 20, minute: Duration::from_millis(400), about_idle: ABOUT_IDLE };
         let following = Following::default();
-        let looking = Looking { focused, pushes: pushes.subscribe(), online: true };
+        let looking = Looking { focused, pushes: pushes.subscribe(), online: Box::new(|| true) };
         following.start(store.clone(), Some(supervisor), feed.clone(), looking, limits);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(asked(&world).is_empty(), "nobody's followed while nobody looks");

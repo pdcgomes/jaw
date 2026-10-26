@@ -293,6 +293,31 @@ pub fn describe(status: &Status) -> String {
         }
         lines.push(line);
     }
+    let times = |n: u64| if n == 1 { "1 time".to_string() } else { format!("{n} times") };
+    if let Some(presence) = &status.presence {
+        lines.push(format!(
+            "presence  {} people followed, at most {} a connection and {} new a minute; {} shown in windows, {} of them past the limits; {} heard, {} dropped; about texts asked for {}",
+            presence.followed,
+            presence.most,
+            presence.per_minute,
+            presence.wanted,
+            presence.waiting,
+            presence.heard,
+            presence.dropped,
+            times(presence.about_asked)
+        ));
+    }
+    if let Some(folders) = &status.folders {
+        let mut line = format!(
+            "folders   counts checked {}, found drifted and built again {}",
+            times(folders.checks),
+            times(folders.drifted)
+        );
+        if let Some(last) = &folders.last_drift {
+            line.push_str(&format!(", last: {last}"));
+        }
+        lines.push(line);
+    }
     if let Some(storage) = &status.storage {
         if let Some(trouble) = &storage.trouble {
             lines.push(format!("trouble   {trouble}"));
@@ -455,6 +480,23 @@ mod tests {
                 "settings  jaw: messages irc, theme tokyo-night; theme \"rose-pine-moon\" isn't one this jawd takes, so its default is used"
             ),
             "{said}"
+        );
+    }
+
+    #[test]
+    fn status_says_whose_presence_is_followed_within_its_limits_and_how_the_folders_counts_checked() {
+        let fixture = include_str!("../../../protocol/fixtures/status.result.json");
+        let reply: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let status: jaw_proto::Status = serde_json::from_value(reply["result"].clone()).unwrap();
+        let said = super::describe(&status);
+        let line = |start: &str| said.lines().find(|line| line.starts_with(start)).unwrap_or_default().to_string();
+        assert_eq!(
+            line("presence  "),
+            "presence  12 people followed, at most 200 a connection and 20 new a minute; 40 shown in windows, 28 of them past the limits; 310 heard, 0 dropped; about texts asked for 3 times"
+        );
+        assert_eq!(
+            line("folders   "),
+            "folders   counts checked 2 times, found drifted and built again 1 time, last: 1 of your folders' counts aren't what they hold"
         );
     }
 }

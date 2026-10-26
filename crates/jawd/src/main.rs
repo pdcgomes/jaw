@@ -545,10 +545,13 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         vec![Arc::new(store.clone()), Arc::new(store.reads().clone()), sending.lane()];
     let finder = find::Finder::start(store.clone()).await?;
     let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
-    let online = matches!(
-        live.lock().expect("live state").connection.state,
-        jaw_proto::ConnectionState::Online | jaw_proto::ConnectionState::CatchingUp
-    );
+    let connection = live.clone();
+    let online = Box::new(move || {
+        matches!(
+            connection.lock().expect("live state").connection.state,
+            jaw_proto::ConnectionState::Online | jaw_proto::ConnectionState::CatchingUp
+        )
+    });
     let looking = presence::Looking { focused: attention.focus(), pushes: pushes.subscribe(), online };
     following.start(store.clone(), engine.clone(), feed.clone(), looking, Default::default());
     let checks = Arc::new(organise::Checks::default());
