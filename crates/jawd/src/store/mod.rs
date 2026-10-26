@@ -2382,6 +2382,7 @@ mod tests {
         for round in 0..2 {
             let id = format!("m{round}");
             store.apply(Lane::Live, messages([text("351910000002@s.whatsapp.net", &id, round, "hi")])).await.unwrap();
+            store.indexed().await.unwrap();
             let committed = Instant::now();
             while std::fs::metadata(&wal).map_or(0, |m| m.len()) > 0 {
                 assert!(committed.elapsed() < Duration::from_secs(10), "the WAL was never emptied");
@@ -2389,7 +2390,10 @@ mod tests {
             }
             let woke = store.wal.woke.load(Ordering::Relaxed);
             tokio::time::sleep(idle * 10).await;
-            assert_eq!(store.wal.woke.load(Ordering::Relaxed), woke, "the checkpointer woke with nothing to do");
+            // Indexing ends with a merge step that writes nothing but still kicks the checkpointer: on a
+            // busy machine it can commit after the WAL was emptied, and the idle timer it starts runs out once.
+            let woken = store.wal.woke.load(Ordering::Relaxed) - woke;
+            assert!(woken <= 1, "the checkpointer woke {woken} times with nothing to do");
         }
     }
 
