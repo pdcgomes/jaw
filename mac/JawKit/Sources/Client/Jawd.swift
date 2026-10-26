@@ -231,6 +231,8 @@ public final class Jawd {
             out.append(.notice(notice.text, notice.tone))
         case let .push(method, params):
             out.append(.push(method: method, params: params))
+        case let .unreadable(why):
+            out.append(.notice(why, .error))
         }
     }
 

@@ -147,3 +147,27 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         #expect(key.hasPrefix("jaw-") && key.count == 36 && key.dropFirst(4).allSatisfy(\.isHexDigit))
     }
 }
+
+@Test func `a row that isn't the protocol leaves out only itself`() throws {
+    var chats = try JSONValue.parse(try fixture("chats.watch.result.json"))
+    guard case var .object(line) = chats, case var .object(result) = line["result"],
+          case var .array(rows) = result["rows"], !rows.isEmpty else {
+        Issue.record("chats.watch.result.json has no rows")
+        return
+    }
+    rows.append(.object(["jid": .string("broken@s.whatsapp.net")]))
+    result["rows"] = .array(rows)
+    line["result"] = .object(result)
+    chats = .object(line)
+
+    let decoder = JSONDecoder()
+    decoder.userInfo[.want] = WantLookup { _ in .chats }
+    let data = try JSONEncoder().encode(chats)
+    guard case let .chats(_, watched) = IncomingLine.decode(data, with: decoder) else {
+        Issue.record("the window sank with its bad row")
+        return
+    }
+    #expect(watched.rows.count == rows.count - 1)
+    #expect(watched.unread == 1)
+    #expect(watched.why != nil)
+}

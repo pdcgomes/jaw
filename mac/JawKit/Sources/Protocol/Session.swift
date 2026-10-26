@@ -31,16 +31,42 @@ public struct Welcome: Decodable, Sendable, Hashable {
 public struct Account: Decodable, Sendable, Hashable {
     public var state: AccountState
     public var me: Me?
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        state = (try? c.decode(AccountState.self, forKey: .state)) ?? .linked
+        me = try? c.decodeIfPresent(Me.self, forKey: .me)
+    }
+
+    enum Keys: String, CodingKey {
+        case state, me
+    }
 }
 
 public enum AccountState: String, Decodable, Sendable, Hashable {
     case unlinked, linking, linked
+
+    /// A state jawd may add later reads as linked, so the app shows what jawd has.
+    public init(from decoder: any Decoder) throws {
+        self = try AccountState(rawValue: decoder.singleValueContainer().decode(String.self)) ?? .linked
+    }
 }
 
 public struct Me: Decodable, Sendable, Hashable {
     public var id: String
     public var name: String
     public var phone: String
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? ""
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? ""
+        phone = (try? c.decodeIfPresent(String.self, forKey: .phone)) ?? ""
+    }
+
+    enum Keys: String, CodingKey {
+        case id, name, phone
+    }
 }
 
 /// The connection to WhatsApp, as `hello`, `status` and the `connection` push say it.
@@ -72,6 +98,12 @@ public enum ConnectionState: String, Decodable, Sendable, Hashable {
     case updateNeeded = "update_needed"
     case banned
     case engineRestarting = "engine_restarting"
+    /// A state jawd may add later.
+    case other
+
+    public init(from decoder: any Decoder) throws {
+        self = try ConnectionState(rawValue: decoder.singleValueContainer().decode(String.self)) ?? .other
+    }
 }
 
 /// `link.start`'s params: by QR code, or by a code typed on the phone for this number.

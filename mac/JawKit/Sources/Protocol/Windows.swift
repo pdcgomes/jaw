@@ -52,6 +52,36 @@ public struct Place: Sendable, Hashable {
     }
 }
 
+/// A window's rows read one by one: a row that isn't jaw's protocol is left out and counted, so it
+/// can be said, rather than losing the rest of the window with it.
+struct Lossy<R: Decodable>: Decodable {
+    var rows: [R] = []
+    var unread = 0
+    var why: String?
+
+    init(from decoder: any Decoder) throws {
+        var c = try decoder.unkeyedContainer()
+        while !c.isAtEnd {
+            do {
+                rows.append(try c.decode(R.self))
+            } catch {
+                unread += 1
+                why = why ?? "\(error)"
+                _ = try? c.decode(JSONValue.self)
+            }
+        }
+    }
+}
+
+extension KeyedDecodingContainer {
+    func rows<R: Decodable>(_ key: Key, into unread: inout Int, why: inout String?) throws -> [R] {
+        guard let lossy = try decodeIfPresent(Lossy<R>.self, forKey: key) else { return [] }
+        unread += lossy.unread
+        why = why ?? lossy.why
+        return lossy.rows
+    }
+}
+
 struct ChatsWatch: Encodable, Sendable {
     var folder: String
     var around: Around
@@ -117,13 +147,16 @@ public struct ChatsWatched: Decodable, Sendable {
     public var total: UInt64
     public var rows: [ChatRow]
     public var remove: [String]
+    /// Rows that weren't jaw's protocol, left out, and why the first wasn't.
+    public var unread = 0
+    public var why: String?
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         watch = try c.decode(String.self, forKey: .watch)
         seq = try c.decode(UInt64.self, forKey: .seq)
         total = try c.decodeIfPresent(UInt64.self, forKey: .total) ?? 0
-        rows = try c.decodeIfPresent([ChatRow].self, forKey: .rows) ?? []
+        rows = try c.rows(.rows, into: &unread, why: &why)
         remove = try c.decodeIfPresent([String].self, forKey: .remove) ?? []
     }
 
@@ -141,6 +174,8 @@ public struct MessagesWatched: Decodable, Sendable {
     public var newer: UInt64
     public var rows: [MessageRow]
     public var remove: [String]
+    public var unread = 0
+    public var why: String?
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -149,7 +184,7 @@ public struct MessagesWatched: Decodable, Sendable {
         total = try c.decodeIfPresent(UInt64.self, forKey: .total) ?? 0
         older = try c.decodeIfPresent(Bool.self, forKey: .older) ?? false
         newer = try c.decodeIfPresent(UInt64.self, forKey: .newer) ?? 0
-        rows = try c.decodeIfPresent([MessageRow].self, forKey: .rows) ?? []
+        rows = try c.rows(.rows, into: &unread, why: &why)
         remove = try c.decodeIfPresent([String].self, forKey: .remove) ?? []
     }
 
@@ -165,13 +200,15 @@ public struct ChatsPush: Decodable, Sendable {
     public var total: UInt64?
     public var upsert: [ChatRow]
     public var remove: [String]
+    public var unread = 0
+    public var why: String?
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         watch = try c.decode(String.self, forKey: .watch)
         seq = try c.decode(UInt64.self, forKey: .seq)
         total = try c.decodeIfPresent(UInt64.self, forKey: .total)
-        upsert = try c.decodeIfPresent([ChatRow].self, forKey: .upsert) ?? []
+        upsert = try c.rows(.upsert, into: &unread, why: &why)
         remove = try c.decodeIfPresent([String].self, forKey: .remove) ?? []
     }
 
@@ -189,6 +226,8 @@ public struct MessagesPush: Decodable, Sendable {
     public var newer: UInt64?
     public var upsert: [MessageRow]
     public var remove: [String]
+    public var unread = 0
+    public var why: String?
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -197,7 +236,7 @@ public struct MessagesPush: Decodable, Sendable {
         total = try c.decodeIfPresent(UInt64.self, forKey: .total)
         older = try c.decodeIfPresent(Bool.self, forKey: .older)
         newer = try c.decodeIfPresent(UInt64.self, forKey: .newer)
-        upsert = try c.decodeIfPresent([MessageRow].self, forKey: .upsert) ?? []
+        upsert = try c.rows(.upsert, into: &unread, why: &why)
         remove = try c.decodeIfPresent([String].self, forKey: .remove) ?? []
     }
 

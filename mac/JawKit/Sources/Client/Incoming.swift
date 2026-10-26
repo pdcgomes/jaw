@@ -48,6 +48,8 @@ enum Incoming: Sendable {
     case push(String, JSONValue)
     /// A line that isn't jaw's protocol.
     case skip
+    /// A push that isn't jaw's protocol, and why, to be said.
+    case badPush(String, String)
 }
 
 struct IncomingLine: Decodable {
@@ -99,7 +101,7 @@ struct IncomingLine: Decodable {
             default: value = try .push(method, c.decodeIfPresent(JSONValue.self, forKey: .params) ?? .null)
             }
         } catch {
-            value = .skip
+            value = .badPush(method, "\(error)")
         }
     }
 

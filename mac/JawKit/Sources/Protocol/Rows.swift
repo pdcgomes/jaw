@@ -44,15 +44,15 @@ public struct ChatRow: WindowRow, Decodable, Hashable {
         kind = try c.decodeIfPresent(ChatKind.self, forKey: .kind) ?? .unknown
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
         avatar = try c.decodeIfPresent(String.self, forKey: .avatar)
-        last = try c.decodeIfPresent(Last.self, forKey: .last)
+        last = try? c.decodeIfPresent(Last.self, forKey: .last)
         unread = try c.decodeIfPresent(Int.self, forKey: .unread) ?? 0
         mentions = try c.decodeIfPresent(Int.self, forKey: .mentions) ?? 0
         pinned = try c.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
-        mutedUntil = try c.decodeIfPresent(Int64.self, forKey: .mutedUntil)
+        mutedUntil = try? c.decodeIfPresent(Int64.self, forKey: .mutedUntil)
         archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
         markedUnread = try c.decodeIfPresent(Bool.self, forKey: .markedUnread) ?? false
         draft = try c.decodeIfPresent(String.self, forKey: .draft)
-        typing = try c.decodeIfPresent([String].self, forKey: .typing) ?? []
+        typing = (try? c.decodeIfPresent([String].self, forKey: .typing)) ?? []
         community = try c.decodeIfPresent(String.self, forKey: .community)
         childrenUnread = try c.decodeIfPresent(Int.self, forKey: .childrenUnread)
     }
@@ -113,6 +113,20 @@ public struct Last: Decodable, Sendable, Hashable {
     public var status: MessageStatus?
     public var at: Int64
 
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        from = try? c.decodeIfPresent(String.self, forKey: .from)
+        mine = (try? c.decodeIfPresent(Bool.self, forKey: .mine)) ?? false
+        summary = (try? c.decodeIfPresent(String.self, forKey: .summary)) ?? ""
+        kind = (try? c.decodeIfPresent(MessageKind.self, forKey: .kind)) ?? .unknown
+        status = try? c.decodeIfPresent(MessageStatus.self, forKey: .status)
+        at = (try? c.decodeIfPresent(Int64.self, forKey: .at)) ?? 0
+    }
+
+    enum Keys: String, CodingKey {
+        case from, mine, summary, kind, status, at
+    }
+
     public init(from: String?, mine: Bool, summary: String, kind: MessageKind = .text, status: MessageStatus? = nil,
                 at: Int64)
     {
@@ -138,6 +152,11 @@ public enum MessageKind: String, Decodable, Sendable, Hashable {
 
 public enum MessageStatus: String, Decodable, Sendable, Hashable, Comparable {
     case pending, sent, delivered, read, played, failed
+
+    /// A status jawd may add later reads as pending, since it isn't known to have gone.
+    public init(from decoder: any Decoder) throws {
+        self = try MessageStatus(rawValue: decoder.singleValueContainer().decode(String.self)) ?? .pending
+    }
 
     private var rank: Int {
         switch self {
@@ -199,13 +218,13 @@ public struct MessageRow: WindowRow, Decodable, Hashable {
         sort = try c.decode(String.self, forKey: .sort)
         chat = try c.decodeIfPresent(String.self, forKey: .chat) ?? ""
         at = try c.decodeIfPresent(Int64.self, forKey: .at) ?? 0
-        from = try c.decodeIfPresent(Sender.self, forKey: .from)
+        from = try? c.decodeIfPresent(Sender.self, forKey: .from)
         mine = try c.decodeIfPresent(Bool.self, forKey: .mine) ?? false
         kind = try c.decodeIfPresent(MessageKind.self, forKey: .kind) ?? .unknown
-        spans = try c.decodeIfPresent([Span].self, forKey: .spans) ?? []
-        reply = try c.decodeIfPresent(Quote.self, forKey: .reply)
+        spans = (try? c.decodeIfPresent([Span].self, forKey: .spans)) ?? []
+        reply = try? c.decodeIfPresent(Quote.self, forKey: .reply)
         forwarded = try c.decodeIfPresent(Int.self, forKey: .forwarded) ?? 0
-        reactions = try c.decodeIfPresent([Reaction].self, forKey: .reactions) ?? []
+        reactions = (try? c.decodeIfPresent([Reaction].self, forKey: .reactions)) ?? []
         status = try c.decodeIfPresent(MessageStatus.self, forKey: .status)
         edited = try c.decodeIfPresent(Bool.self, forKey: .edited) ?? false
         deleted = try c.decodeIfPresent(Bool.self, forKey: .deleted) ?? false

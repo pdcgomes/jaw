@@ -477,9 +477,11 @@ public final class Client: Sendable {
                 return s.current(generation)
             }
         case let .chatsPush(push):
+            if push.unread > 0 { _ = event(.unreadable(Self.unread(push.unread, "chats", push.why)), generation, urgent: false) }
             let update = Update<ChatRow>(seq: push.seq, remove: push.remove, upsert: push.upsert, total: push.total)
             return windowPush(push.watch, generation) { s, window in s.mergeChats(window, update) }
         case let .messagesPush(push):
+            if push.unread > 0 { _ = event(.unreadable(Self.unread(push.unread, "messages", push.why)), generation, urgent: false) }
             let update = Update<MessageRow>(seq: push.seq, remove: push.remove, upsert: push.upsert,
                                             total: push.total, older: push.older, newer: push.newer)
             return windowPush(push.watch, generation) { s, window in s.mergeMessages(window, update) }
@@ -507,6 +509,8 @@ public final class Client: Sendable {
             return event(.notice(notice), generation, urgent: false)
         case let .push(method, params):
             return event(.push(method: method, params: params), generation, urgent: false)
+        case let .badPush(method, why):
+            return event(.unreadable("a \(method) push from jawd isn't jaw's protocol: \(why)"), generation, urgent: false)
         case let .hello(id, welcome):
             return hello(id, .success(welcome), generation)
         case let .error(id, error):
@@ -518,8 +522,10 @@ public final class Client: Sendable {
         case let .found(id, found):
             return reply(id, .success(.found(found)), generation)
         case let .chats(id, watched):
+            if watched.unread > 0 { _ = event(.unreadable(Self.unread(watched.unread, "chats", watched.why)), generation, urgent: false) }
             return reply(id, .success(.chats(watched)), generation)
         case let .messages(id, watched):
+            if watched.unread > 0 { _ = event(.unreadable(Self.unread(watched.unread, "messages", watched.why)), generation, urgent: false) }
             return reply(id, .success(.messages(watched)), generation)
         }
     }
@@ -701,6 +707,10 @@ public final class Client: Sendable {
         return current
     }
 
+    static func unread(_ n: Int, _ what: String, _ why: String?) -> String {
+        "\(n) \(what) from jawd couldn't be read, so they're left out: \(why ?? "not jaw's protocol")"
+    }
+
     /// The default anchor of a window's list, keeping as many rows, for a window whose anchor has gone.
     static func fallback(_ kind: Kind, _ place: Place) -> Place {
         let rows = place.before + place.after
@@ -763,6 +773,8 @@ public enum Event: Sendable {
     case notice(Notice)
     /// Any other push.
     case push(method: String, params: JSONValue)
+    /// Something jawd sent that isn't jaw's protocol, said rather than dropped in silence.
+    case unreadable(String)
 }
 
 /// Everything that came since the last drain: events in order, and one merged update for each
