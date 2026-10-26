@@ -2897,11 +2897,9 @@ fn files_to_pick() -> tempfile::TempDir {
 fn ctrl_o_picks_files_by_their_path_and_the_box_sends_them_with_a_caption_in_sd_or_hd() {
     let dir = files_to_pick();
     let (mut v, rx) = view(140, 40);
-    press(&mut v, &rx, "<c-o>");
     let folder = format!("{}/", dir.path().display());
-    if let Some(p) = v.palette.as_mut() {
-        p.query.set(&folder);
-    }
+    v.attach_from = Some(folder.clone());
+    press(&mut v, &rx, "<c-o>");
     let screen = frame(&mut v);
     assert!(screen.contains("╭ attach ─"), "{screen}");
     let listed: Vec<usize> =
@@ -2974,7 +2972,9 @@ fn a_file_on_its_way_shows_how_far_it_has_got_and_x_stops_it() {
 
 #[test]
 fn the_palettes_attach_files_opens_the_picker() {
+    let dir = files_to_pick();
     let (mut v, rx) = view(140, 40);
+    v.attach_from = Some(format!("{}/", dir.path().display()));
     press(&mut v, &rx, "<c-k>attach files\n");
     let screen = frame(&mut v);
     assert!(screen.contains("╭ attach ─") && !screen.contains("comes with M4"), "{screen}");

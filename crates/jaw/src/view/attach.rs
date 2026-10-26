@@ -25,6 +25,10 @@ pub struct Attaching {
     pub hd: bool,
 }
 
+/// A folder as the picker lists it: the folder, and what's in it that matches, each entry's name,
+/// whether it's a folder, and a file's size.
+pub type Listing = (PathBuf, Vec<(String, bool, Option<u64>)>);
+
 /// What's in the folder a path names, matching the name being typed after its last `/`: folders
 /// first, then files, each by name, hidden ones only once a `.` is typed.
 pub fn entries(typed: &str) -> (PathBuf, Vec<(String, bool)>) {
@@ -134,13 +138,35 @@ impl View {
         p.answered = true;
         let from = self.attach_from.clone().unwrap_or_else(|| "~/".into());
         p.query.set(&from);
+        self.attach_listed.replace(None);
         p.mode = Mode::Attach { picked: vec![] };
         self.palette = Some(p);
     }
 
+    /// The folder a path names as the picker lists it, read again only once the path changes.
+    fn attach_listing(&self, typed: &str) -> Listing {
+        let mut listed = self.attach_listed.borrow_mut();
+        if let Some((was, listing)) = listed.as_ref()
+            && was == typed
+        {
+            return listing.clone();
+        }
+        let (folder, found) = entries(typed);
+        let found = found
+            .into_iter()
+            .map(|(name, dir)| {
+                let bytes = (!dir).then(|| std::fs::metadata(folder.join(&name)).ok().map(|m| m.len())).flatten();
+                (name, dir, bytes)
+            })
+            .collect();
+        let listing = (folder, found);
+        *listed = Some((typed.to_string(), listing.clone()));
+        listing
+    }
+
     /// The picker's rows: where it is and what's picked, then the folder's folders and files.
     pub(super) fn attach_items(&self, typed: &str, picked: &[PathBuf]) -> Vec<Item> {
-        let (folder, found) = entries(typed);
+        let (folder, found) = self.attach_listing(typed);
         let said = match picked.len() {
             0 => shown(&folder),
             n => format!("{n} picked · {}", shown(&folder)),
@@ -149,13 +175,12 @@ impl View {
         if found.is_empty() {
             items.push(Item::Heading("", "nothing here".into()));
         }
-        for (name, dir) in found {
+        for (name, dir, bytes) in found {
             let path = folder.join(&name);
             let mut a = if dir {
                 Action::new(format!("{name}/"), "", Does::Open(path))
             } else {
-                let size = std::fs::metadata(&path).map(|m| crate::fmt::bytes(m.len())).unwrap_or_default();
-                Action::new(name, size, Does::Pick(path.clone()))
+                Action::new(name, bytes.map(crate::fmt::bytes).unwrap_or_default(), Does::Pick(path.clone()))
             };
             a.lead = Some(match &a.does {
                 Does::Pick(path) if picked.contains(path) => "[x]".into(),

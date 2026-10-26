@@ -289,6 +289,9 @@ pub struct View {
     /// picker last picked from.
     attaching: Option<attach::Attaching>,
     attach_from: Option<String>,
+    /// The picker's last listing, by the path it was typed as, so a folder is read once for each
+    /// path typed rather than at every frame.
+    attach_listed: std::cell::RefCell<Option<(String, attach::Listing)>>,
     /// How far each file of yours on its way has got, by its message, as jawd's `job` pushes say.
     jobs: HashMap<String, (crate::data::JobKind, f64)>,
     /// Why the last message wasn't sent, said on the box it went back to until it's typed in.
@@ -414,6 +417,7 @@ impl View {
             recorder: None,
             attaching: None,
             attach_from: None,
+            attach_listed: std::cell::RefCell::new(None),
             jobs: HashMap::new(),
             unsent: None,
             palette: None,
