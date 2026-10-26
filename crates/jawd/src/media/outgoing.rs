@@ -42,6 +42,7 @@ use crate::store::outgoing::{self, Copy, DroppedPaths, Prepared as Placed, Shown
 use crate::store::{Change, Lane as WriteLane, Packed, unpack};
 use crate::work::{Pool, Priority};
 
+pub mod bench;
 #[cfg(test)]
 mod tests;
 

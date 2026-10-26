@@ -257,6 +257,22 @@ enum Bench {
         #[arg(long)]
         full_flush: bool,
     },
+    /// Media out: a photo of yours sent with send.media on the socket, to its copy made and to sent, while texts arrive
+    MediaOut {
+        #[arg(long, default_value_t = 10)]
+        count: u32,
+        /// The photo's size in pixels, a 12-megapixel phone photo's by default
+        #[arg(long, default_value_t = 4032)]
+        width: u32,
+        #[arg(long, default_value_t = 3024)]
+        height: u32,
+        /// Sends each in HD too, as WhatsApp's dual upload does
+        #[arg(long)]
+        hd: bool,
+        /// Milliseconds between two texts arriving all along
+        #[arg(long, default_value_t = 50)]
+        every: u64,
+    },
     /// Sending: send.text answered with its synced commit, and sends there and back through the demo engine
     Send {
         #[arg(long, default_value_t = 1_000)]
@@ -354,6 +370,9 @@ fn jawd(cli: Cli) -> Result<()> {
         Some(Command::Bench(Bench::Send { count, trips, chats })) => {
             bench_send(send::bench::Plan { count, trips, chats })
         }
+        Some(Command::Bench(Bench::MediaOut { count, width, height, hd, every })) => {
+            bench_media_out(media::outgoing::bench::Plan { count, width, height, hd, every })
+        }
         Some(Command::Bench(Bench::Media { count, width, height, flood, voice, texts_alone, full_flush })) => {
             bench_media(media::bench::Plan { count, width, height, flood, voice, alone: texts_alone, full_flush })
         }
@@ -380,6 +399,14 @@ fn bench_media(plan: media::bench::Plan) -> Result<()> {
 }
 
 /// Builds a jaw.db in a folder of its own, removed afterwards, and times the palette's find on it.
+fn bench_media_out(plan: media::outgoing::bench::Plan) -> Result<()> {
+    let scratch = std::env::temp_dir().join(format!("jaw-bench-media-out-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let outcome = runtime()?.block_on(media::outgoing::bench::run(&scratch, plan));
+    let _ = std::fs::remove_dir_all(&scratch);
+    outcome
+}
+
 fn bench_find(plan: find::bench::Plan) -> Result<()> {
     let scratch = std::env::temp_dir().join(format!("jaw-bench-find-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;

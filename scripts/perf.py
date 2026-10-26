@@ -12,9 +12,10 @@ whatsmeow acks them today and in groups. jaw is attached through `jaw bench --so
 opens, start, memory and wake-ups. Then the engine's round trip (`jawd bench link`, on the demo and
 the Go engines, the Go engine unlinked so nothing reaches WhatsApp), the windows' fan-out
 (`jawd bench feed`), the store alone (`jawd bench store`), jaw's own flood with pictures
-(`jaw bench`), a 12-megapixel photo (`media-bench`) and a 12-megapixel photo's arrival to its 256
-pixel preview (`jawd bench media`); --quick leaves out the last four, and --small runs everything
-on 50,000 messages and short floods, to check the harness itself, not the budgets.
+(`jaw bench`), a 12-megapixel photo (`media-bench`), a 12-megapixel photo's arrival to its 256
+pixel preview (`jawd bench media`) and a 12-megapixel photo of yours sent in SD and HD while texts
+arrive (`jawd bench media-out`); --quick leaves out the last five, and --small runs everything on
+50,000 messages and short floods, to check the harness itself, not the budgets.
 
 Each row says the load average while it ran. Everything runs with JAW_HOME and TMPDIR in one
 temporary folder, removed afterwards, so nothing touches jaw's own folder; only the processes it
@@ -56,6 +57,8 @@ IN_FLIGHT = 256
 WAL_LIMIT = 64
 # The 12-megapixel photos `jawd bench media` hands over, one at a time.
 PHOTOS_IN = 3 if SMALL else 10
+# The 12-megapixel photos `jawd bench media-out` sends, one at a time.
+PHOTOS_OUT = 3 if SMALL else 10
 
 
 def load() -> float:
@@ -361,6 +364,18 @@ def main() -> int:
             "small": numbers(r"its 256 px preview" + row, text),
         }
 
+    def photo_out():
+        text = run([str(JAWD), "bench", "media-out", "--count", str(PHOTOS_OUT), "--hd"], raw, "photo-out", env, 600)
+        row = r"\s+p50 ([\d.]+) ms, p99 ([\d.]+) ms, max ([\d.]+) ms \((\d+) "
+        return {
+            "photo": numbers(r"a (\d+)x(\d+) photo \(([\d.]+) MB\)", text),
+            "answer": numbers(r"send\.media's answer" + row, text),
+            "ready": numbers(r"its copy made and in the cache \(ready\)" + row, text),
+            "sent": numbers(r"it sent, once uploaded" + row, text),
+            "acks_between": numbers(r"a text's ack, between photos" + row, text),
+            "acks_during": numbers(r"a text's ack, while a photo went" + row, text),
+        }
+
     started = time.monotonic()
     load_before = os.getloadavg()
     try:
@@ -377,6 +392,7 @@ def main() -> int:
             step("jaw alone", jaw_alone)
             step("photo", photo)
             step("photo in", photo_in)
+            step("photo out", photo_out)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     load_after = os.getloadavg()
@@ -470,6 +486,12 @@ def render(r: dict, steps: dict) -> str:
     if one_ack and one_ack.get("n"):
         row("", "in a catch-up", f"{timing(one_ack)}, {ms(one_ack['max'])} at worst",
             "the backlog acked one at a time, as jaw-engine acks it", "catch-up, one at a time", at_most(p(one_ack), 10))
+    if "photo out" in r:
+        during, between = r["photo out"]["acks_during"], r["photo out"]["acks_between"]
+        row("", "while photos of yours are sent", f"{during[1]:.1f} ms p99, {during[0]:.1f} ms p50, {during[2]:.1f} ms at worst",
+            f"`jawd bench media-out`: a text through the demo engine every 50 ms, {during[3]:.0f} of them while {PHOTOS_OUT} 12-megapixel photos "
+            f"went one at a time in SD and HD; {between[1]:.1f} ms p99 and {between[0]:.1f} ms p50 for the {between[3]:.0f} in the quiet spells "
+            f"between them", "photo out", during[1] <= 10)
     ack = flood.get("demo", {}).get("ack")
     if ack:
         row("", "during the flood", timing(ack), f"each acked after its group's synced commit, with {grouped}", "flood", at_most(p(ack), 10))
@@ -566,6 +588,14 @@ def render(r: dict, steps: dict) -> str:
             f"`jawd bench media`: a {width:.0f}x{height:.0f} photo ({size} MB) handed over by the demo engine, to the push whose row has its "
             f"256 px preview, through the inbox's synced commit, the download into the cache and jaw-media; its thumbnail came at "
             f"{thumbnail[0]:.0f} ms p50 and its file at {file[0]:.0f} ms", "photo in", small[0] <= 300)
+    if "photo out" in r:
+        got = r["photo out"]
+        width, height, size = got["photo"]
+        answer, ready, sent = got["answer"], got["ready"], got["sent"]
+        row("", "sending, ready to upload", f"{ready[0]:.0f} ms p50, {ready[2]:.0f} ms at worst ({PHOTOS_OUT} photos)",
+            f"`jawd bench media-out`: a {width:.0f}x{height:.0f} photo ({size} MB) of yours sent with `send.media` on the socket, in SD and HD, "
+            f"to the push whose row shows its copy made and in the cache; `send.media` answered in {answer[0]:.0f} ms p50, "
+            f"and the row said sent at {sent[0]:.0f} ms, uploaded by the demo engine", "photo out", ready[0] <= 300)
 
     if idle:
         row("Idle", "no drawing, no wake-ups, no polling", f"jawd {idle['wakeups_per_minute']:.1f} wake-ups a minute, {idle['pushes']} pushes",
