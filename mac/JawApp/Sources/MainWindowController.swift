@@ -9,7 +9,7 @@ import SwiftUI
 /// along the bottom of the whole window. Below 960 points the sidebar folds away, and below 740 the
 /// chat list does too, as the terminal folds.
 @MainActor
-final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSMenuItemValidation {
+final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
     let model: AppModel
     let split = NSSplitViewController()
     let sidebar = SidebarController()
@@ -150,6 +150,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         refresh()
     }
 
+    func toggleChatList() {
+        listItem.animator().isCollapsed.toggle()
+    }
+
     func toggleSidebar() {
         sidebarItem.animator().isCollapsed.toggle()
     }
@@ -261,7 +265,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     func showKeys() {
         guard keysSheet == nil else { return }
-        let sheet = NSWindow(contentViewController: NSHostingController(rootView: KeysView { [weak self] in
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: KeysView(commands: Menus.keys(model.commands)) { [weak self] in
             guard let self, let sheet = keysSheet else { return }
             window?.endSheet(sheet)
             keysSheet = nil
@@ -310,7 +314,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         switch id {
         case Self.find:
             let item = NSToolbarItem(itemIdentifier: id)
-            let button = NSButton(title: "Find  ⌘K", image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Find")!,
+            let button = NSButton(title: "Find  \(Shortcut("k").display)", image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Find")!,
                                   target: self, action: #selector(showPalette(_:)))
             button.imagePosition = .imageLeading
             button.bezelStyle = .toolbar
@@ -325,19 +329,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             item.target = self
             item.action = #selector(splitAcross)
             item.showsIndicator = true
-            let menu = NSMenu()
-            for (title, image, action, key, mods) in [
-                ("Split Across", "rectangle.split.2x1", #selector(splitAcross), "d", NSEvent.ModifierFlags.command),
-                ("Split Down", "rectangle.split.1x2", #selector(splitDown), "D", [.command, .shift]),
-                ("Close Pane", "xmark.rectangle", #selector(closePane), "w", .command),
-            ] as [(String, String, Selector, String, NSEvent.ModifierFlags)] {
-                let m = NSMenuItem(title: title, action: action, keyEquivalent: key)
-                m.keyEquivalentModifierMask = mods
-                m.image = NSImage(systemSymbolName: image, accessibilityDescription: title)
-                m.target = self
-                menu.addItem(m)
-            }
-            item.menu = menu
+            item.menu = Menus.menu(["split.across", "split.down", "pane.close"].compactMap(model.command))
             return item
         case Self.newChat:
             let item = NSToolbarItem(itemIdentifier: id)
@@ -345,7 +337,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             item.label = "New Chat"
             item.target = self
             item.action = #selector(showPalette(_:))
-            item.toolTip = "Start a chat: a name or a number (⌘N)"
+            item.toolTip = IconButton.tip("Start a chat: a name or a number", Shortcut("n"))
             return item
         default:
             return nil
@@ -356,17 +348,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         model.split(.across)
     }
 
-    @objc func splitDown() {
-        model.split(.down)
-    }
-
-    @objc func closePane() {
-        model.closeFocusedPane()
-    }
-
-    func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        item.action == #selector(closePane) ? model.panes.count > 1 : true
-    }
 }
 
 extension JSONEncoder {

@@ -39,6 +39,8 @@ final class AppModel {
     var restored = false
     let glance = Glance()
     var focusMode = false
+    /// Everything the app does, made once; the menus, the palette and the keys sheet read it.
+    lazy var commands: [Command] = makeCommands()
     /// Messages sent and not yet answered for, by key, so a refused one goes back to its box.
     var sending: [String: (chat: String, text: String)] = [:]
     var notice: (text: String, until: Date, warn: Bool)?
@@ -481,86 +483,14 @@ final class AppModel {
 
     // MARK: - The palette's actions
 
-    /// Every action the palette offers now, with its key, as the terminal's palette lists them.
+    /// Every action the palette offers now: the commands that can run, by the palette's phrases.
     func actions() -> [PaletteAction] {
-        var all: [PaletteAction] = []
-        let w = window
-        let unread = (w?.chatList.all ?? []).filter { $0.unread > 0 && !$0.muted && $0.kind != .community }
-        all.append(PaletteAction("Start a chat", "with anyone, or a number", key: "⌘N") { w?.showPalette(nil) })
-        all.append(PaletteAction("Go to unread", unread.isEmpty ? "nothing unread" : "\(unread.count) chats") { [weak self] in self?.goToUnread() })
-        all.append(PaletteAction("Search messages", "everywhere", key: "⌘⇧F") { w?.showPalette(kind: .message) })
-        if let c = conversation {
-            all.append(PaletteAction("Search this chat", "its messages", key: "⌘F") { w?.showPalette(kind: .message, scope: (c.chat.id, c.chat.name)) })
-            if let m = c.selectedRow {
-                if m.mine, m.status == .failed { all.append(PaletteAction("Send it again", "it wasn't sent", key: "⏎") { c.act("\n") }) }
-                all.append(PaletteAction("Reply to this message", "the selected message", key: "r") { c.act("r") })
-                all.append(PaletteAction("React to this message", "the selected message", key: "+") { c.act("+") })
-                if ConversationController.notEditable(m) == nil { all.append(PaletteAction("Edit this message", "the selected message", key: "e") { c.act("e") }) }
-                all.append(PaletteAction("Delete this message", "for you, or for everyone", key: "d") { c.act("d") })
-                if ConversationController.notForwardable(m) == nil {
-                    all.append(PaletteAction("Forward this message", "to up to five chats", key: "f") { c.act("f") })
-                }
-                all.append(PaletteAction("This message's info", "who has it and read it", key: "i") { c.act("i") })
-                all.append(PaletteAction("Copy this message", "its text", key: "y") { c.act("y") })
-            }
-            all.append(contentsOf: chatActions(c.chat))
-            all.append(PaletteAction("Split this pane across", "another chat beside it", key: "⌘D") { [weak self] in self?.split(.across) })
-            all.append(PaletteAction("Split this pane down", "another chat below it", key: "⌘⇧D") { [weak self] in self?.split(.down) })
-            if panes.count > 1 {
-                all.append(PaletteAction("Close this pane", "its chat off the screen", key: "⌘W") { [weak self] in self?.closeFocusedPane() })
-            }
-            all.append(PaletteAction(focusMode ? "All chats again" : "Focus on this chat",
-                                     focusMode ? "the chat list and sidebar back" : "the chat list and sidebar folded away", key: "⌘⇧↩")
-            { [weak self] in self?.toggleFocusMode() })
-        }
-        all.append(PaletteAction("The glance", "the chats that need you, staying here", key: "⌘J") { w?.showGlance() })
-        all.append(PaletteAction("Show or fold the sidebar", "All and Archived", key: "⌘B") { w?.toggleSidebar() })
-        all.append(PaletteAction("Bubbles", "how messages look") { [weak self] in self?.preferences.look = .bubbles })
-        all.append(PaletteAction("Lines", "how messages look, as the terminal's") { [weak self] in self?.preferences.look = .lines })
-        all.append(PaletteAction("New poll", "comes with jawd's polls") { [weak self] in self?.say("polls come later") })
-        all.append(PaletteAction("Attach files", "comes with jawd's M4", key: "⌘O") { [weak self] in self?.say("attaching comes with jawd's M4") })
-        all.append(PaletteAction("Record a voice message", "comes with jawd's M5", key: "⌘R") { [weak self] in self?.say("recording comes with jawd's M5") })
-        all.append(PaletteAction("Library", "comes with jawd's M3", key: "⌘L") { [weak self] in self?.say("the library comes with jawd's M3") })
-        if !linked { all.append(PaletteAction("Link a device", "this Mac, by QR code") { w?.refresh() }) }
-        all.append(PaletteAction("Settings", "appearance and messages", key: "⌘,") { w?.showSettings() })
-        all.append(PaletteAction("jawd's status", "as jaw status prints it") { [weak self] in self?.jawd.status() })
-        all.append(PaletteAction("The keys", "every command with its key", key: "⌘/") { w?.showKeys() })
-        all.append(PaletteAction("Quit", "Jaw", key: "⌘Q") { NSApp.terminate(nil) })
-        return all
-    }
-
-    /// Pinning, archiving, muting and marking, which jawd says when it serves them.
-    func chatActions(_ chat: ChatRow) -> [PaletteAction] {
-        let id = chat.id
-        var all: [PaletteAction] = []
-        if chat.muted {
-            all.append(PaletteAction("Unmute this chat", "its notifications back") { [weak self] in
-                self?.jawd.chatAction("chat.mute", chat: id, ["until": .null], what: "unmuting")
-            })
-        } else {
-            let now = Double(Format.now())
-            for (name, until) in [("for 8 hours", now + 8 * 3_600_000), ("for a week", now + 7 * 86_400_000), ("always", -1)] {
-                all.append(PaletteAction("Mute this chat \(name)", "no notifications from it") { [weak self] in
-                    self?.jawd.chatAction("chat.mute", chat: id, ["until": .number(until)], what: "muting")
-                })
-            }
-        }
-        all.append(PaletteAction(chat.archived ? "Unarchive this chat" : "Archive this chat", "as on the phone") { [weak self] in
-            self?.jawd.chatAction("chat.archive", chat: id, ["archived": .bool(!chat.archived)], what: "archiving")
-        })
-        all.append(PaletteAction(chat.pinned ? "Unpin this chat" : "Pin this chat", "at the top of the list") { [weak self] in
-            self?.jawd.chatAction("chat.pin", chat: id, ["pinned": .bool(!chat.pinned)], what: "pinning")
-        })
-        let unread = chat.unread > 0 || chat.markedUnread
-        all.append(PaletteAction(unread ? "Mark this chat read" : "Mark this chat unread", "as on the phone") { [weak self] in
-            self?.jawd.chatAction("chat.mark_unread", chat: id, ["unread": .bool(!unread)], what: unread ? "marking a chat read" : "marking a chat unread")
-        })
-        return all
+        commands.filter { $0.inPalette && $0.enabled() }.map(\.paletteAction)
     }
 
     /// The next chat with unread messages after the focused one.
     func goToUnread() {
-        let unread = (window?.chatList.all ?? []).filter { $0.unread > 0 && !$0.muted && $0.kind != .community }
+        let unread = unreadChats()
         guard !unread.isEmpty else { return say("nothing unread") }
         let at = focusedChat.flatMap { id in unread.firstIndex { $0.id == id } } ?? -1
         open(unread[(at + 1) % unread.count], opened: true)

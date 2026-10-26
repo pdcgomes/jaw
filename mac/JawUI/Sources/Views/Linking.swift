@@ -127,29 +127,26 @@ public struct LinkingView: View {
 /// The keys, every command with its own, as the terminal's `?` shows them.
 public struct KeysView: View {
     public var close: () -> Void
+    /// The commands' keys, by menu, as `Menus.keys` gives them.
+    let commands: [(String, [(String, String)])]
 
-    public init(close: @escaping () -> Void) {
+    public init(commands: [(String, [(String, String)])], close: @escaping () -> Void) {
+        self.commands = commands
         self.close = close
     }
 
-    static let sections: [(String, [(String, String)])] = [
-        ("Everywhere", [
-            ("⌘K or ⌃K", "the palette: chats, people, messages and every action"), ("⌘N", "start a chat"),
-            ("⌘F", "search this chat"), ("⌘⇧F", "search every chat"), ("⌥↑ ⌥↓", "the chat before or after"),
-            ("⌘B", "the sidebar"), ("⌘⇧L", "the chat list"), ("⌘⇧↩", "focus on this chat"), ("⌘J", "the glance"),
-            ("⌘+ ⌘− ⌘0", "message text size"), ("⌘,", "settings"), ("⌘/", "these keys"),
-        ]),
-        ("Panes", [
-            ("⌘D", "split across"), ("⌘⇧D", "split down"), ("⌘⌥ arrows", "the pane that way"),
-            ("⌥⌘1 to ⌥⌘9", "a pane by its place"), ("⌃⌘ arrows", "swap with the pane that way"), ("⌘W", "close the pane"),
-        ]),
+    var sections: [(String, [(String, String)])] {
+        commands + Self.views
+    }
+
+    /// Keys the box and the palette handle themselves, which no menu holds.
+    static let views: [(String, [(String, String)])] = [
         ("The box", [
             ("↩", "send"), ("⇧↩ or ⌥↩", "a new line"), ("↑ from an empty box", "select the newest message"),
             ("@", "a group's members"), (":", "emoji by name"), ("Esc", "drop the reply or the edit"),
         ]),
         ("A selected message", [
-            ("↑ ↓", "the one before or after"), ("r", "reply"), ("e", "edit"), ("d", "delete"), ("+", "react"),
-            ("1 to 6", "a quick reaction"), ("f", "forward"), ("y", "copy"), ("i", "its info"),
+            ("↑ ↓", "the one before or after"), ("1 to 6", "a quick reaction"),
             ("↩", "send again, unfold, or open its link"), ("Esc", "back to typing"),
         ]),
         ("The palette", [
@@ -163,7 +160,7 @@ public struct KeysView: View {
             Text("The keys").font(.headline)
             ScrollView {
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 5) {
-                    ForEach(Self.sections, id: \.0) { title, keys in
+                    ForEach(sections, id: \.0) { title, keys in
                         GridRow { Text(title).textStyle(.callout).fontWeight(.semibold).padding(.top, 8).gridCellColumns(2) }
                         ForEach(keys, id: \.0) { key, what in
                             GridRow {
