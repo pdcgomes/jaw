@@ -20,7 +20,7 @@ const PANELS_KEEP: u16 = 3;
 impl View {
     /// Whether the box is along the bottom: switched on, with a chat open and the keys typing into
     /// it rather than the library's or the chat list's.
-    fn composer_below(&self) -> bool {
+    pub(super) fn composer_below(&self) -> bool {
         self.experiments.composer && self.open.is_some() && self.library.is_none() && !(self.narrow() && self.picking)
     }
 

@@ -58,7 +58,8 @@ impl View {
     }
 
     /// The chat you're in, and how it is: who's typing, or whether they're online or when they
-    /// were seen; muted; catching up.
+    /// were seen; muted; catching up. Its name only where nothing else on the line would say it:
+    /// the box along the bottom, right below, says "to" it.
     fn status_here(&self) -> Vec<Span<'static>> {
         let t = &self.theme;
         let Some(chat) = self.open.as_deref().and_then(|id| self.chat_known(id)) else { return vec![] };
@@ -87,9 +88,18 @@ impl View {
         if self.connection.state == ConnectionState::CatchingUp {
             said.push(Span::styled("catching up", Style::new().fg(t.comment)));
         }
-        let mut out = vec![Span::raw(" "), Span::styled(format!(" {} ", fmt::fit(&chat.name, NAME)), pill)];
+        let named = !self.composer_below();
+        let mut out = vec![Span::raw(" ")];
+        if named {
+            out.push(Span::styled(format!(" {} ", fmt::fit(&chat.name, NAME)), pill));
+        }
         for (i, s) in said.into_iter().enumerate() {
-            out.push(Span::styled(if i == 0 { "  " } else { " · " }, Style::new().fg(t.comment)));
+            let gap = match (i, named) {
+                (0, true) => "  ",
+                (0, false) => " ",
+                _ => " · ",
+            };
+            out.push(Span::styled(gap, Style::new().fg(t.comment)));
             out.push(s);
         }
         out

@@ -147,8 +147,49 @@ fn on_a_narrow_screen_the_box_comes_with_the_chat_and_goes_with_the_list() {
     assert!(screen.contains("chats · All") && !screen.contains("╭ to "), "{screen}");
     press(&mut v, &rx, "<down>\n");
     let screen = frame(&mut v);
-    assert!(screen.contains("╭ to Mãe ─") && screen.contains(" Mãe "), "{screen}");
+    assert!(screen.contains("╭ to Mãe ─"), "{screen}");
     assert!(screen.lines().all(|l| crate::fmt::width(l) <= 80), "{screen}");
+}
+
+/// The status line names the chat you're in only where nothing else on its line would: the box
+/// along the bottom, right below it, says "to" the chat, and then the line keeps only how it is.
+#[test]
+fn the_status_line_names_the_chat_only_where_the_box_below_it_doesnt() {
+    let status_above_box = |v: &mut View| {
+        let screen = frame(v);
+        let top = row_of(&screen, "╭ to ").unwrap_or_else(|| panic!("{screen}"));
+        line(&screen, top - 1).to_string()
+    };
+    let status_above_keys = |v: &mut View| frame(v).lines().nth_back(1).unwrap().to_string();
+
+    let (mut v, rx, _) = view_with("composer,status_line", State::Online, 160, 45);
+    let status = status_above_box(&mut v);
+    assert!(status.starts_with("  typing…") && !status.contains("Ana Ribeiro"), "{status}");
+    assert!(status.contains("@ Família Gomes"), "{status}");
+    press(&mut v, &rx, "<c-l>");
+    let status = status_above_keys(&mut v);
+    assert!(status.starts_with("  Ana Ribeiro   typing…"), "the box away with the library, it names it: {status}");
+    press(&mut v, &rx, "<esc><c-k>mae\n");
+    let status = status_above_box(&mut v);
+    assert!(status.starts_with("  seen 5 min ago") && !status.contains("Mãe"), "{status}");
+
+    let (mut v, _rx, _) = view_with("status_line", State::Online, 160, 45);
+    assert!(status_above_keys(&mut v).starts_with("  Ana Ribeiro   typing…"), "alone, it names it");
+
+    let (mut v, rx, _) = view_with("focus", State::Online, 160, 45);
+    press(&mut v, &rx, "<c-f>");
+    assert!(status_above_keys(&mut v).starts_with("  Ana Ribeiro   typing…"), "focused without the box, too");
+
+    let (mut v, rx, _) = view_with("focus,composer", State::Online, 160, 45);
+    press(&mut v, &rx, "<c-f>");
+    let status = status_above_box(&mut v);
+    assert!(status.starts_with("  typing…") && !status.contains("Ana Ribeiro"), "focused with it, not: {status}");
+
+    let (mut v, rx, _) = view_with("composer,status_line", State::Online, 80, 24);
+    assert!(status_above_keys(&mut v).starts_with("  Ana Ribeiro"), "with the list, no box: it names it");
+    press(&mut v, &rx, "<down>\n");
+    let status = status_above_box(&mut v);
+    assert!(status.starts_with("  seen 5 min ago") && !status.contains("Mãe"), "{status}");
 }
 
 #[test]
