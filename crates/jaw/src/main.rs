@@ -8,6 +8,7 @@ mod bench;
 mod composer;
 mod data;
 mod demo;
+mod experiments;
 mod find;
 mod fmt;
 mod graphics;
@@ -119,6 +120,7 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    experiments::Experiments::start(experiments::Experiments::from_env());
     match cli.command {
         None => run::run(|tx| view::View::new(Box::new(wire::Wire::start(&jaw_proto::local::home(), tx)))),
         Some(Command::Status) => status(),

@@ -1242,3 +1242,59 @@ fn on_a_real_jawd_that_said_linked_and_whose_engine_then_finds_no_device_jaw_off
         .expect("then that it's logged out");
     assert_eq!(logged_out["params"]["reason"], "this device isn't linked any more");
 }
+
+/// The quick look's windows go through the client beside the open chat's: one `messages.watch` of
+/// the newest few for each chat that needs you, their rows to the quick look, and an `unwatch` for
+/// each as it closes.
+#[test]
+fn the_quick_looks_windows_are_watched_beside_the_open_chats_and_let_go_as_it_closes() {
+    let jawd = scripted();
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    v.experiments = crate::experiments::Experiments::parse("quick_look");
+    let (watched, unwatched) = (jawd.asked("messages.watch").len(), jawd.asked("unwatch").len());
+    run::press_live(&mut v, &rx, "<c-g>").unwrap();
+    let looked: Vec<Value> = jawd.asked("messages.watch").into_iter().skip(watched).collect();
+    assert!(
+        looked.len() == 1
+            && looked[0]["chat"] == CLIMBING
+            && looked[0]["around"] == "newest"
+            && looked[0]["before"] == 3,
+        "Lisbon Climbing mentions you, and Ana's is open: {looked:?}"
+    );
+    let screen = until(&mut v, &rx, "Ana           did you get the photos");
+    assert!(screen.contains("╭ quick look") && screen.contains("Ana           did you get the photos"), "{screen}");
+    run::press_live(&mut v, &rx, "<esc>").unwrap();
+    assert!(until_true(&mut v, &rx, |_| jawd.asked("unwatch").len() == unwatched + 1), "{:?}", jawd.asked("unwatch"));
+    assert_eq!(jawd.asked("messages.watch").len(), watched + 1, "the open chat's window stays as it was");
+}
+
+#[test]
+fn on_a_real_jawd_the_quick_looks_windows_are_watched_while_it_is_open_and_jawd_lets_them_go() {
+    let Some(jawd) = real() else {
+        eprintln!("JAWD isn't set to a jawd binary, so this ran on no real jawd");
+        return;
+    };
+    let socket = jaw_proto::local::socket(jawd.home.path());
+    let watched = || -> u64 {
+        let (mut connection, _) = jaw_client::Connection::open(&socket, "jaw-test", "0").unwrap();
+        let status: jaw_proto::Status =
+            serde_json::from_value(connection.call("status", Value::Null).unwrap()).unwrap();
+        status.windows.map_or(0, |w| w.watched)
+    };
+    let relay = Relay::to(&jawd);
+    let (mut v, rx) = view_on(relay.socket.clone(), 140, 30);
+    v.experiments = crate::experiments::Experiments::parse("quick_look");
+    assert!(until_true(&mut v, &rx, |v| frame(v).contains("Lisbon Climbing")), "{}", frame(&mut v));
+    let before = watched();
+    run::press_live(&mut v, &rx, "<c-g>").unwrap();
+    let screen = until(&mut v, &rx, "╭ quick look");
+    eprintln!("{screen}");
+    let looked: Vec<Value> =
+        relay.asked("messages.watch").into_iter().map(|(p, _)| p).filter(|p| p["before"] == 3).collect();
+    assert!(looked.len() == 1 && looked[0]["chat"] == CLIMBING, "{looked:?}");
+    assert!(screen.contains("╭ quick look") && screen.contains("Lisbon Climbing"), "{screen}");
+    assert!(until_true(&mut v, &rx, |_| watched() == before + 1), "jawd watches it beside the rest: {before}");
+    run::press_live(&mut v, &rx, "<esc>").unwrap();
+    assert!(until_true(&mut v, &rx, |_| watched() == before), "and lets it go: {} after {before}", watched());
+    assert!(!frame(&mut v).contains("╭ quick look"));
+}

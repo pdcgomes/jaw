@@ -788,6 +788,12 @@ pub enum Update {
         chat: String,
         update: Window<Message>,
     },
+    /// The newest messages of `chat`, another than the open one, for the quick look while it's
+    /// open; updates for a chat it doesn't show are from a quick look since closed.
+    QuickLook {
+        chat: String,
+        update: Window<Message>,
+    },
     /// A message or an action in `chat` whose answer a dropped connection lost: jawd may have it,
     /// and is asked again with its key once it's back, which answers for what it has rather than
     /// doing it twice.
@@ -894,7 +900,7 @@ impl Update {
         match self {
             Update::Hello { .. } => true,
             Update::Chats(window) => window.moved.is_some(),
-            Update::Messages { update, .. } => update.moved.is_some(),
+            Update::Messages { update, .. } | Update::QuickLook { update, .. } => update.moved.is_some(),
             Update::Folders { whole, .. } | Update::Roster { whole, .. } => *whole,
             Update::Library { window, .. } => window.whole,
             _ => false,
@@ -980,6 +986,11 @@ pub trait Jawd {
     fn folder_remove(&mut self, folder: &str, item: &str);
     /// The open chat's messages: a new window, or the same one moved.
     fn watch_messages(&mut self, chat: &str, place: Place);
+    /// The newest `newest` messages of each of `chats`, for the quick look, in windows of their
+    /// own beside the open chat's, replacing any it watched before; `Update::QuickLook` keeps them
+    /// current until `unwatch_quick_look` lets them go.
+    fn watch_quick_look(&mut self, chats: &[String], newest: u32);
+    fn unwatch_quick_look(&mut self);
     /// You opened a chat yourself, which the palette ranks by; passing through it doesn't count.
     fn opened(&mut self, chat: &str);
     /// Sends text to a chat, as a reply to `reply` and mentioning the people in `mentions`. `key`

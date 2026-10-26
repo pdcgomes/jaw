@@ -86,6 +86,9 @@ pub enum Does {
     Sidebar,
     /// Ctrl-L's library, across all chats.
     Library,
+    /// The experimental quick look, and the focused mode.
+    QuickLook,
+    FocusMode,
 }
 
 /// What the palette is for: finding, or one of a message's actions that picks something.
@@ -523,6 +526,17 @@ impl View {
             Action::new("Go to unread", self.unread_chats(), Does::GoToUnread),
             Action::new("Search messages", "everywhere", Does::SearchMessages).key("/search"),
         ];
+        if self.experiments.quick_look {
+            all.push(Action::new("Quick look", "the chats that need you, staying here", Does::QuickLook).key("ctrl-g"));
+        }
+        if self.experiments.focus {
+            let (name, detail) = if self.focused() {
+                ("All chats again", "the chat list and sidebar back")
+            } else {
+                ("Focus on this chat", "the chat list and sidebar folded away")
+            };
+            all.push(Action::new(name, detail, Does::FocusMode).key("ctrl-f"));
+        }
         if let super::Focus::Message(id) = &self.focus
             && let Some(m) = self.messages.as_ref().and_then(|w| w.get(id))
         {
@@ -618,7 +632,10 @@ impl View {
         if query.trim().is_empty() {
             let common =
                 ["Start a chat", "Go to unread", "New poll", "Attach files", "Record a voice message", "Library"];
-            return all.into_iter().filter(|a| common.contains(&a.name.as_str())).collect();
+            return all
+                .into_iter()
+                .filter(|a| common.contains(&a.name.as_str()) || a.does == Does::QuickLook)
+                .collect();
         }
         let mut found: Vec<Action> = all
             .into_iter()
@@ -1159,6 +1176,14 @@ impl View {
             Does::Library => {
                 close(self);
                 self.open_library(None, None, "");
+            }
+            Does::QuickLook => {
+                close(self);
+                self.open_quick_look();
+            }
+            Does::FocusMode => {
+                close(self);
+                self.toggle_focus_mode();
             }
             Does::OnMessage(id, c) => {
                 close(self);

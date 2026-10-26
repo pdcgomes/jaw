@@ -139,11 +139,14 @@ impl View {
             }
             Reach::Unreachable { .. } if self.chats.is_empty() => self.draw_asleep(f, body),
             _ if self.linking() => self.draw_linking(f, body),
-            _ => self.draw_main(f, body),
+            _ => self.draw_main_and_below(f, body),
         }
         self.draw_hints(f.buffer_mut(), foot);
         if self.palette.is_some() {
             self.draw_palette(f);
+        }
+        if self.quick_look.is_some() {
+            self.draw_quick_look(f);
         }
         match self.overlay {
             Some(Overlay::Keys) => self.draw_keys(f),
@@ -265,6 +268,9 @@ impl View {
         if self.overlay.is_some() {
             return vec![("any key", "closes", true)];
         }
+        if self.quick_look.is_some() {
+            return self.quick_look_hints();
+        }
         if self.palette.is_some() {
             return vec![
                 ("⏎", "does it", true),
@@ -339,6 +345,7 @@ impl View {
                 if self.narrow() {
                     keys.push(("esc", "chat list", true));
                 }
+                keys.extend(self.experiment_hints());
                 keys.push(("?", "keys", true));
                 keys
             }
@@ -365,11 +372,11 @@ impl View {
         buf.set_line(area.x, area.y, &Line::from(spans), area.width);
     }
 
-    fn draw_main(&mut self, f: &mut Frame, body: Rect) {
+    pub(super) fn draw_main(&mut self, f: &mut Frame, body: Rect) {
         if self.library.as_ref().is_some_and(|l| l.chat.is_none()) {
             return self.draw_library(f, body);
         }
-        let beside = body.width >= super::sidebar::SIDEBAR_FROM && !self.sidebar.folded;
+        let beside = body.width >= super::sidebar::SIDEBAR_FROM && !self.sidebar.folded && !self.focused();
         let over = self.sidebar.keys.is_some() && !beside;
         let mut rest = body;
         if beside {
@@ -384,6 +391,8 @@ impl View {
             } else {
                 self.draw_conversation(f, rest);
             }
+        } else if self.focused() {
+            self.draw_conversation(f, rest);
         } else {
             let [list, conversation] = Layout::horizontal([Constraint::Length(LIST), Constraint::Min(20)]).areas(rest);
             self.draw_list(f, list, false);
@@ -553,6 +562,9 @@ impl View {
             }
             return;
         }
+        if self.experiments.composer {
+            return self.draw_messages(f, inner);
+        }
         let box_h = if self.recorder.is_some() {
             3
         } else {
@@ -567,11 +579,15 @@ impl View {
 
     /// The box while recording: its levels as they come, or once stopped the recording's
     /// waveform with how far listening has got.
-    fn draw_recorder(&mut self, f: &mut Frame, area: Rect) {
+    pub(super) fn draw_recorder(&mut self, f: &mut Frame, area: Rect) {
         let t = self.theme;
         let Some(rec) = self.recorder.as_ref() else { return };
         let listening = self.listening().map(|p| p.at);
         let (said, colour) = if rec.stopped { (" ● recorded ", t.muted) } else { (" ● recording ", t.warn) };
+        let said = match self.open.as_deref().and_then(|id| self.chat_known(id)) {
+            Some(chat) if self.experiments.composer => format!("{said}for {} ", chat.name),
+            _ => said.to_string(),
+        };
         let time = match listening {
             Some(at) if rec.stopped => format!(" {} / {} ", fmt::length(at), fmt::length(rec.seconds)),
             _ => format!(" {} ", fmt::length(rec.seconds)),
@@ -617,9 +633,27 @@ impl View {
         }
         let t = self.theme;
         let typing = self.focus == Focus::Typing && self.overlay.is_none();
-        let mut block = self.panel(if typing { t.focus } else { t.gutter }).padding(Padding::horizontal(1));
+        let block = self.panel(if typing { t.focus } else { t.gutter }).padding(Padding::horizontal(1));
+        let block = self.composer_titles(block, area.width);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        self.areas.composer = inner;
+        self.areas.composer_width = inner.width as usize;
+        let (lines, (row, col)) = self.composer.view(inner.width as usize);
+        let style = Style::new().fg(if typing { t.fg } else { t.text });
+        let lines: Vec<Line> = lines.into_iter().map(|l| Line::from(Span::styled(l, style))).collect();
+        f.render_widget(Paragraph::new(lines), inner);
+        if typing && (row as u16) < inner.height {
+            f.set_cursor_position((inner.x + col as u16, inner.y + row as u16));
+        }
+    }
+
+    /// The box's titles, `width` columns at most: what it replies to or that it's editing, and why
+    /// the last message wasn't sent or that jawd will be asked again.
+    pub(super) fn composer_titles(&self, mut block: Block<'static>, width: u16) -> Block<'static> {
+        let t = self.theme;
         if let Some(r) = &self.replying {
-            let room = (area.width as usize).saturating_sub(fmt::width(&r.from) + 9);
+            let room = (width as usize).saturating_sub(fmt::width(&r.from) + 9);
             block = block.title(Line::from(vec![
                 Span::styled(" ↩ ", Style::new().fg(t.comment)),
                 Span::styled(r.from.clone(), Style::new().fg(t.sender(r.colour)).add_modifier(Modifier::BOLD)),
@@ -643,17 +677,7 @@ impl View {
                 Style::new().fg(t.comment),
             )));
         }
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-        self.areas.composer = inner;
-        self.areas.composer_width = inner.width as usize;
-        let (lines, (row, col)) = self.composer.view(inner.width as usize);
-        let style = Style::new().fg(if typing { t.fg } else { t.text });
-        let lines: Vec<Line> = lines.into_iter().map(|l| Line::from(Span::styled(l, style))).collect();
-        f.render_widget(Paragraph::new(lines), inner);
-        if typing && (row as u16) < inner.height {
-            f.set_cursor_position((inner.x + col as u16, inner.y + row as u16));
-        }
+        block
     }
 
     fn mimic_lines(&self, area: Rect, look: Look, said: &str) -> Vec<Line<'static>> {
@@ -847,7 +871,7 @@ impl View {
             let look = crate::graphics::Look {
                 bg: if b.detail.is_some() { t.selection } else { t.bg },
                 truecolor: t.truecolor,
-                over: self.overlay.is_some() || self.palette.is_some(),
+                over: self.overlay.is_some() || self.palette.is_some() || self.quick_look.is_some(),
             };
             for p in &b.lines.pictures {
                 let sources: Vec<std::path::PathBuf> = p.sources.iter().map(|s| self.images.path(s)).collect();
@@ -1101,7 +1125,7 @@ impl View {
             }
             Line::from(spans)
         };
-        let lines = vec![
+        let mut lines = vec![
             head("typing", "a selected message"),
             pair(("⏎", "send", true), Some(("↑ ↓", "the one before, after", true))),
             pair(("alt-⏎", "a new line", true), Some(("home end", "the oldest, the newest", true))),
@@ -1123,6 +1147,13 @@ impl View {
             pair(("esc", "the chat list, when narrow", true), Some(("the mouse", "click, scroll, open", true))),
             pair(("ctrl-b", "the sidebar", true), Some(("ctrl-c", "quit", true))),
         ];
+        let (focus, look) = (self.experiments.focus, self.experiments.quick_look);
+        if focus || look {
+            lines.push(pair(
+                ("ctrl-f", "one chat, or all again", focus),
+                Some(("ctrl-g", "a quick look elsewhere", look)),
+            ));
+        }
         let w = 84.min(f.area().width.saturating_sub(2));
         let h = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));
         let area = Rect::new((f.area().width - w) / 2, (f.area().height - h) / 2, w, h);

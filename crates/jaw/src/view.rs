@@ -3,11 +3,15 @@
 //! (`keys`), and it draws itself (`draw`).
 
 mod actions;
+mod composer;
 mod draw;
+mod focus_mode;
 mod keys;
 mod library;
 mod palette;
+mod quick_look;
 mod sidebar;
+mod status_line;
 mod voice;
 
 use crate::composer::Composer;
@@ -257,6 +261,11 @@ pub struct View {
     size: Option<(u16, u16)>,
     /// The second the last frame was drawn in, so clocks and countdowns redraw as it passes.
     drawn_at: i64,
+    /// The experimental switches, each off unless turned on; whether the open chat has the screen
+    /// to itself, and the quick look while it's open.
+    pub experiments: crate::experiments::Experiments,
+    focus_mode: bool,
+    quick_look: Option<quick_look::QuickLook>,
     effects: Vec<Effect>,
     /// Something on screen changed since the last frame.
     pub dirty: bool,
@@ -346,6 +355,9 @@ impl View {
             areas: Areas::default(),
             size: None,
             drawn_at: 0,
+            experiments: crate::experiments::Experiments::at_start(),
+            focus_mode: false,
+            quick_look: None,
             effects: vec![],
             dirty: true,
             awaited: false,
@@ -530,6 +542,7 @@ impl View {
                     self.focus = Focus::Typing;
                 }
             }
+            Update::QuickLook { chat, update } => self.quick_look_came(&chat, update),
             Update::Found { id, results, counts } => self.found(id, results, counts),
             Update::FindFailed { id, cancelled, why } => self.find_failed(id, cancelled, why),
             Update::ChatStarted { chat } => {
@@ -1007,5 +1020,7 @@ impl View {
     }
 }
 
+#[cfg(test)]
+mod spike_tests;
 #[cfg(test)]
 pub mod tests;

@@ -911,7 +911,7 @@ impl View {
         let look = crate::graphics::Look {
             bg: t.bg,
             truecolor: t.truecolor,
-            over: self.palette.is_some() || self.overlay.is_some(),
+            over: self.palette.is_some() || self.overlay.is_some() || self.quick_look.is_some(),
         };
         for (slot, r, _) in tiles {
             let top = content.y as i32 + slot.line as i32 - self.library.as_ref().map_or(0, |l| l.top) as i32;

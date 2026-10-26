@@ -9,6 +9,7 @@ mod find;
 mod folders;
 mod library;
 pub mod pictures;
+mod quick_look;
 mod voice;
 
 use crate::data::Place;
@@ -122,6 +123,8 @@ pub struct Account {
     folders: folders::Folders,
     /// The library window watched, and its counts of each kind.
     library: Option<(crate::data::LibraryAsk, std::collections::HashMap<crate::data::LibraryKind, u32>)>,
+    /// The quick look's windows: each chat, and how many of its newest messages it holds.
+    quick_look: Vec<(String, usize)>,
 }
 
 struct Shared {
@@ -185,6 +188,7 @@ impl Demo {
             recorder: None,
             folders: folders::Folders::made_up(now),
             library: None,
+            quick_look: vec![],
         };
         let demo = Demo {
             shared: Arc::new(Shared {
@@ -552,6 +556,7 @@ impl Account {
         let len = thread.messages.len();
         let chat = thread.chat.id.clone();
         self.push_chat(t);
+        self.quick_look_arrived(t);
         let Some(open) = self.open.as_mut().filter(|o| o.chat == chat) else { return };
         if open.following {
             open.hi = len;
@@ -821,6 +826,15 @@ impl Jawd for Demo {
     fn watch_messages(&mut self, chat: &str, place: Place) {
         let chat = chat.to_string();
         self.defer(move |a| a.on_watch_messages(&chat, place));
+    }
+
+    fn watch_quick_look(&mut self, chats: &[String], newest: u32) {
+        let chats = chats.to_vec();
+        self.defer(move |a| a.on_watch_quick_look(&chats, newest));
+    }
+
+    fn unwatch_quick_look(&mut self) {
+        self.defer(|a| a.on_unwatch_quick_look());
     }
 
     fn send_text(&mut self, chat: &str, text: &str, key: &str, reply: Option<&str>, mentions: &[String]) {

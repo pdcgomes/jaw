@@ -83,6 +83,10 @@ impl View {
             self.on_palette_key(k);
             return;
         }
+        if self.quick_look.is_some() {
+            self.on_quick_look_key(k);
+            return;
+        }
         if self.recorder.is_some() && self.reach == super::Reach::Up {
             self.on_recorder_key(k, ctrl);
             return;
@@ -100,6 +104,9 @@ impl View {
         }
         if self.linking() {
             self.on_linking_key(k);
+            return;
+        }
+        if self.on_experiment_key(k) {
             return;
         }
         if ctrl && k.code == KeyCode::Char('b') {
@@ -453,6 +460,12 @@ impl View {
                 _ => return,
             }
             self.dirty = true;
+            return;
+        }
+        if self.quick_look.is_some() {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.close_quick_look();
+            }
             return;
         }
         match m.kind {

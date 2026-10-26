@@ -111,6 +111,8 @@ pub struct Wire {
     /// What the library asked, and its watch's ID once jawd answers.
     library: Option<(LibraryAsk, Option<String>)>,
     open: Option<(WindowId, String)>,
+    /// The quick look's windows, and each one's chat, while it's open.
+    quick_look: Vec<(WindowId, String)>,
     asked: HashMap<u64, Asked>,
     /// Messages and actions whose answer the connection lost, to ask for again with their keys
     /// once jawd is back.
@@ -229,6 +231,7 @@ impl Wire {
             roster: None,
             library: None,
             open: None,
+            quick_look: vec![],
             asked: HashMap::new(),
             again: vec![],
             owed: HashMap::new(),
@@ -629,6 +632,19 @@ impl Jawd for Wire {
         }
     }
 
+    fn watch_quick_look(&mut self, chats: &[String], newest: u32) {
+        self.unwatch_quick_look();
+        for chat in chats {
+            self.quick_look.push((self.client.watch_messages(chat, Place::newest(newest)), chat.clone()));
+        }
+    }
+
+    fn unwatch_quick_look(&mut self) {
+        for (w, _) in std::mem::take(&mut self.quick_look) {
+            self.client.unwatch(w);
+        }
+    }
+
     fn opened(&mut self, chat: &str) {
         self.ask("chat.opened", json!({ "chat": chat }), Asked::Quiet);
     }
@@ -803,6 +819,8 @@ impl Jawd for Wire {
                 && *open == w
             {
                 out.push(Update::Messages { chat: chat.clone(), update });
+            } else if let Some((_, chat)) = self.quick_look.iter().find(|(look, _)| *look == w) {
+                out.push(Update::QuickLook { chat: chat.clone(), update });
             }
         }
         out
