@@ -697,10 +697,14 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // mentions_me after its key, so a chat's unread messages and mentions, counted again before
     // every transaction that changes them commits, are counted from the index alone rather than
     // from up to a thousand of the chat's messages, and so are the receipts a read owes. It replaces
-    // the index rather than adding one, so a message written dirties no page more. Measured at 3.4
-    // to 6.8 s per million messages on the reference Mac, its commit and foreign_key_check included,
-    // at a load of 18 to 20; the backup before it took 5 to 12 s of a 574 MB jaw.db.
+    // the index rather than adding one, so a message written dirties no page more. Measured as jawd
+    // runs it, on its writer's connection, at 0.93 to 1.46 s per million messages on the reference
+    // Mac, its foreign_key_check, fingerprint and commit included, at a load of 27 to 30; the backup
+    // before it took 2.2 to 3.1 s of a 595 MB jaw.db. A plain connection, with SQLite's 2 MB cache
+    // and a checkpoint in its commit, takes 5 to 8.4 s.
     "
+    -- Class: an index, derived from messages' own columns; it holds nothing they don't, so it can
+    -- always be built again from them.
     DROP INDEX messages_by_time;
     -- n is the rowid every entry ends with; naming it keeps the keyset's order with what the
     -- counts read after it.

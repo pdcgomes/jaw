@@ -43,6 +43,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 use tokio::sync::{Notify, oneshot, watch};
 
 pub use self::read::Reads;
+#[cfg(test)]
+pub(crate) use self::tests::index_against_text;
 use self::write::Stamps;
 pub use self::write::outbox;
 pub use self::write::unpack;
@@ -1503,6 +1505,58 @@ mod tests {
         store.reads().query(Priority::Interactive, query).await.unwrap()
     }
 
+    /// FTS5's postings, each word at each place, against those of a fresh index, made with the same
+    /// tokenizer, of the text of every message not waiting in fts_backlog: how many only FTS5 holds,
+    /// stale, and how many only the text has, missing. FTS5's own integrity-check, run first, can't
+    /// tell: at rank 0 it checks only the index's structure, which a stale index keeps, and at rank
+    /// 1 it wants every message indexed, those without text too.
+    pub(crate) fn index_against_text(db: &Connection) -> (i64, i64) {
+        db.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('integrity-check', 0)", []).unwrap();
+        db.execute_batch(
+            "DROP TABLE IF EXISTS temp.postings;
+            DROP TABLE IF EXISTS temp.text_postings;
+            DROP TABLE IF EXISTS temp.text_index;
+            CREATE VIRTUAL TABLE temp.text_index USING fts5 (text, tokenize = 'unicode61 remove_diacritics 2');
+            INSERT INTO temp.text_index (rowid, text) SELECT t, text FROM main.messages
+                WHERE text IS NOT NULL AND n NOT IN (SELECT n FROM main.fts_backlog);
+            CREATE VIRTUAL TABLE temp.postings USING fts5vocab (main, messages_fts, instance);
+            CREATE VIRTUAL TABLE temp.text_postings USING fts5vocab (temp, text_index, instance);",
+        )
+        .unwrap();
+        db.query_row(
+            "SELECT (SELECT count(*) FROM (SELECT term, doc, offset FROM temp.postings
+                    EXCEPT SELECT term, doc, offset FROM temp.text_postings)),
+                (SELECT count(*) FROM (SELECT term, doc, offset FROM temp.text_postings
+                    EXCEPT SELECT term, doc, offset FROM temp.postings))",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_index_check_finds_a_stale_index_that_fts5s_own_check_passes() {
+        let mut db = Connection::open_in_memory().unwrap();
+        schema::migrate(&mut db).unwrap();
+        let mut stamps = Stamps::load(&db).unwrap();
+        stamps.begin();
+        let ana = "351910000002@s.whatsapp.net";
+        let photo = Message { kind: "image", text: None, summary: "Photo".into(), ..text(ana, "p1", 2_000, "") };
+        for message in [text(ana, "m1", 1_000, "jantar amanhã"), text(ana, "m2", 1_500, "jantar hoje"), photo] {
+            write::apply(&db, &mut stamps, &Change::Message(message)).unwrap();
+        }
+        assert_eq!(index_against_text(&db), (0, 0), "waiting in fts_backlog, so in neither");
+        while write::index(&db, 1, |_| false).unwrap().1 {}
+        assert_eq!(index_against_text(&db), (0, 0));
+        let rank_1 = db.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('integrity-check', 1)", []);
+        assert!(rank_1.is_err(), "FTS5's check against its content wants the photo, which has no text, indexed");
+        db.execute_batch(
+            "DROP TRIGGER messages_fts_update; UPDATE messages SET text = 'almoço amanhã' WHERE id = 'm1'",
+        )
+        .unwrap();
+        assert_eq!(index_against_text(&db), (1, 1), "jantar in m1 is stale and almoço missing, past FTS5's own check");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_is_acked_only_once_it_is_committed() {
         let home = tempfile::tempdir().unwrap();
@@ -1698,7 +1752,7 @@ mod tests {
         assert_eq!(store.count("fts_backlog").unwrap(), 0);
         let db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.busy_timeout(Duration::from_secs(5)).unwrap();
-        db.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('integrity-check', 0)", []).unwrap();
+        assert_eq!(index_against_text(&db), (0, 0), "postings stale, and missing");
     }
 
     /// Messages `n` and `n + 1` converted from their inbox rows in one live write, as a catch-up's
@@ -1782,6 +1836,36 @@ mod tests {
         let store = Store::open_with(home.path(), limits).unwrap();
         let (found, written) = found_while_writing(&store, lone).await;
         assert!(found >= 100, "{found} of {written} found while lone messages kept coming");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_write_taken_into_an_inbox_commit_is_indexed_with_nothing_written_after_it() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let streaming = Arc::new(AtomicBool::new(true));
+        let feeder = {
+            let (store, streaming) = (store.clone(), streaming.clone());
+            std::thread::spawn(move || {
+                let mut n = 0;
+                while streaming.load(Ordering::Relaxed) {
+                    store.inbox("message", n, vec![1, 2, 3], None);
+                    n += 1;
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let before = store.storage().shared_writes;
+        let live = Message { live: true, ..text("351910000002@s.whatsapp.net", "rode", 5_000, "jantar amanhã") };
+        store.apply_durable(messages([live])).await.unwrap();
+        let shared = store.storage().shared_writes - before;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        streaming.store(false, Ordering::Relaxed);
+        feeder.join().unwrap();
+        assert_eq!(shared, 1, "the write went in an inbox group's commit");
+        store.indexed().await.unwrap();
+        let found = query(&store, |db| read::search(db, "jantar", None, None, 10)).await;
+        assert_eq!(found.hits.len(), 1, "{} still waiting in fts_backlog", store.count("fts_backlog").unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]

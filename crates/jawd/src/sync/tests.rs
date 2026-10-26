@@ -712,9 +712,7 @@ async fn edits_deletes_and_stars_wait_for_their_message_and_keep_the_index_whole
     );
     let db = Connection::open(home.path().join("jaw.db")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
-    // FTS5's check against the content table would count messages without text, which aren't
-    // indexed; this checks the index itself, and the searches above check what it holds.
-    db.execute("INSERT INTO messages_fts (messages_fts, rank) VALUES ('integrity-check', 0)", []).unwrap();
+    assert_eq!(crate::store::index_against_text(&db), (0, 0), "postings stale, and missing");
     let chats = query(&store, |db| read::chats(db, false, None, 10)).await;
     assert_eq!(chats[0].last.as_ref().unwrap().summary, "This message was deleted");
 }
@@ -1419,6 +1417,7 @@ async fn a_history_blob_the_engine_couldnt_ask_for_is_never_quarantined() {
         offered.send(work).unwrap();
     }
     until("the blob after them", || store.count("messages").unwrap() == 1).await;
+    until("its notification's drain, which commits after its rows", || store.count("inbox").unwrap() == 2).await;
     until("each asked for", || engine.asked("history") >= 3).await;
     fetching.abort();
     assert_eq!(store.count("quarantine").unwrap(), 0, "neither is a failure for good");
