@@ -126,7 +126,7 @@ Both are interfaces on the same socket, and everything they share is jawd's:
 ### Focus, reading and presence
 
 - **Focus** is true while the app is active and one of its windows is visible and not minimised, and false when it resigns, the screen locks or the last window closes. jawd says you're online half a second after focus and away 30 s after it goes, so switching apps doesn't flicker.
-- **Reading.** A chat counts as read up to the newest message on screen while its window is key and the app active, sent with `read` at most once a second while messages keep coming, as the terminal does. Each visible pane reads its own chat. Nothing is read in a window that isn't key, so the phone's notifications and unread counts stay right.
+- **Reading.** A chat counts as read up to the newest message on screen while its window is key and the app active, sent with `read` at most once a second while messages keep coming, as the terminal does. With panes, only the focused pane reads its chat, as only the terminal's pane with the keys does (f4fed0a). Nothing is read in a window that isn't key, so the phone's notifications and unread counts stay right.
 - **`chat.opened`** goes when you open a chat yourself (the list, the palette, a favourite), never when a window is watched again after reconnecting, so frecency counts opens.
 
 ## The socket client
@@ -282,21 +282,22 @@ jawd's `find` behind one line, as the terminal's (Ctrl-K there, ⌘K here):
 
 ## Split panels
 
-The terminal's planned panes (jaw's Later), as tmux has them:
+The terminal's panes, as tmux has them, which the terminal has had behind its `panes` switch since f4fed0a (Ctrl-P and a key, six panes at most); the Mac's follow the same rules with the Mac's keys:
 
-- **Split the focused pane across (⌘D) or down (⌘⇧D)**; each pane shows one chat, with its own header and its own box, whose draft is jawd's for that chat, so moving between panes loses nothing typed.
+- **Split the focused pane across (⌘D) or down (⌘⇧D)**; the new pane takes the next chat in the list that no pane shows, as the terminal's does. Each pane shows one chat, with its own header and its own box, whose draft is jawd's for that chat, so moving between panes loses nothing typed.
 - **Moving:** ⌘⌥ and an arrow move to the pane that way, ⌥⌘1 to ⌥⌘9 go straight to a pane, ⌘W closes the focused pane (the last one stays). ⌘⇧ and an arrow swap the focused pane with its neighbour.
 - **Choosing a pane's chat:** pick it in the list (it opens in the focused pane), ⌘↩ in the palette (a new pane), or drag a chat from the list onto a pane: onto an edge to split there, onto the middle to replace it. The edges show as you drag.
+- **A chat shows in one pane at most:** picking one that another pane shows goes to that pane, and ⌥↑ and ⌥↓ pass over chats other panes show, as in the terminal.
 - **The focused pane** has the accent's thin outline and takes the keys; its chat is the one selected in the list.
 - **The layout is a tree of splits with their ratios,** kept by jawd as this interface's saved state (proposal P1), so the app opens where you left off. P1 is being built now, on `interface-state`, for the terminal and the Mac alike, as the owner asked on 26 October; until it lands, the app keeps the layout in its preferences. Each interface keeps its own layout, and either can open the other's (Owner, 26 Oct).
 - **Limits:** each pane is a `messages.watch` window, and jawd allows 32 windows a connection, so the app allows 12 panes, leaving room for the chat list, the folders, the roster, the library and the glance.
-- **Each visible pane is read,** so its chat stays quiet in notifications while the window is in front, as jawd's attention already treats every messages window.
+- **Only the focused pane reads its chat,** as only the terminal's pane with the keys does; the others show what arrives, with the "new" marker, until you go to them. Every pane's chat stays quiet in notifications while the window is in front, as jawd's attention treats every messages window.
 
 ## The status line, focus and the glance
 
 The spike's three ideas, from the terminal's experiments (`JAW_EXPERIMENTS`, on main since f499679):
 
-- **The status line** along the bottom of the window, 24 points, in SF Mono: on the left, jawd's state when it's not online and how the focused chat is (typing, online or last seen, muted), without its name, which the focused pane's box and header already say, as the owner asked of the terminal's once its box named the chat (3d1da48); on the right, what needs you in the other chats, mentions and people by name ("@ Família Gomes", "Ana · 2") and groups counted ("3 more chats · 12 unread"), the count shortening before a name goes, then "⌘J glance". A name is a link to its chat; the count opens the glance. It reads the chat list's and the roster's windows the app already watches and asks jawd for nothing, as the spike's does. Its left half comes in Mac-M1, since jawd's states are said there; its right half comes with focus mode and the glance in Mac-M4.
+- **The status line** along the bottom of the window, 24 points, in SF Mono: on the left, jawd's state when it's not online and how the focused chat is (typing, online or last seen, muted), without its name, which the focused pane's box and header already say, as the owner asked of the terminal's once its box named the chat (3d1da48); on the right, what needs you in the other chats, mentions and people by name ("@ Família Gomes", "Ana · 2") and groups counted ("3 more chats · 12 unread"), the count shortening before a name goes and leaving out chats a pane shows, as the terminal's does with panes, then "⌘J glance". A name is a link to its chat; the count opens the glance. It reads the chat list's and the roster's windows the app already watches and asks jawd for nothing, as the spike's does. Its left half comes in Mac-M1, since jawd's states are said there; its right half comes with focus mode and the glance in Mac-M4.
 - **Focus mode** (⌘⇧↩, as iTerm2 keeps a pane alone): the sidebar and the chat list fold away for the focused pane, the status line the only glimpse of the rest; ⌥↑ and ⌥↓ still move between chats, and ⌘⇧↩ or ⌘B brings the rest back.
 - **The glance** (⌘J, the status line, or the palette): what the spike calls the quick look, renamed so it can't be taken for macOS's Quick Look of files. A popover over the status line with the latest unread messages of the chats that need you, three of each of at most four, from windows watched only while it's open; ↑ and ↓ move, Enter goes to the chat, ⌘↩ opens it in a new pane, Esc closes; nothing is marked read.
 - **The box stays in each conversation,** naming its chat, with the status line across the window (Owner, 26 Oct); the spike's full-width box isn't taken.
@@ -424,8 +425,8 @@ Nothing animates when nothing happens: no idle breathing, no shimmer, no loops o
 | Enter, ⇧↩ or ⌥↩ | send, a new line | Enter, Alt-Enter or Shift-Enter |
 | `@`, `:` | complete names, emoji | the same |
 | ⌘O, ⌘R | attach, record | Ctrl-O, Ctrl-R |
-| ⌘D, ⌘⇧D | split across, down | (planned) |
-| ⌘⌥ arrows, ⌥⌘1 to ⌥⌘9, ⌘⇧ arrows, ⌘W | move between panes, go to a pane, swap, close | (planned) |
+| ⌘D, ⌘⇧D | split across, down | Ctrl-P then % or \|, " or - (the `panes` switch) |
+| ⌘⌥ arrows, ⌥⌘1 to ⌥⌘9, ⌘⇧ arrows, ⌘W | move between panes, go to a pane, swap, close | Ctrl-P then an arrow, a digit, { or }, x |
 | ⌘⇧↩ | focus mode | Ctrl-F in the spike |
 | ⌘J | the glance | Ctrl-G in the spike |
 | ⌘+, ⌘− | message text size | |
