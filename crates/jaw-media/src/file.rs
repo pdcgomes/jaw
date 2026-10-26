@@ -27,6 +27,10 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 /// The names calls in flight are writing, which they may still remove until they return.
 static CLAIMED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+/// Held while a file is synced and put in place, so the jobs of every pool flush the disk one at a
+/// time, and a synced commit of jawd's waits behind one file's flushes at most.
+static FINISHING: Mutex<()> = Mutex::new(());
+
 /// A call's hold on the names it writes, from when it starts until it has returned, so another
 /// call on one of them is told it's busy rather than that it exists, and `Error::Exists` only
 /// ever names a file whose call succeeded or that a crash left whole.
@@ -79,25 +83,42 @@ impl Part {
 
     /// As `create`, put in place as `durability` says.
     pub fn create_as(to: &Path, durability: Durability) -> Result<Part> {
-        if to.as_os_str().to_string_lossy().ends_with(SUFFIX) {
-            return Err(Error::Io {
-                path: to.into(),
-                error: std::io::Error::other(
-                    "a file's name can't end in .part, which jaw keeps for files on their way",
-                ),
-            });
-        }
-        if std::fs::symlink_metadata(to).is_ok() {
-            return Err(Error::Exists { path: to.into() });
-        }
-        if let Some(folder) = to.parent().filter(|f| !f.as_os_str().is_empty()) {
-            create_folders(folder)?;
-        }
-        let mut part = to.as_os_str().to_owned();
-        part.push(format!(".{}-{}{SUFFIX}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        let part = PathBuf::from(part);
+        let part = partial_for(to)?;
         let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&part).map_err(Error::io(&part))?;
         Ok(Part { part, to: to.to_path_buf(), file: Some(file), durability })
+    }
+
+    /// A partial file for `to` that is a copy of `source`: a clone where the file system makes one,
+    /// as APFS and btrfs do, which shares `source`'s blocks until either is written, and a copy of
+    /// its bytes where it doesn't. It's this process's own, as a created one is, and mode 0600.
+    pub fn copy_of(source: &Path, to: &Path) -> Result<Part> {
+        let part = partial_for(to)?;
+        let made = (|| -> std::io::Result<File> {
+            let from = File::open(source)?;
+            if !from.metadata()?.is_file() {
+                return Err(std::io::Error::other("it isn't a file"));
+            }
+            let file = match clone(&from, &part)? {
+                Some(file) => file,
+                None => {
+                    let mut file =
+                        OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&part)?;
+                    std::io::copy(&mut &from, &mut file)?;
+                    file
+                }
+            };
+            file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+            Ok(file)
+        })();
+        match made {
+            Ok(file) => Ok(Part { part, to: to.to_path_buf(), file: Some(file), durability: Durability::Synced }),
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    let _ = std::fs::remove_file(&part);
+                }
+                Err(Error::Io { path: source.to_path_buf(), error })
+            }
+        }
     }
 
     /// Where the file is written until it's whole.
@@ -140,6 +161,7 @@ impl Part {
             });
         }
         let synced = self.durability == Durability::Synced;
+        let _finishing = synced.then(|| FINISHING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
         if synced {
             sync_file(file, &self.part)?;
         }
@@ -167,6 +189,98 @@ impl Drop for Part {
             let _ = std::fs::remove_file(&self.part);
         }
     }
+}
+
+/// A partial file's name for `to`, beside it, once `to` is a name a file can be written to: not a
+/// partial file's own, not taken, and in a folder that's there, made and synced if it wasn't.
+fn partial_for(to: &Path) -> Result<PathBuf> {
+    if to.as_os_str().to_string_lossy().ends_with(SUFFIX) {
+        return Err(Error::Io {
+            path: to.into(),
+            error: std::io::Error::other("a file's name can't end in .part, which jaw keeps for files on their way"),
+        });
+    }
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(Error::Exists { path: to.into() });
+    }
+    if let Some(folder) = to.parent().filter(|f| !f.as_os_str().is_empty()) {
+        create_folders(folder)?;
+    }
+    let mut part = to.as_os_str().to_owned();
+    part.push(format!(".{}-{}{SUFFIX}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    Ok(PathBuf::from(part))
+}
+
+/// Clones `from` as a new file at `to`, open for writing, where the file system can; None where it
+/// can't, as on HFS+, ext4 or across file systems, and nothing is made then.
+#[cfg(target_os = "macos")]
+fn clone(from: &File, to: &Path) -> std::io::Result<Option<File>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
+    // SAFETY: `from` is an open file and `name` a NUL-terminated path; fclonefileat makes the file at
+    // `name`, or fails without making anything, and never follows a link there.
+    if unsafe { libc::fclonefileat(from.as_raw_fd(), libc::AT_FDCWD, name.as_ptr(), 0) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOTSUP | libc::EXDEV | libc::ENOSYS) => Ok(None),
+            _ => Err(error),
+        };
+    }
+    OpenOptions::new().read(true).write(true).open(to).map(Some)
+}
+
+#[cfg(target_os = "linux")]
+fn clone(from: &File, to: &Path) -> std::io::Result<Option<File>> {
+    use std::os::fd::AsRawFd;
+    let file = OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(to)?;
+    // SAFETY: both descriptors are open files; FICLONE makes `file` share `from`'s blocks, or fails
+    // and leaves `file` empty.
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE as _, from.as_raw_fd()) } != 0 {
+        let error = std::io::Error::last_os_error();
+        let _ = std::fs::remove_file(to);
+        return match error.raw_os_error() {
+            Some(libc::EOPNOTSUPP | libc::EXDEV | libc::EINVAL | libc::ENOTTY | libc::EBADF) => Ok(None),
+            _ => Err(error),
+        };
+    }
+    Ok(Some(file))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn clone(_: &File, _: &Path) -> std::io::Result<Option<File>> {
+    Ok(None)
+}
+
+/// Keeps a copy of `source`, someone else's file, at `to`, whole and synced: a clone where the file
+/// system makes one, which costs no time or room, and a copy where it doesn't. Whatever happens to
+/// `source` after, `to` stays as it was. Refuses a name that's taken (`Exists`), or that another
+/// call is writing (`Busy`); says how many bytes it holds.
+pub fn keep(source: &Path, to: &Path) -> Result<u64> {
+    let _claim = Claim::take([to])?;
+    Part::copy_of(source, to)?.finish()
+}
+
+/// Gives the whole, synced file at `file` a second name, `to`, and syncs `to`'s folder, so the name
+/// lasts; refuses a name that's taken (`Exists`), which, where names come from the content, holds
+/// the same file already. For putting a file made under a name of its own into a cache named by
+/// content.
+pub fn link(file: &Path, to: &Path) -> Result<()> {
+    let _claim = Claim::take([to])?;
+    if let Some(folder) = to.parent().filter(|f| !f.as_os_str().is_empty()) {
+        create_folders(folder)?;
+    }
+    let _finishing = FINISHING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match std::fs::hard_link(file, to) {
+        Ok(()) => record(|| format!("link {} {}", file.display(), to.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(Error::Exists { path: to.into() }),
+        Err(e) => return Err(Error::Io { path: to.into(), error: e }),
+    }
+    if let Err(e) = sync_folder(to.parent().unwrap_or(Path::new(""))) {
+        let _ = std::fs::remove_file(to);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Makes `folder` and any folders above it that are missing, and syncs each one made and the
@@ -389,6 +503,83 @@ mod tests {
     #[test]
     fn names_ending_in_part_are_refused() {
         assert!(Part::create(Path::new("/tmp/a.part")).is_err());
+        assert!(keep(Path::new("/etc/hosts"), Path::new("/tmp/a.part")).is_err());
+    }
+
+    #[test]
+    fn a_kept_copy_is_whole_synced_before_its_name_and_its_own_whatever_happens_to_the_file_after() {
+        let folder = tempfile::tempdir().unwrap();
+        let yours = folder.path().join("holiday.jpg");
+        std::fs::write(&yours, b"the photo you picked").unwrap();
+        let kept = folder.path().join("media/outgoing/3EB0AA.jpg");
+        assert_eq!(keep(&yours, &kept).unwrap(), 20);
+        assert_eq!(std::fs::read(&kept).unwrap(), b"the photo you picked");
+        let mode = std::fs::metadata(&kept).unwrap().permissions();
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777, 0o600);
+        let order: Vec<String> = events(folder.path()).into_iter().filter(|e| e.contains("3EB0AA")).collect();
+        assert_eq!(
+            order,
+            [
+                "sync /media/outgoing/3EB0AA.jpg.N.part",
+                "link /media/outgoing/3EB0AA.jpg.N.part /media/outgoing/3EB0AA.jpg",
+            ]
+        );
+        // Written over where it is, or replaced, yours changes and jaw's copy doesn't.
+        std::fs::OpenOptions::new().write(true).open(&yours).unwrap().write_all(b"THE PHOTO").unwrap();
+        std::fs::write(&yours, b"another").unwrap();
+        assert_eq!(std::fs::read(&kept).unwrap(), b"the photo you picked");
+        assert_eq!(std::fs::read_dir(kept.parent().unwrap()).unwrap().count(), 1, "and no partial file");
+    }
+
+    #[test]
+    fn keeping_a_copy_never_replaces_a_name_and_a_failure_leaves_nothing() {
+        let folder = tempfile::tempdir().unwrap();
+        let yours = folder.path().join("a.pdf");
+        std::fs::write(&yours, b"yours").unwrap();
+        let kept = folder.path().join("kept.pdf");
+        std::fs::write(&kept, b"what a row points to").unwrap();
+        assert!(matches!(keep(&yours, &kept), Err(Error::Exists { .. })));
+        assert_eq!(std::fs::read(&kept).unwrap(), b"what a row points to");
+        let gone = keep(&folder.path().join("not there.pdf"), &folder.path().join("b.pdf"));
+        assert!(matches!(gone, Err(Error::Io { .. })), "{gone:?}");
+        assert!(keep(folder.path(), &folder.path().join("c")).is_err(), "a folder isn't a file to send");
+        assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 2, "nothing more was left");
+    }
+
+    #[test]
+    fn a_second_name_is_synced_into_its_folder_and_never_replaces_one() {
+        let folder = tempfile::tempdir().unwrap();
+        let made = folder.path().join("3EB0AA.sd.jpg");
+        Part::create(&made).unwrap().write(|out| out.write_all(b"sd").map_err(Error::io(&made))).unwrap();
+        let cached = folder.path().join("files/ab12.jpg");
+        link(&made, &cached).unwrap();
+        assert_eq!(std::fs::read(&cached).unwrap(), b"sd");
+        let order = events(folder.path());
+        assert_eq!(order[order.len() - 2..], ["link /3EB0AA.sd.jpg /files/ab12.jpg", "sync-folder /files"]);
+        assert!(matches!(link(&made, &cached), Err(Error::Exists { .. })), "the name holds that file already");
+    }
+
+    #[test]
+    fn files_are_synced_and_put_in_place_one_at_a_time_across_threads() {
+        let folder = tempfile::tempdir().unwrap();
+        std::thread::scope(|scope| {
+            for n in 0..8 {
+                let to = folder.path().join(format!("f{n}.jpg"));
+                scope.spawn(move || {
+                    for round in 0..4 {
+                        let to = to.with_extension(format!("{round}.jpg"));
+                        Part::create(&to).unwrap().write(|out| out.write_all(b"x").map_err(Error::io(&to))).unwrap();
+                    }
+                });
+            }
+        });
+        // Each file's sync, link and folder sync come together, never another's between them.
+        let order = events(folder.path());
+        assert_eq!(order.len(), 8 * 4 * 3);
+        for step in order.chunks(3) {
+            let file = step[0].strip_prefix("sync ").and_then(|f| f.strip_suffix(".N.part")).unwrap();
+            assert!(step[1].starts_with(&format!("link {file}.N.part")) && step[2] == "sync-folder ", "{order:#?}");
+        }
     }
 
     #[test]

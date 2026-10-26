@@ -102,7 +102,8 @@ pub struct Probe {
 }
 
 impl Probe {
-    pub(crate) fn new(kind: Kind, format: Format, mime: &str, size: u64) -> Probe {
+    /// A probe that knows only what it's told, for a caller that knows what a file is already.
+    pub fn new(kind: Kind, format: Format, mime: &str, size: u64) -> Probe {
         Probe {
             kind,
             format,

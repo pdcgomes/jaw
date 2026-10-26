@@ -27,7 +27,7 @@ mod tools;
 mod webp;
 
 pub use error::{Error, Result};
-pub use file::{Durability, remove_partial};
+pub use file::{Durability, keep, link, remove_partial};
 pub use job::{Cancel, Job, Progress};
 pub use limits::{HD, Limits, SD, THUMBNAIL_LONG_EDGE, THUMBNAIL_QUALITY};
 pub use plan::{Action, Lane, Plan, Plans, Quality, plan};
