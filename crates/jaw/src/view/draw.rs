@@ -407,9 +407,11 @@ impl View {
         self.list_rows = (inner.height / 2) as usize;
         self.clamp_list();
         if self.chats.is_empty() {
-            let said = if self.folder == "all" { "No chats yet." } else { "No chats in this folder." };
-            let line = Line::from(Span::styled(said, Style::new().fg(t.comment)));
-            f.buffer_mut().set_line(inner.x, inner.y, &line, inner.width);
+            if self.chats.loaded {
+                let said = if self.folder == "all" { "No chats yet." } else { "No chats in this folder." };
+                let line = Line::from(Span::styled(said, Style::new().fg(t.comment)));
+                f.buffer_mut().set_line(inner.x, inner.y, &line, inner.width);
+            }
             return;
         }
         let order: Vec<String> = self.list_order().into_iter().skip(self.list_top).take(self.list_rows).collect();
@@ -544,8 +546,11 @@ impl View {
         let inner = block.inner(area);
         f.render_widget(block, area);
         if self.open.is_none() {
-            let lines = self.mimic_lines(inner, Look::default(), "No chats yet. They come as your phone sends them.");
-            f.render_widget(centred(lines, inner), inner);
+            if self.chats.loaded {
+                let lines =
+                    self.mimic_lines(inner, Look::default(), "No chats yet. They come as your phone sends them.");
+                f.render_widget(centred(lines, inner), inner);
+            }
             return;
         }
         let box_h = if self.recorder.is_some() {

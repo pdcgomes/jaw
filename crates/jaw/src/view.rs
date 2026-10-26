@@ -399,9 +399,11 @@ impl View {
         self.open.as_deref()
     }
 
-    /// Whether the open chat's messages are on screen, which is when the first frame is done.
+    /// Whether the open chat's messages are on screen, or the chat list has come with no chat to
+    /// open, which is when the first frame is done.
     pub fn showing_messages(&self) -> bool {
-        self.messages.as_ref().is_some_and(|w| w.loaded) || (self.reach == Reach::Up && self.chats.is_empty())
+        self.messages.as_ref().is_some_and(|w| w.loaded)
+            || (self.reach == Reach::Up && self.chats.loaded && self.chats.is_empty())
     }
 
     /// Whether something on screen counts seconds: a QR code's or a retry's.

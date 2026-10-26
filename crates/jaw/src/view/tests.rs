@@ -465,6 +465,36 @@ fn a_new_account_has_the_mimic_where_the_chats_will_be() {
     assert!(screen.contains("No chats yet.") && screen.contains("They come as your phone sends them."), "{screen}");
 }
 
+/// What the made-up account has sent since it was last asked, without applying it.
+fn came(rx: &Receiver<Event>) -> Vec<Update> {
+    rx.try_iter().filter_map(|e| if let Event::Update(u) = e { Some(u) } else { None }).collect()
+}
+
+/// A view on the made-up account that has had jawd's hello and nothing else.
+fn greeted(width: u16, height: u16) -> (View, Receiver<Event>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut v = View::new(Box::new(Demo::start(tx, Clock::Fixed(NOW), State::Online, false)));
+    v.clock = Some(NOW);
+    v.tz = UTC;
+    v.resize(width, height);
+    let hello = came(&rx);
+    assert!(matches!(hello[..], [Update::Hello { .. }]), "{hello:?}");
+    v.apply(hello[0].clone());
+    (v, rx)
+}
+
+/// Between jawd's hello and the chat list's first rows the panels wait empty rather than say there
+/// are no chats, and the first frame isn't done until the open chat's messages are in.
+#[test]
+fn until_the_chat_list_comes_nothing_says_there_are_no_chats() {
+    let (mut v, rx) = greeted(140, 30);
+    let screen = frame(&mut v);
+    assert!(!screen.contains("No chats") && !screen.contains('▀') && !v.showing_messages(), "{screen}");
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    assert!(v.showing_messages() && screen.contains("Ana Ribeiro") && !screen.contains("No chats"), "{screen}");
+}
+
 #[test]
 fn without_colour_the_selection_is_reversed() {
     let (mut v, _rx) = view(100, 30);
