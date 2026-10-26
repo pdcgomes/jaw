@@ -81,6 +81,15 @@ enum Command {
         /// Messages in each blob of history, 20,000 for a new one
         #[arg(long)]
         blob: Option<u32>,
+        /// Each chat's newest messages in the history's first pass, the blobs of many small
+        /// conversations a phone sends as INITIAL_BOOTSTRAP, 20 for a new account
+        #[arg(long)]
+        recent: Option<u32>,
+        /// The history comes as on a first run: as the account connects, a backlog waiting after
+        /// time offline arrives a message at a time, as jaw-engine acks each (--catch-up says how
+        /// many, 2,000 otherwise), and the phone's app state is fetched in full; for a new folder
+        #[arg(long)]
+        first_run: bool,
         /// Times lone messages, opening chats, pages at any depth and finds, with nothing else going on
         #[arg(long)]
         steady: bool,
@@ -218,6 +227,8 @@ fn main() -> Result<()> {
             people,
             messages,
             blob,
+            recent,
+            first_run,
             steady,
             flood,
             seconds,
@@ -235,7 +246,9 @@ fn main() -> Result<()> {
                 people: people.map(|n| n as usize),
                 messages: messages.map(|n| n as usize),
                 chunk: blob.map(|n| n as usize),
+                recent: recent.map(|n| n as usize),
             },
+            first_run,
             steady,
             flood,
             seconds,

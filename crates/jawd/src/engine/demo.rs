@@ -49,6 +49,19 @@ pub trait Account: Send + Sync + 'static {
     fn lid_pairs(&self, lids: &[String]) -> pb::LidPairs;
     /// The blob a history notification names, or None if the phone never offered one by that name.
     fn history(&self, notification: &e2e::HistorySyncNotification) -> Option<Blob>;
+    /// Every mutation of the phone's app state, in the order whatsmeow hands them over as it
+    /// fetches every collection again in full; none unless the phone has some.
+    fn app_state(&self) -> Vec<pb::Event> {
+        Vec::new()
+    }
+}
+
+/// A full fetch of the phone's app state as the demo engine played it: how long it took, and how
+/// long jawd took to ack each mutation.
+#[derive(Clone, Debug, Default)]
+pub struct Fetched {
+    pub took: Duration,
+    pub acks: Vec<Duration>,
 }
 
 /// A blob of history: a HistorySync encoded as the phone sends it, and what jaw-engine says of one
@@ -103,6 +116,8 @@ pub struct World {
     asked_now: Notify,
     /// The account the engine answers for, besides its script.
     account: Option<Arc<dyn Account>>,
+    /// The full fetches of its app state the engine has played.
+    fetched: Mutex<Vec<Fetched>>,
     /// The running engine's half of the link, for events delivered from outside its script.
     link: Mutex<Option<WeakLink>>,
 }
@@ -126,6 +141,11 @@ impl World {
 
     pub fn replying(&self, replies: Replies) {
         *self.replies.lock().expect("the demo world") = replies;
+    }
+
+    /// The full fetches of the account's app state played so far.
+    pub fn fetched(&self) -> Vec<Fetched> {
+        self.fetched.lock().expect("the demo world").clone()
     }
 
     /// Fails the next `n` sends with a connection that's down.
@@ -484,12 +504,17 @@ struct WeakLink {
 }
 
 impl Sender {
-    /// Sends an event; a message, a receipt or a bench event waits for its ack. False if jawd has
-    /// gone.
+    /// Sends an event; a message, a receipt, an app-state mutation or a bench event waits for its
+    /// ack, as jaw-engine waits for each. False if jawd has gone.
     async fn send(&self, mut event: pb::Event) -> bool {
         let durable = matches!(
             event.kind,
-            Some(pb::event::Kind::Message(_) | pb::event::Kind::Receipt(_) | pb::event::Kind::Bench(_))
+            Some(
+                pb::event::Kind::Message(_)
+                    | pb::event::Kind::Receipt(_)
+                    | pb::event::Kind::AppState(_)
+                    | pb::event::Kind::Bench(_)
+            )
         );
         if !durable {
             return self.events.send(Incoming { event, ack: None }).await.is_ok();
@@ -538,9 +563,23 @@ impl Sender {
             pb::command::Kind::LidLookup(asked) => {
                 Ok(pb::reply::Kind::LidPairs(self.account()?.lid_pairs(&asked.lids)))
             }
-            // The made-up phone has no app state, nobody in it has a picture, and its history has
-            // all been offered.
-            pb::command::Kind::AppStateResync(_) | pb::command::Kind::HistoryRequest(_) => self.account().and(done),
+            // Its app state, if it has any, comes a mutation at a time, each waiting for its ack, as
+            // whatsmeow hands each over as it fetches every collection again in full.
+            pb::command::Kind::AppStateResync(_) => {
+                let account = self.account()?;
+                let (began, mut acks) = (Instant::now(), Vec::new());
+                for mutation in account.app_state() {
+                    let sent = Instant::now();
+                    if !self.send(mutation).await {
+                        return Err(EngineError::Gone);
+                    }
+                    acks.push(sent.elapsed());
+                }
+                self.world.fetched.lock().expect("the demo world").push(Fetched { took: began.elapsed(), acks });
+                done
+            }
+            // Nobody in the made-up phone has a picture, and its history has all been offered.
+            pb::command::Kind::HistoryRequest(_) => self.account().and(done),
             pb::command::Kind::Avatar(_) => self.account().map(|_| {
                 let none = pb::AvatarFile { state: pb::avatar_file::State::None as i32, ..Default::default() };
                 pb::reply::Kind::AvatarFile(none)
@@ -767,6 +806,55 @@ mod tests {
                 }
             })
         }
+
+        fn app_state(&self) -> Vec<pb::Event> {
+            [["pin_v1", ANA], ["archive", CLIMBING]]
+                .into_iter()
+                .map(|index| pb::Event {
+                    seq: 0,
+                    kind: Some(pb::event::Kind::AppState(pb::AppState {
+                        index: index.iter().map(|part| part.to_string()).collect(),
+                        value: Vec::new(),
+                    })),
+                })
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_fetch_of_the_app_state_waits_for_each_mutations_ack_and_answers_once_all_are_in() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let engine = DemoEngine::for_account(Vec::new(), Arc::new(Tiny));
+        let world = engine.world();
+        let instance = engine.start(tx).await.unwrap();
+        let answered = AtomicBool::new(false);
+        let fetching = async {
+            let names = vec!["regular".to_string()];
+            let reply = instance.commands.call(pb::command::Kind::AppStateResync(pb::AppStateResync { names })).await;
+            answered.store(true, Ordering::SeqCst);
+            reply
+        };
+        let acking = async {
+            for expected in ["pin_v1", "archive"] {
+                let incoming = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("{expected} never came"))
+                    .unwrap();
+                let Some(pb::event::Kind::AppState(state)) = &incoming.event.kind else {
+                    panic!("{:?}", incoming.event)
+                };
+                assert_eq!(state.index[0], expected);
+                let ack = incoming.ack.expect("a mutation needs an ack, as jaw-engine waits for each");
+                let early = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
+                assert!(early.is_err(), "the next came before {expected} was acked");
+                assert!(!answered.load(Ordering::SeqCst), "the fetch was answered before {expected} was acked");
+                ack.send();
+            }
+        };
+        let (reply, ()) = tokio::join!(fetching, acking);
+        assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
+        let fetched = world.fetched();
+        assert_eq!((fetched.len(), fetched[0].acks.len()), (1, 2), "one fetch of two mutations, each acked");
     }
 
     fn download(notification: e2e::HistorySyncNotification, path: &Path) -> pb::command::Kind {

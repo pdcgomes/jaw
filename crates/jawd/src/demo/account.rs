@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use prost::Message as _;
 use prost::encoding::{WireType, encode_key, encode_varint};
 use wa_proto::wa_common::MessageKey;
+use wa_proto::wa_web_protobuf_sync_action as action;
 use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_history_sync::history_sync::HistorySyncType;
 use wa_proto::wa_web_protobufs_history_sync::{Conversation, HistorySync, HistorySyncMsg};
@@ -20,8 +21,9 @@ use crate::engine::pb;
 use crate::find::bench::{FIRST, GROUPS, LAST};
 use crate::store::bench::{BIG_CHATS, DAY_MS, Rng, SPAN_MS, chat_id, lid, phone, sizes, text};
 
-/// How many of each chat's newest messages come in the history's first pass.
-const RECENT: usize = 20;
+/// How many of each chat's newest messages come in the history's first pass, unless asked, and
+/// how far back the other side's read looks for one of yours.
+pub const RECENT: usize = 20;
 /// Chats with messages you haven't read, among the newest.
 const UNREAD_CHATS: usize = 30;
 /// What names a demo history blob, with its number after.
@@ -36,6 +38,14 @@ pub struct Shape {
     pub messages: usize,
     /// Messages in each history blob.
     pub chunk: usize,
+    /// How many of each chat's newest messages come in the history's first pass, which a phone
+    /// sends as INITIAL_BOOTSTRAP: a few each, so its blobs hold many small conversations.
+    #[serde(default = "recent")]
+    pub recent: usize,
+}
+
+fn recent() -> usize {
+    RECENT
 }
 
 pub struct Account {
@@ -45,8 +55,10 @@ pub struct Account {
     chats: Vec<Spec>,
     by_id: HashMap<String, usize>,
     /// Where each stretch of the history starts, in the order the phone sends them (every chat's
-    /// newest RECENT, then the rest of each), and one past the last.
+    /// newest few, then the rest of each), and one past the last.
     starts: Vec<usize>,
+    /// Whether its phone has app state to hand over as whatsmeow fetches it in full.
+    app_state: bool,
 }
 
 /// A chat, as its messages are made.
@@ -68,8 +80,9 @@ impl Spec {
         self.id.ends_with("@g.us")
     }
 
-    fn recent(&self) -> usize {
-        self.size.min(RECENT)
+    /// How many of its newest messages come in the first pass, when each chat's newest `recent` do.
+    fn recent(&self, recent: usize) -> usize {
+        self.size.min(recent)
     }
 }
 
@@ -104,7 +117,13 @@ impl Account {
     pub fn new(shape: Shape, now: i64) -> Account {
         let chats = shape.chats.max(BIG_CHATS + 1);
         let people = shape.people.max(chats);
-        let shape = Shape { chats, people, messages: shape.messages.max(chats), chunk: shape.chunk.max(1) };
+        let shape = Shape {
+            chats,
+            people,
+            messages: shape.messages.max(chats),
+            chunk: shape.chunk.max(1),
+            recent: shape.recent.max(1),
+        };
         let mut first = 0u64;
         let specs: Vec<Spec> = sizes(shape.messages, chats)
             .into_iter()
@@ -140,14 +159,45 @@ impl Account {
             .collect();
         let mut starts = vec![0];
         for spec in &specs {
-            starts.push(starts.last().copied().unwrap_or_default() + spec.recent());
+            starts.push(starts.last().copied().unwrap_or_default() + spec.recent(shape.recent));
         }
         for spec in &specs {
-            starts.push(starts.last().copied().unwrap_or_default() + spec.size - spec.recent());
+            starts.push(starts.last().copied().unwrap_or_default() + spec.size - spec.recent(shape.recent));
         }
         let by_id = specs.iter().enumerate().map(|(n, spec)| (spec.id.clone(), n)).collect();
         let messages = starts.last().copied().unwrap_or_default();
-        Account { shape: Shape { messages, ..shape }, now, chats: specs, by_id, starts }
+        Account { shape: Shape { messages, ..shape }, now, chats: specs, by_id, starts, app_state: false }
+    }
+
+    /// The same account, with app state on its phone for whatsmeow to fetch in full.
+    pub fn with_app_state(self) -> Account {
+        Account { app_state: true, ..self }
+    }
+
+    /// How many messages the history's first pass has, every chat's newest few.
+    fn first_pass(&self) -> usize {
+        self.starts[self.chats.len()]
+    }
+
+    /// The blobs the first pass is cut into: it comes in blobs of its own, as a phone's
+    /// INITIAL_BOOTSTRAP does, and then the rest, in blobs as big as the shape says.
+    pub fn bootstrap_blobs(&self) -> usize {
+        self.first_pass().div_ceil(self.shape.chunk)
+    }
+
+    /// Where blob `k`'s stretch of the history begins and ends.
+    fn stretch(&self, k: usize) -> (usize, usize) {
+        let (first, chunk) = (self.first_pass(), self.shape.chunk);
+        let early = self.bootstrap_blobs();
+        if k < early {
+            return (k * chunk, ((k + 1) * chunk).min(first));
+        }
+        let from = (first + (k - early) * chunk).min(self.shape.messages);
+        (from, (from + chunk).min(self.shape.messages))
+    }
+
+    fn kind(&self, k: usize) -> HistorySyncType {
+        if k < self.bootstrap_blobs() { HistorySyncType::InitialBootstrap } else { HistorySyncType::Full }
     }
 
     pub fn chats(&self) -> usize {
@@ -170,21 +220,15 @@ impl Account {
 
     /// How many blobs the phone offers.
     pub fn blobs(&self) -> usize {
-        self.shape.messages.div_ceil(self.shape.chunk)
+        self.bootstrap_blobs() + (self.shape.messages - self.first_pass()).div_ceil(self.shape.chunk)
     }
 
     /// The phone's history notifications, one for each blob, as messages from your own phone.
     pub fn notifications(&self) -> Vec<pb::Event> {
-        let recent = self.starts[self.chats.len()];
         (0..self.blobs())
             .map(|k| {
-                let kind = if (k + 1) * self.shape.chunk <= recent {
-                    HistorySyncType::InitialBootstrap
-                } else {
-                    HistorySyncType::Full
-                };
                 let notification = e2e::HistorySyncNotification {
-                    sync_type: Some(kind as i32),
+                    sync_type: Some(self.kind(k) as i32),
                     chunk_order: Some(k as u32),
                     progress: Some(self.progress(k)),
                     direct_path: Some(format!("{BLOB}{k}")),
@@ -225,7 +269,7 @@ impl Account {
     /// encoded a message at a time, since a decoded message takes 16 KB whatever it holds, and the
     /// demo engine's blob would otherwise count against jawd's memory.
     pub fn blob(&self, k: usize) -> Option<Blob> {
-        let (from, to) = (k * self.shape.chunk, ((k + 1) * self.shape.chunk).min(self.shape.messages));
+        let (from, to) = self.stretch(k);
         if from >= to {
             return None;
         }
@@ -244,7 +288,8 @@ impl Account {
             let (c, newest) = if segment < chats {
                 (segment, self.chats[segment].size - 1)
             } else {
-                (segment - chats, self.chats[segment - chats].size - self.chats[segment - chats].recent() - 1)
+                let spec = &self.chats[segment - chats];
+                (segment - chats, spec.size - spec.recent(self.shape.recent) - 1)
             };
             let spec = &self.chats[c];
             let place = *placed.entry(c).or_insert_with(|| {
@@ -267,7 +312,7 @@ impl Account {
             at = end.min(to);
             segment += 1;
         }
-        let kind = if to <= self.starts[chats] { HistorySyncType::InitialBootstrap } else { HistorySyncType::Full };
+        let kind = self.kind(k);
         let progress = self.progress(k);
         let head = HistorySync {
             sync_type: kind as i32,
@@ -447,6 +492,70 @@ impl demo::Account for Account {
         let k: usize = notification.direct_path.as_deref()?.strip_prefix(BLOB)?.parse().ok()?;
         (notification.chunk_order == Some(k as u32)).then(|| self.blob(k)).flatten()
     }
+
+    /// Every person's name in your contacts, with their LID, and each chat read up to its newest
+    /// message unless it has messages you haven't read, every tenth muted for ever, every twentieth
+    /// archived and the newest three pinned, if the phone has app state.
+    fn app_state(&self) -> Vec<pb::Event> {
+        if !self.app_state {
+            return Vec::new();
+        }
+        let mutation = |index: [&str; 2], value: action::SyncActionValue| pb::Event {
+            seq: 0,
+            kind: Some(pb::event::Kind::AppState(pb::AppState {
+                index: index.iter().map(|part| part.to_string()).collect(),
+                value: value.encode_to_vec(),
+            })),
+        };
+        let at = Some(self.now - 3_600_000);
+        let mut events: Vec<pb::Event> = (0..self.shape.people)
+            .map(|n| {
+                let full_name = (n % 7 != 3).then(|| name(n));
+                let contact = action::ContactAction {
+                    first_name: full_name.as_ref().map(|full| full.split(' ').next().unwrap_or_default().to_string()),
+                    full_name,
+                    lid_jid: Some(lid(n)),
+                    ..Default::default()
+                };
+                let value =
+                    action::SyncActionValue { timestamp: at, contact_action: Some(contact), ..Default::default() };
+                mutation(["contact", &phone(n)], value)
+            })
+            .collect();
+        for (c, spec) in self.chats.iter().enumerate() {
+            let id = spec.id.as_str();
+            if spec.unread == 0 {
+                let range = action::SyncActionMessageRange {
+                    last_message_timestamp: Some(spec.ends / 1000),
+                    ..Default::default()
+                };
+                let read = action::MarkChatAsReadAction { read: Some(true), message_range: Some(range) };
+                let value = action::SyncActionValue {
+                    timestamp: at,
+                    mark_chat_as_read_action: Some(read),
+                    ..Default::default()
+                };
+                events.push(mutation(["markChatAsRead", id], value));
+            }
+            if c % 10 == 5 {
+                let mute = action::MuteAction { muted: Some(true), mute_end_timestamp: Some(-1), ..Default::default() };
+                let value = action::SyncActionValue { timestamp: at, mute_action: Some(mute), ..Default::default() };
+                events.push(mutation(["mute", id], value));
+            }
+            if c % 20 == 7 {
+                let archive = action::ArchiveChatAction { archived: Some(true), ..Default::default() };
+                let value =
+                    action::SyncActionValue { timestamp: at, archive_chat_action: Some(archive), ..Default::default() };
+                events.push(mutation(["archive", id], value));
+            }
+            if c < 3 {
+                let pin = action::PinAction { pinned: Some(true) };
+                let value = action::SyncActionValue { timestamp: at, pin_action: Some(pin), ..Default::default() };
+                events.push(mutation(["pin_v1", id], value));
+            }
+        }
+        events
+    }
 }
 
 #[cfg(test)]
@@ -457,7 +566,7 @@ mod tests {
     use crate::engine::demo::Account as _;
 
     fn small() -> Account {
-        Account::new(Shape { chats: 40, people: 60, messages: 5_000, chunk: 700 }, 1_792_000_000_000)
+        Account::new(Shape { chats: 40, people: 60, messages: 5_000, chunk: 700, recent: RECENT }, 1_792_000_000_000)
     }
 
     #[test]

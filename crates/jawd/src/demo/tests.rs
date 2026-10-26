@@ -1,9 +1,11 @@
 use super::*;
+use crate::engine::demo::Account as _;
 
 fn plan(folder: &Path, report: &Path) -> Plan {
     Plan {
         folder: folder.to_path_buf(),
-        shape: Asked { chats: Some(30), people: Some(40), messages: Some(3_000), chunk: Some(500) },
+        shape: Asked { chats: Some(30), people: Some(40), messages: Some(3_000), chunk: Some(500), recent: None },
+        first_run: false,
         steady: false,
         flood: None,
         seconds: None,
@@ -31,10 +33,12 @@ fn report(path: &Path) -> Value {
 fn a_demo_accounts_history_catch_up_and_flood_each_arrive_whole_through_the_engine_and_the_socket() {
     let folder = tempfile::tempdir().unwrap();
     let report_to = folder.path().join("report.json");
-    run(plan(folder.path(), &report_to)).unwrap();
+    let first = plan(folder.path(), &report_to);
+    let blobs = account::Account::new(first.shape.shape(None), 0).blobs();
+    run(first).unwrap();
     let history = &report(&report_to)["history"];
     assert_eq!(count(folder.path(), "messages"), 3_000 + history["ack"]["n"].as_i64().unwrap());
-    assert_eq!(history["blobs"], 6);
+    assert_eq!(history["blobs"], blobs);
     assert_eq!(history["missing"], 0, "every live message reached the interface");
     assert!(history["open"]["n"].as_u64().unwrap() > 0, "chats were opened while history went in");
     let marker: Marker = serde_json::from_slice(&std::fs::read(folder.path().join(MARKER)).unwrap()).unwrap();
@@ -76,6 +80,36 @@ fn a_demo_accounts_history_catch_up_and_flood_each_arrive_whole_through_the_engi
     let other = Plan { shape: Asked { messages: Some(5_000), ..Asked::default() }, ..plan(folder.path(), &report_to) };
     let refused = run(other).unwrap_err().to_string();
     assert!(refused.contains("holds a made-up account of 3000 messages"), "{refused}");
+}
+
+#[test]
+fn a_first_runs_backlog_app_state_and_history_all_arrive_whole_at_once() {
+    let folder = tempfile::tempdir().unwrap();
+    let report_to = folder.path().join("report.json");
+    let shape = Asked { recent: Some(2), ..plan(folder.path(), &report_to).shape };
+    run(Plan { first_run: true, catch_up: Some(100), shape, ..plan(folder.path(), &report_to) }).unwrap();
+    let first = &report(&report_to)["first_run"];
+    let receipts = first["catch_up"]["receipts"].as_i64().unwrap();
+    assert_eq!(first["catch_up"]["ack"]["n"].as_i64().unwrap(), 100 + receipts, "each of the backlog was acked");
+    assert_eq!(first["missing"], 0, "every message of the open chat reached the interface");
+    let account = account::Account::new(shape.shape(None), 0).with_app_state();
+    let mutations = account.app_state().len();
+    assert_eq!(first["app_state"]["mutations"], mutations);
+    assert_eq!(first["app_state"]["ack"]["n"], mutations, "each mutation waited for its ack");
+    assert_eq!(first["bootstrap"]["blobs"], account.bootstrap_blobs());
+    assert_eq!(first["bootstrap"]["conversations"], 30, "every chat's newest two came first");
+    assert_eq!(first["history"]["messages"], 3_000);
+    assert_eq!(count(folder.path(), "messages"), 3_000 + 100);
+    // What the app state says of the chats is in: the newest three pinned, every tenth muted and
+    // every twentieth archived, as nothing else says.
+    for (chats, how_many) in [("pinned > 0", 3), ("muted_until > 0", 3), ("archived", 2)] {
+        assert_eq!(count(folder.path(), &format!("chats WHERE {chats}")), how_many, "chats {chats}");
+    }
+    for table in ["inbox", "quarantine"] {
+        assert_eq!(count(folder.path(), table), 0, "{table} is empty");
+    }
+    let again = run(Plan { first_run: true, ..plan(folder.path(), &report_to) }).unwrap_err().to_string();
+    assert!(again.contains("has had its first run"), "{again}");
 }
 
 #[test]

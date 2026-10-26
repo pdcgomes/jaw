@@ -30,10 +30,13 @@ use crate::engine::{Engine, pb};
 use crate::state::State;
 use crate::store::Store;
 use crate::store::bench::{Rng, Timings, ms};
+use crate::work::Report;
 
 pub struct Plan {
     pub folder: PathBuf,
     pub shape: Asked,
+    /// Whether the history comes as on a first run, with a backlog and the app state at once.
+    pub first_run: bool,
     pub steady: bool,
     pub flood: Option<u32>,
     pub seconds: Option<f64>,
@@ -59,16 +62,24 @@ pub struct Asked {
     pub people: Option<usize>,
     pub messages: Option<usize>,
     pub chunk: Option<usize>,
+    pub recent: Option<usize>,
 }
 
 impl Asked {
     fn shape(self, kept: Option<Shape>) -> Shape {
-        let base = kept.unwrap_or(Shape { chats: 3_000, people: 5_000, messages: 1_000_000, chunk: 20_000 });
+        let base = kept.unwrap_or(Shape {
+            chats: 3_000,
+            people: 5_000,
+            messages: 1_000_000,
+            chunk: 20_000,
+            recent: account::RECENT,
+        });
         Shape {
             chats: self.chats.unwrap_or(base.chats),
             people: self.people.unwrap_or(base.people),
             messages: self.messages.unwrap_or(base.messages),
             chunk: self.chunk.unwrap_or(base.chunk),
+            recent: self.recent.unwrap_or(base.recent),
         }
     }
 }
@@ -102,6 +113,8 @@ const RUNS: usize = if cfg!(test) { 3 } else { 30 };
 const FINDS: &[&str] = &["nao", "obrigado", "cafe amanha", "jantar", "zefiro", "lisbon"];
 /// The longest a catch-up's backlog was waiting: since the last run stopped, or this long ago.
 const OFFLINE_MS: i64 = 2 * 24 * 3600 * 1000;
+/// The messages waiting on a first run unless asked, about as many as the owner's had.
+const FIRST_RUN_BACKLOG: u32 = 2_000;
 /// How long jawd goes without a commit before it's counted idle: past the blocking pool's threads'
 /// 10 s, the WAL emptied after 10 s, and the avatars fetched after connecting.
 const SETTLE: Duration = Duration::from_secs(15);
@@ -159,7 +172,13 @@ pub fn run(plan: Plan) -> Result<()> {
         );
     }
     let history = !marker.as_ref().is_some_and(|marker| marker.history);
-    if history && plan.catch_up.is_some() {
+    if plan.first_run && !history {
+        bail!(
+            "{} has had its first run, and its history is in; a first run needs a folder of its own",
+            plan.folder.display()
+        );
+    }
+    if history && plan.catch_up.is_some() && !plan.first_run {
         bail!("a catch-up comes after the history: run jawd demo on {} once first", plan.folder.display());
     }
     let ended = marker.and_then(|marker| marker.ended);
@@ -177,9 +196,11 @@ fn connection(state: pb::connection::State) -> pb::Event {
 }
 
 async fn serve(plan: Plan, shape: Shape, history: bool, ended: Option<i64>) -> Result<()> {
-    let account = Arc::new(Account::new(shape, now_ms()));
-    let mut script =
-        vec![if plan.catch_up.is_some() { connection(pb::connection::State::Connecting) } else { demo::connected() }];
+    let account = Account::new(shape, now_ms());
+    let account = Arc::new(if plan.first_run { account.with_app_state() } else { account });
+    // A catch-up's or a first run's account connects as its phase begins.
+    let connecting = plan.catch_up.is_some() || plan.first_run;
+    let mut script = vec![if connecting { connection(pb::connection::State::Connecting) } else { demo::connected() }];
     if history {
         script.extend(account.notifications());
     }
@@ -217,7 +238,8 @@ async fn serve(plan: Plan, shape: Shape, history: bool, ended: Option<i64>) -> R
         report_to: plan.report.clone(),
         run: now_ms(),
         sent: AtomicU64::new(0),
-        in_flight: Arc::new(Semaphore::new(plan.in_flight.max(1) as usize)),
+        // A first run's backlog comes through jaw-engine, which waits for each ack.
+        in_flight: Arc::new(Semaphore::new(if plan.first_run { 1 } else { plan.in_flight.max(1) as usize })),
         rng: Mutex::new(Rng(0x5EED_DE30)),
     };
     let exit = plan.exit;
@@ -293,13 +315,15 @@ fn mib(bytes: u64) -> f64 {
 impl Demo {
     async fn phases(&self, plan: &Plan, history: bool) -> Result<()> {
         tokio::spawn(log_commits(self.store.clone(), self.commits.clone()));
-        if history {
-            self.history().await?;
+        match (history, plan.first_run) {
+            (true, true) => self.first_run(plan.catch_up.unwrap_or(FIRST_RUN_BACKLOG)).await?,
+            (true, false) => self.history().await?,
+            (false, _) => {}
         }
         if plan.after > 0.0 {
             tokio::time::sleep(Duration::from_secs_f64(plan.after)).await;
         }
-        if let Some(backlog) = plan.catch_up {
+        if let Some(backlog) = plan.catch_up.filter(|_| !plan.first_run) {
             self.catch_up(backlog, plan.in_flight).await?;
         }
         if plan.steady {
@@ -467,6 +491,155 @@ impl Demo {
                 "arrival": summary(&arrivals),
                 "commit_to_interface": summary(&from_commit),
                 "open": summary(&opens),
+                "missing": missing,
+            }),
+        )?;
+        self.history_in.store(true, Ordering::Relaxed);
+        let folder = self.socket.parent().context("the socket's folder")?;
+        write_marker(folder, &Marker { shape: self.shape, history: true, ended: None })
+    }
+
+    /// The account's first run on this jawd, as a phone linked again after time offline brings it:
+    /// as it connects, what waited meanwhile arrives a message at a time, each waiting for its ack
+    /// as jaw-engine waits for each, while the phone's app state is fetched in full, a mutation at a
+    /// time, and the history comes, every chat's newest few first in blobs of many small
+    /// conversations, then the rest.
+    async fn first_run(&self, backlog: u32) -> Result<()> {
+        let (blobs, bootstrap) = (self.account.blobs(), self.account.bootstrap_blobs());
+        println!(
+            "jawd demo: a first run: {backlog} messages waiting, one at a time, while the app state is fetched in full and the phone offers the history, {} messages in {blobs} blobs, the first {bootstrap} each chat's newest {}",
+            self.account.shape.messages, self.account.shape.recent
+        );
+        self.sampler.most();
+        let started = Instant::now();
+        let watcher = self.watch().await?;
+        let opening = self.keep_opening();
+        let history = {
+            let state = self.state.clone();
+            tokio::spawn(async move {
+                let mut first = None;
+                loop {
+                    let got = state.live().lock().expect("live state").history.clone().unwrap_or_default();
+                    if first.is_none() && got.blobs as usize >= bootstrap {
+                        first = Some((started.elapsed(), got.clone()));
+                    }
+                    if got.blobs as usize >= blobs {
+                        return (first, started.elapsed(), got);
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        };
+        let (events, receipts) = self.backlog(backlog);
+        let preview =
+            pb::OfflinePreview { total: backlog + receipts, messages: backlog, receipts, ..Default::default() };
+        let acks: Arc<Mutex<Vec<Duration>>> = Arc::default();
+        self.world.deliver(connection(pb::connection::State::Connected)).await;
+        self.world.deliver(pb::Event { seq: 0, kind: Some(pb::event::Kind::OfflinePreview(preview)) }).await;
+        for (event, expected) in events {
+            self.hand_over(|| (event, expected), &acks).await;
+        }
+        self.landed(1).await;
+        let drained = started.elapsed();
+        let done = pb::OfflineDone { count: backlog + receipts };
+        self.world.deliver(pb::Event { seq: 0, kind: Some(pb::event::Kind::OfflineDone(done)) }).await;
+        let (first, stored, got) = loop {
+            if history.is_finished() {
+                break history.await?;
+            }
+            if self.store.count("quarantine")? > 0 {
+                bail!("some of the first run went to quarantine; jawd's log says why");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let fetched = loop {
+            if let Some(fetched) = self.world.fetched().pop() {
+                break fetched;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        self.converted().await?;
+        let converted = started.elapsed();
+        let indexing = Instant::now();
+        self.store.indexed().await?;
+        let indexed = indexing.elapsed();
+        let opens = opening.stop().await?;
+        stop(watcher).await;
+        let (came, missing) = self.expected.take();
+        let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
+        let acks = std::mem::take(&mut *acks.lock().expect("the acks"));
+        let most = self.sampler.most();
+        let storage = self.store.storage();
+        let waited = self.store.report().wait_background;
+        let (bootstrapped, early) = first.unwrap_or_default();
+        let rate = f64::from(backlog + receipts) / drained.as_secs_f64();
+        println!(
+            "first run: {backlog} messages and {receipts} receipts acked in {:.1} s, {rate:.0} a second one at a time; the app state's {} mutations fetched in {:.1} s; the history's {} messages stored in {:.1} s, the first {bootstrap} blobs' {} messages in {} chats in {:.1} s, and indexed {:.1} s later; all converted {:.1} s after the start",
+            drained.as_secs_f64(),
+            fetched.acks.len(),
+            fetched.took.as_secs_f64(),
+            got.messages,
+            stored.as_secs_f64(),
+            early.messages,
+            early.conversations,
+            bootstrapped.as_secs_f64(),
+            indexed.as_secs_f64(),
+            converted.as_secs_f64()
+        );
+        println!("{}", line("a message or receipt of the backlog, acked", &acks));
+        println!("{}", line("  the open chat's, from hand-over to the interface", &arrivals));
+        println!("{}", line("an app-state mutation, acked", &fetched.acks));
+        println!("{}", line(&format!("a chat opened every {} ms", OPEN_EVERY.as_millis()), &opens));
+        println!(
+            "  background work waited for the WAL {} times, {:.1} s in all, {:.0} ms at p99; the WAL reached {:.0} MiB ({} frames); jawd's memory at most {:.0} MB ({:.0} MB resident){}",
+            storage.background_waits,
+            storage.background_waited_ms as f64 / 1000.0,
+            waited.map_or(0.0, |w| w.p99_us as f64 / 1000.0),
+            mib(most.wal),
+            storage.wal_peak_frames,
+            mb(most.footprint),
+            mb(most.resident),
+            if missing > 0 { format!("; {missing} messages never reached the interface") } else { String::new() }
+        );
+        self.record(
+            "first_run",
+            json!({
+                "catch_up": {
+                    "messages": backlog,
+                    "receipts": receipts,
+                    "acked_seconds": drained.as_secs_f64(),
+                    "rate": rate,
+                    "ack": summary(&acks),
+                    "arrival": summary(&arrivals),
+                },
+                "app_state": {
+                    "mutations": fetched.acks.len(),
+                    "seconds": fetched.took.as_secs_f64(),
+                    "ack": summary(&fetched.acks),
+                },
+                "bootstrap": {
+                    "blobs": bootstrap,
+                    "conversations": early.conversations,
+                    "messages": early.messages,
+                    "seconds": bootstrapped.as_secs_f64(),
+                    "store_seconds": early.store_seconds,
+                },
+                "history": {
+                    "blobs": got.blobs,
+                    "messages": got.messages,
+                    "stored_seconds": stored.as_secs_f64(),
+                    "store_seconds": got.store_seconds,
+                    "indexed_seconds": indexed.as_secs_f64(),
+                },
+                "converted_seconds": converted.as_secs_f64(),
+                "background_waits": storage.background_waits,
+                "background_waited_ms": storage.background_waited_ms,
+                "background_wait_p99_ms": waited.map_or(0.0, |w| w.p99_us as f64 / 1000.0),
+                "open": summary(&opens),
+                "wal_peak_mib": mib(most.wal),
+                "wal_peak_frames": storage.wal_peak_frames,
+                "peak_mb": mb(most.footprint),
+                "peak_resident_mb": mb(most.resident),
                 "missing": missing,
             }),
         )?;
@@ -700,34 +873,40 @@ impl Demo {
     /// coming, then the messages, sent since the last run stopped (two days at most) to chats all
     /// over the list, so each is the newest in its chat, with the receipts for messages of yours
     /// among them, then that it's all come.
-    async fn catch_up(&self, backlog: u32, in_flight: u32) -> Result<()> {
-        let watcher = self.watch().await?;
-        self.sampler.most();
-        let (pushes, lists) = self.expected.pushes();
+    /// `backlog` messages sent while the account was offline, to chats all over the list, so each
+    /// is the newest in its chat, with the receipts for messages of yours among them, each with the
+    /// ID the watcher expects if it's in the open chat; and how many receipts.
+    fn backlog(&self, backlog: u32) -> (Vec<(pb::Event, Option<String>)>, u32) {
         let now = now_ms();
         let chats = self.account.chats() as u64;
         let mut events = Vec::with_capacity(backlog as usize);
         let mut receipts = 0u32;
-        {
-            let mut rng = self.rng.lock().expect("the demo's dice");
-            for n in 0..u64::from(backlog) {
-                let c = match rng.below(8) {
-                    0 => OPEN,
-                    1..4 => rng.below(chats.min(50)) as usize,
-                    _ => rng.below(chats) as usize,
-                };
-                let offline = (now - self.offline_since).max(1);
-                let at = self.offline_since + (n as i64 * offline / i64::from(backlog.max(1)));
-                let id = self.next_id();
-                events.push((self.account.live(c, id.clone(), at), (c == OPEN).then_some(id)));
-                if n % 50 == 49
-                    && let Some(read) = self.account.read(rng.below(chats) as usize, at)
-                {
-                    events.push((read, None));
-                    receipts += 1;
-                }
+        let mut rng = self.rng.lock().expect("the demo's dice");
+        for n in 0..u64::from(backlog) {
+            let c = match rng.below(8) {
+                0 => OPEN,
+                1..4 => rng.below(chats.min(50)) as usize,
+                _ => rng.below(chats) as usize,
+            };
+            let offline = (now - self.offline_since).max(1);
+            let at = self.offline_since + (n as i64 * offline / i64::from(backlog.max(1)));
+            let id = self.next_id();
+            events.push((self.account.live(c, id.clone(), at), (c == OPEN).then_some(id)));
+            if n % 50 == 49
+                && let Some(read) = self.account.read(rng.below(chats) as usize, at)
+            {
+                events.push((read, None));
+                receipts += 1;
             }
         }
+        (events, receipts)
+    }
+
+    async fn catch_up(&self, backlog: u32, in_flight: u32) -> Result<()> {
+        let watcher = self.watch().await?;
+        self.sampler.most();
+        let (pushes, lists) = self.expected.pushes();
+        let (events, receipts) = self.backlog(backlog);
         let preview =
             pb::OfflinePreview { total: backlog + receipts, messages: backlog, receipts, ..Default::default() };
         let acks: Arc<Mutex<Vec<Duration>>> = Arc::default();
