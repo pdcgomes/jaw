@@ -840,6 +840,32 @@ async fn a_copy_on_its_way_stays_in_a_full_cache_even_once_its_message_is_delete
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_copy_of_your_file_goes_only_once_a_synced_commit_has_stopped_naming_it() {
+    let home = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let name = format!("{OUTGOING}/3EB0UNNEEDED.jpg");
+    let file = home.path().join(&name);
+    std::fs::write(&file, b"a copy of yours nothing needs any more").unwrap();
+    let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.execute("INSERT INTO outgoing_drop (path) VALUES (?1)", [&name]).unwrap();
+    // jaw.db's write lock, held from outside, so nothing can be committed until it's let go.
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let dropping = {
+        let inner = rig.media.inner.clone();
+        tokio::spawn(async move { super::drop_some(&inner).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(file.exists(), "the file stays while the commit that stops naming it can't be made");
+    let synced = rig.store.storage().synced_commits;
+    holder.execute_batch("COMMIT").unwrap();
+    dropping.await.unwrap().unwrap();
+    assert!(!file.exists(), "and goes once it's made");
+    assert!(rig.store.storage().synced_commits > synced, "in a synced commit");
+    let left: i64 = rig.query(|db| Ok(db.query_row("SELECT count(*) FROM outgoing_drop", [], |r| r.get(0))?)).await;
+    assert_eq!(left, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_copys_upload_is_kept_in_a_synced_commit_before_its_message_goes() {
     let home = tempfile::tempdir().unwrap();
     let picked = tempfile::tempdir().unwrap();
