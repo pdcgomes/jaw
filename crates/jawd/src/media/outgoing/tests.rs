@@ -523,6 +523,49 @@ async fn a_send_cancelled_while_its_copy_is_made_or_uploaded_fails_until_retried
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_send_cancelled_after_its_copy_is_made_or_uploaded_but_before_jaw_db_is_told_stays_failed() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let state = |id: &str| {
+        let id = id.to_string();
+        rig.query(move |db| {
+            Ok(db.query_row(
+                "SELECT g.state FROM outgoing g JOIN outbox o ON o.n = g.outbox WHERE o.id = ?1",
+                [&id],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+    };
+    for (n, at) in ["made", "uploaded"].into_iter().enumerate() {
+        rig.media.hold_keeping(at == "made");
+        rig.world.gate_uploads(at == "uploaded");
+        let path = yours(picked.path(), &format!("{at}.jpg"), &Picture::lake(640 + 40 * n as u32, 480));
+        let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+        let id = answer["messages"][0].as_str().unwrap().to_string();
+        if at == "uploaded" {
+            rig.until(&id, "its copy made", |row| row["media"]["state"] == "local").await;
+            rig.media.hold_keeping(true);
+            rig.world.gate_uploads(false);
+        }
+        let held = tokio::time::timeout(Duration::from_secs(30), async {
+            while rig.media.hold_keeping(true) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        held.await.unwrap_or_else(|_| panic!("its copy was never {at}"));
+        rig.media.call("media.cancel", json!({ "message": id })).await.unwrap();
+        rig.until(&id, "failed", failed).await;
+        rig.media.hold_keeping(false);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(state(&id).await, "failed", "{at} after it was cancelled, it stays failed");
+        assert!(failed(&rig.row(&id).await));
+        assert_eq!(rig.world.uploads().len(), n, "nothing more is uploaded");
+        assert!(rig.sent(&id).is_empty(), "nor sent");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_upload_that_fails_on_the_way_is_tried_again_and_one_refused_fails_until_retried() {
     let home = tempfile::tempdir().unwrap();
     let picked = tempfile::tempdir().unwrap();

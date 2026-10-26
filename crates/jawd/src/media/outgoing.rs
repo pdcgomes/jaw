@@ -81,6 +81,26 @@ pub(super) struct Sending {
     /// Holds copies before they're made, while set, for the tests that look at what comes before.
     #[cfg(test)]
     pub hold: std::sync::atomic::AtomicBool,
+    /// Holds a copy made or uploaded just before jaw.db is told, while set, counting those held,
+    /// for the tests of what may come in between.
+    #[cfg(test)]
+    pub hold_keeping: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub keeping_held: std::sync::atomic::AtomicUsize,
+}
+
+impl Sending {
+    #[cfg(test)]
+    async fn held_before_keeping(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.hold_keeping.load(SeqCst) {
+            self.keeping_held.fetch_add(1, SeqCst);
+            while self.hold_keeping.load(SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            self.keeping_held.fetch_sub(1, SeqCst);
+        }
+    }
 }
 
 /// What a job's pushes name.
@@ -644,6 +664,8 @@ async fn place(inner: &Arc<Inner>, copy: &Copy, plan: &Plan, prepared: Prepared)
         shown,
         at: now_ms(),
     };
+    #[cfg(test)]
+    inner.sending.held_before_keeping().await;
     let applied = inner.store.apply(WriteLane::Live, vec![Change::Outgoing(Step::Prepared(Box::new(step)))]).await;
     drop(claim);
     match applied {
@@ -753,6 +775,8 @@ async fn upload_one(inner: &Arc<Inner>, copy: &Copy) -> Result<(), Failed> {
         raw: raw.encode_to_vec(),
         shown: shown(copy, &raw),
     };
+    #[cfg(test)]
+    inner.sending.held_before_keeping().await;
     // Kept in a synced commit before the message goes: once it has gone, a power cut mustn't lose
     // where its file is, or the file would be uploaded and the message sent again.
     let applied = inner

@@ -327,6 +327,15 @@ impl Media {
         self.inner.sending.wake();
     }
 
+    /// Holds copies of files to send just before jaw.db is told they're made or uploaded, while
+    /// `held`, and says how many are held.
+    #[cfg(test)]
+    pub fn hold_keeping(&self, held: bool) -> usize {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.inner.sending.hold_keeping.store(held, SeqCst);
+        self.inner.sending.keeping_held.load(SeqCst)
+    }
+
     /// What moves on each time a copy of a file to send changes state, for whatever waits for one.
     pub fn copies_changed(&self) -> tokio::sync::watch::Receiver<u64> {
         self.inner.sending.changes()
