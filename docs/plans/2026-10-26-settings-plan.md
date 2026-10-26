@@ -775,10 +775,10 @@ git commit -m "A domain of settings for each frontend, on the wire, as the owner
 ### Task 3: jaw.db keeps the settings (data layer)
 
 **Files:**
-- Modify: `crates/jawd/src/store/schema.rs` (migration 11), `crates/jawd/src/store/migrations.lock`, `crates/jawd/src/store/write.rs` (`Change::Setting`), `crates/jawd/src/store/mod.rs` (`Store::setting`, a test), `crates/jawd/src/store/plans.txt` (re-pinned)
+- Modify: `crates/jawd/src/store/schema.rs` (migration 11), `crates/jawd/src/store/migrations.lock`, `crates/jawd/src/store/write.rs` (`Change::Settings`), `crates/jawd/src/store/mod.rs` (`Store::setting`, a test), `crates/jawd/src/store/plans.txt` (re-pinned)
 
 **Interfaces:**
-- Produces: `Change::Setting { domain: String, key: String, value: String, at: i64 }`, where `value` is the setting's JSON text and `at` milliseconds since the epoch; `Store::setting(&self, domain: &str, key: &str) -> anyhow::Result<Option<String>>`, what jaw.db holds for `key` in `domain` as its JSON.
+- Produces: `Change::Settings { domain: String, values: Vec<(String, String)>, at: i64 }`, a frontend's settings changed together, each as its key and its JSON text, kept all or none in one step, and `at` milliseconds since the epoch; `Store::setting(&self, domain: &str, key: &str) -> anyhow::Result<Option<String>>`, what jaw.db holds for `key` in `domain` as its JSON.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -790,10 +790,9 @@ In `crates/jawd/src/store/mod.rs`'s test module (it has `query(&store, |db| …)
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         assert_eq!(store.setting("jaw", "theme").unwrap(), None, "a fresh jaw.db holds no settings");
-        let keep = |domain: &str, value: &str, at| Change::Setting {
+        let keep = |domain: &str, value: &str, at| Change::Settings {
             domain: domain.into(),
-            key: "theme".into(),
-            value: value.into(),
+            values: vec![("theme".into(), value.into())],
             at,
         };
         let synced = store.storage().synced_commits;
@@ -813,13 +812,25 @@ In `crates/jawd/src/store/mod.rs`'s test module (it has `query(&store, |db| …)
         let refused = store.apply_durable(vec![keep("jaw", "not json", 4)]).await.unwrap();
         assert_eq!(refused.quarantined, 1, "a value that isn't JSON is refused by the table's check");
         assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"gruvbox\""));
+        let both = |messages: &str, at| Change::Settings {
+            domain: "jaw".into(),
+            values: vec![("theme".into(), "\"nord\"".into()), ("messages".into(), messages.into())],
+            at,
+        };
+        let refused = store.apply_durable(vec![both("not json", 5)]).await.unwrap();
+        assert_eq!(refused.quarantined, 1);
+        assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"gruvbox\""), "kept all or none");
+        assert_eq!(store.setting("jaw", "messages").unwrap(), None);
+        store.apply_durable(vec![both("\"irc\"", 6)]).await.unwrap();
+        assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"nord\""));
+        assert_eq!(store.setting("jaw", "messages").unwrap().as_deref(), Some("\"irc\""));
     }
 ```
 
 - [ ] **Step 2: Run it to see it fail**
 
 Run: `cargo test -p jawd a_setting_is_kept_once`
-Expected: FAIL to compile: no variant `Change::Setting`, no method `setting`.
+Expected: FAIL to compile: no variant `Change::Settings`, no method `setting`.
 
 - [ ] **Step 3: Add migration 11**
 
@@ -851,12 +862,12 @@ Expected: FAIL with `migration 11 has no line in migrations.lock: add \`11 schem
 In `crates/jawd/src/store/write.rs`, add to `enum Change`, after `Remember`:
 
 ```rust
-    /// A frontend's setting, in its domain, as its JSON, kept as jaw's own; `at` is when it was
-    /// chosen, which the same value asked again doesn't change.
-    Setting {
+    /// A frontend's settings changed together, in its domain, each as its key and its JSON, kept
+    /// as jaw's own in one step, so they're kept all or none; `at` is when they were chosen, which
+    /// a value already held doesn't change.
+    Settings {
         domain: String,
-        key: String,
-        value: String,
+        values: Vec<(String, String)>,
         at: i64,
     },
 ```
@@ -864,22 +875,26 @@ In `crates/jawd/src/store/write.rs`, add to `enum Change`, after `Remember`:
 In `provenance`, after the `Change::Remember` arm:
 
 ```rust
-        Some(Change::Setting { domain, key, .. }) => ("setting", format!("{domain} {key}"), None),
+        Some(Change::Settings { domain, .. }) => ("settings", domain.clone(), None),
 ```
 
 In `apply`, after the `Change::Remember` arm:
 
 ```rust
-        Change::Setting { domain, key, value, at } => {
-            db.prepare_cached(
+        Change::Settings { domain, values, at } => {
+            let mut keep = db.prepare_cached(
                 "INSERT INTO settings (domain, key, value, at) VALUES (?1, ?2, ?3, ?4)
                 ON CONFLICT (domain, key) DO UPDATE SET value = excluded.value, at = excluded.at
                 WHERE value IS NOT excluded.value",
-            )?
-            .execute(params![domain, key, value, at])?;
+            )?;
+            for (key, value) in values {
+                keep.execute(params![domain, key, value, at])?;
+            }
             Ok(false)
         }
 ```
+
+Each change is applied in a savepoint of its own, so one that fails partway leaves none of its settings kept.
 
 In `crates/jawd/src/store/mod.rs`, after `remembered`:
 
@@ -909,7 +924,7 @@ Expected: all pass, the migrations' tests included (upgrades from every earlier 
 ```bash
 cargo fmt --all
 git add crates/jawd/src/store
-git commit -m "jaw.db keeps each frontend's settings: migration 11, a schema step, adds settings, a STRICT table of jaw's own with a row for each setting chosen in each domain, the domain being the client a frontend's hello gives, its value JSON by its check and when it was chosen; the writer keeps one as an upsert that changes nothing, not even when it was chosen, for the value already held, a value that isn't JSON quarantined, and jawd reads one back by its domain and key, a search of the primary key, both statements' plans pinned"
+git commit -m "jaw.db keeps each frontend's settings: migration 11, a schema step, adds settings, a STRICT table of jaw's own with a row for each setting chosen in each domain, the domain being the client a frontend's hello gives, its value JSON by its check and when it was chosen; the writer keeps those a change carries together, all or none in one step, each an upsert that changes nothing, not even when it was chosen, for the value already held, a value that isn't JSON quarantining the whole change, and jawd reads one back by its domain and key, a search of the primary key, both statements' plans pinned; nothing outside the tests uses the change or the read until jawd's settings module does, so clippy calls them dead code until then"
 ```
 
 ---
@@ -921,7 +936,7 @@ git commit -m "jaw.db keeps each frontend's settings: migration 11, a schema ste
 - Modify: `crates/jawd/src/main.rs`, `crates/jawd/src/state.rs`, `crates/jawd/src/sock.rs`, `crates/jaw-client/src/lib.rs`, `scripts/check-data-audit.py`
 
 **Interfaces:**
-- Consumes: `Change::Setting` and `Store::setting` (Task 3); `jaw_proto::settings::*` and `jaw_proto::themes::*` (Tasks 1, 2 and 2b).
+- Consumes: `Change::Settings` and `Store::setting` (Task 3), which nothing outside the tests used before this task, so Task 3's commit leaves clippy's two dead-code errors for this one to clear; `jaw_proto::settings::*` and `jaw_proto::themes::*` (Tasks 1, 2 and 2b).
 - Produces: `crate::settings::Settings` with `load(store: Store) -> anyhow::Result<Settings>`, `current(&self) -> jaw_proto::settings::Settings` (the terminal's), `subscribe(&self, client: &str) -> Option<watch::Receiver<jaw_proto::settings::Settings>>` (none for a client with no domain), `by_domain(&self) -> BTreeMap<String, serde_json::Map<String, Value>>`, `ignored(&self) -> Vec<Ignored>`, `async set(&self, client: &str, params: Value) -> Result<jaw_proto::settings::Settings, jaw_proto::Error>`; `State::with_settings(Arc<Settings>)` and `State::settings() -> Option<&Settings>`.
 
 - [ ] **Step 1: Write the module's failing tests**
@@ -1178,20 +1193,16 @@ impl Settings {
         let asked = checked(params)?;
         let mut held = self.held.lock().await;
         let at = now_ms();
-        let changes: Vec<Change> = asked
+        let values: Vec<(String, String)> = asked
             .iter()
             .filter(|(key, value)| held.get(key) != Some(value))
-            .map(|(key, value)| Change::Setting {
-                domain: TERMINAL.to_string(),
-                key: key.to_string(),
-                value: value.clone(),
-                at,
-            })
+            .map(|(key, value)| (key.to_string(), value.clone()))
             .collect();
-        if changes.is_empty() {
+        if values.is_empty() {
             return Ok(self.current());
         }
-        match self.store.apply_durable(changes).await {
+        let change = Change::Settings { domain: TERMINAL.to_string(), values, at };
+        match self.store.apply_durable(vec![change]).await {
             Ok(applied) if applied.quarantined == 0 => {}
             Ok(_) => return Err(Error::new(code::INTERNAL, "jawd couldn't keep that setting, so nothing changed")),
             Err(e) => return Err(Error::new(code::INTERNAL, format!("jawd couldn't keep that setting: {e:#}"))),
