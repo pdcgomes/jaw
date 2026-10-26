@@ -91,6 +91,10 @@ fn a_first_runs_backlog_app_state_and_history_all_arrive_whole_at_once() {
     let first = &report(&report_to)["first_run"];
     let receipts = first["catch_up"]["receipts"].as_i64().unwrap();
     assert_eq!(first["catch_up"]["ack"]["n"].as_i64().unwrap(), 100 + receipts, "each of the backlog was acked");
+    assert_eq!(
+        first["catch_up"]["most_waiting"], 1,
+        "the backlog came a message at a time, as jaw-engine hands it over"
+    );
     assert_eq!(first["missing"], 0, "every message of the open chat reached the interface");
     let account = account::Account::new(shape.shape(None), 0).with_app_state();
     let mutations = account.app_state().len();

@@ -240,6 +240,8 @@ async fn serve(plan: Plan, shape: Shape, history: bool, ended: Option<i64>) -> R
         sent: AtomicU64::new(0),
         // A first run's backlog comes through jaw-engine, which waits for each ack.
         in_flight: Arc::new(Semaphore::new(if plan.first_run { 1 } else { plan.in_flight.max(1) as usize })),
+        waiting: Arc::default(),
+        most_waiting: AtomicU64::new(0),
         rng: Mutex::new(Rng(0x5EED_DE30)),
     };
     let exit = plan.exit;
@@ -286,6 +288,9 @@ struct Demo {
     run: i64,
     sent: AtomicU64,
     in_flight: Arc<Semaphore>,
+    /// Messages handed over and not yet acked, and the most at once in a first run's backlog.
+    waiting: Arc<AtomicU64>,
+    most_waiting: AtomicU64,
     rng: Mutex<Rng>,
 }
 
@@ -511,6 +516,7 @@ impl Demo {
             self.account.shape.messages, self.account.shape.recent
         );
         self.sampler.most();
+        self.most_waiting.store(0, Ordering::Relaxed);
         let started = Instant::now();
         let watcher = self.watch().await?;
         let opening = self.keep_opening();
@@ -609,6 +615,7 @@ impl Demo {
                     "receipts": receipts,
                     "acked_seconds": drained.as_secs_f64(),
                     "rate": rate,
+                    "most_waiting": self.most_waiting.load(Ordering::Relaxed),
                     "ack": summary(&acks),
                     "arrival": summary(&arrivals),
                 },
@@ -754,11 +761,14 @@ impl Demo {
         if let Some(id) = expected {
             self.expected.expect(id, Instant::now());
         }
-        let (world, acks) = (self.world.clone(), acks.clone());
+        let waiting = self.waiting.fetch_add(1, Ordering::Relaxed) + 1;
+        self.most_waiting.fetch_max(waiting, Ordering::Relaxed);
+        let (world, acks, waiting) = (self.world.clone(), acks.clone(), self.waiting.clone());
         tokio::spawn(async move {
             if let Some(ack) = world.deliver(event).await {
                 acks.lock().expect("the acks").push(ack);
             }
+            waiting.fetch_sub(1, Ordering::Relaxed);
             drop(place);
         });
     }

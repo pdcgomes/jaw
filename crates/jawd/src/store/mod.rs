@@ -171,25 +171,31 @@ struct Wal {
     /// Whether the writer copies the last few frames itself, so the checkpointer leaves them.
     finishing: AtomicBool,
     /// How often the checkpointer has woken, for tests of an idle jawd, and flushed jaw.db itself,
-    /// and each of the writer's tries to start the WAL again.
+    /// when its passes were refused the checkpoint lock, and each of the writer's tries to start
+    /// the WAL again.
     #[cfg(test)]
     woke: AtomicU64,
     #[cfg(test)]
     flushed: AtomicU64,
     #[cfg(test)]
+    refused: Mutex<Vec<Instant>>,
+    #[cfg(test)]
     restarts: Mutex<Vec<Restart>>,
 }
 
 /// One of the writer's tries to start the WAL again, for tests: when it began and ended, whether it
-/// did, whether the WAL was at the edge, and how many frames it held.
+/// did, whether a reader held it up, whether the WAL was at the edge, how many frames it held, and
+/// how many inbox rows were committed and not yet acked as it began.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct Restart {
     began: Instant,
     ended: Instant,
     restarted: bool,
+    held_up: bool,
     at_edge: bool,
     frames: u64,
+    unacked: usize,
 }
 
 impl Wal {
@@ -207,6 +213,8 @@ impl Wal {
             woke: AtomicU64::new(0),
             #[cfg(test)]
             flushed: AtomicU64::new(0),
+            #[cfg(test)]
+            refused: Mutex::default(),
             #[cfg(test)]
             restarts: Mutex::default(),
         }
@@ -293,8 +301,9 @@ const INDEX_RETRY_MOST: Duration = Duration::from_secs(60);
 /// The WAL's size in frames, of a 4 KiB page each, past which background transactions wait for
 /// the checkpointer; past WAL_HARD they wait until the WAL has started again from its beginning,
 /// and the writer starts it again itself after an inbox group or a live write. Each start costs
-/// live writes a pause of two flushes of the drive, so the WAL starts again as seldom as WAL_LIMIT
-/// allows, and the file stays under it.
+/// three flushes of the drive, two in a pause that inbox rows and live writes wait for and one in
+/// the transaction after, which syncs the WAL's new header, so the WAL starts again as seldom as
+/// WAL_LIMIT allows, and the file stays under it while no reader holds its frames for long.
 const WAL_SOFT: u64 = 12_288;
 const WAL_HARD: u64 = 15_360;
 /// Frames few enough for the writer to copy itself between two transactions.
@@ -1436,14 +1445,18 @@ impl Writer {
     /// its passes never reach the last frame before the next commit, so the WAL would only grow.
     /// The writer copies what the checkpointer's last pass left and waits up to RESTART_READERS
     /// for readers still on the WAL's frames, so its next transaction writes the WAL from its
-    /// beginning: what arrives meanwhile waits about two flushes of the drive, once each WAL_HARD
-    /// frames. While the checkpointer's pass runs it tries again after its next commit, unless the
-    /// WAL is WAL_EDGE frames past WAL_HARD, when it waits for the pass, and behind a reader that
-    /// holds the frames longer, it tries again RESTART_AGAIN later. While background work waits
-    /// for the WAL to start again, it starts it past WAL_SOFT: the checkpointer can't copy the last
-    /// frames while inbox rows and live writes keep coming, and a reader on the WAL keeps
-    /// background work's next transaction from starting it, so the wait would last until they had
-    /// taken the WAL from WAL_SOFT to WAL_HARD, which a first run's took seconds over.
+    /// beginning: what arrives meanwhile waits about two flushes of the drive, and that transaction
+    /// makes a third as it syncs the WAL's new header, once each WAL_HARD frames. While the
+    /// checkpointer's pass runs it tries again after its next commit, unless the WAL is WAL_EDGE
+    /// frames past WAL_HARD, when it waits for the pass, and behind a reader that holds the frames
+    /// longer, it tries again RESTART_AGAIN later. While background work waits for the WAL to start
+    /// again, it starts it past WAL_SOFT: the checkpointer can't copy the last frames while inbox
+    /// rows and live writes keep coming, and a reader on the WAL keeps background work's next
+    /// transaction from starting it, so the wait would last until they had taken the WAL from
+    /// WAL_SOFT to WAL_HARD, which a first run's took seconds over. A try that doesn't start the
+    /// WAL again wakes the checkpointer as it ends: a pass refused the lock while the try held it
+    /// has gone back to sleep, and while background work waits, nothing may commit to wake it
+    /// before its idle timeout.
     fn bound_wal(&mut self) {
         let (began, frames) = (Instant::now(), self.wal.frames.load(Ordering::Relaxed));
         let bound = if self.holding.is_some() { self.wal.soft } else { self.wal.hard };
@@ -1457,8 +1470,10 @@ impl Writer {
             began,
             ended: Instant::now(),
             restarted: matches!(tried, Ok((false, _, _))),
+            held_up: matches!(tried, Ok((true, log, _)) if log >= 0),
             at_edge,
             frames,
+            unacked: self.inbox.len(),
         });
         if let Err(e) = self.db.busy_timeout(self.busy) {
             eprintln!("jawd: can't give the writer its busy timeout back: {e}");
@@ -1467,6 +1482,9 @@ impl Writer {
             eprintln!("jawd: the writer couldn't start the WAL again: {e:#}");
             (true, 0, 0)
         });
+        if again.0 {
+            let _ = self.kick.try_send(());
+        }
         self.restart_after = restart_again(again).map(|wait| Instant::now() + wait);
     }
 
@@ -1503,9 +1521,9 @@ impl Writer {
 
     /// Makes the groups of `changes` in one transaction, all of them for a live one; a background
     /// one stops between groups at BATCH_ROWS, at BATCH_TIME with its commit, or, once an inbox row
-    /// or a live write is waiting, past YIELD_AFTER with it. Each group runs in a savepoint: one
-    /// that fails is rolled back and kept in quarantine with its error, and the rest go on. A
-    /// durable one is refused unless it commits synced. Says how many changes were taken.
+    /// or a live write is waiting, once its work has had YIELD_AFTER. Each group runs in a
+    /// savepoint: one that fails is rolled back and kept in quarantine with its error, and the rest
+    /// go on. A durable one is refused unless it commits synced. Says how many changes were taken.
     fn transaction(
         &mut self,
         changes: &[Change],
@@ -1653,8 +1671,13 @@ fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>, idle: Duration
             let _ = kicks.try_recv();
             let copied = wal.copied.load(Ordering::Relaxed);
             let passed = match wal_checkpoint(&db, "PASSIVE") {
-                // The writer's checkpoint holds the lock, and says how far it got once it's done.
-                Ok((true, _, _)) => break,
+                // The writer's checkpoint holds the lock and says how far it got once it's done; a
+                // restart of its that didn't start the WAL again wakes this thread as it ends.
+                Ok((true, _, _)) => {
+                    #[cfg(test)]
+                    wal.refused.lock().unwrap().push(Instant::now());
+                    break;
+                }
                 Ok((_, log, copied)) => (log, copied),
                 Err(e) => {
                     eprintln!("jawd: a checkpoint failed: {e:#}");
@@ -1687,6 +1710,7 @@ fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>, idle: Duration
 #[cfg(test)]
 mod tests {
     use std::os::fd::AsRawFd;
+    use std::sync::OnceLock;
 
     use tokio::sync::mpsc;
 
@@ -2655,18 +2679,22 @@ mod tests {
     async fn converting(store: &Store, stop: &AtomicBool) -> i64 {
         let mut written = 0;
         while !stop.load(Ordering::Relaxed) {
-            let changes = (0..10)
-                .flat_map(|k| {
-                    let n = written * 10 + k;
-                    let chat = format!("3519100{:05}@s.whatsapp.net", n % 300);
-                    let words = format!("message {n} of a catch-up, with words enough to fill a page or two");
-                    [Change::Message(text(&chat, &format!("c{n}"), n, &words)), Change::Drained(Drained::Inbox(n))]
-                })
-                .collect();
-            store.apply(Lane::Live, changes).await.unwrap();
+            store.apply(Lane::Live, conversion(written * 10, 10)).await.unwrap();
             written += 1;
         }
         written
+    }
+
+    /// A live write of the converter's during a catch-up: `count` messages from the `from`th and
+    /// their inbox rows' drains, after which indexing waits for the catch-up to end.
+    fn conversion(from: i64, count: i64) -> Vec<Change> {
+        (from..from + count)
+            .flat_map(|n| {
+                let chat = format!("3519100{:05}@s.whatsapp.net", n % 300);
+                let words = format!("message {n} of a catch-up, with words enough to fill a page or two");
+                [Change::Message(text(&chat, &format!("c{n}"), n, &words)), Change::Drained(Drained::Inbox(n))]
+            })
+            .collect()
     }
 
     /// Live writes until `until` holds of the store, or for 15 s.
@@ -2703,8 +2731,8 @@ mod tests {
     }
 
     /// The WAL was started again, each time only once it held HARD frames, since each start costs
-    /// live writes two flushes and no background work waited for it, and never held much more than
-    /// HARD frames: one transaction can begin just under it.
+    /// live writes three flushes and no background work waited for it, and never held much more
+    /// than HARD frames: one transaction can begin just under it.
     fn assert_bounded(store: &Store) {
         let (storage, restarted) = (store.storage(), restarted(store));
         assert!(restarted >= 2, "the WAL started again {restarted} times");
@@ -2731,6 +2759,9 @@ mod tests {
         assert_bounded(&store);
         assert_eq!(acked, rows);
         assert!(slowest < Duration::from_secs(2), "an ack of {rows} took {slowest:?}");
+        // Each try comes after its group's acks, which would otherwise wait for it.
+        let unacked: Vec<usize> = store.wal.restarts.lock().unwrap().iter().map(|r| r.unacked).collect();
+        assert!(unacked.iter().all(|&n| n == 0), "the tries began with {unacked:?} rows not yet acked");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2869,6 +2900,103 @@ mod tests {
         assert_eq!(restart_again((true, 30, 30)), Some(RESTART_AGAIN), "a reader kept it from starting again");
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reader_that_lets_go_while_a_restart_waits_for_it_doesnt_keep_the_wal_from_starting_again() {
+        let home = tempfile::tempdir().unwrap();
+        let store = bounded_store(home.path());
+        let (mut n, mut seen) = (0, 0);
+        for _ in 0..20 {
+            // Short of WAL_HARD by less than the write that follows the reader adds.
+            while !(HARD - 64..HARD).contains(&store.storage().wal_frames) {
+                store.apply(Lane::Live, conversion(n, 1)).await.unwrap();
+                n += 1;
+            }
+            let reader =
+                Connection::open_with_flags(home.path().join("jaw.db"), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            reader.execute_batch("BEGIN").unwrap();
+            let _: i64 = reader.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+            let tries = store.wal.restarts.lock().unwrap().len();
+            store.apply(Lane::Live, conversion(n, 500)).await.unwrap();
+            n += 500;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            let letting_go = Instant::now();
+            reader.execute_batch("COMMIT").unwrap();
+            let let_go = Instant::now();
+            drop(reader);
+            let began = Instant::now();
+            while store.wal.restarts.lock().unwrap().len() == tries && began.elapsed() < Duration::from_secs(2) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let Some(tried) = store.wal.restarts.lock().unwrap().get(tries).copied() else { continue };
+            // Only a try that began while the reader held its snapshot, and saw it let go well
+            // within RESTART_READERS, says whether it waited for it.
+            if tried.began < letting_go && let_go < tried.began + RESTART_READERS * 3 / 4 {
+                let into = let_go - tried.began;
+                assert!(tried.restarted, "a reader that let go {into:?} into the try kept the WAL from starting again");
+                seen += 1;
+                if seen == 3 {
+                    break;
+                }
+            }
+        }
+        assert!(seen > 0, "no try began while the reader held its snapshot and saw it let go");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_work_behind_a_reader_that_held_restarts_up_gets_room_once_it_lets_go_with_nothing_committing() {
+        let home = tempfile::tempdir().unwrap();
+        let store = bounded_store(home.path());
+        let history: Vec<Message> =
+            (0..20_000).map(|n| text("351910000001@s.whatsapp.net", &format!("h{n}"), n, "history")).collect();
+        let batch = {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply(Lane::Background, messages(history)).await.unwrap() })
+        };
+        let began = Instant::now();
+        while !store.wal.held.load(Ordering::Relaxed) {
+            assert!(began.elapsed() < Duration::from_secs(20), "the history never waited for the WAL");
+            tokio::time::sleep(Duration::from_micros(200)).await;
+        }
+        // A reader whose snapshot the live writes after it leave behind, as a search's would.
+        let reader = Connection::open_with_flags(home.path().join("jaw.db"), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+        // Live writes, far enough apart for the writer to try to start the WAL again after each,
+        // until more frames wait behind the reader than the writer copies itself, so background
+        // work waits without a commit that would wake the checkpointer; then until the
+        // checkpointer's pass was refused while the last try held the lock waiting for the reader;
+        // then nothing.
+        let (mut write, mut behind) = (0, false);
+        loop {
+            assert!(write < 100, "no try held the checkpointer's pass up behind the reader");
+            let tries = store.wal.restarts.lock().unwrap().len();
+            store.apply(Lane::Live, conversion(write * 10, 10)).await.unwrap();
+            write += 1;
+            tokio::time::sleep(RESTART_READERS + RESTART_AGAIN + Duration::from_millis(20)).await;
+            let refused = store.wal.refused.lock().unwrap().clone();
+            let held_up = store.wal.restarts.lock().unwrap()[tries..]
+                .iter()
+                .any(|t| t.held_up && refused.iter().any(|&at| (t.began..=t.ended).contains(&at)));
+            let waiting = store.wal.waiting() > WAL_NEAR && store.wal.held.load(Ordering::Relaxed);
+            if behind && waiting && held_up {
+                break;
+            }
+            behind = waiting;
+        }
+        reader.execute_batch("COMMIT").unwrap();
+        drop(reader);
+        let let_go = Instant::now();
+        while store.wal.held.load(Ordering::Relaxed) && let_go.elapsed() < IDLE / 5 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            !store.wal.held.load(Ordering::Relaxed),
+            "background work still waited {:?} after the reader let go, as if for the checkpointer's idle timeout",
+            let_go.elapsed()
+        );
+        assert_eq!(batch.await.unwrap().changed, 20_000);
+    }
+
     /// A store whose WAL has room for the checkpointer's passes, each once WAL_EASY frames wait,
     /// while the writer appends.
     fn roomy_store(home: &Path) -> Store {
@@ -2996,6 +3124,48 @@ mod tests {
         }
         assert!(!taken_elsewhere(&path), "another process took jaw.db once the checkpointer had ended");
         drop(beside);
+    }
+
+    /// Each sync of a file whose methods `sync_recorded` stands in for, with its flags.
+    static SYNCS: Mutex<Vec<(usize, c_int)>> = Mutex::new(Vec::new());
+    static SYNC: OnceLock<unsafe extern "C" fn(*mut ffi::sqlite3_file, c_int) -> c_int> = OnceLock::new();
+
+    unsafe extern "C" fn sync_recorded(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
+        SYNCS.lock().unwrap().push((file as usize, flags));
+        // SAFETY: the file's own sync, which this stands in for, on the file it was asked for.
+        unsafe { SYNC.get().expect("the file's own sync")(file, flags) }
+    }
+
+    #[test]
+    fn the_checkpointers_flush_is_a_full_sync_of_jaw_db_itself() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("jaw.db");
+        let _writer = connect(&path, Role::Writer).unwrap();
+        let db = connect(&path, Role::Checkpointer).unwrap();
+        let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+        // SAFETY: as in `flush`.
+        let found = unsafe {
+            ffi::sqlite3_file_control(
+                db.handle(),
+                c"main".as_ptr(),
+                ffi::SQLITE_FCNTL_FILE_POINTER,
+                (&raw mut file).cast(),
+            )
+        };
+        assert_eq!(found, ffi::SQLITE_OK);
+        // SAFETY: the file is open, and its methods are its VFS's, which last as long as the process.
+        let (own, mut recording) = unsafe { ((*file).pMethods, *(*file).pMethods) };
+        SYNC.get_or_init(|| recording.xSync.expect("jaw.db's file syncs"));
+        recording.xSync = Some(sync_recorded);
+        // SAFETY: only this thread uses `db`, and its file has its own methods back before
+        // `recording` goes.
+        unsafe { (*file).pMethods = &raw const recording };
+        let flushed = flush(&db);
+        // SAFETY: as above.
+        unsafe { (*file).pMethods = own };
+        flushed.unwrap();
+        let syncs = std::mem::take(&mut *SYNCS.lock().unwrap());
+        assert_eq!(syncs, [(file as usize, ffi::SQLITE_SYNC_FULL)], "the flush didn't sync jaw.db's own file, FULL");
     }
 
     #[tokio::test(flavor = "multi_thread")]
