@@ -1,6 +1,6 @@
 # jaw for the Mac: design
 
-26 October 2026. A plan; nothing here is built. It follows [jaw's design](2026-10-16-jaw-design.md), whose principles, budgets and rules hold here too, and [the protocol](../../protocol/README.md). The build order is [the Mac plan](2026-10-26-jaw-mac-plan.md); the screens are drawn in the Mac wireframes canvas (`jaw-mac-wireframes.canvas.tsx` in the project's canvases). The owner's questions are at the end, each with a recommendation; until he answers, this design assumes the recommendation.
+26 October 2026. A plan; nothing here is built. It follows [jaw's design](2026-10-16-jaw-design.md), whose principles, budgets and rules hold here too, and [the protocol](../../protocol/README.md). The build order is [the Mac plan](2026-10-26-jaw-mac-plan.md); the screens are drawn in the Mac wireframes canvas (`jaw-mac-wireframes.canvas.tsx` in the project's canvases). The owner answered its fourteen questions on 26 October, and each answer is a decision below, marked "Owner, 26 Oct".
 
 ## What it is
 
@@ -12,15 +12,25 @@ jaw's design lists "a desktop app on the same socket" under Later. This is it.
 
 ## Decisions
 
+The owner's answers are marked "Owner, 26 Oct"; the others are this design's, with their evidence further down.
+
 - **Another interface, on the terminal's architecture.** The app connects to `jaw.sock`, says hello as `jaw-mac`, and watches windows: the chat list, each open chat, the folders, the roster, the library. It keeps nothing of jawd's on disk, only its own preferences and window frames. Its rows are jawd's rows: it never draws a guess, as the terminal's actions don't.
-- **jawd and jaw-engine ship inside the app** (question 1), in `Contents/Helpers`, signed with the app's identity, with the terminal beside them. jawd is registered as the one LaunchAgent with `SMAppService`, under the label `jaw agent` already uses, so jawd runs at login and notifications come with no window open.
-- **A Swift client of the protocol**, not jaw-client through UniFFI (question 2). The evidence is under "The socket client".
+- **jawd and jaw-engine inside the app, as the one LaunchAgent, and the terminal uses it** (Owner, 26 Oct). They ship in `Contents/Helpers` with the terminal beside them, signed with the app's identity, and the app registers jawd with `SMAppService` under the label `jaw agent` already uses. One build of jawd, jaw-engine and jaw speaks one protocol; jawd runs at login, so notifications come with no window open; and `jaw.lock` with the shared label makes two jawds impossible.
+- **A Swift client of the protocol** (Owner, 26 Oct), not jaw-client through UniFFI: each row is decoded once, into the value the view draws; there's no foreign boundary in the app and no Rust build inside Xcode's; and the interface's half (keys, asking again, owed drafts, all in the terminal's `wire.rs`) is Swift either way. "The socket client" has the evidence.
 - **AppKit where lists and text need it, SwiftUI for the rest.** The chat list, the conversation, the library's grid and the message box are AppKit; settings, sheets, the palette, the linking screen, empty states and the viewer's chrome are SwiftUI. The evidence, measured, is under "The UI stack".
-- **macOS 26 and later, Swift 6 language mode, warnings as errors,** as Redlamp. The owner runs 26, and its newest APIs (the view display link, Observation, Liquid Glass) are used without fallbacks.
-- **Not sandboxed, so not in the App Store.** The app reads jaw's folder (previews and files, by the paths jawd sends) and runs jawd and jaw-engine as helpers, which the App Sandbox forbids. It's signed with a Developer ID, hardened, and notarized.
-- **In jaw's repository, under `mac/`** (question 11), so a protocol change and both its clients land in one branch, and the fixtures, `jawd demo` and `make perf` are at hand.
-- **Redlamp's themes copied, not linked** (question 9). `RedlampDesign` is a Tuist framework that depends on Redlamp's engine API and is mostly a photo editor's controls; jaw takes its ten-colour theme families and keeps them in step with a check, as `scripts/sync-protos` keeps whatsmeow's protobufs.
-- **Mac keys, with the terminal's where they don't clash** (question 8): ⌘K opens the palette and Ctrl-K does too; ⌥↑ and ⌥↓ move between chats, as in the terminal; ⌘1 to ⌘9 go to favourites, since ⌥ and a digit type a character on a Mac.
+- **macOS 26 and later, signed with the owner's Developer ID and notarized** (Owner, 26 Oct), as Redlamp: the newest APIs (the view display link, Observation, Liquid Glass) without fallbacks, a stable identity so macOS asks for the microphone once, and an app Gatekeeper opens. Swift 6 language mode, warnings as errors.
+- **Not sandboxed, so not in the App Store.** The app reads jaw's folder (previews and files, by the paths jawd sends) and runs jawd and jaw-engine as helpers, which the App Sandbox forbids. It's hardened as well as signed and notarized.
+- **In jaw's repository, under `mac/`** (Owner, 26 Oct), so a protocol change and both its clients land in one branch, and the fixtures, `jawd demo` and `make perf` are at hand.
+- **One message box per conversation, naming its chat, with the status line across the window** (Owner, 26 Oct). With panes, a box under each chat leaves no doubt where a message goes, and the status line keeps the spike's view of the rest. The spike's full-width box isn't taken.
+- **Two looks, picked in Settings: bubbles and lines** (Owner, 26 Oct). Bubbles, yours on the right, are the default; lines are the terminal's layout, names on the left and yours from a third of the way across; either can be compact. Both ship in Mac-M1: the layout cache and every kind of message are then drawn for both from the start, which costs less than adding a look once media is in. "Two looks" has the detail.
+- **Notifications from the app while it runs, jawd's own once it's quit** (Owner, 26 Oct). With P2 they have Reply, Mark as Read and a click that opens the chat; the app stays open with its window closed, in under 25 MB; nothing is lost when it's quit.
+- **One split layout per interface, each able to open the other's** (Owner, 26 Oct): a 160-column terminal and a 27-inch window want different panes, and opening the other's covers moving between them.
+- **The library opens in a pane, like a chat** (Owner, 26 Oct), so it sits beside the chat it came from, with the keys and the layout panes already have.
+- **Mac keys, with the terminal's where they don't clash** (Owner, 26 Oct): ⌘K opens the palette and Ctrl-K does too; ⌥↑ and ⌥↓ move between chats, as in the terminal; ⌘1 to ⌘9 go to favourites, since ⌥ and a digit type a character on a Mac.
+- **Redlamp's themes copied into jaw, with a check that keeps them in step** (Owner, 26 Oct). `RedlampDesign` is a Tuist framework that depends on Redlamp's engine API and is mostly a photo editor's controls; jaw needs only its ten-colour theme families, and `scripts/sync-themes` keeps the copy diffable, as `scripts/sync-protos` keeps whatsmeow's protobufs.
+- **jaw's Tokyo Night by default, following the system's light and dark** (Owner, 26 Oct): it looks like jaw from the first launch and still respects a light Mac.
+- **MapKit's maps for locations, with a setting to turn them off** (Owner, 26 Oct): a map reads at a glance, but MapKit asks Apple for its tiles.
+- **Homebrew's ffmpeg for sending video, GIFs and audio** (Owner, 26 Oct), as jawd uses today, the app saying when it's missing: it's on the owner's Mac already, and the choice can change before a build goes to anyone else.
 
 ## Principles
 
@@ -50,6 +60,7 @@ jaw's seven principles hold. Six more bind the app:
 
 - The terminal's first frame is 50 ms; an app's launch costs more before its first line runs (dyld, AppKit, the window server, and on the owner's Mac the endpoint security that looks at each launch, 7 to 37 ms for jaw). The rest is the terminal's path: hello, `chats.watch`, a 60-row window and its first frame.
 - The memory budgets are estimates to confirm in Mac-M1 and Mac-M2. The floor is measured: 17.3 MB for an AppKit window with a 10,000-row table and a SwiftUI view drawn off screen ("Measurements").
+- Every budget holds in both looks, bubbles and lines, and the bench measures each.
 - The owner's Mac Studio likely drives a 60 Hz display. The 120 Hz budget is measured as work per frame on any display, and on a ProMotion MacBook before Mac-M5 closes.
 - `make perf-mac` measures every row against `jawd demo`'s million messages, beside the terminal's in the README's "What it costs", with the load average beside each number.
 
@@ -107,7 +118,7 @@ Both are interfaces on the same socket, and everything they share is jawd's:
 
 ### Notifications
 
-- **jawd decides; the app delivers while it runs** (question 4). jawd already decides what notifies and when: bursts gathered, one summary after a catch-up, muted chats and the chat you're reading quiet. With proposal P2, the app claims notifications and jawd sends it each one instead of handing it to `osascript`; the app posts it through `UNUserNotificationCenter`, grouped by chat, with Reply and Mark as Read, and a click opens the chat (jaw's Later, "clicking a notification to open its chat"). When the app quits, jawd notifies by itself again, as today.
+- **jawd decides; the app delivers while it runs** (Owner, 26 Oct). jawd already decides what notifies and when: bursts gathered, one summary after a catch-up, muted chats and the chat you're reading quiet. With proposal P2, the app claims notifications and jawd sends it each one instead of handing it to `osascript`; the app posts it through `UNUserNotificationCenter`, grouped by chat, with Reply and Mark as Read, and a click opens the chat (jaw's Later, "clicking a notification to open its chat"). When the app quits, jawd notifies by itself again, as today.
 - **Cleared when read anywhere:** with P2, jawd says when a chat it notified for has been read, in the terminal, the app or the phone, and the app withdraws its notifications for that chat.
 - **The app keeps running when its window closes,** as Mail and Messages do. With no window it watches nothing and drops its caches, so it holds the claim in under 25 MB and wakes only for a notification.
 - **The Dock badge** is the unread total of chats that aren't muted, from proposal P3 or from `folders.watch`'s All row once jawd serves folders (M6). Until one of them lands, the app shows no badge rather than a count of the chats it happens to hold.
@@ -177,7 +188,7 @@ The prototype has no window, so as not to put one on the owner's screen at a loa
 
 ### The layout cache
 
-- **Per message, version and width,** as the terminal's: the row's height and its text laid out (Core Text frames for each span run, the positions of links and mentions). A message's `v` changes when anything it shows changes, so an edit, a reaction or a sender's new name lays it out again and nothing else does.
+- **Per message, version, width and look,** as the terminal's is per message, version and width: the row's height and its text laid out (Core Text frames for each span run, the positions of links and mentions). A message's `v` changes when anything it shows changes, so an edit, a reaction or a sender's new name lays it out again, as does a change of look or density, and nothing else does.
 - **A picture's size comes from the row,** before any pixel: `media.w` and `media.h` give a photo's shape inside its limits, an album's layout is fixed by how many items it has, and a sticker, a video note and a voice message have fixed sizes.
 - **Resizing a window** lays out the visible messages at the new width as it goes (20 messages, about 1 ms) and the rest when the resize ends.
 - **Bounded:** each pane keeps layouts for the rows its window holds, at most 200, so the cache can't outgrow the windows.
@@ -194,21 +205,29 @@ One window by default, of four columns: the sidebar, the chat list, the conversa
 
 - **The sidebar** (220 points, ⌘B): the folder tree with unread counts (All, Unread, Groups, Communities and Archived, the smart folders, then yours), favourites marked with their ⌘ digit, and the roster below it, online first, with presence. It sits on the system's sidebar glass, tinted by the theme. Until jawd serves folders (M6), it shows All and Archived, as jawd serves them now.
 - **The chat list** (300 points, 260 to 420): a folder's chats, pinned first, then newest. Each 56-point row: the avatar; the name, bold when unread; the time; the newest message's line (who wrote it in a group, `Draft:` and the draft in the accent, "typing…" in green); the unread count, an @ for a mention, the muted and pinned marks, your last message's ticks. A community is one row that opens to its groups, the announcement group first. The list holds its order while the pointer is over it or for 1.5 s after a key moves through it, so nothing moves under the pointer before a click; moves then animate to their places.
-- **The conversation:** a header (avatar, name, who's typing, online or last seen, members for a group; find in chat, info, close for a pane), the messages, a "2 new ↓" pill when new messages come below while you read above, and the box.
-- **The box** (one per pane, question 3): an `NSTextView` growing to eight lines, then scrolling, its placeholder naming the chat it sends to ("to Lisbon Climbing"), as the spike's border does; above it, the message you're replying to or editing, with Esc to drop it. Enter sends, ⇧↩ or ⌥↩ adds a line, `@` completes the group's members from `chat.info`, `:` completes emoji, ⌘O attaches, files dropped or pasted attach, ⌘R records.
+- **The conversation:** a header (avatar, name, who's typing, online or last seen, members for a group; find in chat, info, close for a pane), the messages in the look picked in Settings, bubbles or lines (see "Two looks"), a "2 new ↓" pill when new messages come below while you read above, and the box.
+- **The box** (one per conversation, Owner, 26 Oct): an `NSTextView` growing to eight lines, then scrolling, its placeholder naming the chat it sends to ("to Lisbon Climbing"), as the spike's border does; above it, the message you're replying to or editing, with Esc to drop it. Enter sends, ⇧↩ or ⌥↩ adds a line, `@` completes the group's members from `chat.info`, `:` completes emoji, ⌘O attaches, files dropped or pasted attach, ⌘R records.
 - **The toolbar** (the window's, unified): the sidebar button; jawd's state when it's anything but online ("Catching up 1,204 of 5,000"); the palette as a field that opens it; split, library and new chat.
 - **Folding,** as the terminal folds: below 960 points the sidebar folds away, and below 740 the chat list does too, opening over the conversation when asked (⌘0 or the toolbar), as the terminal's narrow picking does.
 - **Typography:** the system font at 13 points for messages (11 to 17 with ⌘+ and ⌘−), 12-point semibold names, 11-point times and the status line in SF Mono, a nod to the terminal; a setting sets messages in SF Mono too.
 
 ## Messages
 
+### Two looks
+
+- **Bubbles or lines, picked in Settings › Messages and in View › Message Style,** for every chat at once (Owner, 26 Oct). Bubbles are the default. Switching lays out the visible messages in the new look first (about 20, 1 ms), then the rest, and keeps the anchored message where it was on the screen, so nothing jumps.
+- **Bubbles:** theirs on the left, yours on the right, their width at most 72% of the conversation and 520 points. In a group, the sender's name tops each run in their colour (jawd's `colour` index), with their avatar beside the run's last message. The time and your ticks sit at the end of the last line.
+- **Lines, the terminal's layout grown up:** no bubbles; others' messages under their name, which starts each run at the left in their colour; yours from a third of the way across, as the terminal's `layout.rs` indents them; the time at the right edge when the minute or the sender changes, your ticks before it. Day separators and "2 new" are rules across the conversation, as in the terminal.
+- **Compact,** for either look: half the space between messages and between runs, and no avatars in bubbles.
+- **A run** is one sender's messages within 5 minutes, closer together, in both looks.
+- **Every kind has its place in both:** pictures, video and cards keep their sizes, inside the bubble in one look and under the text at its indent in the other, as the terminal puts its pictures; system and call lines are centred in both.
+
 ### Text and what's around it
 
-- **Layout:** theirs on the left, yours on the right, in bubbles (question 5), their width at most 72% of the conversation and 520 points. In a group, the sender's name tops each run in their colour (jawd's `colour` index), with their avatar beside the run's last message. Messages from one sender within 5 minutes form a run, closer together.
 - **Spans** as jawd parses them: bold, italic, strike, `mono` in SF Mono on the surface colour, quotes with a bar, lists with bullets, links in the link colour, mentions marked, and a mention of you on the mention colour.
-- **What's said around the text:** the time and, on yours, the ticks at the end of the last line (pending, sent, delivered, read and played; failed in the error colour, with Retry); Edited; Forwarded, or Forwarded many times; a star; a timer for a disappearing message. A deleted message says "This message was deleted", or "You deleted this message", in italics.
-- **Quotes:** the quoted message's sender in their colour, its line and a small picture if it has one, inside the bubble's top; a click goes to it and flashes it.
-- **Reactions** below the bubble, each emoji with its count, yours outlined; a click toggles yours.
+- **What's said around the text:** the time and, on yours, the ticks (pending, sent, delivered, read and played; failed in the error colour, with Retry), where the look puts them; Edited; Forwarded, or Forwarded many times; a star; a timer for a disappearing message. A deleted message says "This message was deleted", or "You deleted this message", in italics.
+- **Quotes:** the quoted message's sender in their colour, its line and a small picture if it has one, at the top of the bubble, or as an indented line with a bar in lines; a click goes to it and flashes it.
+- **Reactions** under the message, each emoji with its count, yours outlined; a click toggles yours.
 - **Long messages** fold after 40 lines with "Show more", as the terminal's. One to three emoji alone are drawn large, without a bubble.
 - **Day separators** float at the top while their day scrolls past. Opening a chat with unread messages shows "2 new" above the first of them.
 
@@ -230,11 +249,11 @@ All of it from jawd's rows, previews and files, as the terminal draws it. `state
 - **Video messages:** a 192-point circle from the poster, a click plays it in place with sound and a ring that fills as it plays.
 - **Voice messages:** play, the 64-point waveform drawn as bars with the played part in the accent, the length or where it's got, the speed (1×, 1.5×, 2×), and a dot until you've played it. Playing is jawd's (`voice.play`, `voice.pause`, `voice.seek`, `voice.speed`), so the terminal and the app share it; the playhead moves between jawd's ten `playback` pushes a second at the display's rate, and only while playing. A click on the waveform seeks; one ending plays the next one you haven't heard, as the phone does; while one plays, the status line holds a small player, so it can be paused from any chat. Enter plays the selected one, ← and → seek 5 s, x changes the speed, as in the terminal.
 - **Audio files** (not voice) play in the app with AVFoundation from the file, as videos do, since jawd plays Ogg Opus voice messages.
-- **Sending media** (jawd's M4): files dropped, pasted or attached with ⌘O gather above the box as a strip of previews, each with its caption, and SD or HD for the lot; Enter sends them with `send.media`, and jawd plans, transcodes and uploads each, its progress coming as `job` pushes and the message's rows. Photos need nothing more; video, GIFs and audio need ffmpeg in jawd (question 14).
+- **Sending media** (jawd's M4): files dropped, pasted or attached with ⌘O gather above the box as a strip of previews, each with its caption, and SD or HD for the lot; Enter sends them with `send.media`, and jawd plans, transcodes and uploads each, its progress coming as `job` pushes and the message's rows. Photos need nothing more; video, GIFs and audio need ffmpeg in jawd, Homebrew's (Owner, 26 Oct), and the app says when it's missing.
 - **Recording** (⌘R in the box): `voice.record`, the box becomes a strip of jawd's levels with the time; Enter sends (`voice.send`), ⌘R stops it to listen first (`voice.stop`, then `voice.play` with `recording`), Esc throws it away (`voice.cancel`). The microphone is jawd's, which macOS asks about once.
 - **Documents:** the file's icon for its type, its name, type, size and pages, and its first page once it's here (Quick Look's thumbnails); Space or a click looks at it with Quick Look, ⌘↩ opens it in its app, and it drags out to the Finder, by the file once it's here, by `media.save` into the drop's folder before.
 - **Link previews:** the 140-pixel thumbnail jawd keeps, the title, two lines of the description and the host, under the text; a click opens the link in the browser.
-- **Locations:** a 280-by-140-point map with a pin, drawn by MapKit's snapshotter from the coordinates, and the place's name and address; a click opens Maps. A live location says until when and when it last moved, its map drawn again when its row changes. MapKit fetches its map from Apple, so a setting turns maps off, leaving the name, the coordinates and "Open in Maps" (question 13).
+- **Locations:** a 280-by-140-point map with a pin, drawn by MapKit's snapshotter from the coordinates, and the place's name and address; a click opens Maps. A live location says until when and when it last moved, its map drawn again when its row changes. MapKit fetches its map from Apple, so a setting turns maps off, leaving the name, the coordinates and "Open in Maps" (Owner, 26 Oct).
 - **Contact cards:** the name, the numbers, Message (`chat.start` with the number) and Add to Contacts; several contacts open a sheet of them.
 - **Polls:** the question, each option with its bar and count and your choice ticked, how many voted, single or multiple choice; the bars grow to new tallies as rows come. A click votes with `poll.vote` once jawd serves it; until then the poll is shown and says to vote on the phone.
 - **Events:** a card with what jawd says of it: the name, when, where.
@@ -269,18 +288,18 @@ The terminal's planned panes (jaw's Later), as tmux has them:
 - **Moving:** ⌘⌥ and an arrow move to the pane that way, ⌥⌘1 to ⌥⌘9 go straight to a pane, ⌘W closes the focused pane (the last one stays). ⌘⇧ and an arrow swap the focused pane with its neighbour.
 - **Choosing a pane's chat:** pick it in the list (it opens in the focused pane), ⌘↩ in the palette (a new pane), or drag a chat from the list onto a pane: onto an edge to split there, onto the middle to replace it. The edges show as you drag.
 - **The focused pane** has the accent's thin outline and takes the keys; its chat is the one selected in the list.
-- **The layout is a tree of splits with their ratios,** kept by jawd as this interface's saved state (proposal P1), so the app opens where you left off; until P1 lands, the app keeps it in its preferences. Each interface keeps its own layout, and either can open the other's (question 6).
+- **The layout is a tree of splits with their ratios,** kept by jawd as this interface's saved state (proposal P1), so the app opens where you left off. P1 is being built now, on `interface-state`, for the terminal and the Mac alike, as the owner asked on 26 October; until it lands, the app keeps the layout in its preferences. Each interface keeps its own layout, and either can open the other's (Owner, 26 Oct).
 - **Limits:** each pane is a `messages.watch` window, and jawd allows 32 windows a connection, so the app allows 12 panes, leaving room for the chat list, the folders, the roster, the library and the glance.
 - **Each visible pane is read,** so its chat stays quiet in notifications while the window is in front, as jawd's attention already treats every messages window.
 
 ## The status line, focus and the glance
 
-The spike's three ideas, from `spike-composer`:
+The spike's three ideas, from the terminal's experiments (`JAW_EXPERIMENTS`, on main since f499679):
 
-- **The status line** along the bottom of the window, 24 points, in SF Mono: on the left, jawd's state when it's not online and the focused chat and how it is (typing, online or last seen, muted); on the right, what needs you in the other chats, mentions and people by name ("@ Família Gomes", "Ana · 2") and groups counted ("3 more chats · 12 unread"), the count shortening before a name goes, then "⌘J glance". A name is a link to its chat; the count opens the glance. It reads the chat list's and the roster's windows the app already watches and asks jawd for nothing, as the spike's does. Its left half comes in Mac-M1, since jawd's states are said there; its right half comes with focus mode and the glance in Mac-M4.
+- **The status line** along the bottom of the window, 24 points, in SF Mono: on the left, jawd's state when it's not online and how the focused chat is (typing, online or last seen, muted), without its name, which the focused pane's box and header already say, as the owner asked of the terminal's once its box named the chat (3d1da48); on the right, what needs you in the other chats, mentions and people by name ("@ Família Gomes", "Ana · 2") and groups counted ("3 more chats · 12 unread"), the count shortening before a name goes, then "⌘J glance". A name is a link to its chat; the count opens the glance. It reads the chat list's and the roster's windows the app already watches and asks jawd for nothing, as the spike's does. Its left half comes in Mac-M1, since jawd's states are said there; its right half comes with focus mode and the glance in Mac-M4.
 - **Focus mode** (⌘⇧↩, as iTerm2 keeps a pane alone): the sidebar and the chat list fold away for the focused pane, the status line the only glimpse of the rest; ⌥↑ and ⌥↓ still move between chats, and ⌘⇧↩ or ⌘B brings the rest back.
 - **The glance** (⌘J, the status line, or the palette): what the spike calls the quick look, renamed so it can't be taken for macOS's Quick Look of files. A popover over the status line with the latest unread messages of the chats that need you, three of each of at most four, from windows watched only while it's open; ↑ and ↓ move, Enter goes to the chat, ⌘↩ opens it in a new pane, Esc closes; nothing is marked read.
-- **The full-width box** is question 3. This design keeps a box in each conversation, naming its chat, and the status line across the window; a full-width box naming the focused pane's chat is the alternative.
+- **The box stays in each conversation,** naming its chat, with the status line across the window (Owner, 26 Oct); the spike's full-width box isn't taken.
 
 ## Folders and the roster
 
@@ -295,7 +314,7 @@ As jawd serves them in M6 (`folders.watch`, `roster.watch`, `folder.*`), and as 
 
 `library.watch` (jawd's M3), as the terminal's library:
 
-- **It opens in a pane, as a chat does** (question 7): ⌘L for every chat, or from a chat's header for that chat alone, so it can sit beside the chat it came from.
+- **It opens in a pane, as a chat does** (Owner, 26 Oct): ⌘L for every chat, or from a chat's header for that chat alone, so it can sit beside the chat it came from.
 - **A strip of kinds with their counts:** All, Photos, Videos, Voice, Files, Links. All shows a shelf of each; a kind pages through its window by keyset.
 - **Search with tokens,** as the terminal's takes words and `from:`, `in:`, `since:` and `until:`: a person, a chat and dates complete as tokens, and words match captions, file names and link titles.
 - **Photos and videos as a grid** of 256-pixel previews (videos with their length), voice messages as rows with their waveforms, files and links as lists with who sent them, where and when.
@@ -329,11 +348,11 @@ As jawd serves them in M6 (`folders.watch`, `roster.watch`, `folder.*`), and as 
 
 - **Redlamp keeps themes as families,** each a matched dark and light pair, so a choice survives an appearance change. A family is either authored directly or ten colours (`background`, `card`, `foreground`, `muted`, `primary`, `accent`, `border`, `success`, `destructive`, `neutral`, and `primaryRoles`, which keeps a brand colour to the places it's allowed), mapped to tokens. Its catalog is Neutral, Redlamp, and twenty ported from omoi-station: Kanagawa, Tokyo Night, Moonlight, Catppuccin, Rosé Pine, Nord, Everforest, Gruvbox, Dracula, Solarized, One Dark, Monokai, Ocean, Sakura, Copper, Vinyl Noir, Neon Dusk, Burnt Tape, Phantom Frequency and Velvet Static. Around them: a tint from 0 (the theme's tones in grey) to 1, native controls in the theme's accent or the system's, the panels' translucency (solid under Reduce Transparency), and the palette in a theme of its own.
 - **Its tokens are a photo editor's** (labels, tracks, thumbs, wells, an edited dot), so jaw maps the ten colours to a chat's roles itself, below.
-- **Copied, not linked.** `RedlampDesign` has no `Package.swift` (it's a Tuist framework target), depends on `RedlampEngineAPI` through its sliders and `TrackGradients.swift`, and is mostly controls jaw doesn't use. Linking it would mean a package carved out of it in Redlamp's repository and jaw's builds reaching a private one. jaw copies what it uses, about 300 lines: `RGBA` with its HSL parser and mixing, `ThemePalette`, `ThemeFamily`, `PrimaryRoles` and the catalog's data, in the same slot order. `scripts/sync-themes` compares jaw's copy with `ThemeCatalog.swift` in `~/src/darkroom` and says what differs, as `scripts/sync-protos` does for whatsmeow. Redlamp's files are under the MPL 2.0; the copied ones keep their notice, or the owner, who holds both, relicenses them for jaw.
+- **Copied, not linked** (Owner, 26 Oct). `RedlampDesign` has no `Package.swift` (it's a Tuist framework target), depends on `RedlampEngineAPI` through its sliders and `TrackGradients.swift`, and is mostly controls jaw doesn't use. Linking it would mean a package carved out of it in Redlamp's repository and jaw's builds reaching a private one. jaw copies what it uses, about 300 lines: `RGBA` with its HSL parser and mixing, `ThemePalette`, `ThemeFamily`, `PrimaryRoles` and the catalog's data, in the same slot order. `scripts/sync-themes` compares jaw's copy with `ThemeCatalog.swift` in `~/src/darkroom` and says what differs, as `scripts/sync-protos` does for whatsmeow. Redlamp's files are under the MPL 2.0; the copied ones keep their notice, or the owner, who holds both, relicenses them for jaw.
 
 ### jaw's own theme
 
-- **jaw, first in the list and the default** (question 10): ooze's Tokyo Night, the terminal's palette, authored directly, since it has more than ten colours: the ground `#1a1b26`, the surface `#24283b`, the selection `#283457`, text `#c0caf5` and `#a9b1d6`, the quieter `#737aa2` and `#565f89`, borders `#3b4261`, and its eight accents, which are also the eight group senders' colours. Its light half is Tokyo Night Day, Tokyo Night's own light palette, taken from its source when the family is added. Redlamp's Tokyo Night stays beside it as it is, a lighter take.
+- **jaw, first in the list and the default, following the system's light and dark** (Owner, 26 Oct): ooze's Tokyo Night, the terminal's palette, authored directly, since it has more than ten colours: the ground `#1a1b26`, the surface `#24283b`, the selection `#283457`, text `#c0caf5` and `#a9b1d6`, the quieter `#737aa2` and `#565f89`, borders `#3b4261`, and its eight accents, which are also the eight group senders' colours. Its light half is Tokyo Night Day, Tokyo Night's own light palette, taken from its source when the family is added. Redlamp's Tokyo Night stays beside it as it is, a lighter take.
 
 ### The roles
 
@@ -425,7 +444,7 @@ Proposals for jawd's builders. Each is a jawd change; those on the data layer's 
 
 | | Proposal | In jawd | Audited | For |
 | --- | --- | --- | --- | --- |
-| P1 | **An interface's saved state.** `ui.get` (`key`) answers `value`; `ui.set` (`key`, `value`) keeps a JSON object of at most 64 KB for the connection's `client` name and that key, durably before it answers, as jaw's own class (never dropped or rebuilt, backed up daily with folders, drafts and frecency). | a small table, a schema-step migration, two methods | yes: SQL, a migration | split panes and the window's layout reopening where you left them (Mac-M4); the terminal's panes later |
+| P1 | **An interface's saved state.** `ui.get` (`key`) answers `value`; `ui.set` (`key`, `value`) keeps a JSON object of at most 64 KB for the connection's `client` name and that key, durably before it answers, as jaw's own class (never dropped or rebuilt, backed up daily with folders, drafts and frecency). | a small table, a schema-step migration, two methods | yes: SQL, a migration | split panes and the window's layout reopening where you left them, in the terminal and the Mac alike. Being built now, on `interface-state`, as the owner asked on 26 October; the app uses it from Mac-M4 |
 | P2 | **Notifications claimed by an interface.** `notifications.claim` makes jawd send its `notification` pushes (`chat`, `message`, `title`, `subtitle`, `body`, `unread`, `summary`) to the last connection that claimed them instead of Notification Center, and `notification.clear` (`chat`) when a chat it notified for is read anywhere; with no connection claiming, jawd notifies by itself again. | `notify` and `sock.rs`: a notifier that is a connection | yes, by the paths: `sock.rs` is on them, though it writes nothing | Reply, Mark as Read and a click to open the chat (Mac-M5) |
 | P3 | **The chat list's totals.** `chats.watch` results and pushes carry the folder's `unread` and `mentions`, each chat counted once, derived as `folders.watch`'s rows will be; or `folders.watch` served for the built-in folders ahead of M6. | the feed and the store: a derived total, kept by triggers or counted in the transaction that changes it | yes | the Dock badge and the status line's count (Mac-M1, shown only once served) |
 | P4 | **Animated stickers known.** `media.animated` on stickers, from the message's own flag. | the converter and the store | yes | animated stickers drawn as such before their file is here (Mac-M2) |
@@ -458,7 +477,7 @@ scripts/sync-themes         jaw's copy of Redlamp's catalog against darkroom's
 - **The protocol:** every fixture decodes, and every request JawKit writes equals its fixture.
 - **Window models:** jaw-client's tests, ported: a reference model under shuffled and repeated updates; anchors; the hold; what arrived since a move.
 - **Live, on `jawd demo`** in a temporary folder, never the owner's: watching, paging at depth, sending with keys, a flood of 2,000 a second, jawd killed mid-stream and the windows checked against a fresh watch.
-- **Screens:** the harness draws every state from fixtures (each message kind, each media state, each empty and failing state, the palette's modes, panes) to images at fixed sizes, in jaw's theme light and dark and two of Redlamp's, compared with references, as `jaw snapshot --demo` pins the terminal's frames.
+- **Screens:** the harness draws every state from fixtures (each message kind, each media state, each empty and failing state, the palette's modes, panes) to images at fixed sizes, in both looks, in jaw's theme light and dark and two of Redlamp's, compared with references, as `jaw snapshot --demo` pins the terminal's frames.
 - **The bench:** `jaw-mac bench` times launch, opens, keys in a flood, scrolling with photos, memory and idle wake-ups against `jawd demo`, as `jaw bench` does, and `make perf-mac` writes its table.
 - **CI:** macOS runners on main and by hand, as jaw's design keeps them, since macOS minutes count ten times.
 
@@ -468,30 +487,32 @@ The order and each milestone's steps, done-when and budgets are in [the Mac plan
 
 | | | Needs from jawd |
 | --- | --- | --- |
-| Mac-M1 | **Text, every day:** the client, the window, the chat list, the conversation as text, the box, the message actions jawd serves, chats in the palette | nothing new |
+| Mac-M1 | **Text, every day:** the client, the window, the chat list, the conversation as text in both looks, the box, the message actions jawd serves, chats in the palette | nothing new |
 | Mac-M2 | **Every inline kind:** photos, albums, stickers, GIFs, videos, video messages, voice, documents, links, locations, contacts, polls; the viewer; the library | jawd's M3 media in, M2's link previews, M5 voice |
 | Mac-M3 | **The palette, whole:** every kind and action, its modes, search in a chat, sending media and voice | jawd's M4 media out, M5 recording |
-| Mac-M4 | **Split panels:** panes, focus mode, the glance, folders and the roster | jawd's M6 folders, P1 |
+| Mac-M4 | **Split panels:** panes, focus mode, the glance, folders and the roster | jawd's M6 folders, P1 (being built) |
 | Mac-M5 | **Polish, and it's jaw:** Redlamp's themes, the animations, the Mimic, linking, notifications, accessibility, a signed build | P2, P3, P5 |
 
-## Open questions
+## The owner's answers
 
-Each with the options and the recommendation first; the coordinator puts them to the owner. Those marked *before Mac-M1* decide what's built first.
+The fourteen questions this design asked, answered on 26 October; each is a decision above, with its reason, and the numbers are the canvas's.
 
-1. **Who runs jawd on a Mac with the app** *(before Mac-M1)*: A, the app's own jawd and jaw-engine, as the one LaunchAgent, the terminal using it; B, the terminal's `make install` jawd as today, the app connecting to whatever runs; C, each starting a jawd when nothing answers, with no agent.
-2. **The socket client** *(before Mac-M1)*: A, Swift (JawKit); B, jaw-client through UniFFI.
-3. **The message box** *(before Mac-M1)*: A, one per conversation naming its chat, with the status line across the window; B, one full-width box naming the focused pane's chat, as the spike's; C, full width while there's one pane, one per pane once split.
-4. **Notifications**: A, the app takes them over while it runs (P2) and stays running with its window closed, jawd's own when it's quit; B, always jawd's, as today; C, the app also stays in the menu bar so they're always the app's.
-5. **How messages look** *(before Mac-M1)*: A, bubbles, yours on the right, with a compact setting; B, flat lines as the terminal draws them, names on the left; C, both, picked in Settings, bubbles first.
-6. **The split panes' layout**: A, each interface keeps its own, and either can open the other's; B, one layout shared by the terminal and the app.
-7. **Where the library opens**: A, in a pane, like a chat; B, in a window of its own; C, over the conversation, as the terminal's does.
-8. **Keys**: A, the Mac's (⌘K, ⌘1 to ⌘9), with the terminal's where they don't clash; B, the terminal's exactly, Ctrl and Alt included.
-9. **Redlamp's themes**: A, copied into jaw with a check that keeps them in step; B, a package carved out of RedlampDesign that both apps use.
-10. **The default theme**: A, jaw's own Tokyo Night, following the system's light and dark; B, Redlamp's Neutral; C, jaw's, always dark.
-11. **Where the app's code lives** *(before Mac-M1)*: A, jaw's repository, under `mac/`; B, a repository of its own.
-12. **Which macOS, and how it's signed** *(before Mac-M1)*: A, macOS 26 and later, signed with your Developer ID and notarized, as Redlamp; B, macOS 15 and later, the same signing; C, macOS 26, signed locally, ad hoc (macOS then asks again for the microphone after each build).
-13. **Maps for locations**: A, MapKit's maps, with a setting to turn them off; B, off by default, the coordinates and "Open in Maps"; C, never.
-14. **Sending video, GIFs and audio needs ffmpeg in jawd**: A, Homebrew's ffmpeg, as jawd uses today, the app saying when it's missing; B, a small ffmpeg built into the app (about 20 MB more); C, jawd transcoding with AVFoundation on the Mac, later.
+1. **Who runs jawd:** the app's own jawd and jaw-engine, as the one LaunchAgent; the terminal uses it.
+2. **The socket client:** Swift.
+3. **The message box:** one per conversation, naming its chat, with the status line across the window.
+4. **Notifications:** the app's while it runs (P2), staying open with its window closed; jawd's own once it's quit.
+5. **How messages look:** both, bubbles (the default, yours on the right, with a compact setting) and lines like the terminal's, picked in Settings. It differs from the recommendation, which was bubbles alone with a compact setting; both ship in Mac-M1.
+6. **The split layout:** one per interface, each able to open the other's.
+7. **The library:** in a pane, like a chat.
+8. **Keys:** the Mac's, with the terminal's where they don't clash.
+9. **Redlamp's themes:** copied into jaw, with a check that keeps them in step.
+10. **The default theme:** jaw's Tokyo Night, following the system's light and dark.
+11. **The code:** jaw's repository, under `mac/`.
+12. **macOS and signing:** macOS 26 and later, the owner's Developer ID, notarized.
+13. **Maps:** MapKit's, with a setting to turn them off.
+14. **ffmpeg:** Homebrew's, as jawd uses today.
+
+He also asked for P1, an interface's saved state, to be built now, for the terminal's panes and the Mac's alike; a builder is on it, on `interface-state`.
 
 ## Later
 
@@ -507,6 +528,7 @@ Each with the options and the recommendation first; the coordinator puts them to
 - **The protocol is a draft;** two clients now follow it. The fixtures, P6's schema and the live suite catch a change before it ships.
 - **A terminal built from main beside an app built from a release** can speak different protocols: one bundle avoids it, and error 6 says it plainly.
 - **SwiftUI inside AppKit** has costs at the seams; it's kept out of every list's cells.
+- **Two looks double the screens to keep right:** the harness draws every state in both, and the bench measures both.
 - **120 Hz isn't the owner's display;** the budget is held as work per frame and checked on a ProMotion MacBook.
 - **WhatsApp's terms** don't allow unofficial clients, as for jaw.
 
