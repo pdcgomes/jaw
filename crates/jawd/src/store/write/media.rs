@@ -232,14 +232,13 @@ const SETTLED: &str = "UPDATE media SET wanted = NULL, asked = 0, state = ?4, pr
 const ASKED_PHONE: &str = "UPDATE media SET wanted = NULL, asked = 0, state = 'waiting_for_phone', retried_at = ?4,
         progress = NULL, error = NULL
     WHERE message = ?1 AND variant = ?2 AND wanted IS ?3";
-const UPLOADED: &str =
-    "UPDATE media SET direct_path = ?2, state = 'remote', error = NULL, wanted = coalesce(wanted, ?3),
-        asked = 1
+const UPLOADED: &str = "UPDATE media SET direct_path = ?2, state = 'remote', error = NULL,
+        wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 1
     WHERE message = ?1 AND variant = 'sd'
         AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.sha256 = media.sha256 AND f.path IS NOT NULL)";
 const NOT_UPLOADED: &str = "UPDATE media SET state = ?2, error = ?3
     WHERE message = ?1 AND variant = 'sd' AND state = 'waiting_for_phone'";
-const WANT: &str = "UPDATE media SET wanted = iif(wanted IS NULL OR ?4 > asked, ?3, wanted), asked = max(asked, ?4),
+const WANT: &str = "UPDATE media SET wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = max(asked, ?4),
         error = iif(?4, NULL, error), cancelled = iif(?4, 0, cancelled)
     WHERE message = ?1 AND variant = ?2 AND (wanted IS NULL OR ?4 > asked)";
 const CANCEL: &str = "UPDATE media SET wanted = NULL, asked = 0, progress = NULL, cancelled = 1,
@@ -260,7 +259,8 @@ const LEFT_DOWNLOADING: &str =
 const NOT_DOWNLOADING: &str =
     "UPDATE media SET state = 'remote', progress = NULL WHERE message = ?1 AND variant = ?2 AND state = 'downloading'";
 const LEFT_WAITING: &str = "SELECT message, variant FROM media WHERE state = 'waiting_for_phone' LIMIT 1000";
-const WANTED_AGAIN: &str = "UPDATE media SET state = 'remote', wanted = coalesce(wanted, ?3), asked = 1
+const WANTED_AGAIN: &str =
+    "UPDATE media SET state = 'remote', wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 1
     WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone'";
 const REVOKED: &str = "DELETE FROM media WHERE message = ?1";
 const FOLD: &str = "INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256,
@@ -356,7 +356,9 @@ pub(super) fn fold(db: &Connection, kept: i64, gone: i64) -> Result<()> {
 
 pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result<bool> {
     match step {
-        Step::Downloading { message, variant } => one(db, stamps, *message, DOWNLOADING, params![message, variant]),
+        Step::Downloading { message, variant } => {
+            one(db, stamps, *message, db.prepare_cached(DOWNLOADING)?, params![message, variant])
+        }
         Step::Progress { sha256, progress } => {
             let moved: Vec<i64> = db
                 .prepare_cached(PROGRESS)?
@@ -367,11 +369,13 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
             }
             Ok(!moved.is_empty())
         }
-        Step::Later { message, variant, error } => one(db, stamps, *message, LATER, params![message, variant, error]),
+        Step::Later { message, variant, error } => {
+            one(db, stamps, *message, db.prepare_cached(LATER)?, params![message, variant, error])
+        }
         Step::PhoneSilent { message, variant, before } => {
             let why = "your phone didn't answer when jaw asked it to send this file again; it needs to be online \
                 and have the file, and jaw asks again when you open it";
-            one(db, stamps, *message, PHONE_SILENT, params![message, variant, before, why])
+            one(db, stamps, *message, db.prepare_cached(PHONE_SILENT)?, params![message, variant, before, why])
         }
         Step::Placed { sha256, path, bytes, at } => {
             let placed = db.prepare_cached(PLACED)?.execute(params![sha256, path, *bytes as i64, at])? > 0;
@@ -396,36 +400,38 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
             Ok(made)
         }
         Step::Settled { message, variant, wanted, state, error } => {
-            one(db, stamps, *message, SETTLED, params![message, variant, wanted, state, error])
+            one(db, stamps, *message, db.prepare_cached(SETTLED)?, params![message, variant, wanted, state, error])
         }
         Step::AskedPhone { message, variant, wanted, at } => {
-            one(db, stamps, *message, ASKED_PHONE, params![message, variant, wanted, at])
+            one(db, stamps, *message, db.prepare_cached(ASKED_PHONE)?, params![message, variant, wanted, at])
         }
         Step::Answered { chat, id, answer, at } => {
             let Some((_, n)) = located(db, stamps, &chat_jid(db, chat)?, id)? else { return Ok(false) };
             match answer {
-                Answer::Uploaded(path) => one(db, stamps, n, UPLOADED, params![n, path, at]),
+                Answer::Uploaded(path) => one(db, stamps, n, db.prepare_cached(UPLOADED)?, params![n, path, at]),
                 Answer::NotFound => {
                     let why = "your phone no longer has this file, so it can't send it again";
-                    one(db, stamps, n, NOT_UPLOADED, params![n, "gone", why])
+                    one(db, stamps, n, db.prepare_cached(NOT_UPLOADED)?, params![n, "gone", why])
                 }
-                Answer::Failed(why) => one(db, stamps, n, NOT_UPLOADED, params![n, "expired", why]),
+                Answer::Failed(why) => one(db, stamps, n, db.prepare_cached(NOT_UPLOADED)?, params![n, "expired", why]),
             }
         }
         Step::Want { message, variant, at, asked } => {
-            one(db, stamps, *message, WANT, params![message, variant, at, asked])
+            one(db, stamps, *message, db.prepare_cached(WANT)?, params![message, variant, at, asked])
         }
-        Step::Cancel { message, variant } => one(db, stamps, *message, CANCEL, params![message, variant]),
+        Step::Cancel { message, variant } => {
+            one(db, stamps, *message, db.prepare_cached(CANCEL)?, params![message, variant])
+        }
         Step::Used { sha256, at } => {
             db.prepare_cached(USED)?.execute(params![sha256, at])?;
             Ok(false)
         }
         Step::Forget { sha256, made, path } => {
-            let sql = match made {
-                Made::Previews => FORGET_PREVIEWS,
-                Made::Thumbnail => FORGET_THUMBNAIL,
+            let mut forget = match made {
+                Made::Previews => db.prepare_cached(FORGET_PREVIEWS)?,
+                Made::Thumbnail => db.prepare_cached(FORGET_THUMBNAIL)?,
             };
-            let forgot = db.prepare_cached(sql)?.execute(params![sha256, path])? > 0;
+            let forgot = forget.execute(params![sha256, path])? > 0;
             if forgot {
                 shown_by(db, stamps, sha256)?;
             }
@@ -459,23 +465,29 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
             for (n, variant) in left {
-                changed |= one(db, stamps, n, NOT_DOWNLOADING, params![n, variant])?;
+                changed |= one(db, stamps, n, db.prepare_cached(NOT_DOWNLOADING)?, params![n, variant])?;
             }
             let waiting: Vec<(i64, String)> = db
                 .prepare_cached(LEFT_WAITING)?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
             for (n, variant) in waiting {
-                changed |= one(db, stamps, n, WANTED_AGAIN, params![n, variant, at])?;
+                changed |= one(db, stamps, n, db.prepare_cached(WANTED_AGAIN)?, params![n, variant, at])?;
             }
             Ok(changed)
         }
     }
 }
 
-/// Runs `sql` on one copy of message `n`, giving the message a new version if it changed anything.
-fn one(db: &Connection, stamps: &mut Stamps, n: i64, sql: &str, params: impl rusqlite::Params) -> Result<bool> {
-    let changed = db.prepare_cached(sql)?.execute(params)? > 0;
+/// Runs `statement` on one copy of message `n`, giving the message a new version if it changed anything.
+fn one(
+    db: &Connection,
+    stamps: &mut Stamps,
+    n: i64,
+    mut statement: rusqlite::CachedStatement<'_>,
+    params: impl rusqlite::Params,
+) -> Result<bool> {
+    let changed = statement.execute(params)? > 0;
     if changed {
         shown_n(db, stamps, n)?;
     }

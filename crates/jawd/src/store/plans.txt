@@ -2365,7 +2365,7 @@ UPDATE media SET wanted = NULL, asked = 0, state = 'waiting_for_phone', retried_
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
-UPDATE media SET direct_path = ?2, state = 'remote', error = NULL, wanted = coalesce(wanted, ?3), asked = 1 WHERE message = ?1 AND variant = 'sd' AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.sha256 = media.sha256 AND f.path IS NOT NULL)
+UPDATE media SET direct_path = ?2, state = 'remote', error = NULL, wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 1 WHERE message = ?1 AND variant = 'sd' AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.sha256 = media.sha256 AND f.path IS NOT NULL)
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
     CORRELATED SCALAR SUBQUERY 1
       SEARCH f USING PRIMARY KEY (sha256=?)
@@ -2375,7 +2375,7 @@ UPDATE media SET state = ?2, error = ?3 WHERE message = ?1 AND variant = 'sd' AN
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
-UPDATE media SET wanted = iif(wanted IS NULL OR ?4 > asked, ?3, wanted), asked = max(asked, ?4), error = iif(?4, NULL, error), cancelled = iif(?4, 0, cancelled) WHERE message = ?1 AND variant = ?2 AND (wanted IS NULL OR ?4 > asked)
+UPDATE media SET wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = max(asked, ?4), error = iif(?4, NULL, error), cancelled = iif(?4, 0, cancelled) WHERE message = ?1 AND variant = ?2 AND (wanted IS NULL OR ?4 > asked)
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
@@ -2434,7 +2434,7 @@ SELECT message, variant FROM media WHERE state = 'waiting_for_phone' LIMIT 1000
     SCAN media USING COVERING INDEX media_waiting
 
 -- src/store/write/media.rs
-UPDATE media SET state = 'remote', wanted = coalesce(wanted, ?3), asked = 1 WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone'
+UPDATE media SET state = 'remote', wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 1 WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone'
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs

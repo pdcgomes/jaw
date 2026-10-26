@@ -822,12 +822,31 @@ async fn a_job_settling_never_drops_a_want_that_came_after_it() {
     };
     let (n, taken, _) = read(&store).await;
     let taken = taken.unwrap();
-    // An interface asks while the job that took it runs.
-    let asked = Step::Want { message: n, variant: "sd", at: taken + 10, asked: true };
+    // An interface asks while the job that took it runs, within the same millisecond.
+    let asked = Step::Want { message: n, variant: "sd", at: taken, asked: true };
     store.apply(Lane::Live, vec![Change::Media(asked)]).await.unwrap();
     let settled = Step::Settled { message: n, variant: "sd", wanted: taken, state: "remote", error: None };
     store.apply(Lane::Live, vec![Change::Media(settled)]).await.unwrap();
-    assert_eq!(read(&store).await, (n, Some(taken + 10), true), "still wanted, as asked");
+    let (_, wanted, asked) = read(&store).await;
+    assert_eq!((wanted, asked), (Some(taken + 1), true), "still wanted, as asked");
+    let done = Step::Settled { message: n, variant: "sd", wanted: taken + 1, state: "remote", error: None };
+    store.apply(Lane::Live, vec![Change::Media(done)]).await.unwrap();
+    assert_eq!(read(&store).await, (n, None, false), "the job that took the asked want settles it");
+
+    // The phone's answer comes while a job that took the copy runs, within the same millisecond.
+    let shown = Step::Want { message: n, variant: "sd", at: taken + 5, asked: false };
+    store.apply(Lane::Live, vec![Change::Media(shown)]).await.unwrap();
+    let uploaded = Step::Answered {
+        chat: ANA.into(),
+        id: "3EB0RACE".into(),
+        answer: crate::store::media::Answer::Uploaded("/v/t62.7118-24/again.enc".into()),
+        at: taken + 5,
+    };
+    store.apply(Lane::Live, vec![Change::Media(uploaded)]).await.unwrap();
+    let settled = Step::Settled { message: n, variant: "sd", wanted: taken + 5, state: "remote", error: None };
+    store.apply(Lane::Live, vec![Change::Media(settled)]).await.unwrap();
+    let (_, wanted, asked) = read(&store).await;
+    assert_eq!((wanted, asked), (Some(taken + 6), true), "still wanted, to be downloaded from where the phone put it");
 }
 
 #[tokio::test(flavor = "multi_thread")]
