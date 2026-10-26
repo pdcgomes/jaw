@@ -20,7 +20,7 @@ public struct SettingsView: View {
                 .pickerStyle(.inline)
                 Picker("Theme", selection: $preferences.theme) {
                     ForEach(Catalog.families) { family in
-                        Text(family.name == "jaw" ? "jaw (Tokyo Night)" : family.name).tag(family.id)
+                        Text(family.name == "jaw" ? "Jaw (Tokyo Night)" : family.name).tag(family.id)
                     }
                 }
                 Text("Redlamp's themes come in a later version.").font(.footnote).foregroundStyle(.secondary)

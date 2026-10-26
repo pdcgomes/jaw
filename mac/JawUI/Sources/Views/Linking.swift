@@ -44,7 +44,7 @@ public struct LinkingView: View {
                     code
                     VStack(alignment: .leading, spacing: 12) {
                         MimicImage(look: .awake, scale: 3)
-                        Text("Link jaw to WhatsApp").font(.system(size: 17, weight: .semibold))
+                        Text("Link Jaw to WhatsApp").font(.system(size: 17, weight: .semibold))
                         Text(instructions).foregroundStyle(colour(roles.secondary)).fixedSize(horizontal: false, vertical: true)
                         if case let .qr(_, expires) = step {
                             let left = max(0, Int((Double(expires) / 1000 - now.timeIntervalSince1970).rounded()))
@@ -63,7 +63,7 @@ public struct LinkingView: View {
                     .frame(maxWidth: 340, alignment: .leading)
                 }
             }
-            Text("jaw isn't affiliated with WhatsApp or Meta.").font(.system(size: 11)).foregroundStyle(colour(roles.tertiary))
+            Text("Jaw isn't affiliated with WhatsApp or Meta.").font(.system(size: 11)).foregroundStyle(colour(roles.tertiary))
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -85,7 +85,7 @@ public struct LinkingView: View {
             if case let .code(code) = step {
                 return "On the phone: WhatsApp › Settings › Linked devices › Link a device › Link with phone number instead, then type \(code)."
             }
-            return "Your number, with its country code, and jaw shows a code to type on the phone."
+            return "Your number, with its country code, and Jaw shows a code to type on the phone."
         }
         return "On the phone: WhatsApp › Settings › Linked devices › Link a device, then point it at this code."
     }

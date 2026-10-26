@@ -61,7 +61,7 @@ final class Agent {
         if launch.demo { return startDemo() }
         // jawd at login is registered only when the owner asks, with jaw › jawd at Login…: doing it
         // by itself on his Mac would replace his jawd with a build in progress.
-        return "nothing answers on \(launch.socket): jaw › jawd at Login… starts jaw's own, jaw agent install the terminal's, and --demo a made-up account"
+        return "nothing answers on \(launch.socket): Jaw › jawd at Login… starts Jaw's own, jaw agent install the terminal's, and --demo a made-up account"
     }
 
     /// `jawd --engine demo` on the demo folder: a made-up account, with no WhatsApp behind it.

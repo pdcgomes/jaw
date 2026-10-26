@@ -192,7 +192,9 @@ final class AppModel {
             say("no chat started: \(why)", warn: true)
         case let .status(status):
             window?.showStatus(status)
-        case .windowFailed, .push, .chats:
+        case let .windowFailed(_, why):
+            say("a window couldn't be watched: \(why)", warn: true)
+        case .push, .chats:
             break
         }
     }
@@ -232,10 +234,11 @@ final class AppModel {
             return ("catching up \(Format.num(done)) of \(Format.num(total))", false)
         case .phoneOffline: return ("phone offline: photos and older history wait for it", true)
         case .offline: return ("offline: what you send waits until it's back", true)
-        case .updateNeeded: return ("update needed: WhatsApp wants a newer jaw · reading still works", true)
+        case .updateNeeded: return ("update needed: WhatsApp wants a newer Jaw · reading still works", true)
         case .banned: return ("temporarily banned until \(connection.until.map { Format.until($0) } ?? "later")", true)
         case .engineRestarting: return ("reconnecting: the engine restarted", true)
         case .loggedOut: return ("logged out", true)
+        case .other: return ("connection: \(connection.reason ?? "a state this Jaw doesn't know")", true)
         }
     }
 
@@ -510,7 +513,7 @@ final class AppModel {
         all.append(PaletteAction("Settings", "appearance and messages", key: "⌘,") { w?.showSettings() })
         all.append(PaletteAction("jawd's status", "as jaw status prints it") { [weak self] in self?.jawd.status() })
         all.append(PaletteAction("The keys", "every command with its key", key: "⌘/") { w?.showKeys() })
-        all.append(PaletteAction("Quit", "jaw", key: "⌘Q") { NSApp.terminate(nil) })
+        all.append(PaletteAction("Quit", "Jaw", key: "⌘Q") { NSApp.terminate(nil) })
         return all
     }
 

@@ -87,7 +87,7 @@ func appInfo(name: String, extra: [String: Plist.Value] = [:]) -> InfoPlist {
         "LSApplicationCategoryType": "public.app-category.social-networking",
         "NSPrincipalClass": "NSApplication",
         "NSHighResolutionCapable": true,
-        "NSHumanReadableCopyright": "jaw isn't affiliated with WhatsApp or Meta.",
+        "NSHumanReadableCopyright": "Jaw isn't affiliated with WhatsApp or Meta.",
     ].merging(extra) { $1 })
 }
 
@@ -107,10 +107,10 @@ let project = Project(
             name: "jaw",
             destinations: [.mac],
             product: .app,
-            productName: "jaw",
+            productName: "Jaw",
             bundleId: prefix,
             deploymentTargets: .macOS(macOS),
-            infoPlist: appInfo(name: "jaw"),
+            infoPlist: appInfo(name: "Jaw"),
             sources: ["JawApp/Sources/**"],
             resources: ["JawApp/Resources/**"],
             dependencies: [.target(name: "JawKit"), .target(name: "JawThemes"), .target(name: "JawUI")],
@@ -126,7 +126,7 @@ let project = Project(
             product: .app,
             bundleId: "\(prefix).harness",
             deploymentTargets: .macOS(macOS),
-            infoPlist: appInfo(name: "jaw harness"),
+            infoPlist: appInfo(name: "Jaw Harness"),
             sources: ["JawHarness/Sources/**"],
             resources: ["JawApp/Resources/**"],
             dependencies: [.target(name: "JawKit"), .target(name: "JawThemes"), .target(name: "JawUI")],

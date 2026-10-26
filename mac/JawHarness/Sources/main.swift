@@ -36,7 +36,7 @@ final class Harness: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_: Notification) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
                           styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "jaw harness"
+        window.title = "Jaw Harness"
         let scenes = NSSegmentedControl(labels: Scene.allCases.map(\.rawValue), trackingMode: .selectOne,
                                         target: self, action: #selector(pickScene(_:)))
         scenes.selectedSegment = 0

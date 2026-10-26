@@ -30,7 +30,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
-        window.title = "jaw"
+        window.title = "Jaw"
         window.minSize = NSSize(width: 520, height: 420)
         window.setFrameAutosaveName("jaw")
         window.titlebarAppearsTransparent = true

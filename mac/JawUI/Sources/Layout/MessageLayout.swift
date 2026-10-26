@@ -399,7 +399,7 @@ public enum MessageLayout {
             case .contact: return "Contact card"
             case .poll: return "Poll · " + (m.poll?.question ?? "vote on the phone")
             case .event: return "Event"
-            case .unknown: return "jaw can't show this yet"
+            case .unknown: return "Jaw can't show this yet"
             }
         }
 

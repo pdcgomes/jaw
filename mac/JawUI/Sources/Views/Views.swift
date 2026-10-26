@@ -119,7 +119,7 @@ public struct StateView: View {
     }
 
     var notAffiliated: some View {
-        Text("jaw isn't affiliated with WhatsApp or Meta.")
+        Text("Jaw isn't affiliated with WhatsApp or Meta.")
             .font(.system(size: 11)).foregroundStyle(Color(nsColor: roles.tertiary.nsColor))
     }
 
@@ -146,7 +146,7 @@ public struct StateView: View {
         case .noChats: "They come as your phone sends them."
         case .starting(nil): "jawd keeps your messages and talks to WhatsApp. If it can't start, this says why."
         case let .starting(failed?): "It didn't start: \(failed)"
-        case let .asleep(why, retryIn): "\(why). jaw tries again by itself\(retryIn > 0 ? " in \(retryIn) s" : ""); jaw status says more."
+        case let .asleep(why, retryIn): "\(why). Jaw tries again by itself\(retryIn > 0 ? " in \(retryIn) s" : ""); jaw status says more."
         case let .loggedOut(reason):
             "\(reason.map { $0.prefix(1).uppercased() + $0.dropFirst() + "." } ?? "Your phone logged jaw out.") jawd has deleted the session and kept your messages. Link again with jaw in the terminal: run jaw and scan the code with your phone. Linking comes to this app later."
         case .linking: nil

@@ -1,9 +1,9 @@
 #!/bin/sh
-# `make mac`: jaw.app with jawd, jaw-engine and the terminal inside it, each signed.
+# `make mac`: Jaw.app with jawd, jaw-engine and the terminal inside it, each signed.
 #
 # jawd and jaw are built for release here, since the build Mac has no Rust or Go, jawd with its
 # Info.plist embedded so macOS asks for the microphone in jaw's words; the app is built in Release on
-# the build Mac (here when it doesn't answer) and comes back to mac/build/release/jaw.app. The three
+# the build Mac (here when it doesn't answer) and comes back to mac/build/release/Jaw.app. The three
 # helpers go into Contents/Helpers, jawd's LaunchAgent into Contents/Library/LaunchAgents, and
 # everything is signed from the inside out with the hardened runtime: with JAW_SIGN_IDENTITY, else
 # the team's Developer ID Application identity by its SHA-1, else ad hoc, which runs here only.
@@ -12,7 +12,7 @@ repo="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$repo"
 team="${JAW_TEAM_ID:-3JP75Z3F98}"
 out="mac/build/release"
-app="$out/jaw.app"
+app="$out/Jaw.app"
 
 echo "==> jawd, jaw and jaw-engine for release"
 cargo rustc --release -p jawd --bin jawd --quiet -- \
@@ -20,7 +20,7 @@ cargo rustc --release -p jawd --bin jawd --quiet -- \
 cargo build --release -p jaw --bin jaw --quiet
 (cd engine && go build -trimpath -o ../target/engine/jaw-engine ./cmd/jaw-engine)
 
-echo "==> jaw.app in Release"
+echo "==> Jaw.app in Release"
 rm -rf "$app"
 mkdir -p "$out"
 if ssh -o BatchMode=yes -o ConnectTimeout=5 "${JAW_BUILD_MAC:-build-mac}" true 2>/dev/null; then
@@ -30,7 +30,7 @@ else
     (cd mac && mise exec -- tuist generate --no-open >/dev/null &&
         xcodebuild build -workspace Jaw.xcworkspace -scheme jaw -configuration Release \
             -destination 'platform=macOS,arch=arm64' -derivedDataPath build/DerivedData-release -quiet)
-    ditto mac/build/DerivedData-release/Build/Products/Release/jaw.app "$app"
+    ditto mac/build/DerivedData-release/Build/Products/Release/Jaw.app "$app"
 fi
 
 echo "==> the helpers and jawd's agent"

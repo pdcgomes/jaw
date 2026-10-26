@@ -161,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let terminal = FileManager.default.fileExists(atPath: Agent.terminalAgent)
             alert.messageText = terminal ? "Take over the terminal's jawd?" : "Start jawd at login?"
             alert.informativeText = terminal
-                ? "jaw agent install's LaunchAgent is installed. jaw can stop it, remove it, and start its own jawd at login in its place, under the same label, so there's still only one."
+                ? "jaw agent install's LaunchAgent is installed. Jaw can stop it, remove it, and start its own jawd at login in its place, under the same label, so there's still only one."
                 : "jawd keeps your messages and brings notifications with no window open."
             alert.addButton(withTitle: terminal ? "Take Over" : "Start at Login")
             alert.addButton(withTitle: "Cancel")
@@ -211,17 +211,17 @@ enum Menus {
         }
         let up = String(UnicodeScalar(NSUpArrowFunctionKey)!)
         let down = String(UnicodeScalar(NSDownArrowFunctionKey)!)
-        menu("jaw", [
-            item("About jaw", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+        menu("Jaw", [
+            item("About Jaw", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
             item("Settings…", #selector(AppDelegate.showSettings(_:)), ",", target: target),
             item("jawd at Login…", #selector(AppDelegate.jawdAtLogin(_:)), target: target),
             .separator(),
-            item("Hide jaw", #selector(NSApplication.hide(_:)), "h"),
+            item("Hide Jaw", #selector(NSApplication.hide(_:)), "h"),
             item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
             item("Show All", #selector(NSApplication.unhideAllApplications(_:))),
             .separator(),
-            item("Quit jaw", #selector(NSApplication.terminate(_:)), "q"),
+            item("Quit Jaw", #selector(NSApplication.terminate(_:)), "q"),
         ])
         menu("File", [
             item("New Chat", #selector(AppDelegate.showPalette(_:)), "n", target: target),

@@ -1,4 +1,4 @@
-# jaw for the Mac
+# Jaw for the Mac
 
 The Mac's interface on jawd's socket, as [the Mac design](../docs/plans/2026-10-26-jaw-mac-design.md) has it and in [the Mac plan](../docs/plans/2026-10-26-jaw-mac-plan.md)'s order. This is Mac-M1, text every day, under way.
 
@@ -12,13 +12,13 @@ mac/scripts/build-mac test JawKit           # the client: fixtures, window model
 mac/scripts/build-mac test JawThemes
 mac/scripts/build-mac test JawUITests       # the layout, and its reference pictures in both looks
 mac/scripts/build-mac build jaw
-make mac                                    # jaw.app with jawd, jaw-engine and jaw inside, signed
+make mac                                    # Jaw.app with jawd, jaw-engine and jaw inside, signed
 make mac-test                               # the three suites above
 ```
 
 The build Mac has no Rust or Go, so jawd, jaw and jaw-engine are built here and their binaries go with the checkout. `mise exec -- tuist generate --no-open` makes `Jaw.xcworkspace` for Xcode.
 
-A debug build never opens the owner's jaw folder: without `--home` or `JAW_HOME` it runs `jawd --engine demo`, a made-up account, in a folder of its own, and stops it on quitting. Only a signed release registers its jawd at login (jaw › jawd at Login…), under the label `jaw agent install` uses, offering to take over the terminal's agent on a click and keeping a jawd newer than its own.
+A debug build never opens the owner's jaw folder: without `--home` or `JAW_HOME` it runs `jawd --engine demo`, a made-up account, in a folder of its own, and stops it on quitting. Only a signed release registers its jawd at login (Jaw › jawd at Login…), under the label `jaw agent install` uses, offering to take over the terminal's agent on a click and keeping a jawd newer than its own.
 
 The app's options: `--demo`, `--home <folder>`, `--bench launch|open|memory|idle`, which prints one JSON line and quits, and `--snapshot <png>`, which draws the window once a chat is open. The harness (`JawHarness`) draws each component from made-up rows, either look, dark or light, with `--scene <name>`, `--light` and `--snapshot <png>`.
 
