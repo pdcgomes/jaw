@@ -1105,6 +1105,19 @@ async fn a_kill_once_send_media_has_answered_makes_and_sends_it_from_jaws_copy_a
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_send_refused_once_its_copy_is_ready_at_the_next_start_fails_since_it_cant_have_gone_before() {
+    let (home, picked) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let id = killed(home.path(), picked.path(), "kept").await;
+    let world = world();
+    world.refuse_next(1);
+    let rig = Rig::on(home.path(), world).await;
+    // Queued before the kill, it waited for its copy in this run, so nothing sent it before.
+    let row = rig.until(&id, "failed, not waiting to hear whether it went", failed).await;
+    assert_eq!(rig.world.uploads().len(), 1, "{row}");
+    assert_eq!(rig.world.sends().iter().filter(|s| s.id == id).count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_kill_while_a_copy_is_made_leaves_a_partial_file_that_the_next_start_removes_and_makes_again() {
     if !has_ffmpeg() {
         return;
