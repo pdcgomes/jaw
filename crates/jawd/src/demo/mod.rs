@@ -308,6 +308,90 @@ struct Demo {
     rng: Mutex<Rng>,
 }
 
+/// The library as `--steady` measures it: each window's answers, how many items it said matched,
+/// the pages of a walk down its photos, how deep the walk got, and the load average around it.
+struct Library {
+    windows: Vec<(&'static str, String, u64, Vec<Duration>)>,
+    walk: Vec<Duration>,
+    deepest: usize,
+    loads: (f64, f64),
+}
+
+/// The pages a walk down the library's photos reads at most.
+const LIBRARY_PAGES: usize = if cfg!(test) { 3 } else { 500 };
+/// A page of the library, as jaw asks for one.
+const LIBRARY_PAGE: u32 = 120;
+
+/// The library opened as jaw opens it: its photos, every kind's newest, the biggest chat's, one
+/// person's and yours, found by a word captions say often and by one they say once, and its counts
+/// alone; then a walk 120 at a time from the newest photo down, as jaw pages it.
+fn library(asker: &mut Asker, account: &Account) -> Result<Library> {
+    let before = load_average();
+    let page = |more: Value| {
+        let mut params = json!({"around": "top", "before": 0, "after": LIBRARY_PAGE});
+        params.as_object_mut().expect("an object").extend(more.as_object().expect("an object").clone());
+        params
+    };
+    let (_, newest) = asker.library(page(json!({"kind": "photo"})))?;
+    let sender = newest["rows"]
+        .as_array()
+        .and_then(|rows| rows.iter().find_map(|row| row["from"]["id"].as_str().map(str::to_string)))
+        .unwrap_or_else(|| "me".into());
+    let asks = [
+        ("photos", "its newest 120 photos".to_string(), page(json!({"kind": "photo"}))),
+        ("all", "every kind's newest 14".to_string(), page(json!({"kind": "all", "after": 14}))),
+        (
+            "chat",
+            "the biggest chat's newest 120 photos".to_string(),
+            page(json!({"kind": "photo", "chat": account.chat(0)})),
+        ),
+        ("person", format!("{sender}'s newest 120 photos"), page(json!({"kind": "photo", "person": sender}))),
+        ("mine", "your newest 120 files".to_string(), page(json!({"kind": "file", "person": "me"}))),
+        ("jantar", "photos whose captions say jantar".to_string(), page(json!({"kind": "photo", "text": "jantar"}))),
+        ("zefiro", "photos whose captions say zéfiro".to_string(), page(json!({"kind": "photo", "text": "zéfiro"}))),
+        ("counts", "its counts alone".to_string(), page(json!({"kind": "photo", "after": 0}))),
+        (
+            "person_counts",
+            format!("{sender}'s counts alone"),
+            page(json!({"kind": "photo", "person": sender, "after": 0})),
+        ),
+    ];
+    let mut windows = Vec::new();
+    for (key, what, params) in asks {
+        let mut took = Vec::with_capacity(RUNS);
+        let mut count = 0;
+        for _ in 0..RUNS {
+            let (t, window) = asker.library(params.clone())?;
+            took.push(t);
+            count = window["total"].as_u64().unwrap_or_default();
+        }
+        windows.push((key, what, count, took));
+    }
+    let mut walk = Vec::new();
+    let mut around = "top".to_string();
+    let mut deepest = 0;
+    while walk.len() < LIBRARY_PAGES {
+        let (t, window) =
+            asker.library(json!({"kind": "photo", "around": around, "before": 0, "after": LIBRARY_PAGE}))?;
+        walk.push(t);
+        let Some(last) = window["rows"].as_array().and_then(|rows| rows.last()) else { break };
+        deepest += window["rows"].as_array().map_or(0, Vec::len) - usize::from(around != "top");
+        around = last["id"].as_str().unwrap_or_default().to_string();
+        if window["older"] != true {
+            break;
+        }
+    }
+    Ok(Library { windows, walk, deepest, loads: (before, load_average()) })
+}
+
+/// The machine's load average over the last minute.
+fn load_average() -> f64 {
+    let mut loads = [0f64; 3];
+    // SAFETY: getloadavg fills at most as many values as it's given room for.
+    unsafe { libc::getloadavg(loads.as_mut_ptr(), 3) };
+    loads[0]
+}
+
 /// Timings as `make perf` reads them: how many, and the 50th and 99th percentiles and the most,
 /// in milliseconds.
 fn summary(timings: &[Duration]) -> Value {
@@ -769,9 +853,10 @@ impl Demo {
                 }
                 finds.push((*query, matched, took));
             }
-            Ok((opens, pages, finds))
+            let shelves = library(&mut asker, &account)?;
+            Ok((opens, pages, finds, shelves))
         });
-        let (opens, pages, finds) = asked.await??;
+        let (opens, pages, finds, shelves) = asked.await??;
         let usage = usage::now();
         println!("steady, with the account's {} messages:", self.account.shape.messages);
         println!("{}", line(&format!("a lone message, {} ms apart, acked", LONE_EVERY.as_millis()), &acks));
@@ -798,6 +883,16 @@ impl Demo {
             all.extend(took);
         }
         numbers["find"] = summary(&all);
+        let Library { windows, walk, deepest, loads } = shelves;
+        println!("  the library, at a load of {:.0} to {:.0}:", loads.0, loads.1);
+        for (key, what, count, took) in &windows {
+            println!("{}", line(&format!("  {what} ({count} of them)"), took));
+            numbers[format!("library_{key}")] = summary(took);
+        }
+        println!("{}", line(&format!("  its photos, 120 at a time from the newest to {deepest} in"), &walk));
+        numbers["library_page"] = summary(&walk);
+        numbers["library_page_deepest"] = json!(deepest);
+        numbers["library_load"] = json!([loads.0, loads.1]);
         println!("  jawd's memory now {:.0} MB ({:.0} MB resident)", mb(usage.footprint), mb(usage.resident));
         self.record("steady", numbers)
     }

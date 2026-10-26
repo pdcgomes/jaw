@@ -94,6 +94,91 @@ fn mix(mut x: u64) -> u64 {
     (x ^ (x >> 31)) | 1
 }
 
+/// What message `number` of the account says: mostly `words`, and about one in seven a photo (a
+/// third of them with `words` as their caption), a video, a GIF, a voice message or a document, as
+/// a phone's history has them, each from a generator of its own so the rest of the message is as
+/// it always was. Their files are on no server, so they're gone once asked for.
+fn shared(number: u64, words: String) -> e2e::Message {
+    let mut rng = Rng(mix(number ^ 0x004C_4942_5241_5259));
+    let file = |rng: &mut Rng| -> (Vec<u8>, Vec<u8>, Vec<u8>, String) {
+        let bytes = |rng: &mut Rng| (0..4).flat_map(|_| rng.next().to_le_bytes()).collect::<Vec<u8>>();
+        (bytes(rng), bytes(rng), bytes(rng), format!("/v/demo/history/{number:016x}.enc?ccb=11-4"))
+    };
+    let caption = |rng: &mut Rng, words: String| (rng.below(3) == 0).then_some(words);
+    match rng.below(1_000) {
+        0..90 => {
+            let (sha256, key, enc, path) = file(&mut rng);
+            let (w, h) = if rng.below(4) == 0 { (1200, 1600) } else { (1600, 1200) };
+            let image = e2e::ImageMessage {
+                mimetype: Some("image/jpeg".into()),
+                caption: caption(&mut rng, words),
+                file_sha256: Some(sha256),
+                file_length: Some(150_000 + rng.below(3_000_000)),
+                width: Some(w),
+                height: Some(h),
+                media_key: Some(key),
+                file_enc_sha256: Some(enc),
+                direct_path: Some(path),
+                ..Default::default()
+            };
+            e2e::Message { image_message: Some(Box::new(image)), ..Default::default() }
+        }
+        kind @ 90..120 => {
+            let (sha256, key, enc, path) = file(&mut rng);
+            let gif = kind >= 110;
+            let video = e2e::VideoMessage {
+                mimetype: Some("video/mp4".into()),
+                caption: caption(&mut rng, words),
+                file_sha256: Some(sha256),
+                file_length: Some(500_000 + rng.below(40_000_000)),
+                seconds: Some(if gif { 3 } else { 5 + rng.below(240) as u32 }),
+                width: Some(1280),
+                height: Some(720),
+                media_key: Some(key),
+                file_enc_sha256: Some(enc),
+                direct_path: Some(path),
+                gif_playback: Some(gif),
+                ..Default::default()
+            };
+            e2e::Message { video_message: Some(Box::new(video)), ..Default::default() }
+        }
+        120..140 => {
+            let (sha256, key, enc, path) = file(&mut rng);
+            let voice = e2e::AudioMessage {
+                mimetype: Some("audio/ogg; codecs=opus".into()),
+                ptt: Some(true),
+                seconds: Some(2 + rng.below(90) as u32),
+                file_sha256: Some(sha256),
+                file_length: Some(8_000 + rng.below(200_000)),
+                media_key: Some(key),
+                file_enc_sha256: Some(enc),
+                direct_path: Some(path),
+                ..Default::default()
+            };
+            e2e::Message { audio_message: Some(Box::new(voice)), ..Default::default() }
+        }
+        140..150 => {
+            let (sha256, key, enc, path) = file(&mut rng);
+            let name = format!("{}-{number}.pdf", words.split(' ').next().unwrap_or("documento"));
+            let document = e2e::DocumentMessage {
+                mimetype: Some("application/pdf".into()),
+                file_name: Some(name.clone()),
+                title: Some(name),
+                caption: caption(&mut rng, words),
+                page_count: Some(1 + rng.below(30) as u32),
+                file_sha256: Some(sha256),
+                file_length: Some(20_000 + rng.below(5_000_000)),
+                media_key: Some(key),
+                file_enc_sha256: Some(enc),
+                direct_path: Some(path),
+                ..Default::default()
+            };
+            e2e::Message { document_message: Some(Box::new(document)), ..Default::default() }
+        }
+        _ => e2e::Message { conversation: Some(words), ..Default::default() },
+    }
+}
+
 /// Person `n`'s name: a first name and a surname.
 pub fn name(n: usize) -> String {
     let mut rng = Rng(mix(n as u64 ^ 0x4E41_4D45));
@@ -365,6 +450,9 @@ impl Account {
         let words = text(&mut rng);
         let secret: Vec<u8> = (0..4).flat_map(|_| rng.next().to_le_bytes()).collect();
         let participant = sender.clone().filter(|_| group);
+        let mut message = shared(number, words);
+        message.message_context_info =
+            Some(e2e::MessageContextInfo { message_secret: Some(secret), ..Default::default() });
         WebMessageInfo {
             key: MessageKey {
                 remote_jid: Some(spec.id.clone()),
@@ -372,14 +460,7 @@ impl Account {
                 id: Some(self.message_id(c, i)),
                 participant: participant.clone(),
             },
-            message: Some(e2e::Message {
-                conversation: Some(words),
-                message_context_info: Some(e2e::MessageContextInfo {
-                    message_secret: Some(secret),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
+            message: Some(message),
             message_timestamp: Some((at / 1000) as u64),
             participant,
             push_name: from.map(first_name),

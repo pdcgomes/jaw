@@ -1,7 +1,7 @@
 //! The demo's own interface on the socket, which measures jawd as an interface sees it: a watcher
 //! on the chat list and the open chat's newest messages, noting when each message it was told to
-//! expect reaches it; and an asker that opens chats, reads pages at any depth and finds messages,
-//! timing each answer. The watcher waits on its socket without a timeout, so an idle jawd stays
+//! expect reaches it; and an asker that opens chats, reads pages at any depth, finds messages and
+//! opens and pages the library, timing each answer. The watcher waits on its socket without a timeout, so an idle jawd stays
 //! idle.
 
 use std::collections::HashMap;
@@ -181,6 +181,16 @@ impl Asker {
         let took = asked.elapsed();
         self.line.call("unwatch", json!({"watch": window["watch"]}))?;
         Ok((took, window["rows"].as_array().map_or(0, Vec::len)))
+    }
+
+    /// The library window `params` asks for, watched and let go as jaw's library does, with what
+    /// it answered.
+    pub fn library(&mut self, params: Value) -> Result<(Duration, Value)> {
+        let asked = Instant::now();
+        let window = self.line.call("library.watch", params)?;
+        let took = asked.elapsed();
+        self.line.call("unwatch", json!({"watch": window["watch"]}))?;
+        Ok((took, window))
     }
 
     /// The palette's find for `query`, messages only, as jaw asks for them; says how many matched,

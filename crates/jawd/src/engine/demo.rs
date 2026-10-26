@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use prost::Message as _;
+use sha2::Digest as _;
 use tokio::sync::{Notify, mpsc, oneshot};
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
@@ -252,6 +253,36 @@ impl World {
         pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(message)) }
     }
 
+    /// A document from `sender` in `chat`: `data`, named `name`, which the media server then holds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn document(
+        &self,
+        chat: &str,
+        sender: &str,
+        id: &str,
+        at_ms: i64,
+        name: &str,
+        mime: &str,
+        data: &[u8],
+        caption: &str,
+    ) -> pb::Event {
+        let (sha256, key, direct_path) = self.served(id, data);
+        let document = e2e::DocumentMessage {
+            mimetype: Some(mime.into()),
+            file_name: Some(name.into()),
+            title: Some(name.into()),
+            caption: (!caption.is_empty()).then(|| caption.to_string()),
+            file_sha256: Some(sha256.clone()),
+            file_length: Some(data.len() as u64),
+            media_key: Some(key),
+            file_enc_sha256: Some(sha256.iter().rev().copied().collect()),
+            direct_path: Some(direct_path),
+            ..Default::default()
+        };
+        let raw = e2e::Message { document_message: Some(Box::new(document)), ..Default::default() };
+        media(chat, sender, id, at_ms, raw, "document")
+    }
+
     /// A voice message from `sender` in `chat`, `seconds` long, of `data`, an Ogg file, which the
     /// media server then holds.
     pub fn voice(&self, data: Arc<Vec<u8>>, chat: &str, sender: &str, id: &str, at_ms: i64, seconds: u32) -> pb::Event {
@@ -280,6 +311,16 @@ impl World {
             info.media_type = "ptt".into();
         }
         pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(message)) }
+    }
+
+    /// Has the media server hold `data` for message `id`: its hash, the key it's sent with, and
+    /// where the server has it.
+    fn served(&self, id: &str, data: &[u8]) -> (Vec<u8>, Vec<u8>, String) {
+        let sha256 = sha2::Sha256::digest(data).to_vec();
+        let direct_path = format!("/v/demo/{}.enc?ccb=11-4", pictures::hex(&sha256[..8]));
+        self.serve(&direct_path, Arc::new(data.to_vec()));
+        let key: Vec<u8> = (0..32u8).map(|n| n ^ id.bytes().fold(0u8, |a, b| a.wrapping_add(b))).collect();
+        (sha256, key, direct_path)
     }
 
     /// Has the media server answer 404 for `direct_path`, as WhatsApp's does for old media.
@@ -432,8 +473,16 @@ impl World {
     }
 }
 
+/// Four seconds of someone speaking, as a phone records a voice message: Ogg Opus at 16 kHz.
+const SPEECH: &[u8] = include_bytes!("../../../jaw-voice/tests/fixtures/speech-16k.ogg");
+
+/// The plan the made-up climbing group shares for its Saturday, as a file.
+const SATURDAY: &[u8] = b"Sintra, Saturday\n\n09:00 meet at Rossio, the 09:11 train\n10:00 Peninha, the slabs first\n\
+13:30 lunch in the village\n16:00 back down, the 17:40 train\n\nBring the 60 m rope and the small rack.\n";
+
 impl DemoEngine {
-    /// The made-up account: connected, then a few messages arriving, a photo among them.
+    /// The made-up account: connected, then a few messages arriving, a photo, a file and a voice
+    /// message among them.
     pub fn new() -> DemoEngine {
         let now = now_ms();
         let ana = "351912345678@s.whatsapp.net";
@@ -446,6 +495,7 @@ impl DemoEngine {
             text(ana, ana, "3EB0DEMO00000001", now - 120_000, "did you get the photos from Sunday?"),
             text(climbing, rui, "3EB0DEMO00000002", now - 60_000, "Saturday at 9?"),
             world.photo(&lake, ana, ana, "3EB0DEMO00000008", now - 30_000, "Sunday, at the lake"),
+            world.voice(Arc::new(SPEECH.to_vec()), ana, ana, "3EB0DEMO00000010", now - 20_000, 4),
             text(ana, ana, "3EB0DEMO00000003", now - 5_000, "the one at the lake"),
             // Earlier than the rest, so each chat's newest stays as it was.
             link(
@@ -515,6 +565,16 @@ impl DemoEngine {
                 (38.716_25, -9.131_97),
                 ("Miradouro da Graça", "Calçada da Graça, 1100-265 Lisboa"),
             ),
+            world.document(
+                climbing,
+                rui,
+                "3EB0DEMO0000000D",
+                now - 250_000,
+                "sintra-saturday.txt",
+                "text/plain",
+                SATURDAY,
+                "the plan for Saturday",
+            ),
             // You and the two whose phones answer what you send there, so a mention of one lands;
             // told once the messages are in, so storing them holds none of the messages back, and
             // last, so an interface that sees the group named has the whole script.
@@ -575,6 +635,19 @@ impl Default for DemoEngine {
     fn default() -> Self {
         DemoEngine::new()
     }
+}
+
+/// A message from `sender` in `chat` carrying the file `raw` describes, of `media_type`.
+fn media(chat: &str, sender: &str, id: &str, at_ms: i64, raw: e2e::Message, media_type: &str) -> pb::Event {
+    let Some(pb::event::Kind::Message(mut message)) = text(chat, sender, id, at_ms, "").kind else {
+        unreachable!("a text is a message")
+    };
+    message.raw = raw.encode_to_vec();
+    if let Some(info) = message.info.as_mut() {
+        info.r#type = "media".into();
+        info.media_type = media_type.into();
+    }
+    pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(message)) }
 }
 
 /// Group `jid`'s name and who's in it, as WhatsApp tells of a change to a group.
@@ -1651,7 +1724,11 @@ mod tests {
         let whole = tokio::time::timeout(Duration::from_secs(10), playing).await;
         assert!(whole.is_ok(), "the script played its {script} events: {played:?}");
         let messages = played.iter().filter(|kind| matches!(kind, pb::event::Kind::Message(_))).count();
-        assert_eq!(messages, script - 2, "its messages first, after the connection: {played:?}");
+        assert_eq!(
+            messages,
+            script - 2,
+            "its messages first, the photo, the file and the voice message among them: {played:?}"
+        );
         let Some(pb::event::Kind::GroupChange(group)) = played.last() else { panic!("named last: {played:?}") };
         assert_eq!((group.jid.as_str(), group.name.as_deref()), ("120363012345678901@g.us", Some("Lisbon Climbing")));
         assert_eq!(group.join, [ME, MEMBERS[0], MEMBERS[1]], "you, and the two whose phones answer what you send");
