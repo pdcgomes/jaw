@@ -32,7 +32,7 @@ protocol/README.md gains a "Settings" section, served from the start, and the ro
 {"id":20,"method":"settings.set","params":{"theme":"gruvbox"}}
 {"id":20,"result":{"settings":{"theme":"gruvbox","messages":"bubbles"}}}
 {"method":"settings","params":{"theme":"gruvbox","messages":"bubbles"}}
-{"id":21,"method":"themes","params":{}}
+{"id":21,"method":"themes"}
 {"id":21,"result":{"themes":[{"id":"catppuccin","name":"Catppuccin","mode":"dark","colors":{"accent":"#89b4fa","background":"#1e1e2e","…":"…"}}]}}
 ```
 
