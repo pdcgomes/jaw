@@ -1,13 +1,14 @@
 //! What the read path knows of the files rows name, and tells media of the copies it shows. A
 //! preview or thumbnail is derived and put in place without waiting for the disk, so a power cut
-//! may leave one missing, empty or cut short. Each write of them is numbered, and media sends them
-//! to the drive and notes up to which number they're durable; at a start, those past it are
-//! checked off the read path, which shows them only once the check has passed them, never opening a
-//! file itself. A copy shown without its thumbnail or file is reported, so media can draw or fetch
-//! it then rather than for every message history brings.
+//! may leave one missing, empty or cut short. Media sends them to the drive later and notes up to
+//! which write they're durable; at a start, the files with writes past that are suspect, checked off
+//! the read path, which shows their previews and thumbnail only once the check has passed them,
+//! never opening a file itself. A copy shown without its thumbnail or file is reported, so media
+//! can draw or fetch it then rather than for every message history brings.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::mpsc;
@@ -28,11 +29,10 @@ pub struct Seen {
 
 /// The files of one jaw.db's folder, as its read path sees them.
 pub struct Files {
-    /// Previews and thumbnails numbered past `settled` and up to `made` when jawd started may be
-    /// broken; those the check hasn't passed, up to `checked`, aren't shown.
-    settled: AtomicI64,
-    made: AtomicI64,
-    checked: AtomicI64,
+    /// The files, by their hash in uppercase hex as SQLite's hex() gives it, whose previews or
+    /// thumbnail a power cut may have broken and the check hasn't passed yet.
+    suspect: Mutex<HashSet<String>>,
+    any_suspect: AtomicBool,
     seen: Mutex<Option<mpsc::Sender<Seen>>>,
 }
 
@@ -43,9 +43,8 @@ impl Files {
     /// The Files for jaw.db at `path`, kept for as long as the returned Arc lives.
     pub(super) fn open(path: &Path) -> Arc<Files> {
         let files = Arc::new(Files {
-            settled: AtomicI64::new(0),
-            made: AtomicI64::new(0),
-            checked: AtomicI64::new(0),
+            suspect: Mutex::new(HashSet::new()),
+            any_suspect: AtomicBool::new(false),
             seen: Mutex::new(None),
         });
         let mut open = OPEN.lock().expect("open stores");
@@ -66,24 +65,32 @@ impl Files {
         *self.seen.lock().expect("who watches") = Some(seen);
     }
 
-    /// Previews and thumbnails numbered past `settled` and up to `made` are shown only once the
-    /// check has passed them, as a start finds them.
-    pub fn suspect(&self, settled: i64, made: i64) {
-        self.checked.store(settled, Ordering::SeqCst);
-        self.made.store(made, Ordering::SeqCst);
-        self.settled.store(settled, Ordering::SeqCst);
+    /// The previews and thumbnails of these files, by hash, are shown only once the check has
+    /// passed them, as a start finds them.
+    pub fn suspect(&self, sha256s: impl IntoIterator<Item = Vec<u8>>) {
+        let mut suspect = self.suspect.lock().expect("suspect files");
+        suspect.extend(sha256s.into_iter().map(|sha256| hex(&sha256)));
+        self.any_suspect.store(!suspect.is_empty(), Ordering::SeqCst);
     }
 
-    /// The check has passed every number up to `through`.
-    pub fn checked(&self, through: i64) {
-        self.checked.fetch_max(through, Ordering::SeqCst);
+    /// The check has passed these files: they're whole, or mended.
+    pub fn passed(&self, sha256s: &[Vec<u8>]) {
+        let mut suspect = self.suspect.lock().expect("suspect files");
+        for sha256 in sha256s {
+            suspect.remove(&hex(sha256));
+        }
+        self.any_suspect.store(!suspect.is_empty(), Ordering::SeqCst);
     }
 
-    /// Whether a file's previews and thumbnail, last written as number `made`, can be shown.
-    pub fn trusted(&self, made: i64) -> bool {
-        made <= self.checked.load(Ordering::SeqCst)
-            || made <= self.settled.load(Ordering::SeqCst)
-            || made > self.made.load(Ordering::SeqCst)
+    /// How many files the check hasn't passed yet.
+    pub fn suspects(&self) -> usize {
+        self.suspect.lock().expect("suspect files").len()
+    }
+
+    /// Whether the previews and thumbnail of the file whose hash is `sha256`, in uppercase hex, can
+    /// be shown.
+    pub fn trusted(&self, sha256: &str) -> bool {
+        !self.any_suspect.load(Ordering::SeqCst) || !self.suspect.lock().expect("suspect files").contains(sha256)
     }
 
     /// Tells media of a copy a row showed; one that finds no room is said again the next time.
@@ -92,4 +99,8 @@ impl Files {
             let _ = watching.try_send(seen);
         }
     }
+}
+
+fn hex(sha256: &[u8]) -> String {
+    sha256.iter().map(|b| format!("{b:02X}")).collect()
 }

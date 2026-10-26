@@ -380,7 +380,7 @@ const MESSAGE_COLUMNS: &str = "
         m.reply ->> 'from',
         (SELECT json_object('state', iif(f.path IS NOT NULL, 'local', md.state), 'progress', md.progress,
                 'error', md.error, 'path', f.path, 'small', f.small, 'large', f.large, 'thumbnail', f.thumbnail,
-                'made', f.made, 'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256),
+                'has_thumbnail', md.thumbnail, 'sha256', hex(md.sha256),
                 'hd', (SELECT json_object('path', hf.path) FROM media h LEFT JOIN media_files hf ON hf.sha256 = h.sha256
                     WHERE h.message = m.n AND h.variant = 'hd'))
             FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = m.n AND md.variant = 'sd')";
@@ -561,7 +561,6 @@ struct Copy {
     small: Option<String>,
     large: Option<String>,
     thumbnail: Option<String>,
-    made: Option<i64>,
     has_thumbnail: i64,
     sha256: Option<String>,
     hd: Option<Hd>,
@@ -592,7 +591,7 @@ fn with_media(
     else {
         return;
     };
-    let trusted = copy.made.is_none_or(|made| files.is_none_or(|files| files.trusted(made)));
+    let trusted = copy.sha256.as_deref().is_none_or(|sha256| files.is_none_or(|files| files.trusted(sha256)));
     let previews = copy.small.clone().zip(copy.large.clone()).filter(|_| trusted);
     let thumbnail = copy.thumbnail.clone().filter(|_| trusted);
     if let Value::Object(media) = parsed.entry("media").or_insert_with(|| Value::Object(Default::default())) {

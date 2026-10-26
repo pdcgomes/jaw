@@ -381,6 +381,9 @@ message MediaDownload {
   // The file's size as its message gives it, for progress and the room it needs.
   uint64 size = 7;
   string path = 8;
+  // Flush the file and its folder to the disk in full, rather than fence them with a barrier: jawd
+  // asks it when jaw's folder isn't all on the Mac's own drive, where a barrier orders nothing.
+  bool full_flush = 9;
 }
 
 // Stops download `id`, which answers CANCELLED; Done whether it was running or not.

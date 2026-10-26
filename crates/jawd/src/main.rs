@@ -635,9 +635,10 @@ async fn stop(Started { state, notifications, .. }: Started, socket: &Path) {
     if let Some(notifications) = notifications {
         notifications.abort();
     }
-    // Previews and thumbnails made since media last settled them, so the next start needn't check them.
+    // Previews and thumbnails made since media last settled them, so the next start needn't check
+    // them; those it can't settle within SETTLING are checked then instead.
     if let Some(media) = state.media()
-        && let Err(e) = media.settle().await
+        && let Err(e) = media.settle_within(SETTLING).await
     {
         eprintln!("jawd: can't make the previews made lately durable at the stop: {e:#}");
     }
@@ -661,6 +662,9 @@ async fn stop(Started { state, notifications, .. }: Started, socket: &Path) {
 
 /// How long a clean stop waits for the WAL to be copied into jaw.db and emptied, within STOPPING.
 const EMPTYING: Duration = Duration::from_secs(2);
+/// How long a clean stop gives media to settle its latest previews, within STOPPING, before the
+/// engine's orderly stop and the WAL's emptying.
+const SETTLING: Duration = Duration::from_millis(500);
 
 /// Tells interfaces when jaw.db can't be written, and when it can again.
 async fn trouble(

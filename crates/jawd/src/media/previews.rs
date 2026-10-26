@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use jaw_media::{Cancel, Durability, Error, Kind, Previews, previews_lane};
 
-use super::fetch::Naming;
 use super::schedule::Wanted;
 use super::{Inner, PREVIEWS, now_ms};
 use crate::convert;
@@ -108,14 +107,8 @@ async fn draw_thumbnail(inner: Arc<Inner>, copy: Wanted) -> Drawn {
 }
 
 /// Makes the 256 and 768 pixel previews of `copy`'s file, at `path` in the cache, on the image lane,
-/// and names them once jaw.db names the file, as `named` says; the file stays claimed until then.
-pub(super) async fn previews(
-    inner: &Arc<Inner>,
-    copy: &Wanted,
-    path: &str,
-    named: Naming,
-    priority: Priority,
-) -> Drawn {
+/// and names them; the file stays claimed until they're named.
+pub(super) async fn previews(inner: &Arc<Inner>, copy: &Wanted, path: &str, priority: Priority) -> Drawn {
     let _claim = inner.claims.share(&copy.sha256).await;
     let job = draw_previews(inner.clone(), copy.clone(), path.to_string());
     let handle = inner.images.submit(format!("previews:{}", to_hex(&copy.sha256)), priority, job).await;
@@ -123,9 +116,6 @@ pub(super) async fn previews(
         Drawn::Made(made) => made,
         drawn => return drawn,
     };
-    if let Err(why) = named.wait().await {
-        return Drawn::Failed(why);
-    }
     match inner.store.apply(Lane::Live, vec![Change::Media(made)]).await {
         Ok(_) => {
             inner.clean.notify_one();

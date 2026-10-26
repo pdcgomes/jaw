@@ -393,6 +393,14 @@ pub fn describe(status: &Status) -> String {
         if let Some(paused) = &media.paused {
             lines.push(format!("paused    background downloads: {paused}"));
         }
+        let mut previews = vec![format!("{} preview writes to settle", media.unsettled)];
+        if media.checking {
+            previews.push(format!("checking {} files a power cut may have broken", media.suspect));
+        }
+        if media.full_flush {
+            previews.push("files flushed in full, since jaw's folder isn't all on the Mac's own drive".into());
+        }
+        lines.push(format!("previews  {}", previews.join("; ")));
     }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));

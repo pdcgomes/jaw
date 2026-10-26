@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use jaw_proto::{ConnectionState, Push};
 use tokio::sync::{Notify, broadcast, mpsc};
 
-use super::fetch::{self, Asking, Fetched, Naming};
+use super::fetch::{self, Asking, Fetched};
 use super::previews::{self, Drawn};
 use super::{Inner, now_ms};
 use crate::engine::pb;
@@ -265,38 +265,29 @@ async fn job(inner: &Arc<Inner>, copy: Wanted) {
             eprintln!("jawd: no instant preview for message {} this time: {why}", copy.message);
         }
     };
-    let (_, file) = tokio::join!(thumbnail, file(inner, &copy, priority));
-    let Some(file) = file else { return };
+    let (_, path) = tokio::join!(thumbnail, file(inner, &copy, priority));
+    let Some(path) = path else { return };
     inner.schedule.later.lock().expect("schedule").remove(&key);
-    if let Some((path, named)) = &file {
-        // Its previews are drawn while jaw.db comes to name its file, and named once it has.
-        let drawing = async {
-            if copy.variant == "sd"
-                && !copy.previews
-                && let Drawn::Failed(why) = previews::previews(inner, &copy, path, named.clone(), priority).await
-            {
-                eprintln!("jawd: no previews for message {} this time: {why}", copy.message);
-            }
-        };
-        let (named, ()) = tokio::join!(named.clone().wait(), drawing);
-        if let Err(why) = named {
-            later(inner, &copy, why).await;
-            return;
-        }
+    if let Some(path) = &path
+        && copy.variant == "sd"
+        && !copy.previews
+        && let Drawn::Failed(why) = previews::previews(inner, &copy, path, priority).await
+    {
+        eprintln!("jawd: no previews for message {} this time: {why}", copy.message);
     }
-    let state = if file.is_some() || copy.state == "downloading" { "remote" } else { leave(&copy.state) };
+    let state = if path.is_some() || copy.state == "downloading" { "remote" } else { leave(&copy.state) };
     let _ = inner.store.apply(Lane::Live, vec![settled(&copy, state, None)]).await;
 }
 
-/// The copy's file, and whether jaw.db names it yet: the one in place, or the one downloaded now if
-/// it's to be; None if the job ends here, having said why or left the copy to be tried again.
-async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) -> Option<Option<(String, Naming)>> {
+/// The copy's file: the one in place, or the one downloaded now if it's to be; None if the job
+/// ends here, having said why or left the copy to be tried again.
+async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) -> Option<Option<String>> {
     // A copy left downloading is one whose download, shared with another message's copy, was
     // cancelled for that one, and is downloaded again.
     let fresh = matches!(copy.state.as_str(), "remote" | "downloading");
     let fetching = copy.local.is_none() && (copy.asked || (fresh && downloads_by_itself(inner, copy)));
     match (&copy.local, fetching) {
-        (Some(path), _) => return Some(Some((path.clone(), Naming::named()))),
+        (Some(path), _) => return Some(Some(path.clone())),
         (None, false) => return Some(None),
         (None, true) => {}
     }
@@ -306,7 +297,7 @@ async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) -> Option<O
         let _ = inner.store.apply(Lane::Live, vec![settled(copy, state, Some(why))]).await;
     };
     match fetch::file(inner, copy, priority).await {
-        Fetched::Placed { path, named } => return Some(Some((path, named))),
+        Fetched::Placed { path } => return Some(Some(path)),
         Fetched::Gone(why) => {
             if fetch::gone(inner, copy, why.clone()).await {
                 later(inner, copy, why).await;
@@ -331,6 +322,8 @@ fn leave(state: &str) -> &'static str {
     match state {
         "expired" => "expired",
         "gone" => "gone",
+        // Its phone's answer, or its silence, settles it.
+        "waiting_for_phone" => "waiting_for_phone",
         _ => "remote",
     }
 }

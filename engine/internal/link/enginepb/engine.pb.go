@@ -3278,8 +3278,11 @@ type MediaDownload struct {
 	FileSha256    []byte             `protobuf:"bytes,5,opt,name=file_sha256,json=fileSha256,proto3" json:"file_sha256,omitempty"`
 	FileEncSha256 []byte             `protobuf:"bytes,6,opt,name=file_enc_sha256,json=fileEncSha256,proto3" json:"file_enc_sha256,omitempty"`
 	// The file's size as its message gives it, for progress and the room it needs.
-	Size          uint64 `protobuf:"varint,7,opt,name=size,proto3" json:"size,omitempty"`
-	Path          string `protobuf:"bytes,8,opt,name=path,proto3" json:"path,omitempty"`
+	Size uint64 `protobuf:"varint,7,opt,name=size,proto3" json:"size,omitempty"`
+	Path string `protobuf:"bytes,8,opt,name=path,proto3" json:"path,omitempty"`
+	// Flush the file and its folder to the disk in full, rather than fence them with a barrier: jawd
+	// asks it when jaw's folder isn't all on the Mac's own drive, where a barrier orders nothing.
+	FullFlush     bool `protobuf:"varint,9,opt,name=full_flush,json=fullFlush,proto3" json:"full_flush,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3368,6 +3371,13 @@ func (x *MediaDownload) GetPath() string {
 		return x.Path
 	}
 	return ""
+}
+
+func (x *MediaDownload) GetFullFlush() bool {
+	if x != nil {
+		return x.FullFlush
+	}
+	return false
 }
 
 // Stops download `id`, which answers CANCELLED; Done whether it was running or not.
@@ -6129,7 +6139,7 @@ const file_engine_proto_rawDesc = "" +
 	"\fmedia_cancel\x18\x17 \x01(\v2\x17.jaw.engine.MediaCancelH\x00R\vmediaCancel\x129\n" +
 	"\vmedia_retry\x18\x18 \x01(\v2\x16.jaw.engine.MediaRetryH\x00R\n" +
 	"mediaRetryB\x06\n" +
-	"\x04kind\"\xcf\x02\n" +
+	"\x04kind\"\xee\x02\n" +
 	"\rMediaDownload\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x122\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x1e.jaw.engine.MediaDownload.KindR\x04kind\x12\x1f\n" +
@@ -6140,7 +6150,9 @@ const file_engine_proto_rawDesc = "" +
 	"fileSha256\x12&\n" +
 	"\x0ffile_enc_sha256\x18\x06 \x01(\fR\rfileEncSha256\x12\x12\n" +
 	"\x04size\x18\a \x01(\x04R\x04size\x12\x12\n" +
-	"\x04path\x18\b \x01(\tR\x04path\"K\n" +
+	"\x04path\x18\b \x01(\tR\x04path\x12\x1d\n" +
+	"\n" +
+	"full_flush\x18\t \x01(\bR\tfullFlush\"K\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\t\n" +
 	"\x05IMAGE\x10\x01\x12\t\n" +

@@ -73,4 +73,17 @@ pub struct MediaStatus {
     /// Why background downloads are paused, while they are: the disk is nearly full.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<String>,
+    /// Preview and thumbnail writes not yet made durable, which settle every few seconds.
+    #[serde(default)]
+    pub unsettled: u64,
+    /// Whether the start's check of the previews a power cut may have broken is still going, and
+    /// how many files it hasn't passed yet; nothing settles until it's done.
+    #[serde(default)]
+    pub checking: bool,
+    #[serde(default)]
+    pub suspect: u64,
+    /// Whether media files are flushed to the drive in full, since jaw's folder isn't all on the
+    /// Mac's own drive, where a barrier would order them.
+    #[serde(default)]
+    pub full_flush: bool,
 }

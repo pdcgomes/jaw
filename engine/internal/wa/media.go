@@ -63,21 +63,27 @@ type media struct {
 	// Held while a file is sent to the drive and put in place, one at a time.
 	finishing sync.Mutex
 	// How a file is sent to the drive before it's linked in, and its folder after; the tests' own,
-	// to see the order, or barrierSync and barrierSyncDir.
-	syncFile   func(*os.File) error
-	syncFolder func(string) error
+	// to see the order, or barrierSync and barrierSyncDir, or fullSync and syncDir with full.
+	syncFile   func(f *os.File, full bool) error
+	syncFolder func(dir string, full bool) error
 }
 
-func (m *media) flushFile(f *os.File) error {
-	if m.syncFile != nil {
-		return m.syncFile(f)
+func (m *media) flushFile(f *os.File, full bool) error {
+	switch {
+	case m.syncFile != nil:
+		return m.syncFile(f, full)
+	case full:
+		return fullSync(f)
 	}
 	return barrierSync(f)
 }
 
-func (m *media) flushFolder(dir string) error {
-	if m.syncFolder != nil {
-		return m.syncFolder(dir)
+func (m *media) flushFolder(dir string, full bool) error {
+	switch {
+	case m.syncFolder != nil:
+		return m.syncFolder(dir, full)
+	case full:
+		return syncDir(dir)
 	}
 	return barrierSyncDir(dir)
 }
@@ -226,7 +232,7 @@ func (e *Engine) mediaDownload(c *enginepb.MediaDownload) *enginepb.Reply {
 		return mediaFile(enginepb.MediaFile_BAD_HASH, 0, "the file downloaded isn't the one its message names: its SHA-256 doesn't match")
 	}
 	placed = true
-	if reply := e.place(f, part, c.Path, uint64(size)); reply != nil {
+	if reply := e.place(f, part, c.Path, uint64(size), c.FullFlush); reply != nil {
 		return reply
 	}
 	e.progress(c.Id, uint64(size), c.Size)
@@ -234,12 +240,12 @@ func (e *Engine) mediaDownload(c *enginepb.MediaDownload) *enginepb.Reply {
 }
 
 // place sends the partial file f to the drive, links it in under path, never over a file there,
-// removes the partial file and sends the folder; nil once it's in place. One file at a time is
-// placed.
-func (e *Engine) place(f *os.File, part, path string, size uint64) *enginepb.Reply {
+// removes the partial file and sends the folder, each flushed in full with full; nil once it's in
+// place. One file at a time is placed.
+func (e *Engine) place(f *os.File, part, path string, size uint64, full bool) *enginepb.Reply {
 	e.media.finishing.Lock()
 	defer e.media.finishing.Unlock()
-	err := e.media.flushFile(f)
+	err := e.media.flushFile(f, full)
 	if closeErr := f.Close(); err == nil {
 		err = closeErr
 	}
@@ -258,7 +264,7 @@ func (e *Engine) place(f *os.File, part, path string, size uint64) *enginepb.Rep
 		_ = os.Remove(path)
 		return writeFailed(err)
 	}
-	if err := e.media.flushFolder(filepath.Dir(path)); err != nil {
+	if err := e.media.flushFolder(filepath.Dir(path), full); err != nil {
 		_ = os.Remove(path)
 		return writeFailed(err)
 	}

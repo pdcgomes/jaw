@@ -167,9 +167,10 @@ fn sources() -> Vec<PathBuf> {
     out
 }
 
-/// The string literals in Rust source, in order, outside comments and test modules.
+/// The string literals in Rust source, in order, outside comments and test modules. A test module
+/// in a file of its own (`mod tests;`) ends nothing.
 fn literals(source: &str) -> Vec<String> {
-    let source = source.split("#[cfg(test)]\nmod tests").next().unwrap_or(source);
+    let source = source.split("#[cfg(test)]\nmod tests {").next().unwrap_or(source);
     let chars: Vec<char> = source.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;

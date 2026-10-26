@@ -384,7 +384,6 @@ func TestAFileIsSentToTheDriveBeforeItsLinkedInAndItsFolderAfter(t *testing.T) {
 	defer closeLink()
 	frames := reading(jawd)
 	data := photo(3_000)
-	e.mediaDownloader = &fakeDownloader{data: data}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ab12.jpg")
 	there := func(p string) bool {
@@ -401,21 +400,31 @@ func TestAFileIsSentToTheDriveBeforeItsLinkedInAndItsFolderAfter(t *testing.T) {
 		return n
 	}
 	var order []string
-	e.media.syncFile = func(f *os.File) error {
-		order = append(order, fmt.Sprintf("file: named %v, partial %v", there(path), there(f.Name())))
+	e.media.syncFile = func(f *os.File, full bool) error {
+		order = append(order, fmt.Sprintf("file: named %v, partial %v, full %v", there(path), there(f.Name()), full))
 		return barrierSync(f)
 	}
-	e.media.syncFolder = func(folder string) error {
-		order = append(order, fmt.Sprintf("folder %v: named %v, partials %d", folder == dir, there(path), partials()))
+	e.media.syncFolder = func(folder string, full bool) error {
+		order = append(order, fmt.Sprintf("folder %v: named %v, partials %d, full %v", folder == dir, there(path), partials(), full))
 		return barrierSyncDir(folder)
 	}
-	file, _ := downloaded(t, e, frames, downloadOf(data, path))
-	if file.GetState() != enginepb.MediaFile_PLACED {
-		t.Fatalf("the download answered %v", file)
-	}
-	want := []string{"file: named false, partial true", "folder true: named true, partials 0"}
-	if fmt.Sprint(order) != fmt.Sprint(want) {
-		t.Fatalf("sent to the drive as %q, not %q", order, want)
+	for _, full := range []bool{false, true} {
+		order = nil
+		_ = os.Remove(path)
+		e.mediaDownloader = &fakeDownloader{data: data}
+		asked := downloadOf(data, path)
+		asked.FullFlush = full
+		file, _ := downloaded(t, e, frames, asked)
+		if file.GetState() != enginepb.MediaFile_PLACED {
+			t.Fatalf("the download answered %v", file)
+		}
+		want := []string{
+			fmt.Sprintf("file: named false, partial true, full %v", full),
+			fmt.Sprintf("folder true: named true, partials 0, full %v", full),
+		}
+		if fmt.Sprint(order) != fmt.Sprint(want) {
+			t.Fatalf("sent to the drive as %q, not %q", order, want)
+		}
 	}
 }
 

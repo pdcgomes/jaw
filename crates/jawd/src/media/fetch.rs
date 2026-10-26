@@ -1,8 +1,8 @@
 //! Downloads: one at a time for each file, through the downloads lane, by the engine straight into
 //! the cache under the file's hash, after free space is checked. The engine sends each file to the
-//! drive ordered before whatever follows, and jaw.db names it in a synced commit, which may wait a
-//! moment to be an ack's, so a download costs the drive no flush of its own while messages arrive.
-//! A file WhatsApp's server no longer has is asked of the phone again, a few a minute at most, when
+//! drive ordered before whatever is written after it, so the row naming it, a plain live write,
+//! can't reach the disk first, and both are durable with the next synced commit: a download costs
+//! the drive no flush of its own. A file WhatsApp's server no longer has is asked of the phone again, a few a minute at most, when
 //! an interface asked for it or it arrived live; the phone's answer comes through the inbox
 //! (`sync::drain`), and one that doesn't come in time leaves the copy expired, retryable, and
 //! saying why.
@@ -12,8 +12,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-use tokio::sync::watch;
 
 use super::schedule::Wanted;
 use super::{FILES, Inner, now_ms, retryable};
@@ -27,11 +25,9 @@ use crate::work::Priority;
 /// What became of a file's download.
 #[derive(Clone, Debug)]
 pub(super) enum Fetched {
-    /// In the cache at `path`, relative to jaw's folder; every copy shows it once `named` says
-    /// jaw.db names it.
+    /// In the cache at `path`, relative to jaw's folder, and every copy shows it.
     Placed {
         path: String,
-        named: Naming,
     },
     /// WhatsApp's server no longer has it.
     Gone(String),
@@ -44,31 +40,6 @@ pub(super) enum Fetched {
     Later(String),
     /// Trying again won't.
     Never(String),
-}
-
-/// Whether jaw.db names a file in the cache yet, in a synced commit, or why it couldn't.
-#[derive(Clone)]
-pub(super) struct Naming(watch::Receiver<Option<Result<(), String>>>);
-
-impl Naming {
-    /// A file jaw.db named already.
-    pub fn named() -> Naming {
-        Naming(watch::channel(Some(Ok(()))).1)
-    }
-
-    /// Waits until jaw.db names the file, or says why it couldn't.
-    pub async fn wait(mut self) -> Result<(), String> {
-        match self.0.wait_for(Option::is_some).await {
-            Ok(said) => said.clone().unwrap_or(Ok(())),
-            Err(_) => Err("jawd stopped before jaw.db named the file".into()),
-        }
-    }
-}
-
-impl std::fmt::Debug for Naming {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Naming({:?})", *self.0.borrow())
-    }
 }
 
 /// The downloads lane's key for a file: one download for each, however many copies want it.
@@ -111,7 +82,7 @@ pub(super) async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) 
 }
 
 async fn download(inner: Arc<Inner>, copy: Wanted, priority: Priority) -> Fetched {
-    let claim = inner.claims.share(&copy.sha256).await;
+    let _claim = inner.claims.share(&copy.sha256).await;
     let relative = file_name(&copy);
     let path = inner.home.join(&relative);
     let bytes = match std::fs::symlink_metadata(&path) {
@@ -123,24 +94,12 @@ async fn download(inner: Arc<Inner>, copy: Wanted, priority: Priority) -> Fetche
             Err(fetched) => return fetched,
         },
     };
-    // jaw.db names the file in a synced commit, whose flush makes the file, sent to the drive
-    // before it, durable too. It may wait to share one, so the copies' jobs draw previews
-    // meanwhile; the file can't be dropped from the cache until it's named.
-    let (said, named) = watch::channel(None);
     let placed = Step::Placed { sha256: copy.sha256.clone(), path: relative.clone(), bytes, at: now_ms() };
-    let naming = inner.clone();
-    tokio::spawn(async move {
-        let within = naming.config.naming_within;
-        let done = naming.store.apply_durable_soon(vec![Change::Media(placed)], within).await;
-        if done.is_ok() {
-            naming.clean.notify_one();
-        }
-        let _ = said.send(Some(
-            done.map(|_| ()).map_err(|e| format!("the file is here, and jaw.db couldn't say so yet: {e:#}")),
-        ));
-        drop(claim);
-    });
-    Fetched::Placed { path: relative, named: Naming(named) }
+    if let Err(e) = inner.store.apply(Lane::Live, vec![Change::Media(placed)]).await {
+        return Fetched::Later(format!("the file is here, and jaw.db couldn't say so yet: {e:#}"));
+    }
+    inner.clean.notify_one();
+    Fetched::Placed { path: relative }
 }
 
 /// Has the engine download `copy`'s file to `path`, and says how big it is once it's there, or
@@ -182,6 +141,7 @@ async fn from_engine(inner: &Inner, copy: &Wanted, path: &Path, priority: Priori
         file_enc_sha256: copy.enc_sha256.clone().unwrap_or_default(),
         size,
         path: path.display().to_string(),
+        full_flush: inner.full_flush,
     };
     Err(match engine.call(pb::command::Kind::MediaDownload(command)).await {
         Ok(pb::reply::Kind::MediaFile(file)) => match file.state() {

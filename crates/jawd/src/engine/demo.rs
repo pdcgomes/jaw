@@ -26,6 +26,7 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 
 use super::{Ack, BoxFuture, Commands, Engine, EngineError, Incoming, Instance, Outgoing, PROTOCOL, pb};
 use crate::store::polls::option_hash;
+use crate::media::drive;
 
 mod pictures;
 
@@ -719,20 +720,6 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
-/// Sends what's written to `file` to the drive, ordered before everything written after it, as
-/// jaw-engine does a downloaded file: F_BARRIERFSYNC on macOS, a full sync where there's none.
-fn barrier(file: &std::fs::File) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::fd::AsRawFd;
-        // SAFETY: the descriptor is the open file's, which outlives the call.
-        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } == 0 {
-            return Ok(());
-        }
-    }
-    file.sync_all()
-}
-
 /// Writes `data` to `path` as jaw-engine writes a history blob: through a .part file synced to the
 /// disk before it's renamed into place, and the folder synced after, so after a power cut the file
 /// is either whole or not there.
@@ -1049,7 +1036,7 @@ impl Sender {
             let _ = std::fs::remove_file(&part);
             return file(State::Cancelled, 0, "the download was cancelled");
         }
-        let (sha256, total) = (download.file_sha256.clone(), data.len() as u64);
+        let (sha256, total, full) = (download.file_sha256.clone(), data.len() as u64, download.full_flush);
         let shared = self.world.clone();
         let finished = tokio::task::spawn_blocking(move || -> std::io::Result<State> {
             let mut out = out;
@@ -1059,14 +1046,14 @@ impl Sender {
                     return Ok(State::BadHash);
                 }
                 let _one = shared.finishing.lock().expect("the demo world");
-                barrier(&out)?;
+                drive::barrier(&out, full)?;
                 match std::fs::hard_link(&part, &path) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(State::Exists),
                     Err(e) => return Err(e),
                 }
                 std::fs::remove_file(&part)?;
-                barrier(&std::fs::File::open(path.parent().unwrap_or(Path::new(".")))?)?;
+                drive::barrier(&std::fs::File::open(path.parent().unwrap_or(Path::new(".")))?, full)?;
                 Ok(State::Placed)
             })();
             let _ = std::fs::remove_file(&part);

@@ -24,6 +24,7 @@
 //! passed (`settle`, `store::files`).
 
 mod cache;
+pub(crate) mod drive;
 mod fetch;
 mod previews;
 mod save;
@@ -76,9 +77,16 @@ pub struct Config {
     pub free: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// How often the previews and thumbnails made since the last time are made durable.
     pub settle_every: Duration,
-    /// How long a downloaded file's row may wait to share a synced commit before it goes with the
-    /// others waiting: while messages arrive, it goes with one's ack.
-    pub naming_within: Duration,
+    /// How often every file's previews and thumbnail are looked at for what broke them during a run.
+    pub look_every: Duration,
+    /// How long a start waits before it checks the previews a power cut may have broken, as a test
+    /// holds it.
+    pub check_after: Duration,
+    /// What sends files to the drive, as a test stands in for it; the system's calls otherwise.
+    pub drive: Option<drive::Drive>,
+    /// Whether a barrier orders what jaw writes, as a test says; otherwise the start looks at the
+    /// volumes jaw's folder is on.
+    pub barriers: Option<bool>,
 }
 
 impl Default for Config {
@@ -98,7 +106,10 @@ impl Default for Config {
             retry_most: Duration::from_secs(300),
             free: None,
             settle_every: Duration::from_secs(5),
-            naming_within: Duration::from_millis(100),
+            look_every: Duration::from_secs(7 * 24 * 3600),
+            check_after: Duration::ZERO,
+            drive: None,
+            barriers: None,
         }
     }
 }
@@ -133,6 +144,11 @@ struct Inner {
     /// Whether the start's check of previews a power cut may have broken is done, so newer ones
     /// may be settled.
     checked: std::sync::atomic::AtomicBool,
+    /// Whether a barrier can't order everything jaw writes, as off the Mac's own drive, so downloads
+    /// and settles flush the drive in full instead.
+    full_flush: bool,
+    /// What sends files to the drive.
+    drive: drive::Drive,
 }
 
 #[derive(Default)]
@@ -182,6 +198,14 @@ impl Media {
             eprintln!("jawd: removed {partial} partial media files a stopped jawd left");
         }
         let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let full_flush =
+            !config.barriers.unwrap_or_else(|| drive::barriers_hold(home, &[&home.join(FILES), &home.join(PREVIEWS)]));
+        if full_flush {
+            eprintln!(
+                "jawd: jaw's folder isn't all on the Mac's own drive, so media files are flushed in full rather than fenced"
+            );
+        }
+        let drive = config.drive.clone().unwrap_or_else(|| drive::Drive::system(full_flush));
         let inner = Arc::new(Inner {
             store,
             engine,
@@ -197,10 +221,14 @@ impl Media {
             stats: Mutex::new(Stats { partial_removed: partial as u64, ..Stats::default() }),
             paused: Mutex::new(None),
             checked: std::sync::atomic::AtomicBool::new(false),
+            full_flush,
+            drive,
         });
-        // Previews and thumbnails a power cut may have broken are shown only once they're checked.
+        // Previews and thumbnails a power cut may have broken are shown only once they're checked,
+        // so they're known before anything reads a row.
         let (settled, made) = inner.store.pair("SELECT settled, made FROM media_made WHERE id = 1")?;
-        inner.store.files().suspect(settled, made);
+        let suspects = settle::suspects(&inner, settled, made).await?;
+        inner.store.files().suspect(suspects.iter().cloned());
         let (progress, progressing) = mpsc::channel(256);
         live.lock().expect("live state").media_progress = Some(progress);
         let (seen, seeing) = mpsc::channel(1_024);
@@ -210,13 +238,23 @@ impl Media {
         schedule::start(&inner, progressing, seeing, pushes.subscribe());
         cache::start(&inner);
         fetch::start(&inner);
-        settle::start(&inner, settled, made);
+        settle::start(&inner, suspects);
         Ok(Media { inner })
     }
 
-    /// Makes the previews and thumbnails made since the last time durable now, as at a clean stop.
+    /// Makes the previews and thumbnails made since the last time durable, as at a clean stop.
+    #[cfg(test)]
     pub async fn settle(&self) -> anyhow::Result<()> {
-        settle::settle(&self.inner, Duration::ZERO).await
+        settle::settle(&self.inner).await
+    }
+
+    /// `settle`, given up after `bound`, as a stop has only so long: what's left is checked at the
+    /// next start.
+    pub async fn settle_within(&self, bound: Duration) -> anyhow::Result<()> {
+        match tokio::time::timeout(bound, settle::settle(&self.inner)).await {
+            Ok(settled) => settled,
+            Err(_) => anyhow::bail!("not done within {} ms, so the next start checks what's left", bound.as_millis()),
+        }
     }
 
     /// The download and image lanes, for `status`.
@@ -244,6 +282,13 @@ impl Media {
             evicted: stats.evicted,
             remade: stats.remade,
             paused: inner.paused.lock().expect("paused").clone(),
+            unsettled: inner
+                .store
+                .pair("SELECT made - settled, 0 FROM media_made WHERE id = 1")
+                .map_or(0, |(n, _)| n.max(0) as u64),
+            checking: !inner.checked.load(std::sync::atomic::Ordering::SeqCst),
+            suspect: inner.store.files().suspects() as u64,
+            full_flush: inner.full_flush,
         }
     }
 

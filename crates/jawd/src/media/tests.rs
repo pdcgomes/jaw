@@ -217,30 +217,6 @@ async fn a_photo_arriving_shows_its_thumbnail_then_its_file_and_previews_each_wh
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_downloaded_file_is_named_in_a_synced_commit_and_its_previews_only_after_it() {
-    // Its row waits long enough to share a commit that its previews are drawn well before it goes.
-    let rig = rig(Config { naming_within: Duration::from_secs(2), ..quick() }).await;
-    rig.world.gate_downloads(true);
-    rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0NAMED").await;
-    rig.until(ANA, "3EB0NAMED", "half downloaded", half).await;
-    let synced = rig.store.storage().synced_commits;
-    rig.world.gate_downloads(false);
-    // The file's row waits a moment to share a synced commit, and its previews are drawn meanwhile:
-    // no reader ever sees them before the file.
-    let began = std::time::Instant::now();
-    loop {
-        let row = rig.row(ANA, "3EB0NAMED").await;
-        assert!(local(&row) || row["media"]["previews"].is_null(), "previews named before their file: {row}");
-        if previewed(&row) {
-            break;
-        }
-        assert!(began.elapsed() < Duration::from_secs(30), "never drawn: {row}");
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    assert!(rig.store.storage().synced_commits > synced, "the file's row reached the disk in a synced commit");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_video_or_document_downloads_by_itself_only_below_the_size_set_and_when_asked() {
     let rig = rig(Config { auto_bytes: 50_000, ..quick() }).await;
     let big = Picture::numbered(800, 600, 0);
@@ -442,6 +418,36 @@ async fn a_phone_that_never_answers_leaves_the_file_expired_saying_why_and_askin
     rig.photo(&lost, ANA, ANA, "3EB0LOST").await;
     let row = rig.until(ANA, "3EB0LOST", "gone", |row| row["media"]["state"] == "gone").await;
     assert!(row["media"]["error"].as_str().unwrap().contains("no longer has"), "{row}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_waiting_for_the_phone_still_waits_after_a_job_that_had_nothing_to_fetch() {
+    let rig = rig(Config { phone_wait: Duration::from_secs(60), ..quick() }).await;
+    let lake = Picture::lake(640, 480);
+    rig.world.expire(&lake.direct_path);
+    rig.world.phone(Phone::Silent);
+    rig.photo(&lake, ANA, ANA, "3EB0ASKED").await;
+    rig.until(ANA, "3EB0ASKED", "waiting for the phone", |row| row["media"]["state"] == "waiting_for_phone").await;
+    // A window shows it lacking something, as one does before its thumbnail is drawn, so it's
+    // wanted again, and its job has no file to fetch.
+    let n: i64 = rig.query(|db| Ok(db.query_row("SELECT message FROM media", [], |r| r.get(0))?)).await;
+    let again = Change::Media(Step::Want { message: n, variant: "sd", at: now_ms(), asked: false });
+    rig.store.apply(Lane::Live, vec![again]).await.unwrap();
+    rig.media.inner.schedule.wake();
+    let mut done = false;
+    for _ in 0..500 {
+        let wanted: Option<i64> = rig
+            .query(move |db| Ok(db.query_row("SELECT wanted FROM media WHERE message = ?1", [n], |r| r.get(0))?))
+            .await;
+        if wanted.is_none() {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(done, "the job never settled it");
+    let row = rig.row(ANA, "3EB0ASKED").await;
+    assert_eq!(row["media"]["state"], "waiting_for_phone", "it waits for the phone's answer, or its silence: {row}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -679,15 +685,14 @@ fn previews_settled_before_a_stop_are_shown_at_the_next_start_without_being_chec
         let rig = rig_in(home.clone(), quick()).await;
         rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0SETTLED").await;
         let row = rig.until(ANA, "3EB0SETTLED", "its previews", drawn).await;
-        let synced = rig.store.storage().synced_commits;
+        until_checked(&rig).await;
         rig.media.settle().await.unwrap();
         let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
         assert_eq!((settled, made), (2, 2), "the previews and the thumbnail, numbered 1 and 2, are settled");
-        assert!(rig.store.storage().synced_commits > synced, "noted in a synced commit");
         rig.file(&row["media"]["previews"]["256"])
     });
-    // Only a power cut before they settled could break them; this one was broken by hand, which no
-    // check looks for, so the next start shows it as it is, never reading it on the way.
+    // Only a power cut before they settled could break them; this one was broken by hand, which only
+    // the weekly look finds, so the next start shows it as it is, never reading it on the way.
     std::fs::write(&small, b"").unwrap();
     as_a_jawd(async {
         let rig = rig_in(home.clone(), quick()).await;
@@ -704,14 +709,14 @@ async fn the_read_path_shows_previews_a_power_cut_may_have_broken_only_once_the_
     let db = Connection::open(home.path().join("jaw.db")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
     db.execute("INSERT INTO chats (id, kind, v) VALUES (?1, 'direct', 1)", [ANA]).unwrap();
-    // Files numbered 1 (settled), 5 (past it, from before the start) and 9 (made since); none is on
-    // disk, as the read path never looks.
-    for (n, made) in [(1u8, 1i64), (2, 5), (3, 9)] {
-        let sha256 = vec![n; 32];
+    // Three files, the second of which a start found suspect; none is on disk, as the read path
+    // never looks.
+    for n in [1u8, 2, 3] {
+        let (sha256, made) = (vec![n; 32], i64::from(n));
         db.execute(
             "INSERT INTO messages (chat, id, at, t, kind, detail, v)
             VALUES ((SELECT n FROM chats WHERE id = ?1), ?2, ?3, ?3, 'image', '{\"media\":{}}', 1)",
-            rusqlite::params![ANA, format!("3EB0MADE{made}"), made],
+            rusqlite::params![ANA, format!("3EB0FILE{n}"), made],
         )
         .unwrap();
         db.execute(
@@ -726,7 +731,7 @@ async fn the_read_path_shows_previews_a_power_cut_may_have_broken_only_once_the_
         )
         .unwrap();
     }
-    store.files().suspect(1, 7);
+    store.files().suspect([vec![2u8; 32]]);
     let shown = |id: &'static str| {
         let store = store.clone();
         async move {
@@ -740,11 +745,272 @@ async fn the_read_path_shows_previews_a_power_cut_may_have_broken_only_once_the_
             (row["media"]["previews"].is_object(), row["media"]["thumbnail"].is_string())
         }
     };
-    assert_eq!(shown("3EB0MADE1").await, (true, true), "settled before the start");
-    assert_eq!(shown("3EB0MADE5").await, (false, false), "not yet checked");
-    assert_eq!(shown("3EB0MADE9").await, (true, true), "made since the start");
-    store.files().checked(5);
-    assert_eq!(shown("3EB0MADE5").await, (true, true), "once the check has passed it");
+    assert_eq!(shown("3EB0FILE1").await, (true, true), "not suspect");
+    assert_eq!(shown("3EB0FILE2").await, (false, false), "not yet checked");
+    assert_eq!(shown("3EB0FILE3").await, (true, true), "not suspect either");
+    store.files().passed(&[vec![2u8; 32]]);
+    assert_eq!(shown("3EB0FILE2").await, (true, true), "once the check has passed it");
+}
+
+/// Waits until the start's check has passed every file it found suspect.
+async fn until_checked(rig: &Rig) {
+    for _ in 0..1_000 {
+        if !rig.media.status().checking {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the start's check never finished: {:?}", rig.media.status());
+}
+
+/// What a drive is asked, with how far jaw.db in `home` says previews are settled at each call.
+type Asked = Arc<std::sync::Mutex<Vec<(drive::Flush, std::path::PathBuf, i64)>>>;
+
+/// A stand-in for the drive that records what it's asked, and does nothing.
+fn recording(home: &Path) -> (drive::Drive, Asked) {
+    let asked = Asked::default();
+    let (recorded, db, path) = (asked.clone(), std::sync::Mutex::new(None::<Connection>), home.join("jaw.db"));
+    let drive = drive::Drive::stand_in(move |flush, at| {
+        let mut db = db.lock().unwrap();
+        let db = db.get_or_insert_with(|| Connection::open(&path).unwrap());
+        let settled = db.query_row("SELECT settled FROM media_made", [], |r| r.get(0)).unwrap();
+        recorded.lock().unwrap().push((flush, at.to_path_buf(), settled));
+        Ok(())
+    });
+    (drive, asked)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settle_sends_each_preview_to_the_drive_and_fences_them_before_it_notes_them_settled() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let (drive, asked) = recording(home.path());
+    let rig = rig_in(home.clone(), Config { drive: Some(drive), ..quick() }).await;
+    rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0FENCED").await;
+    let row = rig
+        .until(ANA, "3EB0FENCED", "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string())
+        .await;
+    until_checked(&rig).await;
+    rig.media.settle().await.unwrap();
+    let asked = asked.lock().unwrap().clone();
+    let folder = home.path().join(PREVIEWS);
+    let pushed: Vec<&std::path::PathBuf> =
+        asked.iter().filter(|(flush, ..)| *flush == drive::Flush::Push).map(|(_, path, _)| path).collect();
+    for file in [&row["media"]["previews"]["256"], &row["media"]["previews"]["768"], &row["media"]["thumbnail"]] {
+        assert!(pushed.contains(&&rig.file(file)), "{file} was sent to the drive: {asked:?}");
+    }
+    assert!(pushed.contains(&&folder), "and its folder: {asked:?}");
+    let barriers: Vec<_> = asked.iter().filter(|(flush, ..)| *flush == drive::Flush::Barrier).collect();
+    assert_eq!(barriers.len(), 1, "one barrier: {asked:?}");
+    assert_eq!(
+        asked.last().map(|(flush, path, _)| (*flush, path)),
+        Some((drive::Flush::Barrier, &folder)),
+        "after every push"
+    );
+    assert!(asked.iter().all(|(.., settled)| *settled == 0), "nothing noted settled before the barrier: {asked:?}");
+    let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+    assert_eq!((settled, made), (2, 2), "noted once fenced");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settle_stops_at_a_preview_it_cant_send_to_the_drive_and_passes_over_one_gone_since() {
+    for (error, settles) in [(std::io::ErrorKind::PermissionDenied, false), (std::io::ErrorKind::NotFound, true)] {
+        let failing = Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+        let drive = {
+            let failing = failing.clone();
+            drive::Drive::stand_in(move |_, path| match failing.lock().unwrap().as_deref() {
+                Some(failing) if failing == path => Err(error.into()),
+                _ => Ok(()),
+            })
+        };
+        let rig = rig(Config { drive: Some(drive), ..quick() }).await;
+        rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0UNSENT").await;
+        let row = rig
+            .until(ANA, "3EB0UNSENT", "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string())
+            .await;
+        until_checked(&rig).await;
+        *failing.lock().unwrap() = Some(rig.file(&row["media"]["previews"]["256"]));
+        let settled = rig.media.settle().await;
+        let (through, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+        assert_eq!(
+            (settled.is_ok(), through == made),
+            (settles, settles),
+            "{error:?}: {settled:?}, settled through {through} of {made}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn off_the_macs_own_drive_downloads_are_flushed_in_full_and_status_says_so() {
+    for (barriers, full) in [(true, false), (false, true)] {
+        let rig = rig(Config { barriers: Some(barriers), ..quick() }).await;
+        rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0FLUSHED").await;
+        rig.until(ANA, "3EB0FLUSHED", "downloaded", local).await;
+        let asked: Vec<bool> = rig
+            .world
+            .asked()
+            .into_iter()
+            .filter_map(|kind| match kind {
+                pb::command::Kind::MediaDownload(download) => Some(download.full_flush),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, [full], "with barriers holding: {barriers}");
+        assert_eq!(rig.media.status().full_flush, full);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stops_settle_gives_up_at_its_bound_and_notes_nothing_after() {
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = std::sync::Mutex::new(held);
+    // A drive that takes its time over the barrier, as one under heavy I/O does.
+    let drive = drive::Drive::stand_in(move |flush, _| {
+        if flush == drive::Flush::Barrier {
+            let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        }
+        Ok(())
+    });
+    let rig = rig(Config { drive: Some(drive), ..quick() }).await;
+    rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0BOUND").await;
+    rig.until(ANA, "3EB0BOUND", "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string()).await;
+    until_checked(&rig).await;
+    let began = std::time::Instant::now();
+    let settled = rig.media.settle_within(Duration::from_millis(200)).await;
+    assert!(settled.is_err() && began.elapsed() < Duration::from_secs(2), "{settled:?} after {:?}", began.elapsed());
+    release.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+    assert_eq!((settled, made), (0, 2), "a settle given up notes nothing, even once the drive is done");
+}
+
+/// A photo whose previews and thumbnail a jawd on `home` drew and never settled, and the path of
+/// its 256 px preview, emptied as a power cut leaves it.
+fn drawn_and_cut(home: &Arc<tempfile::TempDir>, id: &'static str) -> (std::path::PathBuf, Vec<u8>) {
+    let lake = Picture::lake(640, 480);
+    let small = as_a_jawd(async {
+        let rig = rig_in(home.clone(), quick()).await;
+        rig.photo(&lake, ANA, ANA, id).await;
+        let row =
+            rig.until(ANA, id, "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string()).await;
+        rig.file(&row["media"]["previews"]["256"])
+    });
+    std::fs::write(&small, b"").unwrap();
+    (small, lake.sha256)
+}
+
+fn drawn_whole(home: &Path) -> impl Fn(&Value) -> bool {
+    let home = home.to_path_buf();
+    move |row: &Value| {
+        previewed(row)
+            && row["media"]["thumbnail"].is_string()
+            && row["media"]["previews"]["256"].as_str().is_some_and(|small| jaw_media::whole_preview(&home.join(small)))
+    }
+}
+
+#[test]
+fn a_suspect_preview_whose_file_a_job_holds_stays_unshown_and_unsettled_until_its_mended() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let (_, sha256) = drawn_and_cut(&home, "3EB0HELD");
+    as_a_jawd(async {
+        let rig = rig_in(home.clone(), Config { check_after: Duration::from_millis(300), ..quick() }).await;
+        // A job holds the file as the check comes to it, as a download started again would.
+        let claim = rig.media.inner.claims.share(&sha256).await;
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let row = rig.row(ANA, "3EB0HELD").await;
+        assert!(row["media"]["previews"].is_null() && row["media"]["thumbnail"].is_null(), "shown unmended: {row}");
+        let status = rig.media.status();
+        assert!(status.checking && status.suspect == 1 && status.remade == 0, "{status:?}");
+        rig.media.settle().await.unwrap();
+        let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+        assert_eq!((settled, made), (0, 2), "nothing settles while it's unmended");
+        drop(claim);
+        rig.until(ANA, "3EB0HELD", "mended once its file is free", drawn_whole(home.path())).await;
+        until_checked(&rig).await;
+        let status = rig.media.status();
+        assert!(status.suspect == 0 && status.remade == 1, "{status:?}");
+        rig.media.settle().await.unwrap();
+        let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+        assert!(settled == made && made > 2, "settled once mended and drawn again: {settled} of {made}");
+    });
+}
+
+#[test]
+fn a_clean_stop_before_the_starts_check_settles_nothing_the_check_hasnt_passed() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    drawn_and_cut(&home, "3EB0STOPPED");
+    as_a_jawd(async {
+        let rig = rig_in(home.clone(), Config { check_after: Duration::from_secs(3600), ..quick() }).await;
+        rig.media.settle().await.unwrap();
+        let (settled, made) = rig.store.pair("SELECT settled, made FROM media_made").unwrap();
+        assert_eq!((settled, made), (0, 2), "the stop settled what the check hadn't passed");
+    });
+    as_a_jawd(async {
+        let rig = rig_in(home.clone(), quick()).await;
+        rig.until(ANA, "3EB0STOPPED", "mended at the next start", drawn_whole(home.path())).await;
+        assert_eq!(rig.media.status().remade, 1);
+    });
+}
+
+/// The row of message `id` anywhere in `line`, as a reply or a push carries it.
+fn row_in<'a>(line: &'a Value, id: &str) -> Option<&'a Value> {
+    match line {
+        Value::Object(map) if map.get("id").and_then(Value::as_str) == Some(id) && map.contains_key("media") => {
+            Some(line)
+        }
+        Value::Object(map) => map.values().find_map(|value| row_in(value, id)),
+        Value::Array(values) => values.iter().find_map(|value| row_in(value, id)),
+        _ => None,
+    }
+}
+
+#[test]
+fn windows_shown_a_photo_before_the_check_passed_it_are_told_once_it_has() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let lake = Picture::lake(640, 480);
+    as_a_jawd(async {
+        let rig = rig_in(home.clone(), quick()).await;
+        rig.photo(&lake, ANA, ANA, "3EB0TOLD").await;
+        rig.until(ANA, "3EB0TOLD", "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string()).await;
+    });
+    as_a_jawd(async {
+        let rig = rig_in(home.clone(), Config { check_after: Duration::from_millis(1_500), ..quick() }).await;
+        let mut interface = Interface::open(&rig.serve()).await;
+        let hello = json!({ "protocol": jaw_proto::PROTOCOL, "client": "test", "version": "0" });
+        interface.call(1, "hello", hello).await;
+        let watched =
+            interface.call(2, "messages.watch", json!({ "chat": ANA, "around": "newest", "before": 20 })).await;
+        let shown = row_in(&watched, "3EB0TOLD").expect("the photo in the window");
+        assert!(shown["media"]["previews"].is_null(), "shown before the check passed it: {shown}");
+        let told = interface
+            .until(Duration::from_secs(10), |line| {
+                row_in(line, "3EB0TOLD").is_some_and(|row| row["media"]["previews"].is_object())
+            })
+            .await;
+        assert!(told.is_some(), "the window was never told the check passed it");
+        assert_eq!(rig.media.status().remade, 0, "whole, so passed as it was");
+    });
+}
+
+#[test]
+fn the_weekly_look_mends_a_settled_preview_broken_since() {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let small = as_a_jawd(async {
+        let rig = rig_in(home.clone(), quick()).await;
+        rig.photo(&Picture::lake(640, 480), ANA, ANA, "3EB0WEEKLY").await;
+        let row = rig
+            .until(ANA, "3EB0WEEKLY", "its previews", |row| previewed(row) && row["media"]["thumbnail"].is_string())
+            .await;
+        until_checked(&rig).await;
+        rig.media.settle().await.unwrap();
+        rig.file(&row["media"]["previews"]["256"])
+    });
+    // Broken by a disk error, or a hand from outside, after it settled.
+    std::fs::write(&small, b"").unwrap();
+    as_a_jawd(async {
+        let rig = rig_in(home.clone(), Config { look_every: Duration::from_millis(300), ..quick() }).await;
+        rig.until(ANA, "3EB0WEEKLY", "mended by the look", drawn_whole(home.path())).await;
+        assert_eq!(rig.media.status().remade, 1);
+    });
 }
 
 #[tokio::test(flavor = "multi_thread")]
