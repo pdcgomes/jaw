@@ -1,12 +1,14 @@
-//! The look: ooze's, in Tokyo Night, falling back to the nearest of the 256 standard colours where
-//! the terminal has no 24-bit colour. A theme is a palette of a few hex values; drawing asks
-//! `Theme` for what a colour is for, never for a hue, so another theme is another palette.
+//! The look: ooze's, in one of Omarchy's themes, falling back to the nearest of the 256 standard
+//! colours where the terminal has no 24-bit colour. A theme is Omarchy's palette mapped onto what
+//! each colour is for; drawing asks `Theme` for a role, never for a hue, and each role is kept
+//! readable against the ground whatever the palette.
 
+use jaw_proto::themes::{Colors, Mode, Rgb};
 use ratatui::style::Color;
 
-/// A theme's colours as hex values: the ground it draws on, its greys, and eight accents.
+/// Each role's colour as hex, from a theme's palette, before the terminal's colours are chosen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Palette {
+pub struct Roles {
     pub bg: u32,
     pub surface: u32,
     pub selection: u32,
@@ -15,35 +17,91 @@ pub struct Palette {
     pub muted: u32,
     pub comment: u32,
     pub gutter: u32,
-    pub blue: u32,
-    pub cyan: u32,
-    pub teal: u32,
-    pub purple: u32,
-    pub green: u32,
-    pub yellow: u32,
-    pub orange: u32,
-    pub red: u32,
+    pub accent: u32,
+    pub link: u32,
+    pub mention: u32,
+    pub online: u32,
+    pub notice: u32,
+    pub senders: [u32; 8],
 }
 
-/// Omarchy's default, and ooze's and hauntop's.
-pub const TOKYO_NIGHT: Palette = Palette {
-    bg: 0x1a1b26,
-    surface: 0x24283b,
-    selection: 0x283457,
-    fg: 0xc0caf5,
-    text: 0xa9b1d6,
-    muted: 0x737aa2,
-    comment: 0x565f89,
-    gutter: 0x3b4261,
-    blue: 0x7aa2f7,
-    cyan: 0x7dcfff,
-    teal: 0x73daca,
-    purple: 0xbb9af7,
-    green: 0x9ece6a,
-    yellow: 0xe0af68,
-    orange: 0xff9e64,
-    red: 0xf7768e,
-};
+impl Roles {
+    /// Omarchy's keys mapped onto jaw's roles. A grey outside its band of contrast with the ground
+    /// is moved toward the ground or the text until it's in, keeping its hue, and every colour
+    /// reads at least 3:1.
+    pub fn of(c: &Colors) -> Roles {
+        let bg = c.background.0;
+        let (fg, text) = if contrast(c.bright_foreground.0, bg) >= contrast(c.foreground.0, bg) {
+            (c.bright_foreground.0, c.foreground.0)
+        } else {
+            (c.foreground.0, c.bright_foreground.0)
+        };
+        let fit = |colour: u32, low: f64, high: f64, target: f64| fit(colour, bg, fg, low, high, target);
+        let comment = fit(c.dark_foreground.0, 2.5, 4.5, 3.0);
+        let hue = |colour: Rgb| fit(colour.0, 3.0, f64::INFINITY, 3.0);
+        Roles {
+            bg,
+            surface: fit(c.lighter_background.0, 1.05, f64::INFINITY, 1.1),
+            selection: fit(c.selection.0, 1.15, f64::INFINITY, 1.25),
+            fg,
+            text,
+            muted: mix(comment, text, 0.5),
+            comment,
+            gutter: fit(c.muted.0, 1.4, 2.6, 1.8),
+            accent: c.accent.0,
+            link: hue(c.cyan),
+            mention: hue(c.orange),
+            online: hue(c.green),
+            notice: hue(c.yellow),
+            senders: [c.red, c.yellow, c.blue, c.magenta, c.cyan, c.green, c.orange, c.bright_cyan].map(hue),
+        }
+    }
+}
+
+/// WCAG's relative luminance of a colour.
+fn luminance(c: u32) -> f64 {
+    let channel = |shift: u32| {
+        let v = f64::from((c >> shift) & 0xff) / 255.0;
+        if v <= 0.039_28 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+/// WCAG's contrast between two colours, from 1 to 21.
+pub fn contrast(a: u32, b: u32) -> f64 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// `a` moved `t` of the way to `b`, channel by channel.
+pub fn mix(a: u32, b: u32, t: f64) -> u32 {
+    let channel = |shift: u32| {
+        let (x, y) = (f64::from((a >> shift) & 0xff), f64::from((b >> shift) & 0xff));
+        ((x + (y - x) * t).round() as u32).min(255) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
+/// `colour` as it is when its contrast with `ground` is from `low` to `high`, and otherwise moved
+/// toward `fg` or `ground` until its contrast is `target`.
+fn fit(colour: u32, ground: u32, fg: u32, low: f64, high: f64, target: f64) -> u32 {
+    let now = contrast(colour, ground);
+    if (low..=high).contains(&now) {
+        return colour;
+    }
+    let end = if now < low { fg } else { ground };
+    let (mut near, mut far) = (0.0, 1.0);
+    for _ in 0..30 {
+        let t = (near + far) / 2.0;
+        let reached = contrast(mix(colour, end, t), ground);
+        if (now < low && reached < target) || (now > high && reached > target) {
+            near = t;
+        } else {
+            far = t;
+        }
+    }
+    mix(colour, end, far)
+}
 
 /// Each colour by what it's for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,40 +143,49 @@ pub struct Theme {
     senders: [Color; 8],
     /// Whether colours are 24-bit, for the creature's own.
     pub truecolor: bool,
+    /// Whether the theme is dark text on a light ground.
+    pub light: bool,
 }
 
 impl Theme {
-    pub fn new(p: &Palette, truecolor: bool) -> Theme {
+    pub fn new(r: &Roles, light: bool, truecolor: bool) -> Theme {
         let c = |h: u32| color(h, truecolor);
         Theme {
-            bg: c(p.bg),
-            surface: c(p.surface),
-            selection: c(p.selection),
-            fg: c(p.fg),
-            text: c(p.text),
-            muted: c(p.muted),
-            comment: c(p.comment),
-            gutter: c(p.gutter),
-            brand: c(p.teal),
-            focus: c(p.blue),
-            link: c(p.cyan),
-            mark: c(p.fg),
-            unread: c(p.fg),
-            mention: c(p.orange),
-            arrived: c(p.orange),
-            online: c(p.green),
-            unseen: c(p.comment),
-            read: c(p.cyan),
-            warn: c(p.orange),
-            notice: c(p.yellow),
-            progress: c(p.blue),
-            senders: [p.red, p.yellow, p.blue, p.purple, p.cyan, p.green, p.orange, p.teal].map(c),
+            bg: c(r.bg),
+            surface: c(r.surface),
+            selection: c(r.selection),
+            fg: c(r.fg),
+            text: c(r.text),
+            muted: c(r.muted),
+            comment: c(r.comment),
+            gutter: c(r.gutter),
+            brand: c(r.accent),
+            focus: c(r.accent),
+            link: c(r.link),
+            mark: c(r.fg),
+            unread: c(r.fg),
+            mention: c(r.mention),
+            arrived: c(r.mention),
+            online: c(r.online),
+            unseen: c(r.comment),
+            read: c(r.link),
+            warn: c(r.mention),
+            notice: c(r.notice),
+            progress: c(r.accent),
+            senders: r.senders.map(c),
             truecolor,
+            light,
         }
     }
 
+    /// The theme `id` names, Tokyo Night where it names none jaw knows.
+    pub fn named(id: &str, truecolor: bool) -> Theme {
+        let theme = jaw_proto::themes::or_default(id);
+        Theme::new(&Roles::of(&theme.colors), theme.mode == Mode::Light, truecolor)
+    }
+
     pub fn with(truecolor: bool) -> Theme {
-        Theme::new(&TOKYO_NIGHT, truecolor)
+        Theme::named(jaw_proto::themes::DEFAULT, truecolor)
     }
 
     pub fn sender(&self, colour: u8) -> Color {
@@ -205,5 +272,61 @@ mod tests {
         assert_eq!(nearest_256(255, 255, 255), 231);
         assert_eq!(nearest_256(0x1a, 0x1b, 0x26), 234, "Tokyo Night's background is a near-black grey");
         assert_eq!(nearest_256(0x7a, 0xa2, 0xf7), 111, "and its blue a soft blue");
+    }
+
+    #[test]
+    fn every_theme_keeps_its_greys_in_their_bands_and_in_order() {
+        for theme in jaw_proto::themes::all() {
+            let r = Roles::of(&theme.colors);
+            let c = |x: u32| contrast(x, r.bg);
+            let id = &theme.id;
+            assert!((1.4..=2.61).contains(&c(r.gutter)), "{id}: borders {:.2}", c(r.gutter));
+            assert!((2.5..=4.51).contains(&c(r.comment)), "{id}: dim text {:.2}", c(r.comment));
+            assert!(c(r.gutter) < c(r.comment) && c(r.comment) < c(r.muted), "{id}: borders, dim, secondary");
+            assert!(c(r.muted) < c(r.text) && c(r.text) <= c(r.fg), "{id}: secondary, text, text that matters");
+            assert!(c(r.text) >= 4.5, "{id}: text {:.2}", c(r.text));
+            assert!(c(r.surface) >= 1.05 && c(r.selection) >= 1.15, "{id}: surface and selection stand out");
+            assert!(contrast(r.fg, r.selection) >= 4.5, "{id}: text on the selection");
+        }
+    }
+
+    #[test]
+    fn every_colour_reads_at_least_three_to_one() {
+        for theme in jaw_proto::themes::all() {
+            let r = Roles::of(&theme.colors);
+            for (what, colour) in [("link", r.link), ("mention", r.mention), ("online", r.online), ("notice", r.notice)]
+                .into_iter()
+                .chain(r.senders.iter().map(|s| ("sender", *s)))
+            {
+                assert!(contrast(colour, r.bg) >= 3.0, "{}: {what} {:.2}", theme.id, contrast(colour, r.bg));
+            }
+        }
+    }
+
+    #[test]
+    fn a_grey_outside_its_band_is_moved_toward_the_ground_or_the_text_keeping_its_hue() {
+        let theme = |id: &str| jaw_proto::themes::get(id).unwrap().colors;
+        let near = |a: u32, b: u32| (0..3).all(|i| ((a >> (8 * i)) & 0xff).abs_diff((b >> (8 * i)) & 0xff) <= 2);
+        let everforest = theme("everforest");
+        let raised = Roles::of(&everforest).comment;
+        assert_ne!(raised, everforest.dark_foreground.0, "Everforest's dim text is too dim, so it's raised");
+        let toward_text = |i: i32| mix(everforest.dark_foreground.0, everforest.foreground.0, f64::from(i) / 200.0);
+        assert!((0..=200).any(|i| near(toward_text(i), raised)), "on the line from its own grey to the text");
+        let osaka = theme("osaka-jade");
+        assert!(
+            contrast(Roles::of(&osaka).comment, osaka.background.0)
+                < contrast(osaka.dark_foreground.0, osaka.background.0)
+        );
+    }
+
+    #[test]
+    fn tokyo_night_is_omarchys_and_an_unknown_theme_is_tokyo_night() {
+        let r = Roles::of(&jaw_proto::themes::get("tokyo-night").unwrap().colors);
+        assert_eq!(
+            (r.bg, r.surface, r.selection, r.fg, r.text, r.comment, r.gutter, r.accent, r.link),
+            (0x1a1b26, 0x24283b, 0x292e42, 0xc0caf5, 0xa9b1d6, 0x565f89, 0x414868, 0x7aa2f7, 0x449dab)
+        );
+        assert_eq!(Theme::named("no-such-theme", true), Theme::with(true));
+        assert!(!Theme::with(true).light && Theme::named("catppuccin-latte", true).light);
     }
 }

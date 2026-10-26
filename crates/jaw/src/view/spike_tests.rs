@@ -82,21 +82,21 @@ fn digest(v: &mut View) -> (u64, String) {
 /// The screens the switches could change, with the digest of each as `main` drew it before them,
 /// every switch off. A change made to the default screen on purpose changes these too.
 const AS_IT_WAS: [(State, u16, u16, &str, u64); 14] = [
-    (State::Online, 160, 45, "", 0x4b28_0165_7925_2b4e),
-    (State::Online, 140, 40, "", 0x52a9_e072_5a18_3990),
-    (State::Online, 100, 30, "", 0x5819_db0f_dc65_fb67),
-    (State::Online, 80, 24, "", 0xc36b_d038_f5b3_e777),
-    (State::Online, 80, 24, "<down>\n", 0x871f_b1ad_f13f_1eb7),
-    (State::Online, 100, 30, "<up>", 0x16c9_4fd5_3d25_ab5d),
-    (State::Online, 140, 34, "levo o vinho<c-k>", 0x11f4_3b22_9bda_f91c),
-    (State::Online, 100, 30, "?", 0xaf22_ca71_fcf3_6fe4),
-    (State::Online, 100, 30, "sim!<a-enter>e levo a sobremesa", 0x9fa0_62df_9fa2_2906),
-    (State::Online, 120, 30, "<c-b>", 0x2190_c6b2_085a_4385),
-    (State::CatchingUp, 140, 30, "<a-down><a-down><a-down><a-down>", 0xdf1c_770e_835c_0222),
-    (State::Online, 100, 30, "<c-r>", 0xaf24_ff68_3d5a_f81b),
-    (State::Online, 140, 40, "<c-l>", 0x8608_0eb3_0005_5e7f),
+    (State::Online, 160, 45, "", 0xb0e3_332c_ffb2_c33d),
+    (State::Online, 140, 40, "", 0xec84_2a3b_2696_f8d3),
+    (State::Online, 100, 30, "", 0x39b3_99cc_e243_5d2c),
+    (State::Online, 80, 24, "", 0x49bd_d9e4_341c_61b9),
+    (State::Online, 80, 24, "<down>\n", 0xfae9_0b86_f22e_e0a7),
+    (State::Online, 100, 30, "<up>", 0x66f4_dfa5_890f_bfb7),
+    (State::Online, 140, 34, "levo o vinho<c-k>", 0x3f00_8b45_43c7_6431),
+    (State::Online, 100, 30, "?", 0x4173_a933_50d2_81d6),
+    (State::Online, 100, 30, "sim!<a-enter>e levo a sobremesa", 0x3fbb_4764_212e_0469),
+    (State::Online, 120, 30, "<c-b>", 0x6537_baa5_1012_c15d),
+    (State::CatchingUp, 140, 30, "<a-down><a-down><a-down><a-down>", 0x06ea_47a7_b2a3_7d28),
+    (State::Online, 100, 30, "<c-r>", 0x0b99_77f5_9595_9e4e),
+    (State::Online, 140, 40, "<c-l>", 0x05ad_ec08_82ed_b50e),
     // The switches' keys do what they did before them while typing: nothing.
-    (State::Online, 140, 40, "<c-f><c-g><c-p>", 0x52a9_e072_5a18_3990),
+    (State::Online, 140, 40, "<c-f><c-g><c-p>", 0xec84_2a3b_2696_f8d3),
 ];
 
 #[test]

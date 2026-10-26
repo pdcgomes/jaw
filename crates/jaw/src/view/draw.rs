@@ -1,7 +1,7 @@
 //! Drawing: the header in a top border of its own, the chat list and the conversation in rounded
 //! panels with their titles in the top border, the message box inside the conversation, and the
-//! keys that matter now in the last line. The panel with the keys' attention is outlined in blue,
-//! and orange is kept for what needs you.
+//! keys that matter now in the last line. The panel with the keys' attention is outlined in the
+//! theme's accent, and orange is kept for what needs you.
 
 use super::{Focus, LIST, NARROW, Overlay, Placed, Reach, Scroll, View};
 use crate::art::{self, Look};
@@ -1051,7 +1051,7 @@ impl View {
         }
         let buf = f.buffer_mut();
         let qr = match &self.link {
-            Some(LinkStep::Qr { code, .. }) => art::qr(code),
+            Some(LinkStep::Qr { code, .. }) => art::qr(code, t.light),
             _ => vec![],
         };
         let mimic = &self.mimic;

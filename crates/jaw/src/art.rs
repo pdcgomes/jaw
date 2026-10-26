@@ -1,5 +1,5 @@
 //! What's drawn rather than written: the Mimic in half-block pixel art, a pixel to a cell, and
-//! QR codes in half-blocks, light on dark.
+//! QR codes in half-blocks, light on dark, or dark on light in a light theme.
 
 use crate::theme::{Theme, nearest_256};
 use ratatui::style::{Color, Style};
@@ -125,9 +125,10 @@ fn luma(p: Rgb) -> f32 {
     0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32
 }
 
-/// A QR code in half-blocks, light on dark with its quiet zone, so a phone reads it from a dark
-/// terminal: two modules to a cell, the top one as the glyph.
-pub fn qr(code: &str) -> Vec<String> {
+/// A QR code in half-blocks with its quiet zone, two modules to a cell, the top one as the glyph:
+/// light on dark for a dark theme, its light modules drawn in the text colour, and dark on light
+/// for a light theme, its dark modules drawn in it, so a phone reads it as printed codes are.
+pub fn qr(code: &str, light: bool) -> Vec<String> {
     let Ok(qr) = qrcode::QrCode::new(code.as_bytes()) else { return vec![] };
     let n = qr.width();
     let quiet = 2;
@@ -141,7 +142,13 @@ pub fn qr(code: &str) -> Vec<String> {
             (0..side)
                 .map(|x| {
                     let (x, y) = (x - quiet as isize, y - quiet as isize);
-                    match (!dark(x, y), !dark(x, y + 1) && y + 1 < side - quiet as isize) {
+                    let below = y + 1 < side - quiet as isize;
+                    let drawn = if light {
+                        (dark(x, y), dark(x, y + 1) && below)
+                    } else {
+                        (!dark(x, y), !dark(x, y + 1) && below)
+                    };
+                    match drawn {
                         (true, true) => '█',
                         (true, false) => '▀',
                         (false, true) => '▄',
@@ -193,11 +200,29 @@ mod tests {
 
     #[test]
     fn a_qr_code_is_light_on_dark_with_room_around_it() {
-        let rows = qr("2@jaw-demo,made-up,linking-code");
+        let rows = qr("2@jaw-demo,made-up,linking-code", false);
         assert!(!rows.is_empty());
         let w = rows[0].chars().count();
         assert!(rows.iter().all(|r| r.chars().count() == w));
         assert!(rows[0].chars().all(|c| c == '█'), "the quiet zone is light: {}", rows[0]);
         assert!(rows.iter().any(|r| r.contains(' ')), "and the modules dark");
+    }
+
+    #[test]
+    fn in_a_light_theme_a_qr_code_is_dark_on_light() {
+        let dark = qr("2@jaw-demo,made-up,linking-code", false);
+        let light = qr("2@jaw-demo,made-up,linking-code", true);
+        assert_eq!(dark.len(), light.len());
+        assert!(light[0].chars().all(|c| c == ' '), "the quiet zone is the light ground: {}", light[0]);
+        let swap = |c: char| match c {
+            '█' => ' ',
+            ' ' => '█',
+            '▀' => '▄',
+            '▄' => '▀',
+            other => other,
+        };
+        for (d, l) in dark.iter().zip(&light).take(dark.len() - 1) {
+            assert_eq!(d.chars().map(swap).collect::<String>(), *l, "each module the other way round");
+        }
     }
 }
