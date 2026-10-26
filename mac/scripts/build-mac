@@ -49,7 +49,7 @@ case "$what" in
         ;;
     snapshot)
         out="$1"; shift
-        run "scripts/check build jaw >/dev/null; rm -rf \\\$TMPDIR/jaw-mac-demo; build/DerivedData/Build/Products/Debug/Jaw.app/Contents/MacOS/jaw --demo --snapshot /tmp/jaw-mac-snapshot.png $* > /tmp/jaw-mac-snapshot.log 2>&1; cat /tmp/jaw-mac-snapshot.log | tail -3"
+        run "scripts/check build jaw >/dev/null; rm -rf \\\$TMPDIR/jaw-mac-demo; build/DerivedData/Build/Products/Debug/Jaw.app/Contents/MacOS/Jaw --demo --snapshot /tmp/jaw-mac-snapshot.png $* > /tmp/jaw-mac-snapshot.log 2>&1; cat /tmp/jaw-mac-snapshot.log | tail -12"
         scp -q -o BatchMode=yes "$host:/tmp/jaw-mac-snapshot.png" "$out" && echo "==> $out"
         ;;
     release)

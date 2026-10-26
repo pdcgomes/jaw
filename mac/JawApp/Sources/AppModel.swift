@@ -355,7 +355,11 @@ final class AppModel {
     func split(_ axis: PaneLayout.Axis) {
         guard let layout, let focused = focusedChat else { return }
         guard panes.count < PaneLayout.most else { return say("\(PaneLayout.most) panes at most") }
-        guard let next = nextUnshown() else { return say("every chat in the list has a pane") }
+        guard let next = nextUnshown() else { return say("every chat is on screen already") }
+        let size = panes[focused]?.view.bounds.size ?? .zero
+        guard (axis == .across ? size.width : size.height) >= 2 * PaneView.least else {
+            return say("no room to split this pane; close one, or a bigger window")
+        }
         _ = makePane(next, place: ConversationController.place(for: next))
         self.layout = layout.splitting(focused, axis, with: next.id)
         focus(next.id)
@@ -368,11 +372,19 @@ final class AppModel {
             window?.window?.performClose(nil)
             return
         }
-        let next = layout?.neighbour(of: focused, .left) ?? layout?.neighbour(of: focused, .up)
-            ?? layout?.panes.first { $0 != focused }
-        closePane(focused)
-        focusedChat = nil
-        if let next { focus(next) }
+        close(pane: focused)
+    }
+
+    /// Closes a pane of several; focus goes to its neighbour when it had it.
+    func close(pane chat: String) {
+        guard panes.count > 1, panes[chat] != nil else { return }
+        let next = layout?.neighbour(of: chat, .left) ?? layout?.neighbour(of: chat, .up)
+            ?? layout?.panes.first { $0 != chat }
+        closePane(chat)
+        if focusedChat == chat {
+            focusedChat = nil
+            if let next { focus(next) }
+        }
         window?.showPanes()
         savePanes()
     }

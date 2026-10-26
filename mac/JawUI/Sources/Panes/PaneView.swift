@@ -8,6 +8,10 @@ public final class PaneView: NSView, NSSplitViewDelegate {
     /// The pane each split view's first side holds, for writing its new share back.
     var splits: [ObjectIdentifier: (String, PaneLayout.Axis)] = [:]
     public var resized: ((String, PaneLayout.Axis, Double) -> Void)?
+    /// The least a pane is, across or down; a pane splits only with room for two.
+    public static let least: CGFloat = 240
+    /// A pane's close button, shown on hover when there's more than one pane.
+    public var close: ((String) -> Void)?
     var layout: PaneLayout?
 
     /// Lays the panes out afresh; the conversations' views move into their places.
@@ -39,6 +43,9 @@ public final class PaneView: NSView, NSSplitViewDelegate {
                 frame.hold(content)
             }
             frame.outline(id == focused ? roles.accent : nil)
+            if layout?.panes.count ?? 0 > 1 {
+                frame.closable(roles) { [weak self] in self?.close?(id) }
+            }
             return frame
         case let .split(axis, _, a, b):
             let split = ThemedSplitView()
@@ -74,11 +81,11 @@ public final class PaneView: NSView, NSSplitViewDelegate {
     }
 
     public func splitView(_: NSSplitView, constrainMinCoordinate proposed: CGFloat, ofSubviewAt _: Int) -> CGFloat {
-        max(proposed, 240)
+        max(proposed, Self.least)
     }
 
     public func splitView(_ split: NSSplitView, constrainMaxCoordinate proposed: CGFloat, ofSubviewAt _: Int) -> CGFloat {
-        min(proposed, (split.isVertical ? split.bounds.width : split.bounds.height) - 240)
+        min(proposed, (split.isVertical ? split.bounds.width : split.bounds.height) - Self.least)
     }
 }
 
@@ -91,9 +98,11 @@ final class ThemedSplitView: NSSplitView {
     }
 }
 
-/// One pane's place: its conversation, and the focused pane's thin outline in the accent.
+/// One pane's place: its conversation, the focused pane's thin outline in the accent, and a close
+/// button over the header's trailing end while the pointer is over the pane.
 final class PaneFrame: NSView {
-    let border = CALayer()
+    var closeButton: NSButton?
+    var closing: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -108,7 +117,7 @@ final class PaneFrame: NSView {
     func hold(_ content: NSView) {
         content.removeFromSuperview()
         content.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(content)
+        addSubview(content, positioned: .below, relativeTo: closeButton)
         NSLayoutConstraint.activate([
             content.topAnchor.constraint(equalTo: topAnchor),
             content.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -117,18 +126,45 @@ final class PaneFrame: NSView {
         ])
     }
 
+    /// The layer's own border is drawn above the conversation and resized with the view in the same
+    /// frame, where a sublayer of its own would be animated to its new size, behind the window.
     func outline(_ colour: RGBA?) {
-        border.removeFromSuperlayer()
-        guard let colour else { return }
-        border.borderColor = colour.cgColor
-        border.borderWidth = 1.5
-        border.zPosition = 10
-        layer?.addSublayer(border)
-        needsLayout = true
+        layer?.borderColor = colour?.cgColor
+        layer?.borderWidth = colour == nil ? 0 : 1.5
     }
 
-    override func layout() {
-        super.layout()
-        border.frame = bounds
+    func closable(_ roles: Roles, _ close: @escaping () -> Void) {
+        closing = close
+        let button = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Pane")!,
+                              target: self, action: #selector(closeClicked))
+        button.isBordered = false
+        button.bezelStyle = .accessoryBarAction
+        button.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        button.contentTintColor = roles.secondary.nsColor
+        button.toolTip = "Close this pane (⌘W)"
+        button.isHidden = true
+        button.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(button, positioned: .above, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            button.centerYAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 24),
+            button.widthAnchor.constraint(equalToConstant: 22),
+            button.heightAnchor.constraint(equalToConstant: 22),
+        ])
+        closeButton = button
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    @objc func closeClicked() {
+        closing?()
+    }
+
+    override func mouseEntered(with _: NSEvent) {
+        closeButton?.isHidden = false
+    }
+
+    override func mouseExited(with _: NSEvent) {
+        closeButton?.isHidden = true
     }
 }

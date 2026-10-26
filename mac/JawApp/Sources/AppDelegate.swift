@@ -228,14 +228,14 @@ enum Menus {
             item("Find", #selector(AppDelegate.showPalette(_:)), "k", .control, target: target),
             .separator(),
             item("Close Pane", #selector(AppDelegate.closePane(_:)), "w", target: target),
-            item("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift]),
+            item("Close Window", #selector(NSWindow.performClose(_:)), "W", [.command, .shift]),
         ])
         let arrows = [NSLeftArrowFunctionKey, NSRightArrowFunctionKey, NSUpArrowFunctionKey, NSDownArrowFunctionKey]
             .map { String(UnicodeScalar($0)!) }
         let ways = ["Left", "Right", "Up", "Down"]
         var paneItems = [
             item("Split Across", #selector(AppDelegate.splitAcross(_:)), "d", target: target),
-            item("Split Down", #selector(AppDelegate.splitDown(_:)), "d", [.command, .shift], target: target),
+            item("Split Down", #selector(AppDelegate.splitDown(_:)), "D", [.command, .shift], target: target),
             .separator(),
         ]
         for (i, way) in ways.enumerated() {
@@ -260,12 +260,12 @@ enum Menus {
         menu("Find", [
             item("Palette", #selector(AppDelegate.showPalette(_:)), "k", target: target),
             item("Search This Chat", #selector(AppDelegate.searchChat(_:)), "f", target: target),
-            item("Search Every Chat", #selector(AppDelegate.searchAll(_:)), "f", [.command, .shift], target: target),
+            item("Search Every Chat", #selector(AppDelegate.searchAll(_:)), "F", [.command, .shift], target: target),
             item("The Glance", #selector(AppDelegate.glance(_:)), "j", target: target),
         ])
         menu("Edit", [
             item("Undo", Selector(("undo:")), "z"),
-            item("Redo", Selector(("redo:")), "z", [.command, .shift]),
+            item("Redo", Selector(("redo:")), "Z", [.command, .shift]),
             .separator(),
             item("Cut", #selector(NSText.cut(_:)), "x"),
             item("Copy", #selector(NSText.copy(_:)), "c"),
@@ -288,7 +288,7 @@ enum Menus {
             item("Actual Size", #selector(AppDelegate.actualSize(_:)), "0", target: target),
             .separator(),
             item("Sidebar", #selector(AppDelegate.toggleSidebarFolders(_:)), "b", target: target),
-            item("Chat List", #selector(AppDelegate.showChatList(_:)), "l", [.command, .shift], target: target),
+            item("Chat List", #selector(AppDelegate.showChatList(_:)), "L", [.command, .shift], target: target),
             item("Focus on This Chat", #selector(AppDelegate.focusMode(_:)), "\r", [.command, .shift], target: target),
             .separator(),
             item("Previous Chat", #selector(AppDelegate.previousChat(_:)), up, .option, target: target),

@@ -9,7 +9,7 @@ import SwiftUI
 /// along the bottom of the whole window. Below 960 points the sidebar folds away, and below 740 the
 /// chat list does too, as the terminal folds.
 @MainActor
-final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
+final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSMenuItemValidation {
     let model: AppModel
     let split = NSSplitViewController()
     let sidebar = SidebarController()
@@ -91,6 +91,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             self?.goTo(m)
         }
         detail.panes.resized = { [weak model] pane, axis, share in model?.resized(pane, axis, share) }
+        detail.panes.close = { [weak model] pane in model?.close(pane: pane) }
 
         let link = content.displayLink(target: self, selector: #selector(frame(_:)))
         link.isPaused = true
@@ -317,12 +318,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             item.label = "Find"
             return item
         case Self.splitAcross:
-            let item = NSToolbarItem(itemIdentifier: id)
+            let item = NSMenuToolbarItem(itemIdentifier: id)
             item.image = NSImage(systemSymbolName: "rectangle.split.2x1", accessibilityDescription: "Split")
             item.label = "Split"
-            item.toolTip = "Another chat beside this one (⌘D)"
+            item.toolTip = "Another chat beside this one (⌘D), or below it from the menu"
             item.target = self
             item.action = #selector(splitAcross)
+            item.showsIndicator = true
+            let menu = NSMenu()
+            for (title, image, action, key, mods) in [
+                ("Split Across", "rectangle.split.2x1", #selector(splitAcross), "d", NSEvent.ModifierFlags.command),
+                ("Split Down", "rectangle.split.1x2", #selector(splitDown), "D", [.command, .shift]),
+                ("Close Pane", "xmark.rectangle", #selector(closePane), "w", .command),
+            ] as [(String, String, Selector, String, NSEvent.ModifierFlags)] {
+                let m = NSMenuItem(title: title, action: action, keyEquivalent: key)
+                m.keyEquivalentModifierMask = mods
+                m.image = NSImage(systemSymbolName: image, accessibilityDescription: title)
+                m.target = self
+                menu.addItem(m)
+            }
+            item.menu = menu
             return item
         case Self.newChat:
             let item = NSToolbarItem(itemIdentifier: id)
@@ -339,6 +354,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     @objc func splitAcross() {
         model.split(.across)
+    }
+
+    @objc func splitDown() {
+        model.split(.down)
+    }
+
+    @objc func closePane() {
+        model.closeFocusedPane()
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.action == #selector(closePane) ? model.panes.count > 1 : true
     }
 }
 

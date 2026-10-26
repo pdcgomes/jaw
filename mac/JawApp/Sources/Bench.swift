@@ -52,20 +52,63 @@ enum Bench {
     /// Opens the first chat once the list's rows come, then draws the window into a PNG and quits.
     static func snapshot(to path: String, model: AppModel) {
         deadline(30)
+        model.window?.window?.setContentSize(NSSize(width: 1440, height: 900))
         model.firstRows = {
             if let first = model.window?.chatList.all.first(where: { $0.kind != .community && $0.last != nil }) {
                 model.open(first, opened: false)
             }
             if CommandLine.arguments.contains("--split") { model.split(.across) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                guard let view = model.window?.window?.contentView else { return finish(["error": 2]) }
-                let rect = view.bounds
-                guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }
-                view.cacheDisplay(in: rect, to: rep)
-                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-                finish(["snapshot": 1])
+            let keys = CommandLine.arguments.firstIndex(of: "--keys").flatMap { i in
+                i + 1 < CommandLine.arguments.count ? CommandLine.arguments[i + 1].split(separator: ",").map(String.init) : nil
+            } ?? []
+            press(keys, model: model) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { draw(to: path, model: model) }
             }
         }
+    }
+
+    /// Presses each shortcut, as `cmd+shift+d`, through the app's own event handling half a second
+    /// apart, and says the panes after each.
+    static func press(_ keys: [String], model: AppModel, then: @escaping @MainActor () -> Void) {
+        guard let key = keys.first else { return then() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            NSApp.activate()
+            model.window?.window?.makeKeyAndOrderFront(nil)
+            var parts = key.lowercased().split(separator: "+").map(String.init)
+            let char = parts.popLast() ?? ""
+            var mods: NSEvent.ModifierFlags = []
+            for m in parts {
+                switch m {
+                case "cmd": mods.insert(.command)
+                case "shift": mods.insert(.shift)
+                case "opt": mods.insert(.option)
+                case "ctrl": mods.insert(.control)
+                default: break
+                }
+            }
+            let codes: [String: UInt16] = ["d": 2, "w": 13, "k": 40, "f": 3, "j": 38]
+            let typed = mods.contains(.shift) ? char.uppercased() : char
+            if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
+                                            windowNumber: model.window?.window?.windowNumber ?? 0, context: nil,
+                                            characters: typed, charactersIgnoringModifiers: typed, isARepeat: false, keyCode: codes[char] ?? 0)
+            {
+                NSApp.sendEvent(event)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                let said = (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
+                FileHandle.standardError.write(Data("\(key): \(model.layout.map { "\($0)" } ?? "no panes")\(said)\n".utf8))
+                press(Array(keys.dropFirst()), model: model, then: then)
+            }
+        }
+    }
+
+    static func draw(to path: String, model: AppModel) {
+        guard let view = model.window?.window?.contentView else { return finish(["error": 2]) }
+        let rect = view.bounds
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }
+        view.cacheDisplay(in: rect, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        finish(["snapshot": 1, "panes": Double(model.panes.count)])
     }
 
     static func opens(_ model: AppModel, _ chats: [ChatRow], _ times: [Double]) {
