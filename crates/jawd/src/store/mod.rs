@@ -427,6 +427,7 @@ impl Store {
             index_after: None,
             index_retry: RETRY_FIRST,
             near: None,
+            holding: None,
             shared_failing: None,
         };
         std::thread::Builder::new().name("jawd-writer".into()).spawn(move || writer.run(background_rx))?;
@@ -620,6 +621,9 @@ struct Writer {
     /// Since when the checkpointer has had only a few frames left to copy, while background work
     /// waits for the WAL to start again.
     near: Option<Instant>,
+    /// Since when background work, a batch or a step of indexing, has waited for the WAL to start
+    /// again.
+    holding: Option<Instant>,
     /// Why the last inbox commit with live writes in it failed, said once until the reason changes
     /// or one succeeds.
     shared_failing: Option<String>,
@@ -755,12 +759,18 @@ impl Writer {
         }
     }
 
-    /// Merges FTS5's segments or indexes some of fts_backlog, if the WAL has room. A step that
-    /// fails is tried again later, waiting longer each time.
+    /// Merges FTS5's segments or indexes some of fts_backlog, if the WAL has room; while it hasn't,
+    /// indexing waits for the checkpointer as background batches do. A step that fails is tried
+    /// again later, waiting longer each time.
     fn index_step(&mut self) {
-        if self.index_after.is_some_and(|at| Instant::now() < at) || !self.room() {
+        if self.index_after.is_some_and(|at| Instant::now() < at) {
             return;
         }
+        if !self.room() {
+            self.hold();
+            return;
+        }
+        self.unhold();
         // Merging first keeps FTS5's levels short of a merge it would do all at once.
         let step = if self.unmerged {
             self.merge()
@@ -1119,27 +1129,40 @@ impl Writer {
     /// Waits until the WAL has room for a background transaction, taking inbox and live writes
     /// meanwhile.
     fn wait_for_room(&mut self) {
-        if self.room() {
-            return;
-        }
-        let began = Instant::now();
-        self.wal.held.store(true, Ordering::Relaxed);
-        // It may have looked at the last commit before anything waited, and left its few frames.
-        let _ = self.kick.try_send(());
-        let (realtime, live) = (self.realtime.clone(), self.live.clone());
-        while !self.room() {
-            select_biased! {
-                recv(realtime) -> row => match row {
-                    Ok(row) => self.take_inbox(row),
-                    Err(_) => break,
-                },
-                recv(live) -> write => match write {
-                    Ok(write) => self.live_write(write),
-                    Err(_) => break,
-                },
-                default(HOLD_POLL) => {}
+        if !self.room() {
+            self.hold();
+            let (realtime, live) = (self.realtime.clone(), self.live.clone());
+            while !self.room() {
+                select_biased! {
+                    recv(realtime) -> row => match row {
+                        Ok(row) => self.take_inbox(row),
+                        Err(_) => break,
+                    },
+                    recv(live) -> write => match write {
+                        Ok(write) => self.live_write(write),
+                        Err(_) => break,
+                    },
+                    default(HOLD_POLL) => {}
+                }
             }
         }
+        self.unhold();
+    }
+
+    /// Background work waits for the WAL to start again, so the checkpointer copies however few
+    /// frames wait. It's woken as the wait begins: it may have looked at the last commit before
+    /// anything waited and left its few frames, and nothing else commits to wake it.
+    fn hold(&mut self) {
+        if self.holding.is_none() {
+            self.holding = Some(Instant::now());
+            self.wal.held.store(true, Ordering::Relaxed);
+            let _ = self.kick.try_send(());
+        }
+    }
+
+    /// Background work has room again, after waiting for it if it did.
+    fn unhold(&mut self) {
+        let Some(began) = self.holding.take() else { return };
         self.wal.held.store(false, Ordering::Relaxed);
         let held = began.elapsed();
         let mut stats = self.stats.lock().expect("the writer's stats");
@@ -2041,6 +2064,32 @@ mod tests {
             storage.background_waited_ms,
             storage.background_waits
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn indexing_for_search_waiting_for_the_wal_gets_room_with_nothing_else_committing() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open_with(home.path(), Limits { wal_soft: 256, wal_hard: 512, ..LIMITS }).unwrap();
+        let history = (0..10_000).map(|n| {
+            let words = format!("history h{n}x with words for search, número {} and more", n * 7919 % 10_007);
+            text("351910000001@s.whatsapp.net", &format!("h{n}"), n, &words)
+        });
+        store.apply(Lane::Background, messages(history)).await.unwrap();
+        let waits = store.storage().background_waits;
+        // Indexed with nothing else committing, so only the writer's index steps wake the
+        // checkpointer whenever they pass the soft limit.
+        let started = Instant::now();
+        store.indexed().await.unwrap();
+        let took = started.elapsed();
+        let waits = store.storage().background_waits - waits;
+        assert!(waits > 0, "indexing never waited for the checkpointer");
+        // Each wait lasts one of the checkpointer's passes, however busy the machine, not the
+        // idle timeout after which it empties the WAL by itself.
+        let longest = store.report().wait_background.map_or(0, |waited| waited.p99_us);
+        assert!(longest < IDLE.as_micros() as u64 / 2, "a wait for the checkpointer took {longest} µs");
+        assert!(took < IDLE * 3, "indexing took {took:?} in {waits} waits for the checkpointer");
+        let found = query(&store, |db| read::search(db, "numero 7919", None, None, 10)).await;
+        assert_eq!(found.hits.len(), 1, "the history is found once it's indexed");
     }
 
     #[tokio::test(flavor = "multi_thread")]
