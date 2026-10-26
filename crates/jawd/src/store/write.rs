@@ -559,6 +559,12 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
 /// Keeps a group of changes that failed, with its error, in place of it.
 pub(super) fn quarantine(db: &Connection, group: &[Change], error: &anyhow::Error) -> Result<()> {
     let (source, reference, raw) = provenance(group);
+    // A step asked for before its merge was pointed on is named by where it goes now, so the step
+    // that ends the merge finds its row.
+    let reference = match group.last() {
+        Some(Change::MergeStep(Some(merging))) => merge_named(db, merging.gone)?.unwrap_or(reference),
+        _ => reference,
+    };
     eprintln!("jawd: kept a change that failed in quarantine ({source} {reference}): {error:#}");
     record_quarantine(db, source, &reference, &format!("{error:#}"), raw.as_deref())
 }
@@ -1375,11 +1381,11 @@ fn merge_direct_chats(db: &Connection, stamps: &mut Stamps, person: i64) -> Resu
 
 /// Starts merging chat `gone` into `keep`, each a chat's n and JID. What's small moves now (its
 /// tombstones, what waits for its messages, its folder places, its settings and where it was
-/// read), and writes for it go to `keep` from here on; its messages follow a few at a time, and
-/// what's waiting to be sent follows its message. What it kept for a message `keep` already has
-/// is done to that message now, as it would be to one of its own as it moves: a deletion for you,
-/// and what waited for it. Only a person's one-to-one chats merge, so sending's group tables
-/// (recipients, settled, regroup) never take part.
+/// read), and writes for it go to `keep` from here on, as do the merges going into it; its
+/// messages follow a few at a time, and what's waiting to be sent follows its message. What it
+/// kept for a message `keep` already has is done to that message now, as it would be to one of
+/// its own as it moves: a deletion for you, and what waited for it. Only a person's one-to-one
+/// chats merge, so sending's group tables (recipients, settled, regroup) never take part.
 fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone: &(i64, String)) -> Result<()> {
     let ((keep, keep_id), (gone, gone_id)) = (keep, gone);
     let groups: i64 = db
@@ -1389,6 +1395,7 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
         bail!("only one-to-one chats merge, and {keep_id} or {gone_id} isn't one");
     }
     db.prepare_cached("INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)")?.execute([gone, keep])?;
+    repoint(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
     let deleted: Vec<String> = db
         .prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2 RETURNING id")?
         .query_map([keep, gone], |r| r.get(0))?
@@ -1419,6 +1426,37 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     .execute(params![keep, gone, seq])?;
     stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
     merge_reads(db, stamps, *keep, *gone)
+}
+
+/// Points the merges going into chat `from`, which is going itself, at `to`, the chat it goes
+/// into, each a chat's n and JID, so no chat is both kept and going, and every lookup that follows
+/// one merge reaches the chat that stays. Each merging chat's read position is merged into `to`'s,
+/// as if it had gone there from the start, and a failed step's quarantine row is named by where
+/// its merge goes now.
+fn repoint(db: &Connection, stamps: &mut Stamps, from: (i64, &str), to: (i64, &str)) -> Result<()> {
+    let merging: Vec<i64> = db
+        .prepare_cached("UPDATE chat_merges SET keep = ?1 WHERE keep = ?2 RETURNING gone")?
+        .query_map([to.0, from.0], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for gone in merging {
+        let gone_id: String =
+            db.prepare_cached("SELECT id FROM chats WHERE n = ?1")?.query_row([gone], |r| r.get(0))?;
+        db.prepare_cached("UPDATE OR REPLACE quarantine SET ref = ?1 WHERE source = 'merge' AND ref = ?2")?
+            .execute([merge_reference(&gone_id, to.1), merge_reference(&gone_id, from.1)])?;
+        merge_reads(db, stamps, to.0, gone)?;
+    }
+    Ok(())
+}
+
+/// How merge `gone` is named in quarantine, while it's under way.
+fn merge_named(db: &Connection, gone: i64) -> Result<Option<String>> {
+    Ok(db
+        .prepare_cached(
+            "SELECT g.id, k.id FROM chat_merges m JOIN chats g ON g.n = m.gone JOIN chats k ON k.n = m.keep
+            WHERE m.gone = ?1",
+        )?
+        .query_row([gone], |r| Ok(merge_reference(&r.get::<_, String>(0)?, &r.get::<_, String>(1)?)))
+        .optional()?)
 }
 
 /// Has what waits under JID `from` for messages jaw hasn't seen there, in `pending` or set aside,
@@ -1508,6 +1546,11 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     // Anything written to the gone chat by its n since the merge began, such as how far WhatsApp
     // has been told, is kept before the chat goes.
     merge_reads(db, stamps, keep, gone)?;
+    // So are merges still going into it, which a jaw.db from before repoint can hold, and the
+    // deletions and what waits that were sent there while they did.
+    repoint(db, stamps, (gone, &gone_jid), (keep, &keep_jid))?;
+    db.prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
+    db.prepare_cached("UPDATE pending SET chat = ?1 WHERE chat = ?2")?.execute([&keep_jid, &gone_jid])?;
     db.prepare_cached("DELETE FROM chat_merges WHERE gone = ?1")?.execute([gone])?;
     db.prepare_cached("DELETE FROM chats WHERE n = ?1")?.execute([gone])?;
     let seq = stamps.seq(CHAT, Some(gone));

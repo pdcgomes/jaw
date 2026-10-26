@@ -1,9 +1,10 @@
 //! Two one-to-one chats found to be one person's, once their phone number and LID are joined, are
 //! merged: the writer moves what's small at once and sends new writes to the chat kept, and this
-//! task moves the messages a short background transaction at a time until none are left. A step
-//! that fails is kept in quarantine and tried again later and later; a merge whose steps keep
-//! failing is left, tried again only once an hour and from the start when jawd next starts, and
-//! `status` counts it.
+//! task moves the messages a short background transaction at a time until none are left. A chat
+//! kept by one merge that starts merging into another takes that merge with it, so every merge
+//! ends in the chat that stays. A step that fails is kept in quarantine and tried again later and
+//! later; a merge whose steps keep failing is left, tried again only once an hour and from the
+//! start when jawd next starts, and `status` counts it.
 
 use std::collections::HashMap;
 use std::sync::Arc;

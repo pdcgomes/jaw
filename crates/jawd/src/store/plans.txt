@@ -1387,6 +1387,24 @@ UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archive
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
+UPDATE chat_merges SET keep = ?1 WHERE keep = ?2 RETURNING gone
+    SEARCH chat_merges USING COVERING INDEX chat_merges_by_keep (keep=?)
+
+-- src/store/write.rs
+SELECT id FROM chats WHERE n = ?1
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+UPDATE OR REPLACE quarantine SET ref = ?1 WHERE source = 'merge' AND ref = ?2
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
+
+-- src/store/write.rs
+SELECT g.id, k.id FROM chat_merges m JOIN chats g ON g.n = m.gone JOIN chats k ON k.n = m.keep WHERE m.gone = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH g USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
 UPDATE pending SET chat = ?1 WHERE chat = ?2 RETURNING target
     SEARCH pending USING COVERING INDEX pending_by_target_at (chat=?)
 
@@ -1422,6 +1440,14 @@ DELETE FROM quarantine WHERE source = 'merge' AND ref = ?1
     SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
 
 -- src/store/write.rs
+UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2
+    SEARCH tombstones USING PRIMARY KEY (chat=?)
+
+-- src/store/write.rs
+UPDATE pending SET chat = ?1 WHERE chat = ?2
+    SEARCH pending USING INDEX pending_by_target_at (chat=?)
+
+-- src/store/write.rs
 DELETE FROM chat_merges WHERE gone = ?1
     SEARCH chat_merges USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -1455,10 +1481,6 @@ SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2
 -- src/store/write.rs
 UPDATE messages SET chat = ?2, v = ?3 WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
-
--- src/store/write.rs
-SELECT id FROM chats WHERE n = ?1
-    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
 SELECT 1 FROM messages WHERE n = ?1
