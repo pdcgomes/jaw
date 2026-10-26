@@ -753,6 +753,8 @@ async fn upload_one(inner: &Arc<Inner>, copy: &Copy) -> Result<(), Failed> {
         raw: raw.encode_to_vec(),
         shown: shown(copy, &raw),
     };
+    // Kept in a synced commit before the message goes: once it has gone, a power cut mustn't lose
+    // where its file is, or the file would be uploaded and the message sent again.
     let applied = inner
         .store
         .apply_durable(vec![Change::Outgoing(Step::Uploaded(Box::new(step)))])

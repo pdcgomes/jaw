@@ -840,6 +840,34 @@ async fn a_copy_on_its_way_stays_in_a_full_cache_even_once_its_message_is_delete
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_copys_upload_is_kept_in_a_synced_commit_before_its_message_goes() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.world.gate_uploads(true);
+    let path = yours(picked.path(), "up.jpg", &Picture::lake(900, 600));
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    // Half uploaded, and jaw's copy of your file dropped in a synced commit of its own, so the
+    // upload's is the one commit left before the message goes.
+    for _ in 0..1_000 {
+        if partial(home.path(), UPLOADS) && rig.files(OUTGOING).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(partial(home.path(), UPLOADS), "half uploaded");
+    assert!(rig.files(OUTGOING).is_empty(), "jaw's copy dropped: {:?}", rig.files(OUTGOING));
+    assert!(rig.world.sends().is_empty(), "the message waits for its upload");
+    // Taken and never answered, so no receipt comes to be kept meanwhile.
+    rig.world.hold(true);
+    let synced = rig.store.storage().synced_commits;
+    rig.world.gate_uploads(false);
+    rig.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Send(s) if s.id == id))).await;
+    assert!(rig.store.storage().synced_commits > synced, "the message went before its upload reached the disk");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn status_reports_the_lanes_and_whats_on_its_way() {
     let home = tempfile::tempdir().unwrap();
     let picked = tempfile::tempdir().unwrap();
