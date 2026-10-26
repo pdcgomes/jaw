@@ -343,10 +343,12 @@ const MESSAGE_COLUMNS: &str = "
         (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect),
                 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine)))
             FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed'
-                ORDER BY n))";
+                ORDER BY n)),
+        iif(instr(m.detail, '\"thumbnail\":\"') > 0, (SELECT h.sha256 FROM thumbnails h
+            WHERE h.sha256 = m.detail ->> '$.link.thumbnail'), NULL)";
 
 /// How many columns MESSAGE_COLUMNS has, for queries that select more after them.
-const MESSAGE_COLUMN_COUNT: usize = 27;
+const MESSAGE_COLUMN_COUNT: usize = 28;
 
 const MESSAGE_JOINS: &str = "
     JOIN chats c ON c.n = m.chat
@@ -387,6 +389,21 @@ fn mentions_named(spans: String, names: Option<String>) -> String {
     serde_json::to_string(&parsed).unwrap_or(spans)
 }
 
+/// A message's `detail` with its link preview's thumbnail as the file interfaces draw, `preview`,
+/// once it's kept (`kept`, its SHA-256), and without the hash that names it either way.
+fn previewed(detail: &str, kept: Option<&str>) -> String {
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Map<String, Value>>(detail) else {
+        return detail.to_string();
+    };
+    if let Some(Value::Object(link)) = parsed.get_mut("link") {
+        link.remove("thumbnail");
+        if let Some(kept) = kept {
+            link.insert("preview".into(), Value::String(super::thumbnails::path(kept)));
+        }
+    }
+    serde_json::to_string(&parsed).unwrap_or_else(|_| detail.to_string())
+}
+
 fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
     let text: Option<String> = r.get(8)?;
     let mut spans = match r.get::<_, Option<String>>(9)? {
@@ -399,6 +416,9 @@ fn message_row(r: &Row) -> rusqlite::Result<MessageRow> {
     };
     let (mut summary, mut reply, mut detail): (String, Option<String>, Option<String>) =
         (r.get(10)?, r.get(11)?, r.get(12)?);
+    if let Some(shown) = detail.as_deref().filter(|detail| detail.contains("\"thumbnail\":\"")) {
+        detail = Some(previewed(shown, r.get::<_, Option<String>>(27)?.as_deref()));
+    }
     let (mut edited_at, mut deleted): (Option<i64>, bool) = (r.get(14)?, r.get(15)?);
     let mut reactions: String = r.get::<_, Option<String>>(24)?.unwrap_or_else(|| "[]".into());
     let row = super::overlay::Shown {
@@ -572,6 +592,77 @@ pub fn matching(db: &Connection, query: &str, chat: Option<&str>, most: usize) -
             .collect::<rusqlite::Result<_>>()?,
     };
     Ok(ts)
+}
+
+/// The newest `most` messages whose links match `query`, an FTS5 query, by their t, in `chat` or
+/// in every chat: each message's links are one document of links_fts, by its t.
+pub fn linked(db: &Connection, query: &str, chat: Option<&str>, most: usize) -> Result<Vec<i64>> {
+    let ts = match chat {
+        None => db
+            .prepare_cached("SELECT rowid FROM links_fts WHERE links_fts MATCH ?1 ORDER BY rowid DESC LIMIT ?2")?
+            .query_map(params![query, most as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?,
+        Some(chat) => db
+            .prepare_cached(
+                "SELECT links_fts.rowid FROM links_fts CROSS JOIN messages m ON m.t = links_fts.rowid
+                WHERE links_fts MATCH ?1 AND m.chat = (SELECT n FROM chats WHERE id = ?2)
+                ORDER BY links_fts.rowid DESC LIMIT ?3",
+            )?
+            .query_map(params![query, chat, most as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?,
+    };
+    Ok(ts)
+}
+
+/// A link a message gave, as the palette and the library show it.
+#[derive(Debug, Serialize)]
+pub struct LinkRow {
+    /// The message's ID, and the link's place among its links.
+    pub message: String,
+    pub place: i64,
+    pub chat: String,
+    pub at: i64,
+    pub mine: bool,
+    pub from: Option<From>,
+    pub url: String,
+    pub host: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+/// The links of the message with t `t`, in their order; none if it's gone.
+pub fn links_of(db: &Connection, t: i64) -> Result<Vec<LinkRow>> {
+    let rows = db
+        .prepare_cached(
+            "SELECT m.id, l.place, c.id, l.at, l.mine, p.n, p.name, p.push_name, p.verified_name, j.jid, l.url, l.host,
+                l.title, l.description
+            FROM messages m JOIN links l ON l.message = m.n JOIN chats c ON c.n = m.chat
+                LEFT JOIN person_jids j ON j.n = l.sender LEFT JOIN people p ON p.n = j.person
+            WHERE m.t = ?1 ORDER BY l.place",
+        )?
+        .query_map([t], |r| {
+            let from = match r.get::<_, Option<i64>>(5)? {
+                Some(id) => {
+                    let jid: Option<String> = r.get(9)?;
+                    Some(From { id, name: shown(r.get(6)?, r.get(7)?, r.get(8)?, jid.as_deref()) })
+                }
+                None => None,
+            };
+            Ok(LinkRow {
+                message: r.get(0)?,
+                place: r.get(1)?,
+                chat: r.get(2)?,
+                at: r.get(3)?,
+                mine: r.get(4)?,
+                from,
+                url: r.get(10)?,
+                host: r.get(11)?,
+                title: r.get(12)?,
+                description: r.get(13)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
 }
 
 /// Messages by their t, in the order given, each with the text search reads; one that's gone is

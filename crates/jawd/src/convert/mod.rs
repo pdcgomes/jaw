@@ -320,6 +320,14 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
     }));
 }
 
+/// The thumbnail a message's link preview came with, out of its wrappers.
+pub fn link_thumbnail(message: &e2e::Message) -> Option<&[u8]> {
+    let (message, _) = unwrap(message);
+    let preview = message.extended_text_message.as_deref()?;
+    preview.matched_text.as_deref().filter(|url| !url.trim().is_empty())?;
+    preview.jpeg_thumbnail.as_deref().filter(|thumbnail| !thumbnail.is_empty())
+}
+
 /// What a message says, out of its wrappers and without the quote, mentions, forwarding and timer
 /// it carried, as a reply quotes it.
 pub fn bare(message: &e2e::Message) -> e2e::Message {

@@ -10,12 +10,14 @@
 //! name their people as WhatsApp writes them (`quote`); reactions, edits and deletions go as
 //! messages of their own through the outbox (`actions`); `forward` sends messages again as new
 //! ones of yours (`forward`); `message.info` gives each recipient's receipts, and `chat.info` a
-//! chat's members (`info`).
+//! chat's members (`info`). Text with a URL goes with its page's preview when the page answers in
+//! time (`link`), and the next message to its chat waits for it, so none overtakes another.
 
 mod actions;
 pub mod bench;
 mod forward;
 mod info;
+pub mod link;
 mod outbox;
 mod presence;
 mod quote;
@@ -27,6 +29,7 @@ mod typing;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -38,7 +41,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, broadcast, watch};
+use tokio::sync::{Mutex, Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, pb};
@@ -95,6 +98,10 @@ struct Inner {
     timing: Timing,
     /// Enqueues one at a time, so a chat's sends are queued in the order they were committed.
     enqueue: Mutex<()>,
+    /// Each chat's place for a message being made, held from its request to its enqueue, so one
+    /// that waits for its link preview isn't overtaken by the next sent there.
+    composing: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    previews: link::Previews,
     /// Woken each time the connection to WhatsApp comes back, for whatever waits to try again.
     online: Notify,
     /// Whether WhatsApp can be reached now; sends wait for it.
@@ -110,7 +117,8 @@ struct Inner {
 impl Sending {
     /// Starts sending: what the outbox held is queued again in each chat's order, read receipts still
     /// owed are sent, and presence follows `focused`, whether any interface is in front, and the
-    /// connection, which `live` says now and `pushes` as it changes.
+    /// connection, which `live` says now and `pushes` as it changes. Text goes with the link
+    /// previews `previews` makes.
     pub async fn start(
         store: Store,
         engine: Option<Supervisor>,
@@ -118,6 +126,7 @@ impl Sending {
         pushes: &broadcast::Sender<Push>,
         focused: watch::Receiver<bool>,
         timing: Timing,
+        previews: link::Previews,
     ) -> anyhow::Result<Sending> {
         let (notices, pushes) = (pushes.clone(), pushes.subscribe());
         let online = presence::connected(&live.lock().expect("live state").connection);
@@ -127,6 +136,8 @@ impl Sending {
             sends: Serial::new("sends", CHATS_AT_ONCE),
             timing,
             enqueue: Mutex::new(()),
+            composing: std::sync::Mutex::default(),
+            previews,
             online: Notify::new(),
             connected: watch::channel(online).0,
             held: outbox::Held::default(),
@@ -188,6 +199,26 @@ impl Sending {
 
 /// The longest text a message or a draft can have, in characters, as WhatsApp allows.
 const TEXT_MOST: usize = 65_536;
+
+/// Takes the places of `chats` for messages being made, in the order of their JIDs so two takers
+/// never wait for each other, once the messages made there before have been enqueued; held until
+/// they're dropped.
+async fn composing(inner: &Inner, chats: &[&str]) -> Vec<OwnedMutexGuard<()>> {
+    let mut chats = chats.to_vec();
+    chats.sort_unstable();
+    chats.dedup();
+    let places: Vec<Arc<Mutex<()>>> = {
+        let mut composing = inner.composing.lock().expect("chats being written to");
+        // A place nobody holds or waits for is let go of, so they're as many as the chats in use.
+        composing.retain(|_, place| Arc::strong_count(place) > 1);
+        chats.iter().map(|chat| composing.entry(chat.to_string()).or_default().clone()).collect()
+    };
+    let mut held = Vec::with_capacity(places.len());
+    for place in places {
+        held.push(place.lock_owned().await);
+    }
+    held
+}
 
 async fn draft(inner: &Inner, draft: DraftSet) -> Result<Value, Error> {
     if draft.text.chars().count() > TEXT_MOST {

@@ -26,6 +26,7 @@ pub mod read;
 #[cfg(test)]
 mod rules;
 mod schema;
+pub mod thumbnails;
 mod write;
 
 use std::cell::Cell;
@@ -47,9 +48,9 @@ use tokio::sync::{Notify, oneshot, watch};
 pub use self::read::Reads;
 #[cfg(test)]
 pub(crate) use self::tests::index_against_text;
+pub use self::thumbnails::Thumbnails;
 use self::write::Stamps;
 pub use self::write::layout;
-pub use self::write::outbox;
 pub use self::write::unpack;
 #[cfg(test)]
 pub use self::write::unpack_for_tests;
@@ -57,6 +58,7 @@ pub use self::write::{
     Amend, Amendment, Change, Chat, Drained, Members, Merging, Message, Opened, Packed, Person, Read, frecency,
     merge_reference,
 };
+pub use self::write::{links, outbox};
 use crate::engine::Ack;
 use crate::work::{Report, Samples};
 
@@ -263,6 +265,7 @@ pub struct Store {
     inboxed: Arc<Notify>,
     wal: Arc<Wal>,
     trouble: watch::Receiver<Option<String>>,
+    thumbnails: Arc<Thumbnails>,
 }
 
 const BATCH_ROWS: usize = 1_000;
@@ -540,6 +543,8 @@ impl Store {
         let (seq, committed) = watch::channel(stamps.last());
         let (trouble, troubled) = watch::channel(None);
         let backlog = db.query_row("SELECT EXISTS (SELECT 1 FROM fts_backlog)", [], |r| r.get(0))?;
+        let kept: i64 = db.query_row("SELECT coalesce(sum(bytes), 0) FROM thumbnails", [], |r| r.get(0))?;
+        let thumbnails = Arc::new(Thumbnails::open(home, kept.max(0) as u64));
         let stats = Arc::new(Mutex::new(Stats::default()));
         let inboxed = Arc::new(Notify::new());
         let wal = Arc::new(Wal::new(limits.wal_soft, limits.wal_hard));
@@ -579,7 +584,24 @@ impl Store {
         std::thread::Builder::new()
             .name("jawd-checkpoint".into())
             .spawn(move || checkpoint(checkpointer, checkpointing, kicks, limits.idle))?;
-        Ok(Store { path, realtime, live, background, reads, committed, stats, inboxed, wal, trouble: troubled })
+        Ok(Store {
+            path,
+            realtime,
+            live,
+            background,
+            reads,
+            committed,
+            stats,
+            inboxed,
+            wal,
+            trouble: troubled,
+            thumbnails,
+        })
+    }
+
+    /// The thumbnails of link previews, kept as files beside jaw.db.
+    pub fn thumbnails(&self) -> &Arc<Thumbnails> {
+        &self.thumbnails
     }
 
     /// The feed's last committed seq, which changes as each transaction with events commits.
@@ -692,6 +714,25 @@ impl Store {
                 Ok((r.get(0)?, r.get(1)?))
             })?;
         Ok((kept.max(0) as u64, largest.max(0) as u64))
+    }
+
+    /// How many messages backfill `name` has still to look at, 0 once it's done, read on a
+    /// connection of its own.
+    pub fn backfill_left(&self, name: &str) -> Result<u64> {
+        let db = connect(&self.path, Role::Reader)?;
+        let left: Option<i64> =
+            db.query_row("SELECT upto - after FROM backfills WHERE name = ?1", [name], |r| r.get(0)).optional()?;
+        Ok(left.unwrap_or(0).max(0) as u64)
+    }
+
+    /// How many link previews' thumbnails are kept, and their bytes, read on a connection of its own.
+    pub fn thumbnails_kept(&self) -> Result<(u64, u64)> {
+        let db = connect(&self.path, Role::Reader)?;
+        let (kept, bytes): (i64, i64) =
+            db.query_row("SELECT count(*), coalesce(sum(bytes), 0) FROM thumbnails", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        Ok((kept.max(0) as u64, bytes.max(0) as u64))
     }
 
     /// The whole backups taken before upgrades beside jaw.db, and until when each is kept.

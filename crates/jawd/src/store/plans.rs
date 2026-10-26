@@ -76,6 +76,14 @@ const ALLOWED: &[(&str, &str)] = &[
         "an action naming a message by its ID alone looks for it in each chat, a search of messages_by_id each; \
         chats are few next to messages",
     ),
+    (
+        "FROM message_links WHERE message =",
+        "one message's links, each place counting the distinct URLs its spans mark before it, a handful",
+    ),
+    (
+        "coalesce(sum(bytes), 0) FROM thumbnails",
+        "once at start, and for jawd status; the thumbnails are as many as fit in 256 MB, tens of thousands at most",
+    ),
 ];
 
 /// Names in format strings that aren't constants, and what to plan them with.
@@ -272,29 +280,69 @@ fn snapshot() -> (String, Vec<String>) {
                 broken.push(format!("{file}: {sql}\n    built from names this test can't fill in"));
                 continue;
             }
-            match plan(&db, &sql) {
-                Ok(lines) => {
-                    for line in &lines {
-                        let _ = writeln!(out, "    {line}");
-                        let scan = line.trim_start().starts_with("SCAN ")
-                            && !line.contains("VIRTUAL TABLE")
-                            && !line.contains("(subquery")
-                            && !line.contains("CONSTANT ROW");
-                        if (scan || line.contains("USE TEMP B-TREE"))
-                            && !ALLOWED.iter().any(|(text, _)| sql.contains(text))
-                        {
-                            broken.push(format!("{file}: {sql}\n    {}", line.trim()));
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = writeln!(out, "    (a part of a statement, planned with the rest: {e})");
-                }
-            }
-            out.push('\n');
+            planned(&db, &file, &sql, &mut out, &mut broken);
+        }
+    }
+    // Every statement a trigger runs, with what it reads of the row (new.x, old.x) as a parameter.
+    let triggers: Vec<(String, String)> = db
+        .prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for (name, trigger) in triggers {
+        let body = trigger.split_once("BEGIN").map_or("", |(_, body)| body);
+        let body = body.rsplit_once("END").map_or(body, |(body, _)| body);
+        for statement in body.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            let sql = row_values(statement).split_whitespace().collect::<Vec<_>>().join(" ");
+            let _ = writeln!(out, "-- trigger {name}\n{sql}");
+            planned(&db, &format!("trigger {name}"), &sql, &mut out, &mut broken);
         }
     }
     (out, broken)
+}
+
+/// `statement`, a trigger's, with each value it reads of the row it fires for as a parameter.
+fn row_values(statement: &str) -> String {
+    let mut out = String::with_capacity(statement.len());
+    let mut rest = statement;
+    while let Some(at) = ["new.", "old."].iter().filter_map(|row| rest.find(row)).min() {
+        let starts = rest[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '.');
+        if !starts {
+            out.push_str(&rest[..at + 4]);
+            rest = &rest[at + 4..];
+            continue;
+        }
+        out.push_str(&rest[..at]);
+        out.push('?');
+        let after = &rest[at + 4..];
+        rest = &after[after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len())..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Plans `sql`, from `file`, into `out`, noting in `broken` a scan or a sort it isn't allowed.
+fn planned(db: &Connection, file: &str, sql: &str, out: &mut String, broken: &mut Vec<String>) {
+    match plan(db, sql) {
+        Ok(lines) => {
+            for line in &lines {
+                let _ = writeln!(out, "    {line}");
+                let scan = line.trim_start().starts_with("SCAN ")
+                    && !line.contains("VIRTUAL TABLE")
+                    && !line.contains("(subquery")
+                    && !line.contains("CONSTANT ROW");
+                if (scan || line.contains("USE TEMP B-TREE")) && !ALLOWED.iter().any(|(text, _)| sql.contains(text)) {
+                    broken.push(format!("{file}: {sql}\n    {}", line.trim()));
+                }
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(out, "    (a part of a statement, planned with the rest: {e})");
+        }
+    }
+    out.push('\n');
 }
 
 #[test]

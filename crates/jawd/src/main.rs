@@ -447,9 +447,16 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, no_notify: bool
     let engine = supervisor.as_ref().ok().cloned();
     tokio::spawn(sync::run(incoming, store.clone(), live.clone(), pushes.clone(), engine.clone(), home.to_path_buf()));
     let attention = Arc::new(attention::Attention::default());
-    let sending =
-        send::Sending::start(store.clone(), engine, live.clone(), &pushes, attention.focus(), send::Timing::default())
-            .await?;
+    let sending = send::Sending::start(
+        store.clone(),
+        engine,
+        live.clone(),
+        &pushes,
+        attention.focus(),
+        send::Timing::default(),
+        send::link::Previews::default(),
+    )
+    .await?;
     let pools: Vec<Arc<dyn work::Report>> =
         vec![Arc::new(store.clone()), Arc::new(store.reads().clone()), sending.lane()];
     let finder = find::Finder::start(store.clone()).await?;
@@ -713,6 +720,42 @@ mod tests {
 
     use super::*;
     use crate::store::{Change, Lane, Message};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_demo_engines_account_shows_a_link_preview_with_its_thumbnail_through_the_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path()), true).await.unwrap();
+        tokio::spawn(sock::serve(started.state.clone(), listener));
+        let path = socket.clone();
+        let link = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&path, "test", "0").unwrap();
+            let watch = serde_json::json!({ "chat": "351912345678@s.whatsapp.net", "around": "newest", "before": 20 });
+            let watched = connection.call("messages.watch", watch).unwrap();
+            let previewed = |rows: &serde_json::Value| {
+                rows.as_array()?
+                    .iter()
+                    .find(|row| row["id"] == "3EB0DEMO00000004" && row["link"]["preview"].is_string())
+                    .cloned()
+            };
+            if let Some(row) = previewed(&watched["rows"]) {
+                return row["link"].clone();
+            }
+            loop {
+                let push = connection.push().unwrap();
+                if let Some(row) = previewed(&push.params["upsert"]) {
+                    return row["link"].clone();
+                }
+            }
+        });
+        let link = tokio::time::timeout(Duration::from_secs(20), link).await.expect("the preview showed").unwrap();
+        assert_eq!(link["title"], "Previsão para Sintra · IPMA");
+        assert_eq!(link["url"], "https://www.ipma.pt/pt/otempo/prev.localidade.hora/");
+        let thumbnail = home.path().join(link["preview"].as_str().unwrap());
+        assert!(image::open(&thumbnail).is_ok(), "{} is the thumbnail", thumbnail.display());
+        stop(started, &socket).await;
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn jawd_stops_well_within_its_bound_while_messages_pour_into_a_watched_chat() {

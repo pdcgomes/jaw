@@ -4,6 +4,7 @@
 //! only the rows whose `v` is past S.
 
 pub mod layout;
+pub mod links;
 pub mod outbox;
 
 use std::borrow::Cow;
@@ -79,6 +80,16 @@ pub enum Change {
     Outbox(outbox::Step),
     /// What an interface keeps of how it was laid out.
     Layout(layout::Keep),
+    /// One step of a backfill a migration left (`links::BACKFILLS`), from where the last left off.
+    Backfill(&'static str),
+    /// A link preview's thumbnail, written to media/links/ and synced: its row goes in, and message
+    /// `id` in `chat`, which shows it, takes a new version.
+    Thumbnail {
+        sha256: String,
+        bytes: u64,
+        chat: String,
+        id: String,
+    },
 }
 
 /// A merge of one chat into another, as a merge step names it.
@@ -525,6 +536,8 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
         }
         Some(Change::Outbox(step)) => outbox::provenance(step),
         Some(Change::Layout(keep)) => layout::provenance(keep),
+        Some(Change::Backfill(name)) => ("backfill", name.to_string(), None),
+        Some(Change::Thumbnail { sha256, chat, id, .. }) => ("thumbnail", format!("{chat} {id} {sha256}"), None),
         None => ("nothing", String::new(), None),
     };
     (source, reference, raw.map(Cow::Borrowed))
@@ -651,6 +664,8 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         Change::MergeStep(merging) => merge_step(db, stamps, merging.as_ref().map(|m| m.gone)),
         Change::Outbox(step) => outbox::apply(db, stamps, step),
         Change::Layout(keep) => layout::apply(db, keep),
+        Change::Backfill(name) => links::backfill(db, name),
+        Change::Thumbnail { sha256, bytes, chat, id } => links::thumbnail(db, stamps, sha256, *bytes, chat, id),
     }
 }
 

@@ -260,6 +260,19 @@ impl DemoEngine {
             // You and the two whose phones answer what you send there, so a mention of one lands;
             // told once the messages are in, so storing them holds none of the messages back.
             group(climbing, "Lisbon Climbing", &[ME, MEMBERS[0], MEMBERS[1]]),
+            // Earlier than the rest, so each chat's newest stays as it was.
+            link(
+                ana,
+                ana,
+                "3EB0DEMO00000004",
+                now - 600_000,
+                &Preview {
+                    text: "a previsão para domingo https://www.ipma.pt/pt/otempo/prev.localidade.hora/",
+                    url: "https://www.ipma.pt/pt/otempo/prev.localidade.hora/",
+                    title: "Previsão para Sintra · IPMA",
+                    description: "Céu pouco nublado, vento fraco. Máxima de 22 °C.",
+                },
+            ),
         ])
     }
 
@@ -343,6 +356,39 @@ pub fn text(chat: &str, sender: &str, id: &str, at_ms: i64, body: &str) -> pb::E
             ..Default::default()
         })),
     }
+}
+
+/// A link preview as a phone sends one with its text.
+pub struct Preview<'a> {
+    pub text: &'a str,
+    pub url: &'a str,
+    pub title: &'a str,
+    pub description: &'a str,
+}
+
+/// A message from `sender` in `chat` with a link `preview`, and its small thumbnail, as the phones
+/// send one.
+pub fn link(chat: &str, sender: &str, id: &str, at_ms: i64, preview: &Preview) -> pb::Event {
+    let thumbnail = image::RgbImage::from_fn(96, 96, |x, y| image::Rgb([30 + x as u8, 90 + y as u8, 180]));
+    let mut jpeg = Vec::new();
+    let encoded = thumbnail.write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 60));
+    let raw = e2e::Message {
+        extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
+            text: Some(preview.text.into()),
+            matched_text: Some(preview.url.into()),
+            title: Some(preview.title.into()),
+            description: Some(preview.description.into()),
+            preview_type: Some(e2e::extended_text_message::PreviewType::None as i32),
+            jpeg_thumbnail: encoded.is_ok().then_some(jpeg),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let mut event = text(chat, sender, id, at_ms, "");
+    if let Some(pb::event::Kind::Message(message)) = &mut event.kind {
+        message.raw = raw.encode_to_vec();
+    }
+    event
 }
 
 /// `recipient`'s phone saying it has, or has read, a message sent to `send.chat`.

@@ -743,6 +743,149 @@ pub(super) const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (domain, key)
     ) STRICT, WITHOUT ROWID;
     ",
+    // 14, a schema step: links. Each URL a message gives is kept in `links`, with its host, its
+    // preview's title and description, and the message's chat, time and sender, by triggers on
+    // messages that read what the converter made of the message, so every write that changes a
+    // message (a copy arriving, an edit, a deletion, a merge moving it) changes its links in the
+    // same statement; and a links index for search keeps one document per message. The messages
+    // jaw.db already holds are linked by a backfill, a short background transaction at a time from
+    // the row it leaves in `backfills`. It makes new tables, views, triggers and one row, so it
+    // costs the same however many messages there are.
+    "
+    -- Class: derived from raw. Each URL a message's spans mark, once, in the order it first comes,
+    -- then its link preview's when the spans don't mark it, each made absolute as the spans make
+    -- one (`https://` before a bare one) and with the preview's title and description on the URL
+    -- it's for; and the message's chat, time, sender and whether it's yours, which follow it. The
+    -- triggers below write and keep them; nothing else does.
+    CREATE TABLE links (
+        n INTEGER PRIMARY KEY AUTOINCREMENT,
+        message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
+        -- Its place among the message's links, from 0.
+        place INTEGER NOT NULL CHECK (place >= 0),
+        -- The message's chat, as recipients names it: a chat's links go with its messages.
+        chat INTEGER NOT NULL,
+        at INTEGER NOT NULL,
+        sender INTEGER REFERENCES person_jids (n),
+        mine INTEGER NOT NULL CHECK (mine IN (0, 1)),
+        url TEXT NOT NULL,
+        host TEXT NOT NULL,
+        title TEXT,
+        description TEXT,
+        UNIQUE (message, url),
+        UNIQUE (message, place)
+    ) STRICT;
+    -- Newest first across chats, in one chat and from one person, as the library pages them; each
+    -- entry ends with the rowid, so each is a keyset.
+    CREATE INDEX links_by_time ON links (at);
+    CREATE INDEX links_by_chat ON links (chat, at);
+    CREATE INDEX links_by_sender ON links (sender, at) WHERE sender IS NOT NULL;
+
+    -- What `links` is made of, each view read for one message, or a range of them, through the
+    -- messages' primary key: the URLs a message's spans mark, with each one's place among its
+    -- spans; its link preview's URL; and its URLs, each once in the order it first comes, the
+    -- preview's last unless the spans mark it, with whether the preview is for it.
+    CREATE VIEW link_spans (message, key, url) AS
+    SELECT m.n, e.key, iif(lower(substr(e.value ->> 'url', 1, 7)) = 'http://'
+            OR lower(substr(e.value ->> 'url', 1, 8)) = 'https://', e.value ->> 'url', 'https://' || (e.value ->> 'url'))
+    FROM messages m, json_each(m.spans) e
+    WHERE NOT m.deleted AND e.value ->> 't' = 'link';
+    CREATE VIEW link_previews (message, url) AS
+    SELECT m.n, iif(lower(substr(m.detail ->> '$.link.url', 1, 7)) = 'http://'
+            OR lower(substr(m.detail ->> '$.link.url', 1, 8)) = 'https://', m.detail ->> '$.link.url',
+            'https://' || (m.detail ->> '$.link.url'))
+    FROM messages m
+    WHERE NOT m.deleted AND m.detail ->> '$.link.url' IS NOT NULL;
+    CREATE VIEW message_urls (message, place, url, previewed) AS
+    SELECT s.message, (SELECT count(DISTINCT d.url) FROM link_spans d WHERE d.message = s.message AND d.key < s.key),
+        s.url, EXISTS (SELECT 1 FROM link_previews p WHERE p.message = s.message AND p.url = s.url)
+    FROM link_spans s
+    WHERE NOT EXISTS (SELECT 1 FROM link_spans d WHERE d.message = s.message AND d.key < s.key AND d.url = s.url)
+    UNION ALL
+    SELECT p.message, (SELECT count(DISTINCT d.url) FROM link_spans d WHERE d.message = p.message), p.url, 1
+    FROM link_previews p
+    WHERE NOT EXISTS (SELECT 1 FROM link_spans d WHERE d.message = p.message AND d.url = p.url);
+    -- A message's links as `links` keeps them: each URL's host is what comes between its scheme and
+    -- its path, without a user or a port, in lower case.
+    CREATE VIEW message_links (message, place, chat, at, sender, mine, url, host, title, description) AS
+    SELECT message, place, chat, at, sender, mine, url,
+        lower(CASE WHEN hp LIKE '[%' THEN substr(hp, 1, instr(hp, ']'))
+            WHEN instr(hp, ':') > 0 THEN substr(hp, 1, instr(hp, ':') - 1) ELSE hp END),
+        title, description
+    FROM (SELECT message, place, chat, at, sender, mine, url, title, description,
+            substr(authority, instr(authority, '@') + 1) AS hp
+        FROM (SELECT message, place, chat, at, sender, mine, url, title, description,
+                substr(rest, 1, min(instr(rest || '/', '/'), instr(rest || '?', '?'), instr(rest || '#', '#')) - 1)
+                    AS authority
+            FROM (SELECT u.message, u.place, m.chat, m.at, m.sender, m.mine, u.url,
+                    substr(u.url, instr(u.url, '://') + 3) AS rest,
+                    iif(u.previewed, m.detail ->> '$.link.title', NULL) AS title,
+                    iif(u.previewed, m.detail ->> '$.link.description', NULL) AS description
+                FROM message_urls u JOIN messages m ON m.n = u.message)));
+
+    -- Class: derived from raw. The words of each message's links, their hosts, titles, descriptions
+    -- and URLs, as one document by the message's t, so search reads them newest first and stops at
+    -- a page; contentless, each document is written and deleted by the triggers that write the
+    -- message's links, and only there, so a message has one at most.
+    CREATE VIRTUAL TABLE links_fts USING fts5 (
+        text,
+        content = '',
+        contentless_delete = 1,
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+    CREATE VIEW message_link_text (message, t, text) AS
+    SELECT m.n, m.t, (SELECT group_concat(concat_ws(' ', l.host, l.title, l.description, l.url), ' ')
+        FROM links l WHERE l.message = m.n)
+    FROM messages m;
+
+    CREATE TRIGGER messages_links_insert AFTER INSERT ON messages
+    WHEN instr(new.spans, '\"t\":\"link\"') > 0 OR instr(new.detail, '\"link\":{') > 0 BEGIN
+        INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description)
+            SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links
+            WHERE message = new.n;
+        INSERT INTO links_fts (rowid, text)
+            SELECT t, text FROM message_link_text WHERE message = new.n AND text IS NOT NULL;
+    END;
+    CREATE TRIGGER messages_links_update AFTER UPDATE OF chat, at, sender, mine, spans, detail, deleted ON messages
+    WHEN (old.chat IS NOT new.chat OR old.at IS NOT new.at OR old.sender IS NOT new.sender
+            OR old.mine IS NOT new.mine OR old.spans IS NOT new.spans OR old.detail IS NOT new.detail
+            OR old.deleted IS NOT new.deleted)
+        AND (instr(old.spans, '\"t\":\"link\"') > 0 OR instr(old.detail, '\"link\":{') > 0
+            OR instr(new.spans, '\"t\":\"link\"') > 0 OR instr(new.detail, '\"link\":{') > 0) BEGIN
+        DELETE FROM links WHERE message = old.n;
+        DELETE FROM links_fts WHERE rowid = old.t;
+        INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description)
+            SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links
+            WHERE message = new.n;
+        INSERT INTO links_fts (rowid, text)
+            SELECT t, text FROM message_link_text WHERE message = new.n AND text IS NOT NULL;
+    END;
+    CREATE TRIGGER messages_links_delete AFTER DELETE ON messages
+    WHEN instr(old.spans, '\"t\":\"link\"') > 0 OR instr(old.detail, '\"link\":{') > 0 BEGIN
+        DELETE FROM links WHERE message = old.n;
+        DELETE FROM links_fts WHERE rowid = old.t;
+    END;
+
+    -- Class: jaw's own. Work a migration leaves to the background, a short transaction at a time,
+    -- until it's done and its row goes: each backfill's name, the last message it has looked at,
+    -- and the last it has to, the newest when the migration ran, since the triggers take the rest.
+    CREATE TABLE backfills (
+        name TEXT PRIMARY KEY,
+        after INTEGER NOT NULL DEFAULT 0 CHECK (after >= 0),
+        upto INTEGER NOT NULL CHECK (upto >= after)
+    ) STRICT, WITHOUT ROWID;
+    INSERT INTO backfills (name, after, upto) SELECT 'links', 0, seq FROM sqlite_sequence
+        WHERE name = 'messages' AND seq > 0;
+
+    -- Class: jaw's own. The thumbnails of link previews written to media/links/ as `<sha256>.jpg`,
+    -- each named by the SHA-256 of the JPEG that came in the message or was made for one sent,
+    -- synced and renamed into place before its row goes in, so every row here has its whole file;
+    -- a preview shows its thumbnail once it has a row, and a file goes only after its row has.
+    CREATE TABLE thumbnails (
+        sha256 TEXT PRIMARY KEY CHECK (length(sha256) = 64),
+        bytes INTEGER NOT NULL CHECK (bytes > 0),
+        at INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.

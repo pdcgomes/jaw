@@ -7,6 +7,7 @@
 //! connection and catching up go out to interfaces as pushes.
 
 mod avatars;
+mod backfill;
 mod drain;
 mod fetch;
 mod merge;
@@ -204,6 +205,7 @@ pub async fn run(
     let avatars = Avatars::new();
     let merges = Merges::default();
     tokio::spawn(merge::run(store.clone(), merges.clone(), live.clone(), merge::Timing::default()));
+    tokio::spawn(backfill::run(store.clone()));
     tokio::spawn(drain::inbox(store.clone(), live.clone(), offered, avatars.clone(), merges.clone()));
     tokio::spawn(drain::history_raw(store.clone(), live.clone()));
     if let Some(engine) = &engine {

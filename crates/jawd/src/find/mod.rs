@@ -1,8 +1,9 @@
 //! Finding anything: `find`, the palette's one search. Names come from the index in memory, matched
-//! on a blocking thread while the messages' full-text query runs on the read pool, so a keystroke
-//! costs the slower of the two. Names come first, best first, then messages, newest first. A newer
-//! find from the same connection cancels the last: matching stops at its next check and a running
-//! query stops within a thousand steps, so typing never queues searches.
+//! on a blocking thread while the full-text queries of messages and of links run on the read pool,
+//! so a keystroke costs the slowest of them. Names come first, best first, then messages, newest
+//! first, then links (their titles, hosts, descriptions and URLs), newest first. A newer find from
+//! the same connection cancels the last: matching stops at its next check and a running query stops
+//! within a thousand steps, so typing never queues searches.
 
 pub mod bench;
 mod index;
@@ -188,6 +189,37 @@ impl Finder {
                     .await
             }
         };
+        let links = {
+            let (store, chat, cancel) = (self.inner.store.clone(), find.chat.clone(), cancel.clone());
+            let words = Words::new(&typed);
+            let wanted = kinds.contains(&Kind::Link) && !words.0.is_empty();
+            async move {
+                if !wanted {
+                    return anyhow::Ok(None);
+                }
+                store
+                    .reads()
+                    .query(Priority::Interactive, move |db| {
+                        cancel.run(db, || {
+                            let ts = read::linked(db, &words.fts(), chat.as_deref(), COUNTED as usize)?;
+                            let mut found = Vec::new();
+                            for &t in &ts {
+                                if found.len() >= limit {
+                                    break;
+                                }
+                                for link in read::links_of(db, t)? {
+                                    let shown = link_shown(&link);
+                                    if found.len() < limit && words.every(&link_words(&link)) {
+                                        found.push((spans(&shown, &words.marks(&shown)), link));
+                                    }
+                                }
+                            }
+                            Ok(Some((found, ts.len())))
+                        })
+                    })
+                    .await
+            }
+        };
         let names = {
             let (inner, cancel) = (self.inner.clone(), cancel.clone());
             async move {
@@ -198,7 +230,7 @@ impl Finder {
                 .await
             }
         };
-        let (names, messages) = tokio::join!(names, messages);
+        let (names, messages, links) = tokio::join!(names, messages, links);
         let (names, mut counts) = names?.ok_or(Cancelled)?;
         let mut results = self.names(names, &cancel).await?;
         if let Some((rows, count)) = messages? {
@@ -215,6 +247,24 @@ impl Finder {
                     chat_name: index.chat_name_of(&row.chat),
                     folders: Vec::new(),
                     row: serde_json::to_value(feed::message_row(row))?,
+                });
+            }
+        }
+        if let Some((found, count)) = links? {
+            if count > 0 {
+                counts.insert(Kind::Link, count as u32);
+            }
+            let index = self.inner.index.read().expect("the name index");
+            for (text, link) in found {
+                let chat_name = index.chat_name_of(&link.chat);
+                results.push(Hit {
+                    kind: Kind::Link,
+                    score: 0,
+                    text,
+                    field: None,
+                    row: link_row(&link, chat_name.as_deref()),
+                    chat_name,
+                    folders: Vec::new(),
                 });
             }
         }
@@ -312,6 +362,15 @@ impl Words {
         words.collect::<Vec<_>>().join(" ")
     }
 
+    /// Whether every word typed finds a word of `text`.
+    fn every(&self, text: &str) -> bool {
+        let found: Vec<String> =
+            text.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(fold).collect();
+        self.0.iter().all(|(typed, prefix)| {
+            found.iter().any(|word| if *prefix { word.starts_with(typed) } else { word == typed })
+        })
+    }
+
     /// Where in `text` the words matched: each word of it that one finds, as byte ranges.
     fn marks(&self, text: &str) -> Vec<(usize, usize)> {
         let mut marks = Vec::new();
@@ -328,6 +387,46 @@ impl Words {
         }
         marks
     }
+}
+
+/// How many sender colours interfaces choose from, as message rows give them.
+const COLOURS: i64 = 8;
+
+/// What a link found shows: its title and host, or its URL when it has no title.
+fn link_shown(link: &read::LinkRow) -> String {
+    match &link.title {
+        Some(title) => format!("{title} · {}", link.host),
+        None => link.url.clone(),
+    }
+}
+
+/// The words a link is found by, as its links_fts document has them.
+fn link_words(link: &read::LinkRow) -> String {
+    [Some(link.host.as_str()), link.title.as_deref(), link.description.as_deref(), Some(link.url.as_str())]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A link found, as the library's rows have one: its own `id` (its message's, `~` and its place),
+/// its message to go to, where and when it was sent and by whom (`from`, absent on yours), and the
+/// link itself.
+fn link_row(link: &read::LinkRow, chat_name: Option<&str>) -> serde_json::Value {
+    let mut row = serde_json::json!({
+        "id": format!("{}~{}", link.message, link.place),
+        "kind": "link",
+        "message": link.message,
+        "chat": link.chat,
+        "chat_name": chat_name,
+        "mine": link.mine,
+        "at": link.at,
+        "link": { "url": link.url, "host": link.host, "title": link.title, "description": link.description },
+    });
+    if let Some(from) = &link.from {
+        row["from"] = serde_json::json!({ "id": format!("person:{}", from.id), "name": from.name, "colour": from.id.rem_euclid(COLOURS) });
+    }
+    row
 }
 
 /// `text` as spans, with `marks` (byte ranges, in order) marked and line breaks as spaces, so a
@@ -529,6 +628,74 @@ mod tests {
         assert_eq!((in_familia.results.len(), in_familia.counts[&Kind::Message]), (2, 2));
         let links = find(&finder, "jantar", &[Kind::Link, Kind::Media, Kind::File]).await;
         assert!(links.results.is_empty() && links.counts.is_empty(), "nothing finds links, media or files yet");
+    }
+
+    fn linked(chat: &str, id: &str, at: i64, words: &str, urls: &[&str], preview: Option<(&str, &str)>) -> Change {
+        let mut spans = vec![serde_json::json!({ "t": "text", "s": words })];
+        spans.extend(urls.iter().map(|url| serde_json::json!({ "t": "link", "s": url, "url": url })));
+        let detail =
+            preview.map(|(url, title)| serde_json::json!({ "link": { "url": url, "title": title } }).to_string());
+        Change::Message(Message {
+            spans: Some(serde_json::Value::Array(spans).to_string()),
+            detail,
+            ..match text(chat, id, at, words) {
+                Change::Message(message) => message,
+                _ => unreachable!(),
+            }
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn links_come_after_messages_newest_first_by_their_title_host_or_url() {
+        let (_home, store, finder) = finder().await;
+        let familia = "120363000000000004@g.us";
+        apply(
+            &store,
+            &finder,
+            vec![
+                group(familia, "Família Gomes"),
+                group(CLIMBING, "Lisbon Climbing"),
+                linked(
+                    CLIMBING,
+                    "old",
+                    1_000,
+                    "o guia ",
+                    &["https://thecrag.com/sintra", "https://www.ipma.pt/previsao"],
+                    Some(("https://thecrag.com/sintra", "Escalada em Sintra")),
+                ),
+                linked(familia, "new", 5_000, "sintra no sábado ", &["https://www.cp.pt/sintra"], None),
+            ],
+        )
+        .await;
+        store.indexed().await.unwrap();
+        let sintra = find(&finder, "sintra", &[Kind::Message, Kind::Link]).await;
+        let kinds: Vec<Kind> = sintra.results.iter().map(|hit| hit.kind).collect();
+        assert_eq!(kinds, [Kind::Message, Kind::Link, Kind::Link], "messages first, then links");
+        assert_eq!(shown(&sintra.results[1]), "https://www.cp.pt/sintra", "the newest first, by its URL");
+        assert_eq!(shown(&sintra.results[2]), "Escalada em Sintra · thecrag.com");
+        let marked: Vec<&str> =
+            sintra.results[2].text.iter().filter(|span| span.t == SpanKind::Mark).map(|span| span.s.as_str()).collect();
+        assert_eq!(marked, ["Sintra"]);
+        let row = &sintra.results[2].row;
+        assert_eq!(row["id"], "old~0");
+        assert_eq!(
+            (row["kind"].as_str(), row["message"].as_str(), row["chat"].as_str()),
+            (Some("link"), Some("old"), Some(CLIMBING))
+        );
+        assert_eq!(row["link"]["host"], "thecrag.com");
+        assert_eq!(row["from"]["id"].as_str().map(|id| id.starts_with("person:")), Some(true));
+        assert_eq!(sintra.results[2].chat_name.as_deref(), Some("Lisbon Climbing"));
+        assert_eq!(sintra.counts[&Kind::Link], 2, "two messages' links");
+
+        let ipma = find(&finder, "ipma", &[Kind::Link]).await;
+        assert_eq!(found(&ipma), [(Kind::Link, "https://www.ipma.pt/previsao".into())], "only the link that says it");
+        let escalada = find(&finder, "escalada sintra", &[Kind::Link]).await;
+        assert_eq!(escalada.results.len(), 1, "every word typed, in one link");
+        let in_familia =
+            Find { query: "sintra".into(), kinds: vec![Kind::Link], chat: Some(familia.into()), ..Find::default() };
+        let in_familia = finder.find(in_familia, Arc::new(Cancel::default())).await.unwrap();
+        assert_eq!(found(&in_familia), [(Kind::Link, "https://www.cp.pt/sintra".into())]);
+        assert!(find(&finder, "sintra", &[Kind::Media, Kind::File]).await.results.is_empty());
     }
 
     #[test]

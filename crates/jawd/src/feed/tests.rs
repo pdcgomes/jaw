@@ -1030,8 +1030,16 @@ async fn serve_all_pushing(bed: &Bed) -> (std::path::PathBuf, broadcast::Sender<
     let live: crate::sync::Shared = Arc::default();
     let attention = Arc::new(crate::attention::Attention::default());
     let timing = crate::send::Timing::default();
-    let sending =
-        crate::send::Sending::start(bed.store.clone(), None, live.clone(), &pushes, attention.focus(), timing).await;
+    let sending = crate::send::Sending::start(
+        bed.store.clone(),
+        None,
+        live.clone(),
+        &pushes,
+        attention.focus(),
+        timing,
+        crate::send::link::Previews::off(),
+    )
+    .await;
     let state = State::new(
         bed.home.path(),
         Err(("demo", "no engine in this test".into())),

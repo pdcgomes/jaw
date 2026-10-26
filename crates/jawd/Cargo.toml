@@ -11,6 +11,9 @@ publish = false
 anyhow.workspace = true
 clap.workspace = true
 crossbeam-channel.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 image.workspace = true
 jaw-client.workspace = true
 jaw-proto.workspace = true
@@ -18,11 +21,15 @@ libc.workspace = true
 nucleo-matcher.workspace = true
 prost.workspace = true
 rusqlite = { workspace = true, features = ["hooks"] }
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
+url.workspace = true
 wa-proto.workspace = true
+webpki-roots.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]

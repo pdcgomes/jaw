@@ -18,7 +18,7 @@ use crate::layout::Layouts;
 use crate::send::Sending;
 use crate::settings::Settings;
 use crate::sock::{APART_MOST, LANE_MOST, Lanes};
-use crate::store::Store;
+use crate::store::{Store, links};
 use crate::sync::Shared;
 use crate::work::Report;
 
@@ -216,6 +216,7 @@ impl State {
             catch_up,
             history,
             stored: self.store.as_ref().and_then(|store| {
+                let (link_thumbnails, link_thumbnail_bytes) = store.thumbnails_kept().ok()?;
                 Some(Stored {
                     inbox: store.count("inbox").ok()?,
                     history: store.count("history_raw").ok()?,
@@ -236,6 +237,11 @@ impl State {
                     regroup: store.count("regroup").ok()?,
                     settled: store.count("settled").ok()?,
                     send_keys: store.count("send_keys").ok()?,
+                    links: store.count("links").ok()?,
+                    links_backfill: store.backfill_left(links::LINKS).ok()?,
+                    link_thumbnails,
+                    link_thumbnail_bytes,
+                    link_thumbnails_refused: store.thumbnails().refused(),
                 })
             }),
             interfaces: Some(Interfaces {

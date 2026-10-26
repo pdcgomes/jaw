@@ -71,8 +71,17 @@ impl Running {
             crate::sync::run(incoming, store.clone(), live.clone(), pushes.clone(), supervisor.clone(), home.into());
         tokio::spawn(sync);
         let attention = Arc::new(crate::attention::Attention::default());
-        let sending =
-            Sending::start(store.clone(), supervisor.clone(), live, &pushes, attention.focus(), timing).await.unwrap();
+        let sending = Sending::start(
+            store.clone(),
+            supervisor.clone(),
+            live,
+            &pushes,
+            attention.focus(),
+            timing,
+            link::Previews::off(),
+        )
+        .await
+        .unwrap();
         if engine && connect {
             let online = async {
                 while let Ok(push) = connected.recv().await {

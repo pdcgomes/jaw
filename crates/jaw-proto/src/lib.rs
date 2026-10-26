@@ -438,6 +438,20 @@ pub struct Stored {
     /// The keys interfaces gave the messages they sent, kept for a day.
     #[serde(default)]
     pub send_keys: u64,
+    /// Each URL a message gives, kept for the palette and the library.
+    #[serde(default)]
+    pub links: u64,
+    /// Messages jaw.db held before links were kept that are still to be looked at for theirs.
+    #[serde(default)]
+    pub links_backfill: u64,
+    /// Link previews' thumbnails kept as files, their bytes, and how many were refused since jawd
+    /// started because they'd take more than the 256 MB the thumbnails may.
+    #[serde(default)]
+    pub link_thumbnails: u64,
+    #[serde(default)]
+    pub link_thumbnail_bytes: u64,
+    #[serde(default)]
+    pub link_thumbnails_refused: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

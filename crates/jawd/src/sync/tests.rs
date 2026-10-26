@@ -1610,3 +1610,82 @@ async fn the_engine_next_word_waits_until_the_account_it_said_before_is_stored()
     running.await.unwrap();
     assert_eq!(store.remembered(ACCOUNT).unwrap().as_deref(), Some(""), "the logout last");
 }
+
+/// A small JPEG, as a link preview's thumbnail comes.
+fn jpeg(w: u32, h: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    image::RgbImage::from_pixel(w, h, image::Rgb([200, 60, 20]))
+        .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 60))
+        .unwrap();
+    out
+}
+
+fn previewed(text: &str, url: &str, thumbnail: Option<Vec<u8>>) -> e2e::Message {
+    e2e::Message {
+        extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
+            text: Some(text.into()),
+            matched_text: Some(url.into()),
+            title: Some("Escalada em Sintra".into()),
+            description: Some("Os melhores blocos".into()),
+            jpeg_thumbnail: thumbnail,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_preview_that_arrives_shows_its_title_and_its_thumbnail_once_its_file_is_whole() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let thumbnail = jpeg(40, 30);
+    let sha = crate::store::thumbnails::sha256(&thumbnail);
+    let events = [
+        live_message(ANA, ANA, "p1", AT, previewed("vê www.8a.nu/sintra", "www.8a.nu/sintra", Some(thumbnail.clone()))),
+        live_message(ANA, ANA, "p2", AT + 1, previewed("e https://8a.nu/peneda", "https://8a.nu/peneda", None)),
+    ];
+    for event in &events {
+        store.inbox("message", 0, event.encode_to_vec(), None);
+    }
+    let converter = converting(&store);
+    drained(&store).await;
+    converter.abort();
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    let link = |n: usize| {
+        let detail: serde_json::Value = serde_json::from_str(rows[n].detail.as_ref().unwrap().get()).unwrap();
+        detail["link"].clone()
+    };
+    assert_eq!(
+        link(0),
+        serde_json::json!({
+            "url": "https://www.8a.nu/sintra",
+            "title": "Escalada em Sintra",
+            "description": "Os melhores blocos",
+            "preview": format!("media/links/{sha}.jpg"),
+        })
+    );
+    assert_eq!(std::fs::read(home.path().join(format!("media/links/{sha}.jpg"))).unwrap(), thumbnail);
+    assert_eq!(link(1)["title"], "Escalada em Sintra");
+    assert!(link(1).get("preview").is_none(), "no thumbnail came with it");
+    assert_eq!(store.thumbnails_kept().unwrap(), (1, thumbnail.len() as u64));
+    assert_eq!(scalar(home.path(), "SELECT count(*) FROM links"), 2, "each preview's URL is a link");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_preview_whose_thumbnail_cant_be_kept_shows_without_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // A file in the way of the folder the thumbnails go in, as a disk that won't take them is.
+    std::fs::create_dir_all(home.path().join("media")).unwrap();
+    std::fs::write(home.path().join("media/links"), b"not a folder").unwrap();
+    let event = live_message(ANA, ANA, "p1", AT, previewed("vê https://8a.nu", "https://8a.nu", Some(jpeg(8, 8))));
+    store.inbox("message", 0, event.encode_to_vec(), None);
+    let converter = converting(&store);
+    drained(&store).await;
+    converter.abort();
+    let rows = query(&store, |db| read::messages(db, ANA, Around::Newest, 10)).await;
+    let detail: serde_json::Value = serde_json::from_str(rows[0].detail.as_ref().unwrap().get()).unwrap();
+    assert_eq!(detail["link"]["title"], "Escalada em Sintra", "the message is in, with its preview");
+    assert!(detail["link"].get("preview").is_none(), "but not its thumbnail");
+    assert_eq!(store.thumbnails_kept().unwrap(), (0, 0));
+}

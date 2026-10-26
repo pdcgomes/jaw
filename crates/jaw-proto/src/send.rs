@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::windows::{ChatRow, MessageRow};
 
-/// `send.text`'s params. Link previews come later in M2; until then `preview` changes nothing.
+/// `send.text`'s params.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendText {
     pub chat: String,
@@ -22,6 +22,7 @@ pub struct SendText {
     /// the interface showed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<String>,
+    /// Whether text with a URL goes with a preview of its page; true when it's left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<bool>,
 }

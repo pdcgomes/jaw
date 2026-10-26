@@ -1,13 +1,13 @@
 //! `find`, the palette's one search: chats, people and folders by name from jawd's memory, then
-//! messages from jaw.db's full-text index, best first; and `chat.opened`, which ranks the chats you
-//! open often first.
+//! messages and links from jaw.db's full-text indexes, best first; and `chat.opened`, which ranks the
+//! chats you open often first.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// What `find` can answer with. Links come in M2, media and files in M3; until then they find none.
+/// What `find` can answer with. Media and files come in M3; until then they find none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
@@ -39,7 +39,7 @@ pub struct Find {
 /// `find`'s result.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Found {
-    /// Names first, best match first; then messages, newest first.
+    /// Names first, best match first; then messages, newest first; then links, newest first.
     pub results: Vec<Hit>,
     /// How many of each kind matched, for each kind that matched any. Text kinds are counted up
     /// to `COUNTED`; a count of that many means at least that many.

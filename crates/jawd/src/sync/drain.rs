@@ -16,7 +16,7 @@ use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 use super::{Avatars, Merges, Shared, fetch};
 use crate::convert::{self, Me, app_state, people};
 use crate::engine::pb;
-use crate::store::{Amend, Amendment, Change, Chat, Drained, Lane, Packed, Read, Store};
+use crate::store::{Amend, Amendment, Change, Chat, Drained, Lane, Packed, Read, Store, thumbnails};
 use crate::work::Priority;
 
 /// Inbox rows read and converted at once.
@@ -35,6 +35,9 @@ pub struct Converted {
     pub my_name: Option<String>,
     /// Chats and people whose pictures changed.
     pub pictures: Vec<String>,
+    /// The thumbnails link previews came with, by SHA-256, each named by a `Change::Thumbnail` in
+    /// its row's changes, which stays only if the thumbnail is kept before they're applied.
+    pub thumbnails: Vec<(String, Vec<u8>)>,
 }
 
 /// One inbox row as it's read.
@@ -207,15 +210,37 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
     // The row keeps the engine's whole event, which says more than the WebMessageInfo made from it.
     let id = web.key.id.as_deref().unwrap_or_default();
     let envelope = Packed::new(&row.payload);
+    let mut shown = None;
     for change in &mut changes {
         if let Change::Message(m) = change
             && m.id == id
         {
             m.envelope = Some(envelope.clone());
+            shown = Some(m.chat.clone());
         }
+    }
+    // Its link preview's thumbnail shows once its file is kept, which it is before these are applied.
+    if let (Some(chat), Some(jpeg)) = (shown, web.message.as_ref().and_then(convert::link_thumbnail)) {
+        let sha256 = thumbnails::sha256(jpeg);
+        changes.push(Change::Thumbnail { sha256: sha256.clone(), bytes: jpeg.len() as u64, chat, id: id.to_string() });
+        out.thumbnails.push((sha256, jpeg.to_vec()));
     }
     out.changes.extend(changes);
     true
+}
+
+/// Keeps the thumbnails `converted` names, and leaves out the `Change::Thumbnail` of each that
+/// couldn't be, so a preview never shows one whose file isn't whole.
+async fn keep_thumbnails(store: &Store, converted: &mut Converted) {
+    if converted.thumbnails.is_empty() {
+        return;
+    }
+    let (thumbnails, wanted) = (store.thumbnails().clone(), std::mem::take(&mut converted.thumbnails));
+    let kept = tokio::task::spawn_blocking(move || thumbnails.keep(&wanted)).await.unwrap_or_default();
+    converted.changes.retain(|change| match change {
+        Change::Thumbnail { sha256, .. } => kept.contains(sha256),
+        _ => true,
+    });
 }
 
 /// A sender's LID and phone number, joined.
@@ -287,7 +312,8 @@ pub async fn inbox(
         if from_before {
             started.get_or_insert_with(Instant::now);
         }
-        let Ok(converted) = tokio::task::spawn_blocking(move || convert_rows(&rows, &me)).await else { continue };
+        let Ok(mut converted) = tokio::task::spawn_blocking(move || convert_rows(&rows, &me)).await else { continue };
+        keep_thumbnails(&store, &mut converted).await;
         let applied = if from_before {
             store.apply(Lane::Background, converted.changes).await.map(|applied| applied.quarantined)
         } else {

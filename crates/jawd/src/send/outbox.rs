@@ -22,13 +22,14 @@ use tokio::sync::Notify;
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_web::{WebMessageInfo, web_message_info};
 
+use super::link;
 use super::quote::{self, Mentioned, Quote};
 use super::{Inner, TEXT_MOST, durably, engine, internal, no_chat, now_ms, query, retryable};
 use crate::convert::{self, Me};
 use crate::engine::{EngineError, pb};
 use crate::feed;
 use crate::store::outbox::{self, Enqueued, Outboxed, Step, Written};
-use crate::store::{Applied, Change, Lane, Person, read};
+use crate::store::{Applied, Change, Lane, Person, read, thumbnails};
 use crate::work::{Next, Priority};
 
 /// A chat to send to: its disappearing timer, the chat it is as the writer finds it (itself, or
@@ -208,6 +209,7 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
         return Err(Error::new(code::LIMIT, format!("a message can be {TEXT_MOST} characters at most")));
     }
     check_key(&send.key)?;
+    let _place = super::composing(inner, &[send.chat.as_str()]).await;
     let (chat, key, reply, people, text) =
         (send.chat.clone(), send.key.clone(), send.reply.clone(), send.mentions.clone(), send.text.clone());
     let composed = query(inner, move |db| {
@@ -248,9 +250,16 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
         Some(Quote::Deleted) => return Err(Error::new(code::NOT_ALLOWED, "a deleted message can't be replied to")),
     };
     let mentioned = composed.mentioned.map_err(|why| bad_param("mentions", why))?;
+    let preview = match send.preview {
+        Some(false) => None,
+        _ => inner.previews.of(&mentioned.text).await,
+    };
     let id = message_id().map_err(|e| internal("make a message ID", e.into()))?;
     let at = now_ms();
-    let raw = quote::text_message(&mentioned.text, ephemeral, quoted.as_ref(), &mentioned.jids);
+    let mut raw = quote::text_message(&mentioned.text, ephemeral, quoted.as_ref(), &mentioned.jids);
+    if let Some(preview) = &preview {
+        raw = link::with_preview(raw, preview);
+    }
     let web = WebMessageInfo {
         key: MessageKey {
             remote_jid: Some(send.chat.clone()),
@@ -278,8 +287,17 @@ pub(super) async fn send_text(inner: &Arc<Inner>, send: SendText) -> Result<Sent
         key: send.key.clone(),
         written: written.clone(),
     };
+    let mut changes = vec![Change::Outbox(step)];
+    if let Some(thumbnail) = preview.and_then(|preview| preview.thumbnail) {
+        let sha256 = thumbnails::sha256(&thumbnail.jpeg);
+        let (kept, wanted) = (inner.store.thumbnails().clone(), vec![(sha256.clone(), thumbnail.jpeg)]);
+        let bytes = wanted[0].1.len() as u64;
+        if tokio::task::spawn_blocking(move || kept.keep(&wanted)).await.is_ok_and(|kept| !kept.is_empty()) {
+            changes.push(Change::Thumbnail { sha256, bytes, chat: send.chat.clone(), id: id.clone() });
+        }
+    }
     let _order = inner.enqueue.lock().await;
-    durably(inner, vec![Change::Outbox(step)], "keep the message, so it isn't sent").await?;
+    durably(inner, changes, "keep the message, so it isn't sent").await?;
     match written.take() {
         Some(Enqueued::Queued { id, chat, chat_n, outbox, .. }) => {
             let sent = answer(inner, chat.clone(), id).await;

@@ -8,6 +8,7 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 
 use super::spans::{self, Span};
 use super::{SUMMARY, user_jid};
+use crate::store::thumbnails;
 
 /// What a message that isn't a row converts to.
 pub const NOTHING: &str = "";
@@ -155,13 +156,28 @@ fn with_length(what: &str, seconds: Option<u32>) -> String {
     }
 }
 
+/// A URL as a link span makes one: `https://` before one that doesn't say how it's reached.
+pub fn absolute(url: &str) -> String {
+    let starts = |scheme: &str| url.get(..scheme.len()).is_some_and(|start| start.eq_ignore_ascii_case(scheme));
+    if starts("http://") || starts("https://") { url.to_string() } else { format!("https://{url}") }
+}
+
+/// Text with its link preview, if it has one: the URL it's for, its title and description, and the
+/// SHA-256 of the thumbnail that came with it, which names its file once jawd has kept it.
 fn extended_text(x: &e2e::ExtendedTextMessage, mentioned: &[String]) -> Body {
     let body = Body::with_text("text", x.text.as_deref(), mentioned, "");
-    let url = x.matched_text.as_deref().filter(|u| !u.is_empty());
+    let url = x.matched_text.as_deref().map(str::trim).filter(|u| !u.is_empty());
+    let said = |s: &Option<String>| s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let (title, description) = (said(&x.title), said(&x.description));
+    let thumbnail = x.jpeg_thumbnail.as_deref().filter(|t| !t.is_empty());
     match url {
-        Some(url) if x.title.is_some() || x.description.is_some() => body.detail(json!({
-            "link": { "url": url, "title": x.title, "description": x.description }
-        })),
+        Some(url) if title.is_some() || description.is_some() || thumbnail.is_some() => {
+            let mut link = json!({ "url": absolute(url), "title": title, "description": description });
+            if let Some(thumbnail) = thumbnail {
+                link["thumbnail"] = json!(thumbnails::sha256(thumbnail));
+            }
+            body.detail(json!({ "link": link }))
+        }
         _ => body,
     }
 }

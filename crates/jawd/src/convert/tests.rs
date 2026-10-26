@@ -118,6 +118,38 @@ fn extended_text_marks_mentions_and_links_and_summarises_its_quote() {
 }
 
 #[test]
+fn a_link_preview_is_its_absolute_url_title_description_and_its_thumbnails_hash() {
+    let previewed = |matched: &str, title: Option<&str>, thumbnail: Option<Vec<u8>>| {
+        row(e2e::Message {
+            extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
+                text: Some(format!("vê {matched}")),
+                matched_text: Some(matched.into()),
+                title: title.map(Into::into),
+                description: Some("  ".into()),
+                jpeg_thumbnail: thumbnail,
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    };
+    let m = previewed("www.jaw.dev", Some("Jaw"), Some(b"a thumbnail".to_vec()));
+    let detail: serde_json::Value = serde_json::from_str(m.detail.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        detail["link"],
+        serde_json::json!({
+            "url": "https://www.jaw.dev",
+            "title": "Jaw",
+            "description": null,
+            "thumbnail": crate::store::thumbnails::sha256(b"a thumbnail"),
+        })
+    );
+    assert_eq!(link_thumbnail(&e2e::Message::default()), None);
+    let only_thumbnail = previewed("https://jaw.dev", None, Some(vec![1]));
+    assert!(only_thumbnail.detail.unwrap().contains("\"thumbnail\""), "a thumbnail alone is a preview");
+    assert_eq!(previewed("https://jaw.dev", None, None).detail, None, "nothing to show, no preview");
+}
+
+#[test]
 fn a_photo_is_its_caption_or_photo() {
     let image = |caption: Option<&str>| e2e::Message {
         image_message: Some(Box::new(e2e::ImageMessage {

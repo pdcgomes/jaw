@@ -93,6 +93,7 @@ pub(super) async fn forward(inner: &Arc<Inner>, forward: Forward) -> Result<Forw
         error.data = Some(serde_json::json!({ "limit": "forward", "most": TO_MOST }));
         return Err(error);
     }
+    let _places = super::composing(inner, &to.iter().map(String::as_str).collect::<Vec<_>>()).await;
     if let Some(key) = forward.key.clone()
         && let Some(ids) = query(inner, move |db| forwarded_by_key(db, &key)).await?
     {
