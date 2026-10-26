@@ -42,8 +42,9 @@ type Engine struct {
 	client  atomic.Pointer[whatsmeow.Client]
 	retired atomic.Pointer[whatsmeow.Client]
 	media   media
-	// What downloads files instead of the client, in the tests.
+	// What downloads and uploads files instead of the client, in the tests.
 	mediaDownloader mediaDownloader
+	mediaUploader   mediaUploader
 }
 
 // cli is the client running now, nil until the session is open.
@@ -525,6 +526,8 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 		return e.userInfo(c.UserInfo)
 	case *enginepb.Command_MediaDownload:
 		return e.mediaDownload(c.MediaDownload)
+	case *enginepb.Command_MediaUpload:
+		return e.mediaUpload(c.MediaUpload)
 	case *enginepb.Command_MediaRetry:
 		return e.mediaRetry(c.MediaRetry)
 	}

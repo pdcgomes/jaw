@@ -287,8 +287,9 @@ message Typing {
   string sender_alt = 4;
 }
 
-// How far a MediaDownload has got: `bytes` of the `size` its message gave. Sent without a seq, at
-// most four times a second for each download, and once more when it's whole.
+// How far a MediaDownload has got, `bytes` of the `size` its message gave, or a MediaUpload, `bytes`
+// of the encrypted file's `size` sent. Sent without a seq, at most four times a second for each,
+// and once more when it's whole.
 message MediaProgress {
   string id = 1;
   uint64 bytes = 2;
@@ -358,6 +359,7 @@ message Command {
     MediaDownload media_download = 22;
     MediaCancel media_cancel = 23;
     MediaRetry media_retry = 24;
+    MediaUpload media_upload = 25;
   }
 }
 
@@ -389,9 +391,24 @@ message MediaDownload {
   bool full_flush = 9;
 }
 
-// Stops download `id`, which answers CANCELLED; Done whether it was running or not.
+// Stops download or upload `id`, which answers CANCELLED; Done whether it was running or not.
 message MediaCancel {
   string id = 1;
+}
+
+// Uploads one file to WhatsApp's media server, encrypted with a media key of its own, and answers
+// with MediaUploaded. The file is read from `path` as it's encrypted into a partial file of the
+// engine's own beside `temp`, which is then uploaded and removed, so it's never held in memory, and
+// a crash's partial file is removed at jawd's start. The file must still be the one `file_sha256`
+// names. MediaProgress events, under `id`, say how much of it has gone, and MediaCancel stops it.
+message MediaUpload {
+  // Names the upload for MediaCancel and MediaProgress.
+  string id = 1;
+  // Which of WhatsApp's keys it's encrypted with, as for a download.
+  MediaDownload.Kind kind = 2;
+  string path = 3;
+  string temp = 4;
+  bytes file_sha256 = 5;
 }
 
 // Asks the phone to upload a message's file again, once WhatsApp's server no longer has it (the
@@ -568,6 +585,7 @@ message Reply {
     OnWhatsAppList on_whatsapp_list = 11;
     UserInfoList user_info_list = 12;
     MediaFile media_file = 13;
+    MediaUploaded media_uploaded = 14;
   }
 }
 
@@ -583,6 +601,30 @@ message User {
   string picture_id = 3;
   string verified_name = 4;
   string lid = 5;
+}
+
+// What became of a MediaUpload. A failure that may pass (the network, the server) is a Failure
+// with `retry` instead.
+message MediaUploaded {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    // On WhatsApp's media server, where a message names it by what follows.
+    UPLOADED = 1;
+    CANCELLED = 2;
+    // The file isn't the one `file_sha256` names any more.
+    CHANGED = 3;
+    // There's no room for the encrypted copy.
+    NO_SPACE = 4;
+  }
+  State state = 1;
+  string url = 2;
+  string direct_path = 3;
+  bytes media_key = 4;
+  bytes file_sha256 = 5;
+  bytes file_enc_sha256 = 6;
+  uint64 file_length = 7;
+  // What happened, as a sentence jawd can pass on.
+  string message = 8;
 }
 
 // What became of a MediaDownload. A failure that may pass (the network, the server) is a Failure
