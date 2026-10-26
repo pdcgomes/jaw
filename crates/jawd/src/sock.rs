@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use jaw_proto::find::{ChatOpened, Find};
-use jaw_proto::settings::{Settings as Shared, SettingsKept};
+use jaw_proto::settings::{Settings as Terminal, SettingsKept};
 use jaw_proto::sync::HistoryMore;
 use jaw_proto::themes::Themes;
 use jaw_proto::{Error, Focus, Hello, LinkStart, Outcome, PROTOCOL, Push, Reply, Request, code};
@@ -53,7 +53,7 @@ struct Session {
     /// Its domain's settings as this connection was last told them: made at its hello, whose
     /// answer carries what this receiver has seen, so no change between that answer and its first
     /// push is missed; none for a client jawd keeps no settings for.
-    settings: Option<watch::Receiver<Shared>>,
+    settings: Option<watch::Receiver<Terminal>>,
 }
 
 /// Every connection's lane, waiting reply and requests answered on tasks of their own, summed for
@@ -504,7 +504,7 @@ async fn windows(windows: &mut Option<feed::Client>) -> feed::Ready {
 /// The settings once they've changed since this connection was last told them: only after its
 /// hello, and never once jawd has stopped publishing them. A push waits for room as a reply
 /// does, so none is dropped, and changes made meanwhile end in the latest.
-async fn changed(settings: &mut Option<watch::Receiver<Shared>>, greeted: bool) -> Shared {
+async fn changed(settings: &mut Option<watch::Receiver<Terminal>>, greeted: bool) -> Terminal {
     match settings {
         Some(settings) if greeted => match settings.changed().await {
             Ok(()) => settings.borrow_and_update().clone(),
@@ -813,7 +813,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::time::Duration;
 
-    use jaw_proto::settings::{Messages, Settings, TERMINAL};
+    use jaw_proto::settings::{Messages, TERMINAL};
     use jaw_proto::{AccountState, ConnectionState, Status};
     use serde_json::json;
 
@@ -1230,10 +1230,14 @@ mod tests {
         assert_eq!(state.attention().connected(), 0, "the connection that ended is forgotten");
     }
 
-    /// jawd serving jaw.db with its settings, on a socket in a folder of its own.
-    async fn serving_settings() -> (tempfile::TempDir, std::path::PathBuf, Store) {
+    /// jawd serving jaw.db with its settings, on a socket in a folder of its own, once jaw.db keeps
+    /// `kept`, as another jawd may have left it.
+    async fn serving_settings(kept: Vec<Change>) -> (tempfile::TempDir, std::path::PathBuf, Store) {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
+        if !kept.is_empty() {
+            assert_eq!(store.apply_durable(kept).await.unwrap().quarantined, 0);
+        }
         let settings = Arc::new(crate::settings::Settings::load(store.clone()).unwrap());
         let socket = jaw_proto::local::socket(home.path());
         let listener = listen(&socket).unwrap();
@@ -1251,7 +1255,7 @@ mod tests {
         (home, socket, store)
     }
 
-    /// The answer to a hello from `client` as jawd wrote it, since `Settings` reads an empty or
+    /// The answer to a hello from `client` as jawd wrote it, since `Terminal` reads an empty or
     /// unknown value as the default.
     fn raw_hello(socket: &Path, client: &str) -> Value {
         let stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
@@ -1265,7 +1269,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn hello_carries_a_domains_settings_and_each_change_is_pushed_to_its_connections_alone() {
-        let (_home, socket, _store) = serving_settings().await;
+        let (_home, socket, _store) = serving_settings(Vec::new()).await;
         let checked = tokio::task::spawn_blocking(move || {
             let fresh = raw_hello(&socket, TERMINAL);
             assert_eq!(fresh["result"]["settings"], json!({"theme": "tokyo-night", "messages": "bubbles"}));
@@ -1285,11 +1289,11 @@ mod tests {
             assert!(welcome["result"].get("settings").is_none(), "a client jawd keeps no settings for gets none");
             let kept = a.call("settings.set", json!({"theme": "gruvbox", "messages": "irc"})).unwrap();
             assert_eq!(kept, json!({"settings": {"theme": "gruvbox", "messages": "irc"}}));
-            let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Irc };
+            let gruvbox = Terminal { theme: "gruvbox".into(), messages: Messages::Irc };
             for connection in [&mut a, &mut b] {
                 let push = connection.push().unwrap();
                 assert_eq!(push.method, "settings");
-                assert_eq!(serde_json::from_value::<Settings>(push.params).unwrap(), gruvbox);
+                assert_eq!(serde_json::from_value::<Terminal>(push.params).unwrap(), gruvbox);
             }
             let asked = r#"{"id":2,"method":"settings.set","params":{"theme":"nord"}}"#;
             let answer = say(asked, &mut line).unwrap();
@@ -1306,7 +1310,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn settings_set_answers_only_once_its_commit_is_synced() {
-        let (home, socket, store) = serving_settings().await;
+        let (home, socket, store) = serving_settings(Vec::new()).await;
         let path = socket.clone();
         let (mut connection, _) =
             tokio::task::spawn_blocking(move || jaw_client::Connection::open(&path, TERMINAL, "0").unwrap())
@@ -1332,20 +1336,24 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_connection_that_reads_nothing_while_settings_change_ends_on_the_latest() {
-        let (_home, socket, _store) = serving_settings().await;
+        // The themes asked for and their answers left unread: fewer than its queue holds, so it's
+        // left in its loop rather than waiting on an answer, and more than a socket takes, so the
+        // rest wait in the queue; then more changes than the queue holds, whose pushes fill it.
+        let (asks, changes) = (WAITING_LINES * 5 / 8, 2 * WAITING_LINES);
+        let answer = encode(&succeeded(0, &Themes { themes: jaw_proto::themes::all().to_vec() })).len();
+        assert!(asks * answer > 256 << 10, "{asks} answers of {answer} bytes might all fit in the socket");
+        let (_home, socket, _store) = serving_settings(Vec::new()).await;
         let seen = tokio::task::spawn_blocking(move || {
             let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
             let mut writer = stream.try_clone().unwrap();
             writer
                 .write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":1,\"client\":\"jaw\",\"version\":\"0\"}}\n")
                 .unwrap();
-            // The themes asked for 40 times, each answer about 15 KB and none read: more than the
-            // socket takes and fewer than the connection's queue, so the pushes after them fill it.
-            for id in 2..42 {
+            for id in 2..asks + 2 {
                 writer.write_all(format!("{{\"id\":{id},\"method\":\"themes\"}}\n").as_bytes()).unwrap();
             }
             let (mut fast, _) = jaw_client::Connection::open(&socket, TERMINAL, "0").unwrap();
-            for i in 0..150 {
+            for i in 0..changes {
                 let theme = ["gruvbox", "nord"][i % 2];
                 fast.call("settings.set", json!({"theme": theme})).unwrap();
             }
@@ -1364,6 +1372,32 @@ mod tests {
         });
         let seen = tokio::time::timeout(Duration::from_secs(60), seen).await.unwrap().unwrap();
         assert_eq!(seen.as_deref(), Some("kanagawa"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_says_every_domains_settings_and_each_value_this_jawd_doesnt_take() {
+        // A theme a newer jawd took, kept in jaw.db before this one starts.
+        let newer = Change::Settings {
+            domain: TERMINAL.into(),
+            values: vec![("theme".into(), "\"rose-pine-moon\"".into())],
+            at: 1,
+        };
+        let (_home, socket, _store) = serving_settings(vec![newer]).await;
+        let status = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&socket, "test", "0").unwrap();
+            connection.call("status", Value::Null).unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(status["settings"], json!({"jaw": {"messages": "bubbles", "theme": "tokyo-night"}}));
+        assert_eq!(status["settings_ignored"], json!([{"domain": "jaw", "key": "theme", "value": "rose-pine-moon"}]));
+        let said = jaw_client::describe(&serde_json::from_value::<Status>(status).unwrap());
+        assert!(
+            said.contains(
+                "settings  jaw: messages bubbles, theme tokyo-night; theme \"rose-pine-moon\" isn't one this jawd takes, so its default is used"
+            ),
+            "{said}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -61,12 +61,14 @@ use crate::engine::Ack;
 use crate::work::{Report, Samples};
 
 /// How a batch of changes went into the database.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Applied {
     /// The changes that changed something; the rest matched what was there.
     pub changed: usize,
     /// The groups of changes that failed and were kept in quarantine instead.
     pub quarantined: usize,
+    /// Why the first of those failed, as the quarantine keeps it.
+    pub error: Option<String>,
     pub transactions: usize,
     pub took: Duration,
     /// The feed's last seq once they were committed.
@@ -121,6 +123,7 @@ struct Shared {
 struct Made {
     changed: usize,
     quarantined: usize,
+    error: Option<String>,
     taken: usize,
 }
 
@@ -839,6 +842,9 @@ fn make_groups(
                 stamps.undo(mark);
                 write::quarantine(tx, &changes[group.clone()], &e)?;
                 made.quarantined += 1;
+                if made.error.is_none() {
+                    made.error = Some(format!("{e:#}"));
+                }
             }
         }
         made.taken = group.end - start;
@@ -1176,6 +1182,7 @@ impl Writer {
                             let _ = write.done.send(Ok(Applied {
                                 changed: write.made.changed,
                                 quarantined: write.made.quarantined,
+                                error: write.made.error,
                                 transactions: 1,
                                 took: write.began.elapsed(),
                                 seq: last,
@@ -1435,6 +1442,7 @@ impl Writer {
             .map(|made| Applied {
                 changed: made.changed,
                 quarantined: made.quarantined,
+                error: made.error,
                 transactions: 1,
                 took: started.elapsed(),
                 seq: self.stamps.last(),
@@ -1602,6 +1610,7 @@ impl Writer {
             })?;
             applied.changed += made.changed;
             applied.quarantined += made.quarantined;
+            applied.error = applied.error.take().or(made.error);
             applied.transactions += 1;
             let first = rest[0].start;
             rest = &rest[rest.iter().take_while(|g| g.end <= first + made.taken).count()..];
@@ -2420,6 +2429,11 @@ mod tests {
         for lane in [Lane::Live, Lane::Background] {
             let applied = store.apply(lane, batch.clone()).await.unwrap();
             assert_eq!(applied.quarantined, 1, "in the {lane:?} lane");
+            assert!(
+                applied.error.as_deref().is_some_and(|why| why.contains("a person needs at least one JID")),
+                "why, in the {lane:?} lane: {:?}",
+                applied.error
+            );
         }
         let ids: Vec<String> = query(&store, move |db| read::messages(db, chat, Around::Newest, 10))
             .await
@@ -3307,6 +3321,7 @@ mod tests {
             };
             slowest = slowest.max(started.elapsed());
             assert_eq!(applied.quarantined, usize::from(live % 2 == 0), "write {live}");
+            assert_eq!(applied.error.is_some(), live % 2 == 0, "write {live} says why only when it was quarantined");
             live += 1;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
