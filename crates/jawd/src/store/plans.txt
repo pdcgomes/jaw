@@ -460,7 +460,7 @@ SELECT n, unread, read_at, read_n, coalesce(phone_unread, 0) FROM chats WHERE id
 
 -- src/store/read.rs
 SELECT at, n FROM messages WHERE chat = ?1 AND (at, n) <= (?2, ?3) AND mine = 0 AND kind NOT IN ('system', 'call') ORDER BY at DESC, n DESC LIMIT ?4
-    SEARCH messages USING INDEX messages_by_time (chat=? AND at<?)
+    SEARCH messages USING COVERING INDEX messages_by_time (chat=? AND at<?)
 
 -- src/store/read.rs
 SELECT id, at, n FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND mine = 0 AND kind NOT IN ('system', 'call') ORDER BY at, n LIMIT 1
@@ -823,13 +823,13 @@ UPDATE chats SET read_at = ?2, read_n = ?3, read_known = ?4, phone_unread = ?5, 
 
 -- src/store/write.rs
 SELECT at, n FROM messages WHERE chat = ?1 AND (at, n) <= (?2, ?3) AND mine = 0 AND kind NOT IN ('system', 'call') ORDER BY at DESC, n DESC LIMIT ?4
-    SEARCH messages USING INDEX messages_by_time (chat=? AND at<?)
+    SEARCH messages USING COVERING INDEX messages_by_time (chat=? AND at<?)
 
 -- src/store/write.rs
 SELECT EXISTS (SELECT 1 FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND (at, n) <= (?4, ?5) AND mine = 0 AND kind NOT IN ('system', 'call'))
     SCAN CONSTANT ROW
     SCALAR SUBQUERY 1
-      SEARCH messages USING INDEX messages_by_time (chat=? AND at>? AND at<?)
+      SEARCH messages USING COVERING INDEX messages_by_time (chat=? AND at>? AND at<?)
 
 -- src/store/write.rs
 SELECT k.read_at, k.read_n, k.marked_unread FROM chat_merges m JOIN chats k ON k.n = m.keep WHERE m.gone = ?1
@@ -839,7 +839,7 @@ SELECT k.read_at, k.read_n, k.marked_unread FROM chat_merges m JOIN chats k ON k
 -- src/store/write.rs
 SELECT count(*), coalesce(sum(mentions_me), 0) FROM (SELECT mentions_me FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND mine = 0 AND kind NOT IN ('system', 'call') LIMIT ?4)
     CO-ROUTINE (subquery-1)
-      SEARCH messages USING INDEX messages_by_time (chat=? AND at>?)
+      SEARCH messages USING COVERING INDEX messages_by_time (chat=? AND at>?)
     SCAN (subquery-1)
 
 -- src/store/write.rs
@@ -858,7 +858,7 @@ UPDATE chats SET marked_unread = ?2, v = ?3 WHERE n = ?1
 
 -- src/store/write.rs
 SELECT at, n FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND mine = 0 AND kind NOT IN ('system', 'call') ORDER BY at, n LIMIT 1
-    SEARCH messages USING INDEX messages_by_time (chat=? AND at>?)
+    SEARCH messages USING COVERING INDEX messages_by_time (chat=? AND at>?)
 
 -- src/store/write.rs
 SELECT gone FROM chat_merges WHERE keep = ?1
@@ -955,7 +955,7 @@ SELECT n, kind FROM chats WHERE id = ?1
 -- src/store/write.rs
 INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread, community, ephemeral, draft, v, avatar, avatar_id) VALUES (?1, coalesce(?2, ?13), ?3, ?4, coalesce(?5, 0), coalesce(?6, 0), coalesce(?7, 0), coalesce(?8, 0), nullif(?9, ''), coalesce(?10, 0), nullif(?11, ''), ?12, nullif(?14, ''), nullif(?15, '')) ON CONFLICT (id) DO UPDATE SET kind = coalesce(?2, kind), person = coalesce(?3, person), name = coalesce(?4, name), pinned = coalesce(?5, pinned), archived = coalesce(?6, archived), muted_until = coalesce(?7, muted_until), marked_unread = coalesce(?8, marked_unread), community = iif(?9 IS NULL, community, nullif(?9, '')), ephemeral = coalesce(?10, ephemeral), draft = iif(?11 IS NULL, draft, nullif(?11, '')), v = ?12, avatar = iif(?14 IS NULL, avatar, nullif(?14, '')), avatar_id = iif(?15 IS NULL, avatar_id, nullif(?15, '')) WHERE coalesce(?2, kind) IS NOT kind OR coalesce(?3, person) IS NOT person OR coalesce(?4, name) IS NOT name OR coalesce(?5, pinned) IS NOT pinned OR coalesce(?6, archived) IS NOT archived OR coalesce(?7, muted_until) IS NOT muted_until OR coalesce(?8, marked_unread) IS NOT marked_unread OR iif(?9 IS NULL, community, nullif(?9, '')) IS NOT community OR coalesce(?10, ephemeral) IS NOT ephemeral OR iif(?11 IS NULL, draft, nullif(?11, '')) IS NOT draft OR iif(?14 IS NULL, avatar, nullif(?14, '')) IS NOT avatar OR iif(?15 IS NULL, avatar_id, nullif(?15, '')) IS NOT avatar_id RETURNING n
     SEARCH regroup USING PRIMARY KEY (chat=?)
-    SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
+    SEARCH messages USING COVERING INDEX messages_by_id (chat=?)
     SEARCH chat_merges USING COVERING INDEX chat_merges_by_keep (keep=?)
     SEARCH chat_merges USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH tombstones USING PRIMARY KEY (chat=?)
@@ -1076,7 +1076,7 @@ DELETE FROM chat_merges WHERE gone = ?1
 DELETE FROM chats WHERE n = ?1
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH regroup USING PRIMARY KEY (chat=?)
-    SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
+    SEARCH messages USING COVERING INDEX messages_by_id (chat=?)
     SEARCH chat_merges USING COVERING INDEX chat_merges_by_keep (keep=?)
     SEARCH chat_merges USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH tombstones USING PRIMARY KEY (chat=?)
