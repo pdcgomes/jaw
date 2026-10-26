@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::art;
-use crate::data::{Chat, Hit, Kind, Media, OtherJawd, Sender, Span, SpanKind};
+use crate::data::{Chat, Hit, Kind, LibraryKind, Media, OtherJawd, Sender, Span, SpanKind};
 use crate::demo::{Clock, Demo, State};
 use crate::graphics::{Images, Protocol};
 use crate::run::{self, Event};
@@ -2565,6 +2565,56 @@ fn what_arrives_while_the_library_is_open_comes_into_it() {
     let rows = library_rows(&v);
     assert_eq!((rows.len(), rows[0].id.as_str()), (before + 1, "new-photo"), "newest first");
     drop(rx);
+}
+
+#[test]
+fn a_count_jawd_stopped_at_says_at_least_that_many_and_only_then() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l><tab>");
+    let counts = |photos: u32| {
+        Some(LibraryKind::ALL.iter().map(|k| (*k, if *k == LibraryKind::Photo { photos } else { 0 })).collect())
+    };
+    let answer = |v: &mut View, photos: u32| {
+        let asked = v.library.as_ref().unwrap().asked;
+        let rows = library_rows(v);
+        let window = crate::data::LibraryWindow {
+            upsert: rows,
+            whole: true,
+            total: Some(photos),
+            counts: counts(photos),
+            ..Default::default()
+        };
+        v.apply(Update::Library { asked, window });
+    };
+    answer(&mut v, 1_000);
+    assert!(frame(&mut v).contains("photos 1,000 "), "every photo counted, kept by jawd");
+    press(&mut v, &rx, "since:a ye");
+    press(&mut v, &rx, "<tab>");
+    assert!(v.library.as_ref().unwrap().chips.iter().any(|c| matches!(c, super::library::Chip::Since { .. })));
+    answer(&mut v, 1_000);
+    let screen = frame(&mut v);
+    assert!(screen.contains("photos 1,000+") && screen.contains("1,000+ of 1,000+"), "counted only so far:\n{screen}");
+    answer(&mut v, 999);
+    assert!(frame(&mut v).contains("photos 999 "), "fewer, exactly");
+}
+
+#[test]
+fn a_library_without_links_says_why_where_they_would_be() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-l><c-l>");
+    let note = "Links come once jaw keeps them; until then the library has no links.";
+    let asked = v.library.as_ref().unwrap().asked;
+    let rows: Vec<_> = library_rows(&v).into_iter().filter(|r| r.kind != LibraryKind::Link).collect();
+    let window =
+        crate::data::LibraryWindow { upsert: rows, whole: true, note: Some(note.into()), ..Default::default() };
+    v.apply(Update::Library { asked, window });
+    let screen = frame(&mut v);
+    assert!(screen.contains(&format!("links · {}", &note[..30])), "under the other shelves:\n{screen}");
+    press(&mut v, &rx, "<s-tab>");
+    let asked = v.library.as_ref().unwrap().asked;
+    let window = crate::data::LibraryWindow { whole: true, note: Some(note.into()), ..Default::default() };
+    v.apply(Update::Library { asked, window });
+    assert!(frame(&mut v).contains(note), "in place of the links");
 }
 
 #[test]

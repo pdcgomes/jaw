@@ -87,6 +87,8 @@ pub struct Library {
     pub dismissed: Option<String>,
     /// The words the latest ask searched for.
     pub words: String,
+    /// What jawd says the library can't hold yet, as its latest answer said.
+    pub note: Option<String>,
 }
 
 /// Where an item is drawn: its line from the top of the library's content, its column and size.
@@ -111,6 +113,15 @@ pub struct Laid {
 /// The day an item was shared, short, as captions say it.
 fn short(at: i64, now: i64, tz: chrono::FixedOffset) -> String {
     fmt::when(at, now, tz)
+}
+
+/// The most of a kind jawd counts when the library has a filter other than its chat; that many
+/// means at least that many.
+const COUNTED: u32 = 1_000;
+
+/// How many there are, as the strip and the headings say it: `1,000+` where jawd stopped counting.
+fn counted(n: u32, capped: bool) -> String {
+    if capped && n >= COUNTED { format!("{}+", fmt::num(n as u64)) } else { fmt::num(n as u64) }
 }
 
 /// A month separator's label: August 2026.
@@ -210,8 +221,11 @@ impl View {
     }
 
     pub(super) fn on_library(&mut self, asked: u64, window: LibraryWindow) {
-        let LibraryWindow { upsert, remove, whole, total, older, counts } = window;
+        let LibraryWindow { upsert, remove, whole, total, older, counts, note } = window;
         let Some(l) = self.library.as_mut().filter(|l| l.asked == asked) else { return };
+        if whole {
+            l.note = note;
+        }
         let paged = l.paging == Some(asked);
         if whole && !paged {
             l.rows = upsert;
@@ -257,6 +271,13 @@ impl View {
         }
     }
 
+    /// Whether jawd counts the library's items only so far: with words, a person or a time.
+    fn capped(&self) -> bool {
+        self.library
+            .as_ref()
+            .is_some_and(|l| !l.words.is_empty() || l.chips.iter().any(|chip| !matches!(chip, Chip::In { .. })))
+    }
+
     /// The items laid out at `width`: shelves of each kind when all show, or one kind under its
     /// months, photos and videos in a grid and the rest as rows.
     pub(super) fn library_layout(&self, width: u16) -> Laid {
@@ -298,6 +319,7 @@ impl View {
         };
         let count =
             |kinds: &[LibraryKind]| -> u32 { kinds.iter().map(|k| l.counts.get(k).copied().unwrap_or(0)).sum() };
+        let capped = self.capped();
         match l.kind {
             None => {
                 let shelves: [(&str, &[LibraryKind], usize); 4] = [
@@ -309,9 +331,13 @@ impl View {
                 for (label, kinds, most) in shelves {
                     let items: Vec<usize> = of(kinds).into_iter().take(most).collect();
                     if items.is_empty() {
+                        if let (true, Some(note)) = (kinds == [LibraryKind::Link], &l.note) {
+                            laid.heads.push((line, label.to_string(), note.clone()));
+                            line += 2;
+                        }
                         continue;
                     }
-                    laid.heads.push((line, label.to_string(), fmt::num(count(kinds) as u64)));
+                    laid.heads.push((line, label.to_string(), counted(count(kinds), capped)));
                     line += 1;
                     if kinds.contains(&LibraryKind::Photo) {
                         place_tiles(&mut laid, &mut line, &items);
@@ -697,11 +723,13 @@ impl View {
     /// The library into `area`: its panel, the kind strip, the search line, then the items.
     pub(super) fn draw_library(&mut self, f: &mut Frame, area: Rect) {
         let t = self.theme;
+        let capped = self.capped();
         let Some(l) = self.library.as_ref() else { return };
         let scope = l.chat.as_ref().map_or_else(|| "all chats".to_string(), |(_, n)| n.clone());
         let shared: u32 = l.counts.values().sum();
+        let more = if capped && l.counts.values().any(|&n| n >= COUNTED) { "+" } else { "" };
         let right =
-            Line::from(Span::styled(format!(" {} shared ", fmt::num(shared as u64)), Style::new().fg(t.comment)))
+            Line::from(Span::styled(format!(" {}{more} shared ", fmt::num(shared as u64)), Style::new().fg(t.comment)))
                 .right_aligned();
         let block = self
             .panel(t.focus)
@@ -729,7 +757,7 @@ impl View {
                 None => "all".to_string(),
                 Some(k) => {
                     let n = l.counts.get(&k).copied().unwrap_or(0);
-                    if n > 0 { format!("{} {}", k.plural(), fmt::num(n as u64)) } else { k.plural().to_string() }
+                    if n > 0 { format!("{} {}", k.plural(), counted(n, capped)) } else { k.plural().to_string() }
                 }
             };
             let style = if kind == l.kind {
@@ -770,7 +798,7 @@ impl View {
             }
             (None, true) => {
                 let of = l.kind.map_or(shared, |k| l.counts.get(&k).copied().unwrap_or(0));
-                format!("{} of {} ", fmt::num(l.total as u64), fmt::num(of.max(l.total) as u64))
+                format!("{} of {} ", counted(l.total, capped), counted(of.max(l.total), capped))
             }
         };
         let mut search = fit(search, w.saturating_sub(said.chars().count() + 1));
@@ -792,8 +820,11 @@ impl View {
             return;
         }
         if l.answered && l.rows.is_empty() {
-            let said =
-                if text.is_empty() && l.chips.is_empty() { "Nothing shared here yet." } else { "Nothing matches." };
+            let said = match (&l.note, l.kind) {
+                (Some(note), Some(LibraryKind::Link) | None) => note.as_str(),
+                _ if text.is_empty() && l.chips.is_empty() => "Nothing shared here yet.",
+                _ => "Nothing matches.",
+            };
             buf.set_line(
                 content.x,
                 content.y,

@@ -833,6 +833,8 @@ pub struct LibraryWindow {
     pub total: Option<u32>,
     pub older: Option<bool>,
     pub counts: Option<HashMap<LibraryKind, u32>>,
+    /// What the window can't hold yet and why, in words to show: links, until jawd keeps them.
+    pub note: Option<String>,
 }
 
 /// What the library asks jawd for: a kind or all of them, the filters, and where its window is.

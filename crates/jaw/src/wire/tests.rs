@@ -196,6 +196,7 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             }
             json!({ "settings": settings })
         }
+        "library.watch" => fixture("library.watch.result")["result"].clone(),
         "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" | "history.more" => {
             json!({})
         }
@@ -800,6 +801,27 @@ fn a_jawd_from_another_build_is_told_apart_at_hello_with_its_process() {
     jawd.kept.lock().unwrap().version = Some("0.1.0".into());
     let pid = Some(std::process::id());
     assert_eq!(other(&jawd), Some(Some(OtherJawd { version: "0.1.0".into(), pid })), "another build");
+}
+
+#[test]
+fn the_library_is_jawds_window_through_the_client() {
+    let jawd = scripted();
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 34);
+    run::press_live(&mut v, &rx, "<c-l>").unwrap();
+    let screen = until(&mut v, &rx, "na praia");
+    assert!(screen.contains("╭ library · Ana Ribeiro"), "the open chat's library:\n{screen}");
+    assert!(screen.contains("photos 6") && screen.contains("videos 1"), "jawd's counts on the strip:\n{screen}");
+    let asked = jawd.asked("library.watch");
+    assert_eq!(
+        asked.first(),
+        Some(&json!({ "kind": "all", "chat": ANA, "around": "top", "before": 0, "after": 14 })),
+        "every kind's newest, in the open chat"
+    );
+    run::press_live(&mut v, &rx, "<tab>").unwrap();
+    until(&mut v, &rx, "na praia");
+    let asked = jawd.asked("library.watch");
+    assert_eq!(asked.last().map(|ask| ask["kind"].clone()), Some(json!("photo")), "Tab narrows to photos: {asked:?}");
+    assert!(jawd.asked("unwatch").iter().any(|u| u["watch"] == "w7"), "the last window let go");
 }
 
 #[test]

@@ -178,6 +178,7 @@ fn library(asked: u64, v: &Value, whole: bool) -> Update {
         total: v["total"].as_u64().map(|n| n as u32),
         older: v["older"].as_bool(),
         counts: serde_json::from_value(v["counts"].clone()).ok(),
+        note: v["note"].as_str().map(String::from),
     };
     Update::Library { asked, window }
 }
