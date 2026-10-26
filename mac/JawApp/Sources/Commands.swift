@@ -166,7 +166,10 @@ extension AppModel {
                     group: 1, enabled: { book()?.isEdited ?? false }) { [weak self] in self?.revertLayout() })
         add(Command("layout.save.as", "Save Layout As…", phrase: "Save these panes as a layout", detail: "with a name, to come back to",
                     symbol: "rectangle.3.group", key: Shortcut("s", [.command, .option, .shift]), place: .layouts, group: 1,
-                    enabled: { [weak self] in self?.grid != nil }) { [weak self] in self?.window?.askLayoutName() })
+                    enabled: { [weak self] in self?.grid != nil }) { [weak self] in self?.window?.showLayoutEditor(.saveAs) })
+        add(Command("layout.edit", "Edit Layout…", phrase: "Edit this layout", detail: "its panes on a grid", symbol: "square.grid.3x2",
+                    key: Shortcut("e", [.command, .option]), place: .layouts, group: 1, enabled: { [weak self] in self?.grid != nil })
+            { [weak self] in self?.window?.showLayoutEditor(.edit) })
         add(Command("layout.rename", "Rename Layout…", phrase: "Rename this layout", detail: "", place: .layouts, group: 2,
                     enabled: { book()?.current != nil }) { [weak self] in self?.window?.askLayoutRename() })
         add(Command("layout.delete", "Delete Layout…", phrase: "Delete this layout", detail: "its panes stay on screen", place: .layouts,

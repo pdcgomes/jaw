@@ -499,6 +499,34 @@ final class AppModel {
         }
     }
 
+    /// What the editor gave back: the layout on screen reshaped and saved, or saved as a new one.
+    func applyEditor(_ mode: LayoutEditorModel.Mode, name: String, grid new: PaneGrid) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            book.focus = focusedSlot
+            book.update(new)
+            switch mode {
+            case .saveAs:
+                try book.saveAs(name)
+            case .edit:
+                if let old = book.current {
+                    book.save()
+                    if !name.isEmpty { try book.rename(old, to: name) }
+                } else if !name.isEmpty {
+                    try book.saveAs(name)
+                }
+            }
+        } catch {
+            say(error.said, warn: true)
+        }
+        reconcile(focus: focusedSlot)
+    }
+
+    /// A chat's name for the editor's panes.
+    func chatName(_ id: String) -> String {
+        window?.chatList.row(id)?.name ?? panes[id]?.chat.name ?? id
+    }
+
     func renameLayout(_ old: String, to new: String) {
         do {
             try book.rename(old, to: new)

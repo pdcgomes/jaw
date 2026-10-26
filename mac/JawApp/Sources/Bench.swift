@@ -73,7 +73,7 @@ enum Bench {
         guard let key = keys.first else { return then() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             NSApp.activate()
-            model.window?.window?.makeKeyAndOrderFront(nil)
+            if model.window?.editorSheet == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key.hasPrefix("size:")
             if key.hasPrefix("save:") { model.saveLayoutAs(String(key.dropFirst(5))) }
             if key == "revert" { model.revertLayout() }
@@ -100,7 +100,7 @@ enum Bench {
             if arrows[char] != nil { mods.insert([.numericPad, .function]) }
             let typed = arrows[char].map { String(UnicodeScalar($0)!) } ?? (char == "return" ? "\r" : mods.contains(.shift) ? char.uppercased() : char)
             if !step, let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
-                                            windowNumber: model.window?.window?.windowNumber ?? 0, context: nil,
+                                            windowNumber: (NSApp.keyWindow ?? model.window?.window)?.windowNumber ?? 0, context: nil,
                                             characters: typed, charactersIgnoringModifiers: typed, isARepeat: false, keyCode: codes[char] ?? 0)
             {
                 NSApp.sendEvent(event)
@@ -115,7 +115,7 @@ enum Bench {
     }
 
     static func draw(to path: String, model: AppModel) {
-        guard let view = model.window?.window?.contentView else { return finish(["error": 2]) }
+        guard let view = model.window?.editorSheet?.contentView ?? model.window?.window?.contentView else { return finish(["error": 2]) }
         let rect = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }
         view.cacheDisplay(in: rect, to: rep)
@@ -162,7 +162,15 @@ enum Bench {
         let line = result.sorted { $0.key < $1.key }.map { "\"\($0.key)\":\($0.value)" }.joined(separator: ",")
         print("{\(line)}")
         fflush(stdout)
+        for w in NSApp.windows {
+            if let sheet = w.attachedSheet { w.endSheet(sheet) }
+        }
         NSApp.terminate(nil)
+        // A sheet or an alert can hold termination back; the demo jawd is stopped either way.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            AppDelegate.shared?.model.stop()
+            exit(0)
+        }
     }
 
     /// What the process costs the system, as jaw-client's `usage` reads it.

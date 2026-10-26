@@ -312,6 +312,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     static let splitAcross = NSToolbarItem.Identifier("split")
     static let layout = NSToolbarItem.Identifier("layout")
     var layoutItem: NSMenuToolbarItem?
+    var editorSheet: NSWindow?
 
     func toolbarDefaultItemIdentifiers(_: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.layout, Self.find, Self.splitAcross, Self.newChat]
@@ -402,9 +403,23 @@ extension MainWindowController {
         }
     }
 
-    func askLayoutName() {
-        askName("Save these panes as a layout", "It keeps their shape and their chats; ⌃⌘ and its number come back to it.",
-                button: "Save") { [weak model] name in model?.saveLayoutAs(name) }
+    /// The layout editor, in a sheet over the window.
+    func showLayoutEditor(_ mode: LayoutEditorModel.Mode) {
+        guard let window, editorSheet == nil else { return }
+        let editor = LayoutEditorModel(mode: mode, grid: model.grid, name: model.book.current, taken: model.book.names)
+        { [weak model] id in model?.chatName(id) ?? id }
+        let end: @MainActor () -> Void = { [weak self] in
+            guard let self, let sheet = editorSheet else { return }
+            window.endSheet(sheet)
+            editorSheet = nil
+        }
+        let view = LayoutEditorView(model: editor, roles: model.roles, save: { [weak model] name, grid in
+            end()
+            model?.applyEditor(mode, name: name, grid: grid)
+        }, cancel: end)
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
+        editorSheet = sheet
+        window.beginSheet(sheet)
     }
 
     func askLayoutRename() {
