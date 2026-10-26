@@ -12,9 +12,9 @@ whatsmeow acks them today and in groups. jaw is attached through `jaw bench --so
 opens, start, memory and wake-ups. Then the engine's round trip (`jawd bench link`, on the demo and
 the Go engines, the Go engine unlinked so nothing reaches WhatsApp), the windows' fan-out
 (`jawd bench feed`), the store alone (`jawd bench store`), jaw's own flood with pictures
-(`jaw bench`) and a 12-megapixel photo (`media-bench`); --quick leaves out the last three, and
---small runs everything on 50,000 messages and short floods, to check the harness itself, not the
-budgets.
+(`jaw bench`), a 12-megapixel photo (`media-bench`) and a 12-megapixel photo's arrival to its 256
+pixel preview (`jawd bench media`); --quick leaves out the last four, and --small runs everything
+on 50,000 messages and short floods, to check the harness itself, not the budgets.
 
 Each row says the load average while it ran. Everything runs with JAW_HOME and TMPDIR in one
 temporary folder, removed afterwards, so nothing touches jaw's own folder; only the processes it
@@ -54,6 +54,8 @@ TRIPS = 1_000
 IN_FLIGHT = 256
 # The WAL's bound, in MiB.
 WAL_LIMIT = 64
+# The 12-megapixel photos `jawd bench media` hands over, one at a time.
+PHOTOS_IN = 3 if SMALL else 10
 
 
 def load() -> float:
@@ -349,6 +351,16 @@ def main() -> int:
             raise RuntimeError("media-bench timed no photo")
         return {"photos": [(name, size, int(t)) for name, size, t in rows]}
 
+    def photo_in():
+        text = run([str(JAWD), "bench", "media", "--count", str(PHOTOS_IN)], raw, "photo-in", env, 600)
+        row = r"\s+p50 (\d+) ms, max (\d+) ms, min (\d+) ms"
+        return {
+            "photo": numbers(r"a (\d+)x(\d+) photo \(([\d.]+) MB\)", text),
+            "thumbnail": numbers(r"its thumbnail" + row, text),
+            "file": numbers(r"its file, downloaded" + row, text),
+            "small": numbers(r"its 256 px preview" + row, text),
+        }
+
     started = time.monotonic()
     load_before = os.getloadavg()
     try:
@@ -364,6 +376,7 @@ def main() -> int:
             step("store", store)
             step("jaw alone", jaw_alone)
             step("photo", photo)
+            step("photo in", photo_in)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     load_after = os.getloadavg()
@@ -544,6 +557,15 @@ def render(r: dict, steps: dict) -> str:
         for n, (name, size, took) in enumerate(r["photo"]["photos"]):
             budget, target = ("A 12-megapixel photo ready to upload", "300 ms") if n == 0 else ("", "")
             row(budget, target, f"{took} ms", f"{name}, {size}, to SD and HD as planned, `media-bench`", "photo", took <= 300)
+    if "photo in" in r:
+        got = r["photo in"]
+        width, height, size = got["photo"]
+        small, thumbnail, file = got["small"], got["thumbnail"], got["file"]
+        budget = "" if "photo" in r else "A 12-megapixel photo ready to upload"
+        row(budget, "arriving, to its 256 px preview", f"{small[0]:.0f} ms p50, {small[1]:.0f} ms at worst ({PHOTOS_IN} photos)",
+            f"`jawd bench media`: a {width:.0f}x{height:.0f} photo ({size} MB) handed over by the demo engine, to the push whose row has its "
+            f"256 px preview, through the inbox's synced commit, the download into the cache and jaw-media; its thumbnail came at "
+            f"{thumbnail[0]:.0f} ms p50 and its file at {file[0]:.0f} ms", "photo in", small[0] <= 300)
 
     if idle:
         row("Idle", "no drawing, no wake-ups, no polling", f"jawd {idle['wakeups_per_minute']:.1f} wake-ups a minute, {idle['pushes']} pushes",

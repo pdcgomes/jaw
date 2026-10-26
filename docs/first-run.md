@@ -73,5 +73,8 @@ These need your phone and the spare number; nothing here is automated.
 2. **Receipts for a LID-addressed message at the kept chat's JID** (the sending audit's H15): after a person's number chat and LID chat merge, read a message that came under the LID and check the sender sees it read.
 3. **Pictures in Ghostty and iTerm2:** `target/debug/jaw demo`, Ana's lake photo, then Família Gomes; scroll with Page Up and Page Down and look for pieces left behind.
 4. **SD and HD limits:** send a photo and a video from the phone in SD and HD, and compare with `crates/jaw-media/src/limits.rs`, whose numbers are estimates.
+5. **Media arriving:** from the phone, send the spare number a photo, a sticker, a GIF, a voice note, a video over 16 MB and a document. The first four should download by themselves and show their previews; the video and the document should wait until asked for (`media.fetch`). `jaw status` shows the cache and the lanes.
+6. **An HD photo:** send a photo in HD. Its HD copy should attach to the photo's message (the row's `media.hd`), with no second photo in the chat. jawd recognises it by the association naming the SD message, as the protobuf describes it; this hasn't been seen on a real account yet.
+7. **Media gone from the server:** ask for a photo old enough that WhatsApp has dropped it (a few weeks). jawd asks the phone to upload it again, and it should arrive. Then, with the phone switched off, ask for another one: after two minutes its row should say the phone didn't answer, and asking again should work once the phone is back on.
 
 If anything looks wrong, stop jawd (Ctrl-C, or `kill <its pid>`, never by name), keep `jaw.db.before-v…`, and the canvas's log says what each step did.
