@@ -22,9 +22,12 @@ use crate::find::{Cancel, Cancelled};
 use crate::state::State;
 use crate::sync::Refused;
 
-/// Lines waiting for an interface to read them. A reply waits for room; window updates wait in
-/// their windows instead, so a slow interface never holds anything else up.
+/// Lines waiting for an interface to read them. Window updates wait in their windows instead, so a
+/// slow interface never holds anything else up, and a reply that finds no room waits on its own,
+/// one at most.
 const WAITING_LINES: usize = 64;
+/// Requests a connection's lane holds, waiting or being answered, before it reads no more.
+const LANE_MOST: usize = 64;
 
 /// What a connection has said, its windows, and what it's looking at.
 struct Session {
@@ -59,7 +62,14 @@ pub async fn serve(state: Arc<State>, listener: UnixListener) -> Result<()> {
     }
 }
 
-async fn one(state: &State, stream: UnixStream) -> Result<()> {
+/// One connection. Its windows, hello and focus are answered on its own task, a find on a task of
+/// its own, and every other request down the connection's lane, in the order sent, so a watch
+/// never waits on jaw.db's writer, the engine or a search. Requests go ahead of the windows'
+/// flushes. A reply that finds the queue to the interface full waits, and meanwhile no request is
+/// read, no other reply or push is sent, and the windows send nothing, so nothing goes ahead of
+/// the watch a reply may be the result of; but they still take their changes, so an interface
+/// that leaves its queue full is told to watch again, a reply waiting or not.
+async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
     let peer = match stream.peer_cred() {
         Ok(credentials) => credentials.uid(),
         // A second jawd checking whether this one answers connects and leaves at once.
@@ -82,41 +92,100 @@ async fn one(state: &State, stream: UnixStream) -> Result<()> {
     // Finds answer when they're done, so the next line, perhaps a newer find, is read meanwhile.
     let (found, mut finished) = mpsc::unbounded_channel();
     let mut finding = Finding::default();
+    let (answered, mut answers) = mpsc::unbounded_channel();
+    let lane = lane(state.clone(), answered);
+    let mut in_lane = 0;
+    let mut waiting: Option<Vec<u8>> = None;
     loop {
+        if session.greeted && pushes.is_none() && waiting.is_none() {
+            pushes = Some(state.pushes.subscribe());
+        }
+        let open = waiting.is_none();
         tokio::select! {
-            line = lines.next_line() => {
+            biased;
+            permit = out.reserve(), if !open => {
+                permit.context("the interface stopped reading")?.send(waiting.take().expect("a reply waits"));
+                if let Some(windows) = session.windows.as_mut() {
+                    windows.hold(false);
+                }
+            }
+            _ = state.stopping() => return Ok(()),
+            Some(reply) = answers.recv(), if open => {
+                in_lane -= 1;
+                send(&out, &reply, &mut waiting, &mut session)?;
+            }
+            Some(reply) = finished.recv(), if open => send(&out, &reply, &mut waiting, &mut session)?,
+            line = lines.next_line(), if open && in_lane < LANE_MOST => {
                 let Some(line) = line? else { return Ok(()) };
                 if line.trim().is_empty() {
                     continue;
                 }
-                if session.greeted
-                    && let Ok(request) = serde_json::from_str::<Request>(&line)
-                    && request.method == "find"
-                {
-                    finding.start(state, request, found.clone());
-                    continue;
-                }
-                let reply = answer(state, &line, &mut session).await;
-                out.send(encode(&reply)).await.context("the interface stopped reading")?;
-                if session.greeted && pushes.is_none() {
-                    pushes = Some(state.pushes.subscribe());
+                match take(state, &line, &mut session).await {
+                    Taken::Answer(reply) => send(&out, &reply, &mut waiting, &mut session)?,
+                    Taken::Find(request) => finding.start(state, request, found.clone()),
+                    Taken::Lane(request) => {
+                        in_lane += 1;
+                        lane.send(request).context("the connection's lane stopped")?;
+                    }
                 }
             }
-            Some(reply) = finished.recv() => out.send(encode(&reply)).await.context("the interface stopped reading")?,
-            push = next(&mut pushes) => match push {
-                // A connection too slow for its pushes misses them; the next says how things are.
-                Ok(push) => drop(out.try_send(encode(&push))),
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => pushes = None,
-            },
             ready = windows(&mut session.windows) => {
                 if let Some(windows) = session.windows.as_mut() {
                     windows.handle(ready).await;
                 }
             }
-            _ = state.stopping() => return Ok(()),
+            push = next(&mut pushes), if open => match push {
+                // A connection too slow for its pushes misses them; the next says how things are.
+                Ok(push) => drop(out.try_send(encode(&push))),
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => pushes = None,
+            },
         }
     }
+}
+
+/// Puts `reply` in the queue to the interface, or, with no room there, keeps it waiting and holds
+/// the windows.
+fn send(
+    out: &mpsc::Sender<Vec<u8>>,
+    reply: &Reply,
+    waiting: &mut Option<Vec<u8>>,
+    session: &mut Session,
+) -> Result<()> {
+    match out.try_send(encode(reply)) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(line)) => {
+            *waiting = Some(line);
+            if let Some(windows) = session.windows.as_mut() {
+                windows.hold(true);
+            }
+            Ok(())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => bail!("the interface stopped reading"),
+    }
+}
+
+/// A connection's lane: answers the requests sent down it one at a time, in order, each reply to
+/// `answered`, until the connection or jawd stops; the request being answered then is answered
+/// all the same.
+fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::UnboundedSender<Request> {
+    let (lane, mut requests) = mpsc::unbounded_channel::<Request>();
+    tokio::spawn(async move {
+        loop {
+            let request = tokio::select! {
+                request = requests.recv() => request,
+                _ = state.stopping() => return,
+            };
+            let Some(request) = request else { return };
+            if answered.is_closed() {
+                return;
+            }
+            if answered.send(answer(&state, request).await).is_err() {
+                return;
+            }
+        }
+    });
+    lane
 }
 
 /// A connection's find in progress: the next find cancels it, and so does the connection ending.
@@ -196,26 +265,37 @@ fn encode(line: &impl serde::Serialize) -> Vec<u8> {
     out
 }
 
-/// The reply to one line from an interface.
-async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
+/// What a connection does with a request.
+enum Taken {
+    /// Answered on the connection's own task.
+    Answer(Reply),
+    /// A find, answered on a task of its own.
+    Find(Request),
+    /// Answered down the connection's lane, after the requests sent there before it.
+    Lane(Request),
+}
+
+/// Takes one line from an interface: its windows, hello and focus are answered here, a find on a
+/// task of its own, and the rest down the lane.
+async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
     let value: Value = match serde_json::from_str(line) {
         Ok(value) => value,
-        Err(_) => return failed(0, Error::new(code::PARSE, "that line isn't JSON")),
+        Err(_) => return Taken::Answer(failed(0, Error::new(code::PARSE, "that line isn't JSON"))),
     };
     let request: Request = match serde_json::from_value(value) {
         Ok(request) => request,
         Err(_) => {
-            return failed(
-                0,
-                Error::new(code::INVALID_REQUEST, "that's JSON, but not a request: it needs an id and a method"),
-            );
+            let error =
+                Error::new(code::INVALID_REQUEST, "that's JSON, but not a request: it needs an id and a method");
+            return Taken::Answer(failed(0, error));
         }
     };
     let id = request.id;
     if !session.greeted && request.method != "hello" {
-        return failed(id, Error::new(code::VERSION, "say hello first, with the protocol version you speak"));
+        let error = Error::new(code::VERSION, "say hello first, with the protocol version you speak");
+        return Taken::Answer(failed(id, error));
     }
-    match request.method.as_str() {
+    let reply = match request.method.as_str() {
         "hello" => match serde_json::from_value::<Hello>(request.params) {
             Ok(hello) if hello.protocol == PROTOCOL => {
                 session.greeted = true;
@@ -239,21 +319,6 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
             }
             Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("hello's params: {e}"))),
         },
-        "status" => {
-            let mut status = state.status();
-            status.engine.answer_us = state.ping().await;
-            succeeded(id, &status)
-        }
-        "link.start" => {
-            let params = if request.params.is_null() { serde_json::json!({}) } else { request.params };
-            match serde_json::from_value::<LinkStart>(params) {
-                Ok(start) => {
-                    let phone = start.phone.unwrap_or_default();
-                    engine(state, id, pb::command::Kind::LinkStart(pb::LinkStart { phone })).await
-                }
-                Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("link.start's params: {e}"))),
-            }
-        }
         "focus" => match serde_json::from_value::<Focus>(request.params) {
             Ok(Focus { focused }) => {
                 session.viewer.focus(focused);
@@ -261,24 +326,16 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
             }
             Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("focus's params: {e}"))),
         },
-        "chat.opened" => match (serde_json::from_value::<ChatOpened>(request.params), state.finder.get()) {
-            (Err(e), _) => failed(id, Error::new(code::INVALID_PARAMS, format!("chat.opened's params: {e}"))),
-            (Ok(opened), finder) => {
-                session.viewer.opened(opened.chat.clone());
-                match finder {
-                    None => failed(id, Error::new(code::INTERNAL, "jawd has no store open to keep that in")),
-                    Some(finder) => match finder.opened(opened.chat).await {
-                        Ok(()) => succeeded(id, &serde_json::json!({})),
-                        Err(e) => failed(
-                            id,
-                            Error::new(code::INTERNAL, format!("jawd couldn't keep that the chat was opened: {e:#}")),
-                        ),
-                    },
-                }
+        // What the interface looks at changes at once; the open counted for frecency is kept
+        // down the lane.
+        "chat.opened" => match serde_json::from_value::<ChatOpened>(request.params.clone()) {
+            Ok(opened) => {
+                session.viewer.opened(opened.chat);
+                return Taken::Lane(request);
             }
+            Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("chat.opened's params: {e}"))),
         },
-        "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
-        "link.logout" => logout(state, id).await,
+        "find" => return Taken::Find(request),
         "chats.watch" | "messages.watch" | "watch.move" | "unwatch" => match session.windows.as_mut() {
             Some(windows) => {
                 let chat = match request.method.as_str() {
@@ -304,6 +361,43 @@ async fn answer(state: &State, line: &str, session: &mut Session) -> Reply {
             }
             None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so there's nothing to watch")),
         },
+        _ => return Taken::Lane(request),
+    };
+    Taken::Answer(reply)
+}
+
+/// The answer to a request down the lane: whatever waits on jaw.db's writer or the engine.
+async fn answer(state: &State, request: Request) -> Reply {
+    let id = request.id;
+    match request.method.as_str() {
+        "status" => {
+            let mut status = state.status();
+            status.engine.answer_us = state.ping().await;
+            succeeded(id, &status)
+        }
+        "link.start" => {
+            let params = if request.params.is_null() { serde_json::json!({}) } else { request.params };
+            match serde_json::from_value::<LinkStart>(params) {
+                Ok(start) => {
+                    let phone = start.phone.unwrap_or_default();
+                    engine(state, id, pb::command::Kind::LinkStart(pb::LinkStart { phone })).await
+                }
+                Err(e) => failed(id, Error::new(code::INVALID_PARAMS, format!("link.start's params: {e}"))),
+            }
+        }
+        "chat.opened" => match (serde_json::from_value::<ChatOpened>(request.params), state.finder.get()) {
+            (Err(e), _) => failed(id, Error::new(code::INVALID_PARAMS, format!("chat.opened's params: {e}"))),
+            (Ok(_), None) => failed(id, Error::new(code::INTERNAL, "jawd has no store open to keep that in")),
+            (Ok(opened), Some(finder)) => match finder.opened(opened.chat).await {
+                Ok(()) => succeeded(id, &serde_json::json!({})),
+                Err(e) => failed(
+                    id,
+                    Error::new(code::INTERNAL, format!("jawd couldn't keep that the chat was opened: {e:#}")),
+                ),
+            },
+        },
+        "link.cancel" => engine(state, id, pb::command::Kind::LinkCancel(pb::LinkCancel {})).await,
+        "link.logout" => logout(state, id).await,
         "history.more" => history_more(state, id, request.params).await,
         method if crate::send::Sending::METHODS.contains(&method) => match state.sending() {
             Some(sending) => match sending.call(&request.method, request.params).await {

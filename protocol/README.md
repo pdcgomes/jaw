@@ -12,7 +12,7 @@ The engine link, between jawd and jaw-engine, is a different protocol: `proto/en
   - a **request** has an `id` (an integer the client picks), a `method` and `params`;
   - a **reply** has the request's `id` and either a `result` or an `error`;
   - a **push**, from jawd, has a `method` and `params`, and no `id`.
-- Requests can be sent without waiting for replies; replies come in any order. A client never blocks on one: whatever it asked for arrives as data.
+- Requests can be sent without waiting for replies; replies come in any order. A client never blocks on one: whatever it asked for arrives as data. jawd answers a connection's watches, `hello` and `focus` without waiting for its other requests, which it carries out in the order they were sent, so a chat opens at once even while a message sent just before it waits for the disk.
 
 ```json
 {"id":7,"method":"send.text","params":{"chat":"351912345678@s.whatsapp.net","text":"on my way"}}
@@ -33,7 +33,7 @@ The engine link, between jawd and jaw-engine, is a different protocol: `proto/en
 | 2 | The engine isn't available right now; `data.retry_ms` says when to try again |
 | 3 | Not found: the chat, message, folder or person doesn't exist |
 | 4 | Not allowed, and why: editing a message older than WhatsApp allows, deleting someone else's message for everyone, voting twice on a single-choice poll |
-| 5 | A limit, and which: presence subscriptions, a file too large to send |
+| 5 | A limit, and which: presence subscriptions, a file too large to send, the outbox, a forward's chats or a connection's windows, the last three with `data.limit` saying so |
 | 6 | Protocol versions don't match |
 | 7 | Cancelled: a newer request replaced this one, as each `find` replaces the last |
 

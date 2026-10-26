@@ -76,6 +76,8 @@ pub struct Client {
     next: u64,
     /// Since when a flush has waited for room in the queue.
     blocked: Option<Instant>,
+    /// Whether a reply is waiting for room ahead of anything its windows would send.
+    held: bool,
     /// Watches dropped for falling behind, owed a `resync`.
     resync: Vec<String>,
 }
@@ -718,6 +720,7 @@ impl Client {
             windows: BTreeMap::new(),
             next: 1,
             blocked: None,
+            held: false,
             resync: Vec::new(),
         }
     }
@@ -725,6 +728,14 @@ impl Client {
     /// Takes hello's `since`, the default for the watches this connection sends again.
     pub fn hello(&mut self, since: Option<u64>) {
         self.since = since;
+    }
+
+    /// Sends nothing while `held`, as while a reply waits for room in the queue: a push could then
+    /// go ahead of the reply it depends on, a watch's result. Its windows still take their changes,
+    /// and one due while held counts as blocked, so once its interface has left the queue full for
+    /// `Timing::behind` it's told to watch again as when it holds no reply.
+    pub fn hold(&mut self, held: bool) {
+        self.held = held;
     }
 
     /// Answers `chats.watch`, `messages.watch`, `watch.move` or `unwatch`.
@@ -934,7 +945,8 @@ impl Client {
             return Ready::Flush;
         }
         let behind_at = self.blocked.filter(|_| !self.windows.is_empty()).map(|since| since + self.timing.behind);
-        let out = self.blocked.map(|_| self.out.clone());
+        // Room in the queue goes first to the reply a held client waits behind.
+        let out = self.blocked.filter(|_| !self.held).map(|_| self.out.clone());
         tokio::select! {
             biased;
             _ = until(flush_at) => Ready::Flush,
@@ -986,8 +998,14 @@ impl Client {
             .min()
     }
 
-    /// Sends what each due window's interface lacks, until the queue is full.
+    /// Sends what the first due window's interface lacks, conversations first, unless the queue
+    /// is full or held. One window a flush: those still due come at once, but after any request
+    /// the interface has sent meanwhile, so a request waits for one window's read at most.
     async fn flush(&mut self) {
+        if self.held {
+            self.blocked.get_or_insert_with(Instant::now);
+            return;
+        }
         while let Some(watch) = self.resync.first() {
             if self.out.try_send(line("resync", Watch { watch: watch.clone() })).is_err() {
                 self.blocked.get_or_insert_with(Instant::now);
@@ -1010,70 +1028,72 @@ impl Client {
             .collect();
         // Conversations first: a lone message shows there, and the chat list can wait a read.
         due.sort_by_key(|(chats, _)| *chats);
-        for (_, watch) in due {
-            if self.out.capacity() == 0 {
-                self.blocked.get_or_insert_with(Instant::now);
-                return;
-            }
-            let Some(window) = self.windows.get(&watch) else { continue };
-            // A chat list held while catching up reads its chats where they are and keeps their order.
-            let only = (!window.may_reorder(now, holding, &self.timing))
-                .then(|| window.state.held.values().map(|held| held.n).collect());
-            let reordered = only.is_none().then_some(now);
-            let read = match only {
-                None => self.shared(&window.slot.clone(), window.owed(self.heard)).await,
-                Some(only) => {
-                    self.shared.reads.fetch_add(1, Ordering::Relaxed);
-                    let read = self.snapshot(window.spec.clone(), Some(only)).await;
-                    read.map(|(mut snapshot, spec, from)| {
-                        // A chat list held while catching up keeps the order its interface has.
-                        if let (Some(window), Rows::Chats(rows)) = (self.windows.get(&watch), &mut snapshot.rows) {
-                            for (_, row) in rows.iter_mut() {
-                                if let Some(held) = window.state.held.get(&row.id) {
-                                    row.sort.clone_from(&held.sort);
-                                }
-                            }
-                        }
-                        Arc::new(found(snapshot, spec, from))
-                    })
-                }
-            };
-            let Some(window) = self.windows.get_mut(&watch) else { continue };
-            window.read = Some(Instant::now());
-            let found = match read {
-                Ok(found) => found,
-                // The window stays marked, so it's read again a `burst` later.
-                Err(e) => {
-                    let failing = *window.failing.get_or_insert_with(|| {
-                        eprintln!("jawd: can't bring {watch} up to date, and will keep trying: {}", e.message);
-                        now
-                    });
-                    if failing.elapsed() >= self.timing.behind {
-                        eprintln!("jawd: {watch} still can't be read, so its interface is told to watch it again");
-                        self.windows.remove(&watch);
-                        self.resync.push(watch);
-                    }
-                    continue;
-                }
-            };
-            window.failing = None;
-            if window.spec != found.spec {
-                window.spec = found.spec.clone();
-                window.slot = self.shared.slot(&window.spec);
-            }
-            let (update, state) = settle(&window.state.held, &found, None);
-            match push(watch, update, &window.state) {
-                None => window.keep(state, reordered),
-                Some(line) => match self.out.try_send(line) {
-                    Ok(()) => window.keep(state, reordered),
-                    Err(_) => {
-                        self.blocked.get_or_insert_with(Instant::now);
-                        return;
-                    }
-                },
-            }
+        if let Some((_, watch)) = due.into_iter().next()
+            && (self.out.capacity() == 0 || !self.flush_one(watch, now, holding).await)
+        {
+            self.blocked.get_or_insert_with(Instant::now);
+            return;
         }
         self.blocked = None;
+    }
+
+    /// Reads `watch` and sends what its interface lacks; false if the queue had no room for it.
+    async fn flush_one(&mut self, watch: String, now: Instant, holding: bool) -> bool {
+        let Some(window) = self.windows.get(&watch) else { return true };
+        // A chat list held while catching up reads its chats where they are and keeps their order.
+        let only = (!window.may_reorder(now, holding, &self.timing))
+            .then(|| window.state.held.values().map(|held| held.n).collect());
+        let reordered = only.is_none().then_some(now);
+        let read = match only {
+            None => self.shared(&window.slot.clone(), window.owed(self.heard)).await,
+            Some(only) => {
+                self.shared.reads.fetch_add(1, Ordering::Relaxed);
+                let read = self.snapshot(window.spec.clone(), Some(only)).await;
+                read.map(|(mut snapshot, spec, from)| {
+                    // A chat list held while catching up keeps the order its interface has.
+                    if let (Some(window), Rows::Chats(rows)) = (self.windows.get(&watch), &mut snapshot.rows) {
+                        for (_, row) in rows.iter_mut() {
+                            if let Some(held) = window.state.held.get(&row.id) {
+                                row.sort.clone_from(&held.sort);
+                            }
+                        }
+                    }
+                    Arc::new(found(snapshot, spec, from))
+                })
+            }
+        };
+        let Some(window) = self.windows.get_mut(&watch) else { return true };
+        window.read = Some(Instant::now());
+        let found = match read {
+            Ok(found) => found,
+            // The window stays marked, so it's read again a `burst` later.
+            Err(e) => {
+                let failing = *window.failing.get_or_insert_with(|| {
+                    eprintln!("jawd: can't bring {watch} up to date, and will keep trying: {}", e.message);
+                    now
+                });
+                if failing.elapsed() >= self.timing.behind {
+                    eprintln!("jawd: {watch} still can't be read, so its interface is told to watch it again");
+                    self.windows.remove(&watch);
+                    self.resync.push(watch);
+                }
+                return true;
+            }
+        };
+        window.failing = None;
+        if window.spec != found.spec {
+            window.spec = found.spec.clone();
+            window.slot = self.shared.slot(&window.spec);
+        }
+        let (update, state) = settle(&window.state.held, &found, None);
+        match push(watch, update, &window.state) {
+            None => window.keep(state, reordered),
+            Some(line) => match self.out.try_send(line) {
+                Ok(()) => window.keep(state, reordered),
+                Err(_) => return false,
+            },
+        }
+        true
     }
 
     /// Whether it has updates or resyncs it hasn't sent.
