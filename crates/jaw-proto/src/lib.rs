@@ -10,6 +10,7 @@ pub mod layout;
 pub mod local;
 pub mod send;
 pub mod sync;
+pub mod themes;
 pub mod windows;
 
 /// The version this crate speaks. jawd serves one, and refuses a hello with another.

@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Fetches Omarchy's themes into protocol/themes/, as Omarchy wrote them.
+
+    scripts/omarchy-themes
+
+Each theme's colors.toml at the commit pinned below goes to protocol/themes/<theme>.toml, and
+Omarchy's licence to docs/licenses/omarchy.txt; Omarchy is MIT-licensed. To move to a newer
+Omarchy, change OMARCHY_COMMIT, run this again and look at what changed: a theme added or gone
+changes FILES in crates/jaw-proto/src/themes.rs and the tests that name the themes.
+"""
+
+import json
+import os
+import re
+import sys
+import urllib.request
+
+OMARCHY = "omacom/omarchy"
+OMARCHY_COMMIT = "4c1b4cb3a94447aff39af98e2fcc0490a9fb32e7"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+THEMES = os.path.join(REPO, "protocol", "themes")
+LICENCE = os.path.join(REPO, "docs", "licenses", "omarchy.txt")
+
+
+def fetch(url):
+    request = urllib.request.Request(url, headers={"User-Agent": "jaw-omarchy-themes"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read().decode()
+
+
+def raw(path):
+    return fetch(f"https://raw.githubusercontent.com/{OMARCHY}/{OMARCHY_COMMIT}/{path}")
+
+
+def main():
+    tree = json.loads(fetch(f"https://api.github.com/repos/{OMARCHY}/git/trees/{OMARCHY_COMMIT}?recursive=1"))
+    found = (re.match(r"themes/([^/]+)/colors\.toml$", item["path"]) for item in tree["tree"])
+    names = sorted({m.group(1) for m in found if m})
+    if not names:
+        sys.exit("omarchy-themes: no themes/<theme>/colors.toml at that commit")
+    os.makedirs(THEMES, exist_ok=True)
+    for stale in os.listdir(THEMES):
+        if stale.endswith(".toml") and stale[: -len(".toml")] not in names:
+            os.remove(os.path.join(THEMES, stale))
+    for name in names:
+        with open(os.path.join(THEMES, f"{name}.toml"), "w") as out:
+            out.write(raw(f"themes/{name}/colors.toml"))
+    os.makedirs(os.path.dirname(LICENCE), exist_ok=True)
+    with open(LICENCE, "w") as out:
+        out.write(raw("LICENSE"))
+    print(f"{len(names)} themes from {OMARCHY} at {OMARCHY_COMMIT[:7]}")
+
+
+if __name__ == "__main__":
+    main()
