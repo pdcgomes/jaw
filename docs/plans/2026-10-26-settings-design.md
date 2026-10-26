@@ -54,7 +54,7 @@ protocol/README.md gains a "Settings" section, served from the start, and the ro
 
 ## Storage and integrity
 
-Migration 11 is a schema step: one new table, which costs the same however big jaw.db is, so it runs at start with any other pending schema steps in one IMMEDIATE transaction.
+Migration 12 is a schema step: one new table, which costs the same however big jaw.db is, so it runs at start with any other pending schema steps in one IMMEDIATE transaction.
 
 ```sql
 -- Class: jaw's own. Each frontend's settings, in a domain named by the client its hello gives, a
@@ -160,7 +160,7 @@ CREATE TABLE settings (
   - A connection that leaves its queue full while changes come still ends on the latest settings.
   - Hello carries the settings; a jawd started again keeps them; a row with a value jawd doesn't take is kept, read as the default and named in `status`.
   - A jaw.db that can't be written publishes nothing and answers with why.
-  - Migration 11 joins the migrations' lock file, the upgrades from every fixture database, the failure injected at each statement and the plan test.
+  - Migration 12 joins the migrations' lock file, the upgrades from every fixture database, the failure injected at each statement and the plan test.
 - **jaw:**
   - Every theme holds the contrast ladder and its bands.
   - Both layouts: yours under "You" at the name column with ticks and the time, the name shown when the sender changes, and quotes, reactions and pictures lined up.
