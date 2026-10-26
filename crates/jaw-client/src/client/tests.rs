@@ -156,6 +156,33 @@ fn two_thousand_pushes_a_second_become_at_most_sixty_applies_a_second() {
     assert_eq!((ids[0], ids[99]), ("m01901", "m02000"), "the window ends as the last push left it");
 }
 
+/// The caller waits for what it asked for, so an answer wakes it at once, even just after a drain,
+/// while a push waits for its frame and comes with the next answer if that's sooner.
+#[test]
+fn an_answer_wakes_the_caller_at_once_and_a_push_waits_for_its_frame() {
+    let fake = Fake::new();
+    let client: Client = Client::start(Config { frame: Duration::from_secs(10), ..fake.config() }, || {});
+    let mut peer = fake.accept();
+    peer.greet();
+    connected(&client);
+    let window = client.watch_messages("c", Place::newest(3));
+    let watch = peer.request();
+    peer.answer(&watch, watched("w1", 3, (1..=3).map(message).collect()));
+    assert!(client.wait(Duration::from_secs(5)), "a watch's answer wakes it at once, a drain ago or not");
+    let frame = client.drain();
+    assert_eq!(frame.messages.iter().map(|(w, _)| *w).collect::<Vec<_>>(), [window]);
+    let push = json!({"watch": "w1", "seq": 4, "upsert": [message(4)], "remove": ["m00001"]});
+    peer.send(json!({"method": "messages", "params": push}));
+    assert!(!client.wait(Duration::from_millis(300)), "a push waits for its frame");
+    let id = client.request("status", Value::Null).unwrap();
+    let asked = peer.request();
+    peer.answer(&asked, json!({}));
+    assert!(client.wait(Duration::from_secs(5)), "a request's answer wakes it at once");
+    let frame = client.drain();
+    assert!(frame.events.iter().any(|e| matches!(e, Event::Reply { id: replied, .. } if *replied == id)));
+    assert_eq!(frame.messages.len(), 1, "the push comes with it");
+}
+
 #[test]
 fn only_the_latest_finds_answer_comes() {
     let fake = Fake::new();

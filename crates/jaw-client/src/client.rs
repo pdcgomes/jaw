@@ -1,7 +1,9 @@
 //! The connection an interface keeps to jawd, which never makes its caller wait. One thread
 //! writes what the caller asks and another reads what jawd sends; replies and pushes wait in an
-//! inbox the caller drains, each window's updates merged as they come, and the caller is woken at
-//! most once a frame, so a flood costs it one apply and one draw a frame.
+//! inbox the caller drains, each window's updates merged as they come. jawd's pushes wake the
+//! caller at most once a frame, so a flood costs it one apply and one draw a frame; the answer to
+//! anything it asked (hello, a window's watch or move, a request) wakes it at once, so what it
+//! waits for comes as soon as jawd sends it.
 //!
 //! When jawd goes away, or isn't there yet, the client says so, tries again from 100 ms doubling to
 //! 2 s, says hello again and watches every window again with the rows its model holds, so the
@@ -53,7 +55,7 @@ pub struct Config {
     pub version: String,
     /// Whether the interface is in front when it connects.
     pub focus: bool,
-    /// The shortest time between two wakes: an interface's frame.
+    /// The shortest time between two wakes for jawd's pushes: an interface's frame.
     pub frame: Duration,
     /// How many of the caller's requests can wait to be written before `request` refuses more.
     pub queue: usize,
@@ -415,7 +417,8 @@ fn fallback(kind: Kind, place: &Place) -> Place {
 
 impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Send + 'static> Client<C, M> {
     /// Starts connecting to jawd, in the background. `wake` is called, from one of the client's
-    /// threads, when something new waits to be drained, at most once a frame.
+    /// threads, when something new waits to be drained: at once for an answer to what the caller
+    /// asked, and at most once a frame for pushes.
     pub fn start(config: Config, wake: impl Fn() + Send + Sync + 'static) -> Client<C, M> {
         let (control, control_rx) = crossbeam_channel::unbounded();
         let (requests, requests_rx) = crossbeam_channel::bounded(config.queue);
@@ -607,13 +610,18 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         }
     }
 
-    /// Puts an event in the inbox, first waiting for room while connection `generation` lasts.
+    /// Puts an event in the inbox, first waiting for room while connection `generation` lasts. An
+    /// answer to what the caller asked wakes it at once, and a push when it's due.
     fn push_event(&self, mut state: MutexGuard<'_, State<C, M>>, generation: u64, event: Event) {
         while state.events.len() >= self.config.events && !state.closed && state.current(generation) {
             state = self.changed.wait(state).expect("the client's state");
         }
+        let frame = match &event {
+            Event::Connected(_) | Event::Reply { .. } | Event::Found { .. } | Event::Window { .. } => Duration::ZERO,
+            Event::Disconnected { .. } | Event::Connection(_) | Event::Link(_) | Event::Push(_) => self.config.frame,
+        };
         state.events.push_back(event);
-        let now = state.signal(self.config.frame, Duration::ZERO);
+        let now = state.signal(frame, Duration::ZERO);
         self.notify(state, now);
     }
 
@@ -975,17 +983,19 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         }
         state.note_read(at);
         if let Some(&window) = state.watches.get(&watch) {
-            self.merge(state, window, update, merges);
+            self.merge(state, window, update, false, merges);
         }
         true
     }
 
-    /// Merges an update into a window's inbox and wakes the caller if it's due.
+    /// Merges an update into a window's inbox and wakes the caller: at once for what it's waiting
+    /// for, a watch's or move's answer where it wants the window, and otherwise when it's due.
     fn merge<R: Row>(
         &self,
         mut state: MutexGuard<'_, State<C, M>>,
         window: WindowId,
         update: Update<R>,
+        awaited: bool,
         merges: impl FnOnce(&mut State<C, M>) -> &mut HashMap<WindowId, Merged<R>>,
     ) {
         let Some(w) = state.windows.get_mut(&window).filter(|w| !w.closing) else { return };
@@ -995,7 +1005,11 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         if let Some(w) = state.windows.get_mut(&window) {
             w.ids = ids;
         }
-        let now = state.signal(self.config.frame, SETTLE);
+        let now = if awaited {
+            state.signal(Duration::ZERO, Duration::ZERO)
+        } else {
+            state.signal(self.config.frame, SETTLE)
+        };
         self.notify(state, now);
     }
 
@@ -1114,7 +1128,7 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                 if follow {
                     self.ask(&mut state, window, false);
                 }
-                self.merge(state, window, update, merges);
+                self.merge(state, window, update, !follow, merges);
             }
             Err(failure) => {
                 if w.closing {

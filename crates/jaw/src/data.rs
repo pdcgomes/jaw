@@ -887,6 +887,20 @@ pub enum Update {
 }
 
 impl Update {
+    /// Whether the screen is waiting for this: jawd's hello, or a window's rows where it was asked
+    /// to be, as when a chat opens. The loop draws it at once, as it does a key, rather than at the
+    /// next frame.
+    pub fn awaited(&self) -> bool {
+        match self {
+            Update::Hello { .. } => true,
+            Update::Chats(window) => window.moved.is_some(),
+            Update::Messages { update, .. } => update.moved.is_some(),
+            Update::Folders { whole, .. } | Update::Roster { whole, .. } => *whole,
+            Update::Library { window, .. } => window.whole,
+            _ => false,
+        }
+    }
+
     /// Takes `next` into this update when the two apply as one, as a burst of upserts to the same
     /// window does; gives it back when they don't. jaw-client merges a frame's updates itself; this
     /// does the same for the made-up account, which sends each as it happens.

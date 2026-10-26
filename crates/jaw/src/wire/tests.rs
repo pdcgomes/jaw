@@ -227,6 +227,37 @@ fn jaw_draws_what_jawd_sends_through_the_client() {
     );
 }
 
+/// After jawd's hello, the chat list and then the open chat's messages each come a round trip
+/// after the one before, and each is drawn as it comes, through the client and the loop, rather
+/// than a frame after the last: so the first frame with a conversation is drawn sooner than two
+/// frames after the hello, which waiting a frame for each answer never was.
+#[test]
+fn the_first_frame_with_a_conversation_is_drawn_as_soon_as_jawds_answers_come() {
+    let jawd = scripted();
+    let (tx, rx) = channel();
+    let mut v = View::new(Box::new(Wire::connect(jawd.socket.clone(), tx.clone())));
+    v.clock = Some(NOW);
+    let mut greeted = false;
+    while !greeted {
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(10)), Ok(run::Event::Jawd)), "jawd's hello");
+        for u in v.drain_jawd() {
+            greeted |= matches!(u, Update::Hello { .. });
+            v.apply(u);
+        }
+    }
+    let hello = Instant::now();
+    let stop = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = tx.send(run::Event::Stop);
+    });
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let mut probe = run::Probe::default();
+    run::drive(&mut v, &rx, &mut terminal, &mut probe, &mut |_| {}).unwrap();
+    stop.join().unwrap();
+    let first = probe.first.expect("the conversation was drawn") - hello;
+    assert!(first < 2 * run::FRAME, "the first frame with a conversation came {first:?} after jawd's hello");
+}
+
 /// Waits until `enough` holds, settling the view meanwhile, for at most a few seconds.
 fn until_true(v: &mut View, rx: &Receiver<crate::run::Event>, mut enough: impl FnMut(&mut View) -> bool) -> bool {
     let end = Instant::now() + Duration::from_secs(10);

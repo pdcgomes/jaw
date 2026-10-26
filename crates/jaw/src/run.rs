@@ -1,8 +1,9 @@
 //! The loop. Input has a thread of its own (crossterm: keys, mouse, paste, focus), and jawd's
 //! updates come from another; both arrive on one channel into the main thread, which sleeps until
 //! something comes or the view's next deadline. Each turn handles every input first, applies the
-//! updates waiting for at most 8 ms, and draws once if anything changed: at once after input, and
-//! otherwise at most 60 times a second however fast updates come. Nothing changing, nothing is
+//! updates waiting for at most 8 ms, and draws once if anything changed: at once after input or
+//! after what the screen was waiting for (jawd's hello, a window's rows where it was asked to be),
+//! and otherwise at most 60 times a second however fast updates come. Nothing changing, nothing is
 //! drawn and the thread doesn't wake but for the clock's minute.
 
 use crate::data::Update;
@@ -142,8 +143,9 @@ where
         }
         view.tick();
         let due = last_frame.is_none_or(|t| t.elapsed() >= FRAME);
-        if view.dirty && (!keys.is_empty() || due) {
+        if view.dirty && (!keys.is_empty() || view.awaited || due) {
             view.dirty = false;
+            view.awaited = false;
             let sent = view.take_writes();
             if !sent.is_empty() {
                 effect(Effect::Write(sent));

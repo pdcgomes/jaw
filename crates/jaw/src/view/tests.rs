@@ -495,6 +495,30 @@ fn until_the_chat_list_comes_nothing_says_there_are_no_chats() {
     assert!(v.showing_messages() && screen.contains("Ana Ribeiro") && !screen.contains("No chats"), "{screen}");
 }
 
+/// jawd's hello and each window's rows where it was asked to be, as a chat opens, are what the
+/// screen waits for, which the loop draws as they come; the pushes after them wait for a frame.
+#[test]
+fn jawds_hello_and_a_windows_rows_where_it_was_asked_to_be_are_awaited_and_pushes_are_not() {
+    let (mut v, rx) = greeted(140, 30);
+    assert!(v.awaited, "jawd's hello");
+    let windows = came(&rx);
+    assert!(windows.iter().any(|u| matches!(u, Update::Chats(_))) && windows.iter().all(Update::awaited));
+    for u in windows {
+        v.apply(u);
+    }
+    let first = came(&rx);
+    assert!(matches!(first[..], [Update::Messages { .. }]) && first[0].awaited(), "{first:?}");
+    v.apply(first[0].clone());
+    v.on_input(Input::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT)));
+    let open = v.open.clone().unwrap();
+    let opened = came(&rx);
+    let rows = opened.iter().find(|u| matches!(u, Update::Messages { chat, .. } if *chat == open));
+    assert!(rows.is_some_and(Update::awaited), "the next chat's messages: {opened:?}");
+    let pushed = jaw_client::Update { upsert: vec![theirs("m-new", "9", NOW, "chego já")], ..Default::default() };
+    assert!(!Update::Messages { chat: open, update: pushed }.awaited());
+    assert!(!Update::Chats(jaw_client::Update::default()).awaited());
+}
+
 #[test]
 fn without_colour_the_selection_is_reversed() {
     let (mut v, _rx) = view(100, 30);

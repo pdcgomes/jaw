@@ -260,6 +260,8 @@ pub struct View {
     effects: Vec<Effect>,
     /// Something on screen changed since the last frame.
     pub dirty: bool,
+    /// What changed is something the screen was waiting for, which the loop draws at once.
+    pub awaited: bool,
     pub quit: bool,
 }
 
@@ -346,6 +348,7 @@ impl View {
             drawn_at: 0,
             effects: vec![],
             dirty: true,
+            awaited: false,
             quit: false,
         }
     }
@@ -418,6 +421,7 @@ impl View {
 
     pub fn apply(&mut self, update: Update) {
         self.dirty = true;
+        self.awaited |= update.awaited();
         match update {
             Update::Hello { root, linked, me, connection } => {
                 self.images.set_root(&root);

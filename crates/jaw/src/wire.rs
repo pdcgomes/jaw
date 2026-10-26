@@ -1,10 +1,11 @@
 //! jaw on jawd: `Jawd` over jaw-client's `Client`. The client's threads read and write the
-//! socket, merging each window's updates as they come, and wake the loop at most once a frame; the
-//! loop drains them here into the interface's `Update`s. What jawd turns down is said where the
-//! user acted, quietly: a message that wasn't sent goes back to the box, an action says why in the
-//! footer, and what goes on in the background (drafts, receipts, typing) says nothing. A message or
-//! an action whose answer a dropped connection lost is asked for again with its key once jawd is
-//! back, and so are the drafts and read positions jawd hadn't answered for.
+//! socket, merging each window's updates as they come, and wake the loop at once for the answers
+//! it asked for and at most once a frame for jawd's pushes; the loop drains them here into the
+//! interface's `Update`s. What jawd turns down is said where the user acted, quietly: a message
+//! that wasn't sent goes back to the box, an action says why in the footer, and what goes on in
+//! the background (drafts, receipts, typing) says nothing. A message or an action whose answer a
+//! dropped connection lost is asked for again with its key once jawd is back, and so are the
+//! drafts and read positions jawd hadn't answered for.
 
 use crate::data::{Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, Place, Typing, Update};
 use crate::run::Event;
