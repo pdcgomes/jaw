@@ -3,6 +3,7 @@
 //! matched here as jawd matches names, and merged in. Results are grouped by kind, best first;
 //! Tab narrows to one kind, and Enter does the obvious thing with what's selected.
 
+use super::panes::{PaneDo, Split};
 use super::{Overlay, View};
 use crate::composer::Composer;
 use crate::data::{Chat, Counts, Found, FoundKind, Hit, Mark, MarkKind};
@@ -86,9 +87,10 @@ pub enum Does {
     Sidebar,
     /// Ctrl-L's library, across all chats.
     Library,
-    /// The experimental quick look, and the focused mode.
+    /// The experimental quick look, the focused mode, and the split panes' actions.
     QuickLook,
     FocusMode,
+    Pane(PaneDo),
 }
 
 /// What the palette is for: finding, or one of a message's actions that picks something.
@@ -536,6 +538,27 @@ impl View {
                 ("Focus on this chat", "the chat list and sidebar folded away")
             };
             all.push(Action::new(name, detail, Does::FocusMode).key("ctrl-f"));
+        }
+        if self.experiments.panes {
+            all.push(
+                Action::new(
+                    "Split this pane across",
+                    "another chat beside it",
+                    Does::Pane(PaneDo::Split(Split::Across)),
+                )
+                .key("ctrl-p %"),
+            );
+            all.push(
+                Action::new("Split this pane down", "another chat below it", Does::Pane(PaneDo::Split(Split::Down)))
+                    .key("ctrl-p \""),
+            );
+            if self.split() {
+                all.push(Action::new("Next pane", "the keys to the next", Does::Pane(PaneDo::Next)).key("ctrl-p o"));
+                all.push(
+                    Action::new("Close this pane", "its chat off the screen", Does::Pane(PaneDo::Close))
+                        .key("ctrl-p x"),
+                );
+            }
         }
         if let super::Focus::Message(id) = &self.focus
             && let Some(m) = self.messages.as_ref().and_then(|w| w.get(id))
@@ -1184,6 +1207,10 @@ impl View {
             Does::FocusMode => {
                 close(self);
                 self.toggle_focus_mode();
+            }
+            Does::Pane(does) => {
+                close(self);
+                self.pane_do(does);
             }
             Does::OnMessage(id, c) => {
                 close(self);

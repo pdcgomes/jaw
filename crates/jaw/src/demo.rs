@@ -8,6 +8,7 @@ mod actions;
 mod find;
 mod folders;
 mod library;
+mod panes;
 pub mod pictures;
 mod quick_look;
 mod voice;
@@ -82,6 +83,25 @@ struct Open {
     hi: usize,
 }
 
+impl Open {
+    /// What the window shows of a message just come into its chat, the chat's `messages` with it:
+    /// the message and the oldest let go past its size while it follows the newest, or how many
+    /// come after its last while it doesn't.
+    fn took(&mut self, messages: &[Message], m: Message) -> Window<Message> {
+        let len = messages.len();
+        if !self.following {
+            return Window { newer: Some((len - self.hi) as u64), ..Window::default() };
+        }
+        self.hi = len;
+        let mut remove = vec![];
+        if self.hi - self.lo > self.before {
+            remove.push(messages[self.lo].id.clone());
+            self.lo += 1;
+        }
+        Window { upsert: vec![m], remove, older: Some(self.lo > 0), ..Window::default() }
+    }
+}
+
 enum Later {
     Tick {
         chat: String,
@@ -125,6 +145,8 @@ pub struct Account {
     library: Option<(crate::data::LibraryAsk, std::collections::HashMap<crate::data::LibraryKind, u32>)>,
     /// The quick look's windows: each chat, and how many of its newest messages it holds.
     quick_look: Vec<(String, usize)>,
+    /// The windows of the panes that don't have the keys.
+    parked: Vec<Open>,
 }
 
 struct Shared {
@@ -189,6 +211,7 @@ impl Demo {
             folders: folders::Folders::made_up(now),
             library: None,
             quick_look: vec![],
+            parked: vec![],
         };
         let demo = Demo {
             shared: Arc::new(Shared {
@@ -552,24 +575,16 @@ impl Account {
         thread.messages.push(m.clone());
         let name = thread.chat.name.clone();
         self.library_arrived(&name, &m);
-        let thread = &mut self.threads[t];
-        let len = thread.messages.len();
-        let chat = thread.chat.id.clone();
+        let chat = self.threads[t].chat.id.clone();
         self.push_chat(t);
         self.quick_look_arrived(t);
-        let Some(open) = self.open.as_mut().filter(|o| o.chat == chat) else { return };
-        if open.following {
-            open.hi = len;
-            let mut remove = vec![];
-            if open.hi - open.lo > open.before {
-                remove.push(self.threads[t].messages[open.lo].id.clone());
-                open.lo += 1;
-            }
-            let update = Window { upsert: vec![m], remove, older: Some(open.lo > 0), ..Window::default() };
-            self.send(Update::Messages { chat, update });
-        } else {
-            let newer = (len - open.hi) as u64;
-            self.send(Update::Messages { chat, update: Window { newer: Some(newer), ..Window::default() } });
+        let messages = &self.threads[t].messages;
+        let updates: Vec<Window<Message>> = (self.open.iter_mut().chain(self.parked.iter_mut()))
+            .filter(|o| o.chat == chat)
+            .map(|o| o.took(messages, m.clone()))
+            .collect();
+        for update in updates {
+            self.send(Update::Messages { chat: chat.clone(), update });
         }
     }
 
@@ -588,8 +603,8 @@ impl Account {
             thread.chat.v += 1;
             self.push_chat(t);
         }
-        if let Some(open) = self.open.as_ref().filter(|o| o.chat == chat && (o.lo..o.hi).contains(&i)) {
-            let chat = open.chat.clone();
+        if self.shows(chat, i) {
+            let chat = chat.to_string();
             self.send(Update::Messages { chat, update: Window { upsert: vec![m], ..Window::default() } });
         }
     }
@@ -835,6 +850,20 @@ impl Jawd for Demo {
 
     fn unwatch_quick_look(&mut self) {
         self.defer(|a| a.on_unwatch_quick_look());
+    }
+
+    fn park_messages(&mut self) {
+        self.defer(|a| a.on_park());
+    }
+
+    fn unpark_messages(&mut self, chat: &str) {
+        let chat = chat.to_string();
+        self.defer(move |a| a.on_unpark(&chat));
+    }
+
+    fn unwatch_parked(&mut self, chat: &str) {
+        let chat = chat.to_string();
+        self.defer(move |a| a.on_unwatch_parked(&chat));
     }
 
     fn send_text(&mut self, chat: &str, text: &str, key: &str, reply: Option<&str>, mentions: &[String]) {

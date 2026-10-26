@@ -19,8 +19,9 @@ impl View {
         self.dirty = true;
     }
 
-    /// The keys the switches turned on: Ctrl-F for the focused mode, Ctrl-G for the quick look;
-    /// says whether it took the key. Ctrl-B, focused, brings the rest back before the sidebar.
+    /// The keys the switches turned on: Ctrl-F for the focused mode, Ctrl-G for the quick look,
+    /// Ctrl-P the panes' prefix; says whether it took the key. Ctrl-B, focused, brings the rest
+    /// back before the sidebar.
     pub(super) fn on_experiment_key(&mut self, k: KeyEvent) -> bool {
         if !k.modifiers.contains(KeyModifiers::CONTROL) {
             return false;
@@ -32,6 +33,10 @@ impl View {
             }
             KeyCode::Char('g') if self.experiments.quick_look && self.library.is_none() => {
                 self.open_quick_look();
+                true
+            }
+            KeyCode::Char('p') if self.experiments.panes => {
+                self.panes.prefix = super::panes::Prefix::Armed;
                 true
             }
             KeyCode::Char('b') if self.focused() => {
@@ -50,6 +55,9 @@ impl View {
         }
         if self.experiments.quick_look {
             keys.push(("ctrl-g", "look", true));
+        }
+        if self.experiments.panes {
+            keys.push(("ctrl-p", "panes", true));
         }
         keys
     }

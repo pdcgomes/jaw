@@ -1275,12 +1275,7 @@ fn on_a_real_jawd_the_quick_looks_windows_are_watched_while_it_is_open_and_jawd_
         return;
     };
     let socket = jaw_proto::local::socket(jawd.home.path());
-    let watched = || -> u64 {
-        let (mut connection, _) = jaw_client::Connection::open(&socket, "jaw-test", "0").unwrap();
-        let status: jaw_proto::Status =
-            serde_json::from_value(connection.call("status", Value::Null).unwrap()).unwrap();
-        status.windows.map_or(0, |w| w.watched)
-    };
+    let watched = || windows_watched(&socket);
     let relay = Relay::to(&jawd);
     let (mut v, rx) = view_on(relay.socket.clone(), 140, 30);
     v.experiments = crate::experiments::Experiments::parse("quick_look");
@@ -1297,4 +1292,51 @@ fn on_a_real_jawd_the_quick_looks_windows_are_watched_while_it_is_open_and_jawd_
     run::press_live(&mut v, &rx, "<esc>").unwrap();
     assert!(until_true(&mut v, &rx, |_| watched() == before), "and lets it go: {} after {before}", watched());
     assert!(!frame(&mut v).contains("╭ quick look"));
+}
+
+/// The windows watched on every connection to the jawd on `socket`, as its status says.
+fn windows_watched(socket: &Path) -> u64 {
+    let (mut connection, _) = jaw_client::Connection::open(socket, "jaw-test", "0").unwrap();
+    let status: jaw_proto::Status = serde_json::from_value(connection.call("status", Value::Null).unwrap()).unwrap();
+    status.windows.map_or(0, |w| w.watched)
+}
+
+/// A split watches the new pane's chat in a window of its own, the first pane's window kept as it
+/// was, and closing the pane lets its window go.
+#[test]
+fn a_split_watches_the_new_panes_chat_beside_the_open_one_and_closing_it_lets_it_go() {
+    let jawd = scripted();
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    v.experiments = crate::experiments::Experiments::parse("panes");
+    let (watched, unwatched) = (jawd.asked("messages.watch").len(), jawd.asked("unwatch").len());
+    run::press_live(&mut v, &rx, "<c-p>%").unwrap();
+    let new: Vec<Value> = jawd.asked("messages.watch").into_iter().skip(watched).collect();
+    assert!(new.len() == 1 && new[0]["chat"] == CLIMBING, "the next chat, in the new pane: {new:?}");
+    assert_eq!(jawd.asked("unwatch").len(), unwatched, "Ana's window kept for her pane");
+    let screen = until(&mut v, &rx, "╭ 2  Lisbon Climbing");
+    assert!(screen.contains("╭ 1 Ana Ribeiro") && screen.contains("╭ 2  Lisbon Climbing"), "{screen}");
+    run::press_live(&mut v, &rx, "<c-p>x").unwrap();
+    assert!(until_true(&mut v, &rx, |_| jawd.asked("unwatch").len() == unwatched + 1), "{:?}", jawd.asked("unwatch"));
+    assert_eq!(jawd.asked("messages.watch").len(), watched + 1, "Ana's window as it was, nothing watched again");
+}
+
+#[test]
+fn on_a_real_jawd_each_pane_has_a_window_and_closing_one_lets_jawd_forget_it() {
+    let Some(jawd) = real() else {
+        eprintln!("JAWD isn't set to a jawd binary, so this ran on no real jawd");
+        return;
+    };
+    let socket = jaw_proto::local::socket(jawd.home.path());
+    let (mut v, rx) = view_on(socket.clone(), 140, 30);
+    v.experiments = crate::experiments::Experiments::parse("panes");
+    assert!(until_true(&mut v, &rx, |v| frame(v).contains("Lisbon Climbing")), "{}", frame(&mut v));
+    let before = windows_watched(&socket);
+    run::press_live(&mut v, &rx, "<c-p>%").unwrap();
+    let screen = until(&mut v, &rx, "╭ 2 ");
+    eprintln!("{screen}");
+    assert!(screen.contains("╭ 1 ") && screen.contains("╭ 2 ") && screen.contains("the one at the lake"), "{screen}");
+    assert!(until_true(&mut v, &rx, |_| windows_watched(&socket) == before + 1), "a window for the new pane: {before}");
+    run::press_live(&mut v, &rx, "<c-p>x").unwrap();
+    assert!(until_true(&mut v, &rx, |_| windows_watched(&socket) == before), "and jawd lets it go");
+    assert!(!frame(&mut v).contains("╭ 2 "));
 }

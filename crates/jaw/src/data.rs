@@ -991,6 +991,13 @@ pub trait Jawd {
     /// current until `unwatch_quick_look` lets them go.
     fn watch_quick_look(&mut self, chats: &[String], newest: u32);
     fn unwatch_quick_look(&mut self);
+    /// Split panes: the open chat's window kept watched for a pane that lost the keys, beside the
+    /// window opened next; its updates still come as `Update::Messages`, for its chat.
+    fn park_messages(&mut self);
+    /// The window kept for `chat`'s pane made the open one again, the open one kept in its turn.
+    fn unpark_messages(&mut self, chat: &str);
+    /// The window kept for `chat`'s pane let go, as the pane closes.
+    fn unwatch_parked(&mut self, chat: &str);
     /// You opened a chat yourself, which the palette ranks by; passing through it doesn't count.
     fn opened(&mut self, chat: &str);
     /// Sends text to a chat, as a reply to `reply` and mentioning the people in `mentions`. `key`

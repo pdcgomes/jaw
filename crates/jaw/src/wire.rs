@@ -113,6 +113,8 @@ pub struct Wire {
     open: Option<(WindowId, String)>,
     /// The quick look's windows, and each one's chat, while it's open.
     quick_look: Vec<(WindowId, String)>,
+    /// The windows of the panes that don't have the keys, and each one's chat.
+    parked: Vec<(WindowId, String)>,
     asked: HashMap<u64, Asked>,
     /// Messages and actions whose answer the connection lost, to ask for again with their keys
     /// once jawd is back.
@@ -232,6 +234,7 @@ impl Wire {
             library: None,
             open: None,
             quick_look: vec![],
+            parked: vec![],
             asked: HashMap::new(),
             again: vec![],
             owed: HashMap::new(),
@@ -645,6 +648,23 @@ impl Jawd for Wire {
         }
     }
 
+    fn park_messages(&mut self) {
+        self.parked.extend(self.open.take());
+    }
+
+    fn unpark_messages(&mut self, chat: &str) {
+        if let Some(at) = self.parked.iter().position(|(_, c)| c == chat) {
+            self.park_messages();
+            self.open = Some(self.parked.remove(at));
+        }
+    }
+
+    fn unwatch_parked(&mut self, chat: &str) {
+        if let Some(at) = self.parked.iter().position(|(_, c)| c == chat) {
+            self.client.unwatch(self.parked.remove(at).0);
+        }
+    }
+
     fn opened(&mut self, chat: &str) {
         self.ask("chat.opened", json!({ "chat": chat }), Asked::Quiet);
     }
@@ -821,6 +841,8 @@ impl Jawd for Wire {
                 out.push(Update::Messages { chat: chat.clone(), update });
             } else if let Some((_, chat)) = self.quick_look.iter().find(|(look, _)| *look == w) {
                 out.push(Update::QuickLook { chat: chat.clone(), update });
+            } else if let Some((_, chat)) = self.parked.iter().find(|(parked, _)| *parked == w) {
+                out.push(Update::Messages { chat: chat.clone(), update });
             }
         }
         out

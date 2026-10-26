@@ -96,7 +96,7 @@ const AS_IT_WAS: [(State, u16, u16, &str, u64); 14] = [
     (State::Online, 100, 30, "<c-r>", 0xaf24_ff68_3d5a_f81b),
     (State::Online, 140, 40, "<c-l>", 0x8608_0eb3_0005_5e7f),
     // The switches' keys do what they did before them while typing: nothing.
-    (State::Online, 140, 40, "<c-f><c-g>", 0x52a9_e072_5a18_3990),
+    (State::Online, 140, 40, "<c-f><c-g><c-p>", 0x52a9_e072_5a18_3990),
 ];
 
 #[test]
@@ -368,7 +368,7 @@ fn with_every_switch_on_the_loop_goes_quiet() {
 
 /// A frame as HTML, each cell in its colours and styles, wide ones over two cells, and the
 /// cursor where it is, for pictures of the switches.
-fn html(v: &mut View, title: &str) -> String {
+pub(super) fn html(v: &mut View, title: &str) -> String {
     let (w, h) = v.size().unwrap();
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     term.draw(|f| v.draw(f)).unwrap();

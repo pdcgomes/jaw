@@ -1,7 +1,7 @@
 //! Experimental switches: a spike's changes to the screen, each off unless turned on, so jaw looks
 //! and behaves as it always has until one is. They're settled once as jaw starts, from
-//! `JAW_EXPERIMENTS` for now (`JAW_EXPERIMENTS=composer,status_line,focus,quick_look`); whatever
-//! holds them later takes the place of `from_env` alone.
+//! `JAW_EXPERIMENTS` for now (`JAW_EXPERIMENTS=composer,status_line,focus,quick_look,panes`);
+//! whatever holds them later takes the place of `from_env` alone.
 
 use std::sync::OnceLock;
 
@@ -21,6 +21,8 @@ pub struct Experiments {
     pub focus: bool,
     /// A short catch-up of the chats that need you, over the one you're in.
     pub quick_look: bool,
+    /// Split panes, as tmux has them: the conversation split across or down, a chat in each.
+    pub panes: bool,
 }
 
 impl Experiments {
@@ -34,7 +36,10 @@ impl Experiments {
                 "status_line" => on.status_line = true,
                 "focus" => on.focus = true,
                 "quick_look" => on.quick_look = true,
-                "all" => on = Experiments { composer: true, status_line: true, focus: true, quick_look: true },
+                "panes" => on.panes = true,
+                "all" => {
+                    on = Experiments { composer: true, status_line: true, focus: true, quick_look: true, panes: true }
+                }
                 _ => {}
             }
         }
@@ -65,8 +70,8 @@ mod tests {
     fn the_list_names_the_switches_turned_on_and_nothing_else_is() {
         assert_eq!(Experiments::parse(""), Experiments::default());
         assert_eq!(Experiments::parse("composer"), Experiments { composer: true, ..Experiments::default() });
-        let all = Experiments { composer: true, status_line: true, focus: true, quick_look: true };
-        assert_eq!(Experiments::parse("composer,status_line,focus,quick_look"), all);
+        let all = Experiments { composer: true, status_line: true, focus: true, quick_look: true, panes: true };
+        assert_eq!(Experiments::parse("composer,status_line,focus,quick_look,panes"), all);
         assert_eq!(
             Experiments::parse(" Status-Line , focus ,nope"),
             Experiments { status_line: true, focus: true, ..Experiments::default() }

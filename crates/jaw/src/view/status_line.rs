@@ -38,14 +38,14 @@ impl View {
         self.experiments.status_line || self.focused()
     }
 
-    /// The chats other than the open one that need you, mentions first, then people writing to
-    /// you, then groups, each in the chat list's order; a muted chat only when it mentions you.
+    /// The chats no pane shows that need you, mentions first, then people writing to you, then
+    /// groups, each in the chat list's order; a muted chat only when it mentions you.
     pub(super) fn needing(&self) -> Vec<(Need, &Chat)> {
         let now = self.now();
         let mut out: Vec<(Need, &Chat)> = self
             .chats
             .rows()
-            .filter(|c| c.kind != ChatKind::Community && self.open.as_deref() != Some(c.id.as_str()))
+            .filter(|c| c.kind != ChatKind::Community && !self.on_screen(&c.id))
             .filter_map(|c| match (c.mentions > 0, c.unread > 0 || c.marked_unread, c.muted(now), c.group()) {
                 (true, ..) => Some((Need::Mention, c)),
                 (false, true, false, false) => Some((Need::Person, c)),
@@ -89,18 +89,24 @@ impl View {
             said.push(Span::styled("catching up", Style::new().fg(t.comment)));
         }
         let named = !self.composer_below();
+        let mut state = vec![];
+        for (i, s) in said.into_iter().enumerate() {
+            if i > 0 {
+                state.push(Span::styled(" · ", Style::new().fg(t.comment)));
+            }
+            state.push(s);
+        }
         let mut out = vec![Span::raw(" ")];
+        if self.split() {
+            out.extend(self.pane_tabs(named, state));
+            return out;
+        }
         if named {
             out.push(Span::styled(format!(" {} ", fmt::fit(&chat.name, NAME)), pill));
         }
-        for (i, s) in said.into_iter().enumerate() {
-            let gap = match (i, named) {
-                (0, true) => "  ",
-                (0, false) => " ",
-                _ => " · ",
-            };
-            out.push(Span::styled(gap, Style::new().fg(t.comment)));
-            out.push(s);
+        if !state.is_empty() {
+            out.push(Span::styled(if named { "  " } else { " " }, Style::new().fg(t.comment)));
+            out.extend(state);
         }
         out
     }

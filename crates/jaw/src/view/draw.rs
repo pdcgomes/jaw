@@ -271,6 +271,9 @@ impl View {
         if self.quick_look.is_some() {
             return self.quick_look_hints();
         }
+        if self.panes.prefix != super::panes::Prefix::Off {
+            return self.pane_hints();
+        }
         if self.palette.is_some() {
             return vec![
                 ("⏎", "does it", true),
@@ -543,6 +546,9 @@ impl View {
     }
 
     fn draw_conversation(&mut self, f: &mut Frame, area: Rect) {
+        if self.split() {
+            return self.draw_panes(f, area);
+        }
         if self.library.is_some() {
             return self.draw_library(f, area);
         }
@@ -627,7 +633,7 @@ impl View {
         f.render_widget(Paragraph::new(line), inner);
     }
 
-    fn draw_composer(&mut self, f: &mut Frame, area: Rect) {
+    pub(super) fn draw_composer(&mut self, f: &mut Frame, area: Rect) {
         if self.recorder.is_some() {
             return self.draw_recorder(f, area);
         }
@@ -814,7 +820,7 @@ impl View {
         (blocks, at_bottom)
     }
 
-    fn draw_messages(&mut self, f: &mut Frame, area: Rect) {
+    pub(super) fn draw_messages(&mut self, f: &mut Frame, area: Rect) {
         self.areas.messages = area;
         let Some(window) = self.messages.take() else { return };
         if !window.loaded {
@@ -1153,6 +1159,13 @@ impl View {
                 ("ctrl-f", "one chat, or all again", focus),
                 Some(("ctrl-g", "a quick look elsewhere", look)),
             ));
+        }
+        if self.experiments.panes {
+            lines.push(pair(
+                ("ctrl-p % \"", "split across, down", true),
+                Some(("ctrl-p 1-6", "a pane; o the next", true)),
+            ));
+            lines.push(pair(("ctrl-p x", "close the pane", true), Some(("ctrl-p { }", "swap; alt-←→↑↓ size", true))));
         }
         let w = 84.min(f.area().width.saturating_sub(2));
         let h = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));

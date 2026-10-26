@@ -87,6 +87,9 @@ impl View {
             self.on_quick_look_key(k);
             return;
         }
+        if self.panes.prefix != super::panes::Prefix::Off && self.on_pane_key(k) {
+            return;
+        }
         if self.recorder.is_some() && self.reach == super::Reach::Up {
             self.on_recorder_key(k, ctrl);
             return;
@@ -354,7 +357,7 @@ impl View {
         }
     }
 
-    fn move_selection(&mut self, by: isize) {
+    pub(super) fn move_selection(&mut self, by: isize) {
         let order = self.list_order();
         if order.is_empty() {
             return;
@@ -370,6 +373,7 @@ impl View {
         self.chats.hold();
         self.hold_until = Some(self.now() + HOLD);
         self.move_selection(by);
+        self.step_past_panes(by);
         if !(self.narrow() && self.picking)
             && let Some(id) = self.selected.clone()
             && !self.toggle_community(&id)
@@ -466,6 +470,9 @@ impl View {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 self.close_quick_look();
             }
+            return;
+        }
+        if self.pane_click(&m) {
             return;
         }
         match m.kind {

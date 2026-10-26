@@ -9,6 +9,7 @@ mod focus_mode;
 mod keys;
 mod library;
 mod palette;
+mod panes;
 mod quick_look;
 mod sidebar;
 mod status_line;
@@ -266,6 +267,9 @@ pub struct View {
     pub experiments: crate::experiments::Experiments,
     focus_mode: bool,
     quick_look: Option<quick_look::QuickLook>,
+    /// The panes once the conversation is split, each other than the one with the keys holding
+    /// its chat's state.
+    panes: panes::Panes,
     effects: Vec<Effect>,
     /// Something on screen changed since the last frame.
     pub dirty: bool,
@@ -358,6 +362,7 @@ impl View {
             experiments: crate::experiments::Experiments::at_start(),
             focus_mode: false,
             quick_look: None,
+            panes: panes::Panes::default(),
             effects: vec![],
             dirty: true,
             awaited: false,
@@ -517,7 +522,9 @@ impl View {
                 }
             }
             Update::Messages { chat, update } => {
-                let Some(window) = self.messages.as_mut().filter(|w| w.chat == chat) else { return };
+                let Some(window) = self.messages.as_mut().filter(|w| w.chat == chat) else {
+                    return self.parked_messages_came(&chat, update);
+                };
                 let first = !window.loaded;
                 let was_empty = window.loaded && window.is_empty();
                 if update.moved.is_some() {
@@ -669,6 +676,9 @@ impl View {
 
     /// Opens a chat at a message, or at its newest.
     pub fn open_chat_at(&mut self, id: &str, at: Option<String>) {
+        if self.open_in_its_pane(id, at.as_deref()) {
+            return;
+        }
         if self.open.as_deref() == Some(id) {
             self.selected = Some(id.to_string());
             self.picking = false;
@@ -726,7 +736,7 @@ impl View {
 
     /// Asks for the open chat's window somewhere, unless that's where it was last asked for.
     fn watch(&mut self, chat: &str, place: Place) {
-        if self.asked_place.as_ref() == Some(&place) {
+        if self.asked_place.as_ref() == Some(&place) || self.panes.drawing {
             return;
         }
         self.asked_place = Some(place.clone());
@@ -796,7 +806,7 @@ impl View {
     /// never lost: into the box if its chat is open, or its chat's draft, ahead of anything typed
     /// since. One jawd has taken stays where it is, in the window.
     fn give_back(&mut self, chat: String, key: String, text: String, why: String) {
-        if self.sent.iter().any(|(k, _)| *k == key) {
+        if self.sent.iter().any(|(k, _)| *k == key) || self.give_back_in_pane(&chat, &key, &text, &why) {
             return;
         }
         let before = |typed: &str| if typed.is_empty() { text.clone() } else { format!("{text}\n{typed}") };
@@ -877,7 +887,10 @@ impl View {
     /// once a second while messages keep coming.
     fn seen_newest(&mut self, newest: &Message) {
         let unread = self.open.as_deref().and_then(|id| self.chats.get(id)).is_some_and(|c| c.unread > 0);
-        if !unread || self.read_upto.as_deref() == Some(newest.id.as_str()) && self.read_due.is_none() {
+        if !unread
+            || self.panes.drawing
+            || self.read_upto.as_deref() == Some(newest.id.as_str()) && self.read_due.is_none()
+        {
             return;
         }
         self.read_upto = Some(newest.id.clone());
@@ -1020,6 +1033,8 @@ impl View {
     }
 }
 
+#[cfg(test)]
+mod panes_tests;
 #[cfg(test)]
 mod spike_tests;
 #[cfg(test)]
