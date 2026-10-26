@@ -1051,7 +1051,7 @@ impl View {
         }
         let buf = f.buffer_mut();
         let qr = match &self.link {
-            Some(LinkStep::Qr { code, .. }) => art::qr(code, t.light),
+            Some(LinkStep::Qr { code, .. }) => art::qr(code, t.light && !self.no_color),
             _ => vec![],
         };
         let mimic = &self.mimic;

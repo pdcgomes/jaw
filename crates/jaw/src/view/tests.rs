@@ -1,6 +1,7 @@
 //! Frames as text at several sizes, keys driving the view, and anchoring as rows arrive.
 
 use super::*;
+use crate::art;
 use crate::data::{Chat, Hit, Kind, Media, Sender, Span, SpanKind};
 use crate::demo::{Clock, Demo, State};
 use crate::graphics::{Images, Protocol};
@@ -367,6 +368,33 @@ fn linking_shows_the_qr_code_beside_the_mimic_or_a_code_for_the_phone() {
     assert!(screen.contains("link with a phone number") && screen.contains("K4PM-7XQ2"), "{screen}");
     press(&mut v, &rx, "<esc>");
     assert!(frame(&mut v).contains("It changes in 20 s."), "Esc goes back to the QR code");
+}
+
+#[test]
+fn a_light_themes_qr_code_is_dark_on_light_but_light_on_dark_without_colour() {
+    let (mut v, _rx) = view_in(State::Linking, 100, 30);
+    v.theme = Theme::named("catppuccin-latte", true);
+    let Some(LinkStep::Qr { code, .. }) = v.link.clone() else { panic!("a QR code to link with") };
+    for (no_color, light) in [(false, true), (true, false)] {
+        v.no_color = no_color;
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| v.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let at = |rows: &[String]| {
+            let (w, h) = (rows[0].chars().count() as u16, rows.len() as u16);
+            let row = |x: u16, y: u16| (x..x + w).map(|x| buf[(x, y)].symbol()).collect::<String>();
+            (0..=30 - h)
+                .flat_map(|y| (0..=100 - w).map(move |x| (x, y)))
+                .find(|&(x, y)| rows.iter().zip(y..).all(|(r, y)| row(x, y) == *r))
+        };
+        let way = if light { "dark on light" } else { "light on dark" };
+        let (x, y) = at(&art::qr(&code, light)).unwrap_or_else(|| panic!("no_color {no_color}: not {way}"));
+        assert!(at(&art::qr(&code, !light)).is_none(), "no_color {no_color}: only {way}");
+        if !no_color {
+            let cell = &buf[(x, y)];
+            assert_eq!((cell.fg, cell.bg), (v.theme.fg, v.theme.bg), "in the text colour on the ground");
+        }
+    }
 }
 
 #[test]

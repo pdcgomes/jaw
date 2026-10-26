@@ -27,8 +27,9 @@ pub struct Roles {
 
 impl Roles {
     /// Omarchy's keys mapped onto jaw's roles. A grey outside its band of contrast with the ground
-    /// is moved toward the ground or the text until it's in, keeping its hue, and every colour
-    /// reads at least 3:1.
+    /// is moved toward the ground or the text until it's in, keeping its hue; the selection is
+    /// then held apart from the surface too, which overlays draw it on; and every colour reads at
+    /// least 3:1.
     pub fn of(c: &Colors) -> Roles {
         let bg = c.background.0;
         let (fg, text) = if contrast(c.bright_foreground.0, bg) >= contrast(c.foreground.0, bg) {
@@ -36,18 +37,20 @@ impl Roles {
         } else {
             (c.foreground.0, c.bright_foreground.0)
         };
-        let fit = |colour: u32, low: f64, high: f64, target: f64| fit(colour, bg, fg, low, high, target);
-        let comment = fit(c.dark_foreground.0, 2.5, 4.5, 3.0);
-        let hue = |colour: Rgb| fit(colour.0, 3.0, f64::INFINITY, 3.0);
+        let held = |colour: u32, low: f64, high: f64, target: f64| fit(colour, bg, fg, low, high, target);
+        let comment = held(c.dark_foreground.0, 2.5, 4.5, 3.0);
+        let hue = |colour: Rgb| held(colour.0, 3.0, f64::INFINITY, 3.0);
+        let surface = held(c.lighter_background.0, 1.05, f64::INFINITY, 1.1);
+        let selection = held(c.selection.0, 1.15, f64::INFINITY, 1.25);
         Roles {
             bg,
-            surface: fit(c.lighter_background.0, 1.05, f64::INFINITY, 1.1),
-            selection: fit(c.selection.0, 1.15, f64::INFINITY, 1.25),
+            surface,
+            selection: fit(selection, surface, fg, 1.15, f64::INFINITY, 1.15),
             fg,
             text,
             muted: mix(comment, text, 0.5),
             comment,
-            gutter: fit(c.muted.0, 1.4, 2.6, 1.8),
+            gutter: held(c.muted.0, 1.4, 2.6, 1.8),
             accent: c.accent.0,
             link: hue(c.cyan),
             mention: hue(c.orange),
@@ -148,7 +151,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub fn new(r: &Roles, light: bool, truecolor: bool) -> Theme {
+    fn new(r: &Roles, mode: Mode, truecolor: bool) -> Theme {
         let c = |h: u32| color(h, truecolor);
         Theme {
             bg: c(r.bg),
@@ -174,14 +177,14 @@ impl Theme {
             progress: c(r.accent),
             senders: r.senders.map(c),
             truecolor,
-            light,
+            light: mode == Mode::Light,
         }
     }
 
     /// The theme `id` names, Tokyo Night where it names none jaw knows.
     pub fn named(id: &str, truecolor: bool) -> Theme {
         let theme = jaw_proto::themes::or_default(id);
-        Theme::new(&Roles::of(&theme.colors), theme.mode == Mode::Light, truecolor)
+        Theme::new(&Roles::of(&theme.colors), theme.mode, truecolor)
     }
 
     pub fn with(truecolor: bool) -> Theme {
@@ -286,6 +289,8 @@ mod tests {
             assert!(c(r.muted) < c(r.text) && c(r.text) <= c(r.fg), "{id}: secondary, text, text that matters");
             assert!(c(r.text) >= 4.5, "{id}: text {:.2}", c(r.text));
             assert!(c(r.surface) >= 1.05 && c(r.selection) >= 1.15, "{id}: surface and selection stand out");
+            let on_surface = contrast(r.selection, r.surface);
+            assert!(on_surface >= 1.15, "{id}: the selection on the surface {on_surface:.2}, as overlays draw it");
             assert!(contrast(r.fg, r.selection) >= 4.5, "{id}: text on the selection");
         }
     }
@@ -294,11 +299,67 @@ mod tests {
     fn every_colour_reads_at_least_three_to_one() {
         for theme in jaw_proto::themes::all() {
             let r = Roles::of(&theme.colors);
-            for (what, colour) in [("link", r.link), ("mention", r.mention), ("online", r.online), ("notice", r.notice)]
-                .into_iter()
-                .chain(r.senders.iter().map(|s| ("sender", *s)))
-            {
+            let colours = [
+                ("accent", r.accent),
+                ("link", r.link),
+                ("mention", r.mention),
+                ("online", r.online),
+                ("notice", r.notice),
+            ];
+            for (what, colour) in colours.into_iter().chain(r.senders.iter().map(|s| ("sender", *s))) {
                 assert!(contrast(colour, r.bg) >= 3.0, "{}: {what} {:.2}", theme.id, contrast(colour, r.bg));
+            }
+        }
+    }
+
+    /// What jaw moves in each theme at Omarchy's 4c1b4cb, as the design lists it.
+    const MOVED: [(&[&str], &[&str]); 6] = [
+        (&[], &["catppuccin", "flexoki-light", "gruvbox", "hackerman", "lumon", "matte-black", "rose-pine"]),
+        (
+            &["dim text raised"],
+            &["catppuccin-latte", "everforest", "last-horizon", "miasma", "nord", "solitude", "white"],
+        ),
+        (&["borders lowered", "dim text lowered"], &["ethereal", "osaka-jade", "retro-82", "starship"]),
+        (&["borders lowered"], &["miasma", "ristretto", "vantablack", "white"]),
+        (&["surface raised"], &["last-horizon", "lupine", "solitude"]),
+        (&["selection raised"], &["kanagawa", "tokyo-night", "vantablack", "white"]),
+    ];
+
+    #[test]
+    fn each_theme_moves_the_greys_the_design_lists_and_each_colour_moved_lands_within_a_step_of_its_target() {
+        for theme in jaw_proto::themes::all() {
+            let (c, r, id) = (&theme.colors, Roles::of(&theme.colors), theme.id.as_str());
+            let mut moved = vec![];
+            for (what, was, now, ground, target) in [
+                ("surface", c.lighter_background.0, r.surface, r.bg, 1.1),
+                ("selection", c.selection.0, r.selection, r.surface, 1.15),
+                ("dim text", c.dark_foreground.0, r.comment, r.bg, 3.0),
+                ("borders", c.muted.0, r.gutter, r.bg, 1.8),
+            ] {
+                if now == was {
+                    continue;
+                }
+                let (from, to) = (contrast(was, ground), contrast(now, ground));
+                moved.push(format!("{what} {}", if to > from { "raised" } else { "lowered" }));
+                let step = if to > from { target..=target + 0.05 } else { target - 0.05..=target };
+                assert!(step.contains(&to), "{id}: {what} moved to {to:.3}, not within a step of {target}");
+            }
+            moved.sort();
+            let mut listed: Vec<String> = MOVED
+                .iter()
+                .filter(|(_, ids)| ids.contains(&id))
+                .flat_map(|(what, _)| what.iter().map(|w| w.to_string()))
+                .collect();
+            listed.sort();
+            assert!(MOVED.iter().any(|(_, ids)| ids.contains(&id)), "{id} isn't in the design's list");
+            assert_eq!(moved, listed, "{id}");
+            let senders = [c.red, c.yellow, c.blue, c.magenta, c.cyan, c.green, c.orange, c.bright_cyan];
+            for (was, now) in [(c.cyan, r.link), (c.orange, r.mention), (c.green, r.online), (c.yellow, r.notice)]
+                .into_iter()
+                .chain(senders.into_iter().zip(r.senders))
+            {
+                let to = contrast(now, r.bg);
+                assert!(now == was.0 || (3.0..=3.05).contains(&to), "{id}: #{:06x} raised to {to:.3}, not 3", was.0);
             }
         }
     }
@@ -306,25 +367,31 @@ mod tests {
     #[test]
     fn a_grey_outside_its_band_is_moved_toward_the_ground_or_the_text_keeping_its_hue() {
         let theme = |id: &str| jaw_proto::themes::get(id).unwrap().colors;
-        let near = |a: u32, b: u32| (0..3).all(|i| ((a >> (8 * i)) & 0xff).abs_diff((b >> (8 * i)) & 0xff) <= 2);
-        let everforest = theme("everforest");
-        let raised = Roles::of(&everforest).comment;
-        assert_ne!(raised, everforest.dark_foreground.0, "Everforest's dim text is too dim, so it's raised");
-        let toward_text = |i: i32| mix(everforest.dark_foreground.0, everforest.foreground.0, f64::from(i) / 200.0);
-        assert!((0..=200).any(|i| near(toward_text(i), raised)), "on the line from its own grey to the text");
+        let on_line =
+            |from: u32, to: u32, colour: u32| (0..=10_000).any(|i| mix(from, to, f64::from(i) / 10_000.0) == colour);
+        let solitude = theme("solitude");
+        let r = Roles::of(&solitude);
+        let (grey, raised) = (solitude.dark_foreground.0, r.comment);
+        assert!(contrast(raised, r.bg) > contrast(grey, r.bg), "Solitude's dim text is too dim, so it's raised");
+        assert_ne!(r.fg, r.text, "Solitude's text that matters isn't its ordinary text");
+        assert!(on_line(grey, r.fg, raised), "on the line from its own grey to the text that matters");
+        assert!(!on_line(grey, r.text, raised), "not on the line to ordinary text");
         let osaka = theme("osaka-jade");
-        assert!(
-            contrast(Roles::of(&osaka).comment, osaka.background.0)
-                < contrast(osaka.dark_foreground.0, osaka.background.0)
-        );
+        let (grey, ground, lowered) = (osaka.dark_foreground.0, osaka.background.0, Roles::of(&osaka).comment);
+        assert!(contrast(lowered, ground) < contrast(grey, ground), "Osaka Jade's dim text stands out too much");
+        assert!(on_line(grey, ground, lowered), "so it's lowered on the line from its own grey to the ground");
     }
 
     #[test]
     fn tokyo_night_is_omarchys_and_an_unknown_theme_is_tokyo_night() {
         let r = Roles::of(&jaw_proto::themes::get("tokyo-night").unwrap().colors);
         assert_eq!(
-            (r.bg, r.surface, r.selection, r.fg, r.text, r.comment, r.gutter, r.accent, r.link),
-            (0x1a1b26, 0x24283b, 0x292e42, 0xc0caf5, 0xa9b1d6, 0x565f89, 0x414868, 0x7aa2f7, 0x449dab)
+            (r.bg, r.surface, r.selection, r.fg, r.text, r.muted, r.comment, r.gutter),
+            (0x1a1b26, 0x24283b, 0x2d3247, 0xc0caf5, 0xa9b1d6, 0x8088b0, 0x565f89, 0x414868)
+        );
+        assert_eq!(
+            (r.accent, r.link, r.mention, r.senders[3], r.senders[7]),
+            (0x7aa2f7, 0x449dab, 0xeb927b, 0xad8ee6, 0x0db9d7)
         );
         assert_eq!(Theme::named("no-such-theme", true), Theme::with(true));
         assert!(!Theme::with(true).light && Theme::named("catppuccin-latte", true).light);

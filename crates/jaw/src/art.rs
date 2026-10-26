@@ -1,5 +1,5 @@
 //! What's drawn rather than written: the Mimic in half-block pixel art, a pixel to a cell, and
-//! QR codes in half-blocks, light on dark, or dark on light in a light theme.
+//! QR codes in half-blocks, light on dark, or dark on light in a light theme drawn in colour.
 
 use crate::theme::{Theme, nearest_256};
 use ratatui::style::{Color, Style};
@@ -126,8 +126,10 @@ fn luma(p: Rgb) -> f32 {
 }
 
 /// A QR code in half-blocks with its quiet zone, two modules to a cell, the top one as the glyph:
-/// light on dark for a dark theme, its light modules drawn in the text colour, and dark on light
-/// for a light theme, its dark modules drawn in it, so a phone reads it as printed codes are.
+/// light on dark, its light modules drawn in the text colour, or, when `light`, dark on light, its
+/// dark modules drawn in it, so a phone reads it as printed codes are. `light` is for a light
+/// theme drawn in colour: without colour (`NO_COLOR`) the theme says nothing of the terminal's
+/// background, so the code stays light on dark.
 pub fn qr(code: &str, light: bool) -> Vec<String> {
     let Ok(qr) = qrcode::QrCode::new(code.as_bytes()) else { return vec![] };
     let n = qr.width();
@@ -221,8 +223,15 @@ mod tests {
             '▄' => '▀',
             other => other,
         };
-        for (d, l) in dark.iter().zip(&light).take(dark.len() - 1) {
+        let last = dark.len() - 1;
+        for (d, l) in dark.iter().zip(&light).take(last) {
             assert_eq!(d.chars().map(swap).collect::<String>(), *l, "each module the other way round");
         }
+        assert!(
+            dark[last].chars().all(|c| c == '▀'),
+            "the last row is the quiet zone's top half alone: {}",
+            dark[last]
+        );
+        assert!(light[last].chars().all(|c| c == ' '), "which dark on light leaves the ground: {}", light[last]);
     }
 }
