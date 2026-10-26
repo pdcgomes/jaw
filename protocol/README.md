@@ -15,7 +15,7 @@ The engine link, between jawd and jaw-engine, is a different protocol: `proto/en
 - Requests can be sent without waiting for replies; replies come in any order. A client never blocks on one: whatever it asked for arrives as data.
   - `hello`, `focus`, `chats.watch`, `messages.watch`, `watch.move` and `unwatch` are answered at once, without waiting for the connection's other requests, so a chat opens at once even while a message sent just before it waits for the disk.
   - `find` and `media.save`, which can take long, are each answered on a task of their own once done, in no order with the rest. A connection can have 64 of them being answered; past that, another is error 5, with `data` `{"limit": "apart", "most": 64}`.
-  - Every other request waits for the ones sent before it: jawd carries them out one at a time, in the order they were sent. It holds 64 of a connection's at most; past that, or while a reply waits for the interface to read it, it reads nothing more from that connection, the requests answered at once included, until one of them is answered.
+  - Every other request waits for the ones sent before it: jawd carries them out one at a time, in the order they were sent. It holds 64 of a connection's at most; past that, or while a reply or a `layout` push waits for the interface to read it, it reads nothing more from that connection, the requests answered at once included, until one of them is answered.
   - A watch is answered with what jaw.db holds when it's read, which may be before a request sent ahead of it has taken effect: a send, a read position, a deletion. That request's effect then comes as a push, and a row it makes can't be an anchor until it has; `around: unread` just after a `read` anchors on the first message unread before it.
   - A window's push can come before the reply to the request that caused it, so a `row` in a reply is an upsert like any other, applied by its `v`.
   - An interface that closes its side for writing, as a script does once its input ends, still gets the reply to every request it sent; jawd then closes the connection.
@@ -39,7 +39,7 @@ The engine link, between jawd and jaw-engine, is a different protocol: `proto/en
 | 2 | The engine isn't available right now; `data.retry_ms` says when to try again |
 | 3 | Not found: the chat, message, folder or person doesn't exist |
 | 4 | Not allowed, and why: editing a message older than WhatsApp allows, deleting someone else's message for everyone, voting twice on a single-choice poll |
-| 5 | A limit, and which: presence subscriptions, a file too large to send, text longer than 65,536 characters (a message's, an edit's or a draft's), the outbox, a forward's chats, a connection's windows or its finds and saves being answered, the last four with `data.limit` saying so |
+| 5 | A limit, and which: presence subscriptions, a file too large to send, text longer than 65,536 characters (a message's, an edit's or a draft's), a layout past its size or panes, a layout for one interface too many, the outbox, a forward's chats, a connection's windows or its finds and saves being answered, the last four with `data.limit` saying so |
 | 6 | Protocol versions don't match |
 | 7 | Cancelled: a newer request replaced this one, as each `find` replaces the last |
 
@@ -228,7 +228,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | Method | Params | Result |
 | --- | --- | --- |
 | `hello` | `protocol`, `client`, `version`, `focus`, `since` | See Hello |
-| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), `interfaces`: how many are `connected`, whether one is `focused`, where `notifications` go, the requests `in_lanes`, read and not yet answered (this one among them), the most a connection's lane holds (`lane_most`), the `lanes_full`, whose connections jawd reads nothing more from until one is answered, and the connections with a reply waiting for room (`replies_waiting`, one each at most), which it reads nothing from and sends nothing else meanwhile, and the finds and saves being answered on tasks of their own (`apart`, at most `apart_most` a connection); and `windows`: how many are `watched` on every connection, how many of them are `distinct`, the `most` one connection can watch, the bytes of the reads kept for windows watched alike to share (`kept_bytes`, at most `kept_most`, the oldest `let_go` past it), and the window `reads` made, `taken` from a kept read and `joined` to one under way |
+| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), `interfaces`: how many are `connected`, whether one is `focused`, where `notifications` go, the requests `in_lanes`, read and not yet answered (this one among them), the most a connection's lane holds (`lane_most`), the `lanes_full`, whose connections jawd reads nothing more from until one is answered, and the connections with a reply, or a `layout` push, waiting for room (`replies_waiting`, one each at most), which it reads nothing from and sends nothing else meanwhile, and the finds and saves being answered on tasks of their own (`apart`, at most `apart_most` a connection); `windows`: how many are `watched` on every connection, how many of them are `distinct`, the `most` one connection can watch, the bytes of the reads kept for windows watched alike to share (`kept_bytes`, at most `kept_most`, the oldest `let_go` past it), and the window `reads` made, `taken` from a kept read and `joined` to one under way; and `layouts`: how many interfaces have one `kept`, of the `most`, the `largest_bytes` of `bytes_most`, and how many were `refused` for a limit |
 | `focus` | `focused` | |
 | `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes |
 | `link.cancel` | | |
@@ -271,6 +271,8 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `folder.add`, `folder.remove` | `folder`, `item` (a chat's `id` or a `person:` id) | |
 | `folder.smart` | `folder`, `rule` | |
 | `favourite.set` | `slot` (1 to 9), `target` (a folder or a chat), or null to clear | |
+| `layout.get` | `interface` (optional, the connection's own by default) | `interface`, `v`, `layout` and `dropped`. See Layouts |
+| `layout.set` | `v`, `layout` | As `layout.get`'s, and `kept`. See Layouts |
 
 ## Other pushes
 
@@ -287,6 +289,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `recording` | `state` (`recording`, `stopped`), `seconds`, `level` (0 to 100), ten times a second while recording |
 | `notice` | `text` and `tone` (`info`, `warning`, `error`): something an interface should say once |
 | `resync` | `watch`: watch it again |
+| `layout` | As `layout.get`'s result: the layout another connection of the same interface just kept. See Layouts |
 
 ## Voice (proposed)
 
@@ -396,6 +399,22 @@ Proposed with the terminal's sidebar in M6, for jawd to build; until then `folde
 - `focus` says whether the interface is in front now: a terminal sends it as focus comes in and goes out, and `hello`'s `focus` says how a connection starts. It's per connection, and you count as looking while any connection's focus is true.
 - jawd keeps which chats each connection is reading: those its `messages.watch` windows show, until it unwatches them, and the chat it last said it opened with `chat.opened`, until it opens another or no window of its shows that one.
 - A chat a connection in front is reading gets no notifications, and presence follows focus (see Presence).
+
+## Layouts
+
+jawd keeps each interface's layout of split panes, by the `client` name it gives in hello (`jaw` for the terminal), so it opens with the panes it was left with, and so another interface can open it: the Mac app can open the terminal's.
+
+```json
+{"id":31,"method":"layout.set","params":{"v":1792000000123,"layout":{"format":1,"focused":1,"tree":{"split":{"how":"across","first":500,"a":{"chat":"351912345678@s.whatsapp.net"},"b":{"chat":"100000000002@lid"}}}}}}
+{"id":31,"result":{"interface":"jaw","v":1792000000123,"layout":{"format":1,"focused":1,"tree":{"split":{"how":"across","first":500,"a":{"chat":"351912345678@s.whatsapp.net"},"b":{"chat":"351912222222@s.whatsapp.net"}}}},"kept":true}}
+```
+
+- **The layout** is a tree: a pane is `{"chat": JID}`, a split is `{"split": {"how", "first", "a", "b"}}`, with `how` `across` (the sides beside each other, `a` on the left) or `down` (`a` on top) and `first` the first side's share in thousandths, 1 to 999. `focused` is the pane with the keys, counted from 0 in the tree's order, `a` before `b`. `format` is 1; jawd refuses another with -32602 and `data` `{"param": "layout.format", "allowed": [1]}`.
+- **`layout.set`** keeps the connection's interface's layout with a synced commit before it answers. `v` is its version, which the interface gives: more than any version it has been told of, such as the time in milliseconds. Only a newer version replaces what's kept, so asking again, or late, changes nothing: the answer has `kept`, whether the layout asked for is the one kept, and always the layout kept, which is newer when `kept` is false. A chat in two panes, a pane that isn't a JID, a share or `focused` out of range, or a `v` of 0 is -32602 with the `param`.
+- **Limits**, each error 5, and in `status`'s `layouts` (`kept` of `most`, the `largest_bytes` of `bytes_most`, and how many were `refused`): 16 panes, 16 KiB of JSON, and 16 interfaces with a layout kept; an interface that has one can always change it.
+- **`layout.get`** answers with what's kept for the connection's interface, or for `interface`. Panes name chats by JID, and jawd answers with each chat as it knows it now: the chat a JID was merged into, or the same person's chat under their other JID (phone number or LID). A pane whose chat is gone, or that shows a chat a pane before it shows, is left out, its JID in `dropped`, and its split closes; if it had the keys, the pane before it takes them, or the first. With nothing kept, or nothing left, there's no `layout` and `v` is what's kept, 0 for none.
+- **Both requests** wait their turn behind the requests sent before them (see The connection), and each is carried out under the `client` name of the hello the connection had said when it sent it.
+- **The `layout` push** goes to the interface's other connections when one keeps a newer layout, never to the one that kept it, and to no other interface. A push that finds the interface not reading waits for it, as a reply does, and is never dropped; meanwhile only the newest layout is kept for that connection, so one slow to read may miss a layout, but never the last. A connection that has closed its writing side still gets a push that waits, and jawd closes it once it has every reply, whatever is kept after.
 
 ## Notifications
 

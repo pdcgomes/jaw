@@ -5,7 +5,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use jaw_proto::find::{ChatOpened, Find};
@@ -14,18 +14,19 @@ use jaw_proto::{Error, Focus, Hello, LinkStart, Outcome, PROTOCOL, Push, Reply, 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::attention::Viewer;
 use crate::engine::{EngineError, pb};
 use crate::feed;
 use crate::find::{Cancel, Cancelled};
+use crate::layout::Pushed;
 use crate::state::State;
 use crate::sync::Refused;
 
 /// Lines waiting for an interface to read them. Window updates wait in their windows instead, so a
-/// slow interface never holds anything else up, and a reply that finds no room waits on its own,
-/// one at most.
+/// slow interface never holds anything else up, and a reply or a `layout` push that finds no room
+/// waits on its own, one at most.
 const WAITING_LINES: usize = 64;
 /// Requests a connection's lane holds, waiting or being answered, before it reads no more.
 pub const LANE_MOST: usize = 64;
@@ -33,11 +34,20 @@ pub const LANE_MOST: usize = 64;
 /// refused.
 pub const APART_MOST: usize = 64;
 
+/// The last connection's number.
+static CONNECTIONS: AtomicU64 = AtomicU64::new(0);
+
 /// What a connection has said, its windows, and what it's looking at.
 struct Session {
+    /// Its number, unique while jawd runs.
+    id: u64,
     greeted: bool,
+    /// The interface's name, as hello gave it.
+    client: Arc<str>,
     windows: Option<feed::Client>,
     viewer: Viewer,
+    /// Its interface's layout, as its other connections keep it.
+    layout: Option<watch::Receiver<Option<Pushed>>>,
 }
 
 /// Every connection's lane, waiting reply and requests answered on tasks of their own, summed for
@@ -61,7 +71,8 @@ impl Lanes {
         Lanes::count(&self.full)
     }
 
-    /// The connections whose reply waits for room in the queue to their interface.
+    /// The connections whose reply, or `layout` push, waits for room in the queue to their
+    /// interface.
     pub fn waiting(&self) -> u64 {
         Lanes::count(&self.waiting)
     }
@@ -84,8 +95,9 @@ impl Lanes {
 }
 
 /// What a connection owes its interface: the requests it has sent down its lane and not had back,
-/// those being answered on tasks of their own, and the reply waiting for room in the queue, one at
-/// most. It's counted in `Lanes` for as long as the connection lasts, each change as it's made.
+/// those being answered on tasks of their own, and the reply or `layout` push waiting for room in
+/// the queue, one at most. It's counted in `Lanes` for as long as the connection lasts, each change
+/// as it's made.
 struct Owed<'a> {
     lanes: &'a Lanes,
     in_lane: usize,
@@ -102,7 +114,7 @@ impl<'a> Owed<'a> {
         self.in_lane >= LANE_MOST
     }
 
-    /// Whether every request read has had its reply sent.
+    /// Whether every request read has had its reply sent, and nothing waits to be.
     fn settled(&self) -> bool {
         self.in_lane == 0 && self.apart == 0 && self.waiting.is_none()
     }
@@ -132,9 +144,9 @@ impl<'a> Owed<'a> {
         self.change(|owed| owed.waiting = Some(line));
     }
 
-    /// The reply that waited, now there's room for it.
+    /// The line that waited, now there's room for it.
     fn sent(&mut self) -> Vec<u8> {
-        self.change(|owed| owed.waiting.take().expect("a reply waits"))
+        self.change(|owed| owed.waiting.take().expect("a line waits"))
     }
 
     /// Its part in `Lanes`.
@@ -185,12 +197,12 @@ pub async fn serve(state: Arc<State>, listener: UnixListener) -> Result<()> {
 /// One connection. Its windows, hello and focus are answered on its own task; a find, and any
 /// request that can take long, on a task of its own; and every other request down the
 /// connection's lane, in the order sent, so a watch never waits on jaw.db's writer, the engine or
-/// a search, nor a send on a long request. Requests go ahead of the windows' flushes. A reply that
-/// finds the queue to the interface full waits, and meanwhile no request is read, no other reply
-/// or push is sent, and the windows send nothing, so nothing goes ahead of the watch a reply may
-/// be the result of; but they still take their changes, so an interface that leaves its queue
-/// full is told to watch again, a reply waiting or not. Once the interface has sent all it will,
-/// every request it sent is still answered before the connection ends.
+/// a search, nor a send on a long request. Requests go ahead of the windows' flushes. A reply, or
+/// a `layout` push, that finds the queue to the interface full waits, and meanwhile no request is
+/// read, no other reply or push is sent, and the windows send nothing, so nothing goes ahead of
+/// the watch a reply may be the result of; but they still take their changes, so an interface
+/// that leaves its queue full is told to watch again, a reply waiting or not. Once the interface
+/// has sent all it will, every request it sent is still answered before the connection ends.
 async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
     let peer = match stream.peer_cred() {
         Ok(credentials) => credentials.uid(),
@@ -205,9 +217,12 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
     let mut lines = BufReader::new(read).lines();
     let out = writer(write);
     let mut session = Session {
+        id: CONNECTIONS.fetch_add(1, Ordering::Relaxed) + 1,
         greeted: false,
+        client: Arc::from(""),
         windows: state.feed().map(|feed| feed.client(out.clone())),
         viewer: state.attention().viewer(),
+        layout: None,
     };
     // Pushes start once the connection has said hello.
     let mut pushes: Option<broadcast::Receiver<Push>> = None;
@@ -277,7 +292,8 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
                     }
                     Taken::Lane(request) => {
                         owed.took();
-                        lane.send(request).context("the connection's lane stopped")?;
+                        let laned = Laned { request, from: session.id, client: session.client.clone() };
+                        lane.send(laned).context("the connection's lane stopped")?;
                     }
                 }
             }
@@ -304,14 +320,30 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => pushes = None,
             },
+            // A layout another of the interface's connections kept waits for room as a reply
+            // does, never dropped. The channel holds only the latest, so leaving it unread while a
+            // line waits loses nothing, and the connection ends on the latest.
+            kept = layout_kept(&mut session.layout), if open => match kept {
+                Some(Some(pushed)) if pushed.from != session.id => {
+                    let params = serde_json::to_value(&pushed.saved).expect("jaw-proto's types serialize");
+                    send(&out, &Push { method: "layout".into(), params }, &mut owed, &mut session)?;
+                }
+                Some(_) => {}
+                None => session.layout = None,
+            },
         }
     }
 }
 
-/// Puts `reply` in the queue to the interface, or, with no room there, keeps it waiting and holds
-/// the windows.
-fn send(out: &mpsc::Sender<Vec<u8>>, reply: &Reply, owed: &mut Owed<'_>, session: &mut Session) -> Result<()> {
-    match out.try_send(encode(reply)) {
+/// Puts `line`, a reply or a `layout` push, in the queue to the interface, or, with no room there,
+/// keeps it waiting and holds the windows.
+fn send(
+    out: &mpsc::Sender<Vec<u8>>,
+    line: &impl serde::Serialize,
+    owed: &mut Owed<'_>,
+    session: &mut Session,
+) -> Result<()> {
+    match out.try_send(encode(line)) {
         Ok(()) => Ok(()),
         Err(mpsc::error::TrySendError::Full(line)) => {
             owed.wait(line);
@@ -324,24 +356,33 @@ fn send(out: &mpsc::Sender<Vec<u8>>, reply: &Reply, owed: &mut Owed<'_>, session
     }
 }
 
+/// A request sent down a connection's lane, with the connection's number and the name its hello
+/// gave as they were when the request was read, so a hello answered meanwhile changes neither.
+struct Laned {
+    request: Request,
+    from: u64,
+    client: Arc<str>,
+}
+
 /// A connection's lane: answers the requests sent down it one at a time, in order, each reply to
 /// `answered`, until the connection or jawd stops; the request being answered then is answered
 /// all the same. A push a request sends once it's answered, as a logout's `connection` push, goes
 /// to every connection after the reply is handed over, so the one that asked has it first.
-fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::UnboundedSender<Request> {
-    let (lane, mut requests) = mpsc::unbounded_channel::<Request>();
+fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::UnboundedSender<Laned> {
+    let (lane, mut requests) = mpsc::unbounded_channel::<Laned>();
     tokio::spawn(async move {
         loop {
-            let request = tokio::select! {
-                request = requests.recv() => request,
+            let laned = tokio::select! {
+                laned = requests.recv() => laned,
                 _ = state.stopping() => return,
             };
-            let Some(request) = request else { return };
+            let Some(Laned { request, from, client }) = laned else { return };
             if answered.is_closed() {
                 return;
             }
             let (reply, then) = match request.method.as_str() {
                 "link.logout" => logout(&state, request.id).await,
+                "layout.get" | "layout.set" => (layouts(&state, request, &client, from).await, None),
                 _ => (answer(&state, request).await, None),
             };
             let gone = answered.send(reply).is_err();
@@ -371,6 +412,17 @@ fn on_own_task(id: u64, answering: impl Future<Output = Reply> + Send + 'static,
             .unwrap_or_else(|e| failed(id, Error::new(code::INTERNAL, format!("jawd failed while answering: {e}"))));
         let _ = found.send(reply);
     });
+}
+
+/// The next layout kept for the connection's interface; none once nothing will be.
+async fn layout_kept(layout: &mut Option<watch::Receiver<Option<Pushed>>>) -> Option<Option<Pushed>> {
+    match layout {
+        Some(layout) => match layout.changed().await {
+            Ok(()) => Some(layout.borrow_and_update().clone()),
+            Err(_) => None,
+        },
+        None => std::future::pending().await,
+    }
 }
 
 /// A connection's find in progress: the next find cancels it, and so does the connection ending.
@@ -496,6 +548,8 @@ async fn take(state: &State, line: &str, session: &mut Session) -> Taken {
         "hello" => match serde_json::from_value::<Hello>(request.params) {
             Ok(hello) if hello.protocol == PROTOCOL => {
                 session.greeted = true;
+                session.layout = state.layouts().and_then(|layouts| layouts.subscribe(&hello.client));
+                session.client = hello.client.into();
                 session.viewer.focus(hello.focus);
                 if let Some(windows) = session.windows.as_mut() {
                     windows.hello(hello.since);
@@ -632,6 +686,24 @@ async fn answer_apart(state: &State, request: Request) -> Reply {
     }
 }
 
+/// `layout.get` and `layout.set`, down the lane of the connection numbered `from`, as the hello it
+/// had said when it sent them named it, `interface`: they wait on jaw.db, so they're answered in
+/// the order sent, as the lane's other requests are.
+async fn layouts(state: &State, request: Request, interface: &str, from: u64) -> Reply {
+    let id = request.id;
+    let Some(layouts) = state.layouts() else {
+        return failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it keeps no layouts"));
+    };
+    let answer = match request.method.as_str() {
+        "layout.get" => layouts.get(interface, request.params).await,
+        _ => layouts.set(interface, from, request.params).await,
+    };
+    match answer {
+        Ok(saved) => succeeded(id, &saved),
+        Err(error) => failed(id, error),
+    }
+}
+
 /// Asks the phone for older messages in a chat; they arrive as upserts once it answers.
 async fn history_more(state: &State, id: u64, params: Value) -> Reply {
     let more = match serde_json::from_value::<HistoryMore>(params) {
@@ -698,7 +770,7 @@ mod tests {
     use super::*;
     use crate::engine::supervisor::{Backoff, Supervisor};
     use crate::find::Finder;
-    use crate::store::{Change, Lane, Message, Store};
+    use crate::store::{Change, Chat, Lane, Message, Store};
     use crate::work::Priority;
 
     /// jawd serving on a socket in a folder of its own, for as long as the test runs.
@@ -1136,6 +1208,269 @@ mod tests {
             let mut connection = connection;
             assert!(connection.call("status", Value::Null).is_err(), "the connection was ended");
             assert!(std::os::unix::net::UnixStream::connect(&socket).is_err(), "nothing listens any more");
+        })
+        .await
+        .unwrap();
+    }
+
+    const ANA: &str = "351912345678@s.whatsapp.net";
+    const CLIMBING: &str = "120363012345678901@g.us";
+
+    /// jawd serving layouts, with Ana's chat and the climbing group, on a socket of its own.
+    async fn serving_layouts() -> (tempfile::TempDir, std::path::PathBuf) {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let listener = listen(&socket).unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let chats = [ANA, CLIMBING].map(|id| Change::Chat(Chat { id: id.into(), ..Chat::default() }));
+        store.apply(Lane::Live, chats.to_vec()).await.unwrap();
+        let state = State::new(
+            home.path(),
+            Err(("go", "no engine in this test".into())),
+            Vec::new(),
+            Arc::default(),
+            Some(store.clone()),
+            broadcast::channel(16).0,
+        )
+        .unwrap()
+        .with_layouts(crate::layout::Layouts::new(store));
+        tokio::spawn(serve(Arc::new(state), listener));
+        (home, socket)
+    }
+
+    /// A connection read a line at a time, keeping the pushes that come before each answer.
+    struct Lines {
+        reader: BufReader<std::os::unix::net::UnixStream>,
+        writer: std::os::unix::net::UnixStream,
+        next: u64,
+        pushes: Vec<Value>,
+    }
+
+    impl Lines {
+        fn open(socket: &Path, client: &str) -> Lines {
+            let stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+            let reader = BufReader::new(stream.try_clone().unwrap());
+            let mut lines = Lines { reader, writer: stream, next: 1, pushes: Vec::new() };
+            let hello = lines.call("hello", json!({ "protocol": PROTOCOL, "client": client, "version": "0" }));
+            assert!(hello.get("result").is_some(), "{hello}");
+            lines
+        }
+
+        fn call(&mut self, method: &str, params: Value) -> Value {
+            let id = self.send(method, params);
+            loop {
+                let line = self.within(Duration::from_secs(10)).expect("an answer");
+                if line["id"] == id {
+                    return line;
+                }
+                self.pushes.push(line);
+            }
+        }
+
+        /// Sends a request without waiting for its answer, and says its id.
+        fn send(&mut self, method: &str, params: Value) -> u64 {
+            let id = self.next;
+            self.next += 1;
+            writeln!(self.writer, "{}", json!({ "id": id, "method": method, "params": params })).unwrap();
+            id
+        }
+
+        /// The connections whose reply or `layout` push waits for room, as `status` says.
+        fn waiting(&mut self) -> u64 {
+            let status = self.call("status", Value::Null);
+            status["result"]["interfaces"]["replies_waiting"].as_u64().unwrap_or_else(|| panic!("{status}"))
+        }
+
+        /// What comes until the answers to `asked` and a push of version `latest` have, and for
+        /// 300 ms after: the answers' ids and versions, and the pushes' versions, in the order they
+        /// came.
+        fn until(&mut self, asked: &[u64], latest: u64) -> (Vec<(u64, u64)>, Vec<u64>) {
+            let (mut answers, mut pushes) = (Vec::<(u64, u64)>::new(), Vec::new());
+            let mut wait = Duration::from_secs(10);
+            while let Some(line) = self.within(wait) {
+                match line["id"].as_u64() {
+                    Some(id) => answers.push((id, line["result"]["v"].as_u64().unwrap_or_else(|| panic!("{line}")))),
+                    None => pushes.push(line["params"]["v"].as_u64().unwrap_or_else(|| panic!("{line}"))),
+                }
+                let answered = asked.iter().all(|id| answers.iter().any(|(answered, _)| answered == id));
+                if answered && pushes.contains(&latest) {
+                    wait = Duration::from_millis(300);
+                }
+            }
+            (answers, pushes)
+        }
+
+        /// The next line, if one comes within `wait`.
+        fn within(&mut self, wait: Duration) -> Option<Value> {
+            self.reader.get_ref().set_read_timeout(Some(wait)).unwrap();
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(n) if n > 0 => Some(serde_json::from_str(&line).unwrap()),
+                _ => None,
+            }
+        }
+    }
+
+    fn halves(v: u64) -> Value {
+        let first = if v.is_multiple_of(2) { 400 } else { 600 };
+        json!({ "format": 1, "focused": 1, "tree": { "split": {
+            "how": "across", "first": first, "a": { "chat": ANA }, "b": { "chat": CLIMBING } } } })
+    }
+
+    /// Ana's chat beside a chat jawd doesn't have, whose JID takes 8 KiB: every answer and push of
+    /// it names that JID in `dropped`, so a few dozen fill the queue to a connection and its socket.
+    fn wide() -> Value {
+        let gone = format!("{}@s.whatsapp.net", "9".repeat(8_192));
+        json!({ "format": 1, "focused": 0, "tree": { "split": {
+            "how": "across", "first": 500, "a": { "chat": ANA }, "b": { "chat": gone } } } })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_layout_kept_is_pushed_to_its_interfaces_other_connections_and_another_interface_can_read_it() {
+        let (_home, socket) = serving_layouts().await;
+        tokio::task::spawn_blocking(move || {
+            let mut setter = Lines::open(&socket, "jaw");
+            let mut other = Lines::open(&socket, "jaw");
+            let mut mac = Lines::open(&socket, "jaw-mac");
+            let answer = setter.call("layout.set", json!({ "v": 5, "layout": halves(5) }));
+            assert_eq!(answer["result"]["kept"], true, "{answer}");
+            let pushed = other.within(Duration::from_secs(10)).expect("the terminal's other connection is told");
+            assert_eq!(pushed["method"], "layout", "{pushed}");
+            assert_eq!(pushed["params"], json!({ "interface": "jaw", "v": 5, "layout": halves(5) }));
+            std::thread::sleep(Duration::from_millis(200));
+            setter.call("status", Value::Null);
+            mac.call("status", Value::Null);
+            assert_eq!(setter.pushes, Vec::<Value>::new(), "the connection that set it isn't told");
+            assert_eq!(mac.pushes, Vec::<Value>::new(), "nor is another interface");
+            let read = mac.call("layout.get", json!({ "interface": "jaw" }));
+            assert_eq!(
+                read["result"],
+                json!({ "interface": "jaw", "v": 5, "layout": halves(5) }),
+                "but it can open it"
+            );
+            let own = mac.call("layout.get", Value::Null);
+            assert_eq!(own["result"], json!({ "interface": "jaw-mac", "v": 0 }));
+            let stale = other.call("layout.set", json!({ "v": 4, "layout": halves(4) }));
+            assert_eq!(stale["result"]["kept"], false, "{stale}");
+            assert_eq!(stale["result"]["layout"], halves(5));
+            assert_eq!(setter.within(Duration::from_millis(300)), None, "and a stale one is pushed to nobody");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_slow_to_read_ends_on_the_latest_layout() {
+        let (_home, socket) = serving_layouts().await;
+        tokio::task::spawn_blocking(move || {
+            let mut slow = Lines::open(&socket, "jaw");
+            let mut setter = Lines::open(&socket, "jaw");
+            // Far more pushes than the connection's lines waiting and its socket hold.
+            const SETS: u64 = 150;
+            for v in 1..=SETS {
+                let answer = setter.call("layout.set", json!({ "v": v, "layout": halves(v) }));
+                assert_eq!(answer["result"]["kept"], true, "{answer}");
+            }
+            let mut last = None;
+            while let Some(push) = slow.within(Duration::from_millis(500)) {
+                last = Some(push["params"]["v"].as_u64().unwrap());
+            }
+            assert_eq!(last, Some(SETS), "a push may be skipped, but never the last");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn under_the_lane_a_slow_connection_has_every_answer_once_in_order_and_ends_on_the_latest_layout() {
+        let (_home, socket) = serving_layouts().await;
+        tokio::task::spawn_blocking(move || {
+            let mut slow = Lines::open(&socket, "jaw");
+            let mut setter = Lines::open(&socket, "jaw");
+            let keep = |setter: &mut Lines, v: u64| {
+                let answer = setter.call("layout.set", json!({ "v": v, "layout": wide() }));
+                assert_eq!(answer["result"]["kept"], true, "{answer}");
+            };
+            // The slow connection reads nothing while the terminal's other connection keeps layouts,
+            // until the queue to it is full and a push waits for room, as a reply would.
+            let mut v = 0;
+            while setter.waiting() == 0 {
+                v += 1;
+                assert!(v <= 400, "no push waited for room, so pushes were dropped or held the connection up");
+                keep(&mut setter, v);
+            }
+            // Meanwhile its requests aren't read, and the layouts kept after the push that waits stay
+            // in its channel, the latest last.
+            let asked: Vec<u64> = (0..20).map(|_| slow.send("layout.get", Value::Null)).collect();
+            for _ in 0..5 {
+                v += 1;
+                keep(&mut setter, v);
+            }
+            // Once it reads, the push that waited comes, then the requests are read and answered down
+            // the lane, in order, each with the latest layout, and the latest is pushed.
+            let (answers, pushes) = slow.until(&asked, v);
+            assert_eq!(answers.iter().map(|(id, _)| *id).collect::<Vec<_>>(), asked, "each answered once, in order");
+            assert!(answers.iter().all(|&(_, got)| got == v), "each read after the last layout kept: {answers:?}");
+            assert!(pushes.is_sorted_by(|a, b| a < b), "a push older than one before it: {pushes:?}");
+            assert_eq!(pushes.last(), Some(&v), "it ends on the latest");
+
+            // Now an answer waits: it asks for its layout again and again, reading nothing, until the
+            // answers fill the queue to it.
+            let mut asked = Vec::new();
+            while setter.waiting() == 0 {
+                assert!(asked.len() < 400, "no answer waited for room");
+                asked.push(slow.send("layout.get", Value::Null));
+            }
+            // The layouts kept meanwhile are neither pushed ahead of the answer that waits nor in its
+            // place: once it reads, every answer comes, once and in order, then only the latest.
+            let before = v;
+            for _ in 0..5 {
+                v += 1;
+                keep(&mut setter, v);
+            }
+            let (answers, pushes) = slow.until(&asked, v);
+            assert_eq!(answers.iter().map(|(id, _)| *id).collect::<Vec<_>>(), asked, "every answer once, in order");
+            let read = answers.iter().map(|&(_, got)| got);
+            assert!(read.clone().all(|got| (before..=v).contains(&got)), "{answers:?}");
+            assert!(read.is_sorted(), "an answer older than one before it: {answers:?}");
+            assert_eq!(pushes, [v], "only the latest of the layouts kept while the answer waited");
+            assert_eq!(setter.waiting(), 0, "nothing waits once it has read");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn layout_requests_take_their_turn_in_the_lane_as_the_hello_before_them_named_the_connection() {
+        let (home, socket) = serving_layouts().await;
+        let db = home.path().join("jaw.db");
+        tokio::task::spawn_blocking(move || {
+            let mut jaw = Lines::open(&socket, "jaw");
+            // jaw.db's write lock, held from outside, so the set waits on the writer, and the get
+            // sent after it waits for it.
+            let holder = rusqlite::Connection::open(&db).unwrap();
+            holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let set = jaw.send("layout.set", json!({ "v": 5, "layout": halves(5) }));
+            let get = jaw.send("layout.get", Value::Null);
+            // Meanwhile what's answered at once is: focus, and a hello giving the connection another
+            // name.
+            let focus = jaw.call("focus", json!({ "focused": true }));
+            assert!(focus.get("result").is_some(), "{focus}");
+            let hello = jaw.call("hello", json!({ "protocol": PROTOCOL, "client": "jaw-mac", "version": "0" }));
+            assert!(hello.get("result").is_some(), "{hello}");
+            assert_eq!(jaw.pushes, Vec::<Value>::new(), "the set or the get was answered while the writer was held");
+            holder.execute_batch("COMMIT").unwrap();
+            // Let go, the set is kept and the get reads it, in the order sent, each as `jaw`, the
+            // name the connection had when it sent them.
+            let answers: Vec<Value> = (0..2).map(|_| jaw.within(Duration::from_secs(10)).expect("an answer")).collect();
+            assert_eq!((&answers[0]["id"], &answers[0]["result"]["kept"]), (&json!(set), &json!(true)), "{answers:?}");
+            assert_eq!(answers[1]["id"], get, "{answers:?}");
+            for answer in &answers {
+                assert_eq!((&answer["result"]["interface"], &answer["result"]["v"]), (&json!("jaw"), &json!(5)));
+            }
+            // Named anew, it has nothing kept of its own.
+            let own = jaw.call("layout.get", Value::Null);
+            assert_eq!(own["result"], json!({ "interface": "jaw-mac", "v": 0 }));
         })
         .await
         .unwrap();

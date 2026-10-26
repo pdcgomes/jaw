@@ -46,6 +46,7 @@ pub use self::read::Reads;
 #[cfg(test)]
 pub(crate) use self::tests::index_against_text;
 use self::write::Stamps;
+pub use self::write::layout;
 pub use self::write::outbox;
 pub use self::write::unpack;
 #[cfg(test)]
@@ -560,6 +561,17 @@ impl Store {
         let db = connect(&self.path, Role::Reader)?;
         let count: i64 = db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))?;
         Ok(count.max(0) as u64)
+    }
+
+    /// How many interfaces keep a layout, and the bytes of the biggest, read on a connection of its
+    /// own so the writer doesn't wait.
+    pub fn layouts_kept(&self) -> Result<(u64, u64)> {
+        let db = connect(&self.path, Role::Reader)?;
+        let (kept, largest): (i64, i64) =
+            db.query_row("SELECT count(*), coalesce(max(octet_length(value)), 0) FROM interface_state", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        Ok((kept.max(0) as u64, largest.max(0) as u64))
     }
 
     /// The whole backups taken before upgrades beside jaw.db, and until when each is kept.

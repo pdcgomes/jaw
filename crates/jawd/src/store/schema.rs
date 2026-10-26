@@ -710,6 +710,24 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- counts read after it.
     CREATE INDEX messages_by_time ON messages (chat, at, n, mine, kind, mentions_me);
     ",
+    // 12: what interfaces keep of how they were laid out, a schema step: one new table, which costs
+    // the same however big jaw.db is, and which nothing refers to.
+    "
+    -- Class: jaw's own. What each interface keeps of how it was laid out, by the name it gives in
+    -- hello (jaw for the terminal) and what it is: under 'layout', its split panes, in the format
+    -- jaw-proto's layout module gives. A row is replaced only by one with a newer version, which
+    -- the interface gives, so asking again, or late, changes nothing. Never dropped or rebuilt; any
+    -- rebuild copies it as it is. jawd keeps 16 rows at most.
+    CREATE TABLE interface_state (
+        interface TEXT NOT NULL CHECK (octet_length(interface) BETWEEN 1 AND 64),
+        key TEXT NOT NULL CHECK (octet_length(key) BETWEEN 1 AND 64),
+        value TEXT NOT NULL CHECK (json_valid(value) AND octet_length(value) <= 16384),
+        v INTEGER NOT NULL CHECK (v > 0),
+        -- When the row was last replaced, in milliseconds since the epoch.
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (interface, key)
+    ) STRICT, WITHOUT ROWID;
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.

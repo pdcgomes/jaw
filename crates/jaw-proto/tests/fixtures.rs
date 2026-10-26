@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use jaw_proto::find::{ChatOpened, Find, Found};
+use jaw_proto::layout::{LayoutGet, LayoutSet, Saved};
 use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
     React, Read, SendRetry, SendText, Sent, Typing,
@@ -87,6 +88,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "forward" => params::<Forward>(&name, &request.params),
                     "message.info" => params::<MessageInfo>(&name, &request.params),
                     "chat.info" => params::<ChatInfo>(&name, &request.params),
+                    "layout.get" => params::<LayoutGet>(&name, &request.params),
+                    "layout.set" => params::<LayoutSet>(&name, &request.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }
@@ -106,6 +109,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "forward" => params::<Forwarded>(&name, result),
                     "message.info" => params::<Info>(&name, result),
                     "chat.info" => params::<ChatInfoResult>(&name, result),
+                    "layout.get" | "layout.set" => params::<Saved>(&name, result),
                     "chats.watch" => params::<ChatsWatched>(&name, result),
                     // A move's result is its window's; this fixture moves a messages window.
                     "messages.watch" | "watch.move" => params::<MessagesWatched>(&name, result),
@@ -121,6 +125,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "messages" => params::<MessagesPush>(&name, &push.params),
                     "resync" => params::<Watch>(&name, &push.params),
                     "notice" => params::<Notice>(&name, &push.params),
+                    "layout" => params::<Saved>(&name, &push.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }

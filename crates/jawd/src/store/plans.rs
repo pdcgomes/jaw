@@ -64,6 +64,14 @@ const ALLOWED: &[(&str, &str)] = &[
     ("SELECT message FROM settled LIMIT", "stops at its limit"),
     ("SELECT chat, member FROM regroup LIMIT", "stops at its limit"),
     (
+        "SELECT count(*) FROM interface_state",
+        "interface_state holds a row for each of 16 interfaces at most, counted when one keeps its first",
+    ),
+    (
+        "SELECT count(*), coalesce(max(octet_length(value)), 0) FROM interface_state",
+        "jawd status, on a table of 16 rows at most",
+    ),
+    (
         "FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1",
         "an action naming a message by its ID alone looks for it in each chat, a search of messages_by_id each; \
         chats are few next to messages",

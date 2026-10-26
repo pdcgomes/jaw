@@ -666,6 +666,38 @@ pub fn chat_n(db: &Connection, id: &str) -> Result<Option<i64>> {
     Ok(db.prepare_cached("SELECT n FROM chats WHERE id = ?1")?.query_row([id], |r| r.get(0)).optional()?)
 }
 
+/// The JID of the chat `jid` names now, as the writer finds one (`chat_jid`): its own, or the chat
+/// it's being merged into, or, when jaw has no chat by that JID, the one-to-one chat with the same
+/// person under another of their JIDs, phone number or LID. None once there's no such chat.
+pub fn chat_named(db: &Connection, jid: &str) -> Result<Option<String>> {
+    let own: Option<String> = db
+        .prepare_cached(
+            "SELECT coalesce(k.id, c.id) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n
+                LEFT JOIN chats k ON k.n = m.keep
+            WHERE c.id = ?1",
+        )?
+        .query_row([jid], |r| r.get(0))
+        .optional()?;
+    if own.is_some() || !super::write::is_person(jid) {
+        return Ok(own);
+    }
+    Ok(db
+        .prepare_cached(
+            "SELECT c.id FROM person_jids j JOIN chats c ON c.person = j.person AND c.kind = 'direct'
+            WHERE j.jid = ?1 AND NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = c.n) ORDER BY c.n LIMIT 1",
+        )?
+        .query_row([super::write::user_jid(jid)], |r| r.get(0))
+        .optional()?)
+}
+
+/// What `interface` keeps under `key`, and its version.
+pub fn interface_state(db: &Connection, interface: &str, key: &str) -> Result<Option<(String, i64)>> {
+    Ok(db
+        .prepare_cached("SELECT value, v FROM interface_state WHERE interface = ?1 AND key = ?2")?
+        .query_row(params![interface, key], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?)
+}
+
 /// A message's place in its chat.
 pub fn message_place(db: &Connection, chat: &str, id: &str) -> Result<Option<MessageCursor>> {
     Ok(db

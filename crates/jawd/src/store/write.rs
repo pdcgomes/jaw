@@ -3,6 +3,7 @@
 //! it last changed: interfaces converge however updates arrive, and a client that saw seq S needs
 //! only the rows whose `v` is past S.
 
+pub mod layout;
 pub mod outbox;
 
 use std::cell::RefCell;
@@ -67,6 +68,8 @@ pub enum Change {
     MergeStep(Option<Merging>),
     /// Sending and reading: the outbox and read positions.
     Outbox(outbox::Step),
+    /// What an interface keeps of how it was laid out.
+    Layout(layout::Keep),
 }
 
 /// A merge of one chat into another, as a merge step names it.
@@ -508,6 +511,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<&[u8]>) {
             ("merge", merging.as_ref().map(|m| m.reference.clone()).unwrap_or_default(), None)
         }
         Some(Change::Outbox(step)) => outbox::provenance(step),
+        Some(Change::Layout(keep)) => layout::provenance(keep),
         None => ("nothing", String::new(), None),
     }
 }
@@ -621,6 +625,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         }
         Change::MergeStep(merging) => merge_step(db, stamps, merging.as_ref().map(|m| m.gone)),
         Change::Outbox(step) => outbox::apply(db, stamps, step),
+        Change::Layout(keep) => layout::apply(db, keep),
     }
 }
 
@@ -1016,7 +1021,7 @@ pub(super) fn index(db: &Connection, limit: usize, mut enough: impl FnMut(usize)
 }
 
 /// A JID without its device: messages from someone's phone and their laptop are from them.
-fn user_jid(jid: &str) -> String {
+pub(super) fn user_jid(jid: &str) -> String {
     match jid.split_once('@') {
         Some((user, server @ ("s.whatsapp.net" | "lid" | "hosted" | "hosted.lid"))) => {
             let user = user.split([':', '.']).next().unwrap_or(user);
@@ -1026,7 +1031,7 @@ fn user_jid(jid: &str) -> String {
     }
 }
 
-fn is_person(jid: &str) -> bool {
+pub(super) fn is_person(jid: &str) -> bool {
     jid.ends_with("@s.whatsapp.net")
         || jid.ends_with("@lid")
         || jid.ends_with("@hosted")

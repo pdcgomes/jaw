@@ -178,6 +178,10 @@ SELECT count(*) FROM inbox
     SCAN inbox
 
 -- src/store/mod.rs
+SELECT count(*), coalesce(max(octet_length(value)), 0) FROM interface_state
+    SCAN interface_state
+
+-- src/store/mod.rs
 INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)
 
 -- src/store/mod.rs
@@ -449,6 +453,23 @@ SELECT n FROM chats WHERE id = ?1
     SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
 
 -- src/store/read.rs
+SELECT coalesce(k.id, c.id) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n LEFT JOIN chats k ON k.n = m.keep WHERE c.id = ?1
+    SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
+-- src/store/read.rs
+SELECT c.id FROM person_jids j JOIN chats c ON c.person = j.person AND c.kind = 'direct' WHERE j.jid = ?1 AND NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = c.n) ORDER BY c.n LIMIT 1
+    SEARCH j USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+    SEARCH c USING INDEX chats_by_person (person=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/read.rs
+SELECT value, v FROM interface_state WHERE interface = ?1 AND key = ?2
+    SEARCH interface_state USING PRIMARY KEY (interface=? AND key=?)
+
+-- src/store/read.rs
 SELECT at, n FROM messages WHERE chat = (SELECT n FROM chats WHERE id = ?1) AND id = ?2
     SEARCH messages USING INDEX messages_by_id (chat=? AND id=?)
     SCALAR SUBQUERY 1
@@ -494,6 +515,17 @@ SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_
 -- src/store/schema.rs
 SELECT count(*) FROM sqlite_schema
     SCAN sqlite_master
+
+-- src/store/write/layout.rs
+SELECT v FROM interface_state WHERE interface = ?1 AND key = ?2
+    SEARCH interface_state USING PRIMARY KEY (interface=? AND key=?)
+
+-- src/store/write/layout.rs
+SELECT count(*) FROM interface_state
+    SCAN interface_state
+
+-- src/store/write/layout.rs
+INSERT INTO interface_state (interface, key, value, v, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (interface, key) DO UPDATE SET value = excluded.value, v = excluded.v, updated_at = excluded.updated_at WHERE excluded.v > interface_state.v
 
 -- src/store/write/outbox.rs
 SELECT k.message, k.id, coalesce(c.id, k.jid), c.n, o.n FROM send_keys k LEFT JOIN messages m ON m.n = k.message LEFT JOIN chats c ON c.n = m.chat LEFT JOIN outbox o ON o.message = m.n WHERE k.key = ?1

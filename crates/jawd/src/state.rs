@@ -14,6 +14,7 @@ use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
 use crate::feed::Feed;
 use crate::find::Finder;
+use crate::layout::Layouts;
 use crate::send::Sending;
 use crate::sock::{APART_MOST, LANE_MOST, Lanes};
 use crate::store::Store;
@@ -41,6 +42,7 @@ pub struct State {
     /// Whether jawd is stopping, so connections end and take no more work.
     stopping: watch::Sender<bool>,
     sending: Option<Sending>,
+    layouts: Option<Layouts>,
 }
 
 impl State {
@@ -71,6 +73,7 @@ impl State {
             lanes: Lanes::default(),
             stopping: watch::channel(false).0,
             sending: None,
+            layouts: None,
         })
     }
 
@@ -115,6 +118,16 @@ impl State {
 
     pub fn sending(&self) -> Option<&Sending> {
         self.sending.as_ref()
+    }
+
+    /// Keeps interfaces' layouts with `layouts`.
+    pub fn with_layouts(mut self, layouts: Layouts) -> State {
+        self.layouts = Some(layouts);
+        self
+    }
+
+    pub fn layouts(&self) -> Option<&Layouts> {
+        self.layouts.as_ref()
     }
 
     /// Serves windows from `feed`.
@@ -224,6 +237,7 @@ impl State {
             }),
             windows: self.feed.as_ref().map(Feed::windows),
             storage: self.store.as_ref().map(Store::storage),
+            layouts: self.layouts.as_ref().map(Layouts::status),
         }
     }
 

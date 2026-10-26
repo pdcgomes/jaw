@@ -274,6 +274,16 @@ pub fn describe(status: &Status) -> String {
             ));
         }
     }
+    if let Some(layouts) = &status.layouts {
+        let mut kept = format!(
+            "layouts   {} kept of {}, the biggest {} of {} bytes",
+            layouts.kept, layouts.most, layouts.largest_bytes, layouts.bytes_most
+        );
+        if layouts.refused > 0 {
+            kept.push_str(&format!("; {} refused for being past a limit", layouts.refused));
+        }
+        lines.push(kept);
+    }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));
     }
@@ -335,6 +345,19 @@ fn duration(us: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_says_how_many_layouts_are_kept_of_the_most_their_biggest_and_how_many_were_refused() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/fixtures/status.result.json")).unwrap();
+        let mut status: super::Status = serde_json::from_value(fixture["result"].clone()).unwrap();
+        let said = super::describe(&status);
+        assert!(said.lines().any(|l| l == "layouts   2 kept of 16, the biggest 312 of 16384 bytes"), "{said}");
+        status.layouts.as_mut().unwrap().refused = 3;
+        let said = super::describe(&status);
+        let refused = "layouts   2 kept of 16, the biggest 312 of 16384 bytes; 3 refused for being past a limit";
+        assert!(said.lines().any(|l| l == refused), "{said}");
+    }
+
     #[test]
     fn a_logout_is_said_with_jawds_reason_and_as_the_phones_without_one() {
         assert_eq!(super::logged_out(None), "logged out from the phone");

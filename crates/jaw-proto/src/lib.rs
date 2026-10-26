@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod find;
+pub mod layout;
 pub mod local;
 pub mod send;
 pub mod sync;
@@ -265,6 +266,22 @@ pub struct Status {
     /// jaw.db's WAL and commits, and why it can't be written if it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<Storage>,
+    /// The layouts kept for interfaces, and the limits on them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layouts: Option<Layouts>,
+}
+
+/// The layouts jawd keeps for interfaces (`layout.set`), and the most it keeps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Layouts {
+    /// Interfaces with a layout kept, and the most that can have one.
+    pub kept: u64,
+    pub most: u64,
+    /// The biggest layout kept, in bytes, and the most one can take.
+    pub largest_bytes: u64,
+    pub bytes_most: u64,
+    /// Layouts refused since jawd started for being past one of those limits.
+    pub refused: u64,
 }
 
 /// The interfaces connected to jawd, and where its notifications go.
@@ -284,8 +301,8 @@ pub struct Interfaces {
     pub lane_most: u64,
     #[serde(default)]
     pub lanes_full: u64,
-    /// The connections whose reply waits for room in the queue to their interface, one each at
-    /// most, which jawd reads nothing from and sends nothing else meanwhile.
+    /// The connections whose reply, or `layout` push, waits for room in the queue to their
+    /// interface, one each at most, which jawd reads nothing from and sends nothing else meanwhile.
     #[serde(default)]
     pub replies_waiting: u64,
     /// The requests being answered on tasks of their own, finds and saves, and the most a

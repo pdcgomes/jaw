@@ -7,6 +7,7 @@ mod demo;
 mod engine;
 mod feed;
 mod find;
+mod layout;
 mod notify;
 mod send;
 mod sock;
@@ -449,6 +450,7 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, no_notify: bool
         .with_feed(feed)
         .with_attention(attention)
         .with_sending(sending)
+        .with_layouts(layout::Layouts::new(store.clone()))
         .with_notifications(says);
     let state = Arc::new(state);
     let _ = state.finder.set(finder);
