@@ -58,12 +58,13 @@ The first request on a connection. Anything else first gets error 6.
 - `since`: the last `seq` this client saw, if it's reconnecting. Its watches, sent again, then return only what changed.
 
 ```json
-{"id":1,"result":{"protocol":1,"jawd":"0.1.0","root":"/Users/me/Library/Application Support/jaw","seq":81233,"account":{"state":"linked","me":{"id":"person:1","name":"Pedro","phone":"+351 912 000 000"}},"connection":{"state":"online"}}}
+{"id":1,"result":{"protocol":1,"jawd":"0.1.0","root":"/Users/me/Library/Application Support/jaw","seq":81233,"account":{"state":"linked","me":{"id":"person:1","name":"Pedro","phone":"+351 912 000 000"}},"connection":{"state":"online"},"settings":{"theme":"tokyo-night","messages":"bubbles"}}}
 ```
 
 - `root`: jaw's folder. Every `path` jawd sends is relative to it, and the files are readable by the same user.
 - `account.state`: `unlinked`, `linking` or `linked`. From the moment jawd starts, an account that was linked when it last connected, and hasn't been logged out since, is `linked`, with `connection.state` `connecting` until the engine connects (`offline` when jawd has no engine to run). If the account was logged out meanwhile, a `connection` push says `logged_out` once the engine finds out, with a `reason`: WhatsApp's, or `this device isn't linked any more` when the engine finds no device. A folder never linked says `unlinked`, and so does one from a jawd before this, until its engine connects.
 - `connection.state`: as the `connection` push below.
+- `settings`: the settings of the connection's own domain, the one its `client` names, with the values in effect, as "Settings" says; absent for a client jawd keeps no settings for.
 
 ## Windows
 
@@ -228,7 +229,9 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | Method | Params | Result |
 | --- | --- | --- |
 | `hello` | `protocol`, `client`, `version`, `focus`, `since` | See Hello |
-| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), `interfaces`: how many are `connected`, whether one is `focused`, where `notifications` go, the requests `in_lanes`, read and not yet answered (this one among them), the most a connection's lane holds (`lane_most`), the `lanes_full`, whose connections jawd reads nothing more from until one is answered, and the connections with a reply, or a `layout` push, waiting for room (`replies_waiting`, one each at most), which it reads nothing from and sends nothing else meanwhile, and the finds and saves being answered on tasks of their own (`apart`, at most `apart_most` a connection); `windows`: how many are `watched` on every connection, how many of them are `distinct`, the `most` one connection can watch, the bytes of the reads kept for windows watched alike to share (`kept_bytes`, at most `kept_most`, the oldest `let_go` past it), and the window `reads` made, `taken` from a kept read and `joined` to one under way; and `layouts`: how many interfaces have one `kept`, of the `most`, the `largest_bytes` of `bytes_most`, and how many were `refused` for a limit |
+| `status` | | jawd's version, connection, account, engine, each pool's depth and times, what's missing (ffmpeg), `interfaces`: how many are `connected`, whether one is `focused`, where `notifications` go, the requests `in_lanes`, read and not yet answered (this one among them), the most a connection's lane holds (`lane_most`), the `lanes_full`, whose connections jawd reads nothing more from until one is answered, and the connections with a reply, or a `layout` push, waiting for room (`replies_waiting`, one each at most), which it reads nothing from and sends nothing else meanwhile, and the finds and saves being answered on tasks of their own (`apart`, at most `apart_most` a connection); `windows`: how many are `watched` on every connection, how many of them are `distinct`, the `most` one connection can watch, the bytes of the reads kept for windows watched alike to share (`kept_bytes`, at most `kept_most`, the oldest `let_go` past it), and the window `reads` made, `taken` from a kept read and `joined` to one under way; `layouts`: how many interfaces have one `kept`, of the `most`, the `largest_bytes` of `bytes_most`, and how many were `refused` for a limit; and `settings`: each domain's settings in effect by its name, with `settings_ignored`, any jawd doesn't take |
+| `settings.set` | any of `theme`, `messages` | `settings`, all of them, once kept. See Settings |
+| `themes` | | `themes`: every theme with its colours. See Settings |
 | `focus` | `focused` | |
 | `link.start` | `method` (`qr` or `phone`), `phone` | Pushes `link` as it goes |
 | `link.cancel` | | |
@@ -287,6 +290,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | --- | --- |
 | `link` | `state`: `qr` with `code` and `expires`, `code` with the phone `code` to type, `done`, or `failed` with `reason` |
 | `connection` | `state`: `connecting`, `online`, `catching_up` (with `done` and `total`), `phone_offline`, `offline`, `logged_out`, `update_needed`, `banned` (with `until`) or `engine_restarting` |
+| `settings` | its domain's settings, as hello's `settings` |
 | `typing` | `chat`, `who` (each `id`, `name` and `state`, `typing` or `recording`; empty once nobody is) |
 | `presence` | `chat`, `person`, `state` (`online`, `seen` or `hidden`), `at` for `seen`, `known` |
 | `job` | `id`, `kind` (`upload`, `download`, `transcode`), `message`, `progress` |
@@ -409,6 +413,24 @@ Proposed with the terminal's sidebar in M6, for jawd to build; until then `folde
 - **The roster.** `roster.watch` takes `folder` as `chats.watch` does, `offline` (false leaves out people who aren't online, typing or recording), and a window's `around`, `before` and `after`. Its rows are people: `id`, `name`, `phone`, `about`, `avatar`, `presence`, `chat` (their one-to-one chat's `id`, if there is one) and `folders`, as chats have them. `sort` puts them online first (`0~` and the name), then by when last seen, the most recent first (`1~` and the time counted down), then those who hide it or whom WhatsApp hasn't told jawd about (`2~` and the name). `presence` is `state` (`online`, `typing`, `recording`, `seen` or `hidden`) with `at` for `seen`, and `known` false when jawd isn't following that person now (scrolled past, or over the limits in Presence), so an interface draws the last known state faintly.
 - **Your folders.** `folder.create` (`name`, `parent`, null for the top) answers with `folder`, the new row, placed last among its siblings; `folder.rename` (`folder`, `name`); `folder.move` (`folder`, `parent`, `position`) nests a folder in another, or puts it back at the top with a null `parent`, at `position` among its new siblings (last without it); `folder.delete` (`folder`) moves its subfolders up to its parent, and its chats and people stay wherever else they are. `folder.add` and `folder.remove` (`folder`, `item`: a chat's `id` or a `person:` id) file and unfile one item; an item can sit in any number of folders. Each pushes the folder rows it changes, and the chat and roster rows whose `folders` change, to every interface.
 - **Errors.** A name that's empty or only spaces is -32602; one a sibling already has is error 4. Moving a folder into itself or one of its own subfolders, renaming, moving, deleting or filing into a built-in folder, or filing into a smart one, is error 4. A folder or item jawd doesn't have is error 3.
+
+## Settings
+
+Each frontend's settings, kept by jawd in jaw.db in a domain of its own, named by the `client` its hello gives, so a terminal and a Mac app on one machine keep separate preferences. A connection reads its own domain's settings in hello's answer, changes them with `settings.set` and is pushed them when they change. The terminal's domain, `jaw`, is the only one jawd keeps so far; `jaw settings` and `jaw status` share it, since they say hello as `jaw` too.
+
+```json
+{"id":20,"method":"settings.set","params":{"theme":"gruvbox"}}
+{"id":20,"result":{"settings":{"theme":"gruvbox","messages":"bubbles"}}}
+{"method":"settings","params":{"theme":"gruvbox","messages":"bubbles"}}
+{"id":21,"method":"themes"}
+{"id":21,"result":{"themes":[{"id":"catppuccin","name":"Catppuccin","mode":"dark","colors":{"accent":"#89b4fa","background":"#1e1e2e","…":"…"}}]}}
+```
+
+- **In the terminal's domain,** `theme` is one of Omarchy's themes by its ID, as `themes` lists them; `tokyo-night` by default. `messages` is where your messages sit: `bubbles`, in a column from a third of the way across, by default, or `irc`, on the left under "You" as everyone's are.
+- **`settings.set`** changes the connection's own domain; a connection whose client has no domain is error 3, with `data` `{"client": "<client>"}`. It takes one setting or more and checks every one before changing any: a setting jawd doesn't know is -32602 with `data` `{"param": "<setting>"}`, a value it doesn't take or of the wrong type is -32602 with `data` `{"param": "<setting>", "allowed": [...]}`, and no settings at all is -32602. It answers with `settings`, all of them as they now are, once the change is on disk, synced; a setting asked with the value jaw.db already holds isn't written again, and an ask of nothing else is answered at once. While jaw.db can't be written for a reason that passes, such as a full disk, the answer waits as every write's does; a change that can't be kept at all is -32603 saying why, and nothing changes.
+- **The `settings` push** goes to every connection of the same domain that has said hello, the one that asked included, whenever that domain's settings change, and carries all of them. A connection always ends on the latest: a change made while it's slow to read may be skipped, never the last. Connections of other domains hear nothing of it.
+- **`themes`** answers with every theme, ordered by ID: its `id`, a `name` to show, its `mode` (`dark` or `light`) and `colors`, Omarchy's 25 colours by their keys as lowercase `#rrggbb`; where a theme leaves them out, `orange` is its `yellow` and `brown` its `orange` mixed half with black, as Omarchy resolves them. They're `protocol/themes/`, each theme's colors.toml as Omarchy wrote it (MIT, `docs/licenses/omarchy.txt`), which an interface in any language can read as well.
+- **`status`** says each domain's settings in effect as `settings`, by the domain's name, and as `settings_ignored` each setting whose value in jaw.db this jawd doesn't take, with its `domain`, its `key` and that `value`; such a setting has its default instead.
 
 ## Focus and reading
 

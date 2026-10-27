@@ -37,7 +37,7 @@ protocol/README.md gains a "Settings" section, served from the start, and the ro
 ```
 
 - **`hello`'s answer** carries `settings`: every setting of the connection's own domain, the one its `client` names, with the value in effect. It's absent for a client jawd keeps no settings for. An interface has them before it draws, and a reconnect brings them current again.
-- **`settings.set`** changes the connection's own domain. A connection whose client has no domain is error 3, with `data` `{"client": "<client>"}`. It takes one setting or more and checks every one before changing any. A setting jawd doesn't know is -32602 with `data` `{"param": "<setting>"}`; a value it doesn't take, or one of the wrong JSON type, is -32602 with `data` `{"param": "<setting>", "allowed": [...]}`; no settings at all is -32602. It answers with `settings`, all of them as they now are, once the change is on disk, synced. A setting asked for with the value jaw.db already holds for it is answered at once and writes nothing. If jaw.db can't be written, it's -32603 saying why, and nothing changes.
+- **`settings.set`** changes the connection's own domain. A connection whose client has no domain is error 3, with `data` `{"client": "<client>"}`. It takes one setting or more and checks every one before changing any. A setting jawd doesn't know is -32602 with `data` `{"param": "<setting>"}`; a value it doesn't take, or one of the wrong JSON type, is -32602 with `data` `{"param": "<setting>", "allowed": [...]}`; no settings at all is -32602. It answers with `settings`, all of them as they now are, once the change is on disk, synced. A setting asked for with the value jaw.db already holds for it isn't written again, and an ask of nothing else is answered at once. While jaw.db can't be written for a reason that passes, such as a full disk, the answer waits as every write's does; a change that can't be kept at all is -32603 saying why, and nothing changes.
 - **The `settings` push** goes to every greeted connection of the same domain, the one that asked included, whenever that domain's settings change, and carries all of them. A connection always ends on the latest settings: one change made while it's slow to read may be skipped, but never the last. Connections of other domains hear nothing of it.
 - **`themes`** answers with every theme, ordered by ID. Each has its `id`; a `name` to show, the ID in title case with "Rosé Pine" for `rose-pine`; its `mode`, `dark` or `light`; and `colors`, Omarchy's 25 colours by their keys as lowercase `#rrggbb`. Where a theme leaves them out, `orange` is its `yellow` and `brown` its `orange` mixed half with black, as Omarchy's own `omarchy-theme-color` resolves them. Keys a theme carries beyond those, such as Hyprland's borders, aren't served.
 - **`status`** gains `settings`, each domain's settings in effect by the domain's name (`{"jaw": {"messages": "bubbles", "theme": "tokyo-night"}}`), and `settings_ignored`, each setting whose value in jaw.db this jawd doesn't take, with its domain, its key and that value. `jawd status` and `jaw status` print them on a line of their own.
@@ -75,7 +75,7 @@ CREATE TABLE settings (
 - **Bounded.** jawd writes only domains and settings it knows, so the table holds at most one row for each, two today; `jawd status` reports what's in effect and anything ignored.
 - **Kept when not understood.** A row whose value this jawd doesn't take, written by a newer jawd within the compatibility window or naming a theme a later Omarchy drops, is left as it is and read as the default, and `status` says so. A row for a domain or a setting this jawd doesn't know is left alone and not read. Being jaw's own, neither is ever dropped.
 - **Not in the feed.** The feed keeps windows current, and settings aren't a window: hello and the push deliver them. So a change to the settings writes no `events` row; the rule that a change and its event commit together is about the feed's rows.
-- **A jaw.db that can't be written** publishes nothing, and the answer says why.
+- **A change that can't be kept** publishes nothing, and the answer says why; one waiting for a jaw.db that can't be written yet waits, as every write does.
 - **Backups.** The design's daily backup of jaw's own tables, still to be built, includes `settings`.
 - **The audit.** `crates/jawd/src/settings` joins the data-layer paths in `scripts/check-data-audit.py`, and the database expert audits the branch before it lands.
 
@@ -113,22 +113,25 @@ CREATE TABLE settings (
 ### Applying them
 
 - The view takes the terminal's settings, the `jaw` domain's, from hello's answer, from `settings` pushes and from `settings.set`'s answers, each carrying all of them. A theme or a value jaw doesn't know falls back to the default, and so does a hello without settings.
+- **A change shows at once,** while jawd's answer is on its way. If jawd refuses it, or it was never sent, the screen goes back to what jawd has and the footer says why after "not kept:", as in "not kept: jawd isn't connected; try again in a moment" for one never sent because jawd isn't connected. If its answer is lost, so jawd may have kept it, or jaw can't read the answer, the screen goes back as it does for a refusal, and the footer says "not confirmed: jawd went away; you'll see what it kept when it's back" or "not confirmed: jaw couldn't read jawd's answer". Any notice too long for the footer ends in "…".
 - A change rebuilds the theme and clears every cached layout (messages, chat rows, the library's and the palette's), so the next frame draws every line again, within a keypress's 16 ms.
 - **The first frame waits** for hello, for jawd to say it can't answer (starting, unreachable) or for 250 ms, whichever comes first, so a light theme never flashes Tokyo Night first. When jawd isn't running, the "starting jawd" screen draws in Tokyo Night and changes once hello comes.
 - The made-up account behind `jaw demo`, `jaw snapshot --demo` and `jaw bench` keeps the settings in memory, answering and pushing as jawd does.
 
 ### The panel
 
-- **Opening it:** Ctrl-,, which reaches jaw where the terminal speaks the kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2, Alacritty), or "settings" in the palette, which also finds it by "theme" and "IRC". Both work wherever Ctrl-K does: once jawd has answered and the account is linked. Ctrl-, closes the panel from anywhere in it, keeping nothing previewed; Esc steps back, from the theme list to the panel and from the panel out. The keys sheet lists Ctrl-,.
+- **Opening it:** Ctrl-,, which reaches jaw where the terminal speaks the kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2, Alacritty), or the palette, which offers "Settings", with ctrl-, beside it, "Change the theme", which opens the panel on the theme list, and "Turn the IRC layout on" or "Turn the IRC layout off", which switches it at once, so "irc" finds it whichever layout is on. Both work wherever Ctrl-K does: once jawd has answered and the account is linked. Ctrl-, closes the panel from anywhere in it, keeping nothing previewed; Esc steps back, from the theme list to the panel and from the panel out. The keys sheet lists Ctrl-,; it drops the blank line between its two sections when the screen can't hold that line too, so every line shows at 80 by 24.
 - **Where it sits:** in the chat list's column, with the focused border, so the open conversation beside it shows each change on real messages. Below 90 columns it takes the screen, as the chat list does there; in the spike's focused mode, it unfolds into the chat list's place while it's open.
-- **Look › Theme:** Enter opens the list of the 23, each with its mode and a strip of its colours, the one kept marked. Moving through the list previews each theme on the whole screen at once, inside jaw only. Enter keeps the one previewed, sending `settings.set`, and Esc goes back to the one kept.
+- **While it's open,** it has the keys: the conversation and the box give up their focused borders, and the box its cursor; pastes, clicks and the wheel do nothing; and opening it takes the keys from a sidebar that would be drawn over it. It stays on screen while jawd is away, a change asked meanwhile being refused at once as never sent, and closes once the account is no longer linked.
+- **Look › Theme:** Enter opens the list of the 23, each with its mode and a strip of its colours, the row with the keys marked ▸ in front and the theme kept ✓ after its name, so one row can show both. Moving through the list previews each theme on the whole screen at once, inside jaw only. Enter keeps the one previewed, sending `settings.set`, and Esc goes back to the one kept.
 - **Chat › Your messages:** "on the right" or "on the left, as IRC". ← → or Enter switches it, sending `settings.set` at once.
-- **What it says:** the footer shows the panel's keys while it's open. If jawd refuses a change or can't keep it, the footer says why and the screen goes back to what jawd has. A push from another jaw while the panel is open changes the theme it shows as kept; a preview under way goes on, and Esc returns to the new one.
+- **What it says:** the footer shows the panel's keys while it's open. If a change isn't kept or confirmed, the footer says so and the screen goes back to what jawd has, as "Applying them" says. A push from another jaw while the panel is open changes the theme it shows as kept; a preview under way goes on, and Esc returns to the new one.
 
 | Keys | In the panel | In the theme list |
 | --- | --- | --- |
 | Ctrl-, | Opens it, and closes it again | Closes the panel, keeping nothing previewed |
 | ↑ ↓, j k | Moves between settings | Previews the theme before or after |
+| PgUp PgDn, Home End | | Previews the theme ten before or after, or the first or the last |
 | ⏎ | Opens the theme list; switches your messages | Keeps the theme previewed, back to the panel |
 | ← → | Switches your messages | |
 | Esc | Closes the panel | Back to the panel, with the theme kept |
@@ -140,13 +143,14 @@ CREATE TABLE settings (
 - **"You" follows the rule for names:** it shows when the sender changes, after half an hour or on a new day, and the messages after it sit under it.
 - **Ticks and the time stay at the right edge,** as in `bubbles`: ticks on each message of yours, the time when the minute or the sender changes.
 - **What hangs off a message moves with it:** a quote, reactions, pictures, a long message's "more lines", "not sent · ⏎ tries again" and the selected message's line of detail all start at the name column.
+- **Your messages read as theirs do:** the selected one's line of detail starts with "You", as theirs start with their name, and one you deleted reads "This message was deleted", as theirs do; `bubbles` keeps "You deleted this message".
 - **The rest is as it is:** system and call lines stay centred, and day separators, "n new", and the blank lines before a new sender in a group and after half an hour don't change.
 - In `layout.rs`, the layout is part of `Shape`, so a message's cached lines are kept for each layout, and where your messages start is decided in one function.
 
 ### `jaw settings`
 
-- `jaw settings` prints each of the terminal's settings, its value and the values it takes. It says hello as `jaw`, so it reads and changes the terminal's own domain.
-- `jaw settings theme=gruvbox messages=irc` changes them with one `settings.set` and prints them as they now are. A setting or value jawd refuses prints jawd's message, and jawd not running prints so, each exiting with 1, as `jaw status` does. So the owner's `dot theme` can keep jaw in step with Ghostty and Neovim.
+- `jaw settings` prints each of the terminal's settings, its value and the values it takes, the list of themes wrapped at 80 columns under it. It says hello as `jaw`, so it reads and changes the terminal's own domain.
+- `jaw settings theme=gruvbox messages=irc` changes them with one `settings.set` and prints them as they now are. A mistake in its arguments, a change that isn't a `name=value` pair or names no setting, or a setting named twice, is refused before it connects, saying what's wrong, exiting with 2. A setting or value jawd refuses prints jawd's message, and jawd not running prints so, each exiting with 1, as `jaw status` does. So the owner's `dot theme` can keep jaw in step with Ghostty and Neovim.
 
 ## Testing
 
@@ -159,7 +163,7 @@ CREATE TABLE settings (
   - Each domain's settings reach only its own connections: a `jaw` connection is pushed a change to the terminal's settings, and a connection of another client gets no push, no `settings` in its hello's answer, and error 3 from `settings.set`.
   - A connection that leaves its queue full while changes come still ends on the latest settings.
   - Hello carries the settings; a jawd started again keeps them; a row with a value jawd doesn't take is kept, read as the default and named in `status`.
-  - A jaw.db that can't be written publishes nothing and answers with why.
+  - A change that can't be kept publishes nothing and answers with why.
   - Migration 12 joins the migrations' lock file, the upgrades from every fixture database, the failure injected at each statement and the plan test.
 - **jaw:**
   - Every theme holds the contrast ladder and its bands.

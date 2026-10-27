@@ -4,6 +4,8 @@ WhatsApp in a terminal, fast, from the keyboard: your chats, photos, voice messa
 
 jaw is being built. [The design](docs/plans/2026-10-16-jaw-design.md) says how it works and what it costs, [the protocol](protocol/README.md) how an interface talks to the daemon, and [your first run](docs/first-run.md) what the first start on a real account does.
 
+Its themes are [Omarchy's](https://github.com/omacom/omarchy), as Omarchy wrote them, MIT-licensed ([docs/licenses/omarchy.txt](docs/licenses/omarchy.txt)); Ctrl-, or `jaw settings` picks one.
+
 jaw isn't affiliated with WhatsApp or Meta.
 
 ## What it costs
