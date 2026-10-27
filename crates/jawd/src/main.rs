@@ -237,6 +237,10 @@ enum Bench {
         /// Times this many texts' acks with no flood, to compare with
         #[arg(long, default_value_t = 0)]
         texts_alone: u32,
+        /// Flushes each downloaded file in full, as off the Mac's own drive, rather than fencing it
+        /// with a barrier
+        #[arg(long)]
+        full_flush: bool,
     },
     /// Sending: send.text answered with its synced commit, and sends there and back through the demo engine
     Send {
@@ -328,8 +332,8 @@ fn jawd(cli: Cli) -> Result<()> {
         Some(Command::Bench(Bench::Send { count, trips, chats })) => {
             bench_send(send::bench::Plan { count, trips, chats })
         }
-        Some(Command::Bench(Bench::Media { count, width, height, flood, voice, texts_alone })) => {
-            bench_media(media::bench::Plan { count, width, height, flood, voice, alone: texts_alone })
+        Some(Command::Bench(Bench::Media { count, width, height, flood, voice, texts_alone, full_flush })) => {
+            bench_media(media::bench::Plan { count, width, height, flood, voice, alone: texts_alone, full_flush })
         }
         None => run(&home, cli.engine, cli.fail, &options),
     }

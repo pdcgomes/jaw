@@ -37,6 +37,9 @@ pub struct Plan {
     pub flood: u32,
     pub voice: bool,
     pub alone: u32,
+    /// Downloaded files flushed in full, as off the Mac's own drive, rather than fenced with a
+    /// barrier.
+    pub full_flush: bool,
 }
 
 const ANA: &str = "351912345678@s.whatsapp.net";
@@ -54,7 +57,7 @@ struct Served {
     socket: std::path::PathBuf,
 }
 
-async fn serve(scratch: &Path) -> Result<Served> {
+async fn serve(scratch: &Path, full_flush: bool) -> Result<Served> {
     let store = Store::open(scratch)?;
     crate::sync::running(&store).await?;
     let engine = DemoEngine::with(vec![demo::connected()]);
@@ -63,8 +66,8 @@ async fn serve(scratch: &Path) -> Result<Served> {
     let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
     let live: crate::sync::Shared = Arc::default();
     let (pushes, _) = broadcast::channel(256);
-    let media =
-        Media::start(store.clone(), Some(supervisor.clone()), scratch, &live, &pushes, Config::default()).await?;
+    let config = Config { barriers: full_flush.then_some(false), ..Config::default() };
+    let media = Media::start(store.clone(), Some(supervisor.clone()), scratch, &live, &pushes, config).await?;
     tokio::spawn(crate::sync::run(
         incoming,
         store.clone(),
@@ -108,7 +111,7 @@ pub async fn run(scratch: &Path, plan: Plan) -> Result<()> {
         made.elapsed().as_secs_f64()
     );
 
-    let Served { world, socket, .. } = serve(scratch).await?;
+    let Served { world, socket, .. } = serve(scratch, plan.full_flush).await?;
     // The chat exists before it's watched, as an open chat does.
     let hello = demo::text(ANA, ANA, "3EB0BENCHHELLO", super::now_ms(), "photos coming");
     world.deliver(hello).await.context("the demo engine took no message")?;
@@ -340,7 +343,7 @@ async fn flood(scratch: &Path, plan: Plan) -> Result<()> {
         made.elapsed().as_secs_f64()
     );
     let load_before = load();
-    let served = serve(scratch).await?;
+    let served = serve(scratch, plan.full_flush).await?;
     let (store, world) = (served.store.clone(), served.world.clone());
     let sampler = Sampler::start(scratch.join("jaw.db-wal"));
     sampler.sampling(true);
@@ -415,12 +418,13 @@ async fn flood(scratch: &Path, plan: Plan) -> Result<()> {
     let mb = |bytes: u64| bytes as f64 / 1e6;
     println!("load before {load_before}, after {}", load());
     println!(
-        "a flood of {} {what} ({:.2} MB each), handed over in {:.1} s, downloaded{} after {:.1} s",
+        "a flood of {} {what} ({:.2} MB each), handed over in {:.1} s, downloaded{} after {:.1} s, each file {}",
         plan.flood,
         held as f64 / 1e6 / f64::from(plan.flood.max(1)),
         handed_at.saturating_duration_since(began).as_secs_f64(),
         if plan.voice { "" } else { " and drawn" },
-        done_at.map_or(f64::NAN, |at| at.saturating_duration_since(began).as_secs_f64())
+        done_at.map_or(f64::NAN, |at| at.saturating_duration_since(began).as_secs_f64()),
+        if plan.full_flush { "flushed in full" } else { "fenced with a barrier" }
     );
     println!("the flood's acks:           {}", spread(flood_acks));
     let (acks, pushed) = phase(None);
