@@ -2350,10 +2350,55 @@ async fn a_reaction_on_its_way_to_a_message_deleted_for_everyone_before_it_goes_
         .apply(Lane::Live, vec![Change::Amend(Amend { what: Amendment::Revoke, ..other_of(ANA, "m1") })])
         .await
         .unwrap();
+    let shown = row(&running, ANA, "m1").await.unwrap();
+    assert!(shown.deleted && shown.reactions.is_empty(), "nor shown while it waits: {:?}", shown.reactions);
     running.connection(Online);
     until_stored(&running).await;
     assert!(kinds_sent(&running).is_empty(), "{:?}", kinds_sent(&running));
     let shown = row(&running, ANA, "m1").await.unwrap();
+    assert!(shown.deleted && shown.reactions.is_empty(), "{:?}", shown.reactions);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_deleted_for_everyone_shows_no_reactions_though_jaw_db_keeps_those_whatsapp_has() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    let hers = Amend { what: Amendment::React { emoji: "👍".into() }, at: now_ms() - 30_000, ..other_of(ANA, "m1") };
+    running.store.apply(Lane::Live, vec![Change::Amend(hers)]).await.unwrap();
+    // Yours is on its way when Ana deletes the message for everyone, and WhatsApp has it then.
+    running.world.gate(true);
+    running.call("react", json!({ "message": "m1", "emoji": "❤️" })).await.unwrap();
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Send(_)))).await;
+    running
+        .store
+        .apply(Lane::Live, vec![Change::Amend(Amend { what: Amendment::Revoke, ..other_of(ANA, "m1") })])
+        .await
+        .unwrap();
+    let shown = row(&running, ANA, "m1").await.unwrap();
+    assert!(shown.deleted && shown.reactions.is_empty(), "neither Ana's nor yours on its way: {:?}", shown.reactions);
+    running.world.gate(false);
+    until_stored(&running).await;
+    assert_eq!(kinds_sent(&running), ["a reaction"]);
+    let shown = row(&running, ANA, "m1").await.unwrap();
+    assert!(shown.deleted && shown.reactions.is_empty(), "nor yours once WhatsApp has it: {:?}", shown.reactions);
+    assert_eq!(stored_reactions(&running).await, 2, "both kept, as WhatsApp keeps them");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_youre_deleting_for_everyone_shows_no_reactions_while_your_deletion_is_on_its_way() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &id, "sent").await;
+    let hers = Amend { what: Amendment::React { emoji: "😮".into() }, ..other_of(ANA, &id) };
+    running.store.apply(Lane::Live, vec![Change::Amend(hers)]).await.unwrap();
+    assert_eq!(reactions(&row(&running, ANA, &id).await.unwrap()), [("😮".into(), 1, false)]);
+    until_offline(&running).await;
+    running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+    let shown = row(&running, ANA, &id).await.unwrap();
     assert!(shown.deleted && shown.reactions.is_empty(), "{:?}", shown.reactions);
 }
 

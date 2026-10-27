@@ -133,7 +133,7 @@ A message row, render-ready:
 | `spans` | The text and caption, parsed: `text`, `bold`, `italic`, `strike`, `mono`, `quote`, `list`, `link` (with `url`) and `mention` (with `person`) |
 | `reply` | The quoted message: its `id`, who wrote it, and a one-line `summary` |
 | `forwarded` | How many times, 0 if it wasn't |
-| `reactions` | Each emoji, how many, and whether one is yours |
+| `reactions` | Each emoji, how many, and whether one is yours; none on a message deleted for everyone, as on the phones |
 | `status` | On yours: `pending`, `sent`, `delivered`, `read`, `played` or `failed`; in groups, as on the phone, delivered once every member it was sent to has it and read once every one has read it (members who joined after don't count, and those who left don't hold it up), with each recipient's times in `message.info` |
 | `edited`, `deleted`, `expires_at`, `view_once`, `starred` | As they are |
 | `media` | For media kinds: `w`, `h` (the original's size in pixels, which the interface keeps the shape of), `seconds`, `bytes`, `name`, `mime`, `hd` (an HD copy exists), `previews` (`{"256": path, "768": path}`, each JPEG, or PNG for a sticker with its transparency, at most that many pixels on its long side, either absent until it's made), `thumbnail` (the tiny copy that came in the message, as a file, for drawing before a preview is made), `path` (the file, once downloaded), `state` (`remote`, `downloading` with `progress`, `local`, `expired`, `waiting_for_phone` or `gone`). Paths are relative to `hello`'s `root` |

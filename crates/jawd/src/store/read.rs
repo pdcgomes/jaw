@@ -559,6 +559,11 @@ fn message_row(r: &Row, polls: &mut Polls) -> rusqlite::Result<MessageRow> {
         voted_at,
     };
     super::overlay::message(row, r.get::<_, Option<String>>(26)?.as_deref());
+    // The phones show no reactions on a message deleted for everyone, though WhatsApp keeps them,
+    // and so does jaw.db.
+    if deleted {
+        reactions = "[]".into();
+    }
     let from = match r.get::<_, Option<i64>>(19)? {
         Some(id) => {
             let jid: Option<String> = r.get(23)?;
