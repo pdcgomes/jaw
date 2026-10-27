@@ -17,15 +17,22 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 FINDER = ".DS_Store"
+
+
+def refuse(constant: str) -> NoReturn:
+    """Refuses the NaN, Infinity and -Infinity that json.loads takes and Swift's JSONDecoder doesn't,
+    so a manifest reads here as it does to the harness."""
+    raise ValueError(f"{constant} isn't JSON")
 
 
 def listing(folder: Path) -> tuple[set[str], set[str]] | None:
     """The scene ids and picture files the manifest.json in `folder` lists, or None if it doesn't read
     as a sweep's."""
     try:
-        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"), parse_constant=refuse)
     except (OSError, ValueError):
         return None
     scenes = manifest.get("scenes") if isinstance(manifest, dict) else None

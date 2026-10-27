@@ -1,0 +1,11 @@
+#!/bin/sh
+# Fails when the harness names jawd's client: it draws from fixtures and asks jawd for nothing, so
+# nothing in it may make a Jawd. Its other rules come with the harness's later phases (the Mac
+# harness's design, "The checks").
+cd "$(dirname "$0")/.."
+found=$(grep -rnw 'Jawd' JawHarness/Sources)
+if [ -n "$found" ]; then
+    echo "$found"
+    echo "check-harness: the harness draws from fixtures and never names Jawd" >&2
+    exit 1
+fi

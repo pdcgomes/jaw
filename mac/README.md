@@ -11,16 +11,33 @@ cargo build -p jawd --bin jawd              # the jawd the live tests and --demo
 mac/scripts/build-mac test JawKit           # the client: fixtures, window models, a fake jawd, a real one
 mac/scripts/build-mac test JawThemes
 mac/scripts/build-mac test JawUITests       # the layout, and its reference pictures in both looks
+mac/scripts/build-mac test JawHarnessTests  # the harness: its catalog, flags, pictures and scenes
 mac/scripts/build-mac build jaw
 make mac                                    # Jaw.app with jawd, jaw-engine and jaw inside, signed
-make mac-test                               # the three suites above
+make mac-test                               # the four suites above
 ```
 
 The build Mac has no Rust or Go, so jawd, jaw and jaw-engine are built here and their binaries go with the checkout. `mise exec -- tuist generate --no-open` makes `Jaw.xcworkspace` for Xcode.
 
 A debug build never opens the owner's jaw folder: without `--home` or `JAW_HOME` it runs `jawd --engine demo`, a made-up account, in a folder of its own, and stops it on quitting. Only a signed release registers its jawd at login (Jaw › jawd at Login…), under the label `jaw agent install` uses, offering to take over the terminal's agent on a click and keeping a jawd newer than its own.
 
-The app's options: `--demo`, `--home <folder>`, `--bench launch|open|memory|idle`, which prints one JSON line and quits, and `--snapshot <png>`, which draws the window once a chat is open (or the sheet over it). With `--snapshot`, `--keys` presses shortcuts through the app's own event handling half a second apart and prints the panes after each: `cmd+shift+d`, `ctrl+cmd+right`, `cmd+opt+e`, a digit or a letter, and the steps `size:1200x800`, `save:<layout>`, `revert` and `drop:<row>:<middle|left|right|top|bottom>`. For example, `mac/scripts/build-mac snapshot /tmp/x.png --keys "cmd+d,save:Work,cmd+w,ctrl+cmd+1"`. The harness (`JawHarness`) draws each component from made-up rows, either look, dark or light, with `--scene <name>`, `--light` and `--snapshot <png>`.
+The app's options: `--demo`, `--home <folder>`, `--bench launch|open|memory|idle`, which prints one JSON line and quits, and `--snapshot <png>`, which draws the window once a chat is open (or the sheet over it). With `--snapshot`, `--keys` presses shortcuts through the app's own event handling half a second apart and prints the panes after each: `cmd+shift+d`, `ctrl+cmd+right`, `cmd+opt+e`, a digit or a letter, and the steps `size:1200x800`, `save:<layout>`, `revert` and `drop:<row>:<middle|left|right|top|bottom>`. For example, `mac/scripts/build-mac snapshot /tmp/x.png --keys "cmd+d,save:Work,cmd+w,ctrl+cmd+1"`.
+
+## The harness
+
+Jaw Harness (`JawHarness`) draws the app's components and screens from made-up rows and the protocol's fixtures, in each theme, look and density, and asks jawd for nothing, as [the harness's design](../docs/plans/2026-10-27-jaw-mac-harness-design.md) has it. Its scenes are listed by section on the left, with the conditions they're drawn in under them; each says what to look at, and each band of specimens what would be wrong with it.
+
+```sh
+mac/scripts/build-mac harness [scene] [options]    # built on the build Mac and opened here
+mac/scripts/build-mac shot <scene> <png> [options] # one scene drawn into a picture
+mac/scripts/build-mac sweep                        # every scene in each variant, into mac/build/review
+```
+
+After a sweep, the review canvas, `.atelier/mac-harness.canvas.tsx`, shows each scene's pictures by section (`atelier open .atelier/mac-harness.canvas.tsx`). Mark each one Right, or Needs work with a note; the marks are kept under `marks`, by scene, with the pictures they were made on, and agents read them with `atelier state .atelier/mac-harness.canvas.tsx`. A scene whose pictures change after its mark asks again.
+
+Its options: `--scene <id>`, `--theme <id>`, `--appearance dark|light`, `--look bubbles|lines`, `--density comfortable|compact`, `--text-size <11…17>`, `--font system|mono`, `--reduce-motion`, `--window <width>x<height>`, `--stage-only`, `--snapshot <png>` and `--sweep <folder>`.
+
+To add a component, write a scene in `JawHarness/Sources/Scenes/` and register it in `BuiltInScenes.swift`. `scripts/check-harness`, which every build runs, fails if the harness names `Jawd`.
 
 ## How the interface is put together
 

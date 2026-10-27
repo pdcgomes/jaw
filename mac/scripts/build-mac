@@ -38,6 +38,7 @@ if ! ssh_ true 2>/dev/null; then
         sweep)
             "$here/mac/scripts/check" build JawHarness | grep -q 'BUILD SUCCEEDED' || { "$here/mac/scripts/check" build JawHarness | tail -20; exit 1; }
             "$here/mac/$harness" --sweep "$here/mac/build/review" "$@"
+            "$here/mac/scripts/review-data"
             exit 0
             ;;
         harness)
@@ -53,7 +54,7 @@ echo "==> copying $(basename "$here") to $host:~/$remote" >&2
 ssh_ "mkdir -p ~/$remote"
 rsync -a --delete \
     --exclude .git --exclude '/target/*' --include '/target/debug/jawd' --exclude 'build/' --exclude '*.xcodeproj' \
-    --exclude '*.xcworkspace' --exclude Derived --exclude .DS_Store --exclude __pycache__ --exclude /.work \
+    --exclude '*.xcworkspace' --exclude Derived --exclude .DS_Store --exclude __pycache__ --exclude /.work --exclude /.atelier \
     --exclude '/marketing/*.mp4' --exclude '/marketing/*.gif' \
     -e "ssh -o BatchMode=yes" "$here/" "$host:$remote/"
 if [ -x "$here/target/debug/jawd" ]; then
@@ -84,6 +85,7 @@ case "$what" in
         mkdir -p "$here/mac/build/.review.incoming"
         rsync -a -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/review/" "$here/mac/build/.review.incoming/"
         "$here/mac/scripts/take-sweep" "$here/mac/build/.review.incoming" "$here/mac/build/review"
+        "$here/mac/scripts/review-data"
         echo "==> $here/mac/build/review"
         ;;
     harness)

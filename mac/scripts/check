@@ -5,6 +5,7 @@
 set -u
 cd "$(dirname "$0")/.."
 scripts/check-components || exit 1
+scripts/check-harness || exit 1
 action=build
 case "${1:-}" in test|build) action="$1"; shift ;; esac
 scheme="${1:-jaw}"; shift 2>/dev/null || true

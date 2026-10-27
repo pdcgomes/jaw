@@ -1,3 +1,6 @@
 target/
 __pycache__/
 .DS_Store
+.atelier/*.state.json
+.atelier/*.events.jsonl
+.atelier/mac-harness.data.ts
