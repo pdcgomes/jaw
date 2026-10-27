@@ -1,12 +1,19 @@
 #!/bin/sh
-# Builds a scheme (or tests it, with `test`) and prints only jaw's own diagnostics and the result.
+# Builds a scheme (or tests it, with `test`) and prints only jaw's own diagnostics and the result,
+# with xcodebuild's whole output kept in build/check.log. It fails unless the build or the tests
+# succeeded, printing the log's last 20 lines when none of jaw's diagnostics says why.
 set -u
 cd "$(dirname "$0")/.."
 scripts/check-components || exit 1
 action=build
 case "${1:-}" in test|build) action="$1"; shift ;; esac
 scheme="${1:-jaw}"; shift 2>/dev/null || true
+diagnostics="/mac/[^ ]+:[0-9]+:[0-9]+: (error|warning)|swiftmacro.*error|✘"
+mkdir -p build
 xcodebuild "$action" -workspace Jaw.xcworkspace -scheme "$scheme" -destination 'platform=macOS,arch=arm64' \
-    -derivedDataPath build/DerivedData "$@" 2>&1 \
-    | grep -E "/mac/[^ ]+:[0-9]+:[0-9]+: (error|warning)|swiftmacro.*error|✘|Test run with|\*\* (BUILD|TEST)" \
-    | grep -v "xctoolchain" | sort -u | head -80
+    -derivedDataPath build/DerivedData "$@" > build/check.log 2>&1
+grep -E "$diagnostics|Test run with|\*\* (BUILD|TEST)" build/check.log | grep -v "xctoolchain" | sort -u | head -80
+case "$action" in test) succeeded="** TEST SUCCEEDED **" ;; *) succeeded="** BUILD SUCCEEDED **" ;; esac
+grep -qF "$succeeded" build/check.log && exit 0
+grep -E "$diagnostics" build/check.log | grep -qv "xctoolchain" || tail -20 build/check.log
+exit 1
