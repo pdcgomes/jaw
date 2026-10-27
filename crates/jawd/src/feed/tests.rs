@@ -1944,6 +1944,37 @@ async fn windows_match_fresh_queries_through_renames_joins_new_people_and_edits(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_window_watched_again_shows_the_new_name_of_the_older_of_two_people_a_row_mentions() {
+    let bed = Bed::new(brisk());
+    let (writer, ana, bea) = (person(DIRECT), person(DIRECT + 1), person(DIRECT + 2));
+    let spans = json!([
+        {"t": "mention", "s": "@a", "person": ana}, {"t": "text", "s": " and "},
+        {"t": "mention", "s": "@b", "person": bea}
+    ]);
+    let message = Message { spans: Some(spans.to_string()), ..text(GROUP, "g1", 2_000, Some(&writer), "@a and @b") };
+    let mut watcher = bed.watcher(64);
+    let seq = bed
+        .apply(vec![
+            Change::Person(named(&ana, "Ana Lopes")),
+            Change::Person(named(&bea, "Bea Lopes")),
+            Change::Person(named(&writer, "Rui")),
+            Change::Message(message),
+        ])
+        .await;
+    let watched = watch_all(&mut watcher, &[group(10)]).await;
+    watcher.settle(seq).await;
+    let seq = bed.apply(vec![Change::Person(named(&bea, "Bea Martins"))]).await;
+    watcher.settle(seq).await;
+    check(&bed, &watcher, &watched, "Bea renamed").await;
+
+    // The connection goes, and Ana, the older of the two, is renamed.
+    let renaming = bed.apply(vec![Change::Person(named(&ana, "Ana Martins"))]).await;
+    let (again, watched) = reconnected(&bed, &watcher, &watched).await;
+    check(&bed, &again, &watched, "watched again after Ana's rename").await;
+    assert_eq!(again.windows[&watched[0].0].rows["g1"]["v"], renaming, "the row's version is Ana's rename's");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_chat_list_owed_a_reorder_is_read_at_its_pace_while_its_reads_fail() {
     let bed = Bed::new(brisk());
     let seeding = (0..5).map(|n| {
