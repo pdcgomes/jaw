@@ -84,6 +84,8 @@ The design leaves these open, or the code forced them; the audit checks them.
 - **Star names your own message's sender "0"**, as jaw's `deleteMessageForMe` does; someone else's message in a group names its sender's JID, and a one-to-one chat's "0", which is what whatsmeow's `BuildStar` gives for them.
 - **Mark read is "already so" when the chat has no mark and nothing unread**, which needs no look at the read position.
 - **Starring a line about the chat or a message deleted for everyone is error 4**, as reacting to one is; a star can always be taken off.
+- **Unarchiving a pinned chat while three others are pinned unpins it** (decided after task 4's review, to keep the limit of three): its `pin_v1` off is queued after the archive patch, as archiving does. The handler builds the unpin patch for every archive request, and the writer queues it only when it unpins: archiving a pinned chat, or unarchiving one past the limit.
+- **A mark read on a chat jaw holds none of the messages of reads it at the patch's time** (decided after task 4's review, so asking again is already so): the writer applies, in the same transaction, the read WhatsApp's echo will apply, so the phone's count clears at once and the echo changes nothing.
 
 ---
 
@@ -2326,7 +2328,7 @@ pub(super) async fn archive(inner: &Arc<Inner>, archive: ChatArchive) -> Result<
     let chat = named(inner, &archive.chat).await?;
     let at = now_ms();
     let range = range(&chat.id, chat.group, chat.newest.as_ref(), at);
-    let unpin = if archive.archived { Some(queued(pinned(&chat.id, false, at))?) } else { None };
+    let unpin = Some(queued(pinned(&chat.id, false, at))?);
     let patch = queued(archived(&chat.id, archive.archived, range, at))?;
     let setting = Setting::Archive { archived: archive.archived, patch, unpin };
     let doing = if archive.archived { "archive the chat" } else { "unarchive the chat" };
@@ -2668,7 +2670,7 @@ pub(super) async fn mark_unread(inner: &Arc<Inner>, mark: ChatMarkUnread) -> Res
     let at = now_ms();
     let range = range(&chat.id, chat.group, chat.newest.as_ref(), at);
     let patch = queued(marked(&chat.id, mark.unread, range, at))?;
-    let setting = Setting::MarkUnread { unread: mark.unread, newest: chat.newest.map(|newest| newest.id), patch };
+    let setting = Setting::MarkUnread { unread: mark.unread, newest: chat.newest.map(|newest| newest.id), at, patch };
     let doing = if mark.unread { "mark the chat unread" } else { "mark the chat read" };
     act(inner, chat.id, Does::Set(setting), doing).await
 }
