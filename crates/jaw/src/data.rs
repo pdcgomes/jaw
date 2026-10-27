@@ -442,6 +442,7 @@ pub enum Kind {
     Poll,
     Event,
     Album,
+    Invite,
     System,
     Call,
     #[serde(other)]

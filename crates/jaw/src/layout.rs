@@ -313,6 +313,7 @@ pub fn summary(m: &Message) -> String {
         Kind::Poll => "☰ poll",
         Kind::Event => "◷ event",
         Kind::Album => "▣ album",
+        Kind::Invite => "✉ invitation",
         Kind::Text | Kind::System | Kind::Call => "",
         Kind::Unknown => "jaw can't show this yet",
     }
@@ -682,9 +683,13 @@ mod tests {
         let lines = lay(&m, 50);
         assert!(lines[0].starts_with("Ana   ▣ 2 photos   ") && lines[0].ends_with("13:58"), "{lines:?}");
         assert_eq!(lines[1], "      a vista do quarto");
+        m.kind = Kind::Invite;
+        m.summary = Some("Invitation to follow Jaw news".into());
+        m.spans.clear();
+        assert!(lay(&m, 50)[0].contains("Invitation to follow Jaw news"), "an invitation is one jaw shows");
+        assert_eq!(serde_json::from_str::<Kind>(r#""invite""#).unwrap(), Kind::Invite);
         m.kind = Kind::Unknown;
         m.summary = None;
-        m.spans.clear();
         assert!(lay(&m, 50)[0].contains("jaw can't show this yet"));
         m.deleted = true;
         assert!(lay(&m, 50)[0].contains("⊘ This message was deleted"));
