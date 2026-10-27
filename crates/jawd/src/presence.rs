@@ -256,7 +256,8 @@ fn favoured(db: &rusqlite::Connection) -> anyhow::Result<HashSet<i64>> {
 }
 
 /// Follows the people the windows show while someone's looking and WhatsApp can be reached,
-/// within MOST on each connection and PER_MINUTE newly, favourites first.
+/// within MOST on each connection and PER_MINUTE newly: open one-to-one chats' people first, then
+/// favourites, then rosters' people in their order.
 async fn follow(
     store: Store,
     engine: Supervisor,
@@ -285,10 +286,11 @@ async fn follow(
             }
             was_connected = online;
         }
-        let wanted: Vec<i64> = if looking && online { feed.showing() } else { Vec::new() };
+        let (open, listed) = if looking && online { feed.showing() } else { Default::default() };
         let favoured: HashSet<i64> = store.reads().query(Priority::Background, favoured).await.unwrap_or_default();
-        let mut ordered: Vec<i64> = wanted.iter().copied().filter(|n| favoured.contains(n)).collect();
-        ordered.extend(wanted.iter().copied().filter(|n| !favoured.contains(n)));
+        let mut ordered = open;
+        ordered.extend(listed.iter().copied().filter(|n| favoured.contains(n)));
+        ordered.extend(listed.iter().copied().filter(|n| !favoured.contains(n)));
         let now = Instant::now();
         while minute.front().is_some_and(|at| now.duration_since(*at) >= limits.minute) {
             minute.pop_front();
@@ -440,7 +442,7 @@ mod tests {
     use crate::engine::demo::DemoEngine;
     use crate::engine::supervisor::Backoff;
     use crate::store::Person;
-    use crate::store::folders::{Done, Target};
+    use crate::store::folders::{Done, Item, Outcome, Target};
 
     const AT: i64 = 1_792_000_000_000;
 
@@ -604,6 +606,80 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(stopped.load(Ordering::Relaxed), "nobody's known once nobody looks");
+        drop(client);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_open_one_to_one_chats_person_is_followed_first_though_favourites_would_fill_the_connection() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        // More favourites than a connection follows, in a folder on Alt-1, and Rui, who isn't one
+        // and whose chat is open: behind them, he'd never be followed.
+        let rui = jid(MOST + 10);
+        let people: Vec<Change> = (0..=MOST + 10)
+            .map(|n| {
+                Change::Person(Person { jids: vec![jid(n)], name: Some(format!("Person {n:03}")), ..Person::default() })
+            })
+            .collect();
+        store.apply(Lane::Live, people).await.unwrap();
+        let said = crate::store::Message {
+            chat: rui.clone(),
+            id: "m".into(),
+            at: AT,
+            sender: Some(rui.clone()),
+            kind: "text",
+            summary: "x".into(),
+            ..Default::default()
+        };
+        store.apply(Lane::Live, vec![Change::Message(said)]).await.unwrap();
+        let done = Done::default();
+        let close = Step::Create { name: "Close".into(), parent: None, rule: None, done: done.clone() };
+        store.apply_durable(vec![Change::Folders(close)]).await.unwrap();
+        let Some(Outcome::Done(Some(close))) = done.take() else { panic!("the folder wasn't made") };
+        let others: Vec<i64> = store
+            .reads()
+            .query(crate::work::Priority::Interactive, {
+                let rui = rui.clone();
+                move |db| {
+                    Ok(db
+                        .prepare("SELECT person FROM person_jids WHERE jid <> ?1")?
+                        .query_map([rui], |r| r.get(0))?
+                        .collect::<rusqlite::Result<_>>()?)
+                }
+            })
+            .await
+            .unwrap();
+        let filed = others
+            .into_iter()
+            .map(|n| Change::Folders(Step::File { folder: close, item: Item::Person(n), done: Done::default() }))
+            .collect();
+        store.apply_durable(filed).await.unwrap();
+        let slot = Step::Favourite { slot: 1, target: Some(Target::Folder(close)), done: Done::default() };
+        store.apply_durable(vec![Change::Folders(slot)]).await.unwrap();
+        let engine = DemoEngine::with(vec![crate::engine::demo::connected()]);
+        let world = engine.world();
+        let (events, _incoming) = mpsc::channel(1024);
+        let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
+        let feed = Feed::start(store.clone(), Arc::new(|| false), crate::feed::Timing::default());
+        let (out, _lines) = mpsc::channel(64);
+        let mut client = feed.client(out);
+        client
+            .call("roster.watch", serde_json::json!({"folder": "all", "around": "top", "after": 1000}))
+            .await
+            .unwrap();
+        client
+            .call("messages.watch", serde_json::json!({"chat": rui, "around": "newest", "before": 10}))
+            .await
+            .unwrap();
+        let (focus, focused) = watch::channel(false);
+        let (pushes, _) = broadcast::channel(16);
+        let limits = Limits { minute: Duration::from_millis(400), ..Limits::default() };
+        let looking = Looking { focused, pushes: pushes.subscribe(), online: Box::new(|| true) };
+        Following::default().start(store.clone(), Some(supervisor), feed.clone(), looking, limits);
+        focus.send_replace(true);
+        until("the first minute's", || asked(&world).len() >= PER_MINUTE).await;
+        let asked = asked(&world);
+        assert_eq!(asked[0], rui, "the open chat's person first: {:?}", &asked[..3]);
         drop(client);
     }
 }

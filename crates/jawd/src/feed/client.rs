@@ -265,16 +265,16 @@ impl Shared {
         self.reads.load(Ordering::Relaxed)
     }
 
-    /// Whose presence the windows show, open chats' people first, each once.
-    pub(super) fn showing(&self) -> Vec<i64> {
+    /// Whose presence the windows show, each once: open chats' people, and rosters' people who
+    /// aren't among them.
+    pub(super) fn showing(&self) -> (Vec<i64>, Vec<i64>) {
         let showing = self.showing.lock().expect("the windows' people");
         let mut seen = HashSet::new();
         let (chats, rosters): (Vec<&Showing>, Vec<&Showing>) = showing.values().partition(|s| s.chat);
-        let mut out = Vec::new();
-        for showing in chats.into_iter().chain(rosters) {
-            out.extend(showing.people.iter().copied().filter(|n| seen.insert(*n)));
-        }
-        out
+        let mut people = |windows: Vec<&Showing>| -> Vec<i64> {
+            windows.iter().flat_map(|s| s.people.iter().copied()).filter(|n| seen.insert(*n)).collect()
+        };
+        (people(chats), people(rosters))
     }
 
     pub(super) fn shown(&self) -> watch::Receiver<u64> {

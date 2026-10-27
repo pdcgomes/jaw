@@ -4406,7 +4406,7 @@ mod folders {
         let roster = watcher.watch("roster.watch", json!({"folder": "all", "around": "top", "after": 10})).await;
         watcher.watch("messages.watch", json!({"chat": INES, "around": "newest", "before": 10})).await;
         watcher.settle(seq).await;
-        let showing = bed.feed.showing();
+        let (open, listed) = bed.feed.showing();
         let ines = bed
             .store
             .reads()
@@ -4415,9 +4415,9 @@ mod folders {
             })
             .await
             .unwrap();
-        assert_eq!(showing.first(), Some(&ines), "the open chat's person first: {showing:?}");
-        assert_eq!(showing.len(), 3, "and the roster's, each once");
+        assert_eq!(open, [ines], "the open chat's person");
+        assert_eq!(listed.len(), 2, "and the roster's others, each once: {listed:?}");
         watcher.call("unwatch", json!({"watch": roster})).await.unwrap();
-        assert_eq!(bed.feed.showing(), [ines], "a window unwatched shows nobody");
+        assert_eq!(bed.feed.showing(), (vec![ines], Vec::new()), "a window unwatched shows nobody");
     }
 }

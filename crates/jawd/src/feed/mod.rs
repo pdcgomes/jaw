@@ -145,9 +145,9 @@ impl Feed {
         self.shared.windows()
     }
 
-    /// Whose presence the windows show now, by person n: open one-to-one chats' first, then
-    /// rosters', each in its roster's order.
-    pub fn showing(&self) -> Vec<i64> {
+    /// Whose presence the windows show now, by person n, each once: open one-to-one chats' people,
+    /// and rosters' people who aren't among them, each in its roster's order.
+    pub fn showing(&self) -> (Vec<i64>, Vec<i64>) {
         self.shared.showing()
     }
 
