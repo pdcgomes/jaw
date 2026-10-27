@@ -109,7 +109,11 @@ public enum Format {
             : String(format: "%d:%02d", s / 60, s % 60)
     }
 
-    public static func now() -> Int64 {
-        Int64(Date().timeIntervalSince1970 * 1000)
+    /// What time it is, in milliseconds since 1970: the system's clock, unless the harness or a test
+    /// sets another, so what's drawn can be drawn as of a fixed time.
+    @MainActor public static var currentTime: () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) }
+
+    @MainActor public static func now() -> Int64 {
+        currentTime()
     }
 }
