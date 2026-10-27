@@ -47,20 +47,24 @@ SELECT folder FROM folder_items WHERE person = ?1
     SEARCH folder_items USING INDEX folder_items_by_person (person=?)
 
 -- src/send/actions.rs
-SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep WHERE c.id = ?1
+SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL, EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed') FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep WHERE c.id = ?1
     SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH a USING INDEX outbox_by_target (target=?)
 
 -- src/send/actions.rs
-SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep LIMIT 4
+SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL, EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed') FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep LIMIT 4
     SCAN c
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH a USING INDEX outbox_by_target (target=?)
 
 -- src/send/actions.rs
 SELECT coalesce(k.id, c.id) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n LEFT JOIN chats k ON k.n = m.keep WHERE c.id = ?1

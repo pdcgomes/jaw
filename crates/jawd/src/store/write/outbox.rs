@@ -2953,7 +2953,9 @@ mod tests {
         assert!(queued.iter().all(|(_, chat)| chat == ANA), "and goes in its queue: {queued:?}");
         apply(vec![Change::DeleteMessage { chat: ANA.into(), id: "only".into() }]).await.unwrap();
         let row = store.reads().query(crate::work::Priority::Interactive, |db| outboxed_by_n(db, 2)).await.unwrap();
-        assert_eq!(row.map(|row| row.id), Some("r2".to_string()), "deleted for you, its reaction still goes");
+        let row = row.expect("deleted for you, its reaction still goes");
+        assert_eq!(row.id, "r2");
+        assert!(!row.withdrawn(), "its message wasn't deleted for everyone, so it isn't withdrawn");
         for outbox in [1, 2] {
             apply(vec![Change::Outbox(Step::Sent { outbox })]).await.unwrap();
         }

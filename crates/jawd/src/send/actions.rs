@@ -27,10 +27,12 @@ use crate::engine::pb;
 use crate::store::outbox::{Enqueued, Step, Written, keyed};
 use crate::store::{Amendment, Change};
 
-/// A message as an action finds it, by ID in a chat, or in a chat being merged into it.
+/// A message as an action finds it, by ID in a chat, or in a chat being merged into it, with whether
+/// your deletion of it for everyone is on its way, which windows show as done.
 pub(super) const TARGET_IN: &str =
     "SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted, m.status,
-        m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL
+        m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL,
+        EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed')
     FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender
     LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep
     WHERE c.id = ?1";
@@ -38,7 +40,8 @@ pub(super) const TARGET_IN: &str =
 /// messages' index for each chat, chats being few next to messages, which CROSS JOIN keeps SQLite
 /// from scanning instead.
 pub(super) const TARGET_ANYWHERE: &str = "SELECT coalesce(k.id, c.id), c.kind, m.mine, j.jid, m.at, m.kind, m.deleted,
-        m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL
+        m.status, m.n, coalesce(k.n, c.n), m.view_once, m.forwarded, m.raw, m.text, m.edited_at IS NOT NULL,
+        EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed')
     FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LEFT JOIN person_jids j ON j.n = m.sender
     LEFT JOIN chat_merges cm ON cm.gone = c.n LEFT JOIN chats k ON k.n = cm.keep
     LIMIT 4";
@@ -79,6 +82,8 @@ pub(super) struct Target {
     pub raw: Option<Vec<u8>>,
     pub text: Option<String>,
     pub edited: bool,
+    /// Whether your deletion of it for everyone is on its way.
+    pub deleting: bool,
 }
 
 pub(super) enum Found {
@@ -107,6 +112,7 @@ fn target_row(id: &str, r: &rusqlite::Row) -> rusqlite::Result<Target> {
         raw: r.get(12)?,
         text: r.get(13)?,
         edited: r.get(14)?,
+        deleting: r.get(15)?,
     })
 }
 
@@ -240,6 +246,9 @@ pub(super) async fn react(inner: &Arc<Inner>, react: React) -> Result<Value, Err
     if target.deleted {
         return Err(Error::new(code::NOT_ALLOWED, "a deleted message can't be reacted to"));
     }
+    if target.deleting {
+        return Err(Error::new(code::NOT_ALLOWED, "it's being deleted for everyone, so it can't be reacted to"));
+    }
     if !someones(&target.kind) {
         return Err(Error::new(code::NOT_ALLOWED, "a line about the chat can't be reacted to"));
     }
@@ -275,6 +284,9 @@ pub(super) async fn edit(inner: &Arc<Inner>, edit: Edit) -> Result<Value, Error>
     }
     if target.deleted {
         return refused("a deleted message can't be edited");
+    }
+    if target.deleting {
+        return refused("it's being deleted for everyone, so it can't be edited");
     }
     if target.kind != "text" {
         return refused("only a text message can be edited so far");

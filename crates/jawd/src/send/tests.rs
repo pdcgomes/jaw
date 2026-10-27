@@ -2543,6 +2543,72 @@ async fn an_edit_on_its_way_to_a_message_your_phone_deletes_for_everyone_and_the
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_on_its_way_to_a_message_only_deleted_for_you_still_goes() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    running.call("react", json!({ "message": "m1", "emoji": "❤️" })).await.unwrap();
+    let mut pushes = running.pushes.subscribe();
+    running.call("delete", json!({ "message": "m1", "for": "me" })).await.unwrap();
+    running.connection(Online);
+    until_stored(&running).await;
+    assert_eq!(kinds_sent(&running), ["a reaction"]);
+    assert!(notices(&mut pushes, Duration::from_millis(500)).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_to_a_message_youre_deleting_for_everyone_is_refused_while_your_deletion_is_on_its_way() {
+    let home = tempfile::tempdir().unwrap();
+    let timing = Timing { unconfirmed_for: Duration::from_secs(1), ..quick() };
+    let running = Running::timed(home.path(), world(), true, true, timing).await;
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &id, "sent").await;
+    // The deletion's first try fails on the way, and its next is refused when it may have gone.
+    running.world.fail_chats(&[ANA.to_string()]);
+    running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+    let react = || running.call("react", json!({ "message": id, "emoji": "👍" }));
+    let refused = react().await.unwrap_err();
+    assert_eq!(refused.code, code::NOT_ALLOWED, "{}", refused.message);
+    assert_eq!(outbox_rows(&running).await.0, [("revoke".to_string(), "queued".to_string())], "nothing written");
+    running.world.until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count() >= 2).await;
+    running.world.refuse_next(1);
+    running.world.stop_failing_chats();
+    let revoke_is = |state: &'static str| {
+        move |db: &Connection| {
+            Ok(db.query_row("SELECT state FROM outbox WHERE kind = 'revoke'", [], |r| r.get::<_, String>(0))? == state)
+        }
+    };
+    eventually(&running, "the deletion waiting for a receipt", revoke_is("unconfirmed")).await;
+    assert_eq!(react().await.unwrap_err().code, code::NOT_ALLOWED, "while it waits for a receipt");
+    // No receipt comes in its time, so it's kept for a late one, and the message shows as it was.
+    eventually(&running, "the deletion kept for a late receipt", revoke_is("failed")).await;
+    assert!(!row(&running, ANA, &id).await.unwrap().deleted);
+    react().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_of_a_message_youre_deleting_for_everyone_is_refused_while_your_deletion_is_on_its_way() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &id, "sent").await;
+    until_offline(&running).await;
+    running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+    let refused = running.call("edit", json!({ "message": id, "text": "chego às 21h" })).await.unwrap_err();
+    assert_eq!(refused.code, code::NOT_ALLOWED, "{}", refused.message);
+    assert_eq!(outbox_rows(&running).await.0, [("revoke".to_string(), "queued".to_string())], "nothing written");
+    // Once WhatsApp refuses the deletion, the message shows as it was, and can be edited again.
+    running.world.refuse_next(1);
+    running.connection(Online);
+    until_stored(&running).await;
+    running.call("edit", json!({ "message": id, "text": "chego às 21h" })).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_action_on_a_message_still_to_go_from_a_chat_being_merged_goes_after_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
@@ -3117,7 +3183,7 @@ fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
         (info::DIRECT_PERSON, "SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)"),
         (
             actions::TARGET_IN,
-            "SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)\nSEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+            "SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)\nSEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)",
         ),
         (
             actions::CHAT_KEPT,
@@ -3125,7 +3191,7 @@ fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
         ),
         (
             actions::TARGET_ANYWHERE,
-            "SCAN c\nSEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+            "SCAN c\nSEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)",
         ),
     ];
     for (sql, expected) in statements {
