@@ -16,9 +16,21 @@ public final class FloatingPanel: NSPanel {
     public var keys: ((NSEvent) -> Bool)?
     /// Said once the panel has closed.
     public var closed: (() -> Void)?
+    /// Where its size is kept when it can be resized, so it opens at the size it was left.
+    let keeps: String?
 
-    public init() {
-        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+    /// A panel; `resizable` by its edges, between `least` and the window's size, its size kept in the
+    /// preferences under `keeps`.
+    public init(resizable: Bool = false, least: NSSize = NSSize(width: 360, height: 240), keeps: String? = nil) {
+        self.keeps = keeps
+        super.init(contentRect: .zero, styleMask: resizable ? [.borderless, .nonactivatingPanel, .resizable] : [.borderless, .nonactivatingPanel],
+                   backing: .buffered, defer: true)
+        minSize = least
+        if keeps != nil {
+            NotificationCenter.default.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: self, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.keepSize() }
+            }
+        }
         isFloatingPanel = true
         backgroundColor = .clear
         isOpaque = false
@@ -31,9 +43,27 @@ public final class FloatingPanel: NSPanel {
         true
     }
 
-    /// Shows `content` at `size` over `window`.
+    /// The size it was left at, if it's kept.
+    public var keptSize: NSSize? {
+        guard let keeps, let s = UserDefaults.standard.string(forKey: keeps) else { return nil }
+        let size = NSSizeFromString(s)
+        return size.width > 0 && size.height > 0 ? size : nil
+    }
+
+    func keepSize() {
+        guard let keeps else { return }
+        UserDefaults.standard.set(NSStringFromSize(frame.size), forKey: keeps)
+    }
+
+    /// Shows `content` over `window`, at the size it was left at when it's kept, otherwise `size`;
+    /// never bigger than the window.
     public func show(_ content: NSView, size: NSSize, over window: NSWindow, at place: Place = .centre) {
+        var size = keptSize ?? size
+        size.width = min(max(size.width, minSize.width), window.frame.width - Space.xxl)
+        size.height = min(max(size.height, minSize.height), window.frame.height - Space.xxl * 2)
+        maxSize = NSSize(width: window.frame.width - Space.xxl, height: window.frame.height - Space.xxl * 2)
         content.frame = NSRect(origin: .zero, size: size)
+        content.autoresizingMask = [.width, .height]
         contentView = content
         let f = window.frame
         let y = place == .centre ? f.midY - size.height / 2 : f.maxY - 60 - size.height

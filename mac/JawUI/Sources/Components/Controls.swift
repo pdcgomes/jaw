@@ -2,10 +2,12 @@ import AppKit
 import JawThemes
 
 /// A symbol button without a bezel: the panes' close, the box's strip, the message's hover actions,
-/// the editor's split. It's tinted by its tone, filled while the pointer is over it, and its tooltip
-/// gives its key, so the mouse teaches the keyboard.
+/// the bottom bar's controls. It draws its symbol itself, at the symbol's own size and centred,
+/// since a button cell scales a symbol into its own metrics and squeezes it; with a title, the
+/// title follows the symbol. It's tinted by its tone, filled while the pointer is over it, and its
+/// tooltip gives its key, so the mouse teaches the keyboard. With a menu, a click opens it.
 @MainActor
-public final class IconButton: NSButton {
+public final class IconButton: NSControl {
     public enum Size: Sendable {
         case small, regular
 
@@ -20,43 +22,46 @@ public final class IconButton: NSButton {
 
     public let label: String
     public let shortcut: Shortcut?
+    let symbol: String
     let size: Size
     let tone: Tone
     let pressed: () -> Void
+    /// A title after the symbol, as the bottom bar's layout button has.
+    public var title: String? {
+        didSet {
+            invalidateIntrinsicContentSize()
+            needsDisplay = true
+        }
+    }
+
+    /// A menu a click opens, above the button when it sits low in the window.
+    public var menuToOpen: (() -> NSMenu?)?
+    /// Run on a click with the button, for a menu shown from it elsewhere.
+    public var pressedFrom: ((IconButton) -> Void)?
     var hovering = false {
-        didSet { colour() }
+        didSet { needsDisplay = true }
     }
 
     public var roles: Roles? {
-        didSet { colour() }
+        didSet { needsDisplay = true }
     }
 
     public init(symbol: String, label: String, shortcut: Shortcut? = nil, size: Size = .regular, tone: Tone = .tertiary,
-                _ pressed: @escaping () -> Void)
+                title: String? = nil, _ pressed: @escaping () -> Void)
     {
         self.label = label
         self.shortcut = shortcut
+        self.symbol = symbol
         self.size = size
         self.tone = tone
+        self.title = title
         self.pressed = pressed
         super.init(frame: NSRect(x: 0, y: 0, width: size.side, height: size.side))
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
-        // At the symbol's own size: a bezel style sets its own height and squeezes the symbol into it.
-        symbolConfiguration = NSImage.SymbolConfiguration(pointSize: size.point, weight: .medium, scale: .medium)
-        isBordered = false
-        imagePosition = .imageOnly
-        imageScaling = .scaleNone
         toolTip = Self.tip(label, shortcut)
+        setAccessibilityRole(.button)
         setAccessibilityLabel(label)
-        target = self
-        action = #selector(press)
-        wantsLayer = true
-        layer?.cornerRadius = Radius.small
         translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: size.side),
-            heightAnchor.constraint(equalToConstant: size.side),
-        ])
+        heightAnchor.constraint(equalToConstant: size.side).isActive = true
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
 
@@ -70,8 +75,51 @@ public final class IconButton: NSButton {
         shortcut.map { "\(label) (\($0.display))" } ?? label
     }
 
-    @objc func press() {
-        pressed()
+    var configuration: NSImage.SymbolConfiguration {
+        NSImage.SymbolConfiguration(pointSize: size.point, weight: .medium, scale: .medium)
+    }
+
+    var titleFont: NSFont {
+        TextStyle.caption.nsFont
+    }
+
+    override public var intrinsicContentSize: NSSize {
+        guard let title, !title.isEmpty else { return NSSize(width: size.side, height: size.side) }
+        let symbolWidth = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(configuration)?.size.width ?? 0
+        let text = (title as NSString).size(withAttributes: [.font: titleFont]).width
+        return NSSize(width: ceil(symbolWidth + Space.xs + text + Space.m * 2), height: size.side)
+    }
+
+    override public func draw(_: NSRect) {
+        guard let roles else { return }
+        if hovering {
+            roles.selection.nsColor.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: Radius.small, yRadius: Radius.small).fill()
+        }
+        let colour = (hovering ? Tone.primary : tone).color(roles).nsColor
+        guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(configuration.applying(.init(paletteColors: [colour])))
+        else { return }
+        let s = image.size
+        let x = title == nil ? (bounds.width - s.width) / 2 : Space.m
+        image.draw(in: NSRect(x: x.rounded(), y: ((bounds.height - s.height) / 2).rounded(), width: s.width, height: s.height))
+        if let title {
+            let text = NSAttributedString(string: title, attributes: [.font: titleFont, .foregroundColor: colour])
+            let t = text.size()
+            text.draw(at: NSPoint(x: x + s.width + Space.xs, y: ((bounds.height - t.height) / 2).rounded()))
+        }
+    }
+
+    override public func mouseDown(with _: NSEvent) {
+        if let menu = menuToOpen?() {
+            let below = (window?.contentView.map { convert(bounds, to: $0).minY } ?? 100) < 200
+            let y = below ? bounds.height + menu.size.height + Space.xs : -Space.xs
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: isFlipped ? -y + bounds.height : y), in: self)
+        } else if let pressedFrom {
+            pressedFrom(self)
+        } else {
+            pressed()
+        }
     }
 
     override public func mouseEntered(with _: NSEvent) {
@@ -82,10 +130,9 @@ public final class IconButton: NSButton {
         hovering = false
     }
 
-    func colour() {
-        guard let roles else { return }
-        contentTintColor = (hovering ? Tone.primary : tone).color(roles).nsColor
-        layer?.backgroundColor = hovering ? roles.selection.cgColor : nil
+    override public func accessibilityPerformPress() -> Bool {
+        pressed()
+        return true
     }
 }
 

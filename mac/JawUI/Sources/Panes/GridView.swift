@@ -79,7 +79,7 @@ public final class GridView: NSView {
         self.grid = grid
         self.focused = focused
         self.roles = roles
-        layer?.backgroundColor = roles.separator.cgColor
+        layer?.backgroundColor = roles.separator.mixed(with: roles.ground, 0.55).cgColor
         let many = grid.slots.count > 1
         for slot in grid.slots {
             let frame = frames[slot.id] ?? {
@@ -234,12 +234,12 @@ final class SlotFrame: NSView {
         addSubview(shade)
         addSubview(closeButton)
         NSLayoutConstraint.activate([
-            shade.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor),
+            shade.topAnchor.constraint(equalTo: topAnchor),
             shade.bottomAnchor.constraint(equalTo: bottomAnchor),
             shade.leadingAnchor.constraint(equalTo: leadingAnchor),
             shade.trailingAnchor.constraint(equalTo: trailingAnchor),
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.l),
-            closeButton.centerYAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: ConversationHeader.height / 2),
+            closeButton.centerYAnchor.constraint(equalTo: topAnchor, constant: ConversationHeader.height / 2),
         ])
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
     }
@@ -304,7 +304,7 @@ final class EmptyPane: NSView {
             addSubview(v)
         }
         NSLayoutConstraint.activate([
-            well.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: Space.l),
+            well.topAnchor.constraint(equalTo: topAnchor, constant: Space.l),
             well.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l),
             well.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.l),
             well.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.l),

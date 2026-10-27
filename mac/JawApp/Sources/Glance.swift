@@ -11,11 +11,12 @@ import SwiftUI
 @MainActor
 final class Glance: NSObject {
     weak var model: AppModel?
-    let panel = FloatingPanel()
+    let panel = FloatingPanel(resizable: true, least: NSSize(width: 380, height: 260), keeps: "glance.size")
     var windows: [WindowID: String] = [:]
     let state = GlanceState()
 
-    static let chats = 4
+    /// The most chats it shows, each a messages window of jawd's 32 a connection.
+    static let chats = 12
     static let lines: UInt32 = 3
 
     var isOpen: Bool {
@@ -35,11 +36,13 @@ final class Glance: NSObject {
         for chat in state.chats {
             windows[model.jawd.watchMessages(chat.id, .newest(Self.lines))] = chat.id
         }
-        let size = NSSize(width: GlanceView.width, height: GlanceView.height(state.chats.count))
+        let size = NSSize(width: 520, height: GlanceView.height(min(state.chats.count, 5)))
         let view = GlanceView(state: state, roles: roles, go: { [weak self] chat, pane in self?.go(chat, newPane: pane) })
         panel.keys = { [weak self] event in self?.key(event) ?? false }
         panel.closed = { [weak self] in self?.closed() }
-        panel.show(NSHostingView(rootView: view), size: size, over: window)
+        let host = NSHostingView(rootView: view)
+        host.sizingOptions = []
+        panel.show(host, size: size, over: window)
     }
 
     /// ↑ and ↓ move, Return goes to the chat and ⌘Return opens it in a new pane.
@@ -102,21 +105,34 @@ struct GlanceView: View {
     let go: (ChatRow, Bool) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Space.m) {
             if state.chats.isEmpty {
                 Text("Nothing needs you.").foregroundStyle(roles.secondary.color)
+                Spacer()
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: Space.m + 2) {
+                            ForEach(Array(state.chats.enumerated()), id: \.element.id) { i, chat in
+                                card(chat, selected: i == state.index).id(i)
+                            }
+                        }
+                    }
+                    .scrollIndicators(.automatic)
+                    .onChange(of: state.index) { proxy.scrollTo(state.index) }
+                }
             }
-            ForEach(Array(state.chats.enumerated()), id: \.element.id) { i, chat in
-                card(chat, selected: i == state.index)
+            HStack {
+                Text("↩ goes to it · ⌘↩ in a new pane · nothing is marked read")
+                Spacer()
+                Text("\(state.chats.count) \(state.chats.count == 1 ? "chat" : "chats") · drag an edge to resize")
             }
-            Text("↩ goes to it · ⌘↩ in a new pane · nothing is marked read").textStyle(.micro).foregroundStyle(roles.tertiary.color)
+            .textStyle(.micro).foregroundStyle(roles.tertiary.color)
         }
         .padding(Space.l + 2)
-        .frame(width: Self.width, height: Self.height(state.chats.count), alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .panel(roles)
     }
-
-    static let width: CGFloat = 460
 
     /// Room for each chat's card and its three latest lines, and the hint.
     static func height(_ chats: Int) -> CGFloat {

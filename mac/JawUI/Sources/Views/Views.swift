@@ -202,9 +202,8 @@ public struct StatusLine: View {
         .monospacedDigit()
         .lineLimit(1)
         .padding(.horizontal, Space.l)
-        .frame(height: 24)
+        .frame(maxHeight: .infinity)
         .background(roles.surface.color)
-        .overlay(alignment: .top) { Rectangle().fill(roles.separator.color).frame(height: 1) }
         .focusEffectDisabled()
     }
 

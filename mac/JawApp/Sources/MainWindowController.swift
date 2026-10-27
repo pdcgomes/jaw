@@ -9,14 +9,18 @@ import SwiftUI
 /// along the bottom of the whole window. Below 960 points the sidebar folds away, and below 740 the
 /// chat list does too, as the terminal folds.
 @MainActor
-final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate {
+final class MainWindowController: NSWindowController, NSWindowDelegate {
     let model: AppModel
     let split = NSSplitViewController()
     let sidebar = SidebarController()
     let chatList: ChatListController
     let detail = DetailController()
     let palette = PalettePanel()
-    var status: NSHostingView<StatusLine>!
+    var bar: BottomBar!
+    var editorSheet: NSWindow?
+    var status: NSHostingView<StatusLine> {
+        bar.status
+    }
     var sidebarItem: NSSplitViewItem!
     var listItem: NSSplitViewItem!
     var displayLink: CADisplayLink?
@@ -34,7 +38,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         window.minSize = NSSize(width: 520, height: 420)
         window.setFrameAutosaveName("jaw")
         window.titlebarAppearsTransparent = true
-        window.toolbarStyle = .unified
+        // No toolbar: its controls are in the bottom bar, so every pane has the window's height.
+        window.titleVisibility = .hidden
         super.init(window: window)
         window.delegate = self
 
@@ -55,9 +60,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         let root = NSViewController()
         let content = NSView()
         root.view = content
-        status = NSHostingView(rootView: StatusLine(state: nil, warn: false, chat: nil, roles: model.roles))
+        bar = BottomBar(model: model)
         root.addChild(split)
-        for v in [split.view, status!] as [NSView] {
+        for v in [split.view, bar!] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
@@ -65,19 +70,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             split.view.topAnchor.constraint(equalTo: content.topAnchor),
             split.view.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             split.view.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            split.view.bottomAnchor.constraint(equalTo: status.topAnchor),
-            status.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            status.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            status.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            status.heightAnchor.constraint(equalToConstant: 24),
+            split.view.bottomAnchor.constraint(equalTo: bar.topAnchor),
+            bar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         window.contentViewController = root
         if window.frame.origin == .zero { window.center() }
 
-        let toolbar = NSToolbar(identifier: "jaw")
-        toolbar.delegate = self
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
 
         sidebar.picked = { [weak model] folder in model?.pick(folder: folder.id) }
         chatList.host = model
@@ -158,6 +158,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         window?.appearance = model.preferences.nsAppearance
         chatList.roles = model.roles
         window?.backgroundColor = model.roles.ground.nsColor
+        bar.restyle(model.roles)
         refresh()
     }
 
@@ -312,77 +313,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         window.beginSheet(sheet)
     }
 
-    // MARK: - The toolbar
-
-    static let find = NSToolbarItem.Identifier("find")
-    static let newChat = NSToolbarItem.Identifier("newChat")
-    static let splitAcross = NSToolbarItem.Identifier("split")
-    static let layout = NSToolbarItem.Identifier("layout")
-    var layoutItem: NSToolbarItem?
-    var layoutButton: NSButton?
-    var layoutMenu: NSMenu?
-    var editorSheet: NSWindow?
-
-    func toolbarDefaultItemIdentifiers(_: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.layout, Self.find, Self.splitAcross, Self.newChat]
-    }
-
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
-    }
-
-    func toolbar(_: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar _: Bool) -> NSToolbarItem? {
-        switch id {
-        case Self.find:
-            let item = NSToolbarItem(itemIdentifier: id)
-            let button = NSButton(title: "Find  \(Shortcut("k").display)", image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Find")!,
-                                  target: self, action: #selector(showPalette(_:)))
-            button.imagePosition = .imageLeading
-            button.bezelStyle = .toolbar
-            item.view = button
-            item.label = "Find"
-            return item
-        case Self.splitAcross:
-            let item = NSMenuToolbarItem(itemIdentifier: id)
-            item.image = NSImage(systemSymbolName: "rectangle.split.2x1", accessibilityDescription: "Split")
-            item.label = "Split"
-            item.toolTip = "Another chat beside this one (⌘D), or below it from the menu"
-            item.target = self
-            item.action = #selector(splitAcross)
-            item.showsIndicator = true
-            item.menu = Menus.menu(["split.across", "split.down", "pane.close"].compactMap(model.command))
-            return item
-        case Self.layout:
-            // A button with the layout's name and a grid, since an icon-only toolbar draws a menu
-            // item with no image as nothing.
-            let item = NSToolbarItem(itemIdentifier: id)
-            let button = NSButton(title: "Unsaved Panes", image: NSImage(systemSymbolName: "square.grid.3x2", accessibilityDescription: "Layout")!,
-                                  target: self, action: #selector(showLayoutMenu(_:)))
-            button.imagePosition = .imageLeading
-            button.bezelStyle = .toolbar
-            item.view = button
-            item.label = "Layout"
-            layoutItem = item
-            layoutButton = button
-            layoutsChanged()
-            return item
-        case Self.newChat:
-            let item = NSToolbarItem(itemIdentifier: id)
-            item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Chat")
-            item.label = "New Chat"
-            item.target = self
-            item.action = #selector(showPalette(_:))
-            item.toolTip = IconButton.tip("Start a chat: a name or a number", Shortcut("n"))
-            return item
-        default:
-            return nil
-        }
-    }
-
-    @objc func splitAcross() {
-        model.split(.across)
-    }
-
 }
 
 // MARK: - Layouts
@@ -394,16 +324,7 @@ extension MainWindowController {
         if let item = NSApp.mainMenu?.item(withTitle: MenuPlace.layouts.rawValue) {
             item.submenu = Menus.menu(commands, title: MenuPlace.layouts.rawValue)
         }
-        let name = model.book.current ?? "Unsaved Panes"
-        layoutButton?.title = (model.book.isEdited ? "\(name) •" : name) + "  ▾"
-        layoutButton?.toolTip = model.book.isEdited
-            ? "\(name), changed since it was saved: Save Layout (⌥⌘S) keeps it"
-            : "Layouts on a grid: Edit Layout (⌥⌘E), and ⌃⌘1 to ⌃⌘9 to go to one"
-        layoutMenu = Menus.menu(commands)
-    }
-
-    @objc func showLayoutMenu(_ sender: NSButton) {
-        layoutMenu?.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + Space.xs), in: sender)
+        bar?.show(layout: model.book.current ?? "Unsaved Panes", edited: model.book.isEdited)
     }
 
     /// Asks for a name, in a sheet that takes the keys at once: Return saves, Esc cancels.

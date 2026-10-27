@@ -33,6 +33,9 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     let placeholder = Labels.make("", .body)
     let completions = CompletionView()
     var heightConstraint: NSLayoutConstraint!
+    /// The field's top: just under the panes, or under the strip while there is one, so a box with
+    /// nothing to say above it keeps no room for it.
+    var scrollTop: NSLayoutConstraint!
 
     /// What the box is doing besides writing a new message.
     enum Mode: Equatable {
@@ -107,16 +110,17 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
             root.addSubview(v)
         }
         heightConstraint = scroll.heightAnchor.constraint(equalToConstant: 30)
+        scrollTop = scroll.topAnchor.constraint(equalTo: root.topAnchor, constant: Space.s)
         NSLayoutConstraint.activate([
             bar.topAnchor.constraint(equalTo: root.topAnchor, constant: 6),
             bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             bar.trailingAnchor.constraint(equalTo: barClose.leadingAnchor, constant: -6),
             barClose.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             barClose.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
-            scroll.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4),
+            scrollTop,
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -Space.m),
             heightConstraint,
             field.topAnchor.constraint(equalTo: scroll.topAnchor),
             field.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
@@ -161,6 +165,11 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         if let why = unsentWhy { text = "Not sent: \(why)" }
         bar.stringValue = text ?? ""
         bar.isHidden = text == nil
+        scrollTop.isActive = false
+        scrollTop = text == nil
+            ? scroll.topAnchor.constraint(equalTo: view.topAnchor, constant: Space.s)
+            : scroll.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: Space.xs)
+        scrollTop.isActive = true
         barClose.isHidden = mode == .writing && unsentWhy == nil
         placeholder.stringValue = "to \(chat.name)"
         colour()

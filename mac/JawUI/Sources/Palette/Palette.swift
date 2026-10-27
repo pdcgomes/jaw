@@ -36,7 +36,7 @@ public final class PaletteModel {
 
     public var mode: Mode = .find
     public var query = "" {
-        didSet { if query != oldValue { index = 0; ask() } }
+        didSet { if query != oldValue { selected = nil; ask() } }
     }
 
     /// The kind the results are narrowed to with Tab, or all of them.
@@ -48,8 +48,22 @@ public final class PaletteModel {
     /// The counts of the last answer to every kind, kept so Tab can come back.
     public private(set) var counts: [FindKind: Int] = [:]
     public private(set) var finding = false
-    public var index = 0
+    /// The selected item, by its id, so it stays on the same row while jawd's answers come in and
+    /// the rows above it change; nil for the first.
+    public var selected: String?
     public var failed: String?
+
+    /// Where the selected item is in the list now: the first when it's gone or nothing is chosen.
+    public var index: Int {
+        get {
+            let all = items
+            return selected.flatMap { id in all.firstIndex { $0.id == id } } ?? 0
+        }
+        set {
+            let all = items
+            selected = all.indices.contains(newValue) ? all[newValue].id : nil
+        }
+    }
 
     @ObservationIgnored public var find: ((UInt64, String, [FindKind], String?, UInt32) -> Void)?
     @ObservationIgnored public var chose: ((Pick) -> Void)?
@@ -80,7 +94,7 @@ public final class PaletteModel {
         found = Found()
         counts = [:]
         failed = nil
-        index = 0
+        selected = nil
         if query.isEmpty { ask() } else { query = "" }
     }
 
@@ -99,7 +113,6 @@ public final class PaletteModel {
         self.found = found
         if kind == nil { counts = found.counts }
         finding = false
-        index = min(index, max(items.count - 1, 0))
     }
 
     public func failed(id: UInt64, why: String) {
@@ -219,10 +232,12 @@ public final class PaletteModel {
 
     // MARK: - Keys
 
+    /// ↑ and ↓: the row before or after the selected one, wrapping round at the ends.
     public func move(_ by: Int) {
-        let n = items.count
-        guard n > 0 else { return }
-        index = (index + by + n) % n
+        let all = items
+        guard !all.isEmpty else { return }
+        let at = selected.flatMap { id in all.firstIndex { $0.id == id } } ?? 0
+        selected = all[(at + by + all.count) % all.count].id
     }
 
     /// Tab: in forwarding, picks or unpicks the chat; otherwise narrows to the next kind found.
@@ -242,7 +257,7 @@ public final class PaletteModel {
         let strip: [FindKind?] = [nil] + kinds
         let at = strip.firstIndex(of: kind) ?? 0
         kind = strip[(at + (back ? -1 : 1) + strip.count) % strip.count]
-        index = 0
+        selected = nil
         ask()
     }
 
@@ -279,7 +294,7 @@ public final class PaletteModel {
     }
 
     public func pick(_ item: Item) {
-        if let i = items.firstIndex(where: { $0.id == item.id }) { index = i }
+        selected = item.id
         pick()
     }
 
@@ -484,6 +499,7 @@ public struct PaletteView: View {
 
     var results: some View {
         let items = model.items
+        let at = model.selected.flatMap { id in items.firstIndex { $0.id == id } } ?? 0
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -494,7 +510,7 @@ public struct PaletteView: View {
                                 .foregroundStyle(roles.tertiary.color)
                                 .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 2)
                         }
-                        row(item, selected: i == model.index).id(i)
+                        row(item, selected: i == at).id(item.id)
                             .onTapGesture { model.pick(item) }
                     }
                     if items.isEmpty, !model.finding {
@@ -505,7 +521,7 @@ public struct PaletteView: View {
                 .padding(.vertical, 4)
             }
             .frame(maxHeight: 372)
-            .onChange(of: model.index) { proxy.scrollTo(model.index) }
+            .onChange(of: model.selected) { proxy.scrollTo(model.selected ?? items.first?.id) }
         }
     }
 

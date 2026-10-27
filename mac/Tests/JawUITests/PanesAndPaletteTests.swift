@@ -78,3 +78,24 @@ import Testing
     model.pick()
     #expect(forwarded.count == 5 && forwarded.first == "c1")
 }
+
+@MainActor
+@Test func `the selection stays on its row as rows come in above it, and ↑ and ↓ reach every row`() {
+    let model = PaletteModel()
+    var names = ["Mute this chat always", "Start a chat", "Search messages"]
+    model.actions = { names.map { PaletteAction($0) {} } }
+    model.move(1)
+    model.move(1)
+    #expect(model.items[model.index].id == "action:Search messages")
+    names.insert("Go to unread", at: 0)
+    #expect(model.items[model.index].id == "action:Search messages", "rows arriving above don't move it")
+    #expect(model.index == 3)
+    var seen: Set<String> = []
+    for _ in 0 ..< model.items.count {
+        model.move(-1)
+        seen.insert(model.items[model.index].id)
+    }
+    #expect(seen.count == model.items.count, "↑ goes through every row, the top ones too")
+    model.query = "x"
+    #expect(model.selected == nil && model.index == 0, "typing goes back to the top")
+}

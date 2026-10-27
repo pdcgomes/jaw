@@ -128,8 +128,7 @@ final class HoverBar: NSStackView {
             IconButton(symbol: "arrowshape.turn.up.left", label: "Reply", shortcut: Shortcut("r", []), size: .small) { [weak self] in self?.reply?() },
         ]
         let more = IconButton(symbol: "ellipsis", label: "More", size: .small) {}
-        more.target = self
-        more.action = #selector(tapMore(_:))
+        more.pressedFrom = { [weak self] button in self?.tapMore(button) }
         buttons.append(more)
         for b in buttons {
             addArrangedSubview(b)

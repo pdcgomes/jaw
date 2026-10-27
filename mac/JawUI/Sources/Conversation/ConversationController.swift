@@ -145,7 +145,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             root.addSubview(v)
         }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
+            header.topAnchor.constraint(equalTo: root.topAnchor),
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             header.heightAnchor.constraint(equalToConstant: ConversationHeader.height),
@@ -168,12 +168,14 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
 
     override public func viewDidLayout() {
         super.viewDidLayout()
-        // The transcript runs under the header, which floats over it, and under the toolbar.
-        let top = view.safeAreaInsets.top + ConversationHeader.height + Space.m
+        // The transcript runs under the header, which floats over it at the pane's top, the
+        // window's title bar's too: there's no toolbar, so every pane has the same height.
+        let top = ConversationHeader.height + Space.m
         if abs(scroll.contentInsets.top - top) >= 0.5 {
             scroll.contentInsets = NSEdgeInsets(top: top, left: 0, bottom: Space.m, right: 0)
             scroll.scrollerInsets = NSEdgeInsets(top: top - Space.m, left: 0, bottom: 0, right: 0)
         }
+        header.clearWindowButtons()
         let width = layoutWidth
         if abs(width - lastWidth) >= 1 {
             lastWidth = width
@@ -915,6 +917,8 @@ final class HeaderView: NSView {
     let avatar = AvatarView()
     let name = Labels.make("", .body)
     let detail = Labels.make("", .caption)
+    lazy var lead = avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset)
+    static let inset = Space.l + 2
     var members = 0
     /// What jawd says of the person's presence, "online" or "last seen 14:02", for a chat with one.
     var presence: String?
@@ -946,7 +950,7 @@ final class HeaderView: NSView {
             tint.leadingAnchor.constraint(equalTo: leadingAnchor), tint.trailingAnchor.constraint(equalTo: trailingAnchor),
             rule.leadingAnchor.constraint(equalTo: leadingAnchor), rule.trailingAnchor.constraint(equalTo: trailingAnchor),
             rule.bottomAnchor.constraint(equalTo: bottomAnchor), rule.heightAnchor.constraint(equalToConstant: Stroke.hairline),
-            avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l + 2),
+            lead,
             avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
             avatar.widthAnchor.constraint(equalToConstant: side), avatar.heightAnchor.constraint(equalToConstant: side),
             stack.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: Space.m + 2),
@@ -962,6 +966,21 @@ final class HeaderView: NSView {
 
     var typing = false
     var online = false
+
+    /// A pane at the window's top left, with the sidebar and the list folded away, would have its
+    /// picture under the window's buttons: the header starts after them there.
+    func clearWindowButtons() {
+        guard let window, let zoom = window.standardWindowButton(.zoomButton), let holder = zoom.superview else { return }
+        let buttons = holder.convert(zoom.frame, to: nil).insetBy(dx: -Space.xs, dy: -Space.xs)
+        let mine = convert(bounds, to: nil)
+        let inset = mine.intersects(buttons) ? max(buttons.maxX + Space.m - mine.minX, Self.inset) : Self.inset
+        if abs(lead.constant - inset) >= 0.5 { lead.constant = inset }
+    }
+
+    /// The header's empty parts move the window, as a title bar does.
+    override var mouseDownCanMoveWindow: Bool {
+        true
+    }
 
     func show(_ chat: ChatRow) {
         name.stringValue = chat.name
