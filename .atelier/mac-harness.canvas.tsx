@@ -1,4 +1,4 @@
-import { Badge, Button, Gallery, Panel, Radio, Row, Stack, Stat, Stats, Tabs, Text, TextArea, useCanvasState } from "atelier";
+import { Badge, Button, Code, Gallery, Panel, Radio, Row, Stack, Tabs, Text, TextArea, Time, useCanvasState } from "atelier";
 import { sweep, type Sweep } from "./mac-harness.data";
 
 export const meta = { title: "Jaw for the Mac: the harness" };
@@ -15,7 +15,7 @@ const words: Record<Standing, string> = {
   unseen: "Not looked at",
 };
 const tones = { right: "success", "needs-work": "danger", changed: "warning", unseen: "muted" } as const;
-const filters: { value: string; label: string }[] = [
+const filters: { value: "all" | Standing; label: string }[] = [
   { value: "all", label: "Every scene" },
   { value: "needs-work", label: "Needs work" },
   { value: "changed", label: "Changed since marked" },
@@ -52,7 +52,7 @@ function ScenePanel({ scene, mark, onMark }: { scene: Scene; mark: Mark | null |
           columns={Math.min(Math.max(scene.pictures.length, 1), 4)}
         />
         <Row gap={8} align="center">
-          <Button tone="success" variant={picked("right")} onClick={() => keep("right", mark?.note ?? "")}>
+          <Button tone="success" variant={picked("right")} onClick={() => keep("right", "")}>
             Right
           </Button>
           <Button tone="danger" variant={picked("needs-work")} onClick={() => keep("needs-work", mark?.note ?? "")}>
@@ -69,7 +69,7 @@ function ScenePanel({ scene, mark, onMark }: { scene: Scene; mark: Mark | null |
           placeholder="What to change, and where"
           rows={2}
           value={mark?.note ?? ""}
-          onChange={(note) => keep(mark?.state ?? "needs-work", note)}
+          onChange={(note) => keep("needs-work", note)}
         />
       </Stack>
     </Panel>
@@ -79,20 +79,28 @@ function ScenePanel({ scene, mark, onMark }: { scene: Scene; mark: Mark | null |
 export default function HarnessReview() {
   const [marks, setMarks] = useCanvasState<Record<string, Mark | null>>("marks", {});
   const [filter, setFilter] = useCanvasState<string>("filter", "all");
+  if (sweep.scenes.length === 0) {
+    return (
+      <Text tone="muted">
+        Nothing has been swept yet: run <Code>mac/scripts/build-mac sweep</Code>.
+      </Text>
+    );
+  }
   const count = (s: Standing) => sweep.scenes.filter((scene) => standing(scene, marks[scene.id]) === s).length;
+  const options = filters.map(({ value, label }) => ({
+    value,
+    label: `${label} (${value === "all" ? sweep.scenes.length : count(value)})`,
+  }));
+  const pictures = sweep.scenes.reduce((n, scene) => n + scene.pictures.length, 0);
   const sections = [...new Set(sweep.scenes.map((s) => s.section))];
   const shown = (scene: Scene) => filter === "all" || standing(scene, marks[scene.id]) === filter;
   const mark = (id: string) => (m: Mark | null) => setMarks((previous) => ({ ...previous, [id]: m }));
   return (
     <Stack gap={16}>
-      <Stats>
-        <Stat label="Scenes" value={sweep.scenes.length} hint={`swept ${sweep.made}`} />
-        <Stat label="Right" value={count("right")} tone="success" />
-        <Stat label="Needs work" value={count("needs-work")} tone="danger" />
-        <Stat label="Changed since marked" value={count("changed")} tone="warning" />
-        <Stat label="Not looked at" value={count("unseen")} tone="muted" />
-      </Stats>
-      <Radio value={filter} onChange={setFilter} options={filters} />
+      <Text tone="muted" size="sm">
+        {sweep.scenes.length} scenes in {pictures} pictures, swept <Time at={sweep.made} />
+      </Text>
+      <Radio value={filter} onChange={setFilter} options={options} />
       <Tabs
         stateKey="section"
         tabs={sections.map((section) => {

@@ -19,6 +19,8 @@ for scene in sweep["scenes"]:
         picture["path"] = f"mac/build/review/{picture['file']}"
 
 out.parent.mkdir(exist_ok=True)
+# The data is checked as a Sweep through a const, not as a literal, so a field a later phase adds to
+# the manifest passes, where a literal's check for properties its type doesn't list would refuse it.
 out.write_text(
     "// Written by mac/scripts/review-data from the last sweep's manifest; git ignores it.\n"
     "export type Sweep = {\n"
@@ -32,7 +34,8 @@ out.write_text(
     "    pictures: { variant: string; file: string; path: string; points: number[]; pixels: number[]; hash: string }[];\n"
     "  }[];\n"
     "};\n"
-    f"export const sweep: Sweep = {json.dumps(sweep, ensure_ascii=False, indent=2)};\n",
+    f"const data = {json.dumps(sweep, ensure_ascii=False, indent=2)};\n"
+    "export const sweep: Sweep = data;\n",
     encoding="utf-8",
 )
 print(out.relative_to(root))

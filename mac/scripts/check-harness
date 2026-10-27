@@ -3,6 +3,10 @@
 # nothing in it may make a Jawd. Its other rules come with the harness's later phases (the Mac
 # harness's design, "The checks").
 cd "$(dirname "$0")/.."
+if [ ! -d JawHarness/Sources ]; then
+    echo "check-harness: there's no JawHarness/Sources to check" >&2
+    exit 1
+fi
 found=$(grep -rnw 'Jawd' JawHarness/Sources)
 if [ -n "$found" ]; then
     echo "$found"

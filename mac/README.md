@@ -23,7 +23,7 @@ A debug build never opens the owner's jaw folder: without `--home` or `JAW_HOME`
 
 The app's options: `--demo`, `--home <folder>`, `--bench launch|open|memory|idle`, which prints one JSON line and quits, and `--snapshot <png>`, which draws the window once a chat is open (or the sheet over it). With `--snapshot`, `--keys` presses shortcuts through the app's own event handling half a second apart and prints the panes after each: `cmd+shift+d`, `ctrl+cmd+right`, `cmd+opt+e`, a digit or a letter, and the steps `size:1200x800`, `save:<layout>`, `revert` and `drop:<row>:<middle|left|right|top|bottom>`. For example, `mac/scripts/build-mac snapshot /tmp/x.png --keys "cmd+d,save:Work,cmd+w,ctrl+cmd+1"`.
 
-## The harness
+## Component harness
 
 Jaw Harness (`JawHarness`) draws the app's components and screens from made-up rows and the protocol's fixtures, in each theme, look and density, and asks jawd for nothing, as [the harness's design](../docs/plans/2026-10-27-jaw-mac-harness-design.md) has it. Its scenes are listed by section on the left, with the conditions they're drawn in under them; each says what to look at, and each band of specimens what would be wrong with it.
 
@@ -33,7 +33,7 @@ mac/scripts/build-mac shot <scene> <png> [options] # one scene drawn into a pict
 mac/scripts/build-mac sweep                        # every scene in each variant, into mac/build/review
 ```
 
-After a sweep, the review canvas, `.atelier/mac-harness.canvas.tsx`, shows each scene's pictures by section (`atelier open .atelier/mac-harness.canvas.tsx`). Mark each one Right, or Needs work with a note; the marks are kept under `marks`, by scene, with the pictures they were made on, and agents read them with `atelier state .atelier/mac-harness.canvas.tsx`. A scene whose pictures change after its mark asks again.
+After a sweep, the review canvas, `.atelier/mac-harness.canvas.tsx`, shows each scene's pictures by section (`atelier open .atelier/mac-harness.canvas.tsx`). Mark each one Right, or Needs work with a note; the marks are kept under `marks`, by scene, with the pictures they were made on, and agents read them with `atelier state .atelier/mac-harness.canvas.tsx`. A scene whose pictures change after its mark asks again. The canvas's pictures come from `build-mac sweep`, which writes them and the canvas's data, with their hashes, together: a `--sweep` run by hand into `mac/build/review` would leave new pictures under the last sweep's hashes until `mac/scripts/review-data` writes the data again.
 
 Its options: `--scene <id>`, `--theme <id>`, `--appearance dark|light`, `--look bubbles|lines`, `--density comfortable|compact`, `--text-size <11…17>`, `--font system|mono`, `--reduce-motion`, `--window <width>x<height>`, `--stage-only`, `--snapshot <png>` and `--sweep <folder>`.
 
