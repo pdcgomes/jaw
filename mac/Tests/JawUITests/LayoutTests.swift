@@ -81,12 +81,13 @@ func spec(_ look: Look, dark: Bool, density: Density = .comfortable) -> LayoutSp
     try compare(try #require(render(spec(.bubbles, dark: true, density: .compact))), "conversation-bubbles-dark-compact")
 }
 
-/// The samples drawn as a conversation 640 points wide, at 2x, as a conversation's rows draw them.
+/// The samples drawn as a conversation 640 points wide, at 2x, as a conversation's rows draw them,
+/// with the typing bubble still after the newest message, since Rui is typing in the sample group.
 func render(_ spec: LayoutSpec) -> CGImage? {
     let rows = Samples.messages
     let cs = MessageContext.of(rows, group: true, unfolded: [], now: Samples.now)
     let laid = zip(rows, cs).map { MessageLayout.lay($0, width: 640, context: $1, style: spec.style, fonts: spec.fonts, me: spec.me) }
-    let height = laid.reduce(0) { $0 + $1.height } + 16
+    let height = laid.reduce(0) { $0 + $1.height } + TypingRowView.height(spec.style) + 16
     let scale: CGFloat = 2
     guard let ctx = CGContext(data: nil, width: Int(640 * scale), height: Int(height * scale), bitsPerComponent: 8,
                               bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -102,6 +103,8 @@ func render(_ spec: LayoutSpec) -> CGImage? {
         l.draw(in: ctx, y: y)
         y += l.height
     }
+    let metrics = MessageLayout.Metrics(spec.style)
+    TypingBubble.draw(in: ctx, at: CGPoint(x: metrics.margin, y: y + metrics.runGap), style: spec.style)
     return ctx.makeImage()
 }
 

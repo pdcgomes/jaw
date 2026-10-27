@@ -12,7 +12,7 @@ jaw's design lists "a desktop app on the same socket" under Later. This is it.
 
 ## Decisions
 
-The owner's answers are marked "Owner, 26 Oct"; the others are this design's, with their evidence further down.
+The owner's answers are marked "Owner, 26 Oct" or "Owner, 27 Oct"; the others are this design's, with their evidence further down.
 
 - **Another interface, on the terminal's architecture.** The app connects to `jaw.sock`, says hello as `jaw-mac`, and watches windows: the chat list, each open chat, the folders, the roster, the library. It keeps nothing of jawd's on disk, only its own preferences and window frames. Its rows are jawd's rows: it never draws a guess, as the terminal's actions don't.
 - **jawd and jaw-engine inside the app, as the one LaunchAgent, and the terminal uses it** (Owner, 26 Oct). They ship in `Contents/Helpers` with the terminal beside them, signed with the app's identity, and the app registers jawd with `SMAppService` under the label `jaw agent` already uses. One build of jawd, jaw-engine and jaw speaks one protocol; jawd runs at login, so notifications come with no window open; and `jaw.lock` with the shared label makes two jawds impossible.
@@ -31,6 +31,7 @@ The owner's answers are marked "Owner, 26 Oct"; the others are this design's, wi
 - **jaw's Tokyo Night by default, following the system's light and dark** (Owner, 26 Oct): it looks like jaw from the first launch and still respects a light Mac.
 - **MapKit's maps for locations, with a setting to turn them off** (Owner, 26 Oct): a map reads at a glance, but MapKit asks Apple for its tiles.
 - **Homebrew's ffmpeg for sending video, GIFs and audio** (Owner, 26 Oct), as jawd uses today, the app saying when it's missing: it's on the owner's Mac already, and the choice can change before a build goes to anyone else.
+- **Typing as WhatsApp shows it now** (Owner, 27 Oct): at the bottom of the open conversation, where their message will land, a bubble of three dots that rise and brighten one after another, the dots alone in lines; and in the header, "typing" with its dots counting ".", "..", "..." under a subtle shimmer across the words and dots, the app's one shimmer, since typing is a live state. The chat list and the status line keep their green "typing…".
 
 ## Principles
 
@@ -206,7 +207,7 @@ One window by default, of four columns: the sidebar, the chat list, the conversa
 
 - **The sidebar** (220 points, ⌘B): the folder tree with unread counts (All, Unread, Groups, Communities and Archived, the smart folders, then yours), favourites marked with their ⌘ digit, and the roster below it, online first, with presence. It sits on the system's sidebar glass, tinted by the theme. Until jawd serves folders (M6), it shows All and Archived, as jawd serves them now.
 - **The chat list** (300 points, 260 to 420): a folder's chats, pinned first, then newest. Each 56-point row: the avatar; the name, bold when unread; the time; the newest message's line (who wrote it in a group, `Draft:` and the draft in the accent, "typing…" in green, from P7); the unread count, an @ for a mention, the muted and pinned marks, your last message's ticks. A community is one row that opens to its groups, the announcement group first. The list holds its order while the pointer is over it or for 1.5 s after a key moves through it, so nothing moves under the pointer before a click; moves then animate to their places.
-- **The conversation:** a header (avatar, name, who's typing and online or last seen, both from P7, members for a group; find in chat, info, close for a pane), the messages in the look picked in Settings, bubbles or lines (see "Two looks"), a "2 new ↓" pill when new messages come below while you read above, and the box.
+- **The conversation:** a header (avatar, name, who's typing and online or last seen, both from P7, members for a group; find in chat, info, close for a pane), the messages in the look picked in Settings, bubbles or lines (see "Two looks"), a bubble of three dots after the newest message while someone types (see "Animation"), a "2 new ↓" pill when new messages come below while you read above, and the box.
 - **The box** (one per conversation, Owner, 26 Oct): an `NSTextView` growing to eight lines, then scrolling, its placeholder naming the chat it sends to ("to Lisbon Climbing"), as the spike's border does; above it, the message you're replying to or editing, with Esc to drop it. Enter sends, ⇧↩ or ⌥↩ adds a line, `@` completes the group's members from `chat.info`, `:` completes emoji, ⌘O attaches, files dropped or pasted attach, ⌘R records.
 - **The toolbar** (the window's, unified): the sidebar button; jawd's state when it's anything but online ("Catching up 1,204 of 5,000"); the palette as a field that opens it; split, library and new chat.
 - **Folding,** as the terminal folds: below 960 points the sidebar folds away, and below 740 the chat list does too, opening over the conversation when asked (⌘0 or the toolbar), as the terminal's narrow picking does.
@@ -391,14 +392,14 @@ Each one says something, takes at most 220 ms, runs on the render server, finish
 | A preview arriving | the blurred thumbnail fades into it, 120 ms | no flash of grey, no shift | the same fade, shorter |
 | Reactions | the pill pops from 0.8 to 1, 140 ms | marks what changed | none |
 | Poll tallies | bars grow to new widths, 200 ms | tallies read as moving | none |
-| Typing | three dots breathing, only while on screen and the window key | a live state, not an event | dots shown still |
+| Typing | after the newest message, at the margin their messages start from, a bubble in their messages' colour whose three dots rise 3 points and brighten one after another, a fifth of a second apart, 1.4 s a round, the dots alone in lines; in the header, "typing" with its dots counting ".", "..", "..." every 0.4 s, room kept for all three, under a shimmer that sweeps across the words and dots in 1.4 s and rests 0.8 s; on the render server, only in the focused pane on screen with the window key; the bubble's row rises in as a message does and fades out in 120 ms, and their message takes its place | a live state, not an event | the bubble's dots shown still, the header's three dots without the shimmer, the row coming and going at once |
 | The palette | fades in, scaling from 0.98, 120 ms, with its field taking keys before it starts | arrives without hiding keys | fades in |
 | Panes and folding | widths ease to their new sizes, 180 ms | shows where a pane came from and went | instant |
 | The viewer | grows from the bubble and shrinks back, 220 ms | keeps your place in the conversation | fades |
 | Voice | the playhead moves at the display's rate, only while playing | follows the sound | the playhead steps with jawd's pushes |
 | The Mimic | chomps when a message comes into an empty chat and when linking is done; sleeps when jawd is out of reach; pixel frames stepped at 10 a second, never smoothed | jaw's creature, as in the terminal | still, open or asleep |
 
-Nothing animates when nothing happens: no idle breathing, no shimmer, no loops off screen.
+Nothing animates when nothing happens: no idle breathing, no shimmer but the header's while someone types (Owner, 27 Oct), no loops off screen.
 
 ## Branding
 

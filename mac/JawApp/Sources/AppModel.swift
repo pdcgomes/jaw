@@ -371,6 +371,9 @@ final class AppModel {
         let changed = focusedSlot != id
         if changed { conversation?.leave() }
         focusedSlot = id
+        for c in panes.values {
+            c.lookingChanged()
+        }
         if changed || force { window?.showPanes() }
         if let chat = slot.chat {
             window?.chatList.select(chat)
@@ -656,15 +659,20 @@ final class AppModel {
 
     // MARK: - Focus
 
-    /// Focus is true while the app is active and its window visible and not minimised.
+    /// Focus is true while the app is active and its window visible and not minimised. Each pane's
+    /// Mimic is told too, since the window can stop being key without focus changing, as for a sheet.
     func updateFocus() {
         let w = window?.window
         let now = NSApp.isActive && (w?.isVisible ?? false) && !(w?.isMiniaturized ?? true)
             && (w?.occlusionState.contains(.visible) ?? false)
-        guard now != focused else { return }
-        focused = now
-        jawd?.focus(now)
-        if now { conversation?.readIfLooking() }
+        if now != focused {
+            focused = now
+            jawd?.focus(now)
+            if now { conversation?.readIfLooking() }
+        }
+        for c in panes.values {
+            c.lookingChanged()
+        }
     }
 
     // MARK: - The palette's actions

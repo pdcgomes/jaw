@@ -81,6 +81,24 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     var empty: NSHostingView<EmptyChatView>?
     var hoveredRow: Int?
 
+    /// Who's typing in the chat now, by person: the chat's row says it today, and jawd's typing
+    /// push will once it comes (P7). While it isn't empty the header says so and the typing bubble
+    /// waits below the newest message.
+    public var typing: [String] = [] {
+        didSet {
+            guard typing != oldValue else { return }
+            header.typing = !typing.isEmpty
+            header.show(chat)
+            showTyping()
+        }
+    }
+
+    let typingRow = TypingRowView()
+    /// Whether the table has the typing row, after the messages.
+    var showsTyping = false
+    /// Whether `rows` has moved on from what the table holds, while their layouts are made.
+    var reloading = false
+
     /// The rows each window watch keeps on each side, as the terminal's `WINDOW`.
     public static let rowsAround: UInt32 = 100
     /// How close to an end of the window scrolling comes before the window moves, as `EDGE`.
@@ -94,6 +112,9 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         window = Messages(chat: chat.id, place: place)
         composer = ComposerController(chat: chat)
         super.init(nibName: nil, bundle: nil)
+        typing = chat.typing
+        header.typing = !typing.isEmpty
+        typingRow.words = Self.typingWords(chat)
     }
 
     @available(*, unavailable)
@@ -162,6 +183,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         hover.react = { [weak self] in self?.hoverAction(.react) }
         hover.reply = { [weak self] in self?.hoverAction(.reply) }
         hover.more = { [weak self] sender in self?.hoverMore(sender) }
+        typingRow.clicked = { [weak self] in
+            guard let self else { return }
+            host?.conversationFocused(self)
+        }
         applyTheme()
         header.show(chat)
         updateEmpty()
@@ -200,6 +225,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         newPill.roles = roles
         hover.roles = roles
         composer.roles = roles
+        typingRow.style = spec.style
     }
 
     // MARK: - jawd's rows
@@ -209,6 +235,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         chat = row
         header.show(row)
         composer.chatChanged(row)
+        typingRow.words = Self.typingWords(row)
+        typing = row.typing
     }
 
     /// Applies a window update from jawd, keeping where you're reading.
@@ -216,13 +244,25 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         let wasEmpty = window.isEmpty
         let atBottom = isAtBottom || !anchoredFirst
         let anchor = currentAnchor()
+        let newest = window.newest
         window.apply(update)
         rebuild()
+        reloading = true
+        if let newest { answered(update.upsert.filter { !$0.mine && Self.precedes(newest, $0) }) }
         let items = Array(zip(rows, contexts))
         // The newest first, so what's on screen when following is laid out before the rest.
         layouts.prepare(Array(items.reversed()), width: layoutWidth, spec: spec) { [weak self] in
             guard let self else { return }
+            reloading = false
+            let wasTyping = showsTyping
+            showsTyping = wantsTyping
             table.reloadData()
+            if showsTyping, wasTyping {
+                typingRow.stay()
+            } else if showsTyping {
+                typingRow.dots.since = CACurrentMediaTime()
+                typingRow.arrive()
+            }
             if !anchoredFirst, !rows.isEmpty {
                 anchoredFirst = true
                 anchorAtOpen()
@@ -329,11 +369,12 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     func settle() {
         let visible = scroll.contentView.bounds
         let range = table.rows(in: visible)
+        lookingChanged()
         guard !rows.isEmpty, range.length > 0 else {
             updatePill()
             return
         }
-        let first = range.location, last = min(range.location + range.length - 1, rows.count - 1)
+        let first = min(range.location, rows.count - 1), last = min(range.location + range.length - 1, rows.count - 1)
         let atBottom = isAtBottom
         let window = self.window
         if first < Self.edge, window.older {
@@ -405,18 +446,86 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         empty?.isHidden = !isEmpty
     }
 
+    // MARK: - Who's typing
+
+    /// Whether the typing bubble belongs below the messages: someone's typing, the window holds the
+    /// chat's newest messages, and there are messages, since an empty chat has the Mimic in it.
+    var wantsTyping: Bool {
+        !typing.isEmpty && window.holdsNewest && !rows.isEmpty
+    }
+
+    /// The typing row comes or goes as `typing` changes, keeping the bottom in view if you were at
+    /// the bottom and what you're reading where it was if not.
+    func showTyping() {
+        guard isViewLoaded, !reloading else { return }
+        if wantsTyping {
+            guard !showsTyping else { return typingRow.stay() }
+            keepingPlace {
+                showsTyping = true
+                typingRow.dots.since = CACurrentMediaTime()
+                table.insertRows(at: IndexSet(integer: rows.count), withAnimation: [])
+            }
+            typingRow.arrive()
+        } else if showsTyping {
+            typingRow.leave { [weak self] in self?.dropTyping() }
+        }
+        lookingChanged()
+    }
+
+    func dropTyping() {
+        guard showsTyping, !wantsTyping, !reloading else { return }
+        keepingPlace {
+            showsTyping = false
+            table.removeRows(at: IndexSet(integer: rows.count), withAnimation: [])
+        }
+        lookingChanged()
+    }
+
+    /// Makes a change below the messages without moving what you're reading.
+    func keepingPlace(_ change: () -> Void) {
+        let atBottom = isAtBottom
+        let anchor = currentAnchor()
+        change()
+        if atBottom { scrollToBottom() } else { restore(anchor) }
+    }
+
+    /// A new message from someone typing ends their typing here at once, as jawd ends it, so the
+    /// message lands where the typing bubble was.
+    func answered(_ theirs: [MessageRow]) {
+        guard !theirs.isEmpty, !typing.isEmpty else { return }
+        typing = chat.kind.isGroup ? typing.filter { id in !theirs.contains { $0.from?.id == id } } : []
+    }
+
+    /// Lets the header's typing and the typing bubble play while this is the pane you're reading,
+    /// the bubble while its row is on screen. Without a host, as in the harness, the pane is the one
+    /// you're reading while its window is key.
+    public func lookingChanged() {
+        guard isViewLoaded else { return }
+        let reading = host.map { $0.conversationIsRead(self) } ?? (view.window?.isKeyWindow ?? false)
+        let shown = showsTyping && NSLocationInRange(rows.count, table.rows(in: scroll.contentView.bounds))
+        typingRow.dots.allowed = reading && shown
+        header.typingLabel.allowed = reading && !typing.isEmpty
+    }
+
+    static func typingWords(_ chat: ChatRow) -> String {
+        chat.kind.isGroup ? "someone's typing…" : "typing…"
+    }
+
     // MARK: - The table
 
     public func numberOfRows(in _: NSTableView) -> Int {
-        rows.count
+        rows.count + (showsTyping ? 1 : 0)
     }
 
     public func tableView(_: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if showsTyping, row >= rows.count { return TypingRowView.height(spec.style) }
         guard row < rows.count else { return 1 }
         return layouts.laid(rows[row], width: layoutWidth, spec: spec, context: contexts[row]).height
     }
 
     public func tableView(_ tableView: NSTableView, viewFor _: NSTableColumn?, row: Int) -> NSView? {
+        if showsTyping, row >= rows.count { return typingRow }
+        guard row < rows.count else { return nil }
         let id = NSUserInterfaceItemIdentifier("message")
         let cell = (tableView.makeView(withIdentifier: id, owner: self) as? MessageView) ?? {
             let v = MessageView(frame: .zero)
@@ -921,6 +1030,8 @@ final class HeaderView: NSView {
     let avatar = AvatarView()
     let name = Labels.make("", .body)
     let detail = Labels.make("", .caption)
+    /// In the detail's place while someone types: "typing", its dots counting, under a shimmer.
+    let typingLabel = TypingLabel()
     lazy var lead = avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset)
     static let inset = Space.l + 2
     var members = 0
@@ -938,7 +1049,8 @@ final class HeaderView: NSView {
         blur.state = .active
         tint.wantsLayer = true
         rule.wantsLayer = true
-        let stack = NSStackView(views: [name, detail])
+        typingLabel.isHidden = true
+        let stack = NSStackView(views: [name, detail, typingLabel])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
@@ -970,7 +1082,12 @@ final class HeaderView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    var typing = false
+    /// Whether someone's typing, as the conversation's `typing` says; its dots start counting when
+    /// someone starts.
+    var typing = false {
+        didSet { if typing, !oldValue { typingLabel.since = CACurrentMediaTime() } }
+    }
+
     var online = false
 
     /// A pane at the window's top left, with the sidebar and the list folded away, would have its
@@ -990,7 +1107,6 @@ final class HeaderView: NSView {
 
     func show(_ chat: ChatRow) {
         name.stringValue = chat.name
-        typing = !chat.typing.isEmpty
         online = !typing && presence == "online"
         var parts: [String] = []
         if typing { parts.append(chat.kind.isGroup ? "someone's typing…" : "typing…") }
@@ -998,7 +1114,10 @@ final class HeaderView: NSView {
         if chat.kind.isGroup, !typing { parts.append(members > 0 ? "\(members) members" : "group") }
         if chat.muted { parts.append("muted") }
         detail.stringValue = parts.joined(separator: " · ")
-        detail.isHidden = parts.isEmpty
+        detail.isHidden = parts.isEmpty || typing
+        typingLabel.isHidden = !typing
+        typingLabel.words = chat.kind.isGroup ? "someone's typing" : "typing"
+        typingLabel.rest = chat.muted ? " · muted" : ""
         setAccessibilityLabel("\(chat.name), \(detail.stringValue)")
         if let roles { avatar.show(chat.name, id: chat.id, image: avatar.image, roles: roles) }
         colour()
@@ -1010,5 +1129,6 @@ final class HeaderView: NSView {
         rule.layer?.backgroundColor = roles.separator.opacity(0.7).cgColor
         name.textColor = roles.text.nsColor
         detail.textColor = typing || online ? roles.online.nsColor : roles.secondary.nsColor
+        typingLabel.colour = roles.online
     }
 }
