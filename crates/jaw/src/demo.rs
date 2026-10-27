@@ -808,19 +808,24 @@ impl Account {
         }
     }
 
-    /// Keeps the settings asked, as jawd does: a theme it doesn't know is refused.
+    /// Keeps the settings asked, as jawd does: a theme it doesn't know is refused, and a change is
+    /// answered with all of them, then pushed if it changed any.
     fn on_set_settings(&mut self, change: SettingsSet) {
         if let Some(theme) = change.theme.as_deref().filter(|t| jaw_proto::themes::get(t).is_none()) {
             self.send(Update::SettingsRefused(format!("jawd doesn't know the theme {theme}")));
             return;
         }
+        let was = self.settings.clone();
         if let Some(theme) = change.theme {
             self.settings.theme = theme;
         }
         if let Some(messages) = change.messages {
             self.settings.messages = messages;
         }
-        self.send(Update::Settings(self.settings.clone()));
+        self.send(Update::SettingsKept(self.settings.clone()));
+        if self.settings != was {
+            self.send(Update::Settings(self.settings.clone()));
+        }
     }
 }
 

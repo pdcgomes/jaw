@@ -783,8 +783,11 @@ pub enum Update {
         settings: Settings,
     },
     Connection(Connection),
-    /// jawd's settings, as a push or `settings.set`'s answer carries them: all of them.
+    /// jawd's settings, as a push carries them whenever they change, here or in another interface:
+    /// all of them.
     Settings(Settings),
+    /// `settings.set`'s answer: jawd kept the change asked, and these are all its settings now.
+    SettingsKept(Settings),
     /// jawd didn't keep the settings asked, and why.
     SettingsRefused(String),
     Link(LinkStep),
@@ -912,7 +915,7 @@ impl Update {
     pub fn awaited(&self) -> bool {
         match self {
             Update::Hello { .. } | Update::Layout(_) => true,
-            Update::Settings(_) => true,
+            Update::Settings(_) | Update::SettingsKept(_) => true,
             Update::Chats(window) => window.moved.is_some(),
             Update::Messages { update, .. } | Update::QuickLook { update, .. } => update.moved.is_some(),
             Update::Folders { whole, .. } | Update::Roster { whole, .. } => *whole,
@@ -1042,8 +1045,9 @@ pub trait Jawd {
     fn typing(&mut self, chat: &str, state: Typing);
     /// Whether the terminal is in front, so jawd says you're online only while it is.
     fn focus(&mut self, focused: bool);
-    /// Asks jawd to keep these settings for the terminal; they come back as `Update::Settings`, or
-    /// `Update::SettingsRefused` with why.
+    /// Asks jawd to keep these settings for the terminal; the answer comes back as
+    /// `Update::SettingsKept`, or `Update::SettingsRefused` with why, and a change jawd keeps is
+    /// pushed too, as `Update::Settings`.
     fn set_settings(&mut self, change: &SettingsSet);
     /// Starts linking by QR code, or by a code typed on the phone for `phone`.
     fn link_start(&mut self, phone: Option<String>);

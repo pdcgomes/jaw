@@ -8,6 +8,7 @@ use crate::theme::Theme;
 use crate::view::View;
 use crate::view::tests::shown;
 use chrono::FixedOffset;
+use jaw_proto::settings::{Messages, Settings};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc::{Receiver, channel};
@@ -44,11 +45,16 @@ struct Kept {
     /// The panes' layout it keeps for jaw, and its version.
     layout: Option<Value>,
     layout_v: u64,
+    /// The terminal's settings, which hello brings to a connection saying hello as the terminal
+    /// and `settings.set` changes; none, as a jawd from before settings keeps, whose hello brings
+    /// none.
+    settings: Option<Value>,
 }
 
 /// A jawd that answers hello, the windows and find with the protocol's fixtures, takes messages
-/// and actions as jawd does, with their keys, turns down what jawd doesn't serve yet, and can go
-/// away and come back on the same socket.
+/// and actions as jawd does, with their keys, keeps the terminal's settings and pushes a change
+/// once it has answered for it, turns down what jawd doesn't serve yet, and can go away and come
+/// back on the same socket.
 struct Scripted {
     socket: PathBuf,
     tell: std::sync::mpsc::Sender<Told>,
@@ -68,18 +74,27 @@ impl Scripted {
     }
 }
 
-/// Its answer to one line, or none when it drops the connection instead.
-fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Value> {
+/// Its answer to one line, then the push that follows it if any, or none when it drops the
+/// connection instead.
+fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
     let request: Value = serde_json::from_str(line).unwrap();
     let mut kept = kept.lock().unwrap();
     kept.asked.push(request.clone());
     let (id, params) = (request["id"].clone(), &request["params"]);
     let method = request["method"].as_str().unwrap_or_default().to_string();
     let error = |code: i32, message: &str, data: Value| {
-        Some(json!({ "id": id, "error": { "code": code, "message": message, "data": data } }))
+        Some(vec![json!({ "id": id, "error": { "code": code, "message": message, "data": data } })])
     };
+    let mut push = None;
     let result = match method.as_str() {
-        "hello" => fixture("hello.result")["result"].clone(),
+        "hello" => {
+            let mut hello = fixture("hello.result")["result"].clone();
+            hello.as_object_mut().unwrap().remove("settings");
+            if let Some(settings) = kept.settings.clone().filter(|_| params["client"] == TERMINAL) {
+                hello["settings"] = settings;
+            }
+            hello
+        }
         "chats.watch" => fixture("chats.watch.result")["result"].clone(),
         "messages.watch" | "watch.move" => fixture("messages.watch.result")["result"].clone(),
         "find" if params["query"] == "ar" => fixture("find.result")["result"].clone(),
@@ -142,24 +157,35 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Value> {
             let data = json!({ "param": "theme", "allowed": ["gruvbox", "nord"] });
             return error(code::INVALID_PARAMS, "theme takes one of gruvbox, nord", data);
         }
-        "settings.set" => json!({ "settings": {
-            "theme": params.get("theme").cloned().unwrap_or(json!("tokyo-night")),
-            "messages": params.get("messages").cloned().unwrap_or(json!("bubbles")),
-        } }),
+        "settings.set" if kept.settings.is_some() => {
+            let was = kept.settings.clone().unwrap_or_default();
+            let mut settings = was.clone();
+            for name in ["theme", "messages"] {
+                if let Some(value) = params.get(name) {
+                    settings[name] = value.clone();
+                }
+            }
+            if settings != was {
+                push = Some(json!({ "method": "settings", "params": settings }));
+            }
+            kept.settings = Some(settings.clone());
+            json!({ "settings": settings })
+        }
         "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" => json!({}),
         _ => {
             kept.refused.push(method.clone());
             return error(code::UNKNOWN_METHOD, &format!("jawd doesn't know {method}"), Value::Null);
         }
     };
-    Some(json!({ "id": id, "result": result }))
+    Some([json!({ "id": id, "result": result })].into_iter().chain(push).collect())
 }
 
 fn scripted() -> Scripted {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("jaw.sock");
     let (tell, told) = channel::<Told>();
-    let kept = Arc::new(Mutex::new(Kept::default()));
+    let settings = fixture("hello.result")["result"]["settings"].clone();
+    let kept = Arc::new(Mutex::new(Kept { settings: Some(settings), ..Kept::default() }));
     let (path, keeping) = (socket.clone(), kept.clone());
     // Listening before it returns, so jaw never connects to a socket that isn't there yet.
     let mut first = Some(UnixListener::bind(&socket).unwrap());
@@ -176,14 +202,16 @@ fn scripted() -> Scripted {
                     std::thread::spawn(move || {
                         for line in BufReader::new(conn).lines() {
                             let Ok(line) = line else { return };
-                            let Some(reply) = answer(&line, &keeping) else {
+                            let Some(said) = answer(&line, &keeping) else {
                                 let _ = out.shutdown(std::net::Shutdown::Both);
                                 return;
                             };
-                            let mut reply = serde_json::to_vec(&reply).unwrap();
-                            reply.push(b'\n');
-                            if out.write_all(&reply).is_err() {
-                                return;
+                            for line in said {
+                                let mut line = serde_json::to_vec(&line).unwrap();
+                                line.push(b'\n');
+                                if out.write_all(&line).is_err() {
+                                    return;
+                                }
                             }
                         }
                     });
@@ -457,21 +485,45 @@ fn drafts_and_read_positions_jawd_missed_are_asked_for_again_once_it_is_back_the
     );
 }
 
+/// The terminal's settings through the client: a change jawd keeps comes back as its answer, then
+/// as jawd's push; one it refuses says why; each connection's hello brings what jawd keeps then,
+/// so the change once jaw is back; and a hello without settings, a jawd's from before them, is
+/// the defaults.
 #[test]
-fn the_settings_hello_brings_and_jawd_keeps_come_back_and_one_it_refuses_says_why() {
+fn the_settings_come_in_each_hello_and_jawds_answer_and_push_and_one_it_refuses_says_why() {
     let jawd = scripted();
     let (tx, rx) = channel();
     let mut wire = Wire::connect(jawd.socket.clone(), tx);
     let mut said = vec![];
+    let hello = |said: &[Update]| {
+        said.iter().find_map(|u| if let Update::Hello { settings, .. } = u { Some(settings.clone()) } else { None })
+    };
     drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
-    assert!(said.iter().any(|u| matches!(u, Update::Hello { settings, .. } if settings.theme == "tokyo-night")));
+    assert_eq!(hello(&said), Some(Settings::default()), "{said:?}");
     wire.set_settings(&SettingsSet { theme: Some("gruvbox".into()), messages: None });
     drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Settings(_))));
-    assert!(said.iter().any(|u| matches!(u, Update::Settings(s) if s.theme == "gruvbox")));
+    let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Bubbles };
+    let came: Vec<&Update> =
+        said.iter().filter(|u| matches!(u, Update::SettingsKept(_) | Update::Settings(_))).collect();
+    let answered = [&Update::SettingsKept(gruvbox.clone()), &Update::Settings(gruvbox.clone())];
+    assert_eq!(came, answered, "the answer, then jawd's push");
     wire.set_settings(&SettingsSet { theme: Some("solarized".into()), messages: None });
     drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::SettingsRefused(_))));
     assert!(said.iter().any(|u| matches!(u, Update::SettingsRefused(why) if why.contains("theme takes one of"))));
     assert_eq!(jawd.asked("settings.set"), [json!({ "theme": "gruvbox" }), json!({ "theme": "solarized" })]);
+
+    let again = |wire: &mut Wire, said: &mut Vec<Update>| {
+        said.clear();
+        jawd.tell.send(Told::Go).unwrap();
+        drive(wire, &rx, said, |s| s.iter().any(|u| matches!(u, Update::Unreachable { .. })));
+        jawd.tell.send(Told::Come).unwrap();
+        drive(wire, &rx, said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+    };
+    again(&mut wire, &mut said);
+    assert_eq!(hello(&said), Some(gruvbox), "back, the settings jawd keeps now: {said:?}");
+    jawd.kept.lock().unwrap().settings = None;
+    again(&mut wire, &mut said);
+    assert_eq!(hello(&said), Some(Settings::default()), "a hello without settings is the defaults: {said:?}");
 }
 
 #[test]

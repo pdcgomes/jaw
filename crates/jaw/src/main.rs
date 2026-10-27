@@ -22,6 +22,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use jaw_proto::settings::TERMINAL;
 use jaw_proto::{AccountState, LinkStart, LinkStep};
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
@@ -205,7 +206,7 @@ fn main() -> Result<()> {
 
 fn connect() -> Result<(jaw_client::Connection, jaw_proto::Welcome)> {
     let socket = jaw_proto::local::socket(&jaw_proto::local::home());
-    jaw_client::Connection::open(&socket, "jaw", env!("CARGO_PKG_VERSION"))
+    jaw_client::Connection::open(&socket, TERMINAL, env!("CARGO_PKG_VERSION"))
 }
 
 fn status() -> Result<()> {

@@ -13,6 +13,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{Event as Input, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::style::Color;
 use std::sync::mpsc::Receiver;
 
 const NOW: i64 = super::tests::NOW;
@@ -417,6 +418,12 @@ fn a_theme_that_changes_draws_every_pane_again_in_its_colours() {
     let w = now.area.width as usize;
     let first = now.content.iter().zip(&was.content).position(|(a, b)| a != b).map(|i| (i % w, i / w));
     assert_eq!(first, None, "each pane as if Gruvbox had been kept all along:\n{}", frame(&mut v));
+    let (gruvbox, tokyo_night) = (Theme::named("gruvbox", true), Theme::with(true));
+    let corners: Vec<Color> =
+        (0..now.area.width).map(|x| &now[(x, 1)]).filter(|c| c.symbol() == "╭").map(|c| c.bg).collect();
+    let top = frame(&mut v).lines().nth(1).unwrap().to_string();
+    assert_eq!(corners, [gruvbox.bg; 4], "the folders, the chat list and both panes, on Gruvbox's ground: {top}");
+    assert!(!now.content.iter().any(|c| c.bg == tokyo_night.bg), "and nothing on Tokyo Night's");
 }
 
 /// Pictures of two, three and four panes at 160 × 45 and 100 × 30, with and without the box along

@@ -317,6 +317,14 @@ impl Images {
         self.drawn.clear();
     }
 
+    /// The ground under the pictures has changed colour: each is drawn as half-blocks, which paint
+    /// its cells on the new ground, until it has stood still again, and only then with its escape,
+    /// whose transparent pixels leave what the terminal has in those cells.
+    pub fn new_ground(&mut self) {
+        self.drawn.clear();
+        self.stood.clear();
+    }
+
     /// Begins a frame: what's drawn with escapes is noted afresh.
     pub fn begin(&mut self) {
         self.drawing.clear();

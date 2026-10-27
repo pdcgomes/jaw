@@ -29,6 +29,7 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// Below this width the chat list folds, and takes the screen until a chat is picked.
 pub const NARROW: u16 = 90;
@@ -54,9 +55,9 @@ const LIST_ROWS: u32 = 100;
 pub const WINDOW: usize = 100;
 /// Ask for the window to move once the screen is this close to its edge.
 const EDGE: usize = 20;
-/// How long jaw waits for jawd's hello before drawing anything, so its first frame is in the
-/// theme jawd keeps rather than a flash of the default.
-pub const PATIENCE: i64 = 250;
+/// How long the first frame waits for jawd's hello, input or not, so it's drawn in the theme jawd
+/// keeps rather than in the default first.
+const FIRST_FRAME_WAIT: Duration = Duration::from_millis(250);
 
 /// Whether jawd answers.
 #[derive(Clone, Debug, PartialEq)]
@@ -154,14 +155,15 @@ pub struct View {
     /// A clock that stands still, for frames that must come out the same.
     pub clock: Option<i64>,
     pub tz: FixedOffset,
-    /// jawd's settings, as hello, a push or an answer last said, and what was last asked of it
-    /// while its answer is on the way.
+    /// jawd's settings, as hello, a push or an answer last said; what was last asked of it while
+    /// its answer is on the way; and how many changes asked are still to be answered.
     settings: Settings,
     settings_asked: Option<Settings>,
+    settings_owed: usize,
     /// The theme the screen is drawn in, by ID.
     theme_id: String,
-    /// When the view was made, by the wall clock, so it draws even when jawd says nothing.
-    born: i64,
+    /// When the view was made, so the first frame waits for jawd at most `FIRST_FRAME_WAIT`.
+    born: Instant,
     jawd: Box<dyn Jawd>,
 
     reach: Reach,
@@ -308,8 +310,9 @@ impl View {
             tz: *chrono::Local::now().offset(),
             settings: Settings::default(),
             settings_asked: None,
+            settings_owed: 0,
             theme_id: jaw_proto::themes::DEFAULT.to_string(),
-            born: chrono::Utc::now().timestamp_millis(),
+            born: Instant::now(),
             jawd,
             reach: Reach::Waiting,
             linked: None,
@@ -451,6 +454,18 @@ impl View {
             || (self.reach == Reach::Up && self.chats.loaded && self.chats.is_empty())
     }
 
+    /// When the first frame is drawn whatever jawd says, while nothing has been drawn yet and jawd
+    /// hasn't said hello or that it can't answer.
+    fn first_frame_due(&self) -> Option<Instant> {
+        (self.reach == Reach::Waiting && self.drawn_at == 0).then(|| self.born + FIRST_FRAME_WAIT)
+    }
+
+    /// Whether the first frame is still waiting for jawd, so nothing is drawn yet, whatever the
+    /// input.
+    pub fn first_frame_waits(&self) -> bool {
+        self.first_frame_due().is_some_and(|due| Instant::now() < due)
+    }
+
     /// Whether something on screen counts seconds: a QR code's or a retry's.
     fn counting(&self) -> bool {
         matches!(self.reach, Reach::Unreachable { .. })
@@ -504,9 +519,9 @@ impl View {
                 self.connection = c;
             }
             Update::Settings(settings) => self.settings_came(settings),
+            Update::SettingsKept(settings) => self.settings_answered(Some(settings)),
             Update::SettingsRefused(why) => {
-                self.settings_asked = None;
-                self.restyle();
+                self.settings_answered(None);
                 self.say(format!("not kept: {why}"));
             }
             Update::Link(step) => {
@@ -710,10 +725,25 @@ impl View {
         self.settings_asked.as_ref().unwrap_or(&self.settings)
     }
 
-    /// jawd's settings came, in hello, a push or an answer; they're what the screen shows now.
+    /// jawd's settings came, in hello or a push, from this interface's change or another's: what
+    /// jawd keeps now, which the screen shows unless a change asked here is still on its way.
     fn settings_came(&mut self, settings: Settings) {
         self.settings = settings;
-        self.settings_asked = None;
+        self.restyle();
+    }
+
+    /// jawd answered a change asked here: kept, with all its settings as they now are, or refused.
+    /// What was last asked stays shown until every change on its way is answered, so a first
+    /// answer doesn't draw the first change over a second, and goes at once when one is refused.
+    fn settings_answered(&mut self, kept: Option<Settings>) {
+        self.settings_owed = self.settings_owed.saturating_sub(1);
+        match kept {
+            Some(settings) => self.settings = settings,
+            None => self.settings_asked = None,
+        }
+        if self.settings_owed == 0 {
+            self.settings_asked = None;
+        }
         self.restyle();
     }
 
@@ -728,12 +758,13 @@ impl View {
             asked.messages = messages;
         }
         self.settings_asked = Some(asked);
+        self.settings_owed += 1;
         self.jawd.set_settings(&change);
         self.restyle();
     }
 
     /// Draws the screen in the theme it shows; a theme that changes lays every message and chat
-    /// row out again, in its colours.
+    /// row out again, in its colours, and draws every picture again on its ground.
     fn restyle(&mut self) {
         let id = self.settings_shown().theme.clone();
         if id != self.theme_id {
@@ -742,6 +773,7 @@ impl View {
             self.laid.clear();
             self.rows_laid.clear();
             self.restyle_panes();
+            self.images.new_ground();
         }
         self.dirty = true;
     }
@@ -982,8 +1014,8 @@ impl View {
     pub fn tick(&mut self) {
         let now = self.now();
         let (second, minute) = (now / 1_000, now / MINUTE);
-        if self.reach == Reach::Waiting && self.drawn_at == 0 {
-            self.dirty |= now - self.born >= PATIENCE;
+        if let Some(due) = self.first_frame_due() {
+            self.dirty |= Instant::now() >= due;
         } else if minute != self.drawn_at / 60 || (self.counting() && second != self.drawn_at) {
             self.dirty = true;
         }
@@ -1011,7 +1043,7 @@ impl View {
             self.chomp_until = None;
             self.dirty = true;
         }
-        if self.images.next_wake().is_some_and(|t| t <= std::time::Instant::now()) {
+        if self.images.next_wake().is_some_and(|t| t <= Instant::now()) {
             self.dirty = true;
         }
     }
@@ -1034,15 +1066,14 @@ impl View {
         if self.chomp_until.is_some() {
             soon(Some(now + 100));
         }
-        if let Some(at) = self.images.next_wake() {
-            soon(Some(now + at.saturating_duration_since(std::time::Instant::now()).as_millis() as i64));
-        }
+        // Rounded up, so the loop never wakes just before the moment and turns until it comes.
+        let in_view_time =
+            |at: Instant| now + at.saturating_duration_since(Instant::now()).as_micros().div_ceil(1_000) as i64;
+        soon(self.images.next_wake().map(in_view_time));
         if self.counting() {
             soon(Some((now / 1_000 + 1) * 1_000));
         }
-        if self.reach == Reach::Waiting && self.drawn_at == 0 {
-            soon(Some(self.born + PATIENCE));
-        }
+        soon(self.first_frame_due().map(in_view_time));
         wake
     }
 

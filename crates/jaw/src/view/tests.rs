@@ -9,6 +9,7 @@ use crate::run::{self, Event};
 use jaw_proto::settings::{Messages, Settings, SettingsSet};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::buffer::CellDiffOption;
 use ratatui::crossterm::event::{
     Event as Input, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -585,7 +586,8 @@ fn nothing_is_drawn_before_jawd_answers_and_the_first_frame_is_in_the_theme_hell
     let mut v = View::new(Box::new(Demo::start(tx, Clock::Fixed(NOW), State::Online, false)));
     v.tick();
     assert!(!v.dirty, "nothing to draw before jawd says hello");
-    assert!(v.next_wake() <= v.born + PATIENCE, "but the loop wakes to draw once a quarter of a second has passed");
+    let wait = FIRST_FRAME_WAIT.as_millis() as i64;
+    assert!(v.next_wake() - v.now() <= wait, "but the loop wakes to draw once a quarter of a second has passed");
     let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Irc };
     v.apply(Update::Hello {
         root: String::new(),
@@ -599,9 +601,13 @@ fn nothing_is_drawn_before_jawd_answers_and_the_first_frame_is_in_the_theme_hell
     assert_eq!(v.settings_shown(), &gruvbox);
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut quiet = View::new(Box::new(Demo::start(tx, Clock::Fixed(NOW), State::Online, false)));
-    quiet.born -= PATIENCE;
+    quiet.clock = Some(NOW);
+    quiet.born -= FIRST_FRAME_WAIT;
     quiet.tick();
-    assert!(quiet.dirty, "a jawd that says nothing for a quarter of a second still gets a frame saying so");
+    assert!(
+        quiet.dirty,
+        "a jawd that says nothing for a quarter of a second still gets a frame, whatever the clock says"
+    );
 }
 
 #[test]
@@ -616,6 +622,77 @@ fn a_change_shows_while_jawd_keeps_it_and_one_it_doesnt_keep_goes_back_and_says_
     assert_eq!(v.theme, Theme::named("kanagawa", true), "another interface's change shows here too");
 }
 
+/// Changes asked one after another: the last asked stays shown while the answers and pushes for
+/// those before it come, and a change another interface makes meanwhile is kept without showing
+/// over it; a refusal goes back to what jawd has at once, even with another change on its way.
+#[test]
+fn with_changes_on_their_way_the_last_asked_stays_shown_until_jawd_has_answered_them_all() {
+    let (mut v, rx) = view(140, 40);
+    let kept = |theme: &str| Settings { theme: theme.into(), messages: Messages::Bubbles };
+    v.ask_settings(SettingsSet { theme: Some("nord".into()), messages: None });
+    v.ask_settings(SettingsSet { theme: Some("kanagawa".into()), messages: None });
+    let answers = came(&rx);
+    let (nord, kanagawa) = (kept("nord"), kept("kanagawa"));
+    let both = [
+        Update::SettingsKept(nord.clone()),
+        Update::Settings(nord),
+        Update::SettingsKept(kanagawa.clone()),
+        Update::Settings(kanagawa.clone()),
+    ];
+    assert_eq!(answers, both);
+    v.apply(Update::Settings(kept("gruvbox")));
+    assert_eq!(v.theme, Theme::named("kanagawa", true), "another interface's change doesn't show over it");
+    for u in answers {
+        let what = format!("{u:?}");
+        v.apply(u);
+        assert_eq!(v.theme, Theme::named("kanagawa", true), "the last asked, after {what}");
+    }
+    assert_eq!((v.settings_asked.as_ref(), &v.settings), (None, &kanagawa), "all answered: what jawd has");
+
+    v.ask_settings(SettingsSet { theme: Some("solarized".into()), messages: None });
+    v.ask_settings(SettingsSet { theme: Some("nord".into()), messages: None });
+    let mut answers = came(&rx).into_iter();
+    let refused = answers.next().unwrap();
+    assert!(matches!(refused, Update::SettingsRefused(_)), "{refused:?}");
+    v.apply(refused);
+    assert_eq!(v.settings_shown(), &kanagawa, "refused, back to what jawd has at once");
+    answers.for_each(|u| v.apply(u));
+    assert_eq!(v.settings_shown(), &kept("nord"));
+}
+
+/// A key or a resize before jawd's hello is taken at once, but the loop draws nothing until hello
+/// comes, so the first frame is already in the theme hello brings.
+#[test]
+fn input_before_jawds_hello_is_taken_but_drawn_only_once_hello_comes_in_its_theme() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut v = View::new(Box::new(Demo::start(tx.clone(), Clock::Fixed(NOW), State::Online, false)));
+    v.clock = Some(NOW);
+    v.tz = UTC;
+    v.no_color = false;
+    // However slowly hello comes, the first frame still waits for it.
+    v.born += Duration::from_secs(10);
+    let Some(Update::Hello { root, linked, me, connection, .. }) = came(&rx).pop() else { panic!("jawd's hello") };
+    let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Bubbles };
+    let hello = Update::Hello { root, linked, me, connection, settings: gruvbox };
+    let start = Instant::now();
+    tx.send(Event::Input(Input::Resize(100, 30), start)).unwrap();
+    tx.send(Event::Input(Input::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)), start)).unwrap();
+    let saying = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        tx.send(Event::Update(hello)).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        tx.send(Event::Stop).unwrap();
+    });
+    let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut probe = run::Probe { from: Some(start + Duration::from_millis(100)), ..run::Probe::default() };
+    run::drive(&mut v, &rx, &mut terminal, &mut probe, &mut |_| {}).unwrap();
+    saying.join().unwrap();
+    assert_eq!(probe.frames - probe.frames_from, 0, "nothing drawn before hello");
+    assert!(probe.frames > 0 && v.overlay == Some(Overlay::Keys), "the key was taken, and drawn once hello came");
+    let ground = terminal.backend().buffer()[(0, 0)].bg;
+    assert_eq!(ground, Theme::named("gruvbox", v.theme.truecolor).bg, "in the theme hello brought");
+}
+
 #[test]
 fn the_made_up_account_keeps_the_settings_asked_as_jawd_does_and_refuses_a_theme_it_doesnt_know() {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -626,8 +703,11 @@ fn the_made_up_account_keeps_the_settings_asked_as_jawd_does_and_refuses_a_theme
     run::settle(&mut v, &rx);
     let kept = Settings { theme: "gruvbox".into(), messages: Messages::Irc };
     v.ask_settings(SettingsSet { theme: Some("gruvbox".into()), messages: Some(Messages::Irc) });
-    assert_eq!(came(&rx), [Update::Settings(kept.clone())], "answered with all of them");
+    let answered = [Update::SettingsKept(kept.clone()), Update::Settings(kept.clone())];
+    assert_eq!(came(&rx), answered, "answered with all of them, then pushed");
     assert_eq!(demo.settings(), kept);
+    v.ask_settings(SettingsSet { theme: Some("gruvbox".into()), messages: None });
+    assert_eq!(came(&rx), [Update::SettingsKept(kept.clone())], "a value it has already changes nothing to push");
     v.ask_settings(SettingsSet { theme: Some("solarized".into()), messages: None });
     let refused = came(&rx);
     assert!(matches!(&refused[..], [Update::SettingsRefused(why)] if why.contains("solarized")), "{refused:?}");
@@ -994,8 +1074,6 @@ fn without_colour_photos_are_their_summary_lines() {
 
 #[test]
 fn scrolling_leaves_nothing_of_an_escape_drawn_picture_behind() {
-    use ratatui::backend::TestBackend;
-    use ratatui::buffer::CellDiffOption;
     let (mut v, rx) = pictured(Protocol::Iterm, 140, 50);
     press(&mut v, &rx, "<a-down><a-down><a-down><up><pgup><pgup>");
     let mut term = ratatui::Terminal::new(TestBackend::new(140, 50)).unwrap();
@@ -1057,6 +1135,45 @@ fn a_picture_that_has_stood_still_wakes_the_loop_to_be_drawn_with_its_escape() {
     assert!(v.dirty, "and once woken there's a frame to draw");
     frame(&mut v);
     assert!(String::from_utf8_lossy(&v.take_writes()).contains("\x1b]1337;File="));
+}
+
+/// A theme that changes draws each picture iTerm2 or sixel drew again on its new ground: first as
+/// half-blocks, which reach the terminal in the new colours in the cells its escape had, then,
+/// once it has stood still again, with its escape over them, so a transparent pixel shows the new
+/// ground rather than what the terminal kept under it.
+#[test]
+fn a_theme_that_changes_draws_the_pictures_escapes_drew_again_on_its_ground() {
+    let (mut v, rx) = pictured(Protocol::Iterm, 140, 50);
+    press(&mut v, &rx, "<a-down><a-down><a-down><up><pgup><pgup>");
+    let mut term = ratatui::Terminal::new(TestBackend::new(140, 50)).unwrap();
+    let mut draw = |v: &mut View| {
+        let buf = term.draw(|f| v.draw(f)).unwrap().buffer.clone();
+        (buf, String::from_utf8_lossy(&v.take_writes()).to_string(), term.backend().buffer().clone())
+    };
+    let escapes = |writes: &str| writes.matches("\x1b]1337;File=").count();
+    draw(&mut v);
+    std::thread::sleep(crate::graphics::STILL + Duration::from_millis(20));
+    let (buf, _, _) = draw(&mut v);
+    let w = buf.area.width;
+    let under: Vec<(u16, u16)> = (0..buf.content.len())
+        .filter(|i| buf.content[*i].diff_option == CellDiffOption::Skip)
+        .map(|i| (i as u16 % w, i as u16 / w))
+        .collect();
+    assert!(!under.is_empty(), "the pictures stand still, drawn with their escapes");
+    v.apply(Update::Settings(Settings { theme: "gruvbox".into(), messages: Messages::Bubbles }));
+    let (buf, writes, shown) = draw(&mut v);
+    assert_eq!(escapes(&writes), 0, "first, half-blocks on the new ground");
+    let reached =
+        |&(x, y): &(u16, u16)| buf[(x, y)].diff_option == CellDiffOption::None && shown[(x, y)] == buf[(x, y)];
+    assert!(under.iter().all(reached), "every cell the escapes had reached the terminal");
+    let ground = Theme::named("gruvbox", true).bg;
+    assert!(
+        under.iter().any(|&(x, y)| shown[(x, y)].bg == ground),
+        "the sticker's transparent pixels, on Gruvbox's ground"
+    );
+    std::thread::sleep(crate::graphics::STILL + Duration::from_millis(20));
+    let (_, writes, _) = draw(&mut v);
+    assert_eq!(escapes(&writes), 4, "then their escapes again, over it");
 }
 
 /// The open chat's voice message lasting `seconds`.

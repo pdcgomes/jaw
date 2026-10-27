@@ -12,7 +12,7 @@ use crate::run::Event;
 use jaw_client::{Client, Config, Event as From, Failure, WindowId};
 use jaw_proto::find::{Find, Kind};
 use jaw_proto::layout::{Layout, Saved};
-use jaw_proto::settings::{SettingsKept, SettingsSet};
+use jaw_proto::settings::{SettingsKept, SettingsSet, TERMINAL};
 use jaw_proto::{AccountState, LinkStart, code};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -227,7 +227,7 @@ impl Wire {
     /// Connects to jawd on `socket`, in the background; what it sends wakes the loop on `tx`.
     pub fn connect(socket: PathBuf, tx: Sender<Event>) -> Wire {
         let wake = tx.clone();
-        let config = Config { focus: true, ..Config::new(socket, "jaw", env!("CARGO_PKG_VERSION")) };
+        let config = Config { focus: true, ..Config::new(socket, TERMINAL, env!("CARGO_PKG_VERSION")) };
         let client = Client::start(config, move || {
             let _ = wake.send(Event::Jawd);
         });
@@ -519,7 +519,7 @@ impl Wire {
                     }
                     (Asked::Settings, Ok(result)) => {
                         if let Ok(kept) = serde_json::from_value::<SettingsKept>(result) {
-                            out.push(Update::Settings(kept.settings));
+                            out.push(Update::SettingsKept(kept.settings));
                         }
                     }
                     (asked, Err(failure)) => out.extend(self.refused(asked, &failure)),

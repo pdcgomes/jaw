@@ -3,8 +3,10 @@
 //! something comes or the view's next deadline. Each turn handles every input first, applies the
 //! updates waiting for at most 8 ms, and draws once if anything changed: at once after input or
 //! after what the screen was waiting for (jawd's hello, a window's rows where it was asked to be),
-//! and otherwise at most 60 times a second however fast updates come. Nothing changing, nothing is
-//! drawn and the thread doesn't wake but for the clock's minute.
+//! and otherwise at most 60 times a second however fast updates come. The first frame waits for
+//! jawd's hello, or for jawd to say it can't answer, a quarter of a second at most, input or not,
+//! so it's drawn in the theme jawd keeps. Nothing changing, nothing is drawn and the thread doesn't
+//! wake but for the clock's minute.
 
 use crate::data::Update;
 use crate::view::{Effect, View};
@@ -76,7 +78,7 @@ where
         } else {
             let wake = Duration::from_millis((view.next_wake() - view.now()).max(0) as u64);
             let mut at = now + wake;
-            if view.dirty {
+            if view.dirty && !view.first_frame_waits() {
                 at = at.min(last_frame.map_or(now, |t| t + FRAME));
             }
             Some(at)
@@ -121,7 +123,7 @@ where
             }
         }
         let start = Instant::now();
-        while keys.is_empty() && !view.quit && start.elapsed() < APPLY {
+        while (keys.is_empty() || view.first_frame_waits()) && !view.quit && start.elapsed() < APPLY {
             let Some(mut batch) = waiting.pop_front() else { break };
             while let Some(next) = waiting.pop_front() {
                 if let Some(next) = batch.absorb(next) {
@@ -143,7 +145,7 @@ where
         }
         view.tick();
         let due = last_frame.is_none_or(|t| t.elapsed() >= FRAME);
-        if view.dirty && (!keys.is_empty() || view.awaited || due) {
+        if view.dirty && !view.first_frame_waits() && (!keys.is_empty() || view.awaited || due) {
             view.dirty = false;
             view.awaited = false;
             let sent = view.take_writes();
