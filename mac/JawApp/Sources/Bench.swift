@@ -74,7 +74,7 @@ enum Bench {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             NSApp.activate()
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
-            let step = key.hasPrefix("save:") || key == "revert" || key.hasPrefix("size:") || key.hasPrefix("drop:")
+            let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -86,6 +86,7 @@ enum Bench {
             }
             if key.hasPrefix("save:") { model.saveLayoutAs(String(key.dropFirst(5))) }
             if key == "revert" { model.revertLayout() }
+            if key == "settings" { model.window?.showSettings() }
             if key.hasPrefix("size:") {
                 let wh = key.dropFirst(5).split(separator: "x").compactMap { Double($0) }
                 if wh.count == 2 { model.window?.window?.setContentSize(NSSize(width: wh[0], height: wh[1])) }
@@ -130,7 +131,7 @@ enum Bench {
     static func draw(to path: String, model: AppModel) {
         // The window's frame view, so the toolbar is drawn too.
         let glance = model.glance.isOpen ? model.glance.panel.contentView : nil
-        guard let view = glance ?? model.window?.editorSheet?.contentView ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
+        guard let view = glance ?? model.window?.editorSheet?.contentView ?? model.window?.settings?.contentView ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
         let rect = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }
         view.cacheDisplay(in: rect, to: rep)

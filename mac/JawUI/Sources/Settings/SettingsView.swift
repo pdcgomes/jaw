@@ -8,6 +8,7 @@ public struct SettingsView: View {
     /// The theme's accent, the outline's colour unless one's picked.
     let accent: RGBA
     let done: () -> Void
+    @State var section = 0
 
     public init(preferences: Preferences, accent: RGBA, done: @escaping () -> Void) {
         self.preferences = preferences
@@ -17,6 +18,17 @@ public struct SettingsView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
+            // Sections chosen with a segmented control inside the sheet: a tab view draws its tabs
+            // across its top edge, half above it, where a sheet has nothing to hold them.
+            Picker("Section", selection: $section) {
+                Text("Appearance").tag(0)
+                Text("Messages").tag(1)
+                Text("Panes").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 330)
+            .padding(.top, Space.xl)
             tabs
             HStack {
                 Spacer()
@@ -28,7 +40,9 @@ public struct SettingsView: View {
     }
 
     var tabs: some View {
-        TabView {
+        Group {
+            switch section {
+        case 0:
             Form {
                 Picker("Appearance", selection: $preferences.appearance) {
                     Text("The system's").tag(Appearance.system)
@@ -44,8 +58,7 @@ public struct SettingsView: View {
                 Text("Redlamp's themes come in a later version.").font(.footnote).foregroundStyle(.secondary)
             }
             .formStyle(.grouped)
-            .tabItem { Label("Appearance", systemImage: "paintpalette") }
-
+        case 1:
             Form {
                 Picker("Messages look like", selection: $preferences.look) {
                     ForEach(Look.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -70,8 +83,7 @@ public struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
-            .tabItem { Label("Messages", systemImage: "text.bubble") }
-
+        default:
             Form {
                 LabeledContent("Dim the other panes") {
                     HStack {
@@ -96,7 +108,7 @@ public struct SettingsView: View {
                     .font(.footnote).foregroundStyle(.secondary)
             }
             .formStyle(.grouped)
-            .tabItem { Label("Panes", systemImage: "rectangle.split.2x1") }
+            }
         }
         .frame(width: 480, height: 360)
     }
