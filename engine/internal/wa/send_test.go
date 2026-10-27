@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/pdcgomes/jaw/engine/internal/link"
@@ -181,5 +183,36 @@ func TestAnAppStatePatchThatCantBeRightIsRefusedForGoodBeforeItGoes(t *testing.T
 		if failure == nil || failure.Retry {
 			t.Errorf("%s: %v", name, failure)
 		}
+	}
+}
+
+func TestAnAppStatePatchCarriesTheTimeJawdWroteForItsEchoToFindTheRowAsItIs(t *testing.T) {
+	pin := func(value *waSyncAction.SyncActionValue) *enginepb.AppStatePatch {
+		raw, err := proto.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		index := []string{"pin_v1", "351910000002@s.whatsapp.net"}
+		return &enginepb.AppStatePatch{Name: "regular_low", Index: index, Version: 5, Value: raw}
+	}
+	patch, err := patchInfo(pin(&waSyncAction.SyncActionValue{
+		Timestamp: proto.Int64(1792000000123),
+		PinAction: &waSyncAction.PinAction{Pinned: proto.Bool(true)},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := patch.Timestamp.UnixMilli(); got != 1792000000123 {
+		t.Errorf("the patch's time is %d, where jawd wrote 1792000000123", got)
+	}
+	if patch.Type != appstate.WAPatchRegularLow || len(patch.Mutations) != 1 || patch.Mutations[0].Version != 5 {
+		t.Errorf("the patch isn't the mutation jawd built: %+v", patch)
+	}
+	bare, err := patchInfo(pin(&waSyncAction.SyncActionValue{PinAction: &waSyncAction.PinAction{Pinned: proto.Bool(false)}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bare.Timestamp.IsZero() {
+		t.Errorf("a value without a time gave the patch %v; whatsmeow then uses the time it encodes", bare.Timestamp)
 	}
 }
