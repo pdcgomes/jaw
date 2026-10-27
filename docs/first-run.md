@@ -33,6 +33,21 @@ or run `target/debug/jaw` alone, which starts jawd if nothing answers (its log g
 
 For a release build, use `cargo build --release` and `target/release/…`; jawd finds the engine at `target/engine/jaw-engine` either way.
 
+## Install
+
+To run jaw from anywhere rather than from the checkout's `target/`:
+
+```sh
+make install PREFIX=~/.local   # ~/.local/bin/jaw and jawd, ~/.local/libexec/jaw/jaw-engine
+make uninstall PREFIX=~/.local
+```
+
+Without `PREFIX` it installs into `/usr/local`, which needs `make release` first, then `sudo make install`. The installed jaw starts the installed jawd when nothing answers, and that jawd runs the engine in `libexec/jaw/` beside its folder; installing sets nothing to start at login.
+
+- **One folder for both.** The installed jaw and the checkout's use the same folder and the same `jaw.db`, and only one jawd runs on it at a time. jaw says when the jawd answering is another build than its own ("jawd is … and jaw …: kill N, then start jaw again"), and so does `jaw status`.
+- **Install what you run, or newer.** An older jawd won't open a `jaw.db` a newer one has upgraded: it stops with "jaw.db is from a newer jawd". Install from the commit you run, or a later one.
+- `jaw --version`, `jawd --version` and `jaw status` say which build each is: `git describe`'s, such as the commit's hash before the first tag.
+
 ## What the first start does
 
 1. **Backs up `jaw.db`** whole and synced, to `jaw.db.before-v…` beside it, before the first data step. The backup is kept for 30 days (the newest only), and `jaw status` shows it.

@@ -8,6 +8,20 @@ Its themes are [Omarchy's](https://github.com/omacom/omarchy), as Omarchy wrote 
 
 jaw isn't affiliated with WhatsApp or Meta.
 
+## Install
+
+From a checkout, with Go and Rust:
+
+```sh
+make install                  # jaw and jawd in /usr/local/bin, jaw-engine in /usr/local/libexec/jaw
+make install PREFIX=~/.local  # or under your home folder, without sudo
+make uninstall                # with the same PREFIX, takes them out again
+```
+
+`make install` builds them first. Into a folder only root can write, run `make release` as yourself, then `sudo make install`, which builds nothing. With Homebrew, once its tap is published: `brew install pdcgomes/jaw/jaw`. ffmpeg is recommended rather than needed: text, and everything you receive, work without it, and sending videos, GIFs and audio files says it's missing.
+
+Then run `jaw`. It starts jawd when nothing answers, and jawd runs the engine installed beside it. All three say one version (`jaw --version`), taken from `git describe`, and when the jawd still running after an upgrade is another build, jaw says so and how to stop it. Your chats stay in jaw's folder, `~/Library/Application Support/jaw` on macOS, whichever jaw you run. `scripts/release.sh`, from a clean tree at a tag, makes a release's source tarball and the tap's formula, and prints the commands that publish them.
+
 ## What it costs
 
 Measured by `make perf` on 25 October 2026, on a Mac Studio (Apple M1 Ultra, 20 cores, 128 GB, macOS 26.6.2) that other work kept at a load average of 10 to 21, with release builds against `jawd demo`'s made-up account of a million messages in 3,000 chats, and jaw attached as it would be in a terminal. The flood of 2,000 messages a second and the backlog acked in groups come from the demo engine, which hands jawd 256 messages before their acks come back. jaw-engine waits for each ack, since whatsmeow handles one message at a time, so through it a real account's burst drains at the rate of the backlog acked one at a time, about 150 a second.
