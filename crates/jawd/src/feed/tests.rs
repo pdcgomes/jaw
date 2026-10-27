@@ -1947,18 +1947,25 @@ async fn windows_match_fresh_queries_through_renames_joins_new_people_and_edits(
 async fn a_window_watched_again_shows_the_new_name_of_the_older_of_two_people_a_row_mentions() {
     let bed = Bed::new(brisk());
     let (writer, ana, bea) = (person(DIRECT), person(DIRECT + 1), person(DIRECT + 2));
-    let spans = json!([
-        {"t": "mention", "s": "@a", "person": ana}, {"t": "text", "s": " and "},
-        {"t": "mention", "s": "@b", "person": bea}
-    ]);
-    let message = Message { spans: Some(spans.to_string()), ..text(GROUP, "g1", 2_000, Some(&writer), "@a and @b") };
+    // One row mentions Ana first and the other Bea first, so neither the first mention's version
+    // nor the last's passes for the newest.
+    let both = |first: &str, second: &str| {
+        json!([
+            {"t": "mention", "s": "@a", "person": first}, {"t": "text", "s": " and "},
+            {"t": "mention", "s": "@b", "person": second}
+        ])
+        .to_string()
+    };
+    let ab = Message { spans: Some(both(&ana, &bea)), ..text(GROUP, "g1", 2_000, Some(&writer), "@a and @b") };
+    let ba = Message { spans: Some(both(&bea, &ana)), ..text(GROUP, "g2", 2_001, Some(&writer), "@b and @a") };
     let mut watcher = bed.watcher(64);
     let seq = bed
         .apply(vec![
             Change::Person(named(&ana, "Ana Lopes")),
             Change::Person(named(&bea, "Bea Lopes")),
             Change::Person(named(&writer, "Rui")),
-            Change::Message(message),
+            Change::Message(ab),
+            Change::Message(ba),
         ])
         .await;
     let watched = watch_all(&mut watcher, &[group(10)]).await;
@@ -1971,7 +1978,216 @@ async fn a_window_watched_again_shows_the_new_name_of_the_older_of_two_people_a_
     let renaming = bed.apply(vec![Change::Person(named(&ana, "Ana Martins"))]).await;
     let (again, watched) = reconnected(&bed, &watcher, &watched).await;
     check(&bed, &again, &watched, "watched again after Ana's rename").await;
-    assert_eq!(again.windows[&watched[0].0].rows["g1"]["v"], renaming, "the row's version is Ana's rename's");
+    for id in ["g1", "g2"] {
+        assert_eq!(again.windows[&watched[0].0].rows[id]["v"], renaming, "{id}'s version is Ana's rename's");
+    }
+}
+
+/// How many people the account of versions has, each with a number and a LID.
+const VERSIONED_PEOPLE: usize = 10;
+
+fn versioned_number(k: usize) -> String {
+    format!("3519400000{k:02}@s.whatsapp.net")
+}
+
+fn versioned_lid(k: usize) -> String {
+    format!("{}@lid", 84_726_193_530_000u64 + k as u64)
+}
+
+fn versioned_groups() -> Vec<String> {
+    (0..3).map(|g| format!("1203630000000003{g:02}@g.us")).collect()
+}
+
+/// A made-up account whose people each have a number and a LID; its rows mention up to three of
+/// them and quote what was sent or someone jaw may not know yet, and, when `direct`, some go to
+/// one-to-one chats, which merge when a number and a LID are found to be one person.
+struct Versions {
+    rng: Rng,
+    clock: i64,
+    next: u64,
+    sent: Vec<Message>,
+    direct: bool,
+}
+
+impl Versions {
+    fn new(seed: u64, direct: bool) -> Versions {
+        let rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        Versions { rng, clock: 1_700_000_000_000, next: 0, sent: Vec::new(), direct }
+    }
+
+    fn jid(&mut self) -> String {
+        let k = self.rng.below(VERSIONED_PEOPLE);
+        if self.rng.below(2) == 0 { versioned_number(k) } else { versioned_lid(k) }
+    }
+
+    fn spans(&mut self) -> Option<String> {
+        let many = self.rng.below(4);
+        if many == 0 {
+            return None;
+        }
+        let mut spans = vec![json!({"t": "text", "s": "hey "})];
+        for _ in 0..many {
+            let whom = self.jid();
+            let number = whom.split('@').next().unwrap().to_string();
+            spans.push(json!({"t": "mention", "s": format!("@{number}"), "person": whom}));
+            spans.push(json!({"t": "text", "s": " "}));
+        }
+        Some(Value::Array(spans).to_string())
+    }
+
+    fn message(&mut self) -> Change {
+        self.clock += 1 + self.rng.below(2_000) as i64;
+        self.next += 1;
+        let sender = self.jid();
+        let chat = if self.direct && self.rng.below(3) == 0 {
+            sender.clone()
+        } else {
+            self.rng.pick(&versioned_groups()).clone()
+        };
+        let mut message = text(&chat, &format!("b{}", self.next), self.clock, Some(&sender), "words");
+        message.spans = self.spans();
+        if self.rng.below(3) == 0 {
+            let (id, from) = match self.rng.below(2) {
+                0 if !self.sent.is_empty() => {
+                    let quoted = self.rng.pick(&self.sent).clone();
+                    (quoted.id, quoted.sender)
+                }
+                _ => ("elsewhere".to_string(), Some(self.jid())),
+            };
+            message.reply = Some(json!({"id": id, "from": from, "summary": "quoted"}).to_string());
+        }
+        self.sent.push(message.clone());
+        Change::Message(message)
+    }
+
+    fn change(&mut self) -> Change {
+        match self.rng.below(12) {
+            0..=3 => self.message(),
+            4..=6 => {
+                let jid = self.jid();
+                let n = self.rng.next() % 100;
+                Change::Person(match self.rng.below(3) {
+                    0 => Person { jids: vec![jid], name: Some(format!("Name {n}")), ..Person::default() },
+                    1 => Person { jids: vec![jid], push_name: Some(format!("push {n}")), ..Person::default() },
+                    _ => Person { jids: vec![jid], verified_name: Some(format!("Biz {n}")), ..Person::default() },
+                })
+            }
+            7 => {
+                let k = self.rng.below(VERSIONED_PEOPLE);
+                let name = (self.rng.below(2) == 0).then(|| format!("Joined {}", self.rng.next() % 100));
+                Change::Person(Person { jids: vec![versioned_number(k), versioned_lid(k)], name, ..Person::default() })
+            }
+            8 if !self.sent.is_empty() => {
+                let k = self.rng.below(self.sent.len());
+                let mut edited = self.sent[k].clone();
+                self.clock += 1;
+                edited.edited_at = Some(self.clock);
+                edited.text = Some(format!("edited {}", self.clock));
+                edited.spans = self.spans();
+                self.sent[k] = edited.clone();
+                Change::Message(edited)
+            }
+            9 if !self.sent.is_empty() => {
+                let gone = self.sent.swap_remove(self.rng.below(self.sent.len()));
+                Change::DeleteMessage { chat: gone.chat, id: gone.id }
+            }
+            _ => self.message(),
+        }
+    }
+}
+
+/// Every message row of every chat, as a fresh query has it, by its n.
+async fn every_message_row(store: &Store) -> HashMap<i64, Value> {
+    store
+        .reads()
+        .query(crate::work::Priority::Interactive, |db| {
+            let mut all = HashMap::new();
+            for chat in read::chats(db, false, None, 100_000)? {
+                for row in read::messages(db, &chat.id, Around::Newest, 1_000_000)? {
+                    all.insert(row.n, serde_json::to_value(message_row(row)).unwrap());
+                }
+            }
+            Ok(all)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a probe's long run, about a minute in debug: cargo test -p jawd -- --ignored a_rows_version"]
+async fn a_rows_version_never_goes_back_and_moves_whenever_what_it_shows_changes() {
+    let without_v = |row: &Value| {
+        let mut row = row.clone();
+        row.as_object_mut().unwrap().remove("v");
+        row
+    };
+    for seed in 1..=20u64 {
+        let bed = Bed::new(brisk());
+        let mut world = Versions::new(seed, true);
+        let seeding: Vec<Change> = (0..20).map(|_| world.message()).collect();
+        bed.apply(seeding).await;
+        let mut was = every_message_row(&bed.store).await;
+        for step in 0..200 {
+            let many = 1 + world.rng.below(3);
+            let changes: Vec<Change> = (0..many).map(|_| world.change()).collect();
+            bed.apply(changes).await;
+            if world.rng.below(3) == 0 {
+                bed.store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+            }
+            let now = every_message_row(&bed.store).await;
+            for (n, row) in &now {
+                let Some(before) = was.get(n) else { continue };
+                let (v, v0) = (row["v"].as_u64().unwrap(), before["v"].as_u64().unwrap());
+                assert!(
+                    v >= v0,
+                    "seed {seed}, step {step}: message {n}'s v went back from {v0} to {v}:\nwas {before}\nnow {row}"
+                );
+                if without_v(row) != without_v(before) {
+                    assert!(
+                        v > v0,
+                        "seed {seed}, step {step}: message {n} shows something new at v {v}:\nwas {before}\nnow {row}"
+                    );
+                }
+            }
+            was = now;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a probe's long run, about half a minute in debug: cargo test -p jawd -- --ignored windows_watched_again"]
+async fn windows_watched_again_from_their_seq_match_fresh_queries_through_many_mentions_and_joins() {
+    for seed in 1..=10u64 {
+        let bed = Bed::new(brisk());
+        let mut world = Versions::new(seed, false);
+        let seeding: Vec<Change> = (0..30).map(|_| world.message()).collect();
+        bed.apply(seeding).await;
+        let wants: Vec<Want> = versioned_groups()
+            .into_iter()
+            .map(|chat| Want::Messages { chat, anchor: None, before: 8, after: 0 })
+            .collect();
+        let mut live = bed.watcher(64);
+        let live_watched = watch_all(&mut live, &wants).await;
+        // The other connection takes no pushes; every few commits it's gone and comes back from what
+        // it held, as jaw does after a reconnect or a resync.
+        let mut away = bed.watcher(64);
+        let mut away_watched = watch_all(&mut away, &wants).await;
+        let mut gap = 0;
+        for step in 0..150 {
+            let many = 1 + world.rng.below(3);
+            let changes: Vec<Change> = (0..many).map(|_| world.change()).collect();
+            let seq = bed.apply(changes).await;
+            live.settle(seq).await;
+            check(&bed, &live, &live_watched, &format!("seed {seed}, step {step}, live")).await;
+            if gap == 0 {
+                (away, away_watched) = reconnected(&bed, &away, &away_watched).await;
+                check(&bed, &away, &away_watched, &format!("seed {seed}, step {step}, watched again")).await;
+                gap = world.rng.below(4);
+            } else {
+                gap -= 1;
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
