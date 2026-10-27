@@ -6,6 +6,10 @@ enum BuiltInScenes {
         var catalog = HarnessCatalog()
         catalog.register(.roles)
         catalog.register(.mimic)
+        catalog.register(.chatList)
+        catalog.register(.conversation)
+        catalog.register(.palette)
+        catalog.register(.states)
         return catalog
     }
 }

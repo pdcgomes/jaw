@@ -128,9 +128,14 @@ let project = Project(
             deploymentTargets: .macOS(macOS),
             infoPlist: appInfo(name: "Jaw Harness"),
             sources: ["JawHarness/Sources/**"],
-            resources: ["JawApp/Resources/**"],
+            // The app's icon, and the protocol's fixtures, which the scenes decode as jawd sends them.
+            resources: ["JawApp/Resources/**", "../protocol/fixtures/*.json"],
             dependencies: [.target(name: "JawKit"), .target(name: "JawThemes"), .target(name: "JawUI")],
-            settings: settings(["ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon"]),
+            settings: settings([
+                "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
+                // Controls follow the user's system accent where the theme doesn't set one.
+                "ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME": "",
+            ]),
         ),
         tests("JawKit", [.target(name: "JawKit")]),
         tests("JawThemes", [.target(name: "JawThemes")]),
