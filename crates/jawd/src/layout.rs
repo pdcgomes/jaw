@@ -389,6 +389,25 @@ mod tests {
         db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
     }
 
+    fn exists(home: &Path, id: &str) -> bool {
+        let db = Connection::open(home.join("jaw.db")).unwrap();
+        db.query_row("SELECT count(*) FROM chats WHERE id = ?1", [id], |r| r.get::<_, i64>(0)).unwrap() == 1
+    }
+
+    fn panes_of(saved: &Saved) -> Vec<String> {
+        saved.layout.as_ref().map(|l| l.chats().into_iter().map(str::to_string).collect()).unwrap_or_default()
+    }
+
+    async fn merges_run(store: &Store, home: &Path) {
+        for _ in 0..50 {
+            if count(home, "chat_merges") == 0 {
+                return;
+            }
+            store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+        }
+        panic!("the merge never finished");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_layout_is_answered_only_once_a_synced_commit_has_it() {
         let home = tempfile::tempdir().unwrap();
@@ -654,6 +673,55 @@ mod tests {
         assert_eq!(read.layout, Some(layout(0, chat(&kept))), "one pane, the chat they merged into, with the keys");
         assert_eq!(read.dropped, [RUI_LID.to_string()], "the second, as it named it, showed what the first does");
         assert_eq!(read.v, 2, "read as jawd knows it, and kept as it was written");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_merge_run_to_its_end_leaves_each_pane_on_a_chat_row_that_exists() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        // Rui's LID chat first, so it has the lower n, then his number's chat and the group.
+        let changes = vec![
+            Change::Chat(Chat { id: RUI_LID.into(), kind: Some("direct"), ..Chat::default() }),
+            Change::Chat(Chat { id: RUI.into(), kind: Some("direct"), ..Chat::default() }),
+            Change::Chat(Chat { id: CLIMBING.into(), ..Chat::default() }),
+        ];
+        store.apply(Lane::Live, changes).await.unwrap();
+        let layouts = Layouts::new(store.clone());
+        let three = layout(2, split(How::Across, 500, chat(RUI_LID), split(How::Down, 500, chat(CLIMBING), chat(RUI))));
+        let saved = layouts.set("jaw", 1, asked(1, &three)).await.unwrap();
+        assert_eq!((saved.kept, saved.dropped.len()), (Some(true), 0), "two chats, before they're one person's");
+        store
+            .apply(
+                Lane::Live,
+                vec![Change::Person(Person { jids: vec![RUI.into(), RUI_LID.into()], ..Person::default() })],
+            )
+            .await
+            .unwrap();
+        assert_eq!(count(home.path(), "chat_merges"), 1, "the merge has begun");
+        let during = layouts.get("jaw", Value::Null).await.unwrap();
+        assert_eq!(panes_of(&during), [RUI, CLIMBING], "during the merge: {during:?}");
+        assert_eq!(during.dropped, [RUI.to_string()], "the second pane on Rui, as it named him");
+        assert_eq!(during.layout.as_ref().unwrap().focused, 1, "the keys to the pane before it");
+        // A pane naming Rui by a device JID while his LID chat, the older, is being merged away.
+        let device = layout(0, split(How::Across, 500, chat("351913333333:7@s.whatsapp.net"), chat(CLIMBING)));
+        let by_device = layouts.set("jaw-mac", 1, asked(1, &device)).await.unwrap();
+        assert_eq!(panes_of(&by_device), [RUI, CLIMBING], "never the chat being merged away: {by_device:?}");
+        merges_run(&store, home.path()).await;
+        assert!(!exists(home.path(), RUI_LID), "the merged-away chat's row is gone");
+        for interface in ["jaw", "jaw-mac"] {
+            let after = layouts.get(interface, Value::Null).await.unwrap();
+            for pane in panes_of(&after) {
+                assert!(exists(home.path(), &pane), "{interface}'s pane on {pane}, which has no row: {after:?}");
+            }
+        }
+        let after = layouts.get("jaw", Value::Null).await.unwrap();
+        assert_eq!(
+            (panes_of(&after), after.dropped.clone()),
+            (vec![RUI.to_string(), CLIMBING.into()], vec![RUI.into()])
+        );
+        // A layout naming only his LID, once its chat is gone, opens his number's.
+        let lid = layouts.set("jaw", 1, asked(2, &layout(0, chat(RUI_LID)))).await.unwrap();
+        assert_eq!((lid.kept, panes_of(&lid)), (Some(true), vec![RUI.to_string()]));
     }
 
     #[test]
