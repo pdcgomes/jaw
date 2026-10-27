@@ -402,7 +402,7 @@ Nothing animates when nothing happens: no idle breathing, no shimmer, no loops o
 
 ## Branding
 
-- **The app icon:** the Mimic, 45 by 26 pixels, at whole multiples on Tokyo Night's ground, its edges crisp, built with Icon Composer in macOS 26's layers (the ground, then the Mimic), with its dark, clear and tinted forms; the smallest sizes use a 16-pixel redraw, as the poster's header does.
+- **The app icon:** the Mimic without its sparkles, 32 by 26 pixels, at the largest whole multiple within four fifths of the icon's rounded square (20× at 1,024 pixels), centred on Tokyo Night's ground, its edges crisp, built with Icon Composer in macOS 26's layers (the ground, then the Mimic), with its dark, clear and tinted forms; the smallest sizes use a 16-pixel redraw, as the poster's header does.
 - **Where the brand lives,** as Redlamp keeps its brand out of editing surfaces: the icon, the linking screen, empty states, the asleep state, About and the README. The conversation and the lists are the theme's.
 - **The Mimic in the app** is `creatures/mimic.png` drawn with nearest-neighbour scaling at whole multiples (4×, 180 by 104 points, in empty states and linking), with `art.rs`'s two looks: asleep (grey, eyes shut) and mid-chomp (the lid, eyes and upper teeth dropped 3 pixels).
 - **The poster's rainbow rule** (green, yellow, orange, red, purple, blue), from `marketing/jaw-in-a-minute/jaw-poster.png` on main, runs under the linking screen's heading and across About, nowhere else.
