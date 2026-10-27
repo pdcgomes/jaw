@@ -114,7 +114,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         detail.panes.paneMenu = { [weak model] slot in
             guard let model else { return nil }
             model.focus(slot: slot)
-            return Menus.menu(["split.across", "split.down", "pane.close"].compactMap(model.command))
+            return Menus.menu(ChatMenu.splits) { id in model.command(id) }
         }
 
         let link = content.displayLink(target: self, selector: #selector(frame(_:)))

@@ -345,8 +345,14 @@ final class AppModel {
             }
         }
         c.composer.gif = { [weak self] in self?.command("box.gif")?.run() }
-        c.headerMenu = Menus.menu(["split.across", "split.down", "pane.close", "swap.left", "swap.right", "swap.up", "swap.down"]
-            .compactMap(command))
+        c.paneMenu = { [weak self, weak c] in
+            guard let self, let c else { return nil }
+            return paneMenu(for: c)
+        }
+        c.messageMenuTail = { [weak self] in
+            guard let self else { return [] }
+            return Menus.items(ChatMenu.splits) { id in command(id) }
+        }
         _ = c.view
         panes[chat.id] = c
         paneWindows[jawd.watchMessages(chat.id, place)] = chat.id
