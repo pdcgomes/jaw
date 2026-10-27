@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, select_biased, unbounded};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::sync::oneshot;
@@ -325,25 +325,26 @@ pub fn chat(db: &Connection, n: i64) -> Result<Option<ChatRow>> {
 
 /// What message_row reads, from `messages m` joined with MESSAGE_JOINS. A quote names who wrote
 /// it as a mention does: by their name once jaw knows it, "You" for yours, and by their JID until
-/// then.
+/// then. A row's v is the newest of its message's and those of the people it names: its sender,
+/// whoever wrote what it quotes, and whoever it mentions, whose newest comes with their names. So
+/// whatever changes how a row names someone must move that person's people.v.
 const MESSAGE_COLUMNS: &str = "
-    SELECT m.n, c.id, m.id, m.v, m.at, m.mine, m.kind, m.status, m.text, m.spans, coalesce(m.summary, m.text, ''),
+    SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text,
+        m.spans, coalesce(m.summary, m.text, ''),
         iif(m.reply ->> 'from' IS NULL, m.reply, json_set(m.reply, '$.from', coalesce(
             iif(instr(' ' || coalesce((SELECT value FROM sync_state WHERE key = 'me'), '') || ' ',
                 ' ' || (m.reply ->> 'from') || ' ') > 0, 'You', NULL),
-            (SELECT coalesce(rp.name, rp.push_name, rp.verified_name) FROM person_jids rj JOIN people rp ON rp.n = rj.person
-                WHERE rj.jid = m.reply ->> 'from'),
-            m.reply ->> 'from'))),
+            rp.name, rp.push_name, rp.verified_name, m.reply ->> 'from'))),
         m.detail,
         m.forwarded, m.edited_at, m.deleted, m.expires_at, m.starred, m.view_once,
         p.n, p.name, p.push_name, p.verified_name, j.jid,
         (SELECT json_group_array(json_object('emoji', emoji, 'n', n, 'mine', json(iif(mine, 'true', 'false'))))
             FROM (SELECT emoji, count(*) AS n, max(mine) AS mine, min(at) AS first FROM reactions
                 WHERE message = m.n GROUP BY emoji ORDER BY first)),
-        iif(instr(m.spans, '\"t\":\"mention\"') > 0, (SELECT json_group_object(e.value ->> 'person',
-                coalesce(mp.name, mp.push_name, mp.verified_name))
+        iif(instr(m.spans, '\"t\":\"mention\"') > 0, (SELECT json_object('names', json_group_object(e.value ->> 'person',
+                coalesce(mp.name, mp.push_name, mp.verified_name)), 'v', max(mp.v))
             FROM json_each(m.spans) e JOIN person_jids mj ON mj.jid = e.value ->> 'person' JOIN people mp ON mp.n = mj.person
-            WHERE e.value ->> 't' = 'mention' AND coalesce(mp.name, mp.push_name, mp.verified_name) IS NOT NULL), NULL),
+            WHERE e.value ->> 't' = 'mention'), NULL),
         (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect),
                 'mine_at', (SELECT max(r.at) FROM reactions r WHERE r.message = m.n AND r.mine)))
             FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed'
@@ -444,7 +445,9 @@ impl<'a> Polls<'a> {
 const MESSAGE_JOINS: &str = "
     JOIN chats c ON c.n = m.chat
     LEFT JOIN person_jids j ON j.n = m.sender
-    LEFT JOIN people p ON p.n = j.person";
+    LEFT JOIN people p ON p.n = j.person
+    LEFT JOIN person_jids rj ON rj.jid = m.reply ->> 'from'
+    LEFT JOIN people rp ON rp.n = rj.person";
 
 #[derive(Serialize)]
 struct Span<'a> {
@@ -460,13 +463,18 @@ fn json(text: Option<String>) -> rusqlite::Result<Option<Box<RawValue>>> {
     .transpose()
 }
 
+/// The people a row mentions, as MESSAGE_COLUMNS reads them: each JID's name to show, null for
+/// someone jaw knows no name for, and the newest of their versions.
+#[derive(Deserialize)]
+struct Mentioned {
+    names: serde_json::Map<String, Value>,
+    v: Option<i64>,
+}
+
 /// `spans` with each mention of someone in `names` (their JID to the name to show) said as `@` and
 /// that name, as the phones show it; WhatsApp writes `@` and the user part of their JID.
-fn mentions_named(spans: String, names: Option<String>) -> String {
-    let Some(names) = names.and_then(|names| serde_json::from_str::<serde_json::Map<String, Value>>(&names).ok())
-    else {
-        return spans;
-    };
+fn mentions_named(spans: String, names: Option<&serde_json::Map<String, Value>>) -> String {
+    let Some(names) = names else { return spans };
     let Ok(mut parsed) = serde_json::from_str::<Vec<serde_json::Map<String, Value>>>(&spans) else { return spans };
     for span in &mut parsed {
         let named = match (span.get("t").and_then(Value::as_str), span.get("person").and_then(Value::as_str)) {
@@ -513,8 +521,13 @@ fn tallied(detail: &str, tally: Tally) -> String {
 
 fn message_row(r: &Row, polls: &mut Polls) -> rusqlite::Result<MessageRow> {
     let text: Option<String> = r.get(8)?;
+    let mentioned: Option<Mentioned> = r
+        .get::<_, Option<String>>(25)?
+        .map(|mentioned| serde_json::from_str(&mentioned))
+        .transpose()
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(25, rusqlite::types::Type::Text, Box::new(e)))?;
     let mut spans = match r.get::<_, Option<String>>(9)? {
-        Some(spans) => mentions_named(spans, r.get(25)?),
+        Some(spans) => mentions_named(spans, mentioned.as_ref().map(|mentioned| &mentioned.names)),
         None => match text.as_deref() {
             Some(text) if !text.is_empty() => serde_json::to_string(&[Span { t: "text", s: text }])
                 .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
@@ -556,7 +569,7 @@ fn message_row(r: &Row, polls: &mut Polls) -> rusqlite::Result<MessageRow> {
         n: r.get(0)?,
         chat: r.get(1)?,
         id: r.get(2)?,
-        v: r.get(3)?,
+        v: r.get::<_, i64>(3)?.max(mentioned.and_then(|mentioned| mentioned.v).unwrap_or(0)),
         at: r.get(4)?,
         mine: r.get(5)?,
         kind: r.get(6)?,

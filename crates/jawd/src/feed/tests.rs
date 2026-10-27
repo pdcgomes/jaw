@@ -551,7 +551,7 @@ async fn windows_match_fresh_queries_after_random_writes() {
 
         for step in 0..200 {
             let changes = world.change();
-            // A new name changes rows whose own versions don't move, so it's checked on its own.
+            // A new name changes chat rows without moving their versions, so it's checked on its own.
             let renamed = matches!(changes[..], [Change::Person(_)]);
             let seq = bed.apply(changes).await;
             if world.rng.below(20) == 0 {
@@ -1717,6 +1717,230 @@ async fn a_rename_reads_again_only_the_windows_whose_rows_name_whoever_was_renam
     watcher.settle(seq).await;
     assert_eq!(bed.feed.reads(), before + 1, "only the group's rows name her");
     check(&bed, &watcher, &watched, "once she's renamed").await;
+}
+
+/// A new connection watching what `was` watched again, as jaw does after a reconnect or a resync:
+/// messages windows from the seq and the ids their interface holds, chat lists whole.
+async fn reconnected(bed: &Bed, was: &Watcher, watched: &[(String, Want)]) -> (Watcher, Vec<(String, Want)>) {
+    let mut again = bed.watcher(64);
+    let mut now = Vec::new();
+    for (watch, want) in watched {
+        let (method, mut params) = want.params();
+        let mut model = match want {
+            Want::Messages { .. } => {
+                let held = was.windows[watch].clone();
+                params["since"] = held.seq.into();
+                params["have"] = json!(held.ids());
+                held
+            }
+            Want::Chats { .. } => Model { chats: true, ..Model::default() },
+        };
+        let result = again.client.call(method, params).await.unwrap();
+        model.take(&result, "rows");
+        let watch = result["watch"].as_str().unwrap().to_string();
+        again.windows.insert(watch.clone(), model);
+        now.push((watch, want.clone()));
+    }
+    (again, now)
+}
+
+/// A window holding the row `row` makes from a writer and whoever is renamed loses its connection,
+/// she's renamed, and the window is watched again from its seq.
+async fn watched_again_after_a_rename(row: fn(&str, &str) -> Message) {
+    let bed = Bed::new(brisk());
+    let (writer, renamed) = (person(DIRECT), person(DIRECT + 1));
+    let mut watcher = bed.watcher(64);
+    let seq = bed
+        .apply(vec![
+            Change::Person(named(&renamed, "Bea Lopes")),
+            Change::Person(named(&writer, "Rui")),
+            Change::Message(row(&writer, &renamed)),
+        ])
+        .await;
+    let watched = watch_all(&mut watcher, &[group(10)]).await;
+    watcher.settle(seq).await;
+    check(&bed, &watcher, &watched, "as watched").await;
+
+    // The connection takes nothing more from here.
+    let renaming = bed.apply(vec![Change::Person(named(&renamed, "Bea Martins"))]).await;
+    let (again, watched) = reconnected(&bed, &watcher, &watched).await;
+    check(&bed, &again, &watched, "watched again from its seq after the rename").await;
+    assert_eq!(again.windows[&watched[0].0].rows["g1"]["v"], renaming, "the row's version is the rename's");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_watched_again_from_its_seq_shows_the_new_name_of_someone_its_rows_only_mention() {
+    watched_again_after_a_rename(|writer, renamed| mentioning(GROUP, "g1", 2_000, writer, renamed)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_watched_again_from_its_seq_shows_the_new_name_of_someone_its_rows_only_quote() {
+    // What it quotes isn't in jaw.db, so whoever wrote that sent none of the window's rows.
+    watched_again_after_a_rename(|writer, renamed| quoting(GROUP, "g1", 2_000, writer, "q0", renamed)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_watched_again_from_its_seq_shows_the_new_name_of_whoever_sent_its_rows() {
+    watched_again_after_a_rename(|_, renamed| text(GROUP, "g1", 2_000, Some(renamed), "hi")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_reaches_a_window_when_one_of_the_many_people_renamed_is_one_of_the_many_its_rows_name() {
+    let bed = Bed::new(brisk());
+    let writer = person(DIRECT);
+    let mentioned: Vec<String> = (1..=6).map(|k| person(DIRECT + k)).collect();
+    let strangers: Vec<String> = (0..42).map(|k| format!("3519200001{k:02}@s.whatsapp.net")).collect();
+    let mut watcher = bed.watcher(64);
+    let mut writes: Vec<Change> =
+        mentioned.iter().chain(&strangers).map(|jid| Change::Person(named(jid, "Someone"))).collect();
+    for (k, whom) in mentioned.iter().enumerate() {
+        writes.push(Change::Message(mentioning(GROUP, &format!("g{k}"), 1_000 + k as i64, &writer, whom)));
+    }
+    let seq = bed.apply(writes).await;
+    let watched = watch_all(&mut watcher, &[group(10)]).await;
+    watcher.settle(seq).await;
+
+    // The window names six JIDs, and each commit renames one of the six with seven people no row
+    // names, so both sides of the meeting have several JIDs and share one: looking up only some
+    // of the smaller side's would miss it in most commits.
+    for (k, whom) in mentioned.iter().enumerate() {
+        let mut renames = vec![Change::Person(named(whom, &format!("Bea {k}")))];
+        renames.extend(strangers[k * 7..k * 7 + 7].iter().map(|jid| Change::Person(named(jid, &format!("Rui {k}")))));
+        let seq = bed.apply(renames).await;
+        watcher.settle(seq).await;
+        let row = &watcher.windows[&watched[0].0].rows[&format!("g{k}")];
+        assert_eq!(row["spans"][1]["s"], format!("@Bea {k}"), "the {k}th mentioned");
+        check(&bed, &watcher, &watched, &format!("once the {k}th mentioned is renamed among seven others")).await;
+    }
+}
+
+/// How many people the account of names has, each with a number and a LID.
+const NAMED_PEOPLE: usize = 6;
+
+fn number_of(k: usize) -> String {
+    format!("3519200000{k:02}@s.whatsapp.net")
+}
+
+fn lid_of(k: usize) -> String {
+    format!("{}@lid", 84_726_193_520_000u64 + k as u64)
+}
+
+fn named_groups() -> Vec<String> {
+    (0..3).map(|g| format!("1203630000000001{g:02}@g.us")).collect()
+}
+
+/// A made-up account whose people each have a number and a LID, send, are mentioned and are
+/// quoted by either, are renamed by either, and now and then are found to be one person.
+struct Names {
+    rng: Rng,
+    clock: i64,
+    next: u64,
+    sent: Vec<Message>,
+}
+
+impl Names {
+    fn jid(&mut self) -> String {
+        let k = self.rng.below(NAMED_PEOPLE);
+        if self.rng.below(2) == 0 { number_of(k) } else { lid_of(k) }
+    }
+
+    fn message(&mut self) -> Change {
+        self.clock += 1 + self.rng.below(2_000) as i64;
+        self.next += 1;
+        let chat = self.rng.pick(&named_groups()).clone();
+        let sender = self.jid();
+        let mut message = text(&chat, &format!("a{}", self.next), self.clock, Some(&sender), "words");
+        match self.rng.below(3) {
+            0 => {
+                let whom = self.jid();
+                let number = whom.split('@').next().unwrap().to_string();
+                let spans =
+                    json!([{"t": "text", "s": "hey "}, {"t": "mention", "s": format!("@{number}"), "person": whom}]);
+                message.spans = Some(spans.to_string());
+            }
+            1 if !self.sent.is_empty() => {
+                let quoted = self.rng.pick(&self.sent).clone();
+                let reply = json!({"id": quoted.id, "from": quoted.sender, "summary": quoted.summary});
+                message.reply = Some(reply.to_string());
+            }
+            _ => {}
+        }
+        self.sent.push(message.clone());
+        Change::Message(message)
+    }
+
+    fn change(&mut self) -> Change {
+        match self.rng.below(10) {
+            0..=3 => self.message(),
+            4..=5 => {
+                let jid = self.jid();
+                let n = self.rng.next() % 100;
+                let person = match self.rng.below(3) {
+                    0 => Person { jids: vec![jid], name: Some(format!("Name {n}")), ..Person::default() },
+                    1 => Person { jids: vec![jid], push_name: Some(format!("push {n}")), ..Person::default() },
+                    _ => Person { jids: vec![jid], verified_name: Some(format!("Biz {n}")), ..Person::default() },
+                };
+                Change::Person(person)
+            }
+            6 => {
+                let k = self.rng.below(NAMED_PEOPLE);
+                Change::Person(Person { jids: vec![number_of(k), lid_of(k)], ..Person::default() })
+            }
+            7 if !self.sent.is_empty() => {
+                let k = self.rng.below(self.sent.len());
+                let whom = self.jid();
+                let mut edited = self.sent[k].clone();
+                self.clock += 1;
+                edited.edited_at = Some(self.clock);
+                edited.text = Some(format!("edited {}", self.clock));
+                edited.spans = (self.rng.below(2) == 0).then(|| {
+                    let number = whom.split('@').next().unwrap().to_string();
+                    json!([{"t": "mention", "s": format!("@{number}"), "person": whom}]).to_string()
+                });
+                self.sent[k] = edited.clone();
+                Change::Message(edited)
+            }
+            8 if !self.sent.is_empty() => {
+                let gone = self.sent.swap_remove(self.rng.below(self.sent.len()));
+                Change::DeleteMessage { chat: gone.chat, id: gone.id }
+            }
+            _ => self.message(),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_match_fresh_queries_through_renames_joins_new_people_and_edits() {
+    for seed in 1..=10u64 {
+        let bed = Bed::new(brisk());
+        let rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut names = Names { rng, clock: 1_700_000_000_000, next: 0, sent: Vec::new() };
+        let seeding: Vec<Change> = (0..30).map(|_| names.message()).collect();
+        bed.apply(seeding).await;
+        let mut wants: Vec<Want> =
+            named_groups().into_iter().map(|chat| Want::Messages { chat, anchor: None, before: 6, after: 0 }).collect();
+        wants.push(Want::Chats { archived: false, anchor: None, before: 0, after: 5 });
+        // Two connections on the same windows, the second settling only now and then, so it takes
+        // the first's kept reads, and now and then reconnecting instead, from what it last held.
+        let (mut first, mut second) = (bed.watcher(64), bed.watcher(64));
+        let first_watched = watch_all(&mut first, &wants).await;
+        let mut second_watched = watch_all(&mut second, &wants).await;
+        let mut reconnects = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
+        for step in 0..150 {
+            let change = names.change();
+            let seq = bed.apply(vec![change]).await;
+            first.settle(seq).await;
+            check(&bed, &first, &first_watched, &format!("seed {seed}, step {step}, the first")).await;
+            if names.rng.below(4) == 0 {
+                second.settle(seq).await;
+                check(&bed, &second, &second_watched, &format!("seed {seed}, step {step}, the second")).await;
+            } else if reconnects.below(8) == 0 {
+                (second, second_watched) = reconnected(&bed, &second, &second_watched).await;
+                let what = format!("seed {seed}, step {step}, the second reconnected");
+                check(&bed, &second, &second_watched, &what).await;
+            }
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

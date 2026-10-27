@@ -213,7 +213,7 @@ fn expand(text: &str, names: &HashMap<String, String>) -> String {
 }
 
 fn is_statement(text: &str) -> bool {
-    let first = text.split_whitespace().next().unwrap_or_default();
+    let first = text.split_whitespace().next().unwrap_or_default().trim_end_matches(',');
     matches!(
         first,
         "SELECT"
