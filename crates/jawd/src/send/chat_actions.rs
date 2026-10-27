@@ -45,13 +45,12 @@ pub(super) fn archived(chat: &str, archived: bool, range: SyncActionMessageRange
     patch("regular_low", vec!["archive".into(), chat.into()], 3, value)
 }
 
-/// Chat `chat` muted until `until`, for ever from FOREVER on, or unmuted at 0 (BuildMuteAbs).
+/// Chat `chat` muted until `until`, for ever when it's negative, as jaw reads any negative end
+/// back, or from FOREVER on; or unmuted at 0 (BuildMuteAbs).
 pub(super) fn muted(chat: &str, until: i64, at: i64) -> pb::AppStatePatch {
     let action = match until {
         0 => MuteAction { muted: Some(false), ..Default::default() },
-        until if until >= FOREVER => {
-            MuteAction { muted: Some(true), mute_end_timestamp: Some(-1), ..Default::default() }
-        }
+        ..0 | FOREVER.. => MuteAction { muted: Some(true), mute_end_timestamp: Some(-1), ..Default::default() },
         until => MuteAction { muted: Some(true), mute_end_timestamp: Some(until), ..Default::default() },
     };
     let value = SyncActionValue { timestamp: Some(at), mute_action: Some(action), ..Default::default() };
@@ -146,39 +145,56 @@ mod tests {
         assert_eq!(value(&pinned(ANA, false, AT)).pin_action.unwrap().pinned, Some(false));
         let mute = |until: i64| {
             let patch = muted(ANA, until, AT);
-            let action = value(&patch).mute_action.unwrap();
-            (patch.name, patch.index, patch.version, action.muted, action.mute_end_timestamp)
+            let decoded = value(&patch);
+            let action = decoded.mute_action.unwrap();
+            (patch.name, patch.index, patch.version, decoded.timestamp, action.muted, action.mute_end_timestamp)
         };
         let index = vec!["mute".to_string(), ANA.to_string()];
-        assert_eq!(mute(AT + 3_600_000), ("regular_high".into(), index.clone(), 2, Some(true), Some(AT + 3_600_000)));
-        assert_eq!(mute(FOREVER), ("regular_high".into(), index.clone(), 2, Some(true), Some(-1)), "for ever is -1");
-        assert_eq!(mute(0), ("regular_high".into(), index, 2, Some(false), None), "unmuted, with no end");
+        let until = |end: i64| ("regular_high".to_string(), index.clone(), 2, Some(AT), Some(true), Some(end));
+        assert_eq!(mute(AT + 3_600_000), until(AT + 3_600_000));
+        assert_eq!(mute(FOREVER), until(-1), "for ever is -1");
+        assert_eq!(mute(i64::MAX), until(-1), "as is the terminal's always");
+        assert_eq!(mute(-1), until(-1), "and the Mac's");
+        assert_eq!(mute(-5), until(-1), "and any other negative, which jaw reads back as for ever");
+        assert_eq!(mute(0), ("regular_high".into(), index, 2, Some(AT), Some(false), None), "unmuted, with no end");
     }
 
     #[test]
     fn an_archive_and_a_read_name_the_chats_newest_message_in_seconds_as_whatsmeow_does() {
-        let newest = Newest { id: "g9".into(), at: AT, mine: false, sender: Some(RUI.into()) };
-        let archive = archived(GROUP, true, range(GROUP, true, Some(&newest), AT + 5), AT + 5);
+        let newest = Newest { id: "g9".into(), at: AT + 500, mine: false, sender: Some(RUI.into()) };
+        let at = AT + 5_000;
+        let archive = archived(GROUP, true, range(GROUP, true, Some(&newest), at), at);
         assert_eq!(
             (archive.name.as_str(), archive.index.as_slice(), archive.version),
             ("regular_low", &["archive".to_string(), GROUP.to_string()][..], 3)
         );
+        assert_eq!(value(&archive).timestamp, Some(at));
         let action = value(&archive).archive_chat_action.unwrap();
         let named = action.message_range.unwrap();
-        assert_eq!((action.archived, named.last_message_timestamp), (Some(true), Some(AT / 1000)));
+        let second = Some(1_792_000_000);
+        assert_eq!((action.archived, named.last_message_timestamp), (Some(true), second), "its second, floored");
         let key = named.messages[0].key.clone().unwrap();
         assert_eq!(
             (key.remote_jid.as_deref(), key.id.as_deref(), key.from_me, key.participant.as_deref()),
             (Some(GROUP), Some("g9"), Some(false), Some(RUI))
         );
-        assert_eq!(named.messages[0].timestamp, Some(AT / 1000));
+        assert_eq!(named.messages[0].timestamp, second);
+        let brought_back = archived(GROUP, false, range(GROUP, true, Some(&newest), at), at);
+        assert_eq!(value(&brought_back).archive_chat_action.unwrap().archived, Some(false));
         let mine = Newest { id: "d1".into(), at: AT, mine: true, sender: None };
         let read = marked(ANA, false, range(ANA, false, Some(&mine), AT), AT);
-        assert_eq!((read.name.as_str(), read.index[0].as_str(), read.version), ("regular_low", "markChatAsRead", 3));
+        assert_eq!(
+            (read.name.as_str(), read.index.as_slice(), read.version),
+            ("regular_low", &["markChatAsRead".to_string(), ANA.to_string()][..], 3)
+        );
+        assert_eq!(value(&read).timestamp, Some(AT));
         let action = value(&read).mark_chat_as_read_action.unwrap();
         assert_eq!(action.read, Some(true));
         let key = action.message_range.unwrap().messages[0].key.clone().unwrap();
         assert_eq!((key.from_me, key.participant), (Some(true), None), "yours names nobody");
+        let theirs = Newest { id: "d2".into(), at: AT, mine: false, sender: Some(ANA.into()) };
+        let key = range(ANA, false, Some(&theirs), AT).messages[0].key.clone().unwrap();
+        assert_eq!((key.from_me, key.participant), (Some(false), None), "nor theirs in a one-to-one chat");
         let unread = marked(ANA, true, range(ANA, false, None, AT), AT);
         assert_eq!(value(&unread).mark_chat_as_read_action.unwrap().read, Some(false));
         let empty = range(ANA, false, None, AT);
@@ -192,10 +208,12 @@ mod tests {
         assert_eq!(index(&target(GROUP, "g2", true, None)), ["star", GROUP, "g2", "1", "0"]);
         assert_eq!(index(&target(ANA, "d1", false, Some(ANA))), ["star", ANA, "d1", "0", "0"]);
         assert_eq!(index(&target(ANA, "d2", true, None)), ["star", ANA, "d2", "1", "0"]);
-        let star = starred(&target(ANA, "d1", false, Some(ANA)), false, AT);
+        let star = starred(&target(ANA, "d1", false, Some(ANA)), true, AT);
         assert_eq!(
             (star.name.as_str(), star.version, value(&star).star_action.unwrap().starred, value(&star).timestamp),
-            ("regular_high", 2, Some(false), Some(AT))
+            ("regular_high", 2, Some(true), Some(AT))
         );
+        let unstar = starred(&target(ANA, "d1", false, Some(ANA)), false, AT);
+        assert_eq!(value(&unstar).star_action.unwrap().starred, Some(false));
     }
 }
