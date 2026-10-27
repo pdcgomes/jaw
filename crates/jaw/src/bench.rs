@@ -120,6 +120,10 @@ pub struct Report {
     pub wakeups: u64,
 }
 
+/// Tests that time one of the design's budgets take turns, so none measures another.
+#[cfg(test)]
+pub(crate) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The `q`th quantile of `sorted`.
 fn at(sorted: &[Duration], q: f64) -> Duration {
     if sorted.is_empty() {
@@ -423,10 +427,6 @@ pub fn flood(f: &Flood) -> Result<Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// The floods take turns, so neither measures the other.
-    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
     /// The design's budget for a keypress drawn while 2,000 messages a second arrive. Other
     /// processes can only make a press slower, so each key of the script, pressed at least

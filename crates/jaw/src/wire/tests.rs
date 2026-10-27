@@ -2,6 +2,7 @@
 //! runs, and a real `jawd --engine demo` on a folder of its own when `JAWD` names its binary.
 
 use super::*;
+use crate::bench::ONE_AT_A_TIME;
 use crate::data::Tick;
 use crate::demo::{Clock, Demo, State};
 use crate::run;
@@ -332,7 +333,7 @@ fn jaw_draws_what_jawd_sends_through_the_client() {
 
 /// How many times the first frame with a conversation is timed: other processes can only make a
 /// run slower, so the fastest is what the frames are held to.
-const FIRST_FRAMES: usize = 10;
+const FIRST_FRAMES: usize = 20;
 
 /// After jawd's hello, the chat list and then the open chat's messages each come a round trip
 /// after the one before, and each is drawn as it comes, through the client and the loop, rather
@@ -340,6 +341,7 @@ const FIRST_FRAMES: usize = 10;
 /// frames after the hello, which waiting a frame for each answer never was.
 #[test]
 fn the_first_frame_with_a_conversation_is_drawn_as_soon_as_jawds_answers_come() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let runs: Vec<Duration> = (0..FIRST_FRAMES).map(|_| first_frame_after_hello()).collect();
     let fastest = runs.iter().min().copied().unwrap_or_default();
     assert!(fastest < 2 * run::FRAME, "the first frame with a conversation came {runs:?} after jawd's hello");
