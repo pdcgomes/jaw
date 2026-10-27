@@ -3724,5 +3724,28 @@ mod tests {
         store.apply_durable(vec![both("\"irc\"", 6)]).await.unwrap();
         assert_eq!(store.setting("jaw", "theme").unwrap().as_deref(), Some("\"nord\""));
         assert_eq!(store.setting("jaw", "messages").unwrap().as_deref(), Some("\"irc\""));
+        let at: i64 = query(&store, |db| {
+            Ok(db.query_row("SELECT at FROM settings WHERE domain = 'jaw' AND key = 'theme'", [], |r| r.get(0))?)
+        })
+        .await;
+        assert_eq!(at, 6, "a value that changes is chosen anew");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_settings_change_that_fails_is_quarantined_with_its_json_so_it_can_be_read_back() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let values = vec![("theme".to_string(), "\"nord\"".to_string()), ("messages".into(), "not json".into())];
+        let change = Change::Settings { domain: "jaw".into(), values: values.clone(), at: 1 };
+        assert_eq!(store.apply_durable(vec![change]).await.unwrap().quarantined, 1);
+        let (source, reference, raw): (String, String, Option<Vec<u8>>) = query(&store, |db| {
+            Ok(db.query_row("SELECT source, ref, raw FROM quarantine", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?)
+        })
+        .await;
+        assert_eq!((source.as_str(), reference.as_str()), ("settings", "jaw"));
+        let kept: serde_json::Value = serde_json::from_slice(&raw.expect("the change kept as its JSON")).unwrap();
+        assert_eq!(kept["domain"], "jaw");
+        let read: Vec<(String, String)> = serde_json::from_value(kept["values"].clone()).unwrap();
+        assert_eq!(read, values, "every setting the change carried, each value as it was asked");
     }
 }

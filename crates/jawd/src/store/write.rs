@@ -6,6 +6,7 @@
 pub mod layout;
 pub mod outbox;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -493,9 +494,9 @@ pub(super) fn transient(e: &anyhow::Error) -> bool {
 }
 
 /// Where a group of changes came from, for the quarantine: the raw row it was converted from, or
-/// the change itself and its raw protobuf.
-fn provenance(group: &[Change]) -> (&'static str, String, Option<&[u8]>) {
-    match group.last() {
+/// the change itself and its raw protobuf, or a settings change's JSON, so it can be read back.
+fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>) {
+    let (source, reference, raw): (&'static str, String, Option<&[u8]>) = match group.last() {
         Some(Change::Drained(Drained::Inbox(seq))) => ("inbox", seq.to_string(), None),
         Some(Change::Drained(Drained::History { chat, id })) => ("history_raw", format!("{chat} {id}"), None),
         Some(Change::Message(m)) => ("message", format!("{} {}", m.chat, m.id), m.raw.as_ref().map(|p| p.0.as_slice())),
@@ -510,7 +511,10 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<&[u8]>) {
         Some(Change::Members(m)) => ("members", m.chat.clone(), None),
         Some(Change::AppState { index, value }) => ("app_state", index.join(" "), Some(value.as_slice())),
         Some(Change::Remember { key, .. }) => ("remember", key.clone(), None),
-        Some(Change::Settings { domain, .. }) => ("settings", domain.clone(), None),
+        Some(Change::Settings { domain, values, .. }) => {
+            let change = serde_json::json!({ "domain": domain, "values": values }).to_string();
+            return ("settings", domain.clone(), Some(Cow::Owned(change.into_bytes())));
+        }
         Some(Change::Quarantined { source, reference, .. }) => (source, reference.clone(), None),
         Some(Change::Opened(o)) => ("opened", o.chat.clone(), None),
         Some(Change::DeleteMessage { chat, id }) => ("delete", format!("{chat} {id}"), None),
@@ -522,14 +526,15 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<&[u8]>) {
         Some(Change::Outbox(step)) => outbox::provenance(step),
         Some(Change::Layout(keep)) => layout::provenance(keep),
         None => ("nothing", String::new(), None),
-    }
+    };
+    (source, reference, raw.map(Cow::Borrowed))
 }
 
 /// Keeps a group of changes that failed, with its error, in place of it.
 pub(super) fn quarantine(db: &Connection, group: &[Change], error: &anyhow::Error) -> Result<()> {
     let (source, reference, raw) = provenance(group);
     eprintln!("jawd: kept a change that failed in quarantine ({source} {reference}): {error:#}");
-    record_quarantine(db, source, &reference, &format!("{error:#}"), raw)
+    record_quarantine(db, source, &reference, &format!("{error:#}"), raw.as_deref())
 }
 
 fn record_quarantine(db: &Connection, source: &str, reference: &str, error: &str, raw: Option<&[u8]>) -> Result<()> {

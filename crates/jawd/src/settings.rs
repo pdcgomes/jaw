@@ -150,13 +150,7 @@ impl Settings {
         let change = Change::Settings { domain: TERMINAL.to_string(), values, at };
         match self.store.apply_durable(vec![change]).await {
             Ok(applied) if applied.quarantined == 0 => {}
-            Ok(applied) => {
-                let why = applied.error.unwrap_or_default();
-                return answer(Err(Error::new(
-                    code::INTERNAL,
-                    format!("jawd couldn't keep that setting, so nothing changed: {why}"),
-                )));
-            }
+            Ok(applied) => return answer(Err(not_kept(applied.error))),
             Err(e) => {
                 return answer(Err(Error::new(code::INTERNAL, format!("jawd couldn't keep that setting: {e:#}"))));
             }
@@ -184,6 +178,12 @@ impl Settings {
             let _ = gate.await;
         }
     }
+}
+
+/// The answer to a change jaw.db's writer kept in quarantine, saying why it failed.
+fn not_kept(why: Option<String>) -> Error {
+    let why = why.unwrap_or_else(|| "what failed is kept in quarantine".into());
+    Error::new(code::INTERNAL, format!("jawd couldn't keep that setting, so nothing changed: {why}"))
 }
 
 /// `settings.set`'s params checked: at least one setting, each one jawd knows with a value it
@@ -398,6 +398,13 @@ mod tests {
             "nord",
             "and it can be asked again"
         );
+    }
+
+    #[test]
+    fn a_change_kept_in_quarantine_without_a_reason_still_says_where_it_went() {
+        let e = not_kept(None);
+        assert_eq!(e.code, code::INTERNAL);
+        assert_eq!(e.message, "jawd couldn't keep that setting, so nothing changed: what failed is kept in quarantine");
     }
 
     #[tokio::test(flavor = "multi_thread")]
