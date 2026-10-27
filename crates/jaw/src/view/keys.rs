@@ -19,7 +19,8 @@ fn opens(kind: Kind) -> &'static str {
             "opening photos, videos and files comes with M3"
         }
         Kind::Audio => "playing audio files comes later",
-        Kind::Location | Kind::LiveLocation | Kind::Contact | Kind::Poll | Kind::Event => "opening these comes with M2",
+        Kind::Location => "its map link opens from your terminal",
+        Kind::LiveLocation | Kind::Contact | Kind::Poll | Kind::Event => "opening these comes with M2",
         _ => "there's nothing to open in this one",
     }
 }
@@ -29,6 +30,10 @@ fn plain(m: &Message) -> String {
     let text: String = m.spans.iter().map(|s| s.s.as_str()).collect();
     if m.kind == Kind::Text {
         return text;
+    }
+    if let Some(place) = &m.location {
+        let place = place.lines().join("\n");
+        return if text.is_empty() { place } else { format!("{place}\n{text}") };
     }
     let summary = crate::layout::summary(m);
     if text.is_empty() { summary } else { format!("{summary}\n{text}") }

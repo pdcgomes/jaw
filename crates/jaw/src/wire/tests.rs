@@ -1193,6 +1193,30 @@ fn on_a_real_jawd_a_chat_starts_by_number_and_reading_marks_it_read() {
 }
 
 #[test]
+fn on_a_real_jawd_a_pin_shows_its_name_its_address_and_a_map_link() {
+    let Some(jawd) = real() else {
+        eprintln!("JAWD isn't set to a jawd binary, so this ran on no real jawd");
+        return;
+    };
+    let relay = Relay::to(&jawd);
+    let (mut v, rx) = view_on(relay.socket.clone(), 140, 40);
+    let screen = until(&mut v, &rx, "⌖ Miradouro da Graça");
+    eprintln!("{screen}");
+    assert!(screen.contains("⌖ Miradouro da Graça"), "{screen}");
+    assert!(screen.contains("Calçada da Graça, 1100-265 Lisboa"), "{screen}");
+    assert!(screen.contains("https://www.openstreetmap.org/?mlat=38.71625&mlon=-9.13197"), "{screen}");
+    let pins: Vec<Value> = relay
+        .passed()
+        .iter()
+        .filter(|p| p.from_jawd)
+        .flat_map(|p| p.line["result"]["rows"].as_array().cloned().unwrap_or_default())
+        .filter(|r| r["kind"] == "location")
+        .collect();
+    let location = &pins.first().expect("jawd sent the pin's row")["location"];
+    assert_eq!((&location["lat"], &location["lon"]), (&38.71625.into(), &(-9.13197).into()), "{location}");
+}
+
+#[test]
 fn on_a_real_jawd_a_draft_typed_in_one_jaw_is_in_the_other_and_sending_it_clears_it_in_both() {
     let Some(jawd) = real() else {
         eprintln!("JAWD isn't set to a jawd binary, so this ran on no real jawd");

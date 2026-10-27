@@ -290,6 +290,46 @@ pub struct Message {
     /// For a voice message: its length and waveform, and whether you've played it.
     #[serde(default)]
     pub voice: Option<Voice>,
+    /// For a location: where it is, and what it's called.
+    #[serde(default)]
+    pub location: Option<Box<Location>>,
+}
+
+/// A pin: where it is, which a row may not say, as jawd shows each field it has and null for the
+/// rest, and what it's called.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Location {
+    #[serde(default)]
+    pub lat: Option<f64>,
+    #[serde(default)]
+    pub lon: Option<f64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub address: Option<String>,
+    /// The place's own page, when the pin is a business's or a venue's.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+impl Location {
+    /// Where it is on OpenStreetMap, which any browser opens without an account, when it says.
+    pub fn map(&self) -> Option<String> {
+        let (lat, lon) = (self.lat?, self.lon?);
+        Some(format!("https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}"))
+    }
+
+    /// Its lines as shown and pasted: its name, or else its coordinates, its address, its map and
+    /// its page.
+    pub fn lines(&self) -> Vec<String> {
+        let named = |s: &Option<String>| s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        let at = || Some(format!("{}, {}", self.lat?, self.lon?));
+        let mut out = vec![format!("⌖ {}", named(&self.name).or_else(at).unwrap_or_else(|| "Location".into()))];
+        out.extend(named(&self.address).filter(|a| Some(a) != named(&self.name).as_ref()));
+        out.extend(self.map());
+        out.extend(named(&self.url));
+        out
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]

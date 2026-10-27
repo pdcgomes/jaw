@@ -15,8 +15,8 @@ mod voice;
 
 use crate::data::Place;
 use crate::data::{
-    Album, AlbumItem, Chat, ChatKind, FoundKind, Jawd, Kind, Last, Media, Message, Person, Quote, Reaction, Sender,
-    Span, SpanKind, Tick, Typing, Typist, TypistState, Typists, Update,
+    Album, AlbumItem, Chat, ChatKind, FoundKind, Jawd, Kind, Last, Location, Media, Message, Person, Quote, Reaction,
+    Sender, Span, SpanKind, Tick, Typing, Typist, TypistState, Typists, Update,
 };
 use crate::fmt::{DAY, MINUTE};
 use crate::run::Event;
@@ -563,6 +563,7 @@ impl Account {
             media: None,
             album: None,
             voice: None,
+            location: None,
         }
     }
 
@@ -1228,6 +1229,7 @@ impl Writing {
             media: None,
             album: None,
             voice: None,
+            location: None,
         });
         self.thread.messages.last_mut().expect("just added")
     }
@@ -1375,7 +1377,14 @@ fn made_up(now: i64) -> Vec<Thread> {
     voice::voiced(w.other(wed + 1.0 * h + 22.0, Some(&mae), Kind::Voice, "▶ voice message 0:31", ""), 31.0, 2, true);
     voice::voiced(w.other(wed + 1.0 * h + 21.0, Some(&mae), Kind::Voice, "▶ voice message 0:09", ""), 9.0, 5, false);
     w.other(wed + 57.0, Some(&rui), Kind::Document, "▣ orcamento-obras-cozinha.pdf · 2.4 MB · 3 pages", "");
-    w.other(wed + 32.0, Some(&mae), Kind::Location, "⌖ Miradouro da Senhora do Monte · Lisbon", "");
+    w.other(wed + 32.0, Some(&mae), Kind::Location, "Location: Miradouro da Senhora do Monte", "").location =
+        Some(Box::new(Location {
+            lat: Some(38.719_23),
+            lon: Some(-9.132_77),
+            name: Some("Miradouro da Senhora do Monte".into()),
+            address: Some("R. da Senhora do Monte 50, 1170-361 Lisboa".into()),
+            url: None,
+        }));
     w.other(wed + 21.0, Some(&ines), Kind::Contact, "◉ Dr.ª Marta Lopes · +351 213 456 789", "");
     w.mine(3.0 * h, "eu levo o pão e a sobremesa");
     w.theirs(2.0 * h + 20.0, &mae, "boa! 😘");

@@ -73,6 +73,7 @@ fn message(id: &str, v: u64, sort: &str) -> Message {
         media: None,
         album: None,
         voice: None,
+        location: None,
     }
 }
 

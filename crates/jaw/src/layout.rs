@@ -349,6 +349,25 @@ fn body(m: &Message, shape: Shape, room: usize, ctx: &Ctx) -> Vec<(String, Style
         if !m.spans.is_empty() {
             out.push(("\n".into(), plain));
         }
+    } else if let Some(place) = &m.location {
+        let link = Style::new().fg(t.link).add_modifier(Modifier::UNDERLINED);
+        let lines = place.lines();
+        let links = usize::from(place.map().is_some())
+            + usize::from(place.url.as_deref().is_some_and(|u| !u.trim().is_empty()));
+        for (i, line) in lines.iter().enumerate() {
+            let style = match i {
+                0 => plain.add_modifier(Modifier::BOLD),
+                i if i >= lines.len() - links => link,
+                _ => Style::new().fg(t.muted),
+            };
+            if i > 0 {
+                out.push(("\n".into(), plain));
+            }
+            out.push((line.clone(), style));
+        }
+        if !m.spans.is_empty() {
+            out.push(("\n".into(), plain));
+        }
     } else if m.kind != Kind::Text {
         let s = summary(m);
         let style = if m.kind == Kind::Unknown { dim } else { Style::new().fg(t.muted) };
@@ -550,6 +569,7 @@ mod tests {
             media: None,
             album: None,
             voice: None,
+            location: None,
         }
     }
 
@@ -705,6 +725,51 @@ mod tests {
         assert!(bubbles[0].trim_start().starts_with("⊘ You deleted this message"), "{bubbles:?}");
         let irc = shown(&lay_irc(&m, 60, true).lines);
         assert!(irc[0].starts_with("You   ⊘ This message was deleted"), "{irc:?}");
+    }
+
+    #[test]
+    fn a_location_shows_its_name_its_address_and_a_map_link_one_unnamed_its_coordinates_and_one_unplaced_no_map() {
+        let mut m = theirs("");
+        m.spans.clear();
+        m.kind = Kind::Location;
+        m.summary = Some("Location: Miradouro da Graça".into());
+        m.location = Some(Box::new(crate::data::Location {
+            lat: Some(38.71625),
+            lon: Some(-9.13197),
+            name: Some("Miradouro da Graça".into()),
+            address: Some("Calçada da Graça, 1100-265 Lisboa".into()),
+            url: Some("https://miradouro.pt".into()),
+        }));
+        let map = "https://www.openstreetmap.org/?mlat=38.71625&mlon=-9.13197#map=17/38.71625/-9.13197";
+        let lines = lay(&m, 120);
+        assert!(lines[0].starts_with("Ana   ⌖ Miradouro da Graça   ") && lines[0].ends_with("13:58"), "{lines:?}");
+        assert_eq!(
+            lines[1..],
+            ["      Calçada da Graça, 1100-265 Lisboa", &format!("      {map}"), "      https://miradouro.pt"]
+        );
+
+        let theme = Theme::with(true);
+        let ctx = Ctx { theme: &theme, tz: UTC, me: &[], pictures: false, cell: (8, 16), sharp: false };
+        let shape =
+            Shape { width: 100, name: true, time: true, unfolded: false, pictured: true, play: None, irc: false };
+        let styled = body(&m, shape, 100, &ctx);
+        let style = |s: &str| styled.iter().find(|(t, _)| t == s).map(|(_, style)| *style).unwrap();
+        assert!(style(map).add_modifier.contains(Modifier::UNDERLINED), "the map is a link");
+        assert!(style("https://miradouro.pt").add_modifier.contains(Modifier::UNDERLINED), "and its page");
+        assert!(!style("Calçada da Graça, 1100-265 Lisboa").add_modifier.contains(Modifier::UNDERLINED));
+
+        m.location =
+            Some(Box::new(crate::data::Location { lat: Some(38.71625), lon: Some(-9.13197), ..Default::default() }));
+        assert_eq!(lay(&m, 120)[1..], [format!("      {map}")]);
+        assert!(lay(&m, 120)[0].starts_with("Ana   ⌖ 38.71625, -9.13197   "));
+
+        // A pin whose row says no coordinates, as jawd's may, shows what it's called, with no map.
+        let row = r#"{"id":"L","v":1,"sort":"1~1","at":1,"kind":"location","spans":[],
+            "location":{"lat":null,"lon":null,"name":"Casa da Ana","address":null,"url":null}}"#;
+        let unplaced: Message = serde_json::from_str(row).expect("a row with null coordinates reads");
+        m.location = unplaced.location;
+        let lines = lay(&m, 120);
+        assert!(lines[0].starts_with("Ana   ⌖ Casa da Ana   ") && lines.len() == 1, "{lines:?}");
     }
 
     #[test]
