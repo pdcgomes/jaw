@@ -2,7 +2,7 @@
 //! gives. The terminal's, in the `jaw` domain, are the only ones so far: the theme and where your
 //! messages sit. They're read once at start and changed one at a time: checked, kept with a synced
 //! commit, then published on the domain's watch channel, which always holds the latest, for each
-//! of its connections to push.
+//! of its connections to push, and answered before the next change can be published.
 
 use std::collections::BTreeMap;
 
@@ -65,11 +65,14 @@ impl Key {
 pub struct Settings {
     store: Store,
     /// What jaw.db holds for each of the terminal's settings chosen, as its JSON. A change holds it
-    /// from its check to its publishing, so changes are made one at a time, in the order their
-    /// commits are.
+    /// from its check to its answer, so changes are made one at a time, in the order their commits
+    /// are, and each is answered before the next is published.
     held: Mutex<BTreeMap<Key, String>>,
     published: watch::Sender<Terminal>,
     ignored: std::sync::Mutex<Vec<Ignored>>,
+    /// In tests, where the next change waits once it's published, until it's let go.
+    #[cfg(test)]
+    gate: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl Settings {
@@ -87,6 +90,8 @@ impl Settings {
             held: Mutex::new(held),
             published: watch::channel(terminal).0,
             ignored: std::sync::Mutex::new(ignored),
+            #[cfg(test)]
+            gate: std::sync::Mutex::new(None),
         })
     }
 
@@ -117,16 +122,21 @@ impl Settings {
     /// `settings.set` from a connection of `client`: checks that its domain is one jawd keeps and
     /// every setting asked before changing any, keeps those that differ from what jaw.db holds in
     /// one synced commit, and only then publishes the domain's settings in effect, if they changed,
-    /// and answers with them. What jaw.db holds already is answered at once, and written again
-    /// never. It must run to completion: dropped while the writer has its change, it would leave
-    /// jaw.db keeping the change while what's held and published stay as they were.
-    pub async fn set(&self, client: &str, params: Value) -> Result<Terminal, Error> {
+    /// and gives `answer` the settings to answer with, or why not, once. It answers while it still
+    /// holds the settings, so no later change is published before the answer is with the
+    /// connection. What jaw.db holds already is answered at once, and written again never. It must
+    /// run to completion: dropped while the writer has its change, it would leave jaw.db keeping
+    /// the change while what's held and published stay as they were.
+    pub async fn set(&self, client: &str, params: Value, answer: impl FnOnce(Result<Terminal, Error>)) {
         if client != TERMINAL {
             let mut error = Error::new(code::NOT_FOUND, format!("jawd keeps no settings for {client}"));
             error.data = Some(json!({ "client": client }));
-            return Err(error);
+            return answer(Err(error));
         }
-        let asked = checked(params)?;
+        let asked = match checked(params) {
+            Ok(asked) => asked,
+            Err(error) => return answer(Err(error)),
+        };
         let mut held = self.held.lock().await;
         let at = now_ms();
         let values: Vec<(String, String)> = asked
@@ -135,25 +145,44 @@ impl Settings {
             .map(|(key, value)| (key.name().to_string(), value.clone()))
             .collect();
         if values.is_empty() {
-            return Ok(self.current());
+            return answer(Ok(self.current()));
         }
         let change = Change::Settings { domain: TERMINAL.to_string(), values, at };
         match self.store.apply_durable(vec![change]).await {
             Ok(applied) if applied.quarantined == 0 => {}
             Ok(applied) => {
                 let why = applied.error.unwrap_or_default();
-                return Err(Error::new(
+                return answer(Err(Error::new(
                     code::INTERNAL,
                     format!("jawd couldn't keep that setting, so nothing changed: {why}"),
-                ));
+                )));
             }
-            Err(e) => return Err(Error::new(code::INTERNAL, format!("jawd couldn't keep that setting: {e:#}"))),
+            Err(e) => {
+                return answer(Err(Error::new(code::INTERNAL, format!("jawd couldn't keep that setting: {e:#}"))));
+            }
         }
         held.extend(asked);
         let (terminal, ignored) = in_effect(&held);
         *self.ignored.lock().expect("the ignored settings") = ignored;
         self.published.send_if_modified(|published| std::mem::replace(published, terminal.clone()) != terminal);
-        Ok(terminal)
+        #[cfg(test)]
+        self.gated().await;
+        answer(Ok(terminal));
+    }
+
+    /// In tests, has the next change wait once it's published, before it's answered, until `open`
+    /// is sent or dropped.
+    #[cfg(test)]
+    pub fn gate_next(&self, open: tokio::sync::oneshot::Receiver<()>) {
+        *self.gate.lock().expect("the gate") = Some(open);
+    }
+
+    #[cfg(test)]
+    async fn gated(&self) {
+        let gate = self.gate.lock().expect("the gate").take();
+        if let Some(gate) = gate {
+            let _ = gate.await;
+        }
     }
 }
 
@@ -223,8 +252,15 @@ mod tests {
         (home, store, settings)
     }
 
+    /// What a change from a connection of `client` is answered with.
+    async fn set(settings: &Settings, client: &str, params: Value) -> Result<Terminal, Error> {
+        let mut answered = None;
+        settings.set(client, params, |answer| answered = Some(answer)).await;
+        answered.expect("every change is answered")
+    }
+
     async fn refused(settings: &Settings, params: Value) -> Error {
-        settings.set(TERMINAL, params).await.unwrap_err()
+        set(settings, TERMINAL, params).await.unwrap_err()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -233,7 +269,7 @@ mod tests {
         assert_eq!(settings.current(), Terminal::default());
         let mut heard = settings.subscribe(TERMINAL).unwrap();
         let synced = store.storage().synced_commits;
-        let now = settings.set(TERMINAL, json!({"theme": "gruvbox"})).await.unwrap();
+        let now = set(&settings, TERMINAL, json!({"theme": "gruvbox"})).await.unwrap();
         assert_eq!(now, Terminal { theme: "gruvbox".into(), messages: Messages::Bubbles });
         assert_eq!(store.storage().synced_commits, synced + 1);
         assert_eq!(store.setting(TERMINAL, "theme").unwrap().as_deref(), Some("\"gruvbox\""));
@@ -246,7 +282,7 @@ mod tests {
     async fn a_client_without_a_domain_has_no_settings_and_cant_change_any() {
         let (_home, store, settings) = opened();
         assert!(settings.subscribe("test").is_none());
-        let e = settings.set("test", json!({"theme": "gruvbox"})).await.unwrap_err();
+        let e = set(&settings, "test", json!({"theme": "gruvbox"})).await.unwrap_err();
         assert_eq!((e.code, e.data), (code::NOT_FOUND, Some(json!({"client": "test"}))));
         assert_eq!(store.setting(TERMINAL, "theme").unwrap(), None, "nothing kept");
         let in_effect = settings.by_domain();
@@ -284,7 +320,7 @@ mod tests {
         let (_home, store, settings) = opened();
         let heard = settings.subscribe(TERMINAL).unwrap();
         let synced = store.storage().synced_commits;
-        assert_eq!(settings.set(TERMINAL, json!({"theme": "tokyo-night"})).await.unwrap(), Terminal::default());
+        assert_eq!(set(&settings, TERMINAL, json!({"theme": "tokyo-night"})).await.unwrap(), Terminal::default());
         assert_eq!(store.storage().synced_commits, synced + 1);
         assert_eq!(store.setting(TERMINAL, "theme").unwrap().as_deref(), Some("\"tokyo-night\""), "the choice is kept");
         assert!(!heard.has_changed().unwrap(), "but nothing in effect changed, so nothing is published");
@@ -293,10 +329,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_value_jaw_db_holds_already_is_answered_at_once_and_writes_nothing() {
         let (_home, store, settings) = opened();
-        settings.set(TERMINAL, json!({"messages": "irc"})).await.unwrap();
+        set(&settings, TERMINAL, json!({"messages": "irc"})).await.unwrap();
         let synced = store.storage().synced_commits;
         let heard = settings.subscribe(TERMINAL).unwrap();
-        let now = settings.set(TERMINAL, json!({"messages": "irc"})).await.unwrap();
+        let now = set(&settings, TERMINAL, json!({"messages": "irc"})).await.unwrap();
         assert_eq!(now.messages, Messages::Irc);
         assert_eq!(store.storage().synced_commits, synced, "nothing written");
         assert!(!heard.has_changed().unwrap(), "and nothing published");
@@ -307,7 +343,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         {
             let settings = Settings::load(Store::open(home.path()).unwrap()).unwrap();
-            settings.set(TERMINAL, json!({"theme": "nord", "messages": "irc"})).await.unwrap();
+            set(&settings, TERMINAL, json!({"theme": "nord", "messages": "irc"})).await.unwrap();
         }
         {
             let settings = Settings::load(Store::open(home.path()).unwrap()).unwrap();
@@ -335,7 +371,7 @@ mod tests {
         assert_eq!(store.count("settings").unwrap(), 4, "a setting or a domain jawd doesn't know is left alone");
         assert_eq!(settings.by_domain().keys().collect::<Vec<_>>(), [TERMINAL], "and not read");
         let heard = settings.subscribe(TERMINAL).unwrap();
-        settings.set(TERMINAL, json!({"theme": "tokyo-night"})).await.unwrap();
+        set(&settings, TERMINAL, json!({"theme": "tokyo-night"})).await.unwrap();
         assert!(settings.ignored().is_empty(), "choosing the default replaces what wasn't understood");
         assert_eq!(store.setting(TERMINAL, "theme").unwrap().as_deref(), Some("\"tokyo-night\""));
         assert!(!heard.has_changed().unwrap(), "and the default was in effect already, so nothing is published");
@@ -358,7 +394,7 @@ mod tests {
         assert_eq!(store.setting(TERMINAL, "theme").unwrap(), None);
         outside.execute_batch("DROP TRIGGER refused").unwrap();
         assert_eq!(
-            settings.set(TERMINAL, json!({"theme": "nord"})).await.unwrap().theme,
+            set(&settings, TERMINAL, json!({"theme": "nord"})).await.unwrap().theme,
             "nord",
             "and it can be asked again"
         );
@@ -374,7 +410,7 @@ mod tests {
         let synced = store.storage().synced_commits;
         let ask = || {
             let settings = settings.clone();
-            tokio::spawn(async move { settings.set(TERMINAL, json!({"theme": "nord"})).await })
+            tokio::spawn(async move { set(&settings, TERMINAL, json!({"theme": "nord"})).await })
         };
         let first = ask();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -402,7 +438,7 @@ mod tests {
                 let theme = themes::all()[i % 23].id.clone();
                 let messages = if i % 2 == 0 { "irc" } else { "bubbles" };
                 tokio::spawn(async move {
-                    settings.set(TERMINAL, json!({"theme": theme, "messages": messages})).await.unwrap()
+                    set(&settings, TERMINAL, json!({"theme": theme, "messages": messages})).await.unwrap()
                 })
             })
             .collect();

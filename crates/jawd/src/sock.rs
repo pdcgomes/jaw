@@ -342,11 +342,25 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
             // dropped. The channel holds only the latest, so leaving it unread while a line waits
             // loses nothing, and the connection ends on the latest.
             settings = changed(&mut session.settings, session.greeted), if open => {
-                let push = Push {
-                    method: "settings".into(),
-                    params: serde_json::to_value(settings).expect("jawd's own types serialize"),
-                };
-                send(&out, &push, &mut owed, &mut session)?;
+                // The lane's replies handed over before these settings were read go ahead of
+                // their push: a change's answer is handed over before a later change can be
+                // published, so it never comes after that change's push.
+                while owed.waiting.is_none()
+                    && let Ok(reply) = answers.try_recv()
+                {
+                    owed.answered();
+                    send(&out, &reply, &mut owed, &mut session)?;
+                }
+                if owed.waiting.is_none() {
+                    let push = Push {
+                        method: "settings".into(),
+                        params: serde_json::to_value(settings).expect("jawd's own types serialize"),
+                    };
+                    send(&out, &push, &mut owed, &mut session)?;
+                } else if let Some(settings) = session.settings.as_mut() {
+                    // A reply waits for room, so the push comes after it, as the latest then.
+                    settings.mark_changed();
+                }
             }
         }
     }
@@ -400,7 +414,12 @@ fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::Unbo
             let (reply, then) = match request.method.as_str() {
                 "link.logout" => logout(&state, request.id).await,
                 "layout.get" | "layout.set" => (layouts(&state, request, &client, from).await, None),
-                "settings.set" => (settings_set(&state, request, &client).await, None),
+                // Its answer is handed over while the settings are held, so `settings_set` hands
+                // it over itself.
+                "settings.set" => {
+                    settings_set(&state, request, &client, &answered).await;
+                    continue;
+                }
                 _ => (answer(&state, request).await, None),
             };
             let gone = answered.send(reply).is_err();
@@ -741,15 +760,22 @@ async fn layouts(state: &State, request: Request, interface: &str, from: u64) ->
 
 /// `settings.set`, down the lane, in the domain the hello the connection had said when it sent it
 /// named, `client`: it waits on jaw.db, so it's answered in the order sent, as the lane's other
-/// requests are.
-async fn settings_set(state: &State, request: Request, client: &str) -> Reply {
+/// requests are. Its answer goes to `answered` while the domain's settings are still held, so no
+/// later change can be pushed to the connection before it.
+async fn settings_set(state: &State, request: Request, client: &str, answered: &mpsc::UnboundedSender<Reply>) {
     let id = request.id;
+    let hand = |reply| drop(answered.send(reply));
     match state.settings() {
-        Some(settings) => match settings.set(client, request.params).await {
-            Ok(settings) => succeeded(id, &SettingsKept { settings }),
-            Err(error) => failed(id, error),
-        },
-        None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it can't keep settings")),
+        Some(settings) => {
+            let answer = |kept| {
+                hand(match kept {
+                    Ok(settings) => succeeded(id, &SettingsKept { settings }),
+                    Err(error) => failed(id, error),
+                })
+            };
+            settings.set(client, request.params, answer).await;
+        }
+        None => hand(failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it can't keep settings"))),
     }
 }
 
@@ -1232,7 +1258,9 @@ mod tests {
 
     /// jawd serving jaw.db with its settings, on a socket in a folder of its own, once jaw.db keeps
     /// `kept`, as another jawd may have left it.
-    async fn serving_settings(kept: Vec<Change>) -> (tempfile::TempDir, std::path::PathBuf, Store) {
+    async fn serving_settings(
+        kept: Vec<Change>,
+    ) -> (tempfile::TempDir, std::path::PathBuf, Store, Arc<crate::settings::Settings>) {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         if !kept.is_empty() {
@@ -1250,9 +1278,9 @@ mod tests {
             broadcast::channel(16).0,
         )
         .unwrap()
-        .with_settings(settings);
+        .with_settings(settings.clone());
         tokio::spawn(serve(Arc::new(state), listener));
-        (home, socket, store)
+        (home, socket, store, settings)
     }
 
     /// The answer to a hello from `client` as jawd wrote it, since `Terminal` reads an empty or
@@ -1269,7 +1297,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn hello_carries_a_domains_settings_and_each_change_is_pushed_to_its_connections_alone() {
-        let (_home, socket, _store) = serving_settings(Vec::new()).await;
+        let (_home, socket, _store, _) = serving_settings(Vec::new()).await;
         let checked = tokio::task::spawn_blocking(move || {
             let fresh = raw_hello(&socket, TERMINAL);
             assert_eq!(fresh["result"]["settings"], json!({"theme": "tokyo-night", "messages": "bubbles"}));
@@ -1310,7 +1338,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn settings_set_answers_only_once_its_commit_is_synced() {
-        let (home, socket, store) = serving_settings(Vec::new()).await;
+        let (home, socket, store, _) = serving_settings(Vec::new()).await;
         let path = socket.clone();
         let (mut connection, _) =
             tokio::task::spawn_blocking(move || jaw_client::Connection::open(&path, TERMINAL, "0").unwrap())
@@ -1335,6 +1363,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn two_connections_changing_settings_at_once_hear_each_answer_before_the_later_change_and_end_on_it() {
+        let (_home, socket, store, settings) = serving_settings(Vec::new()).await;
+        // The first change waits once it's published, before it's answered, until it's let go.
+        let (open, gate) = tokio::sync::oneshot::channel();
+        settings.gate_next(gate);
+        tokio::task::spawn_blocking(move || {
+            let mut first = Lines::open(&socket, TERMINAL);
+            let mut second = Lines::open(&socket, TERMINAL);
+            let nord = first.send("settings.set", json!({"theme": "nord"}));
+            let pushed = first.within(Duration::from_secs(10)).expect("nord is published");
+            assert_eq!(pushed["params"]["theme"], "nord", "its own push can come before its answer: {pushed}");
+            // Asked while the first change holds the settings, unanswered, so it can be kept and
+            // pushed only once the first is answered.
+            let gruvbox = second.send("settings.set", json!({"theme": "gruvbox"}));
+            std::thread::sleep(Duration::from_millis(300));
+            open.send(()).unwrap();
+            // Each connection's lines until its answer and gruvbox's push have come, and for 300 ms
+            // after.
+            let heard = |lines: &mut Lines, asked: u64| {
+                let mut heard: Vec<Value> = Vec::new();
+                while !heard.iter().any(|line| line["id"] == asked)
+                    || !heard.iter().any(|line| line["params"]["theme"] == "gruvbox")
+                {
+                    heard.push(lines.within(Duration::from_secs(10)).expect("its answer and gruvbox's push"));
+                }
+                while let Some(line) = lines.within(Duration::from_millis(300)) {
+                    heard.push(line);
+                }
+                heard
+            };
+            let (first, second) = (heard(&mut first, nord), heard(&mut second, gruvbox));
+            let answered = first.iter().position(|line| line["id"] == nord).unwrap();
+            let later = first.iter().position(|line| line["params"]["theme"] == "gruvbox").unwrap();
+            assert!(answered < later, "the later change was pushed before the first was answered: {first:?}");
+            assert_eq!(first[answered]["result"]["settings"]["theme"], "nord", "answered as it left them");
+            let answer = second.iter().find(|line| line["id"] == gruvbox).unwrap();
+            assert_eq!(answer["result"]["settings"]["theme"], "gruvbox");
+            for heard in [&first, &second] {
+                let last = heard.iter().rev().find(|line| line["method"] == "settings").unwrap();
+                assert_eq!(last["params"], json!({"theme": "gruvbox", "messages": "bubbles"}), "{heard:?}");
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap().as_deref(), Some("\"gruvbox\""), "jaw.db agrees");
+        assert_eq!(settings.current().theme, "gruvbox");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_connection_that_reads_nothing_while_settings_change_ends_on_the_latest() {
         // The themes asked for and their answers left unread: fewer than its queue holds, so it's
         // left in its loop rather than waiting on an answer, and more than a socket takes, so the
@@ -1342,7 +1419,7 @@ mod tests {
         let (asks, changes) = (WAITING_LINES * 5 / 8, 2 * WAITING_LINES);
         let answer = encode(&succeeded(0, &Themes { themes: jaw_proto::themes::all().to_vec() })).len();
         assert!(asks * answer > 256 << 10, "{asks} answers of {answer} bytes might all fit in the socket");
-        let (_home, socket, _store) = serving_settings(Vec::new()).await;
+        let (_home, socket, _store, _) = serving_settings(Vec::new()).await;
         let seen = tokio::task::spawn_blocking(move || {
             let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
             let mut writer = stream.try_clone().unwrap();
@@ -1382,7 +1459,7 @@ mod tests {
             values: vec![("theme".into(), "\"rose-pine-moon\"".into())],
             at: 1,
         };
-        let (_home, socket, _store) = serving_settings(vec![newer]).await;
+        let (_home, socket, _store, _) = serving_settings(vec![newer]).await;
         let status = tokio::task::spawn_blocking(move || {
             let (mut connection, _) = jaw_client::Connection::open(&socket, "test", "0").unwrap();
             connection.call("status", Value::Null).unwrap()
