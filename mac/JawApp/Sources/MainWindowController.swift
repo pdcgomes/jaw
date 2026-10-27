@@ -18,6 +18,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     let palette = PalettePanel()
     var bar: BottomBar!
     var editorSheet: NSWindow?
+    var sidebarToggle: IconButton?
     var status: NSHostingView<StatusLine> {
         bar.status
     }
@@ -77,6 +78,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         ])
         window.contentViewController = root
         if window.frame.origin == .zero { window.center() }
+
+        // The sidebar's button beside the window's, in the title bar as an accessory: a toolbar
+        // would make the title bar taller and take the clicks of the panes' headers under it.
+        let toggle = IconButton(symbol: "sidebar.left", label: "Show or fold the sidebar", shortcut: Shortcut("b"), tone: .secondary)
+        { [weak self] in self?.toggleSidebar() }
+        sidebarToggle = toggle
+        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 34, height: 28))
+        holder.addSubview(toggle)
+        NSLayoutConstraint.activate([
+            toggle.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: Space.xs),
+            toggle.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
+        ])
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = holder
+        accessory.layoutAttribute = .leading
+        window.addTitlebarAccessoryViewController(accessory)
 
 
         sidebar.picked = { [weak model] folder in model?.pick(folder: folder.id) }
@@ -159,6 +176,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         chatList.roles = model.roles
         window?.backgroundColor = model.roles.ground.nsColor
         bar.restyle(model.roles)
+        sidebarToggle?.roles = model.roles
         refresh()
     }
 

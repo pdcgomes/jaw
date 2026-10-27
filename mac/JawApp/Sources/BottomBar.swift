@@ -4,12 +4,11 @@ import JawUI
 import SwiftUI
 
 /// The bar along the bottom of the window, where the controls live so the panes have the window's
-/// whole height: the sidebar, the layout and the splits on the left, the status line between, and
+/// whole height: the layout and the splits on the left, the status line between, and
 /// Find and New Chat on the right. Each runs the same command as its menu item and key.
 @MainActor
 final class BottomBar: NSView {
     let status: NSHostingView<StatusLine>
-    let sidebar: IconButton
     let layout: IconButton
     let split: IconButton
     let find: IconButton
@@ -20,7 +19,6 @@ final class BottomBar: NSView {
     init(model: AppModel) {
         status = NSHostingView(rootView: StatusLine(state: nil, warn: false, chat: nil, roles: model.roles))
         let run = { [weak model] (id: String) in model?.command(id)?.run() }
-        sidebar = IconButton(symbol: "sidebar.left", label: "Show or fold the sidebar", shortcut: Shortcut("b")) { run("sidebar") }
         layout = IconButton(symbol: "square.grid.3x2", label: "Layouts on a grid", shortcut: Shortcut("e", [.command, .option]),
                             title: "Unsaved Panes") {}
         split = IconButton(symbol: "rectangle.split.2x1", label: "Split this pane", shortcut: Shortcut("d")) {}
@@ -35,7 +33,7 @@ final class BottomBar: NSView {
         split.menuToOpen = { [weak model] in
             model.map { m in Menus.menu(["split.across", "split.down", "pane.close"].compactMap(m.command)) }
         }
-        let left = NSStackView(views: [sidebar, layout, split])
+        let left = NSStackView(views: [layout, split])
         let right = NSStackView(views: [find, newChat])
         for stack in [left, right] {
             stack.orientation = .horizontal
@@ -73,7 +71,7 @@ final class BottomBar: NSView {
     func restyle(_ roles: Roles) {
         layer?.backgroundColor = roles.surface.cgColor
         rule.layer?.backgroundColor = roles.separator.mixed(with: roles.surface, 0.5).cgColor
-        for b in [sidebar, layout, split, find, newChat] {
+        for b in [layout, split, find, newChat] {
             b.roles = roles
         }
     }
