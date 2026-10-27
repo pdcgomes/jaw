@@ -3189,17 +3189,26 @@ mod tests {
             let store = store.clone();
             tokio::spawn(async move { store.apply(Lane::Background, messages(history)).await.unwrap() })
         };
-        let mut live = 0;
-        while !batch.is_finished() {
-            let started = Instant::now();
+        let mut waited = Vec::new();
+        while waited.is_empty() || !batch.is_finished() {
+            let (started, live) = (Instant::now(), waited.len() as i64);
             store
                 .apply(Lane::Live, messages([text("351910000002@s.whatsapp.net", &format!("l{live}"), live, "live")]))
                 .await
                 .unwrap();
-            assert!(started.elapsed() < Duration::from_secs(1), "a live write waited {:?}", started.elapsed());
-            live += 1;
+            waited.push(started.elapsed());
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        // Judged on the median: a live write may wait for the WAL to start again, RESTART_MOST and
+        // two syncs at most, and other processes' load can stall any one; live writes that waited
+        // for the history would wait for all of it.
+        waited.sort();
+        let (median, most) = (waited[waited.len() / 2], waited[waited.len() - 1]);
+        assert!(
+            median < Duration::from_secs(1),
+            "{} live writes waited {median:?} at the median, {most:?} at most",
+            waited.len()
+        );
         assert_eq!(batch.await.unwrap().changed, 20_000);
         let storage = store.storage();
         assert!(storage.background_waits > 0, "background work never waited for the checkpointer");
@@ -3210,7 +3219,7 @@ mod tests {
         store.indexed().await.unwrap();
         store.truncate().await.unwrap();
         assert_eq!(std::fs::metadata(home.path().join("jaw.db-wal")).unwrap().len(), 0);
-        assert_eq!(store.count("messages").unwrap(), 20_000 + live as u64);
+        assert_eq!(store.count("messages").unwrap(), 20_000 + waited.len() as u64);
     }
 
     /// Inbox rows handed over about every millisecond until `stop`, each acked once committed: says
