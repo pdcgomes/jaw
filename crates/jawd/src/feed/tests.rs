@@ -4036,6 +4036,82 @@ mod folders {
         assert!(order.contains(&tree) && order.contains(&roster), "all three changed: {order:?}");
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_folder_methods_wait_their_turn_down_the_lane_while_the_tree_and_a_roster_are_answered_at_once() {
+        // What comes on `line` until each of `ids` is answered, or `within` has passed.
+        fn answered(line: &mut Line, ids: &[u64], within: Duration) -> Vec<Value> {
+            let mut came: Vec<Value> = Vec::new();
+            let deadline = Instant::now() + within;
+            while !ids.iter().all(|id| came.iter().any(|value| value["id"] == *id)) && Instant::now() < deadline {
+                came.extend(line.came(ms(100)));
+            }
+            came
+        }
+        let bed = Bed::new(brisk());
+        bed.apply(vec![
+            Change::Person(Person { jids: vec![RUI.into()], name: Some("Rui".into()), ..Person::default() }),
+            Change::Message(text(ANA, "a1", AT, Some(ANA), "olá")),
+        ])
+        .await;
+        let rui = person_n(&bed, RUI).await;
+        let family = format!("folder:{}", create(&bed, "Family", None).await);
+        let cousins = format!("folder:{}", create(&bed, "Cousins", None).await);
+        // Taken out of order, most would be refused: Rui's chat is started, then filed, given a slot
+        // and unfiled; Family is renamed, so a new folder can take its name, and Cousins moved into
+        // it, before it's deleted.
+        let lane = [
+            ("chat.start", json!({"person": format!("person:{rui}")})),
+            ("folder.add", json!({"folder": family, "item": RUI})),
+            ("favourite.set", json!({"slot": 2, "target": RUI})),
+            ("folder.remove", json!({"folder": family, "item": RUI})),
+            ("folder.rename", json!({"folder": family, "name": "Família"})),
+            ("folder.create", json!({"name": "Family"})),
+            ("folder.move", json!({"folder": cousins, "parent": family})),
+            ("folder.delete", json!({"folder": family})),
+            ("folder.smart", json!({"name": "Unread groups", "rule": {"kind": "group", "unread": true}})),
+        ];
+        let sent: Vec<u64> = (10..).take(lane.len()).collect();
+        let socket = serve_all(&bed).await;
+        let (mut line, _) = tokio::task::spawn_blocking(move || Line::open(&socket, None)).await.unwrap();
+
+        // Nothing down the lane can be answered while the writer is held.
+        let locked = Locked::on(&bed);
+        let ids = sent.clone();
+        let (mut line, came) = tokio::task::spawn_blocking(move || {
+            for ((method, params), id) in lane.into_iter().zip(ids) {
+                line.ask(id, method, params);
+            }
+            line.ask(20, "folders.watch", json!({}));
+            line.ask(21, "roster.watch", json!({"folder": "all", "around": "top", "after": 20}));
+            let came = answered(&mut line, &[20, 21], Duration::from_secs(10));
+            (line, came)
+        })
+        .await
+        .unwrap();
+        for id in [20, 21] {
+            assert!(
+                came.iter().any(|value| value["id"] == id && value["result"]["watch"].is_string()),
+                "{id} answered while the writer is held, as a watch: {came:?}"
+            );
+        }
+        let tree = came.iter().find(|value| value["id"] == 20).unwrap();
+        assert!(
+            tree["result"]["rows"].as_array().unwrap().iter().any(|row| row["id"] == family && row["name"] == "Family"),
+            "the tree as jaw.db had it, before the requests sent ahead of it: {tree}"
+        );
+
+        drop(locked);
+        let ids = sent.clone();
+        let came =
+            tokio::task::spawn_blocking(move || answered(&mut line, &ids, Duration::from_secs(30))).await.unwrap();
+        let replies: Vec<&Value> = came.iter().filter(|value| value.get("id").is_some()).collect();
+        let order: Vec<u64> = replies.iter().map(|value| value["id"].as_u64().unwrap()).collect();
+        assert_eq!(order, sent, "answered in the order sent: {came:?}");
+        for reply in replies {
+            assert!(reply.get("result").is_some(), "each in its turn, after what it needed: {reply}");
+        }
+    }
+
     /// A folder's chat list as a fresh read gives it, whole, as its window should hold it.
     async fn listed(bed: &Bed, list: List, after: usize) -> Model {
         let rows = bed
@@ -4178,6 +4254,54 @@ mod folders {
         watcher.settle(seq).await;
         assert!(!watcher.windows[&tree].rows.contains_key(&format!("folder:{family}")), "gone from the tree");
         assert!(watcher.windows[&tree].rows.contains_key("all") && watcher.windows[&tree].rows.contains_key("unread"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_trees_pushes_carry_the_favourite_slots_whole_when_they_change_and_only_then() {
+        // The tree's pushes up to `seq`, as they come: a window's model keeps none of the slots.
+        async fn pushed(watcher: &mut Watcher, tree: &str, seq: i64) -> Vec<Value> {
+            let mut came = Vec::new();
+            loop {
+                while let Ok(line) = watcher.lines.try_recv() {
+                    let FromJawd::Push(push) = serde_json::from_slice(&line).unwrap() else {
+                        panic!("a reply among the pushes")
+                    };
+                    if push.method == "folders" && push.params["watch"] == tree {
+                        came.push(push.params);
+                    }
+                }
+                if watcher.seen >= seq && !watcher.client.pending() {
+                    return came;
+                }
+                watcher.turn().await;
+            }
+        }
+        let bed = Bed::new(brisk());
+        let seq = bed.apply(vec![Change::Message(text(ANA, "a1", AT, Some(ANA), "olá"))]).await;
+        let mut watcher = bed.watcher(64);
+        let tree = watcher.watch("folders.watch", json!({})).await;
+        pushed(&mut watcher, &tree, seq).await;
+
+        let (_, seq) =
+            step(&bed, |done| Step::Favourite { slot: 3, target: Some(Target::Chat(ANA.into())), done }).await;
+        let came = pushed(&mut watcher, &tree, seq).await;
+        assert!(
+            came.iter().any(|push| push["favourites"]
+                .as_array()
+                .is_some_and(|slots| slots.iter().any(|slot| slot["slot"] == 3 && slot["chat"] == ANA))),
+            "the slots, Ana's chat on 3: {came:?}"
+        );
+
+        let said = Message { live: true, ..text(ANA, "a2", AT + 1, Some(ANA), "e agora?") };
+        let seq = bed.apply(vec![Change::Message(said)]).await;
+        let came = pushed(&mut watcher, &tree, seq).await;
+        assert!(!came.is_empty(), "her message counts in the tree");
+        assert!(came.iter().all(|push| push.get("favourites").is_none()), "the slots stay as they were: {came:?}");
+
+        // jaw keeps the slots it was last sent, so an emptied one must come too.
+        let (_, seq) = step(&bed, |done| Step::Favourite { slot: 3, target: None, done }).await;
+        let came = pushed(&mut watcher, &tree, seq).await;
+        assert!(came.iter().any(|push| push["favourites"] == json!([])), "the slots, none left: {came:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -152,7 +152,6 @@ impl State {
         self.settings.as_deref()
     }
 
-    /// Serves windows from `feed`.
     /// Whose presence it follows, and the folders' checks, for `status`.
     pub fn with_following(
         mut self,
@@ -163,6 +162,7 @@ impl State {
         self
     }
 
+    /// Serves windows from `feed`.
     pub fn with_feed(mut self, feed: Feed) -> State {
         self.feed = Some(feed);
         self
