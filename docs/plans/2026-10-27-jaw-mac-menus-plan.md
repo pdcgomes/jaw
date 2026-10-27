@@ -16,7 +16,7 @@
 - The words are the design's: "Open in New Pane", "Pin", "Unpin", "Mute" with "For 8 Hours", "For a Week", "Always", "Unmute", "Archive", "Unarchive", "Mark as Read", "Mark as Unread", "Split Across", "Split Down", "Close Pane", "Swap" with "Left", "Right", "Up", "Down", "Search This Chat", "Star", "Unstar".
 - A debug build never opens the owner's jaw folder; the app's snapshot runs `--demo`. Nothing here touches jawd or the owner's processes.
 - Tests run on the build Mac: `mac/scripts/build-mac test JawUITests` (JawUI's tests) and `mac/scripts/build-mac build jaw` (the app). Each prints only jaw's diagnostics and `** TEST SUCCEEDED **` or `** BUILD SUCCEEDED **`.
-- Commits are on `mac-menus` in `~/src/jaw-mac-menus`, in the repository's style: one or more plain sentences saying what changed and why, no prefix; the Mac builder merges `mac-menus` into `mac-m1`.
+- Commits are on `mac-menus` in `~/src/jaw-mac-menus`, in the repository's style: one or more plain sentences saying what changed and why, no prefix. `mac-menus` rebases onto `mac-m1`'s tip, again if `mac-m1` moves before the hand-over, and the Mac builder fast-forwards `mac-m1` to it. It isn't merged: `mac-m1` is rebased onto main from time to time, and a merge would bring its old commits back beside their twins.
 
 ## Files
 
@@ -27,10 +27,12 @@
 - `mac/JawApp/Sources/ChatMenus.swift` (create): `chatCommands(for:)`, `openInNewPane(_:)`, `chatMenuItems(for:)`, `paneMenu(for:)`.
 - `mac/JawApp/Sources/Commands.swift` (modify): the Chat section takes `chatCommands(for:)`.
 - `mac/JawApp/Sources/AppModel.swift` (modify): `makePane` sets `paneMenu` and `messageMenuTail`; `ChatListHost` gains the menu's items.
-- `mac/JawApp/Sources/MainWindowController.swift` (modify): an empty pane's menu from `ChatMenu.pane`.
+- `mac/JawApp/Sources/MainWindowController.swift` (modify): an empty pane's menu from `ChatMenu.splits`, and a pane showing a chat its whole menu on the strips and controls no view claims (task 5's review).
 - `mac/JawApp/Sources/Bench.swift` (modify): the `menu:` steps of `--keys`.
+- `mac/JawApp/Sources/Glance.swift` (modify): ⌘↩ through `openInNewPane(_:)` (the branch's review).
+- `mac/JawUI/Sources/Conversation/MessageView.swift` and `mac/JawUI/Sources/Layout/MessageLayout.swift` (modify): a message answers a right click only on itself, `Laid.contains` (task 5's review), and VoiceOver's Show Menu (the branch's review).
 - `mac/README.md` (modify): the `menu:` steps.
-- Tests (create): `mac/Tests/JawUITests/MenuEntryTests.swift`, `ChatMenuTests.swift`, `ChatListMenuTests.swift`, `PaneMenuTests.swift`.
+- Tests (create): `mac/Tests/JawUITests/MenuEntryTests.swift`, `ChatMenuTests.swift`, `ChatListMenuTests.swift`, `PaneMenuTests.swift`; (modify, task 7) `TypingTests.swift`, whose `Reader` is a `ConversationHost`.
 
 ---
 
@@ -172,6 +174,8 @@ git commit -m "Right-click menus are made from entries worked out from rows, a c
 ---
 
 ### Task 2: What a chat's menus offer
+
+Amended after the branch's review: a chat's two rules are written once, as `ChatRow.hasChatActions` (it isn't a community) and `ChatRow.readsAsUnread` (`unread > 0 || markedUnread`), in `ChatMenu.swift`. `ChatMenu.list` and `ChatMenu.actions` read them, as task 3's `chatCommands(for:)` does, where the plan's code wrote them out in each. The community test has a pinned, muted and unread community, which still offers nothing, and its announcements group, of kind `.announcement`, which offers everything.
 
 **Files:**
 - Create: `mac/JawUI/Sources/ChatList/ChatMenu.swift`
@@ -340,6 +344,8 @@ git commit -m "What a chat's right-click menus offer, worked out from its row as
 ---
 
 ### Task 3: The app's chat actions, written once and bound to a chat
+
+Amended after the branch's review: every `enabled` in `chatCommands(for:)` reads `ChatRow.hasChatActions`, Unmute's too, so a muted community's Unmute is greyed with the rest of its actions, and Mark's `on` and `says` read `ChatRow.readsAsUnread`. The local `isChat` is `hasActions`, since it means a chat with the chat's actions, where `Commands.swift`'s `isChat` means any chat. Open in New Pane has no palette phrase, as it isn't in the palette. The glance's ⌘↩ calls `openInNewPane(_:)`, so the two agree: the chat goes into the focused pane when it's empty, opens when no pane has the keys, and counts as opened.
 
 **Files:**
 - Create: `mac/JawApp/Sources/ChatMenus.swift`
@@ -596,6 +602,8 @@ git commit -m "The chat list has a right-click menu: its table's menu is filled 
 ---
 
 ### Task 5: The chat's menus
+
+Amended after its review: a message answers a right click only on itself, its body, its regions or the buttons it shows while hovered (`Laid.contains`, which left clicks use too). A right click on the blank space beside, between or under the messages goes on to the transcript's table and the pane's menu, as the design has it, where the plan's `MessageView` answered anywhere in its row. Building a menu doesn't move the focus: the right click's entry points, `menu(for view:)` and `paneMenuShown()`, give the pane the keys, and `menu(for m:)` and `menu(forRow:)` only build, so the snapshot's log changes nothing and the plan's `host.focused == 1` after `c.menu(for: text)` is 0. The slot frame gives a pane showing a chat its whole menu on the strips and controls no view claims, and an empty pane its splits, where the plan's frame offered only the splits. The tests send real right clicks through AppKit's hit test in an offscreen window. After the branch's review, VoiceOver's Show Menu, which has no pointer to hit-test, opens a message's menu under its bubble through `menu(for view:)`, so the pane takes the keys first (`MessageView.accessibilityPerformShowMenu()`, whose pop-up the test stands in for).
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Conversation/ConversationController.swift` (`headerMenu`, `let table`, `loadView()`, `menu(for:)`, `HeaderView`, a new `TranscriptTable`)
@@ -864,6 +872,8 @@ git commit -m "A right click anywhere in a pane offers its splits: a message's m
 
 ### Task 6: The menus in the snapshot's log
 
+Amended after its review: a row that isn't the chat list's, for `menu:list` or `drop:`, says `no row <i>` (`Bench.listRow(_:model:)`), where the plan's `i < list.count` guard let -1 through to trap on `list[i]`. A menu step prints one line, its menu, in place of the panes line it can't change. An unknown kind or extra parts say `unknown step`, hidden items aren't listed, and `said` is `words`, so `press`'s local `said` doesn't shadow it. The README says rows count from 0 and that `menu:message` reads the focused pane's transcript.
+
 **Files:**
 - Modify: `mac/JawApp/Sources/Bench.swift` (`press(_:model:then:)` and two new functions)
 - Modify: `mac/README.md` (the paragraph on the app's options)
@@ -972,6 +982,7 @@ Do this task only once jawd's step "Chat actions from jaw" is on main and `mac-m
 - Modify: `mac/JawUI/Sources/Conversation/ConversationController.swift` (`ConversationHost`, `menu(for m:)`)
 - Modify: `mac/JawApp/Sources/AppModel.swift` (the `ConversationHost` extension)
 - Modify: `mac/Tests/JawUITests/PaneMenuTests.swift` (`PaneHost`, and a test)
+- Modify: `mac/Tests/JawUITests/TypingTests.swift` (`Reader`, which conforms to `ConversationHost` on `mac-m1`, so it needs `conversation(_:star:)` too)
 - Test: `mac/Tests/JawKitTests/FixtureTests.swift` (the request's fixture)
 
 **Interfaces:**
@@ -993,7 +1004,13 @@ In `mac/Tests/JawUITests/PaneMenuTests.swift`, add to `PaneHost`:
     func conversation(_: ConversationController, star message: MessageRow) { starred.append(message.id) }
 ```
 
-and add the test:
+In `mac/Tests/JawUITests/TypingTests.swift`, add to `Reader`:
+
+```swift
+    func conversation(_: ConversationController, star _: MessageRow) {}
+```
+
+and in `PaneMenuTests.swift` add the test:
 
 ```swift
 @MainActor
@@ -1076,7 +1093,7 @@ Expected: `** BUILD SUCCEEDED **`.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add mac/JawKit/Sources/Client/Jawd.swift mac/JawUI/Sources/Conversation/ConversationController.swift mac/JawApp/Sources/AppModel.swift mac/Tests/JawUITests/PaneMenuTests.swift mac/Tests/JawKitTests/FixtureTests.swift
+git add mac/JawKit/Sources/Client/Jawd.swift mac/JawUI/Sources/Conversation/ConversationController.swift mac/JawApp/Sources/AppModel.swift mac/Tests/JawUITests/PaneMenuTests.swift mac/Tests/JawUITests/TypingTests.swift mac/Tests/JawKitTests/FixtureTests.swift
 git commit -m "A message's menu stars it, or takes its star off, now jawd serves star: Star or Unstar after Edit, sent with the message's chat, its request equal to jawd's fixture, the star shown when the message's row comes back"
 ```
 
@@ -1085,5 +1102,5 @@ git commit -m "A message's menu stars it, or takes its star off, now jawd serves
 ## After the plan
 
 - Delete `/tmp/jaw-mac-menus` (the snapshot), and `target` in `~/src/jaw-mac-menus` if task 6 built a jawd rather than copying one.
-- The build Mac keeps `~/src/build-mac/jaw/jaw-mac-menus` with its `build/DerivedData`: delete it when `mac-menus` is merged (`ssh build-mac rm -rf src/build-mac/jaw/jaw-mac-menus`).
-- Tell the owner `mac-menus` is ready for the Mac builder to merge into `mac-m1`, with what each commit does.
+- The build Mac keeps `~/src/build-mac/jaw/jaw-mac-menus` with its `build/DerivedData`: delete it once `mac-m1` has `mac-menus` (`ssh build-mac rm -rf src/build-mac/jaw/jaw-mac-menus`).
+- Tell the owner `mac-menus` is ready, rebased onto `mac-m1`'s tip, for the Mac builder to fast-forward `mac-m1` to, with what each commit does.
