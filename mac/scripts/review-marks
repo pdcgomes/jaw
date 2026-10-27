@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Says where each scene of the last sweep stands on the review canvas, reading the owner's marks by
+the canvas's own rule: a mark counts only while its hashes are the hashes of that scene's pictures in
+the sweep's manifest, in order; otherwise the scene has changed since it was marked; and a scene with
+no mark, or one cleared to null, hasn't been looked at.
+
+    mac/scripts/review-marks [--json] [--manifest <manifest.json>] [--state <state.json>]
+
+It prints a line a scene, in the manifest's order, `<id> · <standing>`, the standing being `right`,
+`needs work: <note>`, `changed since marked` or `not looked at`, then how many stand each way;
+`--json` prints the same for agents, naming the standings as the canvas does (`needs-work`,
+`changed`, `unseen`, `right`). It reads the sweep's manifest, mac/build/review/manifest.json, and the
+canvas's state as Atelier keeps it beside the canvas, .atelier/mac-harness.state.json, where the
+marks are under `marks` by scene id, each `{ state, note, hashes, at }`; it writes neither.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+MANIFEST = ROOT / "mac" / "build" / "review" / "manifest.json"
+STATE = ROOT / ".atelier" / "mac-harness.state.json"
+# In the order the canvas's filters list them.
+WORDS = {"needs-work": "needs work", "changed": "changed since marked", "unseen": "not looked at", "right": "right"}
+
+
+def named(path: Path) -> str:
+    """`path` as the messages name it: from the checkout's root when it's in the checkout."""
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def listed(scene: object) -> bool:
+    """Whether `scene` reads as a manifest's scene: an id, and pictures each with a hash."""
+    return (
+        isinstance(scene, dict)
+        and isinstance(scene.get("id"), str)
+        and isinstance(scene.get("pictures"), list)
+        and all(isinstance(picture, dict) and isinstance(picture.get("hash"), str) for picture in scene["pictures"])
+    )
+
+
+def swept(manifest: Path) -> list[tuple[str, list[str]]]:
+    """Each scene the sweep drew, in the manifest's order, with its pictures' hashes in theirs."""
+    if not manifest.is_file():
+        sys.exit(f"review-marks: there's no sweep yet ({named(manifest)} is missing): run mac/scripts/build-mac sweep")
+    try:
+        sweep = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        sys.exit(f"review-marks: {named(manifest)} doesn't read as a sweep's manifest: {error}")
+    scenes = sweep.get("scenes") if isinstance(sweep, dict) else None
+    if not isinstance(scenes, list) or not all(listed(scene) for scene in scenes):
+        sys.exit(f"review-marks: {named(manifest)} doesn't read as a sweep's manifest")
+    if not scenes:
+        sys.exit(f"review-marks: nothing has been swept yet ({named(manifest)} lists no scenes): run mac/scripts/build-mac sweep")
+    return [(scene["id"], [picture["hash"] for picture in scene["pictures"]]) for scene in scenes]
+
+
+def kept(state: Path) -> dict[str, object]:
+    """The marks the canvas keeps under `marks` in its state, by scene id: none until Atelier keeps a
+    state for it, or until the first mark."""
+    if not state.exists():
+        return {}
+    try:
+        saved = json.loads(state.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        sys.exit(f"review-marks: {named(state)} doesn't read as Atelier's state: {error}")
+    if not isinstance(saved, dict):
+        sys.exit(f"review-marks: {named(state)} doesn't read as Atelier's state, which is an object of keys")
+    marks = saved.get("marks")
+    if marks is None:
+        return {}
+    if not isinstance(marks, dict):
+        sys.exit(f"review-marks: the marks in {named(state)} aren't kept by scene, as the canvas keeps them")
+    return marks
+
+
+def standing(scene: str, hashes: list[str], mark: object, state: Path) -> dict[str, str]:
+    """Where `scene`, whose pictures have `hashes` now, stands under `mark`, with the note when it
+    needs work."""
+    if mark is None:
+        return {"id": scene, "standing": "unseen"}
+    if (
+        not isinstance(mark, dict)
+        or mark.get("state") not in ("right", "needs-work")
+        or not isinstance(mark.get("hashes"), list)
+        or not isinstance(mark.get("note", ""), str)
+    ):
+        sys.exit(f"review-marks: the mark on {scene} in {named(state)} isn't one the canvas makes: {json.dumps(mark)}")
+    if mark["hashes"] != hashes:
+        return {"id": scene, "standing": "changed"}
+    if mark["state"] == "needs-work":
+        return {"id": scene, "standing": "needs-work", "note": mark.get("note", "")}
+    return {"id": scene, "standing": "right"}
+
+
+def line(scene: dict[str, str]) -> str:
+    """`<id> · <standing>`, with a note of several lines put on one."""
+    words = WORDS[scene["standing"]]
+    if scene["standing"] == "needs-work":
+        note = " / ".join(part.strip() for part in scene["note"].splitlines() if part.strip())
+        words += f": {note or '(no note)'}"
+    return f"{scene['id']} · {words}"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="mac/scripts/review-marks", description="Where each scene of the last sweep stands on the review canvas."
+    )
+    parser.add_argument("--json", action="store_true", help="the same as JSON, for agents")
+    parser.add_argument("--manifest", type=Path, default=MANIFEST, help="the sweep's manifest (mac/build/review/manifest.json)")
+    parser.add_argument("--state", type=Path, default=STATE, help="the canvas's state (.atelier/mac-harness.state.json)")
+    args = parser.parse_args()
+    marks = kept(args.state)
+    scenes = [standing(scene, hashes, marks.get(scene), args.state) for scene, hashes in swept(args.manifest)]
+    counts = {name: sum(1 for scene in scenes if scene["standing"] == name) for name in WORDS}
+    if args.json:
+        print(json.dumps({"scenes": scenes, "counts": counts}, ensure_ascii=False, indent=2))
+        return
+    for scene in scenes:
+        print(line(scene))
+    total = f"{len(scenes)} scene{'' if len(scenes) == 1 else 's'}"
+    print(f"{total}: " + ", ".join(f"{counts[name]} {words}" for name, words in WORDS.items()))
+
+
+if __name__ == "__main__":
+    main()
