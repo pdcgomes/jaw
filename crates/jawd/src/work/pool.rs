@@ -14,7 +14,7 @@ use super::Report;
 use super::samples::Samples;
 use crate::engine::BoxFuture;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Priority {
     /// What an interface shows or asked for right now.
     Interactive,

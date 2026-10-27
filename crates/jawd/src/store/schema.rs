@@ -1001,9 +1001,10 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- the keys to download it, kept here since an HD copy's come in a message of its own that isn't
     -- kept as a row; and jaw's own columns, for what jawd is doing with it: `state`, `progress`,
     -- `error`, `wanted` (when it was given something to do: an arrival's thumbnail and download, an
-    -- interface asking), `asked` (an interface asked), `retried_at` (when the phone was asked to
-    -- upload it again), `cancelled`, and `direct_path` once the phone has. Its file and previews are
-    -- the cache's, by `sha256` (media_files).
+    -- interface asking), `asked` (an interface asked), `arrived` (wanted as its message arrived
+    -- live), `retried_at` (when the phone was asked to upload it again), `cancelled`, and
+    -- `direct_path` once the phone has. Its file and previews are the cache's, by `sha256`
+    -- (media_files).
     CREATE TABLE media_rebuilt (
         message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
         variant TEXT NOT NULL CHECK (variant IN ('sd', 'hd')),
@@ -1027,6 +1028,9 @@ pub(super) const MIGRATIONS: &[&str] = &[
         error TEXT,
         wanted INTEGER,
         asked INTEGER NOT NULL DEFAULT 0 CHECK (asked IN (0, 1)),
+        -- Wanted because its message arrived live, which is done ahead of what windows show; it
+        -- goes with the want.
+        arrived INTEGER NOT NULL DEFAULT 0 CHECK (arrived IN (0, 1)),
         retried_at INTEGER,
         -- An interface cancelled its download, so it's fetched again only when asked for.
         cancelled INTEGER NOT NULL DEFAULT 0 CHECK (cancelled IN (0, 1)),
@@ -1034,7 +1038,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
         -- A copy downloading is one jawd was given to do, so a start finds those a stop left by
         -- `wanted`; one waiting for the phone says since when.
         CHECK (state <> 'downloading' OR wanted IS NOT NULL),
-        CHECK (state <> 'waiting_for_phone' OR retried_at IS NOT NULL)
+        CHECK (state <> 'waiting_for_phone' OR retried_at IS NOT NULL),
+        CHECK (arrived = 0 OR wanted IS NOT NULL)
     ) STRICT, WITHOUT ROWID;
     INSERT INTO media_rebuilt (message, variant, mime, bytes, w, h, seconds, name, sha256, state)
     SELECT message, variant, mime, bytes, w, h, seconds, name, iif(length(sha256) = 32, sha256, NULL),
@@ -1084,8 +1089,10 @@ pub(super) const MIGRATIONS: &[&str] = &[
     ALTER TABLE media_rebuilt RENAME TO media;
     CREATE INDEX media_by_hash ON media (sha256) WHERE sha256 IS NOT NULL;
     CREATE INDEX media_wanted ON media (wanted) WHERE wanted IS NOT NULL;
-    -- What an interface asked for is done ahead of whatever else is wanted.
+    -- What an interface asked for is done ahead of whatever else is wanted, and what arrived live
+    -- ahead of what windows show.
     CREATE INDEX media_asked ON media (wanted) WHERE asked = 1;
+    CREATE INDEX media_arrived ON media (wanted) WHERE arrived = 1;
     CREATE INDEX media_waiting ON media (retried_at) WHERE state = 'waiting_for_phone';
 
     -- Class: derived from media_files, kept by its triggers: the cache's bytes on disk and its files.

@@ -25,8 +25,8 @@ use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
 
 use super::{Ack, BoxFuture, Commands, Engine, EngineError, Incoming, Instance, Outgoing, PROTOCOL, pb};
-use crate::store::polls::option_hash;
 use crate::media::drive;
+use crate::store::polls::option_hash;
 
 mod pictures;
 
@@ -147,7 +147,16 @@ pub struct World {
     finishing: Mutex<()>,
     /// Each photo's direct path, by its message's ID, for the phone to send it again.
     photos: Mutex<HashMap<String, String>>,
+    /// How many asks of the phone to fail next, and whether trying again could work.
+    asks_failing: Mutex<(u32, bool)>,
+    /// What a test does as the phone is asked, before it answers.
+    #[cfg(test)]
+    when_asked: Mutex<Option<WhenAsked>>,
 }
+
+/// What a test does as the made-up phone is asked to send a file again.
+#[cfg(test)]
+type WhenAsked = Box<dyn Fn(&pb::MediaRetry) + Send + Sync>;
 
 /// How the made-up phone answers when asked to send a file again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -265,6 +274,19 @@ impl World {
     #[cfg(test)]
     pub fn phone(&self, phone: Phone) {
         *self.phone.lock().expect("the demo world") = phone;
+    }
+
+    /// Fails the next `n` asks of the phone to send a file again, saying whether trying again could
+    /// work.
+    #[cfg(test)]
+    pub fn fail_asks(&self, n: u32, retry: bool) {
+        *self.asks_failing.lock().expect("the demo world") = (n, retry);
+    }
+
+    /// Does `when` each time the phone is asked to send a file again, before it answers.
+    #[cfg(test)]
+    pub fn when_asked(&self, when: impl Fn(&pb::MediaRetry) + Send + Sync + 'static) {
+        *self.when_asked.lock().expect("the demo world") = Some(Box::new(when));
     }
 
     /// Holds downloads partly written while `gated`, letting them go on once it opens.
@@ -959,6 +981,18 @@ impl Sender {
             }
             pb::command::Kind::MediaRetry(retry) => {
                 self.world.ask(pb::command::Kind::MediaRetry(retry.clone()));
+                #[cfg(test)]
+                if let Some(when) = self.world.when_asked.lock().expect("the demo world").as_ref() {
+                    when(&retry);
+                }
+                {
+                    let mut failing = self.world.asks_failing.lock().expect("the demo world");
+                    if failing.0 > 0 {
+                        failing.0 -= 1;
+                        let message = "the phone can't be reached just now".into();
+                        return Err(EngineError::Failed { message, retry: failing.1 });
+                    }
+                }
                 self.send_again(retry);
                 done
             }

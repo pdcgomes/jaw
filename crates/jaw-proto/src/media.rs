@@ -86,4 +86,20 @@ pub struct MediaStatus {
     /// Mac's own drive, where a barrier would order them.
     #[serde(default)]
     pub full_flush: bool,
+    /// Of the copies being done, those nobody asked for, and the most of them done at once.
+    #[serde(default)]
+    pub unasked: u64,
+    #[serde(default)]
+    pub unasked_most: u64,
+    /// Files downloaded and waiting to be named, one for each copy being done at most.
+    #[serde(default)]
+    pub naming: u64,
+    /// The progress of downloads nobody waits on that waits to be written, the most that may, and
+    /// how much was passed over past that since jawd started, each download's next saying more.
+    #[serde(default)]
+    pub progress_waiting: u64,
+    #[serde(default)]
+    pub progress_most: u64,
+    #[serde(default)]
+    pub progress_passed: u64,
 }

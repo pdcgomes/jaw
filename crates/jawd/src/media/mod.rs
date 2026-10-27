@@ -91,6 +91,8 @@ pub struct Config {
     /// Whether a barrier orders what jaw writes, as a test says; otherwise the start looks at the
     /// volumes jaw's folder is on.
     pub barriers: Option<bool>,
+    /// How many of the start's check's looks fail before they read anything, as a test has them.
+    pub looks_failing: Option<Arc<std::sync::atomic::AtomicU32>>,
 }
 
 impl Default for Config {
@@ -114,6 +116,7 @@ impl Default for Config {
             check_after: Duration::ZERO,
             drive: None,
             barriers: None,
+            looks_failing: None,
         }
     }
 }
@@ -153,6 +156,9 @@ struct Inner {
     full_flush: bool,
     /// What sends files to the drive.
     drive: drive::Drive,
+    /// The cleaner's passes that found nothing more to do, as a test waits for one.
+    #[cfg(test)]
+    tidied: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -227,6 +233,8 @@ impl Media {
             checked: std::sync::atomic::AtomicBool::new(false),
             full_flush,
             drive,
+            #[cfg(test)]
+            tidied: std::sync::atomic::AtomicU64::new(0),
         });
         // Previews and thumbnails a power cut may have broken are shown only once they're checked,
         // so they're known before anything reads a row.
@@ -294,6 +302,12 @@ impl Media {
             checking: !inner.checked.load(std::sync::atomic::Ordering::SeqCst),
             suspect: inner.store.files().suspects() as u64,
             full_flush: inner.full_flush,
+            unasked: inner.schedule.counts().1 as u64,
+            unasked_most: schedule::UNASKED_AT_ONCE as u64,
+            naming: inner.schedule.naming.load(std::sync::atomic::Ordering::Relaxed),
+            progress_waiting: inner.schedule.progress_behind.load(std::sync::atomic::Ordering::Relaxed),
+            progress_most: schedule::PROGRESS_BEHIND as u64,
+            progress_passed: inner.schedule.progress_passed.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 

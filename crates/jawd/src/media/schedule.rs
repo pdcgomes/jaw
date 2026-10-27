@@ -1,17 +1,21 @@
 //! The scheduler: it takes what's wanted from jaw.db and does each copy: its thumbnail drawn, its
 //! file downloaded if it downloads by itself or was asked for, its previews made, and the copy
 //! settled. What an interface asked for is taken first, oldest first, however much else is wanted,
-//! and what it writes goes in the writer's live lane. The rest, what windows show, what downloads by
-//! itself and what's tried again, is taken UNASKED_AT_ONCE at most, newest first, and writes in the
-//! background lane, so it waits behind live messages and keeps to the WAL's bound. It looks again
-//! when jaw.db changes (at most so often while it keeps changing), when a job ends, when WhatsApp
-//! can be reached again, and when a copy waiting to be tried again may be; so idle, it sleeps. A
-//! copy that couldn't be done for a reason that may pass stays wanted, and is tried again after a
-//! pause that doubles each time.
+//! beside any job taken for the same copy before it was asked for, and what it writes goes in the
+//! writer's live lane. The rest is taken UNASKED_AT_ONCE at most: what arrived live first, oldest
+//! first, then what windows show and what's wanted again, newest first; it writes in the background
+//! lane, so it waits behind live messages and keeps to the WAL's bound. It looks again when jaw.db
+//! changes (at most so often while it keeps changing), when a job ends, when WhatsApp can be
+//! reached again, and when a copy waiting to be tried again may be; so idle, it sleeps. A copy that
+//! couldn't be done for a reason that may pass stays wanted, and is tried again after a pause that
+//! doubles each time.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+
+use rusqlite::Connection;
 
 use jaw_proto::{ConnectionState, Push};
 use tokio::sync::{Notify, broadcast, mpsc};
@@ -38,7 +42,11 @@ const SEEN_AGAIN: Duration = Duration::from_secs(600);
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 /// The progress of downloads nobody waits on that may wait for the background lane; past that a
 /// download's progress is passed over, as its next says more.
-const PROGRESS_BEHIND: usize = 64;
+pub(super) const PROGRESS_BEHIND: usize = 64;
+
+/// The files whose next job panics, as a test has them.
+#[cfg(test)]
+pub(super) static PANICKING: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 /// A copy jawd was given to do, as jaw.db has it.
 #[derive(Clone, Debug)]
@@ -56,6 +64,8 @@ pub(super) struct Wanted {
     pub has_thumbnail: bool,
     pub state: String,
     pub asked: bool,
+    /// Wanted since its message arrived live.
+    pub arrived: bool,
     pub wanted: i64,
     /// Its message's kind: `image`, `sticker`, `video` and the rest.
     pub kind: String,
@@ -80,11 +90,15 @@ impl Wanted {
 /// A copy, by its message's n and its variant.
 type CopyKey = (i64, &'static str);
 
+/// A job: the copy it does, at the priority it was taken at.
+type JobKey = (CopyKey, Priority);
+
 /// The copies being done, and those waiting to be tried again.
 #[derive(Default)]
 pub(super) struct Schedule {
-    /// The copies being done, each with its priority as its job took it.
-    doing: Mutex<HashMap<CopyKey, Priority>>,
+    /// The jobs running: one at most for each copy at each priority, so one for a copy an interface
+    /// asks for starts beside the one a window's want began, and writes live.
+    doing: Mutex<HashSet<JobKey>>,
     /// When each copy that couldn't be done may be tried again, and the pause after that.
     later: Mutex<HashMap<CopyKey, (Instant, Duration)>>,
     wake: Notify,
@@ -92,6 +106,12 @@ pub(super) struct Schedule {
     /// The files being downloaded for copies an interface asked for, by their downloads key, with
     /// how many such copies wait on each, so their progress is written in the live lane.
     asked_files: Mutex<HashMap<String, usize>>,
+    /// Files downloaded and waiting to be named, one for each job at most.
+    pub naming: AtomicU64,
+    /// Progress of downloads nobody waits on that waits for the background lane, PROGRESS_BEHIND
+    /// at most, and how much was passed over past that since jawd started.
+    pub progress_behind: AtomicU64,
+    pub progress_passed: AtomicU64,
 }
 
 impl Schedule {
@@ -100,15 +120,15 @@ impl Schedule {
         self.wake.notify_one();
     }
 
-    /// Copies being done now.
+    /// Copies being done now, a job each, or two for a copy asked for while a window's job did it.
     pub fn running(&self) -> usize {
         self.doing.lock().expect("schedule").len()
     }
 
-    /// Copies being done now that an interface asked for, and that nobody did.
-    fn counts(&self) -> (usize, usize) {
+    /// Jobs running now for copies an interface asked for, and for copies nobody did.
+    pub fn counts(&self) -> (usize, usize) {
         let doing = self.doing.lock().expect("schedule");
-        let unasked = doing.values().filter(|p| **p == Priority::Background).count();
+        let unasked = doing.iter().filter(|(_, p)| *p == Priority::Background).count();
         (doing.len() - unasked, unasked)
     }
 
@@ -159,65 +179,92 @@ pub(super) fn start(
 const ASKED: &str = "SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256,
         md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once,
         m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL,
-        md.cancelled
+        md.cancelled, md.arrived
     FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256
     WHERE md.asked = 1 AND md.wanted IS NOT NULL ORDER BY md.wanted LIMIT ?1";
-/// The copies nobody asked for, newest first.
-const UNASKED: &str = "SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256,
+/// The copies wanted since their messages arrived live, which nobody asked for, oldest first.
+const ARRIVED: &str = "SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256,
         md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once,
         m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL,
-        md.cancelled
+        md.cancelled, md.arrived
     FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256
-    WHERE md.wanted IS NOT NULL AND md.asked = 0 ORDER BY md.wanted DESC LIMIT ?1";
+    WHERE md.arrived = 1 AND md.wanted IS NOT NULL AND md.asked = 0 ORDER BY md.wanted LIMIT ?1";
+/// The rest of the copies nobody asked for, what windows show among them, newest first.
+const SHOWN: &str = "SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256,
+        md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once,
+        m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL,
+        md.cancelled, md.arrived
+    FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256
+    WHERE md.wanted IS NOT NULL AND md.asked = 0 AND md.arrived = 0 ORDER BY md.wanted DESC LIMIT ?1";
 
-/// The copies wanted at `priority`, and those of them with no hash, which can't be done.
-async fn wanted(
-    inner: &Inner,
-    priority: Priority,
-    most: usize,
-) -> anyhow::Result<Vec<Result<Wanted, (i64, &'static str, i64)>>> {
-    inner
-        .store
-        .reads()
-        .query(Priority::Interactive, move |db| {
-            let mut statement = match priority {
-                Priority::Interactive => db.prepare_cached(ASKED)?,
-                Priority::Background => db.prepare_cached(UNASKED)?,
-            };
-            let rows = statement
-                .query_map([most as i64], |r| {
-                    let variant = if r.get::<_, String>(1)? == "hd" { "hd" } else { "sd" };
-                    let sha256: Option<Vec<u8>> = r.get(6)?;
-                    let (message, wanted): (i64, i64) = (r.get(0)?, r.get(13)?);
-                    let Some(sha256) = sha256 else { return Ok(Err((message, variant, wanted))) };
-                    Ok(Ok(Wanted {
-                        message,
-                        variant,
-                        keys: Keys::from_str(&r.get::<_, String>(2)?),
-                        mime: r.get(3)?,
-                        bytes: r.get::<_, Option<i64>>(4)?.map(|b| b.max(0) as u64),
-                        name: r.get(5)?,
-                        sha256,
-                        enc_sha256: r.get(7)?,
-                        media_key: r.get(8)?,
-                        direct_path: r.get(9)?,
-                        has_thumbnail: r.get(10)?,
-                        state: r.get(11)?,
-                        asked: r.get(12)?,
-                        wanted,
-                        kind: r.get(14)?,
-                        view_once: r.get(15)?,
-                        live: r.get(16)?,
-                        local: r.get(17)?,
-                        previews: r.get::<_, Option<bool>>(18)?.unwrap_or(false),
-                        thumbnail: r.get::<_, Option<bool>>(19)?.unwrap_or(false),
-                        cancelled: r.get(20)?,
-                    }))
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok(rows)
-        })
-        .await
+/// The copies one look reads, in the order a look takes them: what an interface asked for, what
+/// arrived live, then the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Pass {
+    Asked,
+    Arrived,
+    Shown,
+}
+
+impl Pass {
+    const ALL: [Pass; 3] = [Pass::Asked, Pass::Arrived, Pass::Shown];
+
+    fn priority(self) -> Priority {
+        if self == Pass::Asked { Priority::Interactive } else { Priority::Background }
+    }
+
+    /// How many of its priority's jobs may run at once.
+    fn most(self) -> usize {
+        if self == Pass::Asked { AT_ONCE } else { UNASKED_AT_ONCE }
+    }
+}
+
+/// A wanted copy as a look reads it, or one with no hash, which can't be done.
+pub(super) type Row = Result<Wanted, (i64, &'static str, i64)>;
+
+/// The copies `pass` takes, `most` at most, in the order it takes them.
+pub(super) fn read(db: &Connection, pass: Pass, most: usize) -> rusqlite::Result<Vec<Row>> {
+    let mut statement = match pass {
+        Pass::Asked => db.prepare_cached(ASKED)?,
+        Pass::Arrived => db.prepare_cached(ARRIVED)?,
+        Pass::Shown => db.prepare_cached(SHOWN)?,
+    };
+    statement
+        .query_map([most as i64], |r| {
+            let variant = if r.get::<_, String>(1)? == "hd" { "hd" } else { "sd" };
+            let sha256: Option<Vec<u8>> = r.get(6)?;
+            let (message, wanted): (i64, i64) = (r.get(0)?, r.get(13)?);
+            let Some(sha256) = sha256 else { return Ok(Err((message, variant, wanted))) };
+            Ok(Ok(Wanted {
+                message,
+                variant,
+                keys: Keys::from_str(&r.get::<_, String>(2)?),
+                mime: r.get(3)?,
+                bytes: r.get::<_, Option<i64>>(4)?.map(|b| b.max(0) as u64),
+                name: r.get(5)?,
+                sha256,
+                enc_sha256: r.get(7)?,
+                media_key: r.get(8)?,
+                direct_path: r.get(9)?,
+                has_thumbnail: r.get(10)?,
+                state: r.get(11)?,
+                asked: r.get(12)?,
+                arrived: r.get(21)?,
+                wanted,
+                kind: r.get(14)?,
+                view_once: r.get(15)?,
+                live: r.get(16)?,
+                local: r.get(17)?,
+                previews: r.get::<_, Option<bool>>(18)?.unwrap_or(false),
+                thumbnail: r.get::<_, Option<bool>>(19)?.unwrap_or(false),
+                cancelled: r.get(20)?,
+            }))
+        })?
+        .collect()
+}
+
+async fn wanted(inner: &Inner, pass: Pass, most: usize) -> anyhow::Result<Vec<Row>> {
+    inner.store.reads().query(Priority::Interactive, move |db| Ok(read(db, pass, most)?)).await
 }
 
 /// Takes what's wanted and does it, until jawd stops.
@@ -248,11 +295,26 @@ async fn run(inner: Arc<Inner>) {
     }
 }
 
-/// Starts a job for each copy wanted that isn't being done or waiting to be tried again: every copy
-/// an interface asked for, then copies nobody asked for while fewer than UNASKED_AT_ONCE are.
+/// A job's place among those running, given back however the job ends, a panic included.
+struct Slot {
+    inner: Arc<Inner>,
+    job: JobKey,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.inner.schedule.doing.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.job);
+        self.inner.schedule.wake();
+    }
+}
+
+/// Starts a job for each copy wanted that isn't being done at its priority or waiting to be tried
+/// again: every copy an interface asked for, beside a job a window's want began for it, then copies
+/// nobody asked for while fewer than UNASKED_AT_ONCE are, what arrived live first.
 async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
     let waiting = inner.schedule.later.lock().expect("schedule").len();
-    for (priority, most) in [(Priority::Interactive, AT_ONCE), (Priority::Background, UNASKED_AT_ONCE)] {
+    for pass in Pass::ALL {
+        let (priority, most) = (pass.priority(), pass.most());
         let room = |schedule: &Schedule| {
             let (asked, unasked) = schedule.counts();
             if priority == Priority::Interactive { asked < most } else { unasked < most }
@@ -260,7 +322,7 @@ async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
         if !room(&inner.schedule) {
             continue;
         }
-        for row in wanted(inner, priority, most + waiting).await? {
+        for row in wanted(inner, pass, most + waiting).await? {
             let copy = match row {
                 Ok(copy) => copy,
                 Err((message, variant, wanted)) => {
@@ -276,16 +338,17 @@ async fn take(inner: &Arc<Inner>) -> anyhow::Result<()> {
             }
             {
                 let mut doing = inner.schedule.doing.lock().expect("schedule");
-                if doing.contains_key(&key) {
+                let busy = doing.contains(&(key, Priority::Interactive))
+                    || (priority == Priority::Background && doing.contains(&(key, Priority::Background)));
+                if busy {
                     continue;
                 }
-                doing.insert(key, priority);
+                doing.insert((key, priority));
             }
-            let doing = inner.clone();
+            let slot = Slot { inner: inner.clone(), job: (key, priority) };
             tokio::spawn(async move {
-                job(&doing, copy).await;
-                doing.schedule.doing.lock().expect("schedule").remove(&key);
-                doing.schedule.wake();
+                job(&slot.inner, copy).await;
+                drop(slot);
             });
             if !room(&inner.schedule) {
                 break;
@@ -311,6 +374,15 @@ pub(super) fn downloads_by_itself(inner: &Inner, copy: &Wanted) -> bool {
 /// Does one copy: its thumbnail while its file downloads, if it's to be, then its previews, then
 /// settles it.
 async fn job(inner: &Arc<Inner>, copy: Wanted) {
+    #[cfg(test)]
+    {
+        let mut panicking = PANICKING.lock().expect("panicking jobs");
+        if let Some(at) = panicking.iter().position(|sha256| *sha256 == copy.sha256) {
+            panicking.remove(at);
+            drop(panicking);
+            panic!("a test has this file's next job panic");
+        }
+    }
     let priority = copy.priority();
     let key = (copy.message, copy.variant);
     // A view-once message's file, and its thumbnail, are never kept.
@@ -433,6 +505,7 @@ async fn progress(inner: Arc<Inner>, mut progressing: mpsc::Receiver<pb::MediaPr
     tokio::spawn(async move {
         while let Some(step) = writing.recv().await {
             let _ = background.store.apply(Lane::Background, vec![step]).await;
+            background.schedule.progress_behind.fetch_sub(1, Ordering::Relaxed);
         }
     });
     let mut written: HashMap<String, (Instant, f64)> = HashMap::new();
@@ -456,7 +529,12 @@ async fn progress(inner: Arc<Inner>, mut progressing: mpsc::Receiver<pb::MediaPr
                 let _ = inner.store.apply(Lane::Live, vec![step]).await;
             }
             Lane::Background => {
-                let _ = behind.try_send(step);
+                // Counted before it's sent, so the writer's count down can't come first.
+                inner.schedule.progress_behind.fetch_add(1, Ordering::Relaxed);
+                if behind.try_send(step).is_err() {
+                    inner.schedule.progress_behind.fetch_sub(1, Ordering::Relaxed);
+                    inner.schedule.progress_passed.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }

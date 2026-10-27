@@ -59,8 +59,8 @@ SELECT path, small, large, thumbnail FROM media_files WHERE sha256 = ?1
     SEARCH media_files USING PRIMARY KEY (sha256=?)
 
 -- src/media/cache.rs
-SELECT sha256 FROM media_drop LIMIT ?1
-    SCAN media_drop
+SELECT sha256 FROM media_drop WHERE sha256 > ?1 ORDER BY sha256 LIMIT ?2
+    SEARCH media_drop USING PRIMARY KEY (sha256>?)
 
 -- src/media/cache.rs
 SELECT bytes FROM media_cache WHERE id = 1
@@ -110,13 +110,19 @@ SELECT f.path, md.state, md.error, md.wanted IS NOT NULL FROM media md LEFT JOIN
     SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/media/schedule.rs
-SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256, md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once, m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL, md.cancelled FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.asked = 1 AND md.wanted IS NOT NULL ORDER BY md.wanted LIMIT ?1
+SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256, md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once, m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL, md.cancelled, md.arrived FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.asked = 1 AND md.wanted IS NOT NULL ORDER BY md.wanted LIMIT ?1
     SEARCH md USING INDEX media_asked (wanted>?)
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/media/schedule.rs
-SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256, md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once, m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL, md.cancelled FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.wanted IS NOT NULL AND md.asked = 0 ORDER BY md.wanted DESC LIMIT ?1
+SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256, md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once, m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL, md.cancelled, md.arrived FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.arrived = 1 AND md.wanted IS NOT NULL AND md.asked = 0 ORDER BY md.wanted LIMIT ?1
+    SEARCH md USING INDEX media_arrived (wanted>?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+
+-- src/media/schedule.rs
+SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256, md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once, m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL, md.cancelled, md.arrived FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.wanted IS NOT NULL AND md.asked = 0 AND md.arrived = 0 ORDER BY md.wanted DESC LIMIT ?1
     SEARCH md USING INDEX media_wanted (wanted>?)
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
@@ -2361,7 +2367,7 @@ UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/media.rs
-INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail, wanted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) ON CONFLICT (message, variant) DO UPDATE SET keys = excluded.keys, mime = coalesce(excluded.mime, mime), bytes = coalesce(excluded.bytes, bytes), w = coalesce(excluded.w, w), h = coalesce(excluded.h, h), seconds = coalesce(excluded.seconds, seconds), name = coalesce(excluded.name, name), sha256 = coalesce(sha256, excluded.sha256), enc_sha256 = coalesce(enc_sha256, excluded.enc_sha256), media_key = coalesce(media_key, excluded.media_key), direct_path = coalesce(direct_path, excluded.direct_path), thumbnail = max(thumbnail, excluded.thumbnail), wanted = coalesce(wanted, excluded.wanted) WHERE keys IS NOT excluded.keys OR coalesce(excluded.mime, mime) IS NOT mime OR coalesce(excluded.bytes, bytes) IS NOT bytes OR coalesce(excluded.w, w) IS NOT w OR coalesce(excluded.h, h) IS NOT h OR coalesce(excluded.seconds, seconds) IS NOT seconds OR coalesce(excluded.name, name) IS NOT name OR coalesce(sha256, excluded.sha256) IS NOT sha256 OR coalesce(enc_sha256, excluded.enc_sha256) IS NOT enc_sha256 OR coalesce(media_key, excluded.media_key) IS NOT media_key OR coalesce(direct_path, excluded.direct_path) IS NOT direct_path OR max(thumbnail, excluded.thumbnail) IS NOT thumbnail OR coalesce(wanted, excluded.wanted) IS NOT wanted
+INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail, wanted, arrived) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15 IS NOT NULL) ON CONFLICT (message, variant) DO UPDATE SET keys = excluded.keys, mime = coalesce(excluded.mime, mime), bytes = coalesce(excluded.bytes, bytes), w = coalesce(excluded.w, w), h = coalesce(excluded.h, h), seconds = coalesce(excluded.seconds, seconds), name = coalesce(excluded.name, name), sha256 = coalesce(sha256, excluded.sha256), enc_sha256 = coalesce(enc_sha256, excluded.enc_sha256), media_key = coalesce(media_key, excluded.media_key), direct_path = coalesce(direct_path, excluded.direct_path), thumbnail = max(thumbnail, excluded.thumbnail), wanted = coalesce(wanted, excluded.wanted), arrived = iif(wanted IS NULL, excluded.arrived, arrived) WHERE keys IS NOT excluded.keys OR coalesce(excluded.mime, mime) IS NOT mime OR coalesce(excluded.bytes, bytes) IS NOT bytes OR coalesce(excluded.w, w) IS NOT w OR coalesce(excluded.h, h) IS NOT h OR coalesce(excluded.seconds, seconds) IS NOT seconds OR coalesce(excluded.name, name) IS NOT name OR coalesce(sha256, excluded.sha256) IS NOT sha256 OR coalesce(enc_sha256, excluded.enc_sha256) IS NOT enc_sha256 OR coalesce(media_key, excluded.media_key) IS NOT media_key OR coalesce(direct_path, excluded.direct_path) IS NOT direct_path OR max(thumbnail, excluded.thumbnail) IS NOT thumbnail OR coalesce(wanted, excluded.wanted) IS NOT wanted
 
 -- src/store/write/media.rs
 SELECT md.message, m.chat FROM media md JOIN messages m ON m.n = md.message WHERE md.sha256 = ?1
@@ -2419,11 +2425,19 @@ UPDATE media_made SET settled = min(made, max(settled, ?1)) WHERE id = 1
     SEARCH media_made USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/media.rs
-UPDATE media SET wanted = NULL, asked = 0, state = coalesce(?4, state), progress = NULL, error = iif(?4 IS NULL OR (?5 IS NULL AND state = ?4), error, ?5) WHERE message = ?1 AND variant = ?2 AND wanted IS ?3
+UPDATE media SET wanted = NULL, asked = 0, arrived = 0, state = coalesce(?4, state), progress = NULL, error = iif(?4 IS NULL OR (?5 IS NULL AND state = ?4), error, ?5) WHERE message = ?1 AND variant = ?2 AND wanted IS ?3
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
-UPDATE media SET wanted = NULL, asked = 0, state = 'waiting_for_phone', retried_at = ?4, progress = NULL, error = NULL WHERE message = ?1 AND variant = ?2 AND wanted IS ?3
+UPDATE media SET wanted = NULL, asked = 0, arrived = 0, state = 'waiting_for_phone', retried_at = ?4, progress = NULL, error = NULL WHERE message = ?1 AND variant = ?2 AND wanted IS ?3 AND state = 'downloading'
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media SET state = 'remote', wanted = iif(wanted IS NULL, ?4, max(?4, wanted + 1)), asked = max(asked, ?5), arrived = max(arrived, ?6) WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone' AND retried_at = ?3
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media SET state = 'expired', error = ?4 WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone' AND retried_at = ?3
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
@@ -2433,7 +2447,7 @@ UPDATE media SET direct_path = ?2, state = 'remote', error = NULL, wanted = iif(
       SEARCH f USING PRIMARY KEY (sha256=?)
 
 -- src/store/write/media.rs
-UPDATE media SET state = ?2, error = ?3 WHERE message = ?1 AND variant = 'sd' AND state = 'waiting_for_phone'
+UPDATE media SET state = ?2, error = ?3 WHERE message = ?1 AND variant = 'sd' AND state IN ('waiting_for_phone', 'downloading')
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
@@ -2441,7 +2455,7 @@ UPDATE media SET wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
-UPDATE media SET wanted = NULL, asked = 0, progress = NULL, cancelled = 1, state = iif(state = 'downloading', 'remote', state) WHERE message = ?1 AND variant = ?2 AND (wanted IS NOT NULL OR state = 'downloading' OR cancelled = 0)
+UPDATE media SET wanted = NULL, asked = 0, arrived = 0, progress = NULL, cancelled = 1, state = iif(state = 'downloading', 'remote', state) WHERE message = ?1 AND variant = ?2 AND (wanted IS NOT NULL OR state = 'downloading' OR cancelled = 0)
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
@@ -2504,7 +2518,7 @@ DELETE FROM media WHERE message = ?1
     SEARCH media USING PRIMARY KEY (message=?)
 
 -- src/store/write/media.rs
-INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail, state, progress, error, wanted, asked, retried_at, cancelled) SELECT ?1, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail, iif(state = 'downloading', 'remote', state), NULL, error, wanted, asked, retried_at, cancelled FROM media WHERE message = ?2 ON CONFLICT (message, variant) DO UPDATE SET mime = coalesce(mime, excluded.mime), bytes = coalesce(bytes, excluded.bytes), w = coalesce(w, excluded.w), h = coalesce(h, excluded.h), seconds = coalesce(seconds, excluded.seconds), name = coalesce(name, excluded.name), sha256 = coalesce(sha256, excluded.sha256), enc_sha256 = coalesce(enc_sha256, excluded.enc_sha256), media_key = coalesce(media_key, excluded.media_key), direct_path = coalesce(direct_path, excluded.direct_path), thumbnail = max(thumbnail, excluded.thumbnail), wanted = CASE WHEN wanted IS NULL THEN excluded.wanted WHEN excluded.wanted IS NULL THEN wanted ELSE max(wanted, excluded.wanted) + 1 END, asked = max(asked, excluded.asked), cancelled = max(cancelled, excluded.cancelled)
+INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail, state, progress, error, wanted, asked, arrived, retried_at, cancelled) SELECT ?1, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail, iif(state = 'downloading', 'remote', state), NULL, error, wanted, asked, arrived, retried_at, cancelled FROM media WHERE message = ?2 ON CONFLICT (message, variant) DO UPDATE SET mime = coalesce(mime, excluded.mime), bytes = coalesce(bytes, excluded.bytes), w = coalesce(w, excluded.w), h = coalesce(h, excluded.h), seconds = coalesce(seconds, excluded.seconds), name = coalesce(name, excluded.name), sha256 = coalesce(sha256, excluded.sha256), enc_sha256 = coalesce(enc_sha256, excluded.enc_sha256), media_key = coalesce(media_key, excluded.media_key), direct_path = coalesce(direct_path, excluded.direct_path), thumbnail = max(thumbnail, excluded.thumbnail), wanted = CASE WHEN wanted IS NULL THEN excluded.wanted WHEN excluded.wanted IS NULL THEN wanted ELSE max(wanted, excluded.wanted) + 1 END, asked = max(asked, excluded.asked), arrived = max(arrived, excluded.arrived), cancelled = max(cancelled, excluded.cancelled)
     SEARCH media USING PRIMARY KEY (message=?)
 
 -- src/store/write/outbox.rs

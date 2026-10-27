@@ -134,10 +134,6 @@ const ALLOWED: &[(&str, &str)] = &[
         "once at start, and for jawd status; the thumbnails are as many as fit in 256 MB, tens of thousands at most",
     ),
     (
-        "SELECT sha256 FROM media_drop LIMIT",
-        "the files no copy names, waiting to go, a handful at a time; it stops at its limit",
-    ),
-    (
         "FROM media WHERE state = 'waiting_for_phone'",
         "media_waiting holds only the copies waiting for the phone's answer, a few a minute at most; it stops at its \
         limit",

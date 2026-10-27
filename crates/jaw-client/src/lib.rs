@@ -401,6 +401,15 @@ pub fn describe(status: &Status) -> String {
             previews.push("files flushed in full, since jaw's folder isn't all on the Mac's own drive".into());
         }
         lines.push(format!("previews  {}", previews.join("; ")));
+        let mut jobs = vec![format!("{} of {} nobody asked for being done", media.unasked, media.unasked_most)];
+        if media.naming > 0 {
+            jobs.push(format!("{} files waiting to be named", media.naming));
+        }
+        jobs.push(format!(
+            "{} of {} progress writes waiting, {} passed over",
+            media.progress_waiting, media.progress_most, media.progress_passed
+        ));
+        lines.push(format!("jobs      {}", jobs.join("; ")));
     }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));

@@ -11,6 +11,7 @@
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -90,11 +91,30 @@ pub(super) async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) 
         Err(fetched) => return fetched,
     };
     let placed = Step::Placed { sha256: copy.sha256.clone(), path: path.clone(), bytes, at: now_ms() };
-    if let Err(e) = inner.store.apply(lane(priority), vec![Change::Media(placed)]).await {
+    let naming = Naming::new(&inner.schedule.naming);
+    let named = inner.store.apply(lane(priority), vec![Change::Media(placed)]).await;
+    drop(naming);
+    if let Err(e) = named {
         return Fetched::Later(format!("the file is here, and jaw.db couldn't say so yet: {e:#}"));
     }
     inner.clean.notify_one();
     Fetched::Placed { path }
+}
+
+/// A file downloaded and waiting to be named, counted for as long as it lives.
+struct Naming<'a>(&'a AtomicU64);
+
+impl<'a> Naming<'a> {
+    fn new(count: &'a AtomicU64) -> Naming<'a> {
+        count.fetch_add(1, Ordering::Relaxed);
+        Naming(count)
+    }
+}
+
+impl Drop for Naming<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Puts `copy`'s file in the cache unless it's there: the downloads lane's job, done once the file
@@ -204,8 +224,10 @@ impl Asking {
 }
 
 /// What to do with a copy WhatsApp's server no longer has: ask the phone, if an interface asked for
-/// it or it arrived live, a few a minute at most; otherwise it's expired, until it's asked for.
-/// Says whether the copy is still to be tried again later.
+/// it or it arrived live, a few a minute at most, noting that it's asked before it is; otherwise
+/// it's expired, until it's asked for. A phone that can't be asked for now leaves the copy wanted
+/// again, and one that can't be asked at all leaves it expired, saying why. Says whether the copy
+/// is still to be tried again later.
 pub(super) async fn gone(inner: &Arc<Inner>, copy: &Wanted, why: String) -> bool {
     let lane = lane(copy.priority());
     let settle = |state: &'static str, error: String| {
@@ -244,23 +266,30 @@ pub(super) async fn gone(inner: &Arc<Inner>, copy: &Wanted, why: String) -> bool
         let _ = inner.store.apply(lane, vec![settle("expired", error)]).await;
         return false;
     };
-    let ask = pb::MediaRetry { chat: key.chat, sender: key.sender, from_me: key.from_me, id: key.id, media_key };
-    match engine.call(pb::command::Kind::MediaRetry(ask)).await {
-        Ok(_) => {
-            let at = now_ms();
-            let asked = Step::AskedPhone { message: copy.message, variant: copy.variant, wanted: copy.wanted, at };
-            let _ = inner.store.apply(lane, vec![Change::Media(asked)]).await;
-            inner.asked_phone.notify_one();
-            false
-        }
-        Err(e) if retryable(&e) => true,
-        Err(EngineError::Failed { message, .. }) => {
-            let error = format!("{why}, and jaw couldn't ask your phone for it: {message}");
-            let _ = inner.store.apply(lane, vec![settle("expired", error)]).await;
-            false
-        }
-        Err(_) => true,
+    // Noted live before the phone is asked, so its answer, converted live, can't come first.
+    let (message, variant, at) = (copy.message, copy.variant, now_ms());
+    let asked = Step::AskedPhone { message, variant, wanted: copy.wanted, at };
+    match inner.store.apply(Lane::Live, vec![Change::Media(asked)]).await {
+        Ok(noted) if noted.changed > 0 => inner.asked_phone.notify_one(),
+        // Wanted again, cancelled or placed since it was taken: what's left is its next job's.
+        Ok(_) => return false,
+        Err(_) => return true,
     }
+    let ask = pb::MediaRetry { chat: key.chat, sender: key.sender, from_me: key.from_me, id: key.id, media_key };
+    let failed = match engine.call(pb::command::Kind::MediaRetry(ask)).await {
+        Ok(_) => return false,
+        Err(EngineError::Failed { message: said, retry: false, .. }) => {
+            let error = format!("{why}, and jaw couldn't ask your phone for it: {said}");
+            Step::AskRefused { message, variant, at, error }
+        }
+        Err(_) => {
+            let again = (now_ms(), copy.asked, copy.arrived);
+            Step::NotAsked { message, variant, at, wanted: again.0, asked: again.1, arrived: again.2 }
+        }
+    };
+    let again = matches!(failed, Step::NotAsked { .. });
+    let _ = inner.store.apply(Lane::Live, vec![Change::Media(failed)]).await;
+    again
 }
 
 pub(super) fn start(inner: &Arc<Inner>) {

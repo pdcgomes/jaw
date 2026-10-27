@@ -202,7 +202,10 @@ async fn clean(inner: Arc<Inner>) {
         let woken = inner.clean.notified();
         match tidy(&inner).await {
             Ok(true) => continue,
-            Ok(false) => {}
+            Ok(false) => {
+                #[cfg(test)]
+                inner.tidied.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             Err(e) => eprintln!("jawd: can't tidy the media cache this time: {e:#}"),
         }
         let looked = Instant::now();
@@ -219,22 +222,33 @@ async fn clean(inner: Arc<Inner>) {
     }
 }
 
-/// One step of tidying: files no copy names, then, past the cache's size, what was used longest
-/// ago. Says whether there may be more to do.
+/// One step of tidying: files no copy names, a page at a time past those a job holds, which go once
+/// it's done, then, past the cache's size, what was used longest ago. Says whether there may be
+/// more to do.
 async fn tidy(inner: &Arc<Inner>) -> anyhow::Result<bool> {
-    let unnamed: Vec<Vec<u8>> = inner
-        .store
-        .reads()
-        .query(Priority::Background, |db| {
-            Ok(db
-                .prepare_cached("SELECT sha256 FROM media_drop LIMIT ?1")?
-                .query_map([DROP_AT_ONCE], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?)
-        })
-        .await?;
-    if !unnamed.is_empty() {
-        let (dropped, _) = drop_files(inner, unnamed, false).await?;
-        return Ok(dropped > 0);
+    let (mut after, mut dropped) = (Vec::new(), 0);
+    loop {
+        let from = after.clone();
+        let unnamed: Vec<Vec<u8>> = inner
+            .store
+            .reads()
+            .query(Priority::Background, move |db| {
+                Ok(db
+                    .prepare_cached("SELECT sha256 FROM media_drop WHERE sha256 > ?1 ORDER BY sha256 LIMIT ?2")?
+                    .query_map(rusqlite::params![from, DROP_AT_ONCE], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?)
+            })
+            .await?;
+        let Some(last) = unnamed.last() else { break };
+        after = last.clone();
+        let whole_page = unnamed.len() as i64 == DROP_AT_ONCE;
+        dropped += drop_files(inner, unnamed, false).await?.0;
+        if !whole_page {
+            break;
+        }
+    }
+    if dropped > 0 {
+        return Ok(true);
     }
     let bytes: i64 = inner
         .store

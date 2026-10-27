@@ -146,8 +146,15 @@ pub enum Step {
     /// `state`, as it is now, which the phone's answer or its silence may have changed since. A copy
     /// wanted again since keeps being wanted.
     Settled { message: i64, variant: &'static str, wanted: i64, state: Option<&'static str>, error: Option<String> },
-    /// The phone was asked to upload a copy again at `at`; it waits for the answer.
+    /// The phone is asked to upload a copy again at `at`, noted before it is, so no answer can come
+    /// first; it waits for the answer. Only a copy the job that took it at `wanted` is downloading.
     AskedPhone { message: i64, variant: &'static str, wanted: i64, at: i64 },
+    /// The phone couldn't be asked, for now, for a copy noted as asked at `at`: it's wanted again
+    /// from `wanted`, asked for and arrived live as it was, to be tried again.
+    NotAsked { message: i64, variant: &'static str, at: i64, wanted: i64, asked: bool, arrived: bool },
+    /// The phone couldn't be asked for a copy noted as asked at `at`, for a reason that won't pass:
+    /// it's expired, saying why.
+    AskRefused { message: i64, variant: &'static str, at: i64, error: String },
     /// The phone's answer, by the message's chat and ID as WhatsApp named them; an upload is wanted
     /// again at `at`.
     Answered { chat: String, id: String, answer: Answer, at: i64 },
@@ -195,14 +202,15 @@ pub struct DroppedFile {
 }
 
 const UPSERT: &str = "INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256,
-        media_key, direct_path, thumbnail, wanted)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        media_key, direct_path, thumbnail, wanted, arrived)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15 IS NOT NULL)
     ON CONFLICT (message, variant) DO UPDATE SET keys = excluded.keys, mime = coalesce(excluded.mime, mime),
         bytes = coalesce(excluded.bytes, bytes), w = coalesce(excluded.w, w), h = coalesce(excluded.h, h),
         seconds = coalesce(excluded.seconds, seconds), name = coalesce(excluded.name, name),
         sha256 = coalesce(sha256, excluded.sha256), enc_sha256 = coalesce(enc_sha256, excluded.enc_sha256),
         media_key = coalesce(media_key, excluded.media_key), direct_path = coalesce(direct_path, excluded.direct_path),
-        thumbnail = max(thumbnail, excluded.thumbnail), wanted = coalesce(wanted, excluded.wanted)
+        thumbnail = max(thumbnail, excluded.thumbnail), wanted = coalesce(wanted, excluded.wanted),
+        arrived = iif(wanted IS NULL, excluded.arrived, arrived)
     WHERE keys IS NOT excluded.keys OR coalesce(excluded.mime, mime) IS NOT mime
         OR coalesce(excluded.bytes, bytes) IS NOT bytes OR coalesce(excluded.w, w) IS NOT w
         OR coalesce(excluded.h, h) IS NOT h OR coalesce(excluded.seconds, seconds) IS NOT seconds
@@ -240,22 +248,27 @@ const THUMBNAIL: &str = "INSERT INTO media_files (sha256, thumbnail, thumbnail_b
 const NEXT_MADE: &str = "SELECT made + 1 FROM media_made WHERE id = 1";
 const MADE: &str = "UPDATE media_made SET made = ?1 WHERE id = 1";
 const SETTLED_THROUGH: &str = "UPDATE media_made SET settled = min(made, max(settled, ?1)) WHERE id = 1";
-const SETTLED: &str = "UPDATE media SET wanted = NULL, asked = 0, state = coalesce(?4, state), progress = NULL,
-        error = iif(?4 IS NULL OR (?5 IS NULL AND state = ?4), error, ?5)
+const SETTLED: &str = "UPDATE media SET wanted = NULL, asked = 0, arrived = 0, state = coalesce(?4, state),
+        progress = NULL, error = iif(?4 IS NULL OR (?5 IS NULL AND state = ?4), error, ?5)
     WHERE message = ?1 AND variant = ?2 AND wanted IS ?3";
-const ASKED_PHONE: &str = "UPDATE media SET wanted = NULL, asked = 0, state = 'waiting_for_phone', retried_at = ?4,
-        progress = NULL, error = NULL
-    WHERE message = ?1 AND variant = ?2 AND wanted IS ?3";
+const ASKED_PHONE: &str = "UPDATE media SET wanted = NULL, asked = 0, arrived = 0, state = 'waiting_for_phone',
+        retried_at = ?4, progress = NULL, error = NULL
+    WHERE message = ?1 AND variant = ?2 AND wanted IS ?3 AND state = 'downloading'";
+const ASK_AGAIN: &str = "UPDATE media SET state = 'remote', wanted = iif(wanted IS NULL, ?4, max(?4, wanted + 1)),
+        asked = max(asked, ?5), arrived = max(arrived, ?6)
+    WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone' AND retried_at = ?3";
+const ASK_REFUSED: &str = "UPDATE media SET state = 'expired', error = ?4
+    WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone' AND retried_at = ?3";
 const UPLOADED: &str = "UPDATE media SET direct_path = ?2, state = 'remote', error = NULL,
         wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 1
     WHERE message = ?1 AND variant = 'sd'
         AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.sha256 = media.sha256 AND f.path IS NOT NULL)";
 const NOT_UPLOADED: &str = "UPDATE media SET state = ?2, error = ?3
-    WHERE message = ?1 AND variant = 'sd' AND state = 'waiting_for_phone'";
+    WHERE message = ?1 AND variant = 'sd' AND state IN ('waiting_for_phone', 'downloading')";
 const WANT: &str = "UPDATE media SET wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = max(asked, ?4),
         error = iif(?4, NULL, error), cancelled = iif(?4, 0, cancelled)
     WHERE message = ?1 AND variant = ?2 AND (wanted IS NULL OR ?4 > asked)";
-const CANCEL: &str = "UPDATE media SET wanted = NULL, asked = 0, progress = NULL, cancelled = 1,
+const CANCEL: &str = "UPDATE media SET wanted = NULL, asked = 0, arrived = 0, progress = NULL, cancelled = 1,
         state = iif(state = 'downloading', 'remote', state)
     WHERE message = ?1 AND variant = ?2 AND (wanted IS NOT NULL OR state = 'downloading' OR cancelled = 0)";
 const USED: &str = "UPDATE media_files SET used_at = ?2 WHERE sha256 = ?1 AND used_at < ?2";
@@ -278,9 +291,9 @@ const WANTED_AGAIN: &str =
     WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone'";
 const REVOKED: &str = "DELETE FROM media WHERE message = ?1";
 const FOLD: &str = "INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256,
-        media_key, direct_path, thumbnail, state, progress, error, wanted, asked, retried_at, cancelled)
+        media_key, direct_path, thumbnail, state, progress, error, wanted, asked, arrived, retried_at, cancelled)
     SELECT ?1, variant, keys, mime, bytes, w, h, seconds, name, sha256, enc_sha256, media_key, direct_path, thumbnail,
-        iif(state = 'downloading', 'remote', state), NULL, error, wanted, asked, retried_at, cancelled
+        iif(state = 'downloading', 'remote', state), NULL, error, wanted, asked, arrived, retried_at, cancelled
     FROM media WHERE message = ?2
     ON CONFLICT (message, variant) DO UPDATE SET mime = coalesce(mime, excluded.mime),
         bytes = coalesce(bytes, excluded.bytes), w = coalesce(w, excluded.w), h = coalesce(h, excluded.h),
@@ -290,7 +303,8 @@ const FOLD: &str = "INSERT INTO media (message, variant, keys, mime, bytes, w, h
         thumbnail = max(thumbnail, excluded.thumbnail),
         wanted = CASE WHEN wanted IS NULL THEN excluded.wanted WHEN excluded.wanted IS NULL THEN wanted
             ELSE max(wanted, excluded.wanted) + 1 END,
-        asked = max(asked, excluded.asked), cancelled = max(cancelled, excluded.cancelled)";
+        asked = max(asked, excluded.asked), arrived = max(arrived, excluded.arrived),
+        cancelled = max(cancelled, excluded.cancelled)";
 
 /// Gives message `n` a new version, as something it shows changed.
 fn shown(db: &Connection, stamps: &mut Stamps, n: i64, chat: i64) -> Result<()> {
@@ -426,6 +440,13 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
         Step::AskedPhone { message, variant, wanted, at } => {
             one(db, stamps, *message, db.prepare_cached(ASKED_PHONE)?, params![message, variant, wanted, at])
         }
+        Step::NotAsked { message, variant, at, wanted, asked, arrived } => {
+            let again = params![message, variant, at, wanted, asked, arrived];
+            one(db, stamps, *message, db.prepare_cached(ASK_AGAIN)?, again)
+        }
+        Step::AskRefused { message, variant, at, error } => {
+            one(db, stamps, *message, db.prepare_cached(ASK_REFUSED)?, params![message, variant, at, error])
+        }
         Step::Answered { chat, id, answer, at } => {
             let Some((_, n)) = located(db, stamps, &chat_jid(db, chat)?, id)? else { return Ok(false) };
             match answer {
@@ -540,6 +561,8 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
         Step::Thumbnail { sha256, .. } => format!("thumbnail {}", to_hex(sha256)),
         Step::Settled { message, variant, .. } => format!("settled {message} {variant}"),
         Step::AskedPhone { message, variant, .. } => format!("asked the phone {message} {variant}"),
+        Step::NotAsked { message, variant, .. } => format!("not asked the phone yet {message} {variant}"),
+        Step::AskRefused { message, variant, .. } => format!("couldn't ask the phone {message} {variant}"),
         Step::Answered { chat, id, .. } => format!("answered {chat} {id}"),
         Step::Want { message, variant, .. } => format!("want {message} {variant}"),
         Step::Cancel { message, variant } => format!("cancel {message} {variant}"),

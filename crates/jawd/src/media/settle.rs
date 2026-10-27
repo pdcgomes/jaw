@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::drive::Flush;
@@ -146,6 +146,11 @@ async fn check(inner: &Arc<Inner>, suspects: Vec<Vec<u8>>) {
 /// whole ones are passed, broken ones mended and then passed, and the messages showing either get a
 /// new version. Says which it couldn't mend, because a job holds their file.
 async fn look_at(inner: &Arc<Inner>, hashes: Vec<Vec<u8>>) -> anyhow::Result<Vec<Vec<u8>>> {
+    if let Some(failing) = &inner.config.looks_failing
+        && one_less(failing)
+    {
+        anyhow::bail!("a test failed this look before it read anything");
+    }
     let rows = inner
         .store
         .reads()
@@ -189,6 +194,18 @@ async fn look_at(inner: &Arc<Inner>, hashes: Vec<Vec<u8>>) -> anyhow::Result<Vec
         let _ = inner.store.apply(Lane::Background, vec![shown]).await;
     }
     Ok(unmended)
+}
+
+/// Takes one from `count` unless it's 0, saying whether it did.
+fn one_less(count: &AtomicU32) -> bool {
+    let mut n = count.load(Ordering::SeqCst);
+    while n > 0 {
+        match count.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) => n = now,
+        }
+    }
+    false
 }
 
 /// What of `row`'s previews and thumbnail isn't whole on disk.
