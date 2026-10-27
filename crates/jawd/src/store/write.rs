@@ -1238,6 +1238,9 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
             if chat.marked_unread.is_some() {
                 stamps.unsettle(n);
             }
+            if let Some(person) = person {
+                rehome(db, stamps, person)?;
+            }
             Ok(true)
         }
         None => Ok(false),
@@ -1283,11 +1286,15 @@ fn upsert_person(db: &Connection, stamps: &mut Stamps, person: &Person) -> Resul
             n
         }
     };
+    // Each JID is theirs before any join, so a sender of what a merge applies is found among them.
+    for jid in unknown {
+        db.prepare_cached("INSERT INTO person_jids (jid, person) VALUES (?1, ?2)")?.execute(params![jid, keep])?;
+    }
     for &gone in known.iter().skip(1) {
         join(db, stamps, keep, gone)?;
     }
-    for jid in unknown {
-        db.prepare_cached("INSERT INTO person_jids (jid, person) VALUES (?1, ?2)")?.execute(params![jid, keep])?;
+    if joined && !known.is_empty() {
+        rehome(db, stamps, keep)?;
     }
     let seq = stamps.seq(PERSON, Some(keep));
     let changed: Option<i64> = db
@@ -1308,8 +1315,10 @@ fn upsert_person(db: &Connection, stamps: &mut Stamps, person: &Person) -> Resul
 
 /// Joins `gone` into `keep`: its JIDs, its chats and its folder places move, the fields `keep`
 /// lacks are filled from it, and it's removed. Rows that name a JID aren't touched, which keeps a
-/// join to a few rows however many messages they sent.
+/// join to a few rows however many messages they sent; the polls both voted in take a new
+/// version, since their tallies count the two as one from here on.
 fn join(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64) -> Result<()> {
+    polls::joining(db, stamps, keep, gone)?;
     db.prepare_cached(
         "UPDATE people AS k SET name = coalesce(k.name, g.name), push_name = coalesce(k.push_name, g.push_name),
             verified_name = coalesce(k.verified_name, g.verified_name), about = coalesce(k.about, g.about),
@@ -1361,8 +1370,10 @@ fn merge_direct_chats(db: &Connection, stamps: &mut Stamps, person: i64) -> Resu
 /// Starts merging chat `gone` into `keep`, each a chat's n and JID. What's small moves now (its
 /// tombstones, what waits for its messages, its folder places, its settings and where it was
 /// read), and writes for it go to `keep` from here on; its messages follow a few at a time, and
-/// what's waiting to be sent follows its message. Only a person's one-to-one chats merge, so
-/// sending's group tables (recipients, settled, regroup) never take part.
+/// what's waiting to be sent follows its message. What it kept for a message `keep` already has
+/// is done to that message now, as it would be to one of its own as it moves: a deletion for you,
+/// and what waited for it. Only a person's one-to-one chats merge, so sending's group tables
+/// (recipients, settled, regroup) never take part.
 fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone: &(i64, String)) -> Result<()> {
     let ((keep, keep_id), (gone, gone_id)) = (keep, gone);
     let groups: i64 = db
@@ -1372,10 +1383,21 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
         bail!("only one-to-one chats merge, and {keep_id} or {gone_id} isn't one");
     }
     db.prepare_cached("INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)")?.execute([gone, keep])?;
-    db.prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
+    let deleted: Vec<String> = db
+        .prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2 RETURNING id")?
+        .query_map([keep, gone], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     db.prepare_cached("DELETE FROM tombstones WHERE chat = ?1")?.execute([gone])?;
-    db.prepare_cached("UPDATE pending SET chat = ?1 WHERE chat = ?2")?.execute([keep_id, gone_id])?;
-    polls::set_aside_moved(db, keep_id, gone_id)?;
+    for id in deleted {
+        let found: Option<i64> = db
+            .prepare_cached("SELECT n FROM messages WHERE chat = ?1 AND id = ?2")?
+            .query_row(params![keep, id], |r| r.get(0))
+            .optional()?;
+        if let Some(n) = found {
+            delete_row(db, stamps, *keep, n)?;
+        }
+    }
+    follow(db, stamps, gone_id, (*keep, keep_id))?;
     db.prepare_cached("UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
     db.prepare_cached("DELETE FROM folder_items WHERE chat = ?1")?.execute([gone])?;
     let seq = stamps.seq(CHAT, Some(*keep));
@@ -1391,6 +1413,55 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     .execute(params![keep, gone, seq])?;
     stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
     merge_reads(db, stamps, *keep, *gone)
+}
+
+/// Has what waits under JID `from` for messages jaw hasn't seen there, in `pending` or set aside,
+/// wait in chat `to` (its n and JID) instead, as what's addressed to `from` goes there now; and
+/// does to the messages `to` already has what waited for them, as it would have been done had it
+/// come to `to` in the first place.
+fn follow(db: &Connection, stamps: &mut Stamps, from: &str, to: (i64, &str)) -> Result<()> {
+    let (to, to_jid) = to;
+    let mut waiting: Vec<String> = db
+        .prepare_cached("UPDATE pending SET chat = ?1 WHERE chat = ?2 RETURNING target")?
+        .query_map([to_jid, from], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    waiting.extend(polls::set_aside_moved(db, to_jid, from)?);
+    waiting.sort_unstable();
+    waiting.dedup();
+    for id in waiting {
+        let found: Option<(i64, String)> = db
+            .prepare_cached("SELECT n, kind FROM messages WHERE chat = ?1 AND id = ?2")?
+            .query_row(params![to, id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        if let Some((n, kind)) = found {
+            apply_pending(db, stamps, to, n, to_jid, &id, kind == "poll")?;
+        }
+    }
+    Ok(())
+}
+
+/// Has what waits under each JID of `person` that names no chat of its own follow it to the chat
+/// it leads to now, the person's one-to-one chat, as joining their JIDs or making that chat
+/// changes where it leads.
+fn rehome(db: &Connection, stamps: &mut Stamps, person: i64) -> Result<()> {
+    let chatless: Vec<String> = db
+        .prepare_cached(
+            "SELECT j.jid FROM person_jids j WHERE j.person = ?1 AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.id = j.jid)",
+        )?
+        .query_map([person], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for jid in chatless {
+        let to = chat_jid(db, &jid)?;
+        if to == jid {
+            continue;
+        }
+        let n: Option<i64> =
+            db.prepare_cached("SELECT n FROM chats WHERE id = ?1")?.query_row([&to], |r| r.get(0)).optional()?;
+        if let Some(n) = n {
+            follow(db, stamps, &jid, (n, &to))?;
+        }
+    }
+    Ok(())
 }
 
 /// The messages a merge step moves.

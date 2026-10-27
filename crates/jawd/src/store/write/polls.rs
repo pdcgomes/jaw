@@ -50,7 +50,15 @@ const SET_ASIDE_MOVED: &str = "UPDATE quarantine SET
         ref = ?4 || substr(ref, length(?3) + 1) || iif(EXISTS (SELECT 1 FROM quarantine q
             WHERE q.source = 'vote' AND q.ref = ?4 || substr(quarantine.ref, length(?3) + 1)), ' ' || n, ''),
         raw = jsonb_set(raw, '$.chat', ?4)
-    WHERE source = 'vote' AND ref >= ?1 AND ref < ?2";
+    WHERE source = 'vote' AND ref >= ?1 AND ref < ?2
+    RETURNING raw ->> '$.target'";
+// The polls people ?1 and ?2 have both voted in, by any of their JIDs, with their chats.
+const VOTED_BY_BOTH: &str = "SELECT g.message, m.chat FROM person_jids gj
+    JOIN poll_voters g ON g.voter = gj.n
+    JOIN messages m ON m.n = g.message
+    WHERE gj.person = ?2 AND EXISTS (SELECT 1 FROM person_jids kj JOIN poll_voters k ON k.voter = kj.n
+        WHERE kj.person = ?1 AND k.message = g.message)";
+const RECOUNTED: &str = "UPDATE messages SET v = ?2 WHERE n = ?1";
 const POLL_ROW: &str = "SELECT chat, raw, detail FROM messages WHERE n = ?1";
 const POLL_MAX: &str = "UPDATE messages SET detail = json_set(detail, '$.poll.max', ?2), v = ?3
     WHERE n = ?1 AND detail ->> '$.poll.max' IS NOT ?2";
@@ -141,6 +149,29 @@ pub(super) fn backfilled(db: &Connection, stamps: &mut Stamps, n: i64) -> Result
     Ok(true)
 }
 
+/// Gives each poll people `keep` and `gone` have both voted in a new version, as joining `gone`
+/// into `keep` makes their votes there one person's and so changes its tally, which windows count
+/// as they read it: a window showing it, and an interface reconnecting from a seq before the join,
+/// read it again. A poll only one of them voted in counts the same either way.
+pub(super) fn joining(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64) -> Result<()> {
+    let mut polls: Vec<(i64, i64)> = db
+        .prepare_cached(VOTED_BY_BOTH)?
+        .query_map([keep, gone], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    polls.sort_unstable();
+    polls.dedup();
+    for (n, chat) in polls {
+        let seq = stamps.seq(MESSAGE, Some(n));
+        db.prepare_cached(RECOUNTED)?.execute([n, seq])?;
+        stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+        let seq = stamps.seq(CHAT, Some(chat));
+        if db.prepare_cached(CHAT_SHOWS)?.execute(params![chat, n, seq])? > 0 {
+            stamps.record(db, CHAT, chat, Some(chat), seq)?;
+        }
+    }
+    Ok(())
+}
+
 /// Puts the votes set aside for poll `id` in `chat`, which has just come or moved there with a
 /// merge, back in `pending`, to be applied with the rest waiting for it.
 pub(super) fn set_aside_back(db: &Connection, chat: &str, id: &str) -> Result<()> {
@@ -151,12 +182,15 @@ pub(super) fn set_aside_back(db: &Connection, chat: &str, id: &str) -> Result<()
     Ok(())
 }
 
-/// Has the votes set aside for polls in chat `gone`, which is being merged into `keep`, wait for
-/// them in `keep`, as what waits in `pending` does, so they come back with their poll there.
-pub(super) fn set_aside_moved(db: &Connection, keep: &str, gone: &str) -> Result<()> {
+/// Has the votes set aside for polls in chat `gone` wait for them in chat `keep` instead, as what
+/// waits in `pending` does once what's addressed to `gone` goes to `keep`, so they come back with
+/// their poll there. Says the polls they're for, by ID.
+pub(super) fn set_aside_moved(db: &Connection, keep: &str, gone: &str) -> Result<Vec<String>> {
     let (from, to) = (format!("{gone} "), format!("{gone}!"));
-    db.prepare_cached(SET_ASIDE_MOVED)?.execute([&from, &to, gone, keep])?;
-    Ok(())
+    Ok(db
+        .prepare_cached(SET_ASIDE_MOVED)?
+        .query_map([&from, &to, gone, keep], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// Keeps the votes waiting for polls within VOTES_WAITING, setting the oldest past it aside.

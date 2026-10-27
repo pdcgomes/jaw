@@ -13,7 +13,7 @@ use super::window::{chat_row, message_row};
 use super::*;
 use crate::state::State;
 use crate::store::read::{self, Around};
-use crate::store::{Change, Chat, Lane, Message, Person, Read, Store};
+use crate::store::{Amend, Amendment, Change, Chat, Lane, Message, Person, Read, Store};
 use crate::work::Report;
 
 fn ms(n: u64) -> Duration {
@@ -1190,6 +1190,85 @@ async fn reconnecting_with_since_returns_only_what_changed() {
     chats.assert_matches(&fresh(&bed.store, &chats_want).await, "the chat list, reconnected");
     messages.assert_matches(&fresh(&bed.store, &messages_want).await, "the messages window, reconnected");
     assert_eq!(ids(&everything).len(), 10, "a since past the feed's last is from another jaw.db, so everything comes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_that_makes_two_voters_one_reaches_a_window_of_their_poll_and_a_reconnect_from_before_it() {
+    let bed = Bed::new(brisk());
+    let (rui, ana, ana_lid) = ("351910000003@s.whatsapp.net", "351910000002@s.whatsapp.net", "100000000002@lid");
+    let poll = Message {
+        chat: GROUP.into(),
+        id: "p1".into(),
+        at: 1_000,
+        sender: Some(rui.into()),
+        kind: "poll",
+        summary: "Poll: Jantar?".into(),
+        detail: Some(json!({"poll": {"question": "Jantar?", "options": [], "max": 1, "voters": 0}}).to_string()),
+        poll: vec!["Ramen".into(), "Pizza".into()],
+        ..Message::default()
+    };
+    let vote = |voter: &str, at: i64, id: &str, chose: &str| {
+        let hex = crate::store::polls::option_hash(chose).iter().map(|b| format!("{b:02x}")).collect();
+        Change::Amend(Amend {
+            chat: GROUP.into(),
+            target: "p1".into(),
+            sender: Some(voter.into()),
+            mine: false,
+            at,
+            what: Amendment::Vote { options: vec![hex], id: id.into() },
+            raw: None,
+        })
+    };
+    // Rui's poll, which Ana votes in from her number and then from her LID, choosing again, while
+    // jaw knows the two as two people; the group shows none of her messages.
+    bed.apply(vec![Change::Message(poll), vote(ana, 2_000, "a1", "Ramen"), vote(ana_lid, 3_000, "a2", "Pizza")]).await;
+    let socket = serve(&bed);
+    let voters = |row: &Value| row["poll"]["voters"].as_u64();
+    let (line, held) = tokio::task::spawn_blocking({
+        let socket = socket.clone();
+        move || {
+            let (mut line, _) = Line::open(&socket, None);
+            let mut held = Model::default();
+            held.take(&line.call("messages.watch", json!({"chat": GROUP, "around": "newest", "before": 10})), "rows");
+            (line, held)
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(voters(&held.rows["p1"]), Some(2), "two people, as jaw knows them");
+    let since = held.seq;
+
+    bed.apply(vec![Change::Person(Person { jids: vec![ana.into(), ana_lid.into()], ..Person::default() })]).await;
+    let pushed = tokio::task::spawn_blocking(move || {
+        let mut line = line;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            for push in line.came(ms(100)) {
+                let rows = push["params"]["upsert"].as_array().cloned().unwrap_or_default();
+                if let Some(poll) = rows.into_iter().find(|row| row["id"] == "p1") {
+                    return Some(poll);
+                }
+            }
+        }
+        None
+    })
+    .await
+    .unwrap();
+    let pushed = pushed.expect("the window is told of the poll's new tally");
+    assert_eq!(voters(&pushed), Some(1), "one person now: {pushed}");
+    assert!(pushed["v"].as_u64() > held.rows["p1"]["v"].as_u64(), "at a new version");
+
+    let have = held.ids();
+    let again = tokio::task::spawn_blocking(move || {
+        let (mut line, _) = Line::open(&socket, Some(since));
+        line.call("messages.watch", json!({"chat": GROUP, "around": "newest", "before": 10, "have": have}))
+    })
+    .await
+    .unwrap();
+    let rows = again["rows"].as_array().unwrap();
+    let poll =
+        rows.iter().find(|row| row["id"] == "p1").expect("a reconnect from before the join reads the poll again");
+    assert_eq!((voters(poll), &poll["poll"]["options"][1]["votes"]), (Some(1), &json!(1)), "her Pizza alone: {poll}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

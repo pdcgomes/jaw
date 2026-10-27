@@ -1392,7 +1392,8 @@ fn on_a_real_jawd_each_message_action_goes_with_its_chat_and_a_key_of_its_own_an
     eprintln!("{screen}");
     assert!(screen.contains("╭ info ") && screen.contains("delivered"), "{screen}");
 
-    run::press_live(&mut v, &rx, "<esc><up><up>f912345678").unwrap();
+    // Any key closes the info and leaves your reply selected, so Rui's message is one up from it.
+    run::press_live(&mut v, &rx, "<esc><up>f912345678").unwrap();
     assert!(until_true(&mut v, &rx, |_| found(&relay, ANA)), "{:?}", relay.asked("find"));
     run::settle_live(&mut v, &rx, Duration::from_secs(1));
     run::press_live(&mut v, &rx, "\n").unwrap();

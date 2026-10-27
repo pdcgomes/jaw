@@ -272,9 +272,6 @@ impl DemoEngine {
             text(ana, ana, "3EB0DEMO00000001", now - 120_000, "did you get the photos from Sunday?"),
             text(climbing, rui, "3EB0DEMO00000002", now - 60_000, "Saturday at 9?"),
             text(ana, ana, "3EB0DEMO00000003", now - 5_000, "the one at the lake"),
-            // You and the two whose phones answer what you send there, so a mention of one lands;
-            // told once the messages are in, so storing them holds none of the messages back.
-            group(climbing, "Lisbon Climbing", &[ME, MEMBERS[0], MEMBERS[1]]),
             // Earlier than the rest, so each chat's newest stays as it was.
             link(
                 ana,
@@ -306,6 +303,10 @@ impl DemoEngine {
                 &["Ramen"],
             ),
             vote(climbing, rui, "3EB0DEMO00000007", now - 270_000, ("3EB0DEMO00000005", rui), &["Tasca do Chico"]),
+            // You and the two whose phones answer what you send there, so a mention of one lands;
+            // told once the messages are in, so storing them holds none of the messages back, and
+            // last, so an interface that sees the group named has the whole script.
+            group(climbing, "Lisbon Climbing", &[ME, MEMBERS[0], MEMBERS[1]]),
         ])
     }
 
@@ -1017,10 +1018,12 @@ mod tests {
     #[tokio::test]
     async fn the_demo_says_who_is_in_its_group_once_its_messages_are_in_so_a_mention_of_one_lands() {
         let (tx, mut rx) = mpsc::channel(8);
-        let _instance = DemoEngine::new().start(tx).await.unwrap();
+        let demo = DemoEngine::new();
+        let script = demo.script.len();
+        let _instance = demo.start(tx).await.unwrap();
         let mut played = Vec::new();
         let playing = async {
-            while played.len() < 5 {
+            while played.len() < script {
                 let incoming = rx.recv().await.unwrap();
                 if let Some(ack) = incoming.ack {
                     ack.send();
@@ -1029,10 +1032,10 @@ mod tests {
             }
         };
         let whole = tokio::time::timeout(Duration::from_secs(10), playing).await;
-        assert!(whole.is_ok(), "the script played its five events: {played:?}");
+        assert!(whole.is_ok(), "the script played its {script} events: {played:?}");
         let messages = played.iter().filter(|kind| matches!(kind, pb::event::Kind::Message(_))).count();
-        assert_eq!(messages, 3, "its messages first: {played:?}");
-        let Some(pb::event::Kind::GroupChange(group)) = played.last() else { panic!("{played:?}") };
+        assert_eq!(messages, script - 2, "its messages first, after the connection: {played:?}");
+        let Some(pb::event::Kind::GroupChange(group)) = played.last() else { panic!("named last: {played:?}") };
         assert_eq!((group.jid.as_str(), group.name.as_deref()), ("120363012345678901@g.us", Some("Lisbon Climbing")));
         assert_eq!(group.join, [ME, MEMBERS[0], MEMBERS[1]], "you, and the two whose phones answer what you send");
     }

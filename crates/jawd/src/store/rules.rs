@@ -489,6 +489,113 @@ async fn a_merge_step_applies_what_waited_for_a_message_and_drops_one_deleted_fo
     assert_eq!(store.count("pending").unwrap(), 0);
 }
 
+/// Each message of Ana's chat `chat` as (its ID, what it says, its reactions).
+async fn shown(store: &Store, chat: &'static str) -> Vec<(String, String, String)> {
+    let rows = query(store, move |db| read::messages(db, chat, Around::Newest, 20)).await;
+    rows.into_iter().map(|r| (r.id, r.summary, r.reactions.get().to_string())).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_waited_in_a_chat_merged_away_for_a_message_the_kept_chat_has_is_done_to_it_as_the_merge_starts() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // Her messages in her chat under her number, and what was done to them addressed to her chat
+    // under her LID before jaw knew the two were one person's: a reaction and an edit waiting
+    // there, and a deletion for you kept there.
+    apply(
+        &store,
+        vec![
+            Change::Message(message(ANA, "reacted", AT, "reacted to")),
+            Change::Message(message(ANA, "edited", AT + 1, "before")),
+            Change::Message(message(ANA, "deleted", AT + 2, "deleted for you")),
+            Change::Message(message(ANA_LID, "l1", AT + 3, "under the LID")),
+        ],
+    )
+    .await;
+    let edit = Amendment::Edit { text: Some("after".into()), spans: None, summary: "after".into() };
+    apply(
+        &store,
+        vec![
+            amend(ANA_LID, "reacted", AT + 10, Some(ANA_LID), Amendment::React { emoji: "👍".into() }),
+            amend(ANA_LID, "edited", AT + 11, Some(ANA_LID), edit),
+            amend(ANA_LID, "deleted", AT + 12, None, Amendment::DeleteForMe),
+        ],
+    )
+    .await;
+    assert_eq!(store.count("pending").unwrap(), 2, "waiting under the chat they were addressed to");
+    let done = [n_of(&store, "reacted").await, n_of(&store, "edited").await, n_of(&store, "deleted").await];
+    let before = store.committed().borrow().to_owned();
+    joined(&store).await;
+    assert!(merging(&store).await, "no merge step has run");
+    let rows = shown(&store, ANA).await;
+    assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["reacted", "edited"], "the deleted one went");
+    assert!(rows[0].2.contains("👍"), "the reaction: {rows:?}");
+    assert_eq!(rows[1].1, "after", "the edit");
+    assert_eq!(store.count("pending").unwrap(), 0, "nothing waits for a message jaw has");
+    let changed = events(&store, before).await;
+    assert!(done.iter().all(|&n| changed.contains(&("message".into(), n))), "each with its event: {changed:?}");
+    merged(&store).await;
+    let rows = shown(&store, ANA).await;
+    assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["reacted", "edited", "l1"]);
+    let again = Change::Message(message(ANA_LID, "deleted", AT + 2, "deleted for you"));
+    apply(&store, vec![again]).await;
+    assert_eq!(shown(&store, ANA).await.len(), 3, "a copy addressed to either chat doesn't bring it back");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_that_brings_a_jid_of_hers_jaw_has_not_seen_finds_what_she_did_from_it_as_her_chats_merge() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let other = "100000000202@lid";
+    apply(
+        &store,
+        vec![Change::Message(message(ANA, "m1", AT, "hi")), Change::Message(message(ANA_LID, "l1", AT + 1, "hi"))],
+    )
+    .await;
+    apply(&store, vec![amend(ANA_LID, "m1", AT + 10, Some(other), Amendment::React { emoji: "👍".into() })]).await;
+    apply(
+        &store,
+        vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into(), other.into()], ..Person::default() })],
+    )
+    .await;
+    assert_eq!(store.count("quarantine").unwrap(), 0, "the join went in");
+    assert!(merging(&store).await);
+    assert!(shown(&store, ANA).await[0].2.contains("👍"), "her reaction from the JID the join brought");
+    let people: i64 = query(&store, move |db| {
+        Ok(db.query_row(
+            "SELECT count(DISTINCT person) FROM person_jids WHERE jid IN (?1, ?2, ?3)",
+            [ANA, ANA_LID, other],
+            |r| r.get(0),
+        )?)
+    })
+    .await;
+    assert_eq!(people, 1, "one person by all three");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_waiting_under_a_jid_jaw_has_no_chat_by_lands_once_that_jid_leads_to_her_chat() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // Ana's message in her chat under her number, and her reaction to it addressed to her LID,
+    // which jaw has no chat by and doesn't know is hers: it waits under her LID.
+    apply(&store, vec![Change::Message(message(ANA, "m1", AT, "hi"))]).await;
+    apply(&store, vec![amend(ANA_LID, "m1", AT + 10, Some(ANA_LID), Amendment::React { emoji: "👍".into() })]).await;
+    assert_eq!(store.count("pending").unwrap(), 1);
+    joined(&store).await;
+    assert!(shown(&store, ANA).await[0].2.contains("👍"), "it lands once her LID leads to her chat");
+    assert_eq!(store.count("pending").unwrap(), 0);
+
+    // Rui, known by his number and his LID, with no chat yet: his reaction addressed to his LID
+    // waits under it, and lands once his chat comes under his number.
+    let rui_lid = "100000000003@lid";
+    apply(&store, vec![Change::Person(Person { jids: vec![RUI.into(), rui_lid.into()], ..Person::default() })]).await;
+    apply(&store, vec![amend(rui_lid, "r1", AT + 20, Some(rui_lid), Amendment::React { emoji: "🎉".into() })]).await;
+    assert_eq!(store.count("pending").unwrap(), 1);
+    apply(&store, vec![Change::Message(message(RUI, "r1", AT + 5, "olá"))]).await;
+    assert!(shown(&store, RUI).await[0].2.contains("🎉"), "it lands in the chat his LID leads to");
+    assert_eq!(store.count("pending").unwrap(), 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn two_copies_of_a_message_folded_into_one_keep_the_file_downloaded_for_either() {
     let home = tempfile::tempdir().unwrap();

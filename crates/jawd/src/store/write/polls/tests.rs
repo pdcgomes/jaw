@@ -518,6 +518,68 @@ async fn a_vote_set_aside_under_both_chats_of_a_merge_keeps_both_rows_and_counts
     assert_eq!((options, voters, left), (tally([1, 0, 0], None), 1, 0), "both came back, the same vote once");
 }
 
+/// Her poll in her chat under her number, and her vote in it from her LID addressed to her chat
+/// under her LID, where it waits before jaw knows the two are one person's.
+async fn voted_under_her_lid(store: &Store) {
+    apply(store, vec![Change::Message(poll_in(ANA, "p1", DINNER, 1)), hello(ANA_LID, "t2", AT + 1)]).await;
+    apply(store, vec![vote_in(ANA_LID, "p1", ANA_LID, AT + 10, "a1", &["Pizza"])]).await;
+    assert_eq!(count(store, "pending WHERE kind = 'vote'").await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_waiting_in_a_chat_merged_away_counts_in_the_poll_the_kept_chat_has_as_the_merge_starts() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    voted_under_her_lid(&store).await;
+    let (_, _, before) = shown_in(&store, ANA.into(), "p1").await;
+    apply(&store, vec![joined(&[ANA, ANA_LID])]).await;
+    assert_eq!(count(&store, "chat_merges").await, 1, "no merge step has run");
+    let (options, voters, v) = shown_in(&store, ANA.into(), "p1").await;
+    assert_eq!((options, voters), (tally([0, 0, 1], None), 1), "it counts");
+    assert!(v > before, "with a new version");
+    assert_eq!(count(&store, "pending").await, 0, "and waits no more");
+    merged(&store).await;
+    assert_eq!(shown_in(&store, ANA.into(), "p1").await.0, tally([0, 0, 1], None));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_set_aside_in_a_chat_merged_away_comes_back_to_the_poll_the_kept_chat_has_as_the_merge_starts() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    voted_under_her_lid(&store).await;
+    set_aside(&store, home.path()).await;
+    apply(&store, vec![joined(&[ANA, ANA_LID])]).await;
+    let (options, voters, _) = shown_in(&store, ANA.into(), "p1").await;
+    let left = count(&store, "quarantine WHERE source = 'vote'").await;
+    assert_eq!((options, voters, left), (tally([0, 0, 1], None), 1, 0), "it came back, and counts");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_waiting_under_a_jid_jaw_has_no_chat_by_counts_once_that_jid_leads_to_the_chat_with_its_poll() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    // Her vote addressed to her LID, which jaw has no chat by and doesn't know is hers.
+    apply(&store, vec![Change::Message(poll_in(ANA, "p1", DINNER, 1))]).await;
+    apply(&store, vec![vote_in(ANA_LID, "p1", ANA_LID, AT + 10, "a1", &["Pizza"])]).await;
+    apply(&store, vec![joined(&[ANA, ANA_LID])]).await;
+    let (options, voters, _) = shown_in(&store, ANA.into(), "p1").await;
+    assert_eq!((options, voters), (tally([0, 0, 1], None), 1), "it counts once her LID leads to her chat");
+    assert_eq!(count(&store, "pending").await, 0);
+
+    // Rui, known by his number and his LID with no chat yet: his votes addressed to his LID wait
+    // under it, one of them set aside, and count once his chat comes under his number.
+    let rui_lid = "100000000003@lid";
+    apply(&store, vec![joined(&[RUI, rui_lid])]).await;
+    apply(&store, vec![vote_in(rui_lid, "p2", rui_lid, AT + 20, "r1", &["Ramen"])]).await;
+    fill_pending(home.path(), 2);
+    apply(&store, vec![vote_in(rui_lid, "p2", ME, AT + 21, "m1", &["Pizza"])]).await;
+    assert_eq!(count(&store, "quarantine WHERE source = 'vote'").await, 1, "his is set aside");
+    apply(&store, vec![Change::Message(Message { sender: Some(RUI.into()), ..poll_in(RUI, "p2", DINNER, 1) })]).await;
+    let (options, voters, _) = shown_in(&store, RUI.into(), "p2").await;
+    let left = count(&store, "quarantine WHERE source = 'vote'").await;
+    assert_eq!((options, voters, left), (tally([1, 0, 1], Some(2)), 2, 0), "both count in the chat his LID leads to");
+}
+
 #[test]
 fn an_options_hash_is_the_sha_256_of_its_name_and_reads_back_from_hex() {
     let hash = option_hash("abc");
