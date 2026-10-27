@@ -1,8 +1,8 @@
 //! The look: ooze's, in one of Omarchy's themes, falling back to the nearest of the 256 standard
-//! colours where the terminal has no 24-bit colour, the selection and the surface kept off the
-//! colours drawn on them or beside them. A theme is Omarchy's palette mapped onto what each colour
-//! is for; drawing asks `Theme` for a role, never for a hue, and each role is kept readable against
-//! the ground whatever the palette.
+//! colours where the terminal has no 24-bit colour, the ladder kept in its order there and no role
+//! on the colour of one drawn on it or beside it. A theme is Omarchy's palette mapped onto what each
+//! colour is for; drawing asks `Theme` for a role, never for a hue, and each role is kept readable
+//! against the ground whatever the palette.
 
 use jaw_proto::themes::{Colors, Mode, Rgb};
 use ratatui::style::Color;
@@ -154,11 +154,11 @@ pub struct Theme {
 impl Theme {
     fn new(r: &Roles, mode: Mode, truecolor: bool) -> Theme {
         let c = |h: u32| color(h, truecolor);
-        let (surface, selection) = match truecolor {
-            true => (c(r.surface), c(r.selection)),
+        let (surface, selection, comment) = match truecolor {
+            true => (c(r.surface), c(r.selection), c(r.comment)),
             false => {
-                let (surface, selection) = apart_256(r);
-                (Color::Indexed(surface), Color::Indexed(selection))
+                let (surface, selection, comment) = apart_256(r);
+                (Color::Indexed(surface), Color::Indexed(selection), Color::Indexed(comment))
             }
         };
         Theme {
@@ -168,7 +168,7 @@ impl Theme {
             fg: c(r.fg),
             text: c(r.text),
             muted: c(r.muted),
-            comment: c(r.comment),
+            comment,
             gutter: c(r.gutter),
             brand: c(r.accent),
             focus: c(r.accent),
@@ -178,7 +178,7 @@ impl Theme {
             mention: c(r.mention),
             arrived: c(r.mention),
             online: c(r.online),
-            unseen: c(r.comment),
+            unseen: comment,
             read: c(r.link),
             warn: c(r.mention),
             notice: c(r.notice),
@@ -252,37 +252,41 @@ fn macos_major() -> u32 {
     0
 }
 
-/// The surface's and the selection's indices of the 256, each its nearest unless that's the index
-/// of a role drawn on it or beside it: the selection's dim text and borders, the surface's borders.
-/// Then it's the next-nearest that's none of those, nor the ground's or the other's, and keeps the
-/// ladder's order of contrast: ground, surface, selection, dim text; a selection's is also one the
-/// dim text stands out on no less than the borders beside it do, as in truecolor.
-fn apart_256(r: &Roles) -> (u8, u8) {
+/// The surface's, the selection's and the dim text's indices of the 256: each its nearest, unless
+/// that's the index of a role drawn on it or beside it or out of the ladder's order of contrast,
+/// and then its next-nearest that's neither. The dim text goes first, above the borders and below
+/// the secondary text; then the selection, none of the ground's, the surface's, the borders' or
+/// the dim text's, between the surface and the dim text, and one the dim text stands out on no less
+/// than the borders beside it do, as in truecolor; then the surface, none of the ground's, the
+/// selection's or the borders', between the ground and the selection.
+fn apart_256(r: &Roles) -> (u8, u8, u8) {
     let index = |h: u32| nearest_256((h >> 16) as u8, (h >> 8) as u8, h as u8);
-    let (bg, gutter, comment) = (index(r.bg), index(r.gutter), index(r.comment));
+    let (bg, gutter, muted) = (index(r.bg), index(r.gutter), index(r.muted));
     let on_bg = |i: u8| contrast(rgb_256(i), rgb_256(bg));
-    let (mut surface, mut selection) = (index(r.surface), index(r.selection));
-    if selection == comment || selection == gutter {
-        let free = |i: u8| ![bg, surface, gutter, comment].contains(&i);
-        let between = |i: u8| on_bg(surface) < on_bg(i) && on_bg(i) < on_bg(comment);
-        let legible = |i: u8| contrast(rgb_256(i), rgb_256(comment)) >= contrast(rgb_256(i), rgb_256(gutter));
-        selection = next_256(r.selection, |i| free(i) && between(i) && legible(i)).unwrap_or(selection);
-    }
-    if surface == gutter {
-        let free = |i: u8| ![bg, selection, gutter].contains(&i);
-        let between = |i: u8| 1.0 < on_bg(i) && on_bg(i) < on_bg(selection);
-        surface = next_256(r.surface, |i| free(i) && between(i)).unwrap_or(surface);
-    }
-    (surface, selection)
+    let comment = held_256(r.comment, |i| on_bg(gutter) < on_bg(i) && on_bg(i) < on_bg(muted));
+    let surface = index(r.surface);
+    let free = |i: u8| ![bg, surface, gutter, comment].contains(&i);
+    let between = |i: u8| on_bg(surface) < on_bg(i) && on_bg(i) < on_bg(comment);
+    let legible = |i: u8| contrast(rgb_256(i), rgb_256(comment)) >= contrast(rgb_256(i), rgb_256(gutter));
+    let selection = held_256(r.selection, |i| free(i) && between(i) && legible(i));
+    let free = |i: u8| ![bg, selection, gutter].contains(&i);
+    let between = |i: u8| 1.0 < on_bg(i) && on_bg(i) < on_bg(selection);
+    let surface = held_256(r.surface, |i| free(i) && between(i));
+    (surface, selection, comment)
 }
 
-/// The nearest index of the 256 to `h` that `takes`, by distance in RGB.
-fn next_256(h: u32, takes: impl Fn(u8) -> bool) -> Option<u8> {
+/// `h`'s nearest index of the 256 if it `takes`, and otherwise the nearest by distance in RGB that
+/// does, or the nearest again where none does.
+fn held_256(h: u32, takes: impl Fn(u8) -> bool) -> u8 {
+    let nearest = nearest_256((h >> 16) as u8, (h >> 8) as u8, h as u8);
     let distance = |i: u8| {
         let (a, b) = (h, rgb_256(i));
         [16, 8, 0].map(|shift| (((a >> shift) & 0xff) as i32 - ((b >> shift) & 0xff) as i32).pow(2)).iter().sum::<i32>()
     };
-    (16..=255).filter(|&i| takes(i)).min_by_key(|&i| distance(i))
+    match takes(nearest) {
+        true => nearest,
+        false => (16..=255).filter(|&i| takes(i)).min_by_key(|&i| distance(i)).unwrap_or(nearest),
+    }
 }
 
 /// The colour index `i` of xterm's 256 stands for, as hex: the 6×6×6 cube from 16, the grey ramp
@@ -336,40 +340,79 @@ mod tests {
         }
     }
 
-    /// Each role's index of the 256 as the theme draws it without 24-bit colour.
-    fn indices(id: &str) -> [(&'static str, u8); 5] {
-        let t = Theme::named(id, false);
+    /// The ladder's roles, each with its index of the 256 as the theme draws it without 24-bit
+    /// colour and its colour in truecolor.
+    fn indices(id: &str) -> [(&'static str, u8, u32); 8] {
+        let (t, r) = (Theme::named(id, false), Roles::of(&jaw_proto::themes::get(id).unwrap().colors));
         [
-            ("ground", t.bg),
-            ("surface", t.surface),
-            ("selection", t.selection),
-            ("borders", t.gutter),
-            ("dim text", t.comment),
+            ("ground", t.bg, r.bg),
+            ("surface", t.surface, r.surface),
+            ("selection", t.selection, r.selection),
+            ("borders", t.gutter, r.gutter),
+            ("dim text", t.comment, r.comment),
+            ("secondary text", t.muted, r.muted),
+            ("text", t.text, r.text),
+            ("text that matters", t.fg, r.fg),
         ]
-        .map(|(role, c)| match c {
-            Color::Indexed(i) => (role, i),
+        .map(|(role, c, truecolor)| match c {
+            Color::Indexed(i) => (role, i, truecolor),
             other => panic!("{id}: {role} is {other:?}, not one of the 256"),
         })
     }
 
+    /// The ladder's order of contrast against the ground, as truecolor has it in every theme: each
+    /// role below the one after it, or the one colour with it.
+    const LADDERS: [&[&str]; 2] = [
+        &["ground", "surface", "selection", "dim text"],
+        &["ground", "borders", "dim text", "secondary text", "text", "text that matters"],
+    ];
+
     #[test]
-    fn in_256_colours_the_selection_and_the_surface_keep_off_what_is_drawn_on_or_beside_them_in_the_ladders_order() {
+    fn in_256_colours_every_theme_keeps_its_ladders_order_as_truecolor_has_it() {
         for theme in jaw_proto::themes::all() {
             let id = theme.id.as_str();
-            let [(_, bg), (_, surface), (_, selection), (_, gutter), (_, comment)] = indices(id);
-            for (role, i, apart) in
-                [("selection", selection, &[bg, surface, gutter, comment][..]), ("surface", surface, &[bg, gutter][..])]
-            {
-                assert!(!apart.contains(&i), "{id}: the {role} is index {i}, as what's drawn on or beside it is");
-            }
+            let drawn = indices(id);
+            let (_, bg, ground) = drawn[0];
+            let role = |name: &str| *drawn.iter().find(|(role, ..)| *role == name).unwrap();
             let c = |i: u8| contrast(rgb_256(i), rgb_256(bg));
-            assert!(
-                1.0 < c(surface) && c(surface) < c(selection) && c(selection) < c(comment),
-                "{id}: ground, surface {:.2}, selection {:.2}, dim text {:.2}",
-                c(surface),
-                c(selection),
-                c(comment)
-            );
+            for pair in LADDERS.iter().flat_map(|ladder| ladder.windows(2)) {
+                let ((low, i, was), (high, j, is)) = (role(pair[0]), role(pair[1]));
+                let truecolor = (contrast(was, ground), contrast(is, ground));
+                assert!(
+                    was == is || truecolor.0 < truecolor.1,
+                    "{id}: truecolor's {low} {:.2} and {high} {:.2}",
+                    truecolor.0,
+                    truecolor.1
+                );
+                assert!(
+                    if was == is { i == j } else { c(i) < c(j) },
+                    "{id}: {low} {:.2} on {i} and {high} {:.2} on {j}, where truecolor has {:.2} and {:.2}",
+                    c(i),
+                    c(j),
+                    truecolor.0,
+                    truecolor.1
+                );
+            }
+        }
+    }
+
+    /// Every role of the ladder is drawn on or beside every other: the borders and each kind of text
+    /// on the ground, the surface and the selection, the surface on the ground, the selection on
+    /// both and beside the borders, and the text beside the borders in a panel's title and beside
+    /// each other in a row. So no two share an index, but text and the text that matters where
+    /// truecolor makes them one colour.
+    #[test]
+    fn in_256_colours_no_role_is_on_the_index_of_one_drawn_on_it_or_beside_it() {
+        for theme in jaw_proto::themes::all() {
+            let id = theme.id.as_str();
+            let drawn = indices(id);
+            for (k, &(a, i, was)) in drawn.iter().enumerate() {
+                for &(b, j, is) in &drawn[k + 1..] {
+                    let one_colour = (a, b) == ("text", "text that matters") && was == is;
+                    assert!(i != j || one_colour, "{id}: the {a} and the {b} are both index {i}");
+                }
+            }
+            let [_, _, (_, selection, _), (_, gutter, _), (_, comment, _), ..] = drawn;
             let on_selection = |i: u8| contrast(rgb_256(i), rgb_256(selection));
             assert!(
                 on_selection(comment) >= on_selection(gutter),
@@ -386,13 +429,13 @@ mod tests {
             ("last-horizon", "selection", 239, 238),
             ("osaka-jade", "selection", 237, 238),
             ("retro-82", "selection", 23, 237),
+            ("retro-82", "dim text", 23, 240),
             ("white", "surface", 250, 251),
         ];
         for theme in jaw_proto::themes::all() {
-            let (id, r) = (theme.id.as_str(), Roles::of(&theme.colors));
+            let id = theme.id.as_str();
             let nearest = |h: u32| nearest_256((h >> 16) as u8, (h >> 8) as u8, h as u8);
-            for ((role, drawn), was) in indices(id).into_iter().zip([r.bg, r.surface, r.selection, r.gutter, r.comment])
-            {
+            for (role, drawn, was) in indices(id) {
                 let listed = moved.iter().find(|(theme, what, ..)| *theme == id && *what == role);
                 let want = listed.map_or((nearest(was), nearest(was)), |&(.., from, to)| (from, to));
                 assert_eq!((nearest(was), drawn), want, "{id}: {role}");
