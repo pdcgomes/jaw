@@ -1,0 +1,47 @@
+# What the terminal asks of jawd that the Mac doesn't yet, each with the step of the parity plan
+# (docs/plans/2026-10-27-jaw-mac-parity-plan.md) that brings it. `make check-parity` fails when the
+# terminal uses a request or push this list doesn't have, and when the Mac uses one it still holds,
+# so a step takes its rows out as it lands. A row can come before the terminal on main uses it, from
+# a branch it's being built on; one whose name main's protocol doesn't have yet says that branch.
+
+[requests]
+"layout.get" = "1.1"
+"layout.set" = "1.1"
+"folders.watch" = "2.1"
+"roster.watch" = "2.1"
+"folder.create" = "2.1"
+"folder.rename" = "2.1"
+"folder.move" = "2.1"
+"folder.delete" = "2.1"
+"folder.add" = "2.1"
+"folder.remove" = "2.1"
+"favourite.set" = "2.1"
+"library.watch" = "2.4"
+"library.shown" = { step = "2.4", from = "library" }
+"send.media" = "2.5"
+"media.cancel" = "2.5"
+"voice.play" = "2.6"
+"voice.pause" = "2.6"
+"voice.seek" = "2.6"
+"voice.speed" = "2.6"
+"voice.record" = "2.7"
+"voice.stop" = "2.7"
+"voice.send" = "2.7"
+"voice.cancel" = "2.7"
+"settings.set" = { step = "3.5", from = "settings" }
+
+[pushes]
+"layout" = "1.1"
+"folders" = "2.1"
+"roster" = "2.1"
+"library" = { step = "2.4", from = "library" }
+"job" = "2.5"
+"playback" = "2.6"
+"recording" = "2.7"
+"typing" = "3.1"
+"presence" = "3.1"
+"settings" = { step = "3.5", from = "settings" }
+
+# What the terminal uses that the Mac never will, each with why:
+# [not_for_the_mac]
+# "name" = "why"

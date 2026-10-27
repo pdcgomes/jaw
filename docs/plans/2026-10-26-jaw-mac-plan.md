@@ -3,7 +3,8 @@
 26 October 2026. The build order for [the Mac design](2026-10-26-jaw-mac-design.md): the shortest path to an app the owner uses every day (reading and sending text in a fast chat list and conversation), then every inline kind, the palette, split panels, and polish. Each milestone says what it needs from jawd, its steps in order, when it's done, and its budgets. The owner answered the design's questions on 26 October; the decisions the plan rests on come first.
 
 - **Every milestone closes with `make perf-mac`** against `jawd demo`'s million messages, its table in the README beside the terminal's, with the load average beside each number, as `make perf` does.
-- **Nothing here touches jawd's data layer.** The proposals the app needs (P1 to P9 in the design) are jawd changes, built on jawd's branches by jawd's builders and audited by the database expert before they land; a milestone that needs one says what it does until it lands.
+- **Parity with the terminal orders what's left** ([the parity plan](2026-10-27-jaw-mac-parity-plan.md), 27 October): the remaining steps of Mac-M2 to Mac-M5 come in the order the terminal's gaps close, and `make check-parity` tracks every request the terminal sends that the app doesn't yet.
+- **Nothing here touches jawd's data layer.** The proposals the app needs (P1 to P10 in the design) are jawd changes, built on jawd's branches by jawd's builders and audited by the database expert before they land; a milestone that needs one says what it does until it lands.
 - **The owner's account is never used for tests.** Tests and benches run on `jawd demo` in a folder of their own; the owner tries each milestone's build on his own account once it's done.
 
 ## Building on the owner's Mac

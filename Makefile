@@ -4,7 +4,7 @@ GO ?= go
 CARGO ?= cargo
 BUF := github.com/bufbuild/buf/cmd/buf@v1.74.0
 
-.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit hooks perf clean prune-builds mac mac-test
+.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit check-parity hooks perf clean prune-builds mac mac-test
 
 build: engine rust
 
@@ -51,6 +51,12 @@ check-generated: proto
 # Every commit since origin/main that touches the data layer names an approved audit.
 check-audit:
 	python3 scripts/check-data-audit.py origin/main HEAD
+
+# Every request and push of jawd's that the terminal uses and the Mac doesn't has a step of the Mac's
+# parity plan in mac/parity.toml. ARGS="--terminal <branch>" reads a terminal branch before it lands,
+# and ARGS=--table lists every request and push with each side's use.
+check-parity:
+	python3 scripts/check-parity.py $(ARGS)
 
 # The same check before every push to main, from every worktree.
 hooks:
