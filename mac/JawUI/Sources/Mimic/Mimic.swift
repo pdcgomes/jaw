@@ -142,8 +142,8 @@ public final class MimicView: NSView {
         NSSize(width: Mimic.size.width * scale, height: Mimic.size.height * scale)
     }
 
-    func show(_ frame: Mimic.Look? = nil) {
-        shown = frame ?? look
+    func show(_ step: Mimic.Look? = nil) {
+        shown = step ?? look
         needsDisplay = true
     }
 
@@ -168,16 +168,17 @@ public final class MimicView: NSView {
         chompUntil = Date().addingTimeInterval(1.2)
         chompTimer?.invalidate()
         shut = false
-        chompTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
+        chompTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] timer in
+            let chomping = MainActor.assumeIsolated { () -> Bool in
                 guard let self, let until = self.chompUntil, Date() < until else {
-                    self?.chompTimer?.invalidate()
                     self?.show()
-                    return
+                    return false
                 }
                 self.shut.toggle()
                 self.show(self.shut ? .chomp : self.look)
+                return true
             }
+            if !chomping { timer.invalidate() }
         }
     }
 }

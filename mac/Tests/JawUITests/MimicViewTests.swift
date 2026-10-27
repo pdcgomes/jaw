@@ -2,8 +2,8 @@ import AppKit
 @testable import JawUI
 import Testing
 
-/// The Mimic's view: each of its pixels a whole square, in a picture of it as on the screen, and its
-/// chomp still when `Motion` says motion is reduced.
+/// The Mimic's view: each of its pixels a whole square, in a picture of it as on the screen; its chomp
+/// still when `Motion` says motion is reduced; and nothing left firing once it's gone.
 
 @MainActor @Test func `the Mimic's view draws each of its pixels as a whole square, in a picture as on the screen`() throws {
     let view = MimicView(scale: 8)
@@ -46,4 +46,22 @@ import Testing
     mimic.chomp()
     #expect(mimic.chompTimer != nil, "chomping when motion isn't reduced")
     mimic.chompTimer?.invalidate()
+}
+
+@MainActor @Test func `a Mimic let go mid-chomp leaves no timer firing`() throws {
+    let before = Motion.reduced
+    defer { Motion.reduced = before }
+    Motion.reduced = { false }
+    weak var gone: MimicView?
+    let timer = autoreleasepool { () -> Timer? in
+        let mimic = MimicView()
+        gone = mimic
+        mimic.chomp()
+        return mimic.chompTimer
+    }
+    let chomp = try #require(timer)
+    defer { chomp.invalidate() }
+    #expect(gone == nil, "the view was let go")
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
+    #expect(!chomp.isValid, "its timer stopped when it next fired")
 }
