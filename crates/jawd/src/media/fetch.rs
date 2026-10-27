@@ -1,11 +1,12 @@
 //! Downloads: one at a time for each file, through the downloads lane, by the engine straight into
 //! the cache under the file's hash, after free space is checked. The engine sends each file to the
-//! drive ordered before whatever is written after it, so the row naming it, a plain live write,
-//! can't reach the disk first, and both are durable with the next synced commit: a download costs
-//! the drive no flush of its own. A file WhatsApp's server no longer has is asked of the phone again, a few a minute at most, when
-//! an interface asked for it or it arrived live; the phone's answer comes through the inbox
-//! (`sync::drain`), and one that doesn't come in time leaves the copy expired, retryable, and
-//! saying why.
+//! drive ordered before whatever is written after it, so the row naming it, a plain write each
+//! copy's job makes in its own lane once the download is done, can't reach the disk first, and both
+//! are durable with the next synced commit: a download costs the drive no flush of its own, and no
+//! download waits for jaw.db. A file WhatsApp's server no longer has is asked of the phone again, a
+//! few a minute at most, when an interface asked for it or it arrived live; the phone's answer comes
+//! through the inbox (`sync::drain`), and one that doesn't come in time leaves the copy expired,
+//! retryable, and saying why.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -14,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::schedule::Wanted;
-use super::{FILES, Inner, now_ms, retryable};
+use super::{FILES, Inner, lane, now_ms, retryable};
 use crate::convert;
 use crate::engine::pb::media_file::State;
 use crate::engine::{EngineError, pb};
@@ -73,15 +74,32 @@ pub(super) fn file_name(copy: &Wanted) -> String {
     format!("{FILES}/{}.{ext}", to_hex(&copy.sha256))
 }
 
-/// Downloads `copy`'s file through the downloads lane, or joins its download already going, and
-/// says what became of it.
+/// What the downloads lane made of a file: where it is in the cache, relative to jaw's folder, and
+/// how long it is, or what became of it.
+pub(super) type Download = Result<(String, u64), Fetched>;
+
+/// Downloads `copy`'s file through the downloads lane, or joins its download already going, then
+/// names it in `copy`'s lane, whichever copy's download it was, and says what became of it. The
+/// file stays claimed until it's named.
 pub(super) async fn file(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) -> Fetched {
+    let _claim = inner.claims.share(&copy.sha256).await;
     let job = download(inner.clone(), copy.clone(), priority);
     let handle = inner.downloads.submit(key(&copy.sha256), priority, job).await;
-    handle.result().await.unwrap_or(Fetched::Cancelled)
+    let (path, bytes) = match handle.result().await.unwrap_or(Err(Fetched::Cancelled)) {
+        Ok(there) => there,
+        Err(fetched) => return fetched,
+    };
+    let placed = Step::Placed { sha256: copy.sha256.clone(), path: path.clone(), bytes, at: now_ms() };
+    if let Err(e) = inner.store.apply(lane(priority), vec![Change::Media(placed)]).await {
+        return Fetched::Later(format!("the file is here, and jaw.db couldn't say so yet: {e:#}"));
+    }
+    inner.clean.notify_one();
+    Fetched::Placed { path }
 }
 
-async fn download(inner: Arc<Inner>, copy: Wanted, priority: Priority) -> Fetched {
+/// Puts `copy`'s file in the cache unless it's there: the downloads lane's job, done once the file
+/// is in place, so no download waits for jaw.db.
+async fn download(inner: Arc<Inner>, copy: Wanted, priority: Priority) -> Download {
     let _claim = inner.claims.share(&copy.sha256).await;
     let relative = file_name(&copy);
     let path = inner.home.join(&relative);
@@ -89,17 +107,9 @@ async fn download(inner: Arc<Inner>, copy: Wanted, priority: Priority) -> Fetche
         // Named by its content, a file already there is this one, whole and sent to the drive by
         // the engine that put it there, though a crash came before the commit naming it.
         Ok(there) => there.len(),
-        Err(_) => match from_engine(&inner, &copy, &path, priority).await {
-            Ok(bytes) => bytes,
-            Err(fetched) => return fetched,
-        },
+        Err(_) => from_engine(&inner, &copy, &path, priority).await?,
     };
-    let placed = Step::Placed { sha256: copy.sha256.clone(), path: relative.clone(), bytes, at: now_ms() };
-    if let Err(e) = inner.store.apply(Lane::Live, vec![Change::Media(placed)]).await {
-        return Fetched::Later(format!("the file is here, and jaw.db couldn't say so yet: {e:#}"));
-    }
-    inner.clean.notify_one();
-    Fetched::Placed { path: relative }
+    Ok((relative, bytes))
 }
 
 /// Has the engine download `copy`'s file to `path`, and says how big it is once it's there, or
@@ -197,18 +207,19 @@ impl Asking {
 /// it or it arrived live, a few a minute at most; otherwise it's expired, until it's asked for.
 /// Says whether the copy is still to be tried again later.
 pub(super) async fn gone(inner: &Arc<Inner>, copy: &Wanted, why: String) -> bool {
+    let lane = lane(copy.priority());
     let settle = |state: &'static str, error: String| {
         Change::Media(Step::Settled {
             message: copy.message,
             variant: copy.variant,
             wanted: copy.wanted,
-            state,
+            state: Some(state),
             error: Some(error),
         })
     };
     if !(copy.asked || copy.live) || copy.variant == "hd" {
         let error = format!("{why}; ask for it to have your phone send it again");
-        let _ = inner.store.apply(Lane::Live, vec![settle("expired", error)]).await;
+        let _ = inner.store.apply(lane, vec![settle("expired", error)]).await;
         return false;
     }
     if !inner.schedule.asking.may(inner.config.retries_per_minute) {
@@ -230,7 +241,7 @@ pub(super) async fn gone(inner: &Arc<Inner>, copy: &Wanted, why: String) -> bool
         .await;
     let (Ok(Some(key)), Some(media_key)) = (key, copy.media_key.clone()) else {
         let error = format!("{why}, and jaw can't tell the phone which message it is");
-        let _ = inner.store.apply(Lane::Live, vec![settle("expired", error)]).await;
+        let _ = inner.store.apply(lane, vec![settle("expired", error)]).await;
         return false;
     };
     let ask = pb::MediaRetry { chat: key.chat, sender: key.sender, from_me: key.from_me, id: key.id, media_key };
@@ -238,14 +249,14 @@ pub(super) async fn gone(inner: &Arc<Inner>, copy: &Wanted, why: String) -> bool
         Ok(_) => {
             let at = now_ms();
             let asked = Step::AskedPhone { message: copy.message, variant: copy.variant, wanted: copy.wanted, at };
-            let _ = inner.store.apply(Lane::Live, vec![Change::Media(asked)]).await;
+            let _ = inner.store.apply(lane, vec![Change::Media(asked)]).await;
             inner.asked_phone.notify_one();
             false
         }
         Err(e) if retryable(&e) => true,
         Err(EngineError::Failed { message, .. }) => {
             let error = format!("{why}, and jaw couldn't ask your phone for it: {message}");
-            let _ = inner.store.apply(Lane::Live, vec![settle("expired", error)]).await;
+            let _ = inner.store.apply(lane, vec![settle("expired", error)]).await;
             false
         }
         Err(_) => true,
@@ -293,7 +304,7 @@ async fn phone_silent(inner: Arc<Inner>) {
             })
             .collect();
         if !silent.is_empty() {
-            if let Err(e) = inner.store.apply(Lane::Live, silent).await {
+            if let Err(e) = inner.store.apply(Lane::Background, silent).await {
                 eprintln!("jawd: can't say the phone didn't answer yet: {e:#}");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }

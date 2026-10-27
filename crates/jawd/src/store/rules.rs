@@ -664,7 +664,8 @@ async fn a_copy_folded_into_another_is_wanted_after_any_want_a_job_took_of_eithe
     let (n, wanted, asked) = kept(store.clone()).await;
     assert_eq!((wanted, asked), (Some(7), true), "wanted after either copy's want, and still asked for");
     for taken in [5, 6] {
-        let settled = media::Step::Settled { message: n, variant: "sd", wanted: taken, state: "remote", error: None };
+        let settled =
+            media::Step::Settled { message: n, variant: "sd", wanted: taken, state: Some("remote"), error: None };
         apply(&store, vec![Change::Media(settled)]).await;
     }
     assert_eq!(kept(store.clone()).await, (n, Some(7), true), "no job that took a want before the fold settles it");

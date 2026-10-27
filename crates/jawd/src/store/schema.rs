@@ -1084,6 +1084,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
     ALTER TABLE media_rebuilt RENAME TO media;
     CREATE INDEX media_by_hash ON media (sha256) WHERE sha256 IS NOT NULL;
     CREATE INDEX media_wanted ON media (wanted) WHERE wanted IS NOT NULL;
+    -- What an interface asked for is done ahead of whatever else is wanted.
+    CREATE INDEX media_asked ON media (wanted) WHERE asked = 1;
     CREATE INDEX media_waiting ON media (retried_at) WHERE state = 'waiting_for_phone';
 
     -- Class: derived from media_files, kept by its triggers: the cache's bytes on disk and its files.

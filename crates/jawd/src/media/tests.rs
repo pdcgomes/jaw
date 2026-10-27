@@ -149,6 +149,35 @@ impl Rig {
         self.store.reads().query(Priority::Interactive, query).await.unwrap()
     }
 
+    /// How many copies are wanted.
+    async fn wanted(&self) -> i64 {
+        self.query(|db| Ok(db.query_row("SELECT count(*) FROM media WHERE wanted IS NOT NULL", [], |r| r.get(0))?))
+            .await
+    }
+
+    /// Waits until no copy is wanted, every job having settled what it took.
+    async fn until_nothing_wanted(&self, what: &str) {
+        let mut committed = self.store.committed();
+        let waited = tokio::time::timeout(Duration::from_secs(60), async {
+            while self.wanted().await > 0 {
+                let _ = tokio::time::timeout(Duration::from_millis(100), committed.changed()).await;
+            }
+        });
+        if waited.await.is_err() {
+            panic!("{what}: {} copies are still wanted", self.wanted().await);
+        }
+    }
+
+    /// Photo `id` in Ana's chat, as history brings it: nothing wants it until a window shows it or
+    /// an interface asks for it.
+    async fn photo_from_history(&self, picture: &Picture, id: &str) {
+        let event = self.world.photo(picture, ANA, ANA, id, now_ms() - 86_400_000, "");
+        let Some(pb::event::Kind::Message(message)) = event.kind else { unreachable!() };
+        let web = crate::convert::web_message(&message).unwrap();
+        let me = crate::convert::Me::new([demo::ME.to_string()]);
+        self.store.apply(Lane::Background, crate::convert::message(&web, &me, false)).await.unwrap();
+    }
+
     async fn call(&self, method: &str, params: Value) -> Result<Value, jaw_proto::Error> {
         self.media.call(method, params).await
     }
@@ -403,10 +432,11 @@ async fn a_phone_that_never_answers_leaves_the_file_expired_saying_why_and_askin
     rig.until(ANA, "3EB0SILENT", "waiting for the phone", |row| row["media"]["state"] == "waiting_for_phone").await;
     let row = rig.until(ANA, "3EB0SILENT", "expired", |row| row["media"]["state"] == "expired").await;
     assert!(row["media"]["error"].as_str().unwrap().contains("didn't answer"), "{row}");
-    let waiting: i64 = rig
-        .query(|db| Ok(db.query_row("SELECT count(*) FROM media WHERE wanted IS NOT NULL", [], |r| r.get(0))?))
-        .await;
-    assert_eq!(waiting, 0, "and nothing waits for good");
+    // Reading its row before its thumbnail was drawn wanted it again, as a window does, and the job
+    // that settles that want can end after the phone's silence has left it expired, which it keeps.
+    rig.until_nothing_wanted("nothing waits for good").await;
+    let row = rig.row(ANA, "3EB0SILENT").await;
+    assert_eq!(row["media"]["state"], "expired", "{row}");
 
     rig.world.phone(Phone::Uploads);
     rig.call("media.fetch", json!({ "message": "3EB0SILENT" })).await.unwrap();
@@ -451,15 +481,71 @@ async fn a_copy_waiting_for_the_phone_still_waits_after_a_job_that_had_nothing_t
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_phones_silence_noted_while_a_job_with_nothing_to_fetch_runs_is_kept() {
+    let rig = rig(Config { phone_wait: Duration::from_secs(600), ..quick() }).await;
+    let lake = Picture::lake(640, 480);
+    rig.world.expire(&lake.direct_path);
+    rig.world.phone(Phone::Silent);
+    rig.photo(&lake, ANA, ANA, "3EB0QUIET").await;
+    rig.until(ANA, "3EB0QUIET", "waiting for the phone, with its thumbnail", |row| {
+        row["media"]["state"] == "waiting_for_phone" && row["media"]["thumbnail"].is_string()
+    })
+    .await;
+    rig.until_nothing_wanted("the job that asked the phone is done").await;
+    // Its thumbnail forgotten, so the next job draws it, and every image worker held, so that job
+    // waits there.
+    let (n, retried, thumbnail): (i64, i64, String) = rig
+        .query(|db| {
+            Ok(db.query_row(
+                "SELECT md.message, md.retried_at, f.thumbnail FROM media md JOIN media_files f USING (sha256)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await;
+    let forget =
+        Step::Forget { sha256: lake.sha256.clone(), made: crate::store::media::Made::Thumbnail, path: thumbnail };
+    rig.store.apply(Lane::Live, vec![Change::Media(forget)]).await.unwrap();
+    let (open, opened) = tokio::sync::watch::channel(false);
+    for worker in 0..rig.media.inner.images.report().workers {
+        let mut opened = opened.clone();
+        let held = async move {
+            let _ = opened.wait_for(|open| *open).await;
+            previews::Drawn::Nothing
+        };
+        let _ = rig.media.inner.images.submit(format!("held:{worker}"), Priority::Interactive, held).await;
+    }
+    // A window shows it, as one does a copy lacking its thumbnail, and a job takes it while it waits
+    // for the phone: it has no file to fetch.
+    let again = Change::Media(Step::Want { message: n, variant: "sd", at: now_ms(), asked: false });
+    rig.store.apply(Lane::Live, vec![again]).await.unwrap();
+    rig.media.inner.schedule.wake();
+    let images = || rig.media.inner.images.report();
+    for _ in 0..500 {
+        if images().queued_background > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(images().queued_background, 1, "the job's thumbnail waits for a worker");
+    // The phone's silence is noted meanwhile, then the job ends.
+    let silent = Step::PhoneSilent { message: n, variant: "sd", before: retried };
+    rig.store.apply(Lane::Live, vec![Change::Media(silent)]).await.unwrap();
+    open.send(true).unwrap();
+    rig.until_nothing_wanted("the job settled what it took").await;
+    let row = rig.row(ANA, "3EB0QUIET").await;
+    assert_eq!(row["media"]["state"], "expired", "the job left it as the phone's silence did: {row}");
+    assert!(row["media"]["error"].as_str().unwrap().contains("didn't answer"), "{row}");
+    assert!(row["media"]["thumbnail"].is_string(), "{row}");
+    assert_eq!(rig.media.status().waiting_for_phone, 0, "nothing waits for an answer no one will wake for");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn history_gone_from_the_server_waits_to_be_asked_for_before_the_phone_is_asked() {
     let rig = rig(quick()).await;
     let lake = Picture::lake(640, 480);
     rig.world.expire(&lake.direct_path);
-    let event = rig.world.photo(&lake, ANA, ANA, "3EB0OLD", now_ms() - 86_400_000, "");
-    let Some(pb::event::Kind::Message(message)) = event.kind else { unreachable!() };
-    let web = crate::convert::web_message(&message).unwrap();
-    let me = crate::convert::Me::new([demo::ME.to_string()]);
-    rig.store.apply(Lane::Background, crate::convert::message(&web, &me, false)).await.unwrap();
+    rig.photo_from_history(&lake, "3EB0OLD").await;
     let row = rig.row(ANA, "3EB0OLD").await;
     assert_eq!(row["media"]["state"], "remote", "history waits until it's shown: {row}");
     // A window showing it.
@@ -475,6 +561,9 @@ async fn history_gone_from_the_server_waits_to_be_asked_for_before_the_phone_is_
 #[tokio::test(flavor = "multi_thread")]
 async fn the_cache_drops_what_was_used_longest_ago_but_never_a_starred_or_unsent_file_and_only_after_a_synced_commit() {
     let rig = rig(Config { cache_bytes: 120_000, ..quick() }).await;
+    // Rows read here want nothing, as if no window showed them, so no want lands after its file has
+    // gone and downloads it again.
+    rig.store.files().watch(mpsc::channel(1).0);
     let pictures: Vec<Picture> = (0..4).map(|n| Picture::lake(400 + n * 40, 300 + n * 30)).collect();
     // Held until the counter of synced commits is read, so nothing can be dropped before.
     let mut held = Vec::new();
@@ -499,6 +588,7 @@ async fn the_cache_drops_what_was_used_longest_ago_but_never_a_starred_or_unsent
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    rig.until_nothing_wanted("every job settled").await;
     assert_eq!(rig.media.status().evicted, 0, "nothing is dropped while a job may name it");
     let synced = rig.store.storage().synced_commits;
     drop(held);
@@ -513,13 +603,22 @@ async fn the_cache_drops_what_was_used_longest_ago_but_never_a_starred_or_unsent
     }
     assert!(status.cache_bytes <= 120_000 && status.evicted >= 1, "{status:?}");
     assert!(rig.store.storage().synced_commits > synced, "dropped in a synced commit");
-    let first = rig.row(ANA, "3EB0CACHE0").await;
-    assert!(local(&first), "the starred one stays, though it was used longest ago: {first}");
-    let second = rig.row(ANA, "3EB0CACHE1").await;
-    assert_eq!(second["media"]["state"], "remote", "the next oldest went: {second}");
     let kept_files: i64 = rig.query(|db| Ok(db.query_row("SELECT count(*) FROM media_files", [], |r| r.get(0))?)).await;
     let on_disk = std::fs::read_dir(rig.home.path().join(FILES)).unwrap().count() as i64;
     assert_eq!(kept_files, on_disk, "every file dropped is gone from the disk, and none kept is");
+    let second: (String, bool) = rig
+        .query(|db| {
+            Ok(db.query_row(
+                "SELECT md.state, f.path IS NOT NULL FROM messages m JOIN media md ON md.message = m.n
+                LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE m.id = '3EB0CACHE1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await;
+    assert_eq!(second, ("remote".to_string(), false), "the next oldest went");
+    let first = rig.row(ANA, "3EB0CACHE0").await;
+    assert!(local(&first), "the starred one stays, though it was used longest ago: {first}");
     let (bytes, files): (i64, i64) = rig
         .query(|db| {
             Ok(db.query_row(
@@ -1171,6 +1270,181 @@ async fn a_flood_of_photos_never_holds_up_a_message() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn copies_nobody_asked_for_are_done_a_few_at_a_time_and_one_asked_for_never_waits_for_them() {
+    let rig = rig(quick()).await;
+    rig.world.gate_downloads(true);
+    for n in 0..40 {
+        let photo = rig.world.photo(&Picture::lake(320 + n, 240), RUI, RUI, &format!("3EB0MANY{n}"), now_ms(), "");
+        rig.world.deliver(without_thumbnail(photo)).await.unwrap();
+    }
+    let mut most = 0;
+    for _ in 0..50 {
+        most = most.max(rig.media.inner.schedule.running());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(most, schedule::UNASKED_AT_ONCE, "the photos' jobs at once, their downloads held");
+    let asked = Picture::lake(640, 480);
+    rig.photo_from_history(&asked, "3EB0WANTED").await;
+    rig.call("media.fetch", json!({ "message": "3EB0WANTED" })).await.unwrap();
+    rig.until(ANA, "3EB0WANTED", "downloading, ahead of the photos' jobs", |row| {
+        row["media"]["state"] == "downloading"
+    })
+    .await;
+    assert_eq!(rig.media.inner.schedule.running(), schedule::UNASKED_AT_ONCE + 1);
+    rig.world.gate_downloads(false);
+    rig.until(ANA, "3EB0WANTED", "its previews", previewed).await;
+    for n in 0..40 {
+        rig.until(RUI, &format!("3EB0MANY{n}"), "its previews", previewed).await;
+    }
+}
+
+/// A rig whose background work waits for the checkpointer past a few hundred frames in the WAL.
+async fn rig_with_small_wal() -> Rig {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let store = Store::open_with_wal(home.path(), 256, 512).unwrap();
+    crate::sync::running(&store).await.unwrap();
+    rig_on(home, store, quick()).await
+}
+
+impl Rig {
+    /// Holds background work until the reader returned is dropped: it holds the WAL from here, so
+    /// the checkpointer can't copy what comes after, and enough comes after that background work
+    /// waits for it.
+    async fn hold_background(&self) -> Connection {
+        let reader = Connection::open(self.home.path().join("jaw.db")).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+        let padding = (0..1_000).map(|n| Change::Remember { key: format!("padding {n}"), value: "x".repeat(4_000) });
+        self.store.apply(Lane::Live, padding.collect()).await.unwrap();
+        let frames = self.store.storage().wal_frames;
+        assert!(frames > 512, "the WAL holds {frames} frames");
+        reader
+    }
+
+    /// Message `id`'s copy's want, in Ana's chat.
+    async fn want_of(&self, id: &'static str) -> Option<i64> {
+        self.query(move |db| {
+            Ok(db.query_row(
+                "SELECT md.wanted FROM media md JOIN messages m ON m.n = md.message WHERE m.id = ?1",
+                [id],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_windows_show_and_what_downloads_by_itself_wait_for_the_wals_bound_and_what_an_interface_asks_for_doesnt()
+{
+    let rig = rig_with_small_wal().await;
+    let (shown, asked, arriving) = (Picture::lake(640, 480), Picture::lake(320, 240), Picture::lake(400, 300));
+    rig.photo_from_history(&shown, "3EB0SHOWN").await;
+    rig.photo_from_history(&asked, "3EB0ASKED").await;
+    let reader = rig.hold_background().await;
+
+    // A window shows one, and a photo arrives; then an interface asks for another, which is
+    // downloaded, its progress shown, and drawn meanwhile.
+    assert_eq!(rig.row(ANA, "3EB0SHOWN").await["media"]["state"], "remote");
+    rig.photo(&arriving, ANA, ANA, "3EB0ARRIVING").await;
+    rig.world.gate_downloads(true);
+    rig.call("media.fetch", json!({ "message": "3EB0ASKED" })).await.unwrap();
+    rig.until(ANA, "3EB0ASKED", "half downloaded while background work waits", half).await;
+    rig.world.gate_downloads(false);
+    rig.until(ANA, "3EB0ASKED", "downloaded and drawn while background work waits", previewed).await;
+    let took = rig.world.deliver(demo::text(ANA, ANA, "3EB0TEXT", now_ms(), "hi")).await.unwrap();
+    assert!(took < Duration::from_secs(1), "a message waited {took:?}");
+    assert_eq!(rig.want_of("3EB0SHOWN").await, None, "what the window showed waits with the rest of the background");
+    assert!(!local(&rig.row(ANA, "3EB0SHOWN").await));
+    let arrived = rig.row(ANA, "3EB0ARRIVING").await;
+    assert!(arrived["media"]["thumbnail"].is_null() && !local(&arrived), "the photo's job waits too: {arrived}");
+
+    // Once the reader lets go, the WAL starts again, and what waited is done.
+    drop(reader);
+    rig.until(ANA, "3EB0SHOWN", "downloaded and drawn once background work goes on", previewed).await;
+    rig.until(ANA, "3EB0ARRIVING", "downloaded and drawn once background work goes on", previewed).await;
+    assert!(rig.store.storage().background_waits > 0, "background work waited for the WAL");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn downloads_done_while_background_work_waits_leave_the_downloads_lane_free_for_what_an_interface_asks_for() {
+    let rig = rig_with_small_wal().await;
+    let asked = Picture::lake(320, 240);
+    rig.photo_from_history(&asked, "3EB0ASKED").await;
+    rig.world.gate_downloads(true);
+    // A window shows as many photos as there are download workers, and their downloads begin.
+    let workers = rig.media.lanes()[0].report().workers;
+    let shown: Vec<String> = (0..workers).map(|n| format!("3EB0SHOWN{n}")).collect();
+    for (n, id) in shown.iter().enumerate() {
+        rig.photo_from_history(&Picture::lake(400 + n as u32, 300), id).await;
+        assert_eq!(rig.row(ANA, id).await["media"]["state"], "remote");
+    }
+    for id in &shown {
+        rig.until(ANA, id, "half downloaded", half).await;
+    }
+    // They end while background work waits, and naming their files waits with it, out of the lane.
+    let reader = rig.hold_background().await;
+    rig.world.gate_downloads(false);
+    rig.call("media.fetch", json!({ "message": "3EB0ASKED" })).await.unwrap();
+    rig.until(ANA, "3EB0ASKED", "downloaded and drawn while background work waits", previewed).await;
+    for id in &shown {
+        let row = rig.row(ANA, id).await;
+        assert!(!local(&row), "its file waits to be named with the rest of the background work: {row}");
+    }
+    drop(reader);
+    for id in &shown {
+        rig.until(ANA, id, "downloaded and drawn once background work goes on", previewed).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn progress_nobody_waits_on_never_holds_up_the_progress_of_a_file_an_interface_asks_for() {
+    let rig = rig_with_small_wal().await;
+    let (shown, asked) = (Picture::lake(640, 480), Picture::lake(320, 240));
+    rig.photo_from_history(&shown, "3EB0SHOWN").await;
+    rig.photo_from_history(&asked, "3EB0ASKED").await;
+    rig.world.gate_downloads(true);
+    assert_eq!(rig.row(ANA, "3EB0SHOWN").await["media"]["state"], "remote");
+    rig.until(ANA, "3EB0SHOWN", "half downloaded", half).await;
+    let reader = rig.hold_background().await;
+    // The window's download says it has got further, past the least time between two of its
+    // progress's writes, and that write waits for the background lane.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let progress = rig.live.lock().unwrap().media_progress.clone().unwrap();
+    let size = shown.data.len() as u64;
+    progress.send(pb::MediaProgress { id: to_hex(&shown.sha256), bytes: size * 3 / 4, size }).await.unwrap();
+    // An interface asks for the other, whose download's progress shows at once all the same.
+    rig.call("media.fetch", json!({ "message": "3EB0ASKED" })).await.unwrap();
+    rig.until(ANA, "3EB0ASKED", "half downloaded while background work waits", half).await;
+    rig.world.gate_downloads(false);
+    rig.until(ANA, "3EB0ASKED", "downloaded and drawn while background work waits", previewed).await;
+    drop(reader);
+    rig.until(ANA, "3EB0SHOWN", "downloaded and drawn once background work goes on", previewed).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_a_window_began_downloading_is_named_at_once_for_an_interface_asking_while_background_work_waits() {
+    let rig = rig_with_small_wal().await;
+    let lake = Picture::lake(640, 480);
+    rig.photo_from_history(&lake, "3EB0WINDOW").await;
+    rig.photo_from_history(&lake, "3EB0SAME").await;
+    rig.world.gate_downloads(true);
+    // A window shows one, and its file begins downloading in the background.
+    assert_eq!(rig.row(ANA, "3EB0WINDOW").await["media"]["state"], "remote");
+    rig.until(ANA, "3EB0WINDOW", "half downloaded", half).await;
+    let reader = rig.hold_background().await;
+    // An interface asks for the other message with the same file, which joins that download.
+    rig.call("media.fetch", json!({ "message": "3EB0SAME" })).await.unwrap();
+    rig.until(ANA, "3EB0SAME", "downloading", |row| row["media"]["state"] == "downloading").await;
+    rig.world.gate_downloads(false);
+    rig.until(ANA, "3EB0SAME", "downloaded and drawn while background work waits", previewed).await;
+    assert_eq!(rig.world.downloads(), 1, "one download for both");
+    assert!(rig.want_of("3EB0WINDOW").await.is_some(), "the window's copy's job waits to settle");
+    drop(reader);
+    rig.until_nothing_wanted("both settled once background work goes on").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn status_reports_the_cache_and_what_waits() {
     let rig = rig(Config { phone_wait: Duration::from_secs(600), ..quick() }).await;
     let lake = Picture::lake(640, 480);
@@ -1281,11 +1555,11 @@ async fn a_job_settling_never_drops_a_want_that_came_after_it() {
     // An interface asks while the job that took it runs, within the same millisecond.
     let asked = Step::Want { message: n, variant: "sd", at: taken, asked: true };
     store.apply(Lane::Live, vec![Change::Media(asked)]).await.unwrap();
-    let settled = Step::Settled { message: n, variant: "sd", wanted: taken, state: "remote", error: None };
+    let settled = Step::Settled { message: n, variant: "sd", wanted: taken, state: Some("remote"), error: None };
     store.apply(Lane::Live, vec![Change::Media(settled)]).await.unwrap();
     let (_, wanted, asked) = read(&store).await;
     assert_eq!((wanted, asked), (Some(taken + 1), true), "still wanted, as asked");
-    let done = Step::Settled { message: n, variant: "sd", wanted: taken + 1, state: "remote", error: None };
+    let done = Step::Settled { message: n, variant: "sd", wanted: taken + 1, state: Some("remote"), error: None };
     store.apply(Lane::Live, vec![Change::Media(done)]).await.unwrap();
     assert_eq!(read(&store).await, (n, None, false), "the job that took the asked want settles it");
 
@@ -1299,7 +1573,7 @@ async fn a_job_settling_never_drops_a_want_that_came_after_it() {
         at: taken + 5,
     };
     store.apply(Lane::Live, vec![Change::Media(uploaded)]).await.unwrap();
-    let settled = Step::Settled { message: n, variant: "sd", wanted: taken + 5, state: "remote", error: None };
+    let settled = Step::Settled { message: n, variant: "sd", wanted: taken + 5, state: Some("remote"), error: None };
     store.apply(Lane::Live, vec![Change::Media(settled)]).await.unwrap();
     let (_, wanted, asked) = read(&store).await;
     assert_eq!((wanted, asked), (Some(taken + 6), true), "still wanted, to be downloaded from where the phone put it");

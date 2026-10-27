@@ -10,13 +10,17 @@
 //! pool with what an interface shows or asks for ahead of the rest: downloads, six at a time, and
 //! image work, half the cores, so a flood of photos never holds up a message or a keypress, which
 //! never wait on either. Photos, stickers, GIFs and voice messages download by themselves; videos and
-//! documents only when asked, or below `Config::auto_bytes`.
+//! documents only when asked, or below `Config::auto_bytes`. What an interface asks, and what's done
+//! for the copies it asked for, is written in the writer's live lane; everything else media writes,
+//! what windows show and what downloads by itself among it, goes in the background lane, which waits
+//! behind live messages and keeps to the WAL's bound, but for the synced commits after which a file
+//! may be removed, which the background lane doesn't make.
 //!
 //! The files follow the media-files audit's rules (J1 to J9): every name is built one way, absolute
 //! and from jaw's folder, and named by content, so a file already there is the one wanted; a row
-//! names a downloaded file only in a synced commit, the engine having sent the file to the drive
-//! ordered before it, so the commit's flush makes both durable and may be an ack's (`fetch`); a file
-//! goes only after a synced commit has stopped naming it, while no job may be writing it
+//! names a downloaded file only once the engine has sent the file to the drive ordered before it,
+//! so the row can't reach the disk first and both are durable with the next synced commit (`fetch`);
+//! a file goes only after a synced commit has stopped naming it, while no job may be writing it
 //! (`cache::Claims`); the folders are made and synced, and a stopped jawd's partial files removed,
 //! before anything starts; free space is checked before a download. Previews and thumbnails are
 //! derived and put in place without waiting for the disk; they're made durable later, and those a
@@ -130,7 +134,7 @@ struct Inner {
     home: PathBuf,
     pipeline: jaw_media::Media,
     config: Config,
-    downloads: Arc<Pool<fetch::Fetched>>,
+    downloads: Arc<Pool<fetch::Download>>,
     images: Arc<Pool<previews::Drawn>>,
     claims: cache::Claims,
     schedule: schedule::Schedule,
@@ -234,6 +238,7 @@ impl Media {
         let (seen, seeing) = mpsc::channel(1_024);
         inner.store.files().watch(seen);
         let restarted = Change::Media(Step::Restarted { at: now_ms() });
+        // Live, as nothing is served until media has started, whatever background work waits.
         inner.store.apply(crate::store::Lane::Live, vec![restarted]).await?;
         schedule::start(&inner, progressing, seeing, pushes.subscribe());
         cache::start(&inner);
@@ -318,6 +323,15 @@ fn internal(what: &str, e: impl std::fmt::Display) -> Error {
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
+}
+
+/// The writer's lane for what's written at `priority`: live for what an interface asked for, which
+/// someone waits on; the background lane for the rest.
+fn lane(priority: Priority) -> crate::store::Lane {
+    match priority {
+        Priority::Interactive => crate::store::Lane::Live,
+        Priority::Background => crate::store::Lane::Background,
+    }
 }
 
 fn variant_name(variant: Variant) -> &'static str {

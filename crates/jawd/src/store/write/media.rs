@@ -141,10 +141,11 @@ pub enum Step {
     Previews { sha256: Vec<u8>, small: String, large: String, bytes: u64, at: i64 },
     /// A file's message's thumbnail, drawn as its instant preview, in place.
     Thumbnail { sha256: Vec<u8>, path: String, bytes: u64, at: i64 },
-    /// Nothing more is to be done for a copy now: it's as `state` says (`remote`, `expired` or
-    /// `gone`), with `error` saying why, if it's one jawd took when it was `wanted` then; a copy
+    /// Nothing more is to be done for a copy now, if it's one jawd took when it was `wanted` then:
+    /// it's as `state` says (`remote`, `expired` or `gone`), with `error` saying why, or with no
+    /// `state`, as it is now, which the phone's answer or its silence may have changed since. A copy
     /// wanted again since keeps being wanted.
-    Settled { message: i64, variant: &'static str, wanted: i64, state: &'static str, error: Option<String> },
+    Settled { message: i64, variant: &'static str, wanted: i64, state: Option<&'static str>, error: Option<String> },
     /// The phone was asked to upload a copy again at `at`; it waits for the answer.
     AskedPhone { message: i64, variant: &'static str, wanted: i64, at: i64 },
     /// The phone's answer, by the message's chat and ID as WhatsApp named them; an upload is wanted
@@ -166,8 +167,9 @@ pub enum Step {
     /// jawd is starting: copies a stopped jawd left downloading aren't any more, and those it left
     /// waiting for the phone, whose answer the engine started now can't read, are wanted again.
     Restarted { at: i64 },
-    /// Every preview and thumbnail numbered up to `through` has been sent to the drive, so this
-    /// step's synced commit makes them durable.
+    /// Every preview and thumbnail numbered up to `through` has been sent to the drive and fenced,
+    /// so none can reach the disk after this step does, and all are durable with the next synced
+    /// commit.
     Flushed { through: i64 },
     /// Files whose previews and thumbnail a start found whole: every message showing them gets a
     /// new version, so windows show them again.
@@ -238,8 +240,8 @@ const THUMBNAIL: &str = "INSERT INTO media_files (sha256, thumbnail, thumbnail_b
 const NEXT_MADE: &str = "SELECT made + 1 FROM media_made WHERE id = 1";
 const MADE: &str = "UPDATE media_made SET made = ?1 WHERE id = 1";
 const SETTLED_THROUGH: &str = "UPDATE media_made SET settled = min(made, max(settled, ?1)) WHERE id = 1";
-const SETTLED: &str = "UPDATE media SET wanted = NULL, asked = 0, state = ?4, progress = NULL,
-        error = iif(?5 IS NULL AND state = ?4, error, ?5)
+const SETTLED: &str = "UPDATE media SET wanted = NULL, asked = 0, state = coalesce(?4, state), progress = NULL,
+        error = iif(?4 IS NULL OR (?5 IS NULL AND state = ?4), error, ?5)
     WHERE message = ?1 AND variant = ?2 AND wanted IS ?3";
 const ASKED_PHONE: &str = "UPDATE media SET wanted = NULL, asked = 0, state = 'waiting_for_phone', retried_at = ?4,
         progress = NULL, error = NULL

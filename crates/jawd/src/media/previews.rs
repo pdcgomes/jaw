@@ -13,7 +13,7 @@ use std::time::Duration;
 use jaw_media::{Cancel, Durability, Error, Kind, Previews, previews_lane};
 
 use super::schedule::Wanted;
-use super::{Inner, PREVIEWS, now_ms};
+use super::{Inner, PREVIEWS, lane, now_ms};
 use crate::convert;
 use crate::store::media::{Made, Step, to_hex};
 use crate::store::{Change, Lane, unpack};
@@ -42,11 +42,23 @@ fn relative(inner: &Inner, path: &Path) -> String {
     path.strip_prefix(&inner.home).unwrap_or(path).display().to_string()
 }
 
-/// Draws the thumbnail `copy`'s message brought as its instant preview, on the image lane.
+/// Draws the thumbnail `copy`'s message brought as its instant preview, on the image lane, and names
+/// it in `copy`'s lane, whichever copy's job drew it; the file stays claimed until it's named.
 pub(super) async fn thumbnail(inner: &Arc<Inner>, copy: &Wanted, priority: Priority) -> Drawn {
+    let _claim = inner.claims.share(&copy.sha256).await;
     let job = draw_thumbnail(inner.clone(), copy.clone());
     let handle = inner.images.submit(format!("thumbnail:{}", to_hex(&copy.sha256)), priority, job).await;
-    handle.result().await.unwrap_or(Drawn::Nothing)
+    let made = match handle.result().await.unwrap_or(Drawn::Nothing) {
+        Drawn::Made(made) => made,
+        drawn => return drawn,
+    };
+    match inner.store.apply(lane(priority), vec![Change::Media(made)]).await {
+        Ok(_) => {
+            inner.clean.notify_one();
+            Drawn::Done
+        }
+        Err(e) => Drawn::Failed(format!("{e:#}")),
+    }
 }
 
 async fn draw_thumbnail(inner: Arc<Inner>, copy: Wanted) -> Drawn {
@@ -87,21 +99,12 @@ async fn draw_thumbnail(inner: Arc<Inner>, copy: Wanted) -> Drawn {
     })
     .await;
     match drawn {
-        Ok((path, size)) => {
-            let made = Step::Thumbnail {
-                sha256: copy.sha256.clone(),
-                path: relative(&inner, &path),
-                bytes: size,
-                at: now_ms(),
-            };
-            match inner.store.apply(Lane::Live, vec![Change::Media(made)]).await {
-                Ok(_) => {
-                    inner.clean.notify_one();
-                    Drawn::Done
-                }
-                Err(e) => Drawn::Failed(format!("{e:#}")),
-            }
-        }
+        Ok((path, size)) => Drawn::Made(Step::Thumbnail {
+            sha256: copy.sha256.clone(),
+            path: relative(&inner, &path),
+            bytes: size,
+            at: now_ms(),
+        }),
         Err(e) => Drawn::Failed(e.to_string()),
     }
 }
@@ -116,7 +119,7 @@ pub(super) async fn previews(inner: &Arc<Inner>, copy: &Wanted, path: &str, prio
         Drawn::Made(made) => made,
         drawn => return drawn,
     };
-    match inner.store.apply(Lane::Live, vec![Change::Media(made)]).await {
+    match inner.store.apply(lane(priority), vec![Change::Media(made)]).await {
         Ok(_) => {
             inner.clean.notify_one();
             Drawn::Done
@@ -240,7 +243,7 @@ pub(super) async fn mend(inner: &Arc<Inner>, sha256: &[u8], message: Option<i64>
     inner.stats.lock().expect("media stats").remade += broken.len() as u64;
     if let Some(message) = message {
         let again = Change::Media(Step::Want { message, variant: "sd", at: now_ms(), asked: false });
-        let _ = inner.store.apply(Lane::Live, vec![again]).await;
+        let _ = inner.store.apply(Lane::Background, vec![again]).await;
         inner.schedule.wake();
     }
     true

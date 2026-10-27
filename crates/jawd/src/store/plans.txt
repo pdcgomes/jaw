@@ -110,7 +110,13 @@ SELECT f.path, md.state, md.error, md.wanted IS NOT NULL FROM media md LEFT JOIN
     SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
 -- src/media/schedule.rs
-SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256, md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once, m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL, md.cancelled FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.wanted IS NOT NULL ORDER BY md.wanted LIMIT ?1
+SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256, md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once, m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL, md.cancelled FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.asked = 1 AND md.wanted IS NOT NULL ORDER BY md.wanted LIMIT ?1
+    SEARCH md USING INDEX media_asked (wanted>?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+
+-- src/media/schedule.rs
+SELECT md.message, md.variant, md.keys, md.mime, md.bytes, md.name, md.sha256, md.enc_sha256, md.media_key, md.direct_path, md.thumbnail, md.state, md.asked, md.wanted, m.kind, m.view_once, m.envelope IS NOT NULL, f.path, f.small IS NOT NULL AND f.large IS NOT NULL, f.thumbnail IS NOT NULL, md.cancelled FROM media md JOIN messages m ON m.n = md.message LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.wanted IS NOT NULL AND md.asked = 0 ORDER BY md.wanted DESC LIMIT ?1
     SEARCH md USING INDEX media_wanted (wanted>?)
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
@@ -2413,7 +2419,7 @@ UPDATE media_made SET settled = min(made, max(settled, ?1)) WHERE id = 1
     SEARCH media_made USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/media.rs
-UPDATE media SET wanted = NULL, asked = 0, state = ?4, progress = NULL, error = iif(?5 IS NULL AND state = ?4, error, ?5) WHERE message = ?1 AND variant = ?2 AND wanted IS ?3
+UPDATE media SET wanted = NULL, asked = 0, state = coalesce(?4, state), progress = NULL, error = iif(?4 IS NULL OR (?5 IS NULL AND state = ?4), error, ?5) WHERE message = ?1 AND variant = ?2 AND wanted IS ?3
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs

@@ -606,6 +606,13 @@ impl Store {
         Store::open_with(home, LIMITS)
     }
 
+    /// As `open`, with background work waiting for the checkpointer past `soft` frames in the WAL,
+    /// and for it to start again past `hard`, as a test of what waits behind its bound makes them.
+    #[cfg(test)]
+    pub fn open_with_wal(home: &Path, soft: u64, hard: u64) -> Result<Store> {
+        Store::open_with(home, Limits { wal_soft: soft, wal_hard: hard, ..LIMITS })
+    }
+
     fn open_with(home: &Path, limits: Limits) -> Result<Store> {
         let path = home.join("jaw.db");
         let mut db = connect(&path, Role::Writer)?;

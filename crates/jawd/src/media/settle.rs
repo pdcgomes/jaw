@@ -186,7 +186,7 @@ async fn look_at(inner: &Arc<Inner>, hashes: Vec<Vec<u8>>) -> anyhow::Result<Vec
     inner.store.files().passed(&passed);
     if !passed.is_empty() {
         let shown = Change::Media(Step::Checked { sha256s: passed });
-        let _ = inner.store.apply(Lane::Live, vec![shown]).await;
+        let _ = inner.store.apply(Lane::Background, vec![shown]).await;
     }
     Ok(unmended)
 }
@@ -214,7 +214,7 @@ async fn next_look(inner: &Inner) -> tokio::time::Instant {
         Some(last) => last,
         None => {
             let first = Change::Remember { key: LOOKED.into(), value: now_ms().to_string() };
-            let _ = inner.store.apply(Lane::Live, vec![first]).await;
+            let _ = inner.store.apply(Lane::Background, vec![first]).await;
             now_ms()
         }
     };
@@ -255,7 +255,7 @@ async fn look(inner: &Arc<Inner>) {
         }
     }
     let noted = Change::Remember { key: LOOKED.into(), value: now_ms().to_string() };
-    let _ = inner.store.apply(Lane::Live, vec![noted]).await;
+    let _ = inner.store.apply(Lane::Background, vec![noted]).await;
 }
 
 /// Sends the previews and thumbnails made since the last time to the drive, fences them with one
@@ -291,7 +291,7 @@ pub(super) async fn settle(inner: &Arc<Inner>) -> anyhow::Result<()> {
             drive.send(Flush::Barrier, &folder)
         })
         .await??;
-        inner.store.apply(Lane::Live, vec![Change::Media(Step::Flushed { through })]).await?;
+        inner.store.apply(Lane::Background, vec![Change::Media(Step::Flushed { through })]).await?;
         if (rows.len() as i64) < AT_ONCE {
             return Ok(());
         }
