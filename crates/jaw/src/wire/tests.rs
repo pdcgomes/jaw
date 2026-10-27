@@ -50,6 +50,9 @@ struct Kept {
     /// and `settings.set` changes; none, as a jawd from before settings keeps, whose hello brings
     /// none.
     settings: Option<Value>,
+    /// A change another interface makes after a connection's hello, kept before the next
+    /// `settings.set`'s own, so its answer brings a setting that connection's hello didn't.
+    meanwhile: Option<Value>,
 }
 
 /// A jawd that answers hello, the windows and find with the protocol's fixtures, takes messages
@@ -162,9 +165,12 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
         "settings.set" if kept.settings.is_some() => {
             let was = kept.settings.clone().unwrap_or_default();
             let mut settings = was.clone();
-            for name in ["theme", "messages"] {
-                if let Some(value) = params.get(name) {
-                    settings[name] = value.clone();
+            let meanwhile = kept.meanwhile.take().unwrap_or_default();
+            for change in [&meanwhile, params] {
+                for name in ["theme", "messages"] {
+                    if let Some(value) = change.get(name) {
+                        settings[name] = value.clone();
+                    }
                 }
             }
             if settings != was {
@@ -533,8 +539,9 @@ fn the_settings_come_in_each_hello_and_jawds_answer_and_push_and_one_it_refuses_
 
 /// `jaw settings` on the scripted jawd: without changes it prints what hello brings, saying hello as
 /// the terminal, and asks for no change; changes go in one `settings.set` and what it prints is
-/// jawd's answer, every setting in it; a change jawd refuses fails with jawd's own message; and
-/// with nothing on the socket it says jawd isn't running.
+/// jawd's answer, every setting in it, one another interface changed since hello too; a change
+/// jawd refuses fails with jawd's own message, an answer jaw can't read says it was jawd's answer
+/// to `settings.set`, and with nothing on the socket it says jawd isn't running.
 #[test]
 fn jaw_settings_prints_what_hello_brings_or_jawds_answer_to_one_change_and_fails_with_jawds_message() {
     let jawd = scripted();
@@ -549,15 +556,20 @@ fn jaw_settings_prints_what_hello_brings_or_jawds_answer_to_one_change_and_fails
     let said = crate::settings(&jawd.socket, &changes(&["theme=gruvbox", "messages=irc"])).unwrap();
     assert_eq!(jawd.asked("settings.set"), [json!({ "theme": "gruvbox", "messages": "irc" })], "one settings.set");
     assert!(said.starts_with("theme     gruvbox (Gruvbox)\n") && said.contains("\nmessages  irc\n"), "{said}");
-    let said = crate::settings(&jawd.socket, &changes(&["theme=nord"])).unwrap();
-    assert!(said.starts_with("theme     nord (Nord)\n") && said.contains("\nmessages  irc\n"), "jawd's answer: {said}");
+    jawd.kept.lock().unwrap().meanwhile = Some(json!({ "theme": "kanagawa" }));
+    let said = crate::settings(&jawd.socket, &changes(&["messages=bubbles"])).unwrap();
+    let kanagawa =
+        |said: &str| said.starts_with("theme     kanagawa (Kanagawa)\n") && said.contains("\nmessages  bubbles\n");
+    assert!(kanagawa(&said), "jawd's answer, with the theme another interface chose since hello: {said}");
     let said = crate::settings(&jawd.socket, &[]).unwrap();
-    assert!(said.starts_with("theme     nord (Nord)\n") && said.contains("\nmessages  irc\n"), "hello's: {said}");
+    assert!(kanagawa(&said), "hello's: {said}");
     assert_eq!(jawd.asked("settings.set").len(), 2, "and reading them changes nothing");
     assert!(jawd.asked("hello").iter().all(|hello| hello["client"] == TERMINAL), "{:?}", jawd.asked("hello"));
 
     let refused = crate::settings(&jawd.socket, &changes(&["theme=solarized"])).unwrap_err();
     assert_eq!(refused.to_string(), "theme takes one of gruvbox, nord", "the scripted jawd's own list, not jaw's");
+    let garbled = crate::settings(&jawd.socket, &changes(&["theme=garbled"])).unwrap_err();
+    assert_eq!(format!("{garbled:#}"), "jawd's answer to settings.set: missing field `settings`");
     let away = crate::settings(&jawd.socket.with_file_name("nobody.sock"), &[]).unwrap_err();
     assert!(away.to_string().starts_with("jawd isn't running"), "{away}");
 }

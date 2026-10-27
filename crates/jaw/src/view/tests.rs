@@ -715,8 +715,9 @@ fn a_change_whose_answer_was_lost_or_unreadable_goes_back_and_says_it_isnt_confi
 }
 
 /// The footer is one line: a notice too long for it, as jawd's refusal of a theme with all 23 in
-/// it is at 80 columns, ends in an ellipsis where it's cut, and one that fits with its padding is
-/// shown as it is.
+/// it is at 80 columns, ends in an ellipsis where it's cut, and one that fits after the footer's
+/// leading space is shown whole, as a request's lost answer is in 79 columns, only the trailing
+/// space falling off the edge. A wide character that would cross the edge is left out whole.
 #[test]
 fn a_notice_too_long_for_the_footer_ends_in_an_ellipsis_and_one_that_fits_is_shown_whole() {
     let (mut v, _rx) = view(80, 24);
@@ -724,10 +725,15 @@ fn a_notice_too_long_for_the_footer_ends_in_an_ellipsis_and_one_that_fits_is_sho
     let refused = format!("theme takes one of {}", themes.join(", "));
     v.apply(Update::SettingsRefused(refused.clone()));
     let said = format!("not kept: {refused}");
-    assert_eq!(frame(&mut v).lines().last().unwrap(), format!(" {}…", &said[..77]), "cut, and saying so");
-    for (columns, shown) in [(78, format!(" {}", "x".repeat(78))), (79, format!(" {}…", "x".repeat(77)))] {
-        v.apply(Update::Notice("x".repeat(columns)));
-        assert_eq!(frame(&mut v).lines().last().unwrap(), shown, "{columns} columns");
+    assert_eq!(frame(&mut v).lines().last().unwrap(), format!(" {}…", &said[..78]), "cut, and saying so");
+    let x = |columns: usize| "x".repeat(columns);
+    for (notice, shown) in [
+        (x(79), format!(" {}", x(79))),
+        (x(80), format!(" {}…", x(78))),
+        (format!("{}日本語", x(77)), format!(" {}…", x(77))),
+    ] {
+        v.apply(Update::Notice(notice.clone()));
+        assert_eq!(frame(&mut v).lines().last().unwrap(), shown, "{notice}");
     }
 }
 

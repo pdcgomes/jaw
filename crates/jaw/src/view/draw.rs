@@ -364,7 +364,7 @@ impl View {
     fn draw_hints(&self, buf: &mut Buffer, area: Rect) {
         let t = &self.theme;
         if let Some((text, _)) = &self.notice {
-            let text = fmt::fit(text, (area.width as usize).saturating_sub(2));
+            let text = fmt::fit(text, (area.width as usize).saturating_sub(1));
             let line = Line::from(Span::styled(format!(" {text} "), Style::new().fg(t.notice)));
             buf.set_line(area.x, area.y, &line, area.width);
             return;

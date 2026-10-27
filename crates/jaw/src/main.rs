@@ -21,8 +21,9 @@ mod wire;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result, bail};
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser, Subcommand};
 use jaw_proto::settings::TERMINAL;
 use jaw_proto::{AccountState, LinkStart, LinkStep};
 use qrcode::QrCode;
@@ -134,6 +135,12 @@ fn main() -> Result<()> {
         Some(Command::Status) => status(),
         Some(Command::Link { phone }) => link(phone),
         Some(Command::Settings { changes }) => {
+            if let Err(twice) = asked_settings(&changes) {
+                let mut jaw = Cli::command();
+                jaw.build();
+                let command = jaw.find_subcommand_mut("settings").expect("jaw has a settings command");
+                command.error(ErrorKind::ArgumentConflict, twice).exit();
+            }
             println!("{}", settings(&jaw_proto::local::socket(&jaw_proto::local::home()), &changes)?);
             Ok(())
         }
@@ -274,7 +281,9 @@ fn settings(socket: &Path, changes: &[(String, String)]) -> Result<String> {
         welcome.settings.unwrap_or_default()
     } else {
         let kept = connection.call("settings.set", asked)?;
-        serde_json::from_value::<jaw_proto::settings::SettingsKept>(kept)?.settings
+        serde_json::from_value::<jaw_proto::settings::SettingsKept>(kept)
+            .context("jawd's answer to settings.set")?
+            .settings
     };
     Ok(describe_settings(&now))
 }
@@ -347,7 +356,6 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::error::ErrorKind;
     use jaw_proto::settings::{Messages, Settings};
     use serde_json::json;
 

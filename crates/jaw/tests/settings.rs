@@ -1,13 +1,24 @@
 //! `jaw settings`, the binary as the owner runs it, on a `jawd --engine demo` of its own: jawd is
 //! built beside this test, runs on a temporary folder that each child is pointed at with
-//! `JAW_HOME`, and is killed through its own child when the test is done.
+//! `JAW_HOME`, and is killed through its own child when the test is done. Everything the test
+//! waits for has a deadline, so a jawd or a `jaw` that never answers fails it rather than holding
+//! the gate.
 
+use std::fs::File;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
+use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use jaw_proto::settings::TERMINAL;
+
+/// How long a fresh jawd has to answer hello, making its jaw.db on a loaded machine.
+const JAWD_ANSWERS: Duration = Duration::from_secs(60);
+
+/// How long one `jaw settings` has to finish.
+const JAW_FINISHES: Duration = Duration::from_secs(30);
 
 /// jawd, built as this test was, beside it.
 fn jawd() -> &'static Path {
@@ -34,9 +45,11 @@ struct Jawd {
 
 impl Jawd {
     /// Starts one and returns once it answers hello with the terminal's settings, its jaw.db open.
+    /// The asking runs on a thread of its own: jawd binds jaw.sock before it serves, so one stuck
+    /// starting takes the connection and never answers it.
     fn demo() -> Jawd {
         let home = tempfile::tempdir().unwrap();
-        let log = std::fs::File::create(home.path().join("jawd.log")).unwrap();
+        let log = File::create(home.path().join("jawd.log")).unwrap();
         let child = Command::new(jawd())
             .args(["--engine", "demo"])
             .env("JAW_HOME", home.path())
@@ -47,13 +60,22 @@ impl Jawd {
             .expect("jawd starts");
         let jawd = Jawd { child, home };
         let socket = jaw_proto::local::socket(jawd.home.path());
-        let answers =
-            || jaw_client::Connection::open(&socket, TERMINAL, "0").is_ok_and(|(_, hello)| hello.settings.is_some());
-        let end = Instant::now() + Duration::from_secs(60);
-        while !answers() {
+        let end = Instant::now() + JAWD_ANSWERS;
+        let (answered, answers) = channel();
+        let asking = socket.clone();
+        std::thread::spawn(move || {
+            while Instant::now() < end {
+                let hello = jaw_client::Connection::open(&asking, TERMINAL, "0");
+                if hello.is_ok_and(|(_, hello)| hello.settings.is_some()) {
+                    let _ = answered.send(());
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        if answers.recv_timeout(end.saturating_duration_since(Instant::now())).is_err() {
             let log = std::fs::read_to_string(jawd.home.path().join("jawd.log")).unwrap_or_default();
-            assert!(Instant::now() < end, "jawd never answered on {}:\n{log}", socket.display());
-            std::thread::sleep(Duration::from_millis(50));
+            panic!("jawd didn't answer on {} within {JAWD_ANSWERS:?}:\n{log}", socket.display());
         }
         jawd
     }
@@ -71,15 +93,41 @@ impl Drop for Jawd {
 }
 
 /// `jaw settings` with `args` on the jawd in `home`: how it exited, and what it printed on stdout
-/// and on stderr.
+/// and on stderr. One still running after `JAW_FINISHES` is killed, through its own child, and
+/// fails the test with what it printed.
 fn jaw_settings(home: &Path, args: &[&str]) -> (Option<i32>, String, String) {
-    let ran = Command::new(env!("CARGO_BIN_EXE_jaw"))
+    let (mut out, mut err) = (tempfile::tempfile().unwrap(), tempfile::tempfile().unwrap());
+    let mut jaw = Command::new(env!("CARGO_BIN_EXE_jaw"))
         .arg("settings")
         .args(args)
         .env("JAW_HOME", home)
-        .output()
+        .stdout(out.try_clone().unwrap())
+        .stderr(err.try_clone().unwrap())
+        .spawn()
         .expect("jaw runs");
-    (ran.status.code(), String::from_utf8(ran.stdout).unwrap(), String::from_utf8(ran.stderr).unwrap())
+    let end = Instant::now() + JAW_FINISHES;
+    let exited = loop {
+        match jaw.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = jaw.kill();
+                let _ = jaw.wait();
+                break None;
+            }
+        }
+    };
+    let printed = |file: &mut File| {
+        let mut said = String::new();
+        file.rewind().unwrap();
+        file.read_to_string(&mut said).unwrap();
+        said
+    };
+    let (out, err) = (printed(&mut out), printed(&mut err));
+    let Some(exited) = exited else {
+        panic!("jaw settings {} hadn't finished after {JAW_FINISHES:?}, so it was killed:\n{out}{err}", args.join(" "));
+    };
+    (exited.code(), out, err)
 }
 
 #[test]
@@ -109,7 +157,9 @@ fn jaw_settings_prints_and_changes_them_on_a_demo_jawd_and_exits_with_1_when_jaw
     assert_eq!(exit, Some(2), "a change that isn't a pair is refused before jaw connects: {err}");
     assert!(err.contains("invalid value 'gruvbox' for '[NAME=VALUE]...': it isn't a name=value pair"), "{err}");
     let (exit, _, err) = jaw_settings(&home, &["theme=nord", "theme=gruvbox"]);
-    assert_eq!((exit, err.lines().next()), (Some(1), Some("Error: theme is asked for twice; give each setting once")));
+    assert_eq!(exit, Some(2), "a setting named twice is a usage error too, refused before jaw connects: {err}");
+    assert!(err.starts_with("error: theme is asked for twice; give each setting once\n"), "{err}");
+    assert!(err.contains("Usage: jaw settings [NAME=VALUE]..."), "{err}");
 
     drop(jawd);
     assert!(!home.exists(), "the temporary folder is removed");
