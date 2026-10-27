@@ -1,6 +1,7 @@
 //! Sending: `send.text`, `send.poll`, `send.contact` and `send.retry`, `chat.start`, `draft.set`,
-//! `read` and `typing`; and the message actions: `react`, `edit`, `delete`, `forward`, `poll.vote`,
-//! `message.info` and `chat.info`.
+//! `read` and `typing`; the message actions: `react`, `edit`, `delete`, `forward`, `poll.vote`,
+//! `message.info` and `chat.info`; and the chat actions: `chat.pin`, `chat.archive`, `chat.mute`,
+//! `chat.mark_unread` and `star`.
 
 use serde::{Deserialize, Serialize};
 
@@ -299,4 +300,44 @@ pub struct Member {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phone: Option<String>,
     pub admin: bool,
+}
+
+/// `chat.pin`'s params: the chat pinned now, or unpinned.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPin {
+    pub chat: String,
+    pub pinned: bool,
+}
+
+/// `chat.archive`'s params: the chat archived, which unpins it, or brought back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatArchive {
+    pub chat: String,
+    pub archived: bool,
+}
+
+/// `chat.mute`'s params: muted until `until`, in milliseconds since the epoch, or for ever with -1 or
+/// any time from the last millisecond of 9999 on; null unmutes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatMute {
+    pub chat: String,
+    #[serde(default)]
+    pub until: Option<i64>,
+}
+
+/// `chat.mark_unread`'s params: marked unread, or the mark taken off and the chat read up to its
+/// newest message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatMarkUnread {
+    pub chat: String,
+    pub unread: bool,
+}
+
+/// `star`'s params: a message starred, or its star taken off. `chat`, when given, is where it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Star {
+    pub message: String,
+    pub starred: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
 }

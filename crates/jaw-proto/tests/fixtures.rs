@@ -10,8 +10,9 @@ use jaw_proto::layout::{Book, LayoutGet, LayoutSet, Saved};
 use jaw_proto::library::{LibraryPush, LibraryShown, LibraryWatch, LibraryWatched};
 use jaw_proto::media::{Job, MediaCancel, MediaFetch, MediaSave, Saved as MediaSaved, SendMedia, SentMedia};
 use jaw_proto::send::{
-    ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
-    PollVote, React, Read, SendContact, SendEvent, SendLocation, SendPoll, SendRetry, SendText, Sent, Typing,
+    ChatArchive, ChatInfo, ChatInfoResult, ChatMarkUnread, ChatMute, ChatPin, ChatStart, ChatStarted, Delete, DraftSet,
+    Edit, Forward, Forwarded, Info, MessageInfo, PollVote, React, Read, SendContact, SendEvent, SendLocation, SendPoll,
+    SendRetry, SendText, Sent, Star, Typing,
 };
 use jaw_proto::settings::{Messages, Settings, SettingsKept, SettingsSet};
 use jaw_proto::sync::{HistoryMore, Notice};
@@ -125,6 +126,11 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "forward" => params::<Forward>(&name, &request.params),
                     "message.info" => params::<MessageInfo>(&name, &request.params),
                     "chat.info" => params::<ChatInfo>(&name, &request.params),
+                    "chat.pin" => params::<ChatPin>(&name, &request.params),
+                    "chat.archive" => params::<ChatArchive>(&name, &request.params),
+                    "chat.mute" => params::<ChatMute>(&name, &request.params),
+                    "chat.mark_unread" => params::<ChatMarkUnread>(&name, &request.params),
+                    "star" => params::<Star>(&name, &request.params),
                     "layout.get" => params::<LayoutGet>(&name, &request.params),
                     "layout.set" if book => params::<LayoutSet<Book>>(&name, &request.params),
                     "layout.set" => params::<LayoutSet>(&name, &request.params),
@@ -158,7 +164,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     }
                     "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
                     | "typing" | "react" | "edit" | "delete" | "poll.vote" | "folder.add" | "favourite.set"
-                    | "media.fetch" | "media.cancel" | "library.shown" => {
+                    | "media.fetch" | "media.cancel" | "library.shown" | "chat.pin" | "chat.archive" | "chat.mute"
+                    | "chat.mark_unread" | "star" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
                     "media.save" => params::<MediaSaved>(&name, result),
