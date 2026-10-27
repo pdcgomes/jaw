@@ -400,6 +400,29 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_change_whose_second_setting_cant_be_kept_keeps_neither_and_publishes_nothing() {
+        let (home, store, settings) = opened();
+        let outside = rusqlite::Connection::open(home.path().join("jaw.db")).unwrap();
+        // The settings are kept in the order of their names, so the theme is the second.
+        outside
+            .execute_batch(
+                "CREATE TRIGGER refused BEFORE INSERT ON settings WHEN NEW.key = 'theme'
+                BEGIN SELECT RAISE(ABORT, 'refused'); END",
+            )
+            .unwrap();
+        let heard = settings.subscribe(TERMINAL).unwrap();
+        let e = refused(&settings, json!({"messages": "irc", "theme": "nord"})).await;
+        assert_eq!(e.code, code::INTERNAL, "{}", e.message);
+        assert_eq!(store.setting(TERMINAL, "messages").unwrap(), None, "the first isn't kept without the second");
+        assert_eq!(settings.current(), Terminal::default());
+        assert!(!heard.has_changed().unwrap(), "nothing published");
+        outside.execute_batch("DROP TRIGGER refused").unwrap();
+        let now = set(&settings, TERMINAL, json!({"messages": "irc", "theme": "nord"})).await.unwrap();
+        assert_eq!(now, Terminal { theme: "nord".into(), messages: Messages::Irc }, "asked again, both are kept");
+        assert_eq!(store.setting(TERMINAL, "messages").unwrap().as_deref(), Some("\"irc\""));
+    }
+
     #[test]
     fn a_change_kept_in_quarantine_without_a_reason_still_says_where_it_went() {
         let e = not_kept(None);
