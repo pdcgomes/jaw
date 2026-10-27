@@ -9,7 +9,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension};
 
 use super::outbox::{OUTBOX_MOST, app_state_row, waiting};
@@ -44,15 +44,18 @@ pub enum Does {
 
 #[derive(Clone, Debug)]
 pub enum Setting {
-    /// Pinned at `at`, the time its patch carries, or unpinned when `None`.
+    /// Pinned at `at`, the time its patch carries, which is positive, or unpinned when `None`.
     Pin { at: Option<i64>, patch: Patch },
-    /// Archived or brought back; archiving a pinned chat unpins it, with `unpin` after `patch`.
+    /// Archived or brought back. Archiving a pinned chat unpins it, as WhatsApp's apps do, and so
+    /// does bringing one back while PINNED_MOST others are pinned, with `unpin` after `patch`;
+    /// either needs `unpin`, which is otherwise unused.
     Archive { archived: bool, patch: Patch, unpin: Option<Patch> },
     /// Muted until `until`, in milliseconds (`FOREVER` for ever), or unmuted at 0.
     Mute { until: i64, patch: Patch },
     /// Marked unread; or the mark taken off and the chat read here up to `newest`, its newest
-    /// message, which owes WhatsApp its read receipts.
-    MarkUnread { unread: bool, newest: Option<String>, patch: Patch },
+    /// message, which owes WhatsApp its read receipts, or, with none of its messages here, read
+    /// as WhatsApp's echo of the patch reads it, at `at`, the time the patch carries.
+    MarkUnread { unread: bool, newest: Option<String>, at: i64, patch: Patch },
 }
 
 /// An app-state patch to queue: its outbox row's own ID, and the AppStatePatch, encoded.
@@ -166,6 +169,9 @@ fn set(db: &Connection, stamps: &mut Stamps, jid: &str, setting: &Setting) -> Re
     let mut read = None;
     match setting {
         Setting::Pin { at, patch } => {
+            if let Some(at) = at.filter(|&at| at <= 0) {
+                bail!("a chat is pinned at a positive time, not {at}");
+            }
             if at.is_some() == (chat.pinned > 0) {
                 return Ok((Acted::Already, false));
             }
@@ -181,7 +187,10 @@ fn set(db: &Connection, stamps: &mut Stamps, jid: &str, setting: &Setting) -> Re
             }
             row.archived = Some(*archived);
             patches.push(patch);
-            if let (true, Some(unpin)) = (chat.pinned > 0, unpin) {
+            if chat.pinned > 0 && (*archived || pinned_elsewhere(db, chat.n)? >= PINNED_MOST) {
+                let Some(unpin) = unpin else {
+                    bail!("archiving or bringing back {jid} unpins it, so it needs its unpin patch");
+                };
                 row.pinned = Some(0);
                 patches.push(unpin);
             }
@@ -200,16 +209,14 @@ fn set(db: &Connection, stamps: &mut Stamps, jid: &str, setting: &Setting) -> Re
             row.marked_unread = Some(true);
             patches.push(patch);
         }
-        Setting::MarkUnread { unread: false, newest, patch } => {
+        Setting::MarkUnread { unread: false, newest, at, patch } => {
             if !chat.marked && chat.unread == 0 {
                 return Ok((Acted::Already, false));
             }
             row.marked_unread = Some(false);
-            read = newest.as_ref().map(|id| Read {
-                chat: jid.to_string(),
-                ids: vec![id.clone()],
-                here: true,
-                ..Read::default()
+            read = Some(match newest {
+                Some(id) => Read { chat: jid.to_string(), ids: vec![id.clone()], here: true, ..Read::default() },
+                None => Read { chat: jid.to_string(), at: *at, ..Read::default() },
             });
             patches.push(patch);
         }
@@ -292,6 +299,9 @@ pub(super) fn undo(db: &Connection, stamps: &mut Stamps, undo: &Undo) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use prost::Message as _;
+    use wa_proto::wa_web_protobuf_sync_action as action;
+
     use super::*;
     use crate::store::schema;
     use crate::store::{Amend, Change, Message};
@@ -325,11 +335,28 @@ mod tests {
         Does::Set(Setting::Pin { at, patch: patch(id) })
     }
 
+    /// An archive or its undoing, with the unpin patch the handler builds for every one.
+    fn archive(archived: bool, id: &str) -> Does {
+        Does::Set(Setting::Archive { archived, patch: patch(id), unpin: Some(patch(&format!("{id} unpin"))) })
+    }
+
     /// Does `does` to `chat` as the writer does, and says what it came to.
     fn acted(db: &Connection, chat: &str, does: Does) -> Acted {
         let outcome = Outcome::default();
         written(db, &[Change::ChatAction(Act { chat: chat.into(), does, outcome: outcome.clone() })]);
         outcome.take().expect("a chat action says what it came to")
+    }
+
+    /// Does `does` to `chat` as the writer does, for a caller's mistake: it fails, saying nothing of
+    /// what it came to.
+    fn refused(db: &Connection, chat: &str, does: Does) -> anyhow::Error {
+        let outcome = Outcome::default();
+        let mut stamps = Stamps::load(db).unwrap();
+        stamps.begin();
+        let act = Change::ChatAction(Act { chat: chat.into(), does, outcome: outcome.clone() });
+        let error = super::super::apply(db, &mut stamps, &act).expect_err("a caller's mistake fails");
+        assert_eq!(outcome.take(), None);
+        error
     }
 
     fn chats(db: &Connection, ids: &[&str]) {
@@ -356,6 +383,34 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    /// Puts `rows` reactions in the outbox, waiting to go.
+    fn outbox_holding(db: &Connection, rows: u64) {
+        for n in 0..rows {
+            db.execute(
+                "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'reaction', x'', 0, 0)",
+                rusqlite::params![ANA, format!("w{n}")],
+            )
+            .unwrap();
+        }
+    }
+
+    /// Pins `pinned` from jaw, then has `archived` pinned and archived, as the phone may leave one.
+    fn pinned_and_one_archived(db: &Connection, pinned: &[&str], archived: &str) {
+        chats(db, pinned);
+        for id in pinned {
+            assert!(matches!(acted(db, id, pin(Some(AT), id)), Acted::Queued { .. }), "{id}");
+        }
+        written(
+            db,
+            &[Change::Chat(Chat { id: archived.into(), pinned: Some(AT), archived: Some(true), ..Chat::default() })],
+        );
+    }
+
+    /// How many chats are pinned and not archived.
+    fn pinned_unarchived(db: &Connection) -> i64 {
+        db.query_row("SELECT count(*) FROM chats WHERE pinned > 0 AND archived = 0", [], |r| r.get(0)).unwrap()
     }
 
     fn from_ana(id: &str, at: i64) -> Change {
@@ -425,10 +480,6 @@ mod tests {
         let db = db();
         chats(&db, &[ANA, RUI]);
         written(&db, &[Change::Chat(Chat { id: ANA.into(), pinned: Some(AT), ..Chat::default() })]);
-        let archive = |archived: bool, id: &str| {
-            let unpin = archived.then(|| patch(&format!("{id} unpin")));
-            Does::Set(Setting::Archive { archived, patch: patch(id), unpin })
-        };
         let Acted::Queued { outbox, .. } = acted(&db, ANA, archive(true, "a1")) else { panic!("not queued") };
         assert_eq!(outbox.len(), 2);
         let (pinned, archived, ..) = chat(&db, ANA);
@@ -440,6 +491,39 @@ mod tests {
         assert_eq!(outbox.len(), 1, "a chat that isn't pinned has nothing to unpin");
         assert!(matches!(acted(&db, ANA, archive(false, "a3")), Acted::Queued { .. }));
         assert!(!chat(&db, ANA).1);
+    }
+
+    #[test]
+    fn bringing_back_a_pinned_chat_while_three_others_are_pinned_unpins_it_with_a_second_patch_after_the_first() {
+        let db = db();
+        let [a, b, c, d] = [
+            "351910000021@s.whatsapp.net",
+            "351910000022@s.whatsapp.net",
+            "351910000023@s.whatsapp.net",
+            "351910000024@s.whatsapp.net",
+        ];
+        pinned_and_one_archived(&db, &[a, b, d], c);
+        let without = Does::Set(Setting::Archive { archived: false, patch: patch("c0"), unpin: None });
+        assert!(refused(&db, c, without).to_string().contains("unpin patch"), "a fourth needs its unpin");
+        let Acted::Queued { outbox, .. } = acted(&db, c, archive(false, "c1")) else { panic!("not queued") };
+        assert_eq!(outbox.len(), 2);
+        let (pinned, archived, ..) = chat(&db, c);
+        assert_eq!((pinned, archived), (0, false), "brought back, and unpinned, as it would be a fourth");
+        let ids: Vec<String> = queued(&db).into_iter().filter(|(jid, ..)| jid == c).map(|(_, id, _)| id).collect();
+        assert_eq!(ids, ["c1", "c1 unpin"], "the archive patch first, then the unpin");
+        assert_eq!(pinned_unarchived(&db), 3);
+    }
+
+    #[test]
+    fn bringing_back_a_pinned_chat_with_fewer_than_three_others_pinned_keeps_it_pinned_with_one_patch() {
+        let db = db();
+        let [a, b, c] = ["351910000021@s.whatsapp.net", "351910000022@s.whatsapp.net", "351910000023@s.whatsapp.net"];
+        pinned_and_one_archived(&db, &[a, b], c);
+        let Acted::Queued { outbox, .. } = acted(&db, c, archive(false, "c1")) else { panic!("not queued") };
+        assert_eq!(outbox.len(), 1, "its unpin patch isn't used");
+        let (pinned, archived, ..) = chat(&db, c);
+        assert_eq!((pinned, archived), (AT, false), "brought back, and still pinned");
+        assert_eq!(pinned_unarchived(&db), 3);
     }
 
     #[test]
@@ -461,7 +545,7 @@ mod tests {
         written(&db, &[from_ana("m1", AT), from_ana("m2", AT + 10)]);
         assert_eq!(chat(&db, ANA).4, 2, "two unread");
         let mark = |unread: bool, id: &str| {
-            Does::Set(Setting::MarkUnread { unread, newest: Some("m2".into()), patch: patch(id) })
+            Does::Set(Setting::MarkUnread { unread, newest: Some("m2".into()), at: AT + 20, patch: patch(id) })
         };
         assert!(matches!(acted(&db, ANA, mark(true, "u1")), Acted::Queued { .. }));
         assert!(chat(&db, ANA).3);
@@ -473,6 +557,61 @@ mod tests {
             db.query_row("SELECT told_at IS NOT NULL FROM chats WHERE n = ?1", [chat_n], |r| r.get(0)).unwrap();
         assert!(owes, "read here, its read receipts are owed");
         assert_eq!(acted(&db, ANA, mark(false, "r2")), Acted::Already, "nothing marked and nothing unread");
+        assert_eq!(queued(&db).len(), 2);
+    }
+
+    #[test]
+    fn marking_read_a_chat_with_only_the_phones_count_reads_it_at_the_patchs_time_as_whatsapps_echo_will() {
+        let db = db();
+        written(&db, &[Change::Read(Read { chat: ANA.into(), at: AT, phone: Some((3, 0)), ..Read::default() })]);
+        let (.., marked, unread, v) = chat(&db, ANA);
+        assert_eq!((marked, unread), (false, 3), "the phone's count, with none of its messages here");
+        let at = AT + 1_500;
+        let read = |id: &str| Does::Set(Setting::MarkUnread { unread: false, newest: None, at, patch: patch(id) });
+        assert!(matches!(acted(&db, ANA, read("r1")), Acted::Queued { .. }));
+        let (.., unread, read_v) = chat(&db, ANA);
+        assert_eq!(unread, 0, "the phone's count cleared at once");
+        assert!(read_v > v, "with a new version");
+        let event: String = db.query_row("SELECT type FROM events WHERE seq = ?1", [read_v], |r| r.get(0)).unwrap();
+        assert_eq!(event, "chat", "and its event");
+        let read_at: i64 = db.query_row("SELECT read_at FROM chats WHERE id = ?1", [ANA], |r| r.get(0)).unwrap();
+        assert_eq!(read_at, at, "read at the patch's time");
+        let echo = action::SyncActionValue {
+            timestamp: Some(at),
+            mark_chat_as_read_action: Some(action::MarkChatAsReadAction {
+                read: Some(true),
+                message_range: Some(action::SyncActionMessageRange {
+                    last_message_timestamp: Some(at / 1000),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        let index = ["markChatAsRead".to_string(), ANA.to_string()];
+        written(&db, &crate::convert::app_state::mutation(&index, &echo.encode_to_vec()).changes);
+        assert_eq!(chat(&db, ANA).5, read_v, "WhatsApp's echo of the patch changes nothing");
+        assert_eq!(acted(&db, ANA, read("r2")), Acted::Already, "asked again, it's so already");
+        assert_eq!(queued(&db).len(), 1, "and no second patch");
+    }
+
+    #[test]
+    fn marking_read_is_so_already_only_for_a_chat_with_no_mark_and_nothing_unread() {
+        let db = db();
+        let untouched = "351910000004@s.whatsapp.net";
+        written(
+            &db,
+            &[from_ana("m1", AT), Change::Chat(Chat { id: RUI.into(), marked_unread: Some(true), ..Chat::default() })],
+        );
+        chats(&db, &[untouched]);
+        let read = |newest: Option<&str>, id: &str| {
+            let newest = newest.map(str::to_string);
+            Does::Set(Setting::MarkUnread { unread: false, newest, at: AT + 100, patch: patch(id) })
+        };
+        assert!(matches!(acted(&db, ANA, read(Some("m1"), "a1")), Acted::Queued { .. }), "unread, though not marked");
+        assert_eq!(chat(&db, ANA).4, 0, "and read");
+        assert!(matches!(acted(&db, RUI, read(None, "r1")), Acted::Queued { .. }), "marked, though nothing's unread");
+        assert!(!chat(&db, RUI).3, "and the mark taken off");
+        assert_eq!(acted(&db, untouched, read(None, "u1")), Acted::Already, "neither marked nor unread");
         assert_eq!(queued(&db).len(), 2);
     }
 
@@ -496,6 +635,20 @@ mod tests {
     }
 
     #[test]
+    fn a_star_without_room_in_the_outbox_is_refused_as_full_and_writes_nothing() {
+        let db = db();
+        written(&db, &[from_ana("m1", AT)]);
+        outbox_holding(&db, OUTBOX_MOST);
+        let message = |db: &Connection| -> (bool, i64) {
+            db.query_row("SELECT starred, v FROM messages WHERE id = 'm1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        };
+        let before = message(&db);
+        let star = Does::Star { id: "m1".into(), starred: true, patch: patch("s1") };
+        assert_eq!(acted(&db, ANA, star), Acted::Full { waiting: 1_000, failed: 0 });
+        assert_eq!((message(&db), queued(&db).len()), (before, 0), "nothing written or queued");
+    }
+
+    #[test]
     fn a_chat_jaw_doesnt_have_or_a_communitys_own_row_is_left_alone() {
         let db = db();
         written(&db, &[Change::Chat(Chat { id: COMMUNITY.into(), kind: Some("community"), ..Chat::default() })]);
@@ -510,13 +663,7 @@ mod tests {
         let db = db();
         chats(&db, &[ANA, RUI]);
         written(&db, &[Change::Chat(Chat { id: ANA.into(), pinned: Some(AT), ..Chat::default() })]);
-        for n in 0..OUTBOX_MOST as i64 - 1 {
-            db.execute(
-                "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'reaction', x'', 0, 0)",
-                rusqlite::params![ANA, format!("w{n}")],
-            )
-            .unwrap();
-        }
+        outbox_holding(&db, OUTBOX_MOST - 1);
         let archive =
             Does::Set(Setting::Archive { archived: true, patch: patch("a1"), unpin: Some(patch("a1 unpin")) });
         assert_eq!(acted(&db, ANA, archive), Acted::Full { waiting: 999, failed: 0 }, "two places, one left");
@@ -524,6 +671,21 @@ mod tests {
         assert_eq!((pinned, archived), (AT, false), "nothing written");
         assert!(matches!(acted(&db, RUI, pin(Some(AT), "r1")), Acted::Queued { .. }), "the last place");
         assert_eq!(acted(&db, RUI, pin(None, "r2")), Acted::Full { waiting: 1_000, failed: 0 });
+    }
+
+    #[test]
+    fn archiving_a_pinned_chat_without_its_unpin_patch_or_pinning_at_a_time_that_isnt_positive_is_refused() {
+        let db = db();
+        chats(&db, &[ANA, RUI]);
+        written(&db, &[Change::Chat(Chat { id: ANA.into(), pinned: Some(AT), ..Chat::default() })]);
+        let without = Does::Set(Setting::Archive { archived: true, patch: patch("a1"), unpin: None });
+        assert!(refused(&db, ANA, without).to_string().contains("unpin patch"));
+        let (pinned, archived, ..) = chat(&db, ANA);
+        assert_eq!((pinned, archived), (AT, false), "neither archived nor unpinned");
+        for at in [0, -1] {
+            assert!(refused(&db, RUI, pin(Some(at), "p1")).to_string().contains("positive"), "pinned at {at}");
+        }
+        assert_eq!((chat(&db, RUI).0, queued(&db).len()), (0, 0), "not pinned, and nothing queued");
     }
 
     #[test]
