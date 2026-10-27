@@ -776,4 +776,8 @@ extension AppModel: ChatListHost {
     func chatList(_: ChatListController, move place: Place) {
         if let w = listWindow { jawd.move(w, place) }
     }
+
+    func chatList(_: ChatListController, menuItemsFor chat: ChatRow) -> [NSMenuItem] {
+        chatMenuItems(for: chat)
+    }
 }

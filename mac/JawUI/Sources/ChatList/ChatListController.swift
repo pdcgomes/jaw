@@ -7,6 +7,8 @@ public protocol ChatListHost: AnyObject {
     /// You picked a chat yourself, from the list.
     func chatList(_ list: ChatListController, open chat: ChatRow)
     func chatList(_ list: ChatListController, move place: Place)
+    /// The menu for a chat right-clicked in the list, made as it opens.
+    func chatList(_ list: ChatListController, menuItemsFor chat: ChatRow) -> [NSMenuItem]
 }
 
 /// A folder's chats, pinned first, then newest, in 56-point rows. The list holds its order while
@@ -14,7 +16,7 @@ public protocol ChatListHost: AnyObject {
 /// pointer before a click, as the terminal holds it. A community is one row that opens to its
 /// groups, the announcement group first.
 @MainActor
-public final class ChatListController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+public final class ChatListController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     public weak var host: ChatListHost?
     public private(set) var chats: Chats<ChatRow>
     public var roles: Roles {
@@ -62,6 +64,10 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         table.list = self
         table.setAccessibilityLabel("Chats")
         table.setDraggingSourceOperationMask(.move, forLocal: true)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+        table.menu = menu
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         Scrolling.style(scroll)
@@ -189,6 +195,22 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         {
             host?.chatList(self, move: .top(UInt32(chats.count) + Self.rows))
         }
+    }
+
+    // MARK: Its menu
+
+    /// Fills the table's menu for the row right-clicked, which AppKit outlines while it's open.
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for item in menuItems(forRow: table.clickedRow) {
+            menu.addItem(item)
+        }
+    }
+
+    /// The menu of the chat at row `i`, from the host; none off the rows.
+    func menuItems(forRow i: Int) -> [NSMenuItem] {
+        guard i >= 0, i < shown.count else { return [] }
+        return host?.chatList(self, menuItemsFor: shown[i]) ?? []
     }
 
     // MARK: The table
