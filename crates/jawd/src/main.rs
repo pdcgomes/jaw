@@ -608,6 +608,7 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
     tokio::spawn(trouble(store.trouble(), pushes.clone()));
     let engine = supervisor.as_ref().ok().cloned();
     let following = presence::Following::default();
+    let app_state = sync::AppStateTurn::default();
     tokio::spawn(sync::run(
         incoming,
         store.clone(),
@@ -617,6 +618,7 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         home.to_path_buf(),
         following.clone(),
         typing.clone(),
+        app_state.clone(),
     ));
     let attention = Arc::new(attention::Attention::default());
     let media =
@@ -629,6 +631,7 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         attention.focus(),
         send::Timing::default(),
         send::Makers { previews: send::link::Previews::default(), media: Some(media.clone()) },
+        app_state,
     )
     .await?;
     let me = live.lock().expect("live state").me();

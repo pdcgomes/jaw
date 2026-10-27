@@ -44,6 +44,7 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
     let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
     let live: crate::sync::Shared = Arc::default();
     let (pushes, _) = broadcast::channel(256);
+    let app_state = crate::sync::AppStateTurn::default();
     let sync = crate::sync::run(
         incoming,
         store.clone(),
@@ -53,6 +54,7 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         home.to_path_buf(),
         Default::default(),
         crate::feed::Typing::default(),
+        app_state.clone(),
     );
     tokio::spawn(sync);
     let chats: Vec<Change> =
@@ -67,6 +69,7 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         attention.focus(),
         Timing::default(),
         super::Makers { previews: super::link::Previews::off(), media: None },
+        app_state,
     )
     .await?;
 

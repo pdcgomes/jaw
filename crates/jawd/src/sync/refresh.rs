@@ -2,7 +2,7 @@
 //! every group with its members, every app-state collection again in full, the phone numbers of
 //! LIDs jaw has none for, and avatars for the chats at the top of the list.
 
-use super::{Avatars, Merges};
+use super::{AppStateTurn, Avatars, Merges};
 use crate::convert::people;
 use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
@@ -15,7 +15,14 @@ pub const COLLECTIONS: [&str; 5] = ["critical_block", "critical_unblock_low", "r
 const LIDS: usize = 5_000;
 
 /// Brings the account's people, groups and, when `resync`, app state in.
-pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, merges: Merges, resync: bool) {
+pub async fn run(
+    store: Store,
+    engine: Supervisor,
+    avatars: Avatars,
+    merges: Merges,
+    resync: bool,
+    app_state: AppStateTurn,
+) {
     match engine.call(pb::command::Kind::Contacts(pb::Contacts {})).await {
         Ok(pb::reply::Kind::ContactList(list)) => store_changes(&store, people::contacts(&list), "contacts").await,
         Ok(other) => eprintln!("jawd: the engine answered contacts with {other:?}"),
@@ -29,19 +36,23 @@ pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, merges: Mer
         Ok(other) => eprintln!("jawd: the engine answered groups with {other:?}"),
         Err(e) => eprintln!("jawd: can't list the groups: {e}"),
     }
-    if resync && !resynced(&engine).await {
-        tokio::spawn(resync_again(engine.clone()));
+    if resync && !resynced(&engine, &app_state).await {
+        tokio::spawn(resync_again(engine.clone(), app_state));
     }
     lids(&store, &engine).await;
     merges.poke();
     avatars.seed(&store).await;
 }
 
-/// Asks the engine to fetch every app-state collection again in full, saying whether it did.
-async fn resynced(engine: &Supervisor) -> bool {
+/// Asks the engine to fetch every app-state collection again in full, saying whether it did. It
+/// waits for its turn with jaw's own patches, and holds it until every mutation is kept.
+async fn resynced(engine: &Supervisor, app_state: &AppStateTurn) -> bool {
     let names: Vec<String> = COLLECTIONS.iter().map(|name| name.to_string()).collect();
+    let turn = app_state.take().await;
     let started = std::time::Instant::now();
-    match engine.call(pb::command::Kind::AppStateResync(pb::AppStateResync { names })).await {
+    let fetched = engine.call(pb::command::Kind::AppStateResync(pb::AppStateResync { names })).await;
+    drop(turn);
+    match fetched {
         Ok(_) => {
             eprintln!("jawd: fetched app state again in full in {:.1} s", started.elapsed().as_secs_f64());
             true
@@ -62,12 +73,12 @@ const RESYNC_TRIES: u32 = 10;
 /// Tries the full refetch again while the engine that failed it runs, since until it succeeds
 /// what an engine stopped in the middle of left behind stays missing. An engine started again
 /// fetches it itself.
-async fn resync_again(engine: Supervisor) {
+async fn resync_again(engine: Supervisor, app_state: AppStateTurn) {
     let restarts = engine.status().restarts;
     let mut pause = RESYNC_FIRST;
     for _ in 0..RESYNC_TRIES {
         tokio::time::sleep(pause).await;
-        if engine.status().restarts != restarts || resynced(&engine).await {
+        if engine.status().restarts != restarts || resynced(&engine, &app_state).await {
             return;
         }
         pause = (pause * 2).min(RESYNC_MOST);

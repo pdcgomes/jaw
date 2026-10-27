@@ -7,7 +7,7 @@ use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, watch};
-use wa_proto::wa_web_protobuf_sync_action::{PinAction, SyncActionValue};
+use wa_proto::wa_web_protobuf_sync_action::{ContactAction, PinAction, SyncActionValue};
 
 use super::*;
 use crate::engine::demo::{self, DemoEngine, Replies, World};
@@ -84,6 +84,7 @@ impl Running {
         let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
         let mut connected = pushes.subscribe();
         let typing = crate::feed::Typing::default();
+        let app_state = crate::sync::AppStateTurn::default();
         let sync = crate::sync::run(
             incoming,
             store.clone(),
@@ -93,6 +94,7 @@ impl Running {
             home.into(),
             Default::default(),
             typing.clone(),
+            app_state.clone(),
         );
         tokio::spawn(sync);
         let attention = Arc::new(crate::attention::Attention::default());
@@ -104,6 +106,7 @@ impl Running {
             attention.focus(),
             timing,
             Makers { previews: link::Previews::off(), media: None },
+            app_state,
         )
         .await
         .unwrap();
@@ -392,6 +395,26 @@ fn a_scene_of_jawd_to_be_killed() {
                 running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Send(_)))).await;
                 running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
                 at(&id);
+            }
+            "pinned behind a message" => {
+                let running = Running::on(home, phone_with_app_state(), true).await;
+                until_fetched(&running, 1).await;
+                // Ana has no picture, as the avatars looked for once the engine connects find, so
+                // jawd started again looks for none.
+                let pictureless = Chat {
+                    id: ANA.into(),
+                    avatar: Some(String::new()),
+                    avatar_id: Some("none".into()),
+                    ..Chat::default()
+                };
+                running.store.apply(Lane::Live, vec![Change::Chat(pictureless)]).await.unwrap();
+                until_offline(&running).await;
+                running.send(ANA, "on my way").await;
+                // Ana's newer message keeps the one sent from being the chat's newest, whose status
+                // its line shows, so its going later leaves the chat's row as it is.
+                running.arrives(ANA, ANA, "m2", now_ms() + 1_000).await;
+                running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
+                at("pinned");
             }
             other => panic!("there's no scene {other}"),
         }
@@ -4094,6 +4117,110 @@ async fn toggling_a_pin_while_whatsapp_cant_be_reached_ends_as_asked_last_once_i
     until_echoed(&running, &sent[4]).await;
     let ana = chat_row(&running, ANA).await;
     assert_eq!((ana.pinned, ana.v), (true, asked.v), "as asked last, the earlier echoes changing nothing");
+    let latest = value_of(&latest_for(&running, ["pin_v1", ANA]));
+    assert_eq!(latest.pin_action, Some(PinAction { pinned: Some(true) }), "and WhatsApp's latest pins it");
+}
+
+/// How many people's names the phone's app state holds ahead of Ana's chat.
+const NAMES: usize = 300;
+
+/// A phone whose app state holds NAMES people's names and, after them, Ana's chat unpinned an hour
+/// ago, so a full fetch of it reaches her chat only once every name is in.
+struct Phone;
+
+impl demo::Account for Phone {
+    fn contacts(&self) -> pb::ContactList {
+        pb::ContactList::default()
+    }
+
+    fn groups(&self) -> pb::GroupList {
+        pb::GroupList::default()
+    }
+
+    fn members(&self, _: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn lid_pairs(&self, _: &[String]) -> pb::LidPairs {
+        pb::LidPairs::default()
+    }
+
+    fn history(&self, _: &wa_proto::wa_web_protobufs_e2e::HistorySyncNotification) -> Option<demo::Blob> {
+        None
+    }
+
+    fn app_state(&self) -> Vec<pb::Event> {
+        let an_hour_ago = Some(now_ms() - 3_600_000);
+        let mutation = |index: [String; 2], value: SyncActionValue| pb::Event {
+            seq: 0,
+            kind: Some(pb::event::Kind::AppState(pb::AppState { index: index.into(), value: value.encode_to_vec() })),
+        };
+        let mut events: Vec<pb::Event> = (0..NAMES)
+            .map(|n| {
+                let named = ContactAction { full_name: Some(format!("Person {n}")), ..Default::default() };
+                let value =
+                    SyncActionValue { timestamp: an_hour_ago, contact_action: Some(named), ..Default::default() };
+                mutation(["contact".into(), format!("35192{n:07}@s.whatsapp.net")], value)
+            })
+            .collect();
+        let unpinned = SyncActionValue {
+            timestamp: an_hour_ago,
+            pin_action: Some(PinAction { pinned: Some(false) }),
+            ..Default::default()
+        };
+        events.push(mutation(["pin_v1".into(), ANA.into()], unpinned));
+        events
+    }
+}
+
+/// WhatsApp holding the phone's app state, whose people take an hour to answer a message.
+fn phone_with_app_state() -> Arc<World> {
+    let world = DemoEngine::for_account(Vec::new(), Arc::new(Phone)).world();
+    world.replying(Replies { delivered: Duration::from_secs(3_600), read: Duration::from_secs(3_600) });
+    world
+}
+
+/// Waits until the engine has played `fetches` full fetches of the app state, and every mutation
+/// they brought is converted.
+async fn until_fetched(running: &Running, fetches: usize) {
+    for _ in 0..1_500 {
+        if running.world.fetched().len() >= fetches {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(running.world.fetched().len() >= fetches, "the engine didn't fetch the app state again in full");
+    eventually(running, "the fetch's mutations to be converted", |db| {
+        Ok(db.query_row("SELECT count(*) FROM inbox", [], |r| r.get::<_, i64>(0))? == 0)
+    })
+    .await;
+}
+
+/// Ana's chat's pinned and v.
+fn ana_pinned(db: &Connection) -> rusqlite::Result<(i64, i64)> {
+    db.query_row("SELECT pinned, v FROM chats WHERE id = ?1", [ANA], |r| Ok((r.get(0)?, r.get(1)?)))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pin_that_goes_while_the_engine_start_fetches_app_state_again_ends_pinned_as_asked() {
+    let home = tempfile::tempdir().unwrap();
+    crash(home.path(), "pinned behind a message").await;
+    let pinned = ana_pinned(&Connection::open(home.path().join("jaw.db")).unwrap()).unwrap();
+    assert!(pinned.0 > 0, "pinned while WhatsApp couldn't be reached");
+    let world = phone_with_app_state();
+    // The message ahead of the pin waits at WhatsApp until the engine start's full fetch has begun,
+    // so the pin goes while the fetch is still handing over the names ahead of Ana's chat.
+    world.gate(true);
+    let running = Running::on(home.path(), world, true).await;
+    running.world.until(|asked| asked.iter().any(|kind| matches!(kind, pb::command::Kind::AppStateResync(_)))).await;
+    running.world.gate(false);
+    until_stored(&running).await;
+    until_fetched(&running, 1).await;
+    assert_eq!(
+        running.query(|db| Ok(ana_pinned(db)?)).await,
+        pinned,
+        "pinned at jaw's time, unchanged since the pin, the unpin the fetch brought held back"
+    );
     let latest = value_of(&latest_for(&running, ["pin_v1", ANA]));
     assert_eq!(latest.pin_action, Some(PinAction { pinned: Some(true) }), "and WhatsApp's latest pins it");
 }

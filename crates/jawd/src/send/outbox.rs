@@ -500,7 +500,19 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
     } else {
         pb::command::Kind::Send(pb::Send { chat: row.chat.clone(), id: row.id.clone(), raw: row.raw.clone() })
     };
-    let failure = match engine(&inner, command).await {
+    // A patch holds its turn with sync's full fetches of app state until the engine answers, once
+    // the patch's echo is kept; while another has it, it waits as for the connection.
+    let turn = if app_state {
+        let Some(turn) = inner.app_state.try_take() else {
+            return Next::After(Box::pin(inner.app_state.free()));
+        };
+        Some(turn)
+    } else {
+        None
+    };
+    let answered = engine(&inner, command).await;
+    drop(turn);
+    let failure = match answered {
         Ok(pb::reply::Kind::Sent(sent)) => {
             settle(&inner, sent_changes(&row, &sent)).await;
             return Next::Done;

@@ -29,6 +29,7 @@ async fn sending(home: &Path) -> (Store, Sending, Arc<World>) {
     let engine = DemoEngine::sharing(vec![demo::connected()], world.clone());
     let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
     let mut connected = pushes.subscribe();
+    let app_state = crate::sync::AppStateTurn::default();
     let sync = crate::sync::run(
         incoming,
         store.clone(),
@@ -38,6 +39,7 @@ async fn sending(home: &Path) -> (Store, Sending, Arc<World>) {
         home.into(),
         Default::default(),
         crate::feed::Typing::default(),
+        app_state.clone(),
     );
     tokio::spawn(sync);
     let attention = Arc::new(crate::attention::Attention::default());
@@ -51,6 +53,7 @@ async fn sending(home: &Path) -> (Store, Sending, Arc<World>) {
         attention.focus(),
         timing,
         Makers { previews: link::Previews::off(), media: None },
+        app_state,
     )
     .await
     .unwrap();
