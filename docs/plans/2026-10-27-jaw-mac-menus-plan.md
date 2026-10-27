@@ -36,6 +36,8 @@
 
 ### Task 1: Right-click menus made from entries
 
+Amended after its review (3f630c9): an item under an entry's own title says what it will do, so it has no tick, never "✓ Unpin", neither as `Menus.items` makes it nor when a menu that enables its items checks it (`CommandBox.ticks`, read by `CommandTarget.validateMenuItem`); an item is enabled and ticked by that one rule; and the tests cover a separator where two met, a submenu that can run and a setting that's off.
+
 **Files:**
 - Modify: `mac/JawUI/Sources/Commands/Command.swift` (after `Menus.menu(_:title:)`, and a new enum at the end of the file)
 - Test: `mac/Tests/JawUITests/MenuEntryTests.swift`
@@ -543,6 +545,7 @@ In `loadView()`, after `table.setDraggingSourceOperationMask(.move, forLocal: tr
 
 ```swift
         let menu = NSMenu()
+        menu.autoenablesItems = false
         menu.delegate = self
         table.menu = menu
 ```
