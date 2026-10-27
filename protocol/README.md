@@ -139,7 +139,7 @@ A message row, render-ready:
 | `voice` | `seconds` and `waveform`, 64 values from 0 to 100, and `played`: on someone else's, whether you've played it, as the played receipt jawd sent says (the interface shows a dot until then, and plays the next one not yet played when one ends) |
 | `link` | A link preview: `url`, `title`, `description`, `preview` |
 | `poll` | `question`, `options` (each with `name`, `votes` and `mine`), `max` (how many choices), `voters` |
-| `location`, `contact`, `event` | Their fields, ready to show |
+| `location`, `contact`, `event` | Their fields, ready to show: `location` is `lat`, `lon`, `name`, `address`, `url`; `contact` is `name` and `vcard`; `event` is `name`, `description`, `start`, `end` (milliseconds since the epoch), `place`, `call` (a call link, if it has one), `cancelled`, and `going`, `maybe` and `not_going` counts with `mine` (proposed, with Composing) |
 | `system` | For `system` and `call`: one sentence, such as "Rui added Sofia" or "Missed voice call" |
 
 ### roster.watch
@@ -247,6 +247,11 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `send.media` | `chat`, `files` (each a `path`, `kind` and `caption`), `quality` (`sd` or `hd`), `reply` | `messages` |
 | `send.poll` | `chat`, `question`, `options`, `max` | `message` |
 | `poll.vote` | `message`, `options` | |
+| `send.event` | `chat`, `name`, `description`, `start`, `end`, `place`, `call` | `message`. See Composing |
+| `send.contact` | `chat`, `cards` (each a `name` and a `vcard`) | `message`. See Composing |
+| `send.location` | `chat`, `lat`, `lon`, `name`, `address` | `message`. See Composing |
+| `gif.search` | `query` (empty for what's trending), `limit`, `cursor` | `gifs` and the next `cursor`. See Composing |
+| `send.gif` | `chat`, `gif` (an `id` from `gif.search`), `caption`, `reply` | `message`. See Composing |
 | `react` | `message`, `emoji` (empty to remove), and optionally `chat`, `key` | |
 | `edit` | `message`, `text`, and optionally `chat`, `key` | |
 | `delete` | `message`, `for` (`me` or `everyone`), and optionally `chat`, `key` | |
@@ -313,6 +318,22 @@ Proposed with the `jaw-voice` crate in M5, for jawd to wire in; until then the `
   - `cancelled`, or `failed` with `error`; nothing is kept after either.
 - `voice.stop` stops recording and keeps it, to listen to or send. `voice.send` sends the stopped recording as a voice message, or stops and sends one still recording (Enter while recording), and returns `message`. `voice.cancel` throws it away, recording or stopped.
 - The played receipt: jawd sends it for someone else's voice message when it first starts playing, once.
+
+## Composing (proposed)
+
+Proposed with the Mac app's box (its design, `docs/plans/2026-10-27-jaw-mac-box-design.md`), for jawd to build: sending events, contacts and places, and GIFs found by search. Events and places come in M2 beside polls, contacts in M4 beside media, and GIF search after M4. Until then the rows above are the draft. Each answers as `send.text` does, with the `message` it made, whose row arrives as an upsert; a `key` makes asking again safe, as for the message actions.
+
+```json
+{"id":40,"method":"send.event","params":{"chat":"120363000000000002@g.us","name":"Sintra","description":"Bring the rope","start":1792231200000,"end":1792252800000,"place":"Cabo da Roca","call":false,"key":"9f2c"}}
+{"id":41,"method":"gif.search","params":{"query":"thank you","limit":24}}
+{"id":41,"result":{"gifs":[{"id":"giphy:3o7abKhOpu0NwenH3O","w":480,"h":270,"preview":"media/g/3o7abK.mp4","title":"Thank You"}],"cursor":"24"}}
+```
+
+- **`send.event`:** a WhatsApp event, as the phones make them: `name` (required), `description`, `start` (required), `end`, `place` (a name, or a place as `send.location` takes it), and `call` true to add a WhatsApp call link. Its row is kind `event`; replies to it (going, maybe, not going) update its counts as upserts.
+- **`send.contact`:** one card or several, each a `name` and a `vcard` (vCard 3.0, as the Contacts app exports it). Its row is kind `contact`.
+- **`send.location`:** a place by `lat` and `lon`, with an optional `name` and `address`. Its row is kind `location`. Live locations aren't sent.
+- **`gif.search`:** jawd asks Giphy, and nothing else in jaw talks to a service besides WhatsApp: only when an interface asks, which it does only while a GIF picker is open and something is typed (an empty `query` asks for what's trending). jawd fetches each result's small looping MP4 into its media cache and answers with paths, so interfaces show files, never URLs. Results are kept for an hour; Giphy's key is jawd's, set by environment. Error 6 when Giphy doesn't answer in 3 seconds.
+- **`send.gif`:** a result by its `id`: jawd fetches its MP4 and sends it as WhatsApp's GIF (a looping video), with the `caption`. Its row is kind `gif`.
 
 ## Message actions (proposed)
 

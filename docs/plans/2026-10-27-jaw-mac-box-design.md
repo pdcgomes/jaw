@@ -52,11 +52,11 @@ Each is a sheet over the window, keys first: Tab moves, Return sends, Esc cancel
 | --- | --- | --- |
 | `send.media` | files by path, kind, caption, quality, reply | in the protocol, not served on main (M4) |
 | `send.poll` | question, options, max | in the protocol, not served on main (M2) |
-| `send.event` | name, description, start, end, place, call link | to propose |
-| `send.contact` | vCards | to propose |
-| `send.location` | latitude, longitude, name, address | to propose |
-| `gif.search` | query (empty for trending), limit; answers with ids, sizes and preview paths | to propose; jawd asks Giphy |
-| `send.gif` | a GIF from `gif.search` by its id: jawd fetches its MP4 and sends it as a GIF | to propose (M4) |
+| `send.event` | name, description, start, end, place, call link | proposed in the protocol's Composing (M2) |
+| `send.contact` | vCards | proposed in the protocol's Composing (M4) |
+| `send.location` | latitude, longitude, name, address | proposed in the protocol's Composing (M2) |
+| `gif.search` | query (empty for trending), limit; answers with ids, sizes and preview paths | proposed in the protocol's Composing (after M4); jawd asks Giphy |
+| `send.gif` | a GIF from `gif.search` by its id: jawd fetches its MP4 and sends it as a GIF | proposed in the protocol's Composing (after M4) |
 
 Until jawd serves one, the app makes the request anyway and says what jawd answers ("attaching comes with jawd's M4"), as the chat actions do, so nothing in the app changes when jawd does.
 
