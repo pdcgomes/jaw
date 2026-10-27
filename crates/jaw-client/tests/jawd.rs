@@ -257,14 +257,21 @@ fn an_interface_that_falls_behind_is_told_to_watch_again_and_ends_as_a_fresh_one
 
     // With room for one event, the second reply stops the slow interface's reading, so jawd's
     // queue to it fills while messages pour in, and 5 seconds later jawd drops its windows. Focus
-    // is answered at once, so the reading stops at once; then jawd is asked until only the fresh
-    // interface's two windows are watched.
+    // is answered at once, so the reading stops at once; then jawd is asked until one connection,
+    // the slow interface's, has no windows, while every other has its two: the bench's own
+    // interface connects and watches once its first stream is written, which can be before or
+    // after the drop. A connection just made has none for a moment, so the count holds twice.
     for focused in [false, true, false] {
         slow.client.request("focus", serde_json::json!({ "focused": focused })).unwrap();
     }
     let until = Instant::now() + DEADLINE;
-    while fresh.status()["windows"]["watched"] != 2 {
-        assert!(Instant::now() < until, "jawd never dropped the slow interface's windows");
+    let mut held = 0;
+    while held < 2 {
+        let status = fresh.status();
+        let (watched, connected) = (status["windows"]["watched"].as_u64(), status["interfaces"]["connected"].as_u64());
+        let one_without = watched.zip(connected).is_some_and(|(watched, connected)| watched + 2 == 2 * connected);
+        held = if one_without { held + 1 } else { 0 };
+        assert!(Instant::now() < until, "jawd never dropped the slow interface's windows: {status}");
         std::thread::sleep(Duration::from_millis(200));
     }
     slow.until(DEADLINE, "jawd's resync", |ui| ui.client.stats().resyncs == 2);
