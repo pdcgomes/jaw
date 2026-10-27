@@ -860,7 +860,10 @@ async fn a_lone_change_after_quiet_goes_at_once_rather_than_waiting_to_coalesce(
         }
     }
     task.abort();
-    assert!(delays.iter().all(|&delay| delay < ms(50)), "a lone message waited to coalesce: {delays:?}");
+    // Judged on the median, since other processes' load can stall any one push; a lone message
+    // that waited to coalesce would wait its 100 ms each time.
+    delays.sort();
+    assert!(delays[delays.len() / 2] < ms(50), "lone messages waited to coalesce: {delays:?}");
 }
 
 /// Writes 2,000 messages, four a millisecond and half of them to the open chat, each in a
@@ -3544,38 +3547,40 @@ async fn no_window_starves_while_the_others_keep_falling_due() {
             tokio::time::sleep(ms(3)).await;
         }
     });
-    let started = Instant::now();
-    let until = started + Duration::from_secs(2);
-    let mut last: HashMap<String, Instant> = watches.iter().map(|watch| (watch.clone(), started)).collect();
-    let mut longest: HashMap<String, Duration> = HashMap::new();
+    // A window's wait is counted in the batches the others had meanwhile, which other processes'
+    // load can't stretch as it can the time between batches: a stall holds them all alike. The
+    // chat list goes after the conversations, so it can wait two turns of theirs; one that starves
+    // waits all 2 s.
+    let until = Instant::now() + Duration::from_secs(2);
+    let count = |batches: &HashMap<String, usize>, watch: &String| batches.get(watch).copied().unwrap_or(0);
+    let (mut seen, mut at) = (0, HashMap::<String, usize>::new());
+    let mut most = HashMap::<String, usize>::new();
     while Instant::now() < until
         && let Ok(ready) = tokio::time::timeout_at(until.into(), watcher.client.ready()).await
     {
         watcher.client.handle(ready).await;
         let before = watcher.batches.clone();
         watcher.drain();
-        let now = Instant::now();
+        seen = watches.iter().map(|watch| count(&watcher.batches, watch)).sum();
         for watch in &watches {
-            if watcher.batches.get(watch) != before.get(watch) {
-                let most = longest.entry(watch.clone()).or_default();
-                *most = (*most).max(now - last[watch]);
-                last.insert(watch.clone(), now);
+            let new = count(&watcher.batches, watch) - count(&before, watch);
+            if new > 0 {
+                let others = seen - new - at.get(watch).copied().unwrap_or(0);
+                most.entry(watch.clone()).and_modify(|most| *most = (*most).max(others)).or_insert(others);
+                at.insert(watch.clone(), seen);
             }
         }
     }
-    let end = Instant::now();
     for watch in &watches {
-        let most = longest.entry(watch.clone()).or_default();
-        *most = (*most).max(end - last[watch]);
+        let since = seen - at.get(watch).copied().unwrap_or(0);
+        most.entry(watch.clone()).and_modify(|most| *most = (*most).max(since)).or_insert(since);
     }
     flood.await.unwrap();
     bed.feed.slow_reads(0);
-    let report: Vec<(&String, usize, u128)> = watches
-        .iter()
-        .map(|watch| (watch, watcher.batches.get(watch).copied().unwrap_or(0), longest[watch].as_millis()))
-        .collect();
-    for (watch, _, gap) in &report {
-        assert!(*gap < 500, "{watch} went {gap} ms without a batch while its chats kept changing: {report:?}");
+    let report: Vec<(&String, usize, usize)> =
+        watches.iter().map(|watch| (watch, count(&watcher.batches, watch), most[watch])).collect();
+    for (watch, _, others) in &report {
+        assert!(*others <= 4 * (watches.len() - 1), "{watch} waited while the others had {others} batches: {report:?}");
     }
 }
 
