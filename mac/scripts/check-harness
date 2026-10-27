@@ -13,7 +13,7 @@ if [ -n "$found" ]; then
     echo "check-harness: the harness draws from fixtures and never names Jawd" >&2
     exit 1
 fi
-found=$(grep -rnE '(^|[^[:alnum:]_])Client(\(|\.Config)' JawHarness/Sources)
+found=$(grep -rnw 'Client' JawHarness/Sources)
 if [ -n "$found" ]; then
     echo "$found"
     echo "check-harness: the harness draws from fixtures and never names JawKit's Client, which opens jawd's socket itself" >&2
