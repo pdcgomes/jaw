@@ -89,7 +89,7 @@ const AS_IT_WAS: [(State, u16, u16, &str, u64); 14] = [
     (State::Online, 80, 24, "<down>\n", 0x871f_b1ad_f13f_1eb7),
     (State::Online, 100, 30, "<up>", 0x16c9_4fd5_3d25_ab5d),
     (State::Online, 140, 34, "levo o vinho<c-k>", 0x11f4_3b22_9bda_f91c),
-    (State::Online, 100, 30, "?", 0xe5c4_4888_f448_8ead),
+    (State::Online, 100, 30, "?", 0xaf22_ca71_fcf3_6fe4),
     (State::Online, 100, 30, "sim!<a-enter>e levo a sobremesa", 0x9fa0_62df_9fa2_2906),
     (State::Online, 120, 30, "<c-b>", 0x2190_c6b2_085a_4385),
     (State::CatchingUp, 140, 30, "<a-down><a-down><a-down><a-down>", 0xdf1c_770e_835c_0222),

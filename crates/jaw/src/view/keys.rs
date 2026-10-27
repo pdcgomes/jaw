@@ -124,6 +124,10 @@ impl View {
             self.library_key();
             return;
         }
+        if alt && k.modifiers.contains(KeyModifiers::SHIFT) && matches!(k.code, KeyCode::Up | KeyCode::Down) {
+            self.step_folder(if k.code == KeyCode::Up { -1 } else { 1 });
+            return;
+        }
         if alt && matches!(k.code, KeyCode::Up | KeyCode::Down) {
             self.step_chat(if k.code == KeyCode::Up { -1 } else { 1 });
             return;
@@ -470,6 +474,10 @@ impl View {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 self.close_quick_look();
             }
+            return;
+        }
+        if inside(self.areas.sidebar, x, y) {
+            self.on_sidebar_mouse(m);
             return;
         }
         if self.pane_click(&m) {

@@ -134,6 +134,12 @@ struct Areas {
     message_rows: Vec<(u16, u16, String)>,
     composer: Rect,
     composer_width: usize,
+    /// The sidebar, each folder's row and the open or closed mark of those with folders in them,
+    /// each with its folder, and each person's row in the roster with theirs.
+    sidebar: Rect,
+    folder_rows: Vec<(u16, String)>,
+    folder_marks: Vec<(Rect, String)>,
+    people_rows: Vec<(u16, String)>,
     width: u16,
     height: u16,
 }

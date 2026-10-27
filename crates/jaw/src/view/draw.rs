@@ -1145,13 +1145,13 @@ impl View {
             pair(("@", "a name, in a group", true), Some(("i", "info", true))),
             pair(("ctrl-o", "attach · M4", false), Some(("s", "save · M3", false))),
             pair(("ctrl-r", "record a voice message", true), Some(("← →  x", "seek, speed of a voice one", true))),
-            pair(("", "", true), Some(("esc", "back to typing", true))),
+            pair(("/search", "words in this chat", true), Some(("esc", "back to typing", true))),
             Line::default(),
             head("moving", "anywhere"),
             pair(("ctrl-k", "the palette: anything", true), Some(("?", "these keys", true))),
-            pair(("alt-↑ ↓", "the chat before, after", true), Some(("/search", "words in this chat", true))),
-            pair(("esc", "the chat list, when narrow", true), Some(("the mouse", "click, scroll, open", true))),
-            pair(("ctrl-b", "the sidebar", true), Some(("ctrl-c", "quit", true))),
+            pair(("alt-↑ ↓", "the chat before, after", true), Some(("the mouse", "click, scroll, open", true))),
+            pair(("alt-⇧-↑ ↓", "the folder before, after", true), Some(("ctrl-b", "folders and people", true))),
+            pair(("esc", "the chat list, when narrow", true), Some(("ctrl-c", "quit", true))),
         ];
         let (focus, look) = (self.experiments.focus, self.experiments.quick_look);
         if focus || look {

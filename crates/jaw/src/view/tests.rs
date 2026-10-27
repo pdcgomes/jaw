@@ -5,6 +5,8 @@ use crate::data::{Chat, Hit, Kind, Media, Sender, Span, SpanKind};
 use crate::demo::{Clock, Demo, State};
 use crate::graphics::{Images, Protocol};
 use crate::run::{self, Event};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{
     Event as Input, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -199,6 +201,29 @@ fn the_keys_show_on_question_mark_and_any_key_closes_them() {
     press(&mut v, &rx, "?");
     assert!(v.overlay.is_none());
     assert_eq!(v.composer.text(), "?", "the key that closed them is typed, so a lone ? can be sent");
+}
+
+#[test]
+fn at_80_by_24_the_keys_show_every_line_and_say_where_folders_are() {
+    let rows = |screen: &str| {
+        let top = row_of(screen, "╭ keys ─").unwrap_or_else(|| panic!("{screen}"));
+        row_of(screen, " any key closes ─").unwrap_or_else(|| panic!("{screen}")) - top - 1
+    };
+    let (mut v, rx) = view(80, 24);
+    press(&mut v, &rx, "?");
+    let screen = frame(&mut v);
+    let all = run::snapshot(&mut v, 120, 60);
+    assert_eq!(rows(&screen), rows(&all), "every line, as a tall screen has them:\n{screen}\n{all}");
+    for said in [
+        "typing                                 a selected message",
+        "/search    words in this chat          esc        back to typing",
+        "alt-↑ ↓    the chat before, after      the mouse  click, scroll, open",
+        "alt-⇧-↑ ↓  the folder before, after    ctrl-b     folders and people",
+        "esc        the chat list, when narrow  ctrl-c     quit",
+    ] {
+        assert!(screen.contains(said), "{said}:\n{screen}");
+    }
+    assert!(!screen.contains("sidebar"), "{screen}");
 }
 
 #[test]
@@ -1639,6 +1664,187 @@ fn presence_changing_moves_people_in_the_roster() {
     v.apply(Update::Roster { folder: "folder:1".into(), upsert: vec![row], remove: vec![], whole: false });
     let screen = frame(&mut v);
     assert!(row_of(&screen, "● Inês Gomes").unwrap() < row_of(&screen, "○ Mãe").unwrap(), "{screen}");
+}
+
+const CLICK: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+
+/// The mouse at a cell, everything it brings applied.
+fn mouse(v: &mut View, rx: &Receiver<Event>, kind: MouseEventKind, (column, row): (u16, u16)) {
+    v.on_input(Input::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }));
+    run::settle(v, rx);
+}
+
+/// The cell `text` starts on, the first time the screen has it: its column and its row.
+fn cell_of(screen: &str, text: &str) -> (u16, u16) {
+    let row = row_of(screen, text).unwrap_or_else(|| panic!("no {text:?} on the screen:\n{screen}"));
+    let line = screen.lines().nth(row).unwrap_or_default();
+    (line[..line.find(text).unwrap_or_default()].width() as u16, row as u16)
+}
+
+/// The sidebar's rows its band is on, the selection's colour behind them, as text.
+fn banded(v: &mut View) -> Vec<String> {
+    let (w, h) = v.size().unwrap();
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| v.draw(f)).unwrap();
+    let (buf, selection) = (term.backend().buffer(), v.theme.selection);
+    (0..h)
+        .filter(|&y| buf[(1, y)].bg == selection)
+        .map(|y| (1..sidebar::SIDEBAR - 1).map(|x| buf[(x, y)].symbol()).collect::<String>().trim().to_string())
+        .collect()
+}
+
+#[test]
+fn alt_shift_up_and_down_go_to_the_folder_before_and_after_from_typing_and_stay_at_the_ends() {
+    let (mut v, rx) = view(100, 30);
+    press(&mut v, &rx, "olá<a-s-down>");
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ chats · Unread") && screen.contains("Escola do Bairro"), "{screen}");
+    assert!(
+        !screen.contains("Pedro & Ana") && !screen.contains("╭ folders"),
+        "its chats, the sidebar folded:\n{screen}"
+    );
+    assert_eq!(
+        (v.open.as_deref(), v.focus.clone(), v.composer.text()),
+        (Some("ana"), Focus::Typing, "olá"),
+        "the chat and the box as they were"
+    );
+    press(&mut v, &rx, "<a-s-up>");
+    assert!(frame(&mut v).contains("╭ chats · All"));
+    press(&mut v, &rx, "<a-s-up>");
+    assert_eq!(v.folder, "all", "All is the first, and it stays there");
+    let mut walked = vec![];
+    for _ in 0..14 {
+        press(&mut v, &rx, "<a-s-down>");
+        walked.push(v.folder.clone());
+    }
+    assert_eq!(
+        walked,
+        [
+            "unread",
+            "groups",
+            "communities",
+            "archived",
+            "folder:1",
+            "folder:2",
+            "folder:3",
+            "folder:4",
+            "folder:5",
+            "folder:6",
+            "smart:1",
+            "smart:2",
+            "smart:3",
+            "smart:3"
+        ],
+        "the tree's order with every folder open, staying at the last"
+    );
+    assert!(frame(&mut v).contains("╭ chats · Muted, unread"));
+}
+
+#[test]
+fn alt_shift_down_to_a_nested_folder_opens_its_parents_and_the_sidebars_band_follows() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<a-s-down><a-s-down><a-s-down><a-s-down><a-s-down>");
+    assert!(banded(&mut v).iter().any(|b| b.starts_with("▸ Family")), "{:?}", banded(&mut v));
+    press(&mut v, &rx, "<a-s-down>");
+    let screen = frame(&mut v);
+    assert!(
+        screen.contains("▾ Family") && screen.contains("│     Parents") && screen.contains("chats · Parents"),
+        "{screen}"
+    );
+    assert_eq!(banded(&mut v), ["Parents"]);
+    press(&mut v, &rx, "<c-b><a-s-down>");
+    assert_eq!((v.folder.as_str(), v.sidebar.keys), ("folder:3", Some(sidebar::Part::Folders)));
+    assert_eq!(banded(&mut v), ["Cousins"], "with the keys in the sidebar too");
+    press(&mut v, &rx, "<down>\n");
+    assert_eq!(v.folder, "folder:4", "the sidebar's keys go on from there");
+}
+
+#[test]
+fn alt_up_and_down_still_step_chats_and_alt_left_and_right_still_move_by_word() {
+    let (mut v, rx) = view(100, 30);
+    press(&mut v, &rx, "<a-down>");
+    assert_eq!((v.open.as_deref(), v.folder.as_str()), (Some("mae"), "all"));
+    press(&mut v, &rx, "<a-up>vens jantar sexta<a-left>na <a-right>?");
+    assert_eq!((v.open.as_deref(), v.folder.as_str()), (Some("ana"), "all"));
+    assert_eq!(v.composer.text(), "vens jantar na sexta?");
+}
+
+#[test]
+fn a_click_in_the_sidebar_shows_a_folders_chats_opens_it_on_its_mark_and_opens_someones_chat() {
+    let (mut v, rx) = view(140, 44);
+    let screen = frame(&mut v);
+    mouse(&mut v, &rx, CLICK, cell_of(&screen, "Work"));
+    assert_eq!(v.folder, "folder:4");
+    assert_eq!((v.sidebar.keys, v.focus.clone()), (None, Focus::Typing), "the keys stay in the box");
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ chats · Work") && screen.contains("roster · Work"), "{screen}");
+    assert_eq!(banded(&mut v), ["Work"]);
+
+    let mark = cell_of(&screen, "▸ Family");
+    mouse(&mut v, &rx, CLICK, mark);
+    let screen = frame(&mut v);
+    assert!(screen.contains("▾ Family") && screen.contains("│     Parents"), "{screen}");
+    assert_eq!(v.folder, "folder:4", "the mark opens it instead");
+    mouse(&mut v, &rx, CLICK, mark);
+    assert!(!frame(&mut v).contains("Parents"), "and closes it");
+    mouse(&mut v, &rx, CLICK, (mark.0 + 2, mark.1));
+    assert_eq!(v.folder, "folder:1", "its name shows its chats");
+
+    let screen = frame(&mut v);
+    mouse(&mut v, &rx, CLICK, cell_of(&screen, "○ Mãe"));
+    assert_eq!((v.open.as_deref(), v.sidebar.keys), (Some("mae"), None));
+    let screen = frame(&mut v);
+    mouse(&mut v, &rx, CLICK, cell_of(&screen, "Inês Gomes"));
+    assert_eq!(v.starting.as_deref(), Some("person:4"), "someone without a chat: one begins");
+    assert!(frame(&mut v).contains("a chat with Inês Gomes begins"));
+}
+
+#[test]
+fn the_wheel_over_the_sidebar_moves_nothing_as_nothing_in_it_scrolls() {
+    let (mut v, rx) = view(140, 44);
+    let before = frame(&mut v);
+    for text in ["▸ Family", "● João"] {
+        mouse(&mut v, &rx, MouseEventKind::ScrollDown, cell_of(&before, text));
+    }
+    assert_eq!(frame(&mut v), before);
+
+    let (mut v, rx) = view(100, 30);
+    press(&mut v, &rx, "<c-b>");
+    let before = frame(&mut v);
+    for _ in 0..3 {
+        mouse(&mut v, &rx, MouseEventKind::ScrollDown, cell_of(&before, "▸ Family"));
+    }
+    assert_eq!(v.list_top, 0, "the chat list under it stays where it was");
+    assert_eq!(frame(&mut v), before);
+    press(&mut v, &rx, "<esc>");
+    mouse(&mut v, &rx, MouseEventKind::ScrollDown, cell_of(&before, "▸ Family"));
+    assert_eq!(v.list_top, 1, "where the list scrolls once the sidebar's gone");
+}
+
+#[test]
+fn below_120_columns_a_click_in_the_sidebar_over_the_list_acts_as_enter_and_closes_it() {
+    for width in [100, 80] {
+        let (mut v, rx) = view(width, 40);
+        press(&mut v, &rx, "<c-b>");
+        let screen = frame(&mut v);
+        mouse(&mut v, &rx, CLICK, cell_of(&screen, "▸ Family"));
+        let screen = frame(&mut v);
+        assert!(
+            screen.contains("▾ Family") && screen.contains("Parents") && v.sidebar.keys.is_some(),
+            "at {width}, a mark leaves it open:\n{screen}"
+        );
+        mouse(&mut v, &rx, CLICK, cell_of(&screen, "Parents"));
+        assert_eq!((v.folder.as_str(), v.sidebar.keys), ("folder:2", None), "at {width}");
+        let screen = frame(&mut v);
+        assert!(!screen.contains("╭ folders") && screen.contains("╭ chats · Parents"), "at {width}:\n{screen}");
+        assert_eq!(v.open.as_deref(), Some("ana"), "at {width}, nothing under the sidebar was clicked");
+
+        press(&mut v, &rx, "<c-b>");
+        let screen = frame(&mut v);
+        mouse(&mut v, &rx, CLICK, cell_of(&screen, "○ Mãe"));
+        assert_eq!((v.open.as_deref(), v.sidebar.keys), (Some("mae"), None), "at {width}");
+        assert!(!frame(&mut v).contains("╭ folders"), "at {width}");
+    }
 }
 
 #[test]

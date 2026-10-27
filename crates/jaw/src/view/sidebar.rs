@@ -2,7 +2,9 @@
 //! picked, as the wireframes have them. It sits left of the chat list from 120 columns, and
 //! Ctrl-B gives it the keys, folds it away, or below 120 draws it over the list while it has them.
 //! Picking a folder makes the chat list that folder's window; Tab moves to the roster, whose
-//! Enter opens or starts someone's chat.
+//! Enter opens or starts someone's chat. Alt-Shift-Up and Alt-Shift-Down move between folders
+//! from anywhere, and a click does what Enter does on the folder or person under it, or opens or
+//! closes a folder on its mark, leaving the keys where they were.
 
 use super::{Focus, View};
 use crate::data::Place;
@@ -10,8 +12,8 @@ use crate::data::{FolderRow, PresenceState, RosterRow};
 use crate::fmt;
 use jaw_client::Chats;
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::Rect;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
@@ -54,6 +56,13 @@ pub enum Roster {
     Heading { name: String, online: usize, of: usize },
     Person(Box<RosterRow>),
     Offline(usize),
+}
+
+/// What a line of the sidebar is to the mouse: a folder, with its mark's column if it has folders
+/// in it, or someone in the roster.
+enum Hit {
+    Folder(String, Option<u16>),
+    Person(String),
 }
 
 /// The built-in folders, before jawd has said its counts.
@@ -105,13 +114,21 @@ impl View {
         }
         self.sidebar.folded = false;
         self.sidebar.keys = Some(Part::Folders);
-        let tree = self.tree();
-        self.sidebar.at =
-            tree.iter().position(|t| matches!(t, Tree::Folder { id, .. } if *id == self.folder)).unwrap_or(0);
+        self.sidebar.at = self.tree_row(&self.folder).unwrap_or(0);
+    }
+
+    /// The row of the tree a folder is on, if it shows.
+    fn tree_row(&self, folder: &str) -> Option<usize> {
+        self.tree().iter().position(|t| matches!(t, Tree::Folder { id, .. } if id == folder))
     }
 
     /// The tree as drawn: built-in folders, yours nested under the ones opened, then smart ones.
     pub(super) fn tree(&self) -> Vec<Tree> {
+        self.tree_open(|id| self.sidebar.open.contains(id))
+    }
+
+    /// The tree with yours opened where `open` says.
+    fn tree_open(&self, open: impl Fn(&str) -> bool) -> Vec<Tree> {
         fn by_position(mut rows: Vec<&FolderRow>) -> Vec<&FolderRow> {
             rows.sort_by_key(|r| (r.position, r.name.clone()));
             rows
@@ -131,7 +148,7 @@ impl View {
         while let Some((f, depth)) = stack.pop() {
             let under = children(Some(&f.id));
             out.push(Tree::Folder { id: f.id.clone(), depth, children: !under.is_empty() });
-            if self.sidebar.open.contains(&f.id) {
+            if open(&f.id) {
                 stack.extend(under.into_iter().rev().map(|c| (c, depth + 1)));
             }
         }
@@ -208,6 +225,30 @@ impl View {
         self.dirty = true;
     }
 
+    /// Alt-Shift-Up and Alt-Shift-Down: the folder before or after, in the tree's order with every
+    /// folder open, picked as Enter picks it, the folders it's in opened so the sidebar shows it.
+    /// At either end it stays, as Alt-Up and Alt-Down do.
+    pub(super) fn step_folder(&mut self, by: isize) {
+        let order: Vec<String> = self
+            .tree_open(|_| true)
+            .into_iter()
+            .filter_map(|t| match t {
+                Tree::Folder { id, .. } => Some(id),
+                Tree::Gap => None,
+            })
+            .collect();
+        let Some(last) = order.len().checked_sub(1) else { return };
+        let at = order.iter().position(|id| *id == self.folder).unwrap_or(0) as isize;
+        let id = order[(at + by).clamp(0, last as isize) as usize].clone();
+        let mut parent = self.folder(&id).and_then(|f| f.parent.clone());
+        while let Some(p) = parent {
+            parent = self.folder(&p).and_then(|f| f.parent.clone());
+            self.sidebar.open.insert(p);
+        }
+        self.pick_folder(&id);
+        self.sidebar.at = self.tree_row(&id).unwrap_or(self.sidebar.at);
+    }
+
     pub(super) fn on_folders(&mut self, upsert: Vec<FolderRow>, remove: Vec<String>, whole: bool) {
         if whole {
             let mut rows = upsert;
@@ -269,28 +310,14 @@ impl View {
             }
             (Part::Folders, KeyCode::Enter) => {
                 if let Some(Tree::Folder { id, .. }) = self.tree().get(self.sidebar.at).cloned() {
-                    self.pick_folder(&id);
-                    if !self.wide() {
-                        self.sidebar.keys = None;
-                    }
+                    self.show_folder(&id);
                 }
             }
             (Part::Roster, KeyCode::Up | KeyCode::Char('k')) => self.roster_move(-1),
             (Part::Roster, KeyCode::Down | KeyCode::Char('j')) => self.roster_move(1),
             (Part::Roster, KeyCode::Enter) => {
                 if let Some(p) = self.roster_selected() {
-                    self.sidebar.keys = None;
-                    match &p.chat {
-                        Some(chat) => {
-                            self.open_chat(chat);
-                            self.jawd.opened(chat);
-                        }
-                        None => {
-                            self.starting = Some(p.id.clone());
-                            self.jawd.start_chat(&p.id);
-                            self.say(format!("a chat with {} begins", p.name));
-                        }
-                    }
+                    self.open_person(&p);
                 }
             }
             (Part::Roster, KeyCode::Char('m')) => {
@@ -299,6 +326,60 @@ impl View {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Enter on a folder, or a click on it: its chats, and below 120 columns the sidebar closes.
+    fn show_folder(&mut self, id: &str) {
+        self.pick_folder(id);
+        if !self.wide() {
+            self.sidebar.keys = None;
+        }
+    }
+
+    /// Enter on someone in the roster, or a click on them: their chat opens, or one with them
+    /// begins, and the keys leave the sidebar.
+    fn open_person(&mut self, p: &RosterRow) {
+        self.sidebar.keys = None;
+        match &p.chat {
+            Some(chat) => {
+                self.open_chat(chat);
+                self.jawd.opened(chat);
+            }
+            None => {
+                self.starting = Some(p.id.clone());
+                self.jawd.start_chat(&p.id);
+                self.say(format!("a chat with {} begins", p.name));
+            }
+        }
+    }
+
+    /// The mouse over the sidebar, wherever it's drawn: a click on a folder shows its chats, on its
+    /// mark opens or closes it, and on someone opens their chat, each as Enter does there, without
+    /// giving the sidebar the keys. Neither the tree nor the roster scrolls, so the wheel moves
+    /// nothing, not even the list under the sidebar drawn over it.
+    pub(super) fn on_sidebar_mouse(&mut self, m: MouseEvent) {
+        if m.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        self.dirty = true;
+        self.overlay = None;
+        let (at, y) = (Position::new(m.column, m.row), m.row);
+        let on_row = |rows: &[(u16, String)]| rows.iter().find(|(row, _)| *row == y).map(|(_, id)| id.clone());
+        if let Some(id) = self.areas.folder_marks.iter().find(|(mark, _)| mark.contains(at)).map(|(_, id)| id.clone()) {
+            self.sidebar.at = self.tree_row(&id).unwrap_or(self.sidebar.at);
+            if !self.sidebar.open.remove(&id) {
+                self.sidebar.open.insert(id);
+            }
+        } else if let Some(id) = on_row(&self.areas.folder_rows) {
+            self.sidebar.at = self.tree_row(&id).unwrap_or(self.sidebar.at);
+            self.show_folder(&id);
+        } else if let Some(id) = on_row(&self.areas.people_rows) {
+            let people = self.roster_people();
+            if let Some(i) = people.iter().position(|p| p.id == id) {
+                self.sidebar.roster_at = i;
+                self.open_person(&people[i]);
+            }
         }
     }
 
@@ -373,12 +454,13 @@ impl View {
             .padding(ratatui::widgets::Padding::horizontal(1));
         let inner = block.inner(area);
         f.render_widget(block, area);
+        self.areas.sidebar = area;
         let w = inner.width as usize;
         let tree = self.tree();
-        let mut lines: Vec<(Line<'static>, bool)> = vec![];
+        let mut lines: Vec<(Line<'static>, bool, Option<Hit>)> = vec![];
         for (i, row) in tree.iter().enumerate() {
             let Tree::Folder { id, depth, children } = row else {
-                lines.push((Line::default(), false));
+                lines.push((Line::default(), false, None));
                 continue;
             };
             let Some(folder) = self.folder(id) else { continue };
@@ -420,16 +502,17 @@ impl View {
             spans.push(Span::raw(" ".repeat(w.saturating_sub(used + right_w))));
             spans.extend(right);
             let band = if self.sidebar.keys == Some(Part::Folders) { i == self.sidebar.at } else { picked };
-            lines.push((Line::from(spans), band));
+            let mark = children.then_some(2 * *depth as u16);
+            lines.push((Line::from(spans), band, Some(Hit::Folder(id.clone(), mark))));
         }
         let roster_title = format!("roster · {}", self.folder_name(&self.folder));
-        lines.push((Line::default(), false));
-        lines.push((Line::from(Span::styled(fmt::fit(&roster_title, w), Style::new().fg(t.comment))), false));
+        lines.push((Line::default(), false, None));
+        lines.push((Line::from(Span::styled(fmt::fit(&roster_title, w), Style::new().fg(t.comment))), false, None));
         let now = self.now();
         let selected = self.roster_selected().map(|p| p.id);
         let roster_keys = self.sidebar.keys == Some(Part::Roster);
         for line in self.roster_lines() {
-            let (spans, band) = match line {
+            let (spans, band, hit) = match line {
                 Roster::Heading { name, online, of } => {
                     let said = format!("{online} of {of}");
                     let mut spans =
@@ -437,9 +520,11 @@ impl View {
                     let used: usize = spans.iter().map(|s| s.width()).sum();
                     spans.push(Span::raw(" ".repeat(w.saturating_sub(used + said.len()))));
                     spans.push(Span::styled(said, Style::new().fg(t.gutter)));
-                    (spans, false)
+                    (spans, false, None)
                 }
-                Roster::Offline(n) => (vec![Span::styled(format!("  {n} offline"), Style::new().fg(t.gutter))], false),
+                Roster::Offline(n) => {
+                    (vec![Span::styled(format!("  {n} offline"), Style::new().fg(t.gutter))], false, None)
+                }
                 Roster::Person(p) => {
                     let faint = !p.presence.known;
                     let (dot, said, said_style) = match p.presence.state {
@@ -469,17 +554,28 @@ impl View {
                     let used: usize = spans.iter().map(|s| s.width()).sum();
                     spans.push(Span::raw(" ".repeat(w.saturating_sub(used + said.chars().count()))));
                     spans.push(Span::styled(said, said_style));
-                    (spans, roster_keys && selected.as_deref() == Some(p.id.as_str()))
+                    let band = roster_keys && selected.as_deref() == Some(p.id.as_str());
+                    (spans, band, Some(Hit::Person(p.id.clone())))
                 }
             };
-            lines.push((Line::from(spans), band));
+            lines.push((Line::from(spans), band, hit));
         }
         let buf = f.buffer_mut();
-        for (i, (line, band)) in lines.into_iter().take(inner.height as usize).enumerate() {
+        for (i, (line, band, hit)) in lines.into_iter().take(inner.height as usize).enumerate() {
             let y = inner.y + i as u16;
             buf.set_line(inner.x, y, &line, inner.width);
             if band {
                 buf.set_style(Rect::new(area.x + 1, y, area.width - 2, 1), Style::new().bg(t.selection));
+            }
+            match hit {
+                Some(Hit::Folder(id, mark)) => {
+                    if let Some(x) = mark {
+                        self.areas.folder_marks.push((Rect::new(inner.x + x, y, 2, 1), id.clone()));
+                    }
+                    self.areas.folder_rows.push((y, id));
+                }
+                Some(Hit::Person(id)) => self.areas.people_rows.push((y, id)),
+                None => {}
             }
         }
     }
