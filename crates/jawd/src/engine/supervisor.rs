@@ -93,6 +93,12 @@ impl Supervisor {
         self.status.borrow().clone()
     }
 
+    /// The engine's status as it changes. It's `Restarting` only once an engine has stopped and
+    /// before the next is started, so nothing the next sends can come before it.
+    pub fn watch(&self) -> watch::Receiver<EngineStatus> {
+        self.status.clone()
+    }
+
     /// Sends a command to the engine running now; if none is, says why at once.
     pub async fn call(&self, kind: pb::command::Kind) -> Result<pb::reply::Kind, EngineError> {
         let commands = self.current.borrow().clone();

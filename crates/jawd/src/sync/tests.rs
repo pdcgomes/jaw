@@ -1819,3 +1819,124 @@ async fn measure_live_previews_with_and_without_a_thumbnail() {
         );
     }
 }
+
+/// How long a test waits for a push it expects, however busy the machine.
+const WAIT: Duration = Duration::from_secs(10);
+
+/// The supervisor of `engine`, pausing `pause` before it starts another, long enough to see the
+/// pause on a busy machine.
+fn supervised_pausing(engine: &Scripted, pause: Duration) -> (Supervisor, mpsc::Receiver<crate::engine::Incoming>) {
+    let (events, incoming) = mpsc::channel(64);
+    let backoff = crate::engine::supervisor::Backoff { first: pause, most: pause, settled: Duration::from_secs(60) };
+    (Supervisor::spawn(Arc::new(engine.clone()), events, backoff), incoming)
+}
+
+/// The next `connection` push's state, if one comes within `within`.
+async fn next_connection_within(told: &mut broadcast::Receiver<Push>, within: Duration) -> Option<ConnectionState> {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let push = tokio::time::timeout_at(deadline, told.recv()).await.ok()?.unwrap();
+        if push.method == "connection" {
+            return Some(serde_json::from_value::<jaw_proto::Connection>(push.params).unwrap().state);
+        }
+    }
+}
+
+/// What a running sync on `store` says, with `engine` supervised as `supervisor`.
+fn syncing(
+    store: &Store,
+    home: &Path,
+    supervisor: Supervisor,
+    incoming: mpsc::Receiver<crate::engine::Incoming>,
+) -> (Shared, broadcast::Receiver<Push>, tokio::task::JoinHandle<()>) {
+    let live: Shared = Arc::new(Mutex::new(starting(store, true)));
+    let (pushes, told) = broadcast::channel(64);
+    let running =
+        tokio::spawn(run(incoming, store.clone(), live.clone(), pushes, Some(supervisor), home.to_path_buf()));
+    (live, told, running)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_that_stops_has_jawd_reconnecting_until_the_next_says_how_it_is_and_ends_its_catch_up() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let engine = Scripted::default();
+    let (supervisor, incoming) = supervised_pausing(&engine, Duration::from_secs(1));
+    let (live, mut told, running) = syncing(&store, home.path(), supervisor.clone(), incoming);
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    let preview = pb::OfflinePreview { total: 10, messages: 10, ..Default::default() };
+    engine.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::OfflinePreview(preview)) }).await;
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::CatchingUp));
+    engine.stop.notify_one();
+    assert_eq!(
+        next_connection_within(&mut told, WAIT).await,
+        Some(ConnectionState::EngineRestarting),
+        "while it starts again"
+    );
+    {
+        let live = live.lock().unwrap();
+        assert_eq!(live.connection.state, ConnectionState::EngineRestarting, "and a new hello says so too");
+        assert!(!live.catching_up(), "the catch-up it cut short ended");
+        assert!(live.catch_up.as_ref().unwrap().seconds.is_some(), "so the chat list and notifications go on");
+        assert_eq!(live.account.state, AccountState::Linked, "the account is as it was");
+    }
+    let next = next_connection_within(&mut told, WAIT).await;
+    assert_eq!(next, Some(ConnectionState::Online), "the next engine's word");
+    assert_eq!(supervisor.status().restarts, 1);
+    running.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_stopped_engine_sent_comes_before_jawd_says_it_is_reconnecting_and_the_next_engines_after() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let engine = Scripted::default();
+    let (supervisor, incoming) = supervised_pausing(&engine, Duration::from_secs(1));
+    let (_live, mut told, running) = syncing(&store, home.path(), supervisor.clone(), incoming);
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    // Holding jaw.db's writer holds sync on the account the next Connected names, so what the
+    // engine sends after it waits in `incoming` while the engine stops.
+    let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    engine.send(connection_event(State::Connected).event).await;
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    engine.send(connection_event(State::Disconnected).event).await;
+    engine.stop.notify_one();
+    until("the engine to stop", || supervisor.status().state == crate::engine::supervisor::State::Restarting).await;
+    holder.execute_batch("COMMIT").unwrap();
+    let mut said = Vec::new();
+    while said.len() < 3 {
+        match next_connection_within(&mut told, WAIT).await {
+            Some(state) => said.push(state),
+            None => break,
+        }
+    }
+    let expected = [ConnectionState::Offline, ConnectionState::EngineRestarting, ConnectionState::Online];
+    assert_eq!(said, expected, "the stopped engine's last word, then reconnecting, then the next engine's");
+    running.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_whatsapp_said_of_the_account_stands_while_the_engine_starts_again() {
+    use pb::connection::State;
+    for (state, said) in [
+        (State::LoggedOut, ConnectionState::LoggedOut),
+        (State::ClientOutdated, ConnectionState::UpdateNeeded),
+        (State::TemporaryBan, ConnectionState::Banned),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let engine = Scripted::default();
+        let (supervisor, incoming) = supervised_pausing(&engine, Duration::from_secs(1));
+        let (live, mut told, running) = syncing(&store, home.path(), supervisor.clone(), incoming);
+        assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+        engine.send(connection_event(state).event).await;
+        assert_eq!(next_connection_within(&mut told, WAIT).await, Some(said));
+        engine.stop.notify_one();
+        until("the engine to stop", || supervisor.status().restarts == 1).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(live.lock().unwrap().connection.state, said, "{said:?} stands while it starts again");
+        running.abort();
+    }
+}

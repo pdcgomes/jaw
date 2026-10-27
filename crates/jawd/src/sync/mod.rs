@@ -26,7 +26,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 pub use self::avatars::Avatars;
 pub use self::merge::Merges;
 use crate::convert;
-use crate::engine::supervisor::Supervisor;
+use crate::engine::supervisor::{self, EngineStatus, Supervisor};
 use crate::engine::{EngineError, Incoming, pb};
 use crate::store::{Change, Lane, Store};
 use crate::work::Priority;
@@ -225,7 +225,21 @@ pub async fn run(
     // in full, which changes nothing that's already right. The restarts count says which engine.
     let mut refreshed: Option<u32> = None;
     let mut linked_now = false;
-    while let Some(Incoming { event, ack }) = incoming.recv().await {
+    let mut status = engine.as_ref().map(Supervisor::watch);
+    loop {
+        // An engine's events are all in `incoming` before the supervisor says it stopped, and the
+        // next engine's can't come before that, so taking events first keeps the order they came in.
+        let Incoming { event, ack } = tokio::select! {
+            biased;
+            incoming = incoming.recv() => match incoming {
+                Some(incoming) => incoming,
+                None => break,
+            },
+            () = stopped(&mut status) => {
+                restarting(&live, &pushes);
+                continue;
+            }
+        };
         let kept = |kind: &'static str, payload: Vec<u8>, ack| store.inbox(kind, now_ms(), payload, ack);
         match event.kind {
             Some(pb::event::Kind::Message(message)) => {
@@ -336,6 +350,43 @@ pub async fn run(
             None => {}
         }
     }
+}
+
+/// Waits until an engine has stopped and the next isn't started yet; with no engine, or once its
+/// supervisor has gone, that's never.
+async fn stopped(status: &mut Option<watch::Receiver<EngineStatus>>) {
+    if let Some(status) = status {
+        while status.changed().await.is_ok() {
+            if status.borrow_and_update().state == supervisor::State::Restarting {
+                return;
+            }
+        }
+    }
+    std::future::pending().await
+}
+
+/// The engine has stopped and the next isn't running: interfaces hear jawd is reconnecting, so they
+/// keep what they have and sends wait, and a catch-up it cut short ends, so the chat list and
+/// notifications aren't held for it. What WhatsApp said of the account (logged out, a newer version
+/// wanted, a ban) stands, since starting the engine again doesn't change it; the next engine's own
+/// word replaces it if it should.
+fn restarting(live: &Shared, pushes: &broadcast::Sender<Push>) {
+    let connection = {
+        let mut live = live.lock().expect("live state");
+        if let Some(started) = live.catching_up.take() {
+            live.caught_chats.clear();
+            if let Some(catch_up) = live.catch_up.as_mut() {
+                catch_up.seconds = Some(started.elapsed().as_secs_f64());
+            }
+        }
+        use ConnectionState::{Banned, LoggedOut, UpdateNeeded};
+        if matches!(live.connection.state, LoggedOut | UpdateNeeded | Banned) {
+            return;
+        }
+        live.connection = Connection::new(ConnectionState::EngineRestarting);
+        live.connection.clone()
+    };
+    push(pushes, "connection", connection);
 }
 
 /// Ends the engine in the order that leaves nothing of it after jaw.db says the stop was clean:
