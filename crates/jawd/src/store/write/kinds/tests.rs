@@ -5,8 +5,10 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::web_message_info::StubType;
 use wa_proto::waai_common_deprecated::{AiRichResponseSubMessage, AiRichResponseSubMessageType};
 
+use std::time::Duration;
+
 use super::*;
-use crate::store::{Applied, Lane, Store, schema};
+use crate::store::{Applied, LIMITS, Lane, Limits, Store, schema};
 use crate::work::{Priority, Report};
 
 const GROUP: &str = "120363000000000001@g.us";
@@ -97,7 +99,7 @@ fn answer_edit(id: &str, target: &str, at: i64, said: &str) -> WebMessageInfo {
     web(ANA, id, Some(ANA), Some(e2e::Message { protocol_message: Some(Box::new(edit)), ..Default::default() }))
 }
 
-const TUESDAY: &str = "It ships on Tuesday now";
+const TUESDAY: &str = "It ships on _Tuesday_ now";
 /// The ID of a message whose conversion panics, as `backfilled` does for it in tests.
 pub(super) const PANICS: &str = "3EB0PANICS";
 /// The ID of a message whose conversion fails once it has written, as `backfilled` does for it in
@@ -184,7 +186,9 @@ async fn a_message_rolled_back_leaves_its_chat_no_version_without_an_event() {
     )
     .unwrap();
     drop(db);
-    let store = Store::open(home.path()).unwrap();
+    // A background transaction made long, so both go in one however busy the machine.
+    let (batch_time, yield_after) = (Duration::from_millis(500), Duration::from_millis(250));
+    let store = Store::open_with(home.path(), Limits { batch_time, yield_after, ..LIMITS }).unwrap();
     let applied = store.apply(Lane::Background, vec![Change::Backfill(KINDS); 4]).await.unwrap();
     assert_eq!(applied.transactions, 1, "both in one transaction, which counts the chat again at its end");
     assert_eq!(store.backfill_left(KINDS).unwrap(), 0);
@@ -252,12 +256,30 @@ async fn a_message_whose_conversion_fails_or_panics_is_kept_in_quarantine_and_th
 fn monday(chat: &str, id: &str) -> WebMessageInfo {
     let template = e2e::TemplateMessage {
         hydrated_template: Some(Box::new(e2e::template_message::HydratedFourRowTemplate {
-            hydrated_content_text: Some("Your order ships on Monday".into()),
+            hydrated_content_text: Some(MONDAY.into()),
             ..Default::default()
         })),
         ..Default::default()
     };
     web(chat, id, Some(ANA), Some(e2e::Message { template_message: Some(Box::new(template)), ..Default::default() }))
+}
+
+const MONDAY: &str = "Your order ships on *Monday*: https://jaw.example/monday";
+
+/// The text, spans and summary, as a row keeps it, that converting `message` gives its row or what
+/// stands in for it.
+fn said(message: &WebMessageInfo) -> (Option<String>, Option<String>, Option<String>) {
+    let changes = convert::message(message, &Me::new([ME.to_string()]), false);
+    let shown = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Message(message) => Some(message.clone()),
+            Change::Edited { shown, .. } => Some(shown.as_ref().clone()),
+            _ => None,
+        })
+        .unwrap();
+    let summary = (shown.text.as_ref() != Some(&shown.summary)).then_some(shown.summary);
+    (shown.text, shown.spans, summary)
 }
 
 /// Ana's edit, made at `at`, of her message `target` in `chat`, to say `TUESDAY`.
@@ -561,6 +583,9 @@ fn before_kinds(home: &std::path::Path) -> Vec<Left> {
             .execute(params![n, chat, id, AT + n, sender, mine, kind, text, summary, detail, edited_at, deleted, raw])
             .unwrap();
     }
+    // Row 14's edit came first, so the row reads as the edit does, spans and summary too.
+    let (_, spans, summary) = said(&tuesday(GROUP, "t14", AT + 50));
+    db.execute("UPDATE messages SET spans = ?1, summary = ?2 WHERE n = 14", params![spans, summary]).unwrap();
     db.execute_batch(
         "UPDATE chats SET last_message = 11, last_at = 1792000000011 WHERE n = 1;
         UPDATE chats SET last_message = 1, last_at = 1792000000001 WHERE n = 2;
@@ -806,25 +831,23 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
         row(12).map(|r| (r.1, r.3)),
         Some(("system".into(), Some("Open WhatsApp on your phone to see this message".into())))
     );
-    // A template edited after it came keeps its edit's words, whichever way round they came.
-    for (n, edited_at) in [(14, AT + 50), (15, AT + 60)] {
-        let at: Option<i64> =
-            query(
-                &store,
-                move |db| Ok(db.query_row("SELECT edited_at FROM messages WHERE n = ?1", [n], |r| r.get(0))?),
-            )
-            .await;
-        assert_eq!(
-            (row(n).map(|r| (r.1, r.2)), at),
-            (Some(("text".into(), Some(TUESDAY.into()))), Some(edited_at)),
-            "{n}"
-        );
+    // A template edited after it came keeps its edit's words, spans and summary, whichever way
+    // round they came, and none of the template's links; one edited by an edit jaw couldn't read,
+    // which left nothing to keep, reads as the template does, its links and all. Each keeps when
+    // it was edited.
+    let edit = said(&tuesday(GROUP, "t15", AT + 60));
+    let template = said(&monday(GROUP, "t17"));
+    assert!(edit.1.is_some() && edit.2.is_some() && template.1.is_some() && template.2.is_some());
+    for (n, words, edited_at) in [(14, &edit, AT + 50), (15, &edit, AT + 60), (17, &template, AT + 70)] {
+        let kept: (String, Option<String>, Option<String>, Option<String>, Option<i64>) = query(&store, move |db| {
+            Ok(db.query_row("SELECT kind, text, spans, summary, edited_at FROM messages WHERE n = ?1", [n], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?)
+        })
+        .await;
+        let expected = ("text".to_string(), words.0.clone(), words.1.clone(), words.2.clone(), Some(edited_at));
+        assert_eq!(kept, expected, "message {n}");
     }
-    assert_eq!(
-        row(17).map(|r| (r.1, r.2, r.3)),
-        Some(("text".into(), Some("Your order ships on Monday".into()), None)),
-        "an edit jaw couldn't read left nothing to keep, so the message's words show"
-    );
     assert_eq!(row(16).map(|r| r.1), Some("poll".into()), "a comment that's a poll is a poll");
     assert_eq!(store.count("poll_options WHERE message = 16").unwrap(), 2, "with its options");
     for n in [1, 2, 5, 6, 12, 14, 15, 16, 17] {
@@ -922,10 +945,19 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     .await;
     assert_eq!(found, ["t2"]);
     let linked: Vec<String> = query(&store, |db| {
-        Ok(db.prepare("SELECT url FROM links")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+        Ok(db
+            .prepare(
+                "SELECT m.id || ' ' || l.url FROM links l JOIN messages m ON m.n = l.message ORDER BY m.n, l.place",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
     })
     .await;
-    assert_eq!(linked, ["https://jaw.example/track"]);
+    assert_eq!(
+        linked,
+        ["t2 https://jaw.example/track", "t17 https://jaw.example/monday"],
+        "the templates' links, not those of t14's and t15's, which read as their edits do"
+    );
 
     // Taken again from the start, it changes nothing.
     let settled = shown(&store).await;
