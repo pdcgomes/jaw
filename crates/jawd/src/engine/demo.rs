@@ -5,14 +5,16 @@
 //! recipients' phones send delivered and then read, and a message sent again with the same ID is
 //! the same message. A reaction, an edit or a deletion for everyone is a message too, which the
 //! recipients' phones say they have but never read; the server refuses an edit once WhatsApp's
-//! window for it has passed; and app state sent for your other devices is taken, kept as the latest
-//! for its index and sent back, as whatsmeow fetches a collection again after each patch, unless a
-//! test has it refused. Given an `Account`, it answers for its contacts and groups, and writes each
-//! history blob its phone offers to the spool as jaw-engine does; events can also be delivered from
-//! outside its script, several waiting for their acks at once. Its people type and record as
-//! WhatsApp's chat presence says it, sent over the link as the `Typing` event jaw-engine sends, in
-//! order with the rest.
+//! window for it has passed; and app state sent for your other devices is taken, kept with the
+//! account's own as the latest for its index in its collection, and sent back, as whatsmeow fetches
+//! a collection again after each patch, unless a test has it refused; a full fetch sends what it
+//! keeps in the collections named, or in every collection. Given an `Account`, it answers for its
+//! contacts and groups, and writes each history blob its phone offers to the spool as jaw-engine
+//! does; events can also be delivered from outside its script, several waiting for their acks at
+//! once. Its people type and record as WhatsApp's chat presence says it, sent over the link as the
+//! `Typing` event jaw-engine sends, in order with the rest.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -136,11 +138,12 @@ pub struct World {
     fetched: Mutex<Vec<Fetched>>,
     /// How many app-state patches to refuse next, as WhatsApp refuses one it won't take.
     refusing_patches: Mutex<u32>,
-    /// Whether app-state patches are taken without an answer, as a connection that drops does.
+    /// Whether app-state patches are taken and kept but never answered, as when the connection
+    /// drops once the server has a patch.
     holding_patches: AtomicBool,
-    /// The app-state patches the server has taken, the latest for each index, which a full fetch of
-    /// their collection brings back, as WhatsApp keeps them for every device.
-    taken: Mutex<Vec<pb::AppStatePatch>>,
+    /// The app state the server keeps for every device: the account's, as its phone left it, and
+    /// each patch it has taken since.
+    app_state: Mutex<Held>,
     /// The running engine's half of the link, for events delivered from outside its script.
     link: Mutex<Option<WeakLink>>,
     /// Whose presence jawd follows, in the order it asked.
@@ -203,6 +206,15 @@ pub enum Phone {
     Silent,
 }
 
+/// App state as WhatsApp's server keeps it: the latest mutation for each index in each collection,
+/// in the order each index was first written.
+#[derive(Default)]
+struct Held {
+    mutations: Vec<(String, pb::AppState)>,
+    /// Where each collection's index is in `mutations`.
+    at: HashMap<(String, Vec<String>), usize>,
+}
+
 impl World {
     /// Says `sender` is typing (`Composing`) or recording in `chat`, or has stopped, as WhatsApp
     /// says it, through the engine running now, which jawd takes only while WhatsApp would say it:
@@ -239,7 +251,7 @@ impl World {
         *self.replies.lock().expect("the demo world") = replies;
     }
 
-    /// The full fetches of the account's app state played so far.
+    /// The full fetches of app state played so far.
     pub fn fetched(&self) -> Vec<Fetched> {
         self.fetched.lock().expect("the demo world").clone()
     }
@@ -459,9 +471,9 @@ impl World {
         *self.refusing_patches.lock().expect("the demo world") = n;
     }
 
-    /// Takes app-state patches without answering them, until it's told otherwise.
+    /// Takes and keeps app-state patches but never answers them, as when the connection drops once
+    /// the server has each, until it's told otherwise.
     #[cfg(test)]
-    #[expect(dead_code)]
     pub fn hold_patches(&self, holding: bool) {
         self.holding_patches.store(holding, Ordering::SeqCst);
     }
@@ -551,18 +563,27 @@ impl World {
         self.asked_now.notify_waiters();
     }
 
-    /// The patches taken in collections `names`, or in every collection when it names none, as a
-    /// full fetch brings them.
-    fn taken_in(&self, names: &[String]) -> Vec<pb::Event> {
-        self.taken
-            .lock()
-            .expect("the demo world")
+    /// Keeps `state` as the latest for its index in `collection`.
+    fn keep(&self, collection: &str, state: pb::AppState) {
+        let mut held = self.app_state.lock().expect("the demo world");
+        let held = &mut *held;
+        match held.at.entry((collection.to_string(), state.index.clone())) {
+            Entry::Occupied(at) => held.mutations[*at.get()].1 = state,
+            Entry::Vacant(at) => {
+                at.insert(held.mutations.len());
+                held.mutations.push((collection.to_string(), state));
+            }
+        }
+    }
+
+    /// What the server keeps in collections `names`, or in every collection when it names none, as
+    /// a full fetch brings it.
+    fn kept_in(&self, names: &[String]) -> Vec<pb::Event> {
+        let held = self.app_state.lock().expect("the demo world");
+        held.mutations
             .iter()
-            .filter(|patch| names.is_empty() || names.contains(&patch.name))
-            .map(|patch| {
-                let state = pb::AppState { index: patch.index.clone(), value: patch.value.clone() };
-                pb::Event { seq: 0, kind: Some(pb::event::Kind::AppState(state)) }
-            })
+            .filter(|(collection, _)| names.is_empty() || names.contains(collection))
+            .map(|(_, state)| pb::Event { seq: 0, kind: Some(pb::event::Kind::AppState(state.clone())) })
             .collect()
     }
 }
@@ -573,6 +594,18 @@ const SPEECH: &[u8] = include_bytes!("../../../jaw-voice/tests/fixtures/speech-1
 /// The plan the made-up climbing group shares for its Saturday, as a file.
 const SATURDAY: &[u8] = b"Sintra, Saturday\n\n09:00 meet at Rossio, the 09:11 train\n10:00 Peninha, the slabs first\n\
 13:30 lunch in the village\n16:00 back down, the 17:40 train\n\nBring the 60 m rope and the small rack.\n";
+
+/// The collection WhatsApp keeps a mutation in, by the kind its index starts with, as whatsmeow
+/// groups its app-state indexes; any other kind in regular.
+fn collection(index: &[String]) -> &'static str {
+    match index.first().map(String::as_str) {
+        Some("setting_pushName" | "setting_locale" | "setting_securityNotification") => "critical_block",
+        Some("contact" | "lid_contact") => "critical_unblock_low",
+        Some("star" | "mute" | "deleteMessageForMe" | "clearChat" | "deleteChat" | "userStatusMute") => "regular_high",
+        Some("pin_v1" | "archive" | "markChatAsRead" | "setting_unarchiveChats") => "regular_low",
+        _ => "regular",
+    }
+}
 
 impl DemoEngine {
     /// The made-up account: connected, then a few messages arriving, a photo, a file and a voice
@@ -704,10 +737,16 @@ impl DemoEngine {
         DemoEngine { script, world: Arc::default(), pause: Duration::ZERO, typists: false }
     }
 
-    /// The made-up `account`, which plays `script` and answers what jawd asks about it.
+    /// The made-up `account`, which plays `script` and answers what jawd asks about it; its WhatsApp
+    /// keeps the app state its phone has.
     pub fn for_account(script: Vec<pb::Event>, account: Arc<dyn Account>) -> DemoEngine {
-        let world = Arc::new(World { account: Some(account), ..World::default() });
-        DemoEngine { script, world, pause: Duration::ZERO, typists: false }
+        let world = World { account: Some(account.clone()), ..World::default() };
+        for event in account.app_state() {
+            if let Some(pb::event::Kind::AppState(state)) = event.kind {
+                world.keep(collection(&state.index), state);
+            }
+        }
+        DemoEngine { script, world: Arc::new(world), pause: Duration::ZERO, typists: false }
     }
 
     /// An engine on `world`, as an engine started again talks to the same WhatsApp.
@@ -1385,15 +1424,13 @@ impl Sender {
             pb::command::Kind::LidLookup(asked) => {
                 Ok(pb::reply::Kind::LidPairs(self.account()?.lid_pairs(&asked.lids)))
             }
-            // Its app state, the account's and what it has taken since, comes a mutation at a time,
-            // each waiting for its ack, as whatsmeow hands each over as it fetches a collection
-            // again in full.
+            // What the server keeps in the collections named, or in every collection when it names
+            // none, comes a mutation at a time, each waiting for its ack, as whatsmeow hands each
+            // over as it fetches each collection again in full.
             pb::command::Kind::AppStateResync(resync) => {
                 self.world.ask(pb::command::Kind::AppStateResync(resync.clone()));
-                let mut mutations = self.world.account.as_ref().map(|account| account.app_state()).unwrap_or_default();
-                mutations.extend(self.world.taken_in(&resync.names));
                 let (began, mut acks) = (Instant::now(), Vec::new());
-                for mutation in mutations {
+                for mutation in self.world.kept_in(&resync.names) {
                     let sent = Instant::now();
                     if !self.send(mutation).await {
                         return Err(EngineError::Gone);
@@ -1716,8 +1753,9 @@ impl Sender {
     }
 
     /// WhatsApp takes an app-state patch, unless told to refuse it, and keeps it as the latest for
-    /// its index; whatsmeow then fetches the collection again, so the patch comes back as an
-    /// AppState event, acked before the patch is answered.
+    /// its index in its collection; whatsmeow then fetches the collection again, so the patch comes
+    /// back as an AppState event, acked before the patch is answered. A held patch is kept, and its
+    /// answer lost.
     async fn patched(&self, patch: pb::AppStatePatch) -> Result<pb::reply::Kind, EngineError> {
         let world = &self.world;
         {
@@ -1727,16 +1765,12 @@ impl Sender {
                 return Err(EngineError::Failed { message: "server returned error 400".into(), retry: false });
             }
         }
+        let state = pb::AppState { index: patch.index, value: patch.value };
+        world.keep(&patch.name, state.clone());
         if world.holding_patches.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
-        {
-            let mut taken = world.taken.lock().expect("the demo world");
-            taken.retain(|kept| kept.index != patch.index);
-            taken.push(patch.clone());
-        }
-        let echo = pb::AppState { index: patch.index, value: patch.value };
-        if !self.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::AppState(echo)) }).await {
+        if !self.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::AppState(state)) }).await {
             return Err(EngineError::Gone);
         }
         Ok(pb::reply::Kind::Done(pb::Done {}))
@@ -1957,7 +1991,7 @@ mod tests {
         }
 
         fn app_state(&self) -> Vec<pb::Event> {
-            [["pin_v1", ANA], ["archive", CLIMBING]]
+            [["pin_v1", ANA], ["archive", CLIMBING], ["mute", ANA]]
                 .into_iter()
                 .map(|index| pb::Event {
                     seq: 0,
@@ -1978,7 +2012,7 @@ mod tests {
         let instance = engine.start(tx).await.unwrap();
         let answered = AtomicBool::new(false);
         let fetching = async {
-            let names = vec!["regular".to_string()];
+            let names = vec!["regular_low".to_string()];
             let reply = instance.commands.call(pb::command::Kind::AppStateResync(pb::AppStateResync { names })).await;
             answered.store(true, Ordering::SeqCst);
             reply
@@ -2000,7 +2034,8 @@ mod tests {
                 ack.send();
             }
         };
-        let (reply, ()) = tokio::join!(fetching, acking);
+        let joined = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(fetching, acking) });
+        let (reply, ()) = joined.await.expect("the fetch never answered");
         assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
         let fetched = world.fetched();
         assert_eq!((fetched.len(), fetched[0].acks.len()), (1, 2), "one fetch of two mutations, each acked");
@@ -2220,7 +2255,8 @@ mod tests {
         assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
         world.refuse_patches(1);
         let other = pb::AppStatePatch { index: vec!["pin_v1".into(), CLIMBING.into()], ..pin.clone() };
-        let refused = instance.commands.call(pb::command::Kind::AppStatePatch(other)).await;
+        let refusing = instance.commands.call(pb::command::Kind::AppStatePatch(other));
+        let refused = tokio::time::timeout(Duration::from_secs(10), refusing).await.expect("the refusal never came");
         assert!(matches!(refused, Err(EngineError::Failed { retry: false, .. })), "{refused:?}");
         let fetch = |names: &[&str]| {
             let names = names.iter().map(|name| name.to_string()).collect();
@@ -2234,13 +2270,141 @@ mod tests {
             assert_eq!(state.index, pin.index, "what WhatsApp took, not what it refused");
             incoming.ack.expect("a mutation needs an ack").send();
         };
-        let (reply, ()) = tokio::join!(fetching, acking);
+        let joined = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(fetching, acking) });
+        let (reply, ()) = joined.await.expect("the fetch of regular_low never answered");
         assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
-        let elsewhere = instance.commands.call(fetch(&["regular_high"])).await;
+        let elsewhere = tokio::time::timeout(Duration::from_secs(10), instance.commands.call(fetch(&["regular_high"])))
+            .await
+            .expect("the fetch of regular_high never answered");
         assert!(matches!(elsewhere, Ok(pb::reply::Kind::Done(_))), "{elsewhere:?}");
         assert!(rx.try_recv().is_err(), "nothing was taken in regular_high");
         let fetches =
             world.asked().into_iter().filter(|kind| matches!(kind, pb::command::Kind::AppStateResync(_))).count();
         assert_eq!(fetches, 2, "each fetch is noted");
+    }
+
+    /// jaw's app-state patch of `index` in collection `name`.
+    fn patch(name: &str, index: [&str; 2], value: &[u8]) -> pb::command::Kind {
+        let index = index.iter().map(|part| part.to_string()).collect();
+        pb::command::Kind::AppStatePatch(pb::AppStatePatch {
+            name: name.into(),
+            index,
+            version: 2,
+            value: value.to_vec(),
+        })
+    }
+
+    /// A full fetch of collections `names`.
+    fn resync(names: &[&str]) -> pb::command::Kind {
+        let names = names.iter().map(|name| name.to_string()).collect();
+        pb::command::Kind::AppStateResync(pb::AppStateResync { names })
+    }
+
+    /// A mutation as WhatsApp sends one back.
+    fn state(index: [&str; 2], value: &[u8]) -> pb::AppState {
+        pb::AppState { index: index.iter().map(|part| part.to_string()).collect(), value: value.to_vec() }
+    }
+
+    /// Asks the engine `kind`, acking each mutation that comes meanwhile, and says how it answered and
+    /// what came, in order; it fails, rather than waits, if no answer comes within ten seconds.
+    async fn answered(
+        instance: &Instance,
+        rx: &mut mpsc::Receiver<Incoming>,
+        kind: pb::command::Kind,
+    ) -> (Result<pb::reply::Kind, EngineError>, Vec<pb::AppState>) {
+        let asked = format!("{kind:?}");
+        let mut asking = std::pin::pin!(instance.commands.call(kind));
+        let mut came = Vec::new();
+        let answering = async {
+            loop {
+                tokio::select! {
+                    reply = &mut asking => return reply,
+                    Some(incoming) = rx.recv() => {
+                        let Some(pb::event::Kind::AppState(state)) = &incoming.event.kind else {
+                            panic!("{:?}", incoming.event)
+                        };
+                        came.push(state.clone());
+                        incoming.ack.expect("a mutation needs an ack").send();
+                    }
+                }
+            }
+        };
+        let reply = tokio::time::timeout(Duration::from_secs(10), answering)
+            .await
+            .unwrap_or_else(|_| panic!("{asked} was never answered"));
+        (reply, came)
+    }
+
+    #[tokio::test]
+    async fn a_fetch_sends_the_latest_whatsapp_holds_in_the_collections_named_and_in_every_one_with_none() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let instance = DemoEngine::for_account(Vec::new(), Arc::new(Tiny)).start(tx).await.unwrap();
+        let (reply, echo) = answered(&instance, &mut rx, patch("regular_low", ["archive", CLIMBING], &[8, 0])).await;
+        assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
+        assert_eq!(echo, [state(["archive", CLIMBING], &[8, 0])]);
+        let (reply, low) = answered(&instance, &mut rx, resync(&["regular_low"])).await;
+        assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
+        assert_eq!(
+            low,
+            [state(["pin_v1", ANA], &[]), state(["archive", CLIMBING], &[8, 0])],
+            "the account's pin and its archive as jaw patched it, once, and not its mute, in regular_high"
+        );
+        let (_, high) = answered(&instance, &mut rx, resync(&["regular_high"])).await;
+        assert_eq!(high, [state(["mute", ANA], &[])]);
+        let (_, every) = answered(&instance, &mut rx, resync(&[])).await;
+        assert_eq!(
+            every,
+            [state(["pin_v1", ANA], &[]), state(["archive", CLIMBING], &[8, 0]), state(["mute", ANA], &[])],
+            "no names, every collection"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_patch_is_kept_without_an_answer_and_a_fetch_meanwhile_brings_it_back() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let engine = DemoEngine::with(Vec::new());
+        let world = engine.world();
+        let instance = engine.start(tx).await.unwrap();
+        world.hold_patches(true);
+        let mut holding = std::pin::pin!(instance.commands.call(patch("regular_high", ["mute", ANA], &[8, 1])));
+        let unanswered = tokio::time::timeout(Duration::from_millis(200), &mut holding).await;
+        assert!(unanswered.is_err(), "a held patch was answered: {unanswered:?}");
+        assert!(rx.try_recv().is_err(), "nor was it sent back");
+        let (reply, fetched) = answered(&instance, &mut rx, resync(&["regular_high"])).await;
+        assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
+        assert_eq!(fetched, [state(["mute", ANA], &[8, 1])], "WhatsApp took it before the answer was lost");
+        let still = tokio::time::timeout(Duration::from_millis(50), &mut holding).await;
+        assert!(still.is_err(), "and it's still unanswered: {still:?}");
+        world.hold_patches(false);
+        let (reply, echo) = answered(&instance, &mut rx, patch("regular_high", ["mute", ANA], &[8, 0])).await;
+        assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "a patch once they're let go: {reply:?}");
+        assert_eq!(echo, [state(["mute", ANA], &[8, 0])]);
+    }
+
+    #[tokio::test]
+    async fn only_as_many_patches_as_a_test_says_are_refused_and_the_next_is_taken() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let engine = DemoEngine::with(Vec::new());
+        let world = engine.world();
+        let instance = engine.start(tx).await.unwrap();
+        world.refuse_patches(1);
+        let (refused, nothing) = answered(&instance, &mut rx, patch("regular_low", ["pin_v1", ANA], &[8, 1])).await;
+        assert!(matches!(refused, Err(EngineError::Failed { retry: false, .. })), "{refused:?}");
+        assert!(nothing.is_empty(), "a refused patch isn't sent back: {nothing:?}");
+        let (taken, echo) = answered(&instance, &mut rx, patch("regular_low", ["pin_v1", ANA], &[8, 1])).await;
+        assert!(matches!(taken, Ok(pb::reply::Kind::Done(_))), "the next is taken: {taken:?}");
+        assert_eq!(echo, [state(["pin_v1", ANA], &[8, 1])]);
+    }
+
+    #[tokio::test]
+    async fn an_index_patched_twice_comes_back_once_as_the_second() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let instance = DemoEngine::with(Vec::new()).start(tx).await.unwrap();
+        for value in [[8, 1], [8, 0]] {
+            let (reply, _) = answered(&instance, &mut rx, patch("regular_low", ["pin_v1", ANA], &value)).await;
+            assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
+        }
+        let (_, fetched) = answered(&instance, &mut rx, resync(&["regular_low"])).await;
+        assert_eq!(fetched, [state(["pin_v1", ANA], &[8, 0])]);
     }
 }
