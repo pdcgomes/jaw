@@ -28,7 +28,9 @@ The design is settled: `docs/plans/2026-10-27-jaw-mac-menus-and-folders-design.m
   - Every patch's `SyncActionValue.timestamp` is the time jawd wrote, and a pin's row holds that same time.
 - One transaction, synced, before the answer: the row's change, a new `v` for the row and its `events` row, and the outbox rows. Asking for what's already so writes, pushes and queues nothing.
 - The patch goes after the chat's earlier sends, retried as the outbox retries, bounded by the outbox's 1,000 and counted in `jawd status` (`stored.outbox`); a patch refused for good, or out of tries, is kept in quarantine with its error, never dropped (`stored.quarantined`), what it set is put back, every interface gets a `notice`, and its collection is fetched again (`AppStateResync`).
-- No new table, column or migration: `chats.pinned`, `archived`, `muted_until`, `marked_unread`, `messages.starred`, the outbox's `app_state` rows and `quarantine` exist.
+- The change WhatsApp takes last wins, and jaw shows only what lasts (decided after task 8's review). WhatsApp takes app state in one order and sends it back in that order, so while jaw has a patch for an index whose echo hasn't come back, whatever WhatsApp sends for that index came before jaw's patch: the converter keeps it raw (`app_state`) but doesn't apply it, since jaw's patch, taken after it, sets every device as the row already is, and jaw's echo then changes nothing. So an earlier echo can't set the row back, the row never shows a state that won't last, and a request is judged against what will.
+- One new table and no new column: `app_state_awaiting` (migration 13, a schema step; class: jaw's own) holds, for each app-state index jaw has queued a patch for, the time its latest patch carries (`at`), that patch's outbox row (`outbox`), and, once WhatsApp has taken it, the inbox's last `seq` then (`echo_by`), where its echo has to be. A row goes when that echo is converted, when the converter passes `echo_by` without it, when its outbox row has gone without going, or with its patch's refusal; there's at most one per index, and `jawd status` counts them (`stored.awaiting`). `chats.pinned`, `archived`, `muted_until`, `marked_unread`, `messages.starred`, the outbox's `app_state` rows and `quarantine` exist.
+- The time a chat action is done at is taken under `inner.enqueue`, later than the last one jawd gave since it started, so no two of jaw's patches for one index carry one time; the writer refuses a patch whose time is already its index's awaited time.
 - No `OFFSET`, no scans of large tables, no temporary b-tree sorts, no `ANALYZE`; every new statement is pinned in `crates/jawd/src/store/plans.txt` (`JAW_PLANS=write CARGO_INCREMENTAL=0 cargo test -p jawd --bin jawd plans`) and in its module's plan test.
 - `protocol/fixtures/star.request.json` is exactly `{"id":20,"method":"star","params":{"message":"3EB0A1B2C3D4E5F6","starred":true,"chat":"351912345678@s.whatsapp.net"}}` and `star.result.json` exactly `{"id":20,"result":{}}`; the four chat requests take ids 16 to 19. Fixtures end with a newline.
 - The terminal (`crates/jaw`) needs no change: `wire.rs` already sends the four chat requests, and its made-up account (`crates/jaw/src/demo.rs`) changes its own rows without asking jawd.
@@ -87,6 +89,7 @@ The design leaves these open, or the code forced them; the audit checks them.
 - **Unarchiving a pinned chat while three others are pinned unpins it** (decided after task 4's review, to keep the limit of three): its `pin_v1` off is queued after the archive patch, as archiving does. The handler builds the unpin patch for every archive request, and the writer queues it only when it unpins: archiving a pinned chat, or unarchiving one past the limit.
 - **A mark read on a chat jaw holds none of the messages of reads it at the patch's time** (decided after task 4's review, so asking again is already so): the writer applies, in the same transaction, the read WhatsApp's echo will apply, so the phone's count clears at once and the echo changes nothing.
 - **A refused mark read leaves the chat read here** (decided after task 5's review): its undo clears the mark it cleared, and when jaw held none of the chat's messages, the phone's count it cleared isn't brought back, since app state carries no counts and keeping the count for the undo would need a column the plan doesn't add; the chat's next message is counted from the read as any is. The design's account of how a refused patch is put back says so (task 12), and the audit weighs it.
+- **What WhatsApp sends for an index while jaw's own patch for it is on its way is held back** (decided after task 8's review, replacing the design's "applied as it comes"). Applied as it came, an earlier echo set the row back after jaw's next change: a request in that window was judged already so and lost on every device (pin, unpin, pin ended unpinned everywhere), and a fourth chat could be pinned. Holding back goes by WhatsApp's order, never by times, which each device sets from its own clock. Both engines answer `Done` only once the patch's echo is in the inbox, so a mutation the converter reaches past `echo_by` came after jaw's patch, and is applied: that's how a full fetch at an engine's start, which sends what WhatsApp holds rather than its history, is taken when an echo never came. A refused patch puts its field back only while it's its index's latest, since a later patch's intent stands, and its collection is fetched again, which brings back what was held. A refused deletion for you has no awaited row: it changes nothing a later mutation could set back.
 
 ---
 
@@ -2928,6 +2931,8 @@ git commit -m "jawd serves chat.mark_unread and star: marking unread sets the ma
 
 ### Task 10: A refused patch is kept, put back, said, and its collection fetched again
 
+> **Since task 8's fix:** the store's `refused` releases the index's `app_state_awaiting` row and runs the undo only when that row named the refused patch, so a refused patch a later one has superseded puts nothing back. The handler below still passes the undo its index gives, and still fetches the collection again whenever there is one, which brings back what the converter held back. Its tests queue their patches through the requests, so each has its awaited row.
+
 **Files:**
 - Modify: `crates/jawd/src/send/chat_actions.rs` (module doc, imports, `undo_of`, `what_it_did`, `refused`, `fetch_again`, `say`, `FETCH_TRIES`, one test)
 - Modify: `crates/jawd/src/send/outbox.rs` (`attempt`; `settle` becomes `pub(super)`)
@@ -3365,27 +3370,33 @@ async fn chat_actions_go_through_the_socket_and_a_window_watched_again_from_its_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_change_from_the_phone_while_a_pin_waits_shows_as_it_comes_and_the_pin_goes_after_it() {
+async fn a_change_from_the_phone_while_a_pin_waits_is_held_back_and_the_pin_goes_after_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
     running.chats(&[ANA]).await;
     until_offline(&running).await;
     running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
-    let pinned = pinned_at(&running, ANA).await;
-    // The phone unpins it meanwhile, after jaw pinned it.
+    let pinned = chat_row(&running, ANA).await;
+    let at = pinned_at(&running, ANA).await;
+    // The phone unpins it meanwhile, with a later clock; WhatsApp takes jaw's pin after it all the same.
     let unpin = SyncActionValue {
         timestamp: Some(now_ms() + 1_000),
         pin_action: Some(PinAction { pinned: Some(false) }),
         ..Default::default()
     };
-    let state = pb::AppState { index: vec!["pin_v1".into(), ANA.into()], value: unpin.encode_to_vec() };
+    let value = unpin.encode_to_vec();
+    let state = pb::AppState { index: vec!["pin_v1".into(), ANA.into()], value: value.clone() };
     running.world.deliver(pb::Event { seq: 0, kind: Some(pb::event::Kind::AppState(state)) }).await.unwrap();
+    let key = serde_json::to_string(&["pin_v1", ANA]).unwrap();
     running
-        .until("the phone's unpin, shown as it came", |db| {
-            Ok(db.query_row("SELECT pinned FROM chats WHERE id = ?1", [ANA], |r| r.get::<_, i64>(0))? == 0)
+        .until("the phone's unpin, kept raw", move |db| {
+            let kept: Option<Vec<u8>> =
+                db.query_row("SELECT value FROM app_state WHERE key = ?1", [&key], |r| r.get(0)).optional()?;
+            Ok(kept.as_deref() == Some(value.as_slice()))
         })
         .await;
-    let unpinned = chat_row(&running, ANA).await.v;
+    let held = chat_row(&running, ANA).await;
+    assert!(held.pinned && held.v == pinned.v, "held back: jaw's pin goes after it, so it's how every device ends");
     assert!(patches_sent(&running).is_empty(), "jaw's pin still waits");
     running.connection(jaw_proto::ConnectionState::Online);
     until_stored(&running).await;
@@ -3393,8 +3404,8 @@ async fn a_change_from_the_phone_while_a_pin_waits_shows_as_it_comes_and_the_pin
     assert_eq!(sent.len(), 1);
     until_echoed(&running, &sent[0]).await;
     let ana = chat_row(&running, ANA).await;
-    assert!(ana.pinned && ana.v > unpinned, "jaw's went after the phone's, so it's what WhatsApp took last");
-    assert_eq!(pinned_at(&running, ANA).await, pinned, "at the time jaw pinned it");
+    assert!(ana.pinned && ana.v == pinned.v, "jaw's echo changes nothing");
+    assert_eq!(pinned_at(&running, ANA).await, at, "at the time jaw pinned it");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3462,7 +3473,7 @@ Expected: PASS, every unit test and `crates/jawd/tests/` (`starting`, `stopping`
 ```bash
 cd /Users/pedrogomes/src/jaw-chat-actions
 git add crates/jawd/src/send/tests.rs
-git commit -m "Tests that the chat actions go through the socket and a window watched again from its seq is sent their rows, that a change from the phone while a pin waits shows as it comes and jaw's pin goes after it, at the time jaw pinned it, and that a pin killed waiting for its commit leaves nothing while one answered was on disk first, goes once after the crash with the time jawd wrote, comes back changing nothing and, asked again, sends nothing more. Tests only"
+git commit -m "Tests that the chat actions go through the socket and a window watched again from its seq is sent their rows, that a change from the phone while a pin waits is kept but held back, since jaw's pin goes after it, at the time jaw pinned it, and its echo changes nothing, and that a pin killed waiting for its commit leaves nothing while one answered was on disk first, goes once after the crash with the time jawd wrote, comes back changing nothing and, asked again, sends nothing more. Tests only"
 ```
 
 ---
@@ -3544,7 +3555,7 @@ What you set on a chat from jaw, as your phone sets it: pinned, archived, muted,
 - **`star`** (`message`, `starred`, and optionally `chat`, where it is, as the message actions take it) stars a message or takes its star off. A line about the chat, or a message deleted for everyone, can't be starred (error 4); a star can always be taken off.
 - **Answers.** Each answers with nothing once its change is on disk, synced, with what tells your other devices. The row it changes comes to every window that shows it with a new `v`, so a window watched again from an earlier `seq` is sent it. Asking for what's already so changes nothing and answers the same, so an interface that lost an answer asks again.
 - **Errors.** A chat or message jawd doesn't have is error 3; a community's own row, whose groups carry these, is error 4 for the four chat requests; an account that isn't linked is error 1; past the outbox's thousand, error 5, as for `send.text`.
-- **Your other devices** hear of it after the chat's earlier sends, waiting while WhatsApp can't be reached, as an action on a message does; reading a chat sends its read receipts first. A change your phone makes meanwhile shows as it comes, and jaw's goes after it, so what WhatsApp takes last is what every device shows. If WhatsApp refuses it, the chat is put back as your phone has it, every interface is sent a `notice` saying why, and jawd keeps what was refused in its quarantine (`status`'s `quarantined`).
+- **Your other devices** hear of it after the chat's earlier sends, waiting while WhatsApp can't be reached, as an action on a message does; reading a chat sends its read receipts first. A change your phone makes to the same setting before jaw's reaches WhatsApp isn't shown, since jaw's goes after it and is what every device ends with; one made after it shows as it comes. If WhatsApp refuses it, the chat is put back as your phone has it, every interface is sent a `notice` saying why, and jawd keeps what was refused in its quarantine (`status`'s `quarantined`).
 
 ````
 
@@ -3705,7 +3716,8 @@ Beyond your standard checks, look at:
 6. A read-marking patch sends the chat's owed receipts first (send/outbox.rs attempt, send/chat_actions.rs receipts_first, send/reads.rs tell_now), keeping set_read's rule that WhatsApp's read at jaw's position settles what's owed.
 7. A refusal: the row moved to quarantine with its patch, the field put back to how a chat is when nothing set it, then AppStateResync of its collection; a refused deleteMessageForMe is now quarantined where it was dropped. Every engine start already fetches every collection in full (sync/refresh.rs), which covers a crash between the refusal's commit and its fetch.
 8. Archive and unpin as two patches in the chat's order, and the outcomes when one of them is refused.
-9. The plans pinned in plans.txt and the module plan tests; no new table or migration.
+9. The plans pinned in plans.txt and the module plan tests; one new table, `app_state_awaiting` (migration 13, a schema step, class jaw's own), and no new column.
+10. The hold-back (task 8's fix): while jaw's patch for an index hasn't echoed, what WhatsApp sends for that index is kept raw and not applied; the awaited row goes with its echo, past `echo_by`, when its outbox row has gone without going, or with its refusal; a refusal undoes only its index's latest patch; the time each patch carries is unique to its index; `stored.awaiting` counts the rows.
 ```
 
 - [ ] **Step 2: Fix what it marks, and audit again**
@@ -3789,6 +3801,7 @@ Each rule in the design's Tests, and where it fails without its change:
 | A refusal quarantined and the collection fetched again | Task 5 `app_state_whatsapp_refused_...`; Task 10 `a_patch_whatsapp_refuses_...`, `telling_your_other_devices_of_a_deletion_...` |
 | A crash between the commit and the answer, and one before the commit | Task 11 `a_pin_answered_...`, `a_pin_killed_...` |
 | A phone change arriving while jaw's waits | Task 11 `a_change_from_the_phone_...` |
+| An earlier echo converted after jaw's next change | Task 8's fix: the writer's and the requests' tests of the hold-back |
 | A chat read anywhere unmarks it | Task 3 `a_chat_read_on_any_device_...` |
 | Errors 1, 3, 4, 5 and -32602 | Tasks 4, 8, 9, 11 |
 | Plans pinned | Task 4 `every_statement_a_chat_action_runs_...`, Task 5 and Task 8 plan tests, `plans.txt` |
