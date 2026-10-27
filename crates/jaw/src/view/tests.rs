@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::art;
-use crate::data::{Chat, Hit, Kind, Media, Sender, Span, SpanKind};
+use crate::data::{Chat, Hit, Kind, Media, OtherJawd, Sender, Span, SpanKind};
 use crate::demo::{Clock, Demo, State};
 use crate::graphics::{Images, Protocol};
 use crate::run::{self, Event};
@@ -534,6 +534,7 @@ fn once_logged_out_jaw_stays_there_whatever_the_connection_says_until_it_is_link
         me: vec![],
         connection,
         settings: Settings::default(),
+        other: None,
     };
     v.apply(hello(Connection::new(ConnectionState::Offline)));
     let screen = frame(&mut v);
@@ -577,6 +578,31 @@ fn the_header_says_how_the_connection_is() {
         let screen = frame(&mut v);
         assert!(screen.lines().next().unwrap().contains(said), "{state:?}:\n{screen}");
     }
+}
+
+#[test]
+fn a_jawd_from_another_build_is_said_in_the_header_with_what_to_do_until_jaws_own_answers() {
+    let (mut v, _rx) = view(140, 30);
+    let hello = |other| Update::Hello {
+        root: String::new(),
+        linked: true,
+        me: vec![],
+        connection: Connection::new(ConnectionState::Online),
+        settings: Settings::default(),
+        other,
+    };
+    let jaw = jaw_version::VERSION;
+    v.apply(hello(Some(OtherJawd { version: "0.1.0".into(), pid: Some(8376) })));
+    let screen = frame(&mut v);
+    let said = format!("jaw  online · jawd is 0.1.0 and jaw {jaw}: kill 8376, then start jaw again");
+    assert!(screen.lines().next().unwrap().contains(&said), "{screen}");
+    v.apply(hello(Some(OtherJawd { version: "0.1.0".into(), pid: None })));
+    let screen = frame(&mut v);
+    let said = format!("jawd is 0.1.0 and jaw {jaw}: stop jawd, then start jaw again");
+    assert!(screen.lines().next().unwrap().contains(&said), "without its process:\n{screen}");
+    v.apply(hello(None));
+    let screen = frame(&mut v);
+    assert!(!screen.lines().next().unwrap().contains("jawd is"), "jaw's own jawd answers:\n{screen}");
 }
 
 #[test]
@@ -665,6 +691,7 @@ fn nothing_is_drawn_before_jawd_answers_and_the_first_frame_is_in_the_theme_hell
         me: vec![],
         connection: Connection::new(ConnectionState::Online),
         settings: gruvbox.clone(),
+        other: None,
     });
     assert!(v.dirty && v.awaited);
     assert_eq!(v.theme, Theme::named("gruvbox", v.theme.truecolor));
@@ -803,7 +830,7 @@ fn input_before_jawds_hello_is_taken_but_drawn_only_once_hello_comes_in_its_them
     v.born += Duration::from_secs(10);
     let Some(Update::Hello { root, linked, me, connection, .. }) = came(&rx).pop() else { panic!("jawd's hello") };
     let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Bubbles };
-    let hello = Update::Hello { root, linked, me, connection, settings: gruvbox };
+    let hello = Update::Hello { root, linked, me, connection, settings: gruvbox, other: None };
     let start = Instant::now();
     tx.send(Event::Input(Input::Resize(100, 30), start)).unwrap();
     tx.send(Event::Input(Input::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)), start)).unwrap();

@@ -30,7 +30,7 @@ use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 
 #[derive(Parser)]
-#[command(name = "jaw", version, about = "WhatsApp in a terminal, fast, from the keyboard")]
+#[command(name = "jaw", version = jaw_version::VERSION, about = "WhatsApp in a terminal, fast, from the keyboard")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -223,13 +223,18 @@ fn main() -> Result<()> {
 }
 
 fn connect(socket: &Path) -> Result<(jaw_client::Connection, jaw_proto::Welcome)> {
-    jaw_client::Connection::open(socket, TERMINAL, env!("CARGO_PKG_VERSION"))
+    jaw_client::Connection::open(socket, TERMINAL, jaw_version::VERSION)
 }
 
 fn status() -> Result<()> {
-    let (mut connection, _) = connect(&jaw_proto::local::socket(&jaw_proto::local::home()))?;
+    let socket = jaw_proto::local::socket(&jaw_proto::local::home());
+    let (mut connection, _) = connect(&socket)?;
     let status: jaw_proto::Status = serde_json::from_value(connection.call("status", serde_json::Value::Null)?)?;
     println!("{}", jaw_client::describe(&status));
+    if status.jawd != jaw_version::VERSION {
+        let other = data::OtherJawd { version: status.jawd, pid: jaw_client::jawd_pid(&socket) };
+        println!("jaw       {}, another build than jawd's: {}", jaw_version::VERSION, other.remedy());
+    }
     Ok(())
 }
 

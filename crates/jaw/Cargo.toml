@@ -18,6 +18,7 @@ fast_image_resize.workspace = true
 image.workspace = true
 jaw-client.workspace = true
 jaw-proto.workspace = true
+jaw-version.workspace = true
 libc.workspace = true
 png.workspace = true
 qrcode.workspace = true

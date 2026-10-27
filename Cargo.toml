@@ -53,6 +53,7 @@ zstd = { version = "0.14", default-features = false }
 jaw-client = { path = "crates/jaw-client" }
 jaw-media = { path = "crates/jaw-media" }
 jaw-proto = { path = "crates/jaw-proto" }
+jaw-version = { path = "crates/jaw-version" }
 wa-proto = { path = "crates/wa-proto" }
 
 # Dependencies optimised in debug builds too, so the timing tests the gate runs in debug measure

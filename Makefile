@@ -4,12 +4,16 @@ GO ?= go
 CARGO ?= cargo
 BUF := github.com/bufbuild/buf/cmd/buf@v1.74.0
 
+# The version jaw, jawd and jaw-engine all say: git describe's, or VERSION's in a release's
+# tarball (scripts/version says how; crates/jaw-version gives the Rust programs the same).
+JAW_VERSION ?= $(shell sh scripts/version)
+
 .PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit check-parity hooks perf clean prune-builds mac mac-test
 
 build: engine rust
 
 engine:
-	cd engine && $(GO) build -o ../target/engine/jaw-engine ./cmd/jaw-engine
+	cd engine && $(GO) build -trimpath -ldflags "-X main.version=$(JAW_VERSION)" -o ../target/engine/jaw-engine ./cmd/jaw-engine
 
 rust:
 	$(CARGO) build --workspace

@@ -214,6 +214,7 @@ fn the_panel_closes_with_the_screen_it_was_on_once_the_account_is_no_longer_link
         me: vec![],
         connection: Connection::new(ConnectionState::Offline),
         settings: Settings::default(),
+        other: None,
     };
     for (update, said) in [(Update::Connection(logged_out), "⏎ link again"), (unlinked, "p link with a phone number")]
     {
@@ -468,6 +469,7 @@ fn with_jawd_away_and_no_chats_the_open_panel_stays_on_screen_through_a_reconnec
         me: vec![],
         connection: Connection::new(ConnectionState::Online),
         settings: Settings::default(),
+        other: None,
     });
     assert!(v.settings_panel.is_some(), "back, it's still open");
     v.apply(away());

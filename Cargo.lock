@@ -1206,6 +1206,7 @@ dependencies = [
  "image",
  "jaw-client",
  "jaw-proto",
+ "jaw-version",
  "libc",
  "png",
  "qrcode",
@@ -1252,6 +1253,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jaw-version"
+version = "0.1.0"
+
+[[package]]
 name = "jaw-voice"
 version = "0.1.0"
 dependencies = [
@@ -1278,6 +1283,7 @@ dependencies = [
  "image",
  "jaw-client",
  "jaw-proto",
+ "jaw-version",
  "libc",
  "nucleo-matcher",
  "prost",

@@ -173,6 +173,7 @@ impl View {
     fn troubled(&self) -> bool {
         matches!(self.reach, Reach::Unreachable { .. })
             || self.logged_out.is_some()
+            || (self.reach == Reach::Up && self.other_jawd.is_some())
             || matches!(
                 self.connection.state,
                 ConnectionState::PhoneOffline
@@ -239,6 +240,21 @@ impl View {
         }
     }
 
+    /// That the jawd answering is from another build than this jaw, and what to do about it.
+    fn header_other_jawd(&self) -> Vec<Span<'static>> {
+        let t = &self.theme;
+        match &self.other_jawd {
+            Some(other) if self.reach == Reach::Up => vec![
+                Span::styled(" · ", Style::new().fg(t.comment)),
+                Span::styled(
+                    format!("jawd is {} and jaw {}: {}", other.version, jaw_version::VERSION, other.remedy()),
+                    Style::new().fg(t.warn),
+                ),
+            ],
+            _ => vec![],
+        }
+    }
+
     fn draw_header(&self, buf: &mut Buffer, area: Rect) {
         let t = &self.theme;
         let border = Style::new().fg(if self.troubled() { t.warn } else { t.gutter });
@@ -246,6 +262,7 @@ impl View {
         let pill = Span::styled(" jaw ", Style::new().bg(t.brand).fg(t.bg).add_modifier(Modifier::BOLD));
         let mut left = vec![Span::styled("╭ ", border), pill, Span::raw(" ")];
         left.extend(self.header_state(w));
+        left.extend(self.header_other_jawd());
         left.push(Span::raw(" "));
         let mut right = vec![Span::raw(" ")];
         let unread: u32 =

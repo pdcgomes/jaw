@@ -17,6 +17,7 @@ hyper-util.workspace = true
 image.workspace = true
 jaw-client.workspace = true
 jaw-proto.workspace = true
+jaw-version.workspace = true
 libc.workspace = true
 nucleo-matcher.workspace = true
 prost.workspace = true

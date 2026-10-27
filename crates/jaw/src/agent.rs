@@ -267,7 +267,7 @@ fn loaded() -> bool {
 /// jawd's version, if a jawd answers on jaw's socket.
 fn answering(places: &Places) -> Option<String> {
     let socket = jaw_proto::local::socket(&places.jaw);
-    jaw_client::Connection::open(&socket, "jaw agent", env!("CARGO_PKG_VERSION")).ok().map(|(_, welcome)| welcome.jawd)
+    jaw_client::Connection::open(&socket, "jaw agent", jaw_version::VERSION).ok().map(|(_, welcome)| welcome.jawd)
 }
 
 pub fn describe(places: &Places, status: &Status) -> String {

@@ -1,0 +1,17 @@
+#!/bin/sh
+# The version jaw, jawd and jaw-engine all say. In a checkout, git describe's from the newest tag
+# like v0.1.0: 0.1.0 at the tag, 0.1.0-3-g4d2c1e9 three commits on, or the commit's hash before the
+# first tag. In a release's source tarball, which has no .git, the tag git archive wrote into
+# VERSION. JAW_VERSION, if it's set, instead.
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [ -n "${JAW_VERSION:-}" ]; then
+	version=$JAW_VERSION
+elif [ -e "$root/.git" ] && version=$(git -C "$root" describe --tags --match 'v[0-9]*' --always 2>/dev/null); then
+	:
+else
+	version=$(cat "$root/VERSION" 2>/dev/null)
+	case $version in
+	'' | *'$Format'*) version=unknown ;;
+	esac
+fi
+echo "${version#v}"

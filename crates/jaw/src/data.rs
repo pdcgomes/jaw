@@ -768,6 +768,24 @@ impl TryFrom<RawFound> for Found {
 /// How many of each kind matched; for messages, 1,000 means at least that many.
 pub type Counts = std::collections::BTreeMap<FoundKind, u32>;
 
+/// A jawd from another build than this jaw's, as after an upgrade while the last one ran on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OtherJawd {
+    pub version: String,
+    /// Its process, as the socket says, to stop it by.
+    pub pid: Option<u32>,
+}
+
+impl OtherJawd {
+    /// What to do about it, in a few words.
+    pub fn remedy(&self) -> String {
+        match self.pid {
+            Some(pid) => format!("kill {pid}, then start jaw again"),
+            None => "stop jawd, then start jaw again".into(),
+        }
+    }
+}
+
 /// What arrives on the main thread's channel from jawd, or from the made-up account.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {
@@ -782,6 +800,8 @@ pub enum Update {
         /// The terminal's settings, as jawd keeps them in the jaw domain, or the defaults when hello
         /// brings none.
         settings: Settings,
+        /// The jawd that answered, if it isn't this jaw's version.
+        other: Option<OtherJawd>,
     },
     Connection(Connection),
     /// jawd's settings, as a push carries them whenever they change, here or in another interface:

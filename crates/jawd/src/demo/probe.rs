@@ -63,8 +63,7 @@ impl Line {
     fn open(socket: &Path) -> Result<Line> {
         let stream = UnixStream::connect(socket).with_context(|| format!("can't reach {}", socket.display()))?;
         let mut line = Line { reader: BufReader::new(stream.try_clone()?), writer: stream, next: 1 };
-        let hello =
-            json!({"protocol": jaw_proto::PROTOCOL, "client": "jawd demo", "version": env!("CARGO_PKG_VERSION")});
+        let hello = json!({"protocol": jaw_proto::PROTOCOL, "client": "jawd demo", "version": jaw_version::VERSION});
         line.call("hello", hello)?;
         Ok(line)
     }

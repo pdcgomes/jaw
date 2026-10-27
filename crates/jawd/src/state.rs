@@ -169,7 +169,7 @@ impl State {
     pub fn welcome(&self) -> Welcome {
         Welcome {
             protocol: PROTOCOL,
-            jawd: env!("CARGO_PKG_VERSION").into(),
+            jawd: jaw_version::VERSION.into(),
             root: self.home.display().to_string(),
             seq: self.feed.as_ref().map_or(0, Feed::seq),
             account: self.account(),
@@ -205,7 +205,7 @@ impl State {
             (live.account.clone(), live.connection.clone(), live.catch_up.clone(), live.history.clone())
         };
         Status {
-            jawd: env!("CARGO_PKG_VERSION").into(),
+            jawd: jaw_version::VERSION.into(),
             protocol: PROTOCOL,
             root: self.home.display().to_string(),
             account,

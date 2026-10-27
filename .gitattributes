@@ -1,0 +1,2 @@
+# git archive writes the release's tag into VERSION, for scripts/version to read in its tarball.
+VERSION export-subst

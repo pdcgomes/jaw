@@ -35,7 +35,7 @@ use crate::engine::{Engine, Incoming, pb};
 #[derive(Parser)]
 #[command(
     name = "jawd",
-    version,
+    version = jaw_version::VERSION,
     about = "jaw's daemon: it keeps your WhatsApp and does the work for jaw's interfaces"
 )]
 struct Cli {
@@ -563,7 +563,7 @@ impl Signals {
 
 fn status(home: &Path) -> Result<()> {
     let socket = jaw_proto::local::socket(home);
-    let (mut connection, _) = jaw_client::Connection::open(&socket, "jawd status", env!("CARGO_PKG_VERSION"))?;
+    let (mut connection, _) = jaw_client::Connection::open(&socket, "jawd status", jaw_version::VERSION)?;
     let status: jaw_proto::Status = serde_json::from_value(connection.call("status", serde_json::Value::Null)?)?;
     println!("{}", jaw_client::describe(&status));
     Ok(())

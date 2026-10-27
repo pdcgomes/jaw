@@ -15,9 +15,8 @@ import (
 	"github.com/pdcgomes/jaw/engine/internal/wa"
 )
 
-const version = "0.1.0"
-
-var versionParts = [3]uint32{0, 1, 0}
+// version is the one jaw and jawd say too, from git describe: make engine sets it.
+var version = "unknown"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print jaw-engine's version and whatsmeow's")
@@ -32,7 +31,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "jaw-engine is started by jawd, which talks to it on its standard input and output")
 		os.Exit(2)
 	}
-	wa.Configure(versionParts)
+	wa.Configure(versionParts(version))
 	log := wa.NewLogger("engine", *level)
 	program := "jaw-engine " + version
 	if err := wa.Run(context.Background(), link.New(os.Stdin, os.Stdout), *home, program, whatsmeowVersion(), log); err != nil {
@@ -42,6 +41,16 @@ func main() {
 	// jawd closed the link. Exiting now, rather than letting whatsmeow's handlers finish, keeps it
 	// from acknowledging messages jawd may not have stored.
 	os.Exit(0)
+}
+
+// versionParts is the release a version such as 0.2.0 or 0.2.0-3-g4d2c1e9 is or follows, which the
+// phone lists the device with; 0.1.0 for a build from before the first tag.
+func versionParts(v string) [3]uint32 {
+	var parts [3]uint32
+	if _, err := fmt.Sscanf(v, "%d.%d.%d", &parts[0], &parts[1], &parts[2]); err != nil {
+		return [3]uint32{0, 1, 0}
+	}
+	return parts
 }
 
 // whatsmeowVersion is the whatsmeow commit this binary was built with, as go.mod pins it.

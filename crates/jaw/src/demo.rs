@@ -457,6 +457,7 @@ impl Account {
             me: vec![ME.into()],
             connection: self.connection.clone(),
             settings: self.settings.clone(),
+            other: None,
         });
     }
 

@@ -91,6 +91,43 @@ impl Connection {
     }
 }
 
+/// The process listening on `socket`, jawd's, as the socket says, to tell which jawd to stop; none
+/// if nothing listens or the system doesn't say.
+pub fn jawd_pid(socket: &Path) -> Option<u32> {
+    peer_pid(&UnixStream::connect(socket).ok()?)
+}
+
+#[cfg(target_os = "macos")]
+fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let mut pid: libc::pid_t = 0;
+    let mut size = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `size` bytes into `pid`, which is that size, for a
+    // descriptor the stream holds open.
+    let asked = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&raw mut pid).cast(), &mut size)
+    };
+    (asked == 0 && pid > 0).then_some(pid as u32)
+}
+
+#[cfg(target_os = "linux")]
+fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let mut peer = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `size` bytes into `peer`, which is that size, for a
+    // descriptor the stream holds open.
+    let asked = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut peer).cast(), &mut size)
+    };
+    (asked == 0 && peer.pid > 0).then_some(peer.pid as u32)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn peer_pid(_: &UnixStream) -> Option<u32> {
+    None
+}
+
 /// How the account came to be logged out, in a few words: jawd's reason, which may be WhatsApp's,
 /// or the phone's doing when it gave none.
 pub fn logged_out(reason: Option<&str>) -> String {
@@ -371,6 +408,15 @@ mod tests {
         let said = super::describe(&status);
         let refused = "layouts   2 kept of 16, the biggest 312 of 16384 bytes; 3 refused for being past a limit";
         assert!(said.lines().any(|l| l == refused), "{said}");
+    }
+
+    #[test]
+    fn jawds_process_is_the_one_listening_on_its_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("jaw.sock");
+        let _listening = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert_eq!(super::jawd_pid(&socket), Some(std::process::id()));
+        assert_eq!(super::jawd_pid(&dir.path().join("nothing.sock")), None);
     }
 
     #[test]

@@ -7,7 +7,9 @@
 //! dropped connection lost is asked for again with its key once jawd is back, and so are the
 //! drafts and read positions jawd hadn't answered for.
 
-use crate::data::{Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, Place, Typing, Update};
+use crate::data::{
+    Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, OtherJawd, Place, Typing, Update,
+};
 use crate::run::Event;
 use jaw_client::{Client, Config, Event as From, Failure, WindowId};
 use jaw_proto::find::{Find, Kind};
@@ -107,6 +109,8 @@ struct Starting {
 
 pub struct Wire {
     client: Client<Chat, Message>,
+    /// jawd's socket, which also says which process jawd is.
+    socket: PathBuf,
     tx: Sender<Event>,
     list: Option<WindowId>,
     /// The folder the chat list's window shows.
@@ -230,12 +234,13 @@ impl Wire {
     /// Connects to jawd on `socket`, in the background; what it sends wakes the loop on `tx`.
     pub fn connect(socket: PathBuf, tx: Sender<Event>) -> Wire {
         let wake = tx.clone();
-        let config = Config { focus: true, ..Config::new(socket, TERMINAL, env!("CARGO_PKG_VERSION")) };
+        let config = Config { focus: true, ..Config::new(socket.clone(), TERMINAL, jaw_version::VERSION) };
         let client = Client::start(config, move || {
             let _ = wake.send(Event::Jawd);
         });
         Wire {
             client,
+            socket,
             tx,
             list: None,
             list_folder: "all".into(),
@@ -463,12 +468,15 @@ impl Wire {
                         me.push(format!("{digits}@s.whatsapp.net"));
                     }
                 }
+                let other = (w.jawd != jaw_version::VERSION)
+                    .then(|| OtherJawd { version: w.jawd, pid: jaw_client::jawd_pid(&self.socket) });
                 out.push(Update::Hello {
                     root: w.root,
                     linked: w.account.state == AccountState::Linked,
                     me,
                     connection: w.connection,
                     settings: w.settings.unwrap_or_default(),
+                    other,
                 });
                 self.ask_again(out);
             }

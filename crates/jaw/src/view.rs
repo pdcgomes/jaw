@@ -271,6 +271,8 @@ pub struct View {
     /// A message to anchor on and select once it's in the window.
     jump: Option<String>,
     notice: Option<(String, i64)>,
+    /// The jawd that last answered, while it's from another build than this jaw.
+    other_jawd: Option<crate::data::OtherJawd>,
     hold_until: Option<i64>,
     chomp_until: Option<i64>,
     last_click: Option<(i64, String)>,
@@ -379,6 +381,7 @@ impl View {
             starting: None,
             jump: None,
             notice: None,
+            other_jawd: None,
             hold_until: None,
             chomp_until: None,
             last_click: None,
@@ -481,11 +484,12 @@ impl View {
         self.dirty = true;
         self.awaited |= update.awaited();
         match update {
-            Update::Hello { root, linked, me, connection, settings } => {
+            Update::Hello { root, linked, me, connection, settings, other } => {
                 self.images.set_root(&root);
                 self.reach = Reach::Up;
                 self.linked = Some(linked);
                 self.me = me;
+                self.other_jawd = other;
                 if connection.state == ConnectionState::LoggedOut {
                     self.told_logged_out(connection.reason.clone());
                 } else if linked {
