@@ -1,6 +1,6 @@
 # Jaw for the Mac: parity with the terminal
 
-27 October 2026. The plan that brings the Mac app level with the terminal: first every gap where the terminal already has something the Mac lacks, then what the terminal and jawd are building now, as each lands, with the terminal tracked so that nothing new slips past (Owner, 27 Oct). It reorders what's left of [the Mac plan](2026-10-26-jaw-mac-plan.md) around those gaps rather than replacing it, and every step does things the Mac's way, as [the Mac design](2026-10-26-jaw-mac-design.md) and its later designs have them. The owner left the choices to this plan ("just dive in", 27 Oct), so the decisions below are its own; the questions at the end are the ones that are his.
+27 October 2026. The plan that brings the Mac app level with the terminal: first every gap where the terminal already has something the Mac lacks, then what the terminal and jawd are building now, as each lands, with the terminal tracked so that nothing new slips past (Owner, 27 Oct). It reorders what's left of [the Mac plan](2026-10-26-jaw-mac-plan.md) around those gaps rather than replacing it, and every step does things the Mac's way, as [the Mac design](2026-10-26-jaw-mac-design.md) and its later designs have them. The owner left the choices to this plan ("just dive in", 27 Oct) and approved it that afternoon, answering its four questions as their leans had it (Owner, 27 Oct); the decisions not marked as his are the plan's.
 
 ## Where it starts
 
@@ -14,6 +14,7 @@
 - **Ahead of main:** `make check-parity ARGS="--terminal <branch>"` reads a terminal branch against the Mac on main, so what's being built is queued before it lands. Rows from a branch whose names main's protocol doesn't have yet say which branch (`from`); `library.shown` and `settings.set` are queued that way now.
 - **What a request can't show:** a feature that needs no new request, such as the terminal's folder keys or the IRC layout. Those come from each terminal branch's commits and the parity canvas, which is brought up to date whenever main moves; the canvas is the whole picture, and the check is the guard.
 - **When it runs:** whenever main moves, with each terminal or jawd branch that lands, and at the start and end of every Mac step. Something new from the terminal becomes a row in the list and a line in its step below, in the same commit.
+- **In CI** (Owner, 27 Oct): the check runs on every push, beside the data-audit check, once CI runs again; not in the pre-push hook, so the Mac never holds a terminal branch up.
 - **The board** (`ws-mac-parity.canvas.tsx`) shows each step's state and what it waits on.
 
 ## The order
@@ -133,8 +134,10 @@ The Mac draws every state already. Once `failure-states` lands (the engine resta
 
 ### 3.5 Settings kept by jawd
 
-On `settings`, the terminal's settings move into jawd, a domain for each frontend (`settings.set`, the `settings` push and `themes`), with Omarchy's 23 themes and the IRC layout. The Mac keeps its own preferences, as its design has them, and already has two looks. Whether its settings join jawd as a domain of their own, and whether it offers jawd's themes beside Redlamp's, are the owner's (Questions); until he says, this step is the Mac reading nothing from jawd's settings, which the list records.
+On `settings`, the terminal's settings move into jawd, a domain for each frontend (`settings.set`, the `settings` push and `themes`), with Omarchy's 23 themes and the IRC layout. The Mac keeps its own preferences, as its design has them, and already has two looks.
 
+- **What jawd can keep, jawd keeps** (Owner, 27 Oct): the settings that are jawd's (what downloads by itself, the cache's size, notifications, P5) are set from the Mac's Settings through jawd and shared with the terminal; the Mac's look (bubbles or lines, density, text size, the panes' outline) stays in its own preferences.
+- **Both sets of themes** (Owner, 27 Oct): once `settings` lands, the Appearance pane lists Omarchy's 23, read from jawd's `themes` and mapped onto the Mac's roles as the terminal maps them onto its own, beside jaw's Tokyo Night; Redlamp's families join them in Mac-M5.
 - **The check:** `settings.set` and the `settings` push (both from `settings`).
 
 ### 3.6 Scheduled messages and reminders
@@ -161,16 +164,18 @@ A proposal for jawd's builders, for 1.1, added to the Mac design's proposals. `l
 
 It stays done: each terminal feature that lands gets its Mac step that day, queued by the check or from its commits, and the board shows it until it's closed.
 
-## Questions for the owner
+## The owner's answers
 
-1. **The Mac's settings in jawd.** Should the Mac's settings join jawd as a domain of their own, as the terminal's are moving to? This plan's lean: yes, with P5, so Media and Notifications live in jawd; the look stays the Mac's own.
-2. **Themes.** Should the Mac offer Omarchy's 23 from jawd's `themes`, Redlamp's families as its design has them, or both? Lean: both, Omarchy's first since jawd serves them and nothing is copied, Redlamp's in Mac-M5.
-3. **The check in CI.** Should `make check-parity` run in CI, so a terminal branch can't land a new request without its Mac row? Lean: yes, once CI runs again, but not in the pre-push hook, so the Mac never holds a terminal branch up.
-4. **The other way.** Should the 14 places the Mac leads get a plan of their own for the terminal's builders? Lean: yes, separately; `history.more` is already coming on `failure-states`.
+The plan's four questions, answered on 27 October as their leans had them:
+
+1. **The Mac's settings in jawd:** yes, what jawd can keep, with P5; the look stays the Mac's own (3.5).
+2. **Themes:** both, Omarchy's from jawd's `themes` first and Redlamp's in Mac-M5 (3.5, Phase 4).
+3. **The check in CI:** yes, on every push once CI runs again, but not in the pre-push hook.
+4. **The other way:** yes, a plan of its own for the terminal's builders: [the terminal's parity plan](2026-10-27-jaw-terminal-parity-plan.md).
 
 ## Working rules
 
 - **As the Mac plan's "Building on the owner's Mac":** his folder and processes are never touched, tests run on `jawd demo` in a folder of their own, the real agent label is never registered on his Mac by a build in progress, and work lands from the worktree it was built in.
 - **Each step begins with its own implementation plan** in `docs/plans/`, as the menus and harness plans do, on a branch from main named for it (`mac-folders`, `mac-pictures`, …), and lands with its rows taken out of `mac/parity.toml` and `make check-parity` passing.
 - **jawd's parts stay jawd's,** on its branches with their audits; a Mac step that finds the protocol short writes a proposal, as P10 is, rather than changing jawd itself.
-- **Who:** the Mac builder builds the steps, after `mac-menus`' current tasks and the harness's first phase; the parity workstream keeps the check, the list, the parity canvas and the board current whenever main moves.
+- **Who** (Owner, 27 Oct): the Mac builder builds the steps, after `mac-menus`' current tasks and the harness's first phase; the parity workstream keeps the check, the list, the parity canvas and the board current whenever main moves.

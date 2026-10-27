@@ -15,6 +15,12 @@ jobs:
       - run: python3 scripts/check-data-audit.py "$BASE" "$GITHUB_SHA"
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || '0' }}
+  # Every request and push the terminal uses that the Mac doesn't has a step of the Mac's parity plan.
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 scripts/check-parity.py
   test:
     strategy:
       fail-fast: false
