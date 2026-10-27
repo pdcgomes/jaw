@@ -108,6 +108,41 @@ fn at_140_columns_the_chat_list_sits_beside_the_conversation() {
 }
 
 #[test]
+fn in_the_irc_layout_yours_start_at_the_name_column_under_you() {
+    let (mut v, rx) = view(140, 40);
+    v.apply(Update::Settings(Settings { theme: "tokyo-night".into(), messages: Messages::Irc }));
+    let screen = frame(&mut v);
+    let line = |screen: &str, text: &str| screen.lines().find(|l| l.contains(text)).unwrap().to_string();
+    let column = |line: &str, text: &str| line[..line.find(text).unwrap()].chars().count();
+    let mine = line(&screen, "cheguei, boa noite");
+    assert_eq!(column(&mine, "cheguei"), 26 + 34 + 2 + 6, "yours start at the name column:\n{mine}");
+    assert!(mine.contains("│ You   cheguei"), "under You, as the sender changed:\n{screen}");
+    assert!(mine.ends_with("✓✓  23:12 │"), "{mine}");
+    assert!(line(&screen, "bom dia!").contains("│ You   bom dia!"), "on a new day:\n{screen}");
+    assert!(line(&screen, "the one at the lake").contains("│ You   yes"), "{screen}");
+    let next = line(&screen, "a Sofia tirou mais");
+    let under = column(&next, "a Sofia") == 26 + 34 + 2 + 6 && !next.contains("You");
+    assert!(under, "the next of yours sits under it:\n{screen}");
+
+    let yours = |id: &str, sort: &str, at: i64, text: &str| Message {
+        mine: true,
+        from: None,
+        status: Some(crate::data::Tick::Read),
+        ..theirs(id, sort, at, text)
+    };
+    let soon = yours("soon", "9999999999990~000000001", NOW + MINUTE, "vou já");
+    let later = yours("later", "9999999999990~000000002", NOW + 31 * MINUTE, "cheguei");
+    arrive(&mut v, "ana", vec![soon, later]);
+    run::settle(&mut v, &rx);
+    let screen = frame(&mut v);
+    assert!(line(&screen, "vou já").contains("│ You   vou já"), "{screen}");
+    assert!(line(&screen, "14:33").contains("│ You   cheguei"), "after half an hour:\n{screen}");
+    press(&mut v, &rx, "<up>");
+    let detail = line(&frame(&mut v), "14:33:00 · read");
+    assert_eq!(column(&detail, "Friday"), 26 + 34 + 2 + 6, "the selected one's detail too:\n{detail}");
+}
+
+#[test]
 fn at_100_columns_the_list_keeps_its_width_and_the_conversation_takes_the_rest() {
     let (mut v, _rx) = view(100, 30);
     let screen = frame(&mut v);

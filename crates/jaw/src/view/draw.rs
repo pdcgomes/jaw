@@ -747,7 +747,8 @@ impl View {
         if m.edited {
             said.push("edited".into());
         }
-        let lead = if m.mine { layout::indent(w) } else { layout::NAME };
+        let irc = self.settings_shown().messages == jaw_proto::settings::Messages::Irc;
+        let lead = layout::margins(m.mine, irc, w).0;
         let text = fmt::fit(&said.join(" · "), w.saturating_sub(lead));
         Line::from(vec![Span::raw(" ".repeat(lead)), Span::styled(text, Style::new().fg(t.muted))])
     }

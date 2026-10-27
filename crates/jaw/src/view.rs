@@ -1116,6 +1116,7 @@ impl View {
             unfolded: self.unfolded.contains(&m.id),
             pictured: !self.pictureless.contains(&m.id),
             play: self.play_of(&m.id),
+            irc: self.settings_shown().messages == jaw_proto::settings::Messages::Irc,
         }
     }
 

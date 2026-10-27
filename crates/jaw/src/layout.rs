@@ -1,7 +1,8 @@
-//! A message as lines at a width: others' under their name on the left, yours in a column from a
-//! third of the way across, each with its time at the right edge when the minute or the sender
-//! changes. Laying one out is the costly part of a frame, so the view keeps what this returns per
-//! message, version and width, and lays out only what's on screen.
+//! A message as lines at a width: others' under their name on the left, and yours in a column from
+//! a third of the way across or, in the IRC layout, under "You" as others' are under their names,
+//! each with its time at the right edge when the minute or the sender changes. Laying one out is
+//! the costly part of a frame, so the view keeps what this returns per message, version, width and
+//! layout, and lays out only what's on screen.
 
 use crate::data::{Kind, Message, SpanKind, Tick, Voice};
 use crate::fmt;
@@ -12,7 +13,8 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-/// The column others' names take, and where their text starts.
+/// The column names take, others' and "You" in the IRC layout, and where the text under them
+/// starts.
 pub const NAME: usize = 6;
 /// The time at the right edge: two spaces and HH:MM.
 const TIME: usize = 7;
@@ -34,6 +36,9 @@ pub struct Shape {
     pub pictured: bool,
     /// For the voice message playing or paused: where.
     pub play: Option<Play>,
+    /// Yours on the left under "You", as everyone's are, as IRC clients put them, rather than in
+    /// a column from a third of the way across.
+    pub irc: bool,
 }
 
 /// Where a voice message's playhead is, in steps its line can show.
@@ -193,9 +198,23 @@ fn plan(m: &Message, col: usize, room: usize, ctx: &Ctx) -> (Vec<Picture>, usize
     }
 }
 
-/// Where your own messages start: a third of the way across.
-pub fn indent(width: usize) -> usize {
+/// Where your own messages start outside the IRC layout: a third of the way across.
+fn indent(width: usize) -> usize {
     width / 3
+}
+
+/// What labels your messages in the IRC layout.
+pub const YOU: &str = "You";
+
+/// Where a message's text starts and what its right edge keeps: others' at the name column, and
+/// yours there too in the IRC layout or a third of the way across otherwise, with room for their
+/// ticks.
+pub fn margins(mine: bool, irc: bool, width: usize) -> (usize, usize) {
+    match (mine, irc) {
+        (true, false) => (indent(width), TIME + TICKS),
+        (true, true) => (NAME, TIME + TICKS),
+        (false, _) => (NAME, TIME),
+    }
 }
 
 /// Styled text cut into lines: the first `first` columns wide, the rest `rest`, broken at spaces
@@ -363,7 +382,7 @@ pub fn laid(m: &Message, shape: Shape, ctx: &Ctx) -> Laidout {
         return out;
     }
     let w = shape.width;
-    let (left, right) = if m.mine { (indent(w), TIME + TICKS) } else { (NAME, TIME) };
+    let (left, right) = margins(m.mine, shape.irc, w);
     let (mut pictures, rows) = plan(m, left, w.saturating_sub(left + right).max(8), ctx);
     if pictures.is_empty() {
         return out;
@@ -389,9 +408,13 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
         let colour = if m.kind == Kind::Call { t.muted } else { t.comment };
         return vec![Line::from(Span::styled(text, Style::new().fg(colour))).centered()];
     }
-    let (left, right) = if m.mine { (indent(w), TIME + TICKS) } else { (NAME, TIME) };
+    let (left, right) = margins(m.mine, shape.irc, w);
     let text_w = w.saturating_sub(left + right).max(8);
-    let name = m.from.as_ref().filter(|_| shape.name && !m.mine).map(|f| fmt::fit(&f.name, 20));
+    let name = if m.mine {
+        (shape.irc && shape.name).then(|| YOU.to_string())
+    } else {
+        m.from.as_ref().filter(|_| shape.name).map(|f| fmt::fit(&f.name, 20))
+    };
     let name_w = name.as_ref().map_or(0, |n| n.width() + 1);
     let first_w = if name_w > NAME { text_w.saturating_sub(name_w - NAME) } else { text_w };
 
@@ -426,11 +449,11 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
     for (i, text) in wrapped.into_iter().enumerate() {
         let mut spans: Vec<Span<'static>> = vec![];
         let mut used = 0;
-        if m.mine {
+        if m.mine && !shape.irc {
             spans.push(Span::raw(" ".repeat(left)));
             used += left;
         } else if i == 0 && name_w > 0 {
-            let colour = m.from.as_ref().map_or(t.sender(0), |f| t.sender(f.colour));
+            let colour = if m.mine { t.fg } else { m.from.as_ref().map_or(t.sender(0), |f| t.sender(f.colour)) };
             let n = name.clone().unwrap_or_default();
             let pad = NAME.max(name_w) - n.width();
             spans.push(Span::styled(n, Style::new().fg(colour).add_modifier(Modifier::BOLD)));
@@ -497,7 +520,7 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::{Quote, Reaction, Sender, Span as Run};
+    use crate::data::{Media, Previews, Quote, Reaction, Sender, Span as Run};
 
     const UTC: FixedOffset = FixedOffset::east_opt(0).unwrap();
     const NOW: i64 = 1_792_159_320_000;
@@ -542,9 +565,15 @@ mod tests {
         let theme = Theme::with(true);
         let me = ["person:0".to_string()];
         let ctx = Ctx { theme: &theme, tz: UTC, me: &me, pictures: false, cell: (8, 16), sharp: false };
-        shown(
-            &laid(m, Shape { width, name: true, time: true, unfolded: false, pictured: true, play: None }, &ctx).lines,
-        )
+        let shape = Shape { width, name: true, time: true, unfolded: false, pictured: true, play: None, irc: false };
+        shown(&laid(m, shape, &ctx).lines)
+    }
+
+    fn lay_irc(m: &Message, width: usize, name: bool) -> Laidout {
+        let theme = Theme::with(true);
+        let me = ["person:0".to_string()];
+        let ctx = Ctx { theme: &theme, tz: UTC, me: &me, pictures: true, cell: (8, 16), sharp: false };
+        laid(m, Shape { width, name, time: true, unfolded: false, pictured: true, play: None, irc: true }, &ctx)
     }
 
     #[test]
@@ -581,6 +610,57 @@ mod tests {
         m.status = Some(Tick::Failed);
         let lines = lay(&m, 60);
         assert_eq!(lines[1].trim(), "! not sent · ⏎ tries again");
+    }
+
+    #[test]
+    fn in_the_irc_layout_yours_sit_under_you_at_the_name_column_with_their_ticks_at_the_edge() {
+        let mut m = theirs("yes, the one at the lake");
+        m.mine = true;
+        m.from = None;
+        m.status = Some(Tick::Read);
+        let first = lay_irc(&m, 60, true);
+        assert_eq!(shown(&first.lines), [format!("You   yes, the one at the lake{}✓✓  13:58", " ".repeat(21))]);
+        let you = &first.lines[0].spans[0];
+        assert_eq!(you.content, "You");
+        assert_eq!(you.style, Style::new().fg(Theme::with(true).fg).add_modifier(Modifier::BOLD));
+        let next = shown(&lay_irc(&m, 60, false).lines);
+        assert!(next[0].starts_with("      yes, the one at the lake") && next[0].contains("✓✓"), "{next:?}");
+        let mut long = m.clone();
+        long.spans = text("vens jantar sexta? a tua mãe pergunta se trazes o vinho e o pão");
+        assert_eq!(
+            shown(&lay_irc(&long, 40, true).lines),
+            ["You   vens jantar sexta? a tua ✓✓  13:58", "      mãe pergunta se trazes o", "      vinho e o pão"]
+        );
+        m.reply = Some(Quote { id: None, from: Some("Ana".into()), colour: 0, summary: "trazes o vinho?".into() });
+        m.reactions = vec![Reaction { emoji: "❤".into(), n: 2, mine: false }];
+        let lines = shown(&lay_irc(&m, 60, true).lines);
+        assert!(lines[0].starts_with("You   ┃ Ana trazes o vinho?"), "{lines:?}");
+        assert!(lines.last().unwrap().starts_with("       ❤ 2"), "reactions start at the name column: {lines:?}");
+        assert_eq!(margins(true, true, 60), (NAME, 10));
+        assert_eq!(margins(true, false, 60), (20, 10));
+        assert_eq!(margins(false, true, 60), (NAME, 7));
+    }
+
+    #[test]
+    fn in_the_irc_layout_yours_more_lines_not_sent_and_pictures_start_at_the_name_column_too() {
+        let mut m = theirs(&"line\n".repeat(60));
+        m.mine = true;
+        m.from = None;
+        m.status = Some(Tick::Failed);
+        let lines = shown(&lay_irc(&m, 60, true).lines);
+        assert!(lines[FOLD].starts_with("      ⋯ 21 more lines"), "{lines:?}");
+        assert_eq!(lines[FOLD + 1], "      ! not sent · ⏎ tries again");
+        m.kind = Kind::Image;
+        m.spans = text("a vista do topo");
+        m.media = Some(Box::new(Media {
+            w: 800,
+            h: 600,
+            previews: Previews { small: Some("topo-256.jpg".into()), large: None },
+            ..Media::default()
+        }));
+        let photo = lay_irc(&m, 60, true);
+        let at: Vec<(usize, u16, u16)> = photo.pictures.iter().map(|p| (p.line, p.col, p.cols)).collect();
+        assert_eq!(at, [(1, NAME as u16, 40)], "under the line that says what it is, at the name column");
     }
 
     #[test]

@@ -426,6 +426,17 @@ fn a_theme_that_changes_draws_every_pane_again_in_its_colours() {
     assert!(!now.content.iter().any(|c| c.bg == tokyo_night.bg), "and nothing on Tokyo Night's");
 }
 
+#[test]
+fn switching_to_the_irc_layout_lays_every_panes_messages_out_again() {
+    let (mut v, rx, _) = view_with("panes", 160, 45);
+    press(&mut v, &rx, "<c-p>%");
+    assert!(!frame(&mut v).contains("You   "), "bubbles, in both panes");
+    v.apply(Update::Settings(Settings { theme: "tokyo-night".into(), messages: Messages::Irc }));
+    let screen = frame(&mut v);
+    assert!(screen.contains("You   haha, ela vai adorar"), "Ana's pane, without the keys:\n{screen}");
+    assert!(screen.contains("You   ok, ligo-te logo à noite"), "and Mãe's, with them:\n{screen}");
+}
+
 /// Pictures of two, three and four panes at 160 × 45 and 100 × 30, with and without the box along
 /// the bottom, as HTML in `JAW_SHOTS` (or /tmp/jaw-spike-panes), for a browser to turn into PNGs.
 /// Each pane has something typed in its box, and Ana writes in hers while another has the keys.
