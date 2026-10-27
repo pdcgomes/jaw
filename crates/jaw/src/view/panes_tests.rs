@@ -47,7 +47,7 @@ fn frame(v: &mut View) -> String {
 }
 
 /// A frame's cells, each with its colours.
-fn drawn(v: &mut View) -> Buffer {
+pub(super) fn drawn(v: &mut View) -> Buffer {
     let (w, h) = v.size().unwrap();
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     term.draw(|f| v.draw(f)).unwrap();

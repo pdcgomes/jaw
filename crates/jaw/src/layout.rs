@@ -330,20 +330,21 @@ pub fn ticks(tick: Tick, t: &Theme) -> Span<'static> {
 }
 
 /// The text of a message as styled segments, from jawd's spans; a voice message's line is drawn
-/// to fit `room`.
-fn body(m: &Message, play: Option<Play>, room: usize, ctx: &Ctx) -> Vec<(String, Style)> {
+/// to fit `room`. A deleted one of yours says you deleted it, but under "You" in the IRC layout it
+/// reads as theirs do.
+fn body(m: &Message, shape: Shape, room: usize, ctx: &Ctx) -> Vec<(String, Style)> {
     let t = ctx.theme;
     let plain = Style::new().fg(t.fg);
     let dim = Style::new().fg(t.comment).add_modifier(Modifier::ITALIC);
     if m.deleted {
-        let said = if m.mine { "⊘ You deleted this message" } else { "⊘ This message was deleted" };
+        let said = if m.mine && !shape.irc { "⊘ You deleted this message" } else { "⊘ This message was deleted" };
         return vec![(said.into(), dim)];
     }
     let mut out = vec![];
     if m.kind == Kind::Voice
         && let Some(v) = &m.voice
     {
-        out.extend(voice(m, v, play, room, ctx));
+        out.extend(voice(m, v, shape.play, room, ctx));
         if !m.spans.is_empty() {
             out.push(("\n".into(), plain));
         }
@@ -434,7 +435,7 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
         segments.push(("\n".into(), Style::new()));
     }
     let room = if m.reply.is_some() { text_w } else { first_w };
-    segments.extend(body(m, shape.play, room, ctx));
+    segments.extend(body(m, shape, room, ctx));
     if m.edited && !m.deleted {
         segments.push(("  edited".into(), Style::new().fg(t.comment)));
     }
@@ -449,10 +450,7 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
     for (i, text) in wrapped.into_iter().enumerate() {
         let mut spans: Vec<Span<'static>> = vec![];
         let mut used = 0;
-        if m.mine && !shape.irc {
-            spans.push(Span::raw(" ".repeat(left)));
-            used += left;
-        } else if i == 0 && name_w > 0 {
+        if i == 0 && name_w > 0 {
             let colour = if m.mine { t.fg } else { m.from.as_ref().map_or(t.sender(0), |f| t.sender(f.colour)) };
             let n = name.clone().unwrap_or_default();
             let pad = NAME.max(name_w) - n.width();
@@ -460,8 +458,8 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
             spans.push(Span::raw(" ".repeat(pad)));
             used += NAME.max(name_w);
         } else {
-            spans.push(Span::raw(" ".repeat(NAME)));
-            used += NAME;
+            spans.push(Span::raw(" ".repeat(left)));
+            used += left;
         }
         used += width_of(&text);
         spans.extend(text.into_iter().map(|(s, st)| Span::styled(s, st)));
@@ -690,6 +688,18 @@ mod tests {
         assert!(lay(&m, 50)[0].contains("jaw can't show this yet"));
         m.deleted = true;
         assert!(lay(&m, 50)[0].contains("⊘ This message was deleted"));
+    }
+
+    #[test]
+    fn a_deleted_message_of_yours_reads_as_theirs_do_under_you_in_the_irc_layout() {
+        let mut m = theirs("vou já");
+        m.mine = true;
+        m.from = None;
+        m.deleted = true;
+        let bubbles = lay(&m, 60);
+        assert!(bubbles[0].trim_start().starts_with("⊘ You deleted this message"), "{bubbles:?}");
+        let irc = shown(&lay_irc(&m, 60, true).lines);
+        assert!(irc[0].starts_with("You   ⊘ This message was deleted"), "{irc:?}");
     }
 
     #[test]

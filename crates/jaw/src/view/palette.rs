@@ -637,13 +637,13 @@ impl View {
         all.push(Action::new("Change the theme", format!("{theme} now; previewed as you move"), Does::Theme));
         all.push(match shown.messages {
             Messages::Bubbles => Action::new(
-                "Your messages on the left, as IRC",
-                "under \"You\", as everyone's are",
+                "Turn the IRC layout on",
+                "your messages on the left, under \"You\"",
                 Does::Messages(Messages::Irc),
             ),
             Messages::Irc => Action::new(
-                "Your messages on the right",
-                "a third of the way across",
+                "Turn the IRC layout off",
+                "your messages back on the right",
                 Does::Messages(Messages::Bubbles),
             ),
         });

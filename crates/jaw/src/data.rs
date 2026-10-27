@@ -790,6 +790,9 @@ pub enum Update {
     SettingsKept(Settings),
     /// jawd didn't keep the settings asked, and why.
     SettingsRefused(String),
+    /// jawd may have kept the settings asked, but jaw doesn't know: its answer was lost with the
+    /// connection or couldn't be read, and why.
+    SettingsUnconfirmed(String),
     Link(LinkStep),
     /// The chat list's window: a watch's or a move's rows, or a push, as jaw-client's models take
     /// them.
@@ -1046,8 +1049,9 @@ pub trait Jawd {
     /// Whether the terminal is in front, so jawd says you're online only while it is.
     fn focus(&mut self, focused: bool);
     /// Asks jawd to keep these settings for the terminal; the answer comes back as
-    /// `Update::SettingsKept`, or `Update::SettingsRefused` with why, and a change jawd keeps is
-    /// pushed too, as `Update::Settings`.
+    /// `Update::SettingsKept`, `Update::SettingsRefused` with why, or `Update::SettingsUnconfirmed`
+    /// with why when the answer was lost or couldn't be read, and a change jawd keeps is pushed too,
+    /// as `Update::Settings`.
     fn set_settings(&mut self, change: &SettingsSet);
     /// Starts linking by QR code, or by a code typed on the phone for `phone`.
     fn link_start(&mut self, phone: Option<String>);

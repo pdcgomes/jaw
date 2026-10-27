@@ -244,6 +244,11 @@ impl View {
     pub(super) fn parked_chat(&self, p: usize) -> Option<String> {
         self.panes.parked.get(p).and_then(|s| s.open.clone())
     }
+
+    /// Where pane `p` was last drawn.
+    pub(super) fn pane_area(&self, p: usize) -> Option<Rect> {
+        self.panes.drawn.iter().find(|(q, _)| *q == p).map(|(_, r)| *r)
+    }
 }
 
 impl View {

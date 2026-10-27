@@ -526,6 +526,10 @@ impl View {
                 self.settings_answered(None);
                 self.say(format!("not kept: {why}"));
             }
+            Update::SettingsUnconfirmed(why) => {
+                self.settings_answered(None);
+                self.say(format!("not confirmed: {why}"));
+            }
             Update::Link(step) => {
                 if let LinkStep::Done { phone } = &step {
                     self.say(format!("Linked {phone}. jawd is fetching your history."));
@@ -735,9 +739,10 @@ impl View {
         self.restyle();
     }
 
-    /// jawd answered a change asked here: kept, with all its settings as they now are, or refused.
-    /// What was last asked stays shown until every change on its way is answered, so a first
-    /// answer doesn't draw the first change over a second, and goes at once when one is refused.
+    /// jawd answered a change asked here: kept, with all its settings as they now are, or refused
+    /// or unconfirmed. What was last asked stays shown until every change on its way is answered,
+    /// so a first answer doesn't draw the first change over a second, and goes at once when one
+    /// isn't kept or confirmed.
     fn settings_answered(&mut self, kept: Option<Settings>) {
         self.settings_owed = self.settings_owed.saturating_sub(1);
         match kept {
@@ -1153,6 +1158,8 @@ impl View {
 
 #[cfg(test)]
 mod panes_tests;
+#[cfg(test)]
+mod settings_tests;
 #[cfg(test)]
 mod spike_tests;
 #[cfg(test)]

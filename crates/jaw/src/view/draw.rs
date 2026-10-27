@@ -137,7 +137,10 @@ impl View {
                 let failed = failed.clone();
                 self.draw_starting(f, body, failed);
             }
-            Reach::Unreachable { .. } if self.chats.is_empty() => self.draw_asleep(f, body),
+            // An open settings panel stays on screen while jawd is away, so coming back keeps it.
+            Reach::Unreachable { .. } if self.chats.is_empty() && self.settings_panel.is_none() => {
+                self.draw_asleep(f, body)
+            }
             _ if self.linking() => self.draw_linking(f, body),
             _ => self.draw_main_and_below(f, body),
         }
@@ -735,12 +738,15 @@ impl View {
         ])
     }
 
-    /// Everything about the selected message, on a line under it.
-    fn detail(&self, m: &Message, w: usize) -> Line<'static> {
+    /// Everything about the selected message, on a line under it from where its text starts: who
+    /// sent it, "You" for yours in the IRC layout, as `shape` lays it out.
+    fn detail(&self, m: &Message, shape: layout::Shape) -> Line<'static> {
         let t = &self.theme;
         let mut said = vec![fmt::full(m.at, self.tz)];
-        if let Some(from) = m.from.as_ref().filter(|_| !m.mine) {
-            said.insert(0, from.name.clone());
+        let who =
+            if m.mine { shape.irc.then(|| layout::YOU.to_string()) } else { m.from.as_ref().map(|f| f.name.clone()) };
+        if let Some(who) = who {
+            said.insert(0, who);
         }
         if let Some(status) = m.status {
             said.push(
@@ -758,9 +764,8 @@ impl View {
         if m.edited {
             said.push("edited".into());
         }
-        let irc = self.settings_shown().messages == jaw_proto::settings::Messages::Irc;
-        let lead = layout::margins(m.mine, irc, w).0;
-        let text = fmt::fit(&said.join(" · "), w.saturating_sub(lead));
+        let lead = layout::margins(m.mine, shape.irc, shape.width).0;
+        let text = fmt::fit(&said.join(" · "), shape.width.saturating_sub(lead));
         Line::from(vec![Span::raw(" ".repeat(lead)), Span::styled(text, Style::new().fg(t.muted))])
     }
 
@@ -771,7 +776,7 @@ impl View {
         let day = new_day.then(|| fmt::day(m.at, self.now(), self.tz));
         let blank = (new_day && prev.is_some()) || (!new_day && self.gap(m, prev));
         let lines = self.lines(m, shape);
-        let detail = (self.focus == Focus::Message(m.id.clone())).then(|| self.detail(m, width));
+        let detail = (self.focus == Focus::Message(m.id.clone())).then(|| self.detail(m, shape));
         Placing { id: m.id.clone(), sort: m.sort.clone(), top, day, blank, lines, detail }
     }
 

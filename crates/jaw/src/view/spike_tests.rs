@@ -21,7 +21,7 @@ const UTC: FixedOffset = FixedOffset::east_opt(0).unwrap();
 
 /// A view on the made-up account with the switches `on` names, and the account, to ask it what
 /// it watches.
-fn view_with(on: &str, state: State, width: u16, height: u16) -> (View, Receiver<Event>, Demo) {
+pub(super) fn view_with(on: &str, state: State, width: u16, height: u16) -> (View, Receiver<Event>, Demo) {
     let (tx, rx) = std::sync::mpsc::channel();
     let demo = Demo::start(tx, Clock::Fixed(NOW), state, false);
     let mut v = View::new(Box::new(demo.clone()));
@@ -35,12 +35,12 @@ fn view_with(on: &str, state: State, width: u16, height: u16) -> (View, Receiver
     (v, rx, demo)
 }
 
-fn frame(v: &mut View) -> String {
+pub(super) fn frame(v: &mut View) -> String {
     let (w, h) = v.size().unwrap();
     run::snapshot(v, w, h)
 }
 
-fn press(v: &mut View, rx: &Receiver<Event>, keys: &str) {
+pub(super) fn press(v: &mut View, rx: &Receiver<Event>, keys: &str) {
     run::press(v, rx, keys).unwrap();
 }
 

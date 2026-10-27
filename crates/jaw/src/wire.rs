@@ -386,6 +386,9 @@ impl Wire {
             Asked::Did(what) => Some(Update::Notice(why_not(failure, what))),
             Asked::StartChat => Some(Update::NotStarted(failure.to_string())),
             Asked::Voice => Some(Update::VoiceRefused(why_not(failure, "voice"))),
+            Asked::Settings if matches!(failure, Failure::Lost) => Some(Update::SettingsUnconfirmed(
+                "jawd went away before answering; you'll see what it kept when it's back".into(),
+            )),
             Asked::Settings => Some(Update::SettingsRefused(why_not(failure, "settings"))),
             Asked::Info(message) => Some(Update::Info { message, info: Err(why_not(failure, "a message's info")) }),
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
@@ -519,7 +522,7 @@ impl Wire {
                     }
                     (Asked::Settings, Ok(result)) => out.push(match serde_json::from_value::<SettingsKept>(result) {
                         Ok(kept) => Update::SettingsKept(kept.settings),
-                        Err(_) => Update::SettingsRefused("jaw couldn't read jawd's answer".into()),
+                        Err(_) => Update::SettingsUnconfirmed("jaw couldn't read jawd's answer".into()),
                     }),
                     (asked, Err(failure)) => out.extend(self.refused(asked, &failure)),
                     _ => {}

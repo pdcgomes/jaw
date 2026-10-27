@@ -139,7 +139,15 @@ fn in_the_irc_layout_yours_start_at_the_name_column_under_you() {
     assert!(line(&screen, "14:33").contains("│ You   cheguei"), "after half an hour:\n{screen}");
     press(&mut v, &rx, "<up>");
     let detail = line(&frame(&mut v), "14:33:00 · read");
-    assert_eq!(column(&detail, "Friday"), 26 + 34 + 2 + 6, "the selected one's detail too:\n{detail}");
+    assert!(
+        detail.contains("You · Friday 16 October 2026, 14:33:00 · read"),
+        "from You, as theirs from them:\n{detail}"
+    );
+    assert_eq!(column(&detail, "You · Friday"), 26 + 34 + 2 + 6, "at the name column:\n{detail}");
+    v.apply(Update::Settings(Settings { theme: "tokyo-night".into(), messages: Messages::Bubbles }));
+    let detail = line(&frame(&mut v), "14:33:00 · read");
+    assert!(!detail.contains("You"), "in bubbles it names no one, as it didn't:\n{detail}");
+    assert_eq!(column(&detail, "Friday"), 26 + 34 + 2 + 76 / 3, "a third of the way across:\n{detail}");
 }
 
 #[test]
@@ -589,7 +597,7 @@ fn a_new_account_has_the_mimic_where_the_chats_will_be() {
 }
 
 /// What the made-up account has sent since it was last asked, without applying it.
-fn came(rx: &Receiver<Event>) -> Vec<Update> {
+pub(super) fn came(rx: &Receiver<Event>) -> Vec<Update> {
     rx.try_iter().filter_map(|e| if let Event::Update(u) = e { Some(u) } else { None }).collect()
 }
 
@@ -682,6 +690,28 @@ fn a_change_shows_while_jawd_keeps_it_and_one_it_doesnt_keep_goes_back_and_says_
     assert!(frame(&mut v).lines().last().unwrap().contains("not kept: jaw.db can't be written"));
     v.apply(Update::Settings(Settings { theme: "kanagawa".into(), messages: Messages::Bubbles }));
     assert_eq!(v.theme, Theme::named("kanagawa", true), "another interface's change shows here too");
+}
+
+/// A change whose answer was lost, or couldn't be read, may have been kept: it goes back on screen
+/// as a refused one does, but the footer says it isn't confirmed rather than that it wasn't kept.
+#[test]
+fn a_change_whose_answer_was_lost_or_unreadable_goes_back_and_says_it_isnt_confirmed() {
+    let (mut v, _rx) = view(140, 40);
+    let lost = "jawd went away before answering; you'll see what it kept when it's back";
+    let unreadable = "jaw couldn't read jawd's answer";
+    for (answer, said) in [
+        (Update::SettingsUnconfirmed(lost.into()), format!("not confirmed: {lost}")),
+        (Update::SettingsUnconfirmed(unreadable.into()), format!("not confirmed: {unreadable}")),
+        (Update::SettingsRefused("jaw.db can't be written".into()), "not kept: jaw.db can't be written".into()),
+    ] {
+        v.ask_settings(SettingsSet { theme: Some("nord".into()), messages: None });
+        assert_eq!(v.theme, Theme::named("nord", true), "shown at once");
+        v.apply(answer);
+        assert_eq!(v.theme, Theme::with(true), "{said}: back to what jawd has");
+        assert_eq!((v.settings_owed, &v.settings_asked), (0, &None), "{said}: nothing left on its way");
+        let screen = frame(&mut v);
+        assert!(screen.lines().last().unwrap().contains(&said), "{said}:\n{screen}");
+    }
 }
 
 /// A theme jaw doesn't know is drawn as Tokyo Night, so moving between one and Tokyo Night changes

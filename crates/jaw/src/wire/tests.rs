@@ -39,8 +39,8 @@ struct Kept {
     keyed: HashMap<String, String>,
     /// Each action it did, by key, with its answer.
     acted: HashMap<String, Value>,
-    /// Whether to take the next message, action or layout and drop the connection before
-    /// answering, as a jawd killed between its commit and its answer does.
+    /// Whether to take the next message, action, layout or settings change and drop the connection
+    /// before answering, as a jawd killed between its commit and its answer does.
     swallow: bool,
     /// The panes' layout it keeps for jaw, and its version.
     layout: Option<Value>,
@@ -170,6 +170,9 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
                 push = Some(json!({ "method": "settings", "params": settings }));
             }
             kept.settings = Some(settings.clone());
+            if std::mem::take(&mut kept.swallow) {
+                return None;
+            }
             json!({ "settings": settings })
         }
         "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" => json!({}),
@@ -527,8 +530,13 @@ fn the_settings_come_in_each_hello_and_jawds_answer_and_push_and_one_it_refuses_
     assert_eq!(hello(&said), Some(Settings::default()), "a hello without settings is the defaults: {said:?}");
 }
 
+/// Whether an update answers a settings change.
+fn answers_settings(u: &Update) -> bool {
+    matches!(u, Update::SettingsKept(_) | Update::SettingsRefused(_) | Update::SettingsUnconfirmed(_))
+}
+
 /// An answer to `settings.set` that doesn't read as the settings jawd kept still answers the
-/// change, as not kept, so the screen doesn't wait for good on an answer that has come.
+/// change, as not confirmed, so the screen doesn't wait for good on an answer that has come.
 #[test]
 fn an_answer_to_a_settings_change_that_cant_be_read_says_so() {
     let jawd = scripted();
@@ -537,10 +545,40 @@ fn an_answer_to_a_settings_change_that_cant_be_read_says_so() {
     let mut said = vec![];
     drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
     wire.set_settings(&SettingsSet { theme: Some("garbled".into()), messages: None });
-    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::SettingsRefused(_))));
-    let answered: Vec<&Update> =
-        said.iter().filter(|u| matches!(u, Update::SettingsKept(_) | Update::SettingsRefused(_))).collect();
-    assert_eq!(answered, [&Update::SettingsRefused("jaw couldn't read jawd's answer".into())], "{said:?}");
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(answers_settings));
+    let answered: Vec<&Update> = said.iter().filter(|u| answers_settings(u)).collect();
+    assert_eq!(answered, [&Update::SettingsUnconfirmed("jaw couldn't read jawd's answer".into())], "{said:?}");
+}
+
+/// A settings change whose answer the connection lost may have been kept: it's said as not
+/// confirmed, and jawd's hello once it's back brings what it kept. One asked while jawd is away is
+/// never sent, so it's not kept.
+#[test]
+fn a_settings_change_whose_answer_is_lost_is_unconfirmed_and_one_never_sent_is_not_kept() {
+    let jawd = scripted();
+    let (tx, rx) = channel();
+    let mut wire = Wire::connect(jawd.socket.clone(), tx);
+    let mut said = vec![];
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+    said.clear();
+    jawd.kept.lock().unwrap().swallow = true;
+    wire.set_settings(&SettingsSet { theme: Some("gruvbox".into()), messages: None });
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+    let lost = "jawd went away before answering; you'll see what it kept when it's back";
+    let answered: Vec<&Update> = said.iter().filter(|u| answers_settings(u)).collect();
+    assert_eq!(answered, [&Update::SettingsUnconfirmed(lost.into())], "{said:?}");
+    let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Bubbles };
+    let hello = said.iter().find_map(|u| if let Update::Hello { settings, .. } = u { Some(settings) } else { None });
+    assert_eq!(hello, Some(&gruvbox), "back, what jawd kept: {said:?}");
+
+    said.clear();
+    jawd.tell.send(Told::Go).unwrap();
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Unreachable { .. })));
+    wire.set_settings(&SettingsSet { theme: Some("nord".into()), messages: None });
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(answers_settings));
+    let answered: Vec<&Update> = said.iter().filter(|u| answers_settings(u)).collect();
+    let unsent = "jawd isn't connected; jaw is trying to reach it, so try again in a moment";
+    assert_eq!(answered, [&Update::SettingsRefused(unsent.into())], "{said:?}");
 }
 
 #[test]
