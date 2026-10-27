@@ -4,7 +4,7 @@
 
 **Goal:** Settings kept by jawd in a domain for each frontend (the terminal's: Omarchy's 23 themes, and where your messages sit), with a panel in jaw, the IRC layout and `jaw settings`, as `docs/plans/2026-10-26-settings-design.md` specifies.
 
-**Architecture:** jaw-proto defines the terminal's settings and carries Omarchy's palettes, `protocol/themes/*.toml`, parsed once. jawd keeps each frontend's settings in a new table of jaw's own (migration 12), keyed by domain and setting, the domain being the `client` a connection's hello gives; it changes them one at a time with a synced commit, publishes each domain's on a tokio `watch` channel that its connections push from, and sends a connection its domain's in hello's answer. jaw maps a palette onto its colour roles with bands of contrast, follows the settings from hello, answers and pushes, draws the panel in the chat list's place, and lays your messages out under "You" in the IRC layout.
+**Architecture:** jaw-proto defines the terminal's settings and carries Omarchy's palettes, `protocol/themes/*.toml`, parsed once. jawd keeps each frontend's settings in a new table of jaw's own (migration 13), keyed by domain and setting, the domain being the `client` a connection's hello gives; it changes them one at a time with a synced commit, publishes each domain's on a tokio `watch` channel that its connections push from, and sends a connection its domain's in hello's answer. jaw maps a palette onto its colour roles with bands of contrast, follows the settings from hello, answers and pushes, draws the panel in the chat list's place, and lays your messages out under "You" in the IRC layout.
 
 **Tech Stack:** Rust 2024 workspace (jaw-proto, jawd, jaw-client, jaw), rusqlite with SQLite bundled, tokio, ratatui and crossterm, serde; Python 3 for the theme script.
 
@@ -13,7 +13,7 @@
 - The spec is `docs/plans/2026-10-26-settings-design.md`. Where this plan and the spec differ, the spec wins: stop and say so.
 - Work only in the worktree `/Users/pedrogomes/src/jaw-settings`, on the branch `settings`. Never push, never pass `--no-verify`, never rewrite commits that aren't yours.
 - The data layer (`crates/jawd/src/store/`, `sync*`, `feed/`, `find*`, `send*`, `engine/`, `sock.rs`, and from Task 4 `crates/jawd/src/settings*`) follows `.cursor/rules/data-integrity.mdc`. Read "Data integrity" and "Migrations" in `docs/plans/2026-10-16-jaw-design.md` before Task 3. Don't add `Data-Audit` trailers; Task 11 does.
-- Migration 12 is new: a schema step, appended to `MIGRATIONS`, with its line in `migrations.lock`. A merged migration is never edited.
+- Migration 13 is new: a schema step, appended to `MIGRATIONS`, with its line in `migrations.lock`. A merged migration is never edited.
 - No `OFFSET`, no scan of a table, no temporary b-tree; every new SQL statement's plan is pinned (`JAW_PLANS=write cargo test -p jawd plans`, then read the diff of `plans.txt`).
 - Never stop processes by name, never copy the owner's `session.db`, never run the Go engine on a folder holding it; anything run by hand uses a temporary `JAW_HOME` and `--engine demo`.
 - Commit messages are one long sentence in the project's voice (read `git log -5`), with no prefixes such as `feat:`.
@@ -775,7 +775,7 @@ git commit -m "A domain of settings for each frontend, on the wire, as the owner
 ### Task 3: jaw.db keeps the settings (data layer)
 
 **Files:**
-- Modify: `crates/jawd/src/store/schema.rs` (migration 12), `crates/jawd/src/store/migrations.lock`, `crates/jawd/src/store/write.rs` (`Change::Settings`), `crates/jawd/src/store/mod.rs` (`Store::setting`, a test), `crates/jawd/src/store/plans.txt` (re-pinned)
+- Modify: `crates/jawd/src/store/schema.rs` (migration 13), `crates/jawd/src/store/migrations.lock`, `crates/jawd/src/store/write.rs` (`Change::Settings`), `crates/jawd/src/store/mod.rs` (`Store::setting`, a test), `crates/jawd/src/store/plans.txt` (re-pinned)
 
 **Interfaces:**
 - Produces: `Change::Settings { domain: String, values: Vec<(String, String)>, at: i64 }`, a frontend's settings changed together, each as its key and its JSON text, kept all or none in one step, and `at` milliseconds since the epoch; `Store::setting(&self, domain: &str, key: &str) -> anyhow::Result<Option<String>>`, what jaw.db holds for `key` in `domain` as its JSON.
@@ -832,12 +832,12 @@ In `crates/jawd/src/store/mod.rs`'s test module (it has `query(&store, |db| …)
 Run: `cargo test -p jawd a_setting_is_kept_once`
 Expected: FAIL to compile: no variant `Change::Settings`, no method `setting`.
 
-- [ ] **Step 3: Add migration 12**
+- [ ] **Step 3: Add migration 13**
 
-Append to `MIGRATIONS` in `crates/jawd/src/store/schema.rs`, after migration 11's string:
+Append to `MIGRATIONS` in `crates/jawd/src/store/schema.rs`, after migration 12's string:
 
 ```rust
-    // 12, a schema step: each frontend's settings, one new table, which costs the same however big
+    // 13, a schema step: each frontend's settings, one new table, which costs the same however big
     // jaw.db is.
     "
     -- Class: jaw's own. Each frontend's settings, in a domain named by the client its hello gives, a
@@ -855,7 +855,7 @@ Append to `MIGRATIONS` in `crates/jawd/src/store/schema.rs`, after migration 11'
 ```
 
 Run: `cargo test -p jawd each_merged_migration_is_still_the_text_it_was_merged_with`
-Expected: FAIL with `migration 12 has no line in migrations.lock: add \`12 schema <hash>\``. Append that exact line to `crates/jawd/src/store/migrations.lock`, under line 11.
+Expected: FAIL with `migration 13 has no line in migrations.lock: add \`13 schema <hash>\``. Append that exact line to `crates/jawd/src/store/migrations.lock`, under line 12.
 
 - [ ] **Step 4: Add the change and the read**
 
@@ -924,7 +924,7 @@ Expected: all pass, the migrations' tests included (upgrades from every earlier 
 ```bash
 cargo fmt --all
 git add crates/jawd/src/store
-git commit -m "jaw.db keeps each frontend's settings: migration 12, a schema step, adds settings, a STRICT table of jaw's own with a row for each setting chosen in each domain, the domain being the client a frontend's hello gives, its value JSON by its check and when it was chosen; the writer keeps those a change carries together, all or none in one step, each an upsert that changes nothing, not even when it was chosen, for the value already held, a value that isn't JSON quarantining the whole change, and jawd reads one back by its domain and key, a search of the primary key, both statements' plans pinned; nothing outside the tests uses the change or the read until jawd's settings module does, so clippy calls them dead code until then"
+git commit -m "jaw.db keeps each frontend's settings: migration 13, a schema step, adds settings, a STRICT table of jaw's own with a row for each setting chosen in each domain, the domain being the client a frontend's hello gives, its value JSON by its check and when it was chosen; the writer keeps those a change carries together, all or none in one step, each an upsert that changes nothing, not even when it was chosen, for the value already held, a value that isn't JSON quarantining the whole change, and jawd reads one back by its domain and key, a search of the primary key, both statements' plans pinned; nothing outside the tests uses the change or the read until jawd's settings module does, so clippy calls them dead code until then"
 ```
 
 ---
@@ -3152,7 +3152,7 @@ git commit -m "The settings in the protocol, the design and the README: settings
 - [ ] **Step 1: Catch up with main**
 
 Run: `git fetch origin && git rebase origin/main`
-If `migrations.lock` conflicts because main gained migration 12, renumber ours to the next free number: move its text after theirs in `MIGRATIONS`, give its lock line that number (its hash doesn't change), update the comment above it, and continue the rebase.
+If `migrations.lock` conflicts because main gained migration 13, renumber ours to the next free number: move its text after theirs in `MIGRATIONS`, give its lock line that number (its hash doesn't change), update the comment above it, and continue the rebase.
 
 - [ ] **Step 2: The gate**
 
