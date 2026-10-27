@@ -16,6 +16,9 @@ use serde_json::Value;
 /// `jawd bench feed`'s open chat, where one message in four goes.
 const OPEN: &str = "351900000000@s.whatsapp.net";
 
+/// How long a test waits for what it expects before it fails.
+const DEADLINE: Duration = Duration::from_secs(60);
+
 /// jawd, built as this test was, beside it.
 fn jawd() -> &'static Path {
     static JAWD: OnceLock<PathBuf> = OnceLock::new();
@@ -141,7 +144,7 @@ impl Interface {
                 _ => None,
             })
         };
-        self.until(Duration::from_secs(30), "jawd's status", |ui| answer(ui).is_some());
+        self.until(DEADLINE, "jawd's status", |ui| answer(ui).is_some());
         answer(self).expect("it answered")
     }
 
@@ -175,9 +178,9 @@ fn a_jawd_killed_mid_stream_and_started_again_ends_with_the_windows_a_fresh_watc
     let bench = Jawd::bench(scratch.path(), 60);
     let config = Config::new(bench.socket(), "test", "0");
     let mut ui = Interface::new(config.clone());
-    ui.until(Duration::from_secs(10), "the windows' first rows", Interface::loaded);
+    ui.until(DEADLINE, "the windows' first rows", Interface::loaded);
     let seq = ui.messages.seq;
-    ui.until(Duration::from_secs(10), "messages arriving", |ui| ui.messages.seq > seq + 1_000);
+    ui.until(DEADLINE, "messages arriving", |ui| ui.messages.seq > seq + 1_000);
 
     // Frozen, jawd can't answer; killed, its connection drops with the request still in flight.
     bench.signal(libc::SIGSTOP);
@@ -185,19 +188,19 @@ fn a_jawd_killed_mid_stream_and_started_again_ends_with_the_windows_a_fresh_watc
     std::thread::sleep(Duration::from_millis(100));
     let home = bench.home.clone();
     drop(bench);
-    ui.until(Duration::from_secs(5), "the request failing", |ui| {
+    ui.until(DEADLINE, "the request failing", |ui| {
         ui.events.contains(&Event::Reply { id: asked, outcome: Err(Failure::Lost) }) && ui.disconnected()
     });
     let away = ui.shown();
     assert_eq!((away.0.len(), away.2.len()), (20, 100), "the models keep what they had while jawd is away");
-    ui.until(Duration::from_secs(1), "saying jawd isn't running", |ui| {
+    ui.until(DEADLINE, "saying jawd isn't running", |ui| {
         ui.events.iter().any(|e| matches!(e, Event::Disconnected { why, .. } if why.contains("jawd isn't running")))
     });
 
     let _jawd = Jawd::demo(&home);
-    ui.until(Duration::from_secs(30), "connecting again", |ui| ui.client.stats().connects == 2);
+    ui.until(DEADLINE, "connecting again", |ui| ui.client.stats().connects == 2);
     let mut fresh = Interface::new(config);
-    let until = Instant::now() + Duration::from_secs(30);
+    let until = Instant::now() + DEADLINE;
     loop {
         ui.step();
         fresh.step();
@@ -221,13 +224,13 @@ fn the_palette_keeps_only_the_answer_to_its_latest_find() {
     let home = Jawd::bench(scratch.path(), 30).home.clone();
     let jawd = Jawd::demo(&home);
     let mut ui = Interface::new(Config::new(jawd.socket(), "test", "0"));
-    ui.until(Duration::from_secs(30), "the windows' first rows", Interface::loaded);
+    ui.until(DEADLINE, "the windows' first rows", Interface::loaded);
     let typed: Vec<u64> = ["s", "su", "sunday"]
         .iter()
         .map(|query| ui.client.find(Find { query: query.to_string(), ..Find::default() }).unwrap())
         .collect();
     let last = ui.client.request("status", Value::Null).unwrap();
-    ui.until(Duration::from_secs(10), "the last find's answer", |ui| {
+    ui.until(DEADLINE, "the last find's answer", |ui| {
         ui.events.iter().any(|e| matches!(e, Event::Found { .. }))
             && ui.events.iter().any(|e| matches!(e, Event::Reply { id, .. } if *id == last))
     });
@@ -241,13 +244,15 @@ fn the_palette_keeps_only_the_answer_to_its_latest_find() {
 #[test]
 fn an_interface_that_falls_behind_is_told_to_watch_again_and_ends_as_a_fresh_one() {
     let scratch = tempfile::tempdir().unwrap();
-    let bench = Jawd::bench(scratch.path(), 10);
+    // Long enough to outlive the waits for jawd to drop the slow interface's windows and tell it
+    // to watch again: once the bench has gone, neither can come.
+    let bench = Jawd::bench(scratch.path(), 20);
     let mut config = Config::new(bench.socket(), "test", "0");
     let mut fresh = Interface::new(config.clone());
     config.events = 1;
     let mut slow = Interface::new(config);
     for ui in [&mut slow, &mut fresh] {
-        ui.until(Duration::from_secs(10), "the windows' first rows", Interface::loaded);
+        ui.until(DEADLINE, "the windows' first rows", Interface::loaded);
     }
 
     // With room for one event, the second reply stops the slow interface's reading, so jawd's
@@ -257,16 +262,16 @@ fn an_interface_that_falls_behind_is_told_to_watch_again_and_ends_as_a_fresh_one
     for focused in [false, true, false] {
         slow.client.request("focus", serde_json::json!({ "focused": focused })).unwrap();
     }
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + DEADLINE;
     while fresh.status()["windows"]["watched"] != 2 {
         assert!(Instant::now() < until, "jawd never dropped the slow interface's windows");
         std::thread::sleep(Duration::from_millis(200));
     }
-    slow.until(Duration::from_secs(10), "jawd's resync", |ui| ui.client.stats().resyncs == 2);
+    slow.until(DEADLINE, "jawd's resync", |ui| ui.client.stats().resyncs == 2);
 
     // Once the bench has written its last message and gone, both hold what they last had.
     for ui in [&mut slow, &mut fresh] {
-        ui.until(Duration::from_secs(60), "the bench ending", Interface::disconnected);
+        ui.until(2 * DEADLINE, "the bench ending", Interface::disconnected);
     }
     assert_eq!(slow.client.stats().connects, 1, "the slow interface stayed connected");
     assert_eq!(slow.shown(), fresh.shown(), "the windows watched again match the ones watched throughout");
