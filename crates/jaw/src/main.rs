@@ -45,6 +45,11 @@ enum Command {
         #[arg(long)]
         phone: Option<String>,
     },
+    /// The terminal's settings, or changes them: jaw settings theme=gruvbox messages=irc
+    Settings {
+        /// Settings to change, each as name=value
+        changes: Vec<String>,
+    },
     /// The terminal interface on a made-up account, to try jaw without one
     Demo {
         /// How things stand: linked and online, linking, logged out, jawd out of reach…
@@ -126,6 +131,7 @@ fn main() -> Result<()> {
         None => run::run(|tx| view::View::new(Box::new(wire::Wire::start(&jaw_proto::local::home(), tx)))),
         Some(Command::Status) => status(),
         Some(Command::Link { phone }) => link(phone),
+        Some(Command::Settings { changes }) => settings(changes),
         Some(Command::Demo { state, flood }) => run::run(|tx| {
             let demo = demo::Demo::start(tx, demo::Clock::Wall, state, true);
             demo.answer_on_a_thread();
@@ -254,6 +260,44 @@ fn link(phone: Option<String>) -> Result<()> {
     }
 }
 
+fn settings(changes: Vec<String>) -> Result<()> {
+    let (mut connection, welcome) = connect()?;
+    let now = if changes.is_empty() {
+        welcome.settings.unwrap_or_default()
+    } else {
+        let kept = connection.call("settings.set", asked_settings(&changes)?)?;
+        serde_json::from_value::<jaw_proto::settings::SettingsKept>(kept)?.settings
+    };
+    println!("{}", describe_settings(&now));
+    Ok(())
+}
+
+/// `name=value` pairs as `settings.set`'s params; jawd checks the names and the values.
+fn asked_settings(changes: &[String]) -> Result<serde_json::Value> {
+    let mut asked = serde_json::Map::new();
+    for change in changes {
+        let Some((name, value)) = change.split_once('=') else {
+            bail!("{change} isn't a name=value pair, such as theme=gruvbox");
+        };
+        asked.insert(name.trim().to_string(), serde_json::Value::from(value.trim()));
+    }
+    Ok(serde_json::Value::Object(asked))
+}
+
+/// The settings as `jaw settings` prints them, each with the values it takes.
+fn describe_settings(settings: &jaw_proto::settings::Settings) -> String {
+    let themes: Vec<&str> = jaw_proto::themes::all().iter().map(|t| t.id.as_str()).collect();
+    let messages = jaw_proto::settings::Messages::ALL.map(|m| m.name());
+    format!(
+        "theme     {} ({})\n          one of {}\nmessages  {}\n          one of {}",
+        settings.theme,
+        jaw_proto::themes::or_default(&settings.theme).name,
+        themes.join(", "),
+        settings.messages.name(),
+        messages.join(", "),
+    )
+}
+
 /// The code as half-block characters, light on dark, so a terminal with a dark background shows a
 /// QR code the phone can read.
 fn qr(code: &str) -> Result<String> {
@@ -263,4 +307,24 @@ fn qr(code: &str) -> Result<String> {
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_are_asked_as_name_value_pairs_for_jawd_to_check() {
+        let asked = asked_settings(&["theme=gruvbox".into(), " messages = irc ".into()]).unwrap();
+        assert_eq!(asked, serde_json::json!({"theme": "gruvbox", "messages": "irc"}));
+        assert!(asked_settings(&["gruvbox".into()]).unwrap_err().to_string().contains("name=value"));
+    }
+
+    #[test]
+    fn settings_are_said_with_the_values_each_takes() {
+        let said = describe_settings(&jaw_proto::settings::Settings::default());
+        assert!(said.starts_with("theme     tokyo-night (Tokyo Night)\n"), "{said}");
+        assert!(said.contains("catppuccin, catppuccin-latte, ethereal"), "{said}");
+        assert!(said.contains("messages  bubbles\n          one of bubbles, irc"), "{said}");
+    }
 }
