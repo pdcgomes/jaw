@@ -2313,6 +2313,50 @@ async fn an_outbox_full_of_messages_whatsapp_refuses_for_good_is_emptied_by_dele
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn past_a_thousand_a_deletion_for_you_of_a_message_with_a_reaction_kept_for_a_late_receipt_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.chats(&[ANA]).await;
+    running.arrives(ANA, ANA, "theirs", now_ms()).await;
+    {
+        let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        let tx = db.transaction().unwrap();
+        // A thousand messages of yours WhatsApp refused, and your reaction to Ana's, which had no
+        // receipt in its day and is kept for a late one, outside the thousand.
+        for n in 0..1_000 {
+            let id = format!("w{n}");
+            tx.execute(
+                "INSERT INTO messages (chat, id, at, t, kind, mine, status, v)
+                VALUES ((SELECT n FROM chats WHERE id = ?3), ?1, ?2, ?2, 'text', 1, 'failed', 1)",
+                rusqlite::params![id, n as i64, ANA],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO outbox (message, jid, id, kind, raw, state, next_at, created_at)
+                VALUES (last_insert_rowid(), ?1, ?2, 'text', x'', 'failed', ?3, 0)",
+                rusqlite::params![ANA, id, now_ms() + 3_600_000],
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO outbox (target, jid, id, kind, raw, effect, state, next_at, created_at)
+            VALUES ((SELECT n FROM messages WHERE id = 'theirs'), ?1, 'kept', 'reaction', x'',
+                '{\"do\":\"react\",\"emoji\":\"👍\"}', 'failed', 0, ?2)",
+            rusqlite::params![ANA, now_ms()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+    assert_eq!(outbox_rows(&running).await.1, (1_000, 1_000));
+    // The kept reaction frees no place: it doesn't count, and a deletion for you leaves it.
+    let refused = running.call("delete", json!({ "message": "theirs", "for": "me" })).await.unwrap_err();
+    assert_eq!(refused.code, code::LIMIT, "{}", refused.message);
+    assert_eq!(outbox_rows(&running).await.1, (1_000, 1_000), "no place taken");
+    assert!(row(&running, ANA, "theirs").await.is_some(), "not deleted");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_reaction_held_on_a_message_your_phone_then_deletes_for_everyone_isnt_sent() {
     let home = tempfile::tempdir().unwrap();
     let id = crash(home.path(), "held").await;
@@ -2357,6 +2401,36 @@ async fn a_reaction_on_its_way_to_a_message_deleted_for_everyone_before_it_goes_
     assert!(kinds_sent(&running).is_empty(), "{:?}", kinds_sent(&running));
     let shown = row(&running, ANA, "m1").await.unwrap();
     assert!(shown.deleted && shown.reactions.is_empty(), "{:?}", shown.reactions);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_whatsapp_turns_out_to_have_as_it_is_withdrawn_isnt_said_not_to_have_been_sent() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    running.call("react", json!({ "message": "m1", "emoji": "❤️" })).await.unwrap();
+    running
+        .store
+        .apply(Lane::Live, vec![Change::Amend(Amend { what: Amendment::Revoke, ..other_of(ANA, "m1") })])
+        .await
+        .unwrap();
+    let reaction: String =
+        running.query(|db| Ok(db.query_row("SELECT id FROM outbox WHERE kind = 'reaction'", [], |r| r.get(0))?)).await;
+    let mut pushes = running.pushes.subscribe();
+    let (stopped, go) = running.sending.pause_next_withdrawal();
+    running.connection(Online);
+    stopped.notified().await;
+    // Its receipt lands once the attempt has read it as still to go, and before it withdraws it:
+    // WhatsApp had it, from a try before jawd last stopped.
+    running.receipt(ANA, &reaction, ANA, "delivered").await;
+    go.notify_one();
+    until_stored(&running).await;
+    assert!(kinds_sent(&running).is_empty(), "{:?}", kinds_sent(&running));
+    let said = notices(&mut pushes, Duration::from_millis(500)).await;
+    assert!(said.is_empty(), "nothing is said not to have been sent: {said:?}");
+    assert_eq!(stored_reactions(&running).await, 1, "it's done, as WhatsApp has it");
 }
 
 #[tokio::test(flavor = "multi_thread")]

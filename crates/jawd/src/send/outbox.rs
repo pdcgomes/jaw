@@ -392,6 +392,16 @@ fn pause(inner: &Inner, attempts: i64) -> Duration {
     doubled.min(inner.timing.retry_most)
 }
 
+/// Where a test has stopped an attempt, as `Sending::pause_next_withdrawal` asked.
+#[cfg(test)]
+async fn paused(inner: &Inner) {
+    let pausing = inner.pausing.lock().expect("the test's pause").take();
+    if let Some((stopped, go)) = pausing {
+        stopped.notify_one();
+        go.notified().await;
+    }
+}
+
 /// Tries to send outbox row `outbox` once. It reads the row again first, so a message sent, failed
 /// or deleted meanwhile isn't sent, and nothing is tried while WhatsApp can't be reached. What it
 /// waits for before the next try, it waits for without holding a place in the sends' lane.
@@ -415,6 +425,8 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
         return Next::Done;
     }
     if row.withdrawn() {
+        #[cfg(test)]
+        paused(&inner).await;
         let applied = settle(&inner, vec![Change::Outbox(Step::Withdrawn { outbox })]).await;
         if applied.changed > 0 {
             super::actions::withdrawn(&inner, &row.kind);

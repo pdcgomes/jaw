@@ -114,6 +114,10 @@ struct Inner {
     typing: typing::Typists,
     /// What every interface is told, for saying WhatsApp refused an action.
     pushes: broadcast::Sender<Push>,
+    /// Stops the next attempt that withdraws an action, between reading its row and withdrawing it:
+    /// it notifies the first when it stops, and goes on once the second is notified.
+    #[cfg(test)]
+    pausing: std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
 }
 
 impl Sending {
@@ -146,6 +150,8 @@ impl Sending {
             reads: reads::Reads::default(),
             typing: typing::Typists::new(),
             pushes: notices,
+            #[cfg(test)]
+            pausing: std::sync::Mutex::default(),
         });
         typing::start(&inner);
         regroup::start(&inner);
@@ -159,6 +165,15 @@ impl Sending {
     /// The sends' lane, for `status`.
     pub fn lane(&self) -> Arc<dyn Report> {
         self.inner.sends.clone()
+    }
+
+    /// Stops the next attempt that withdraws an action, between reading its row and withdrawing
+    /// it: it notifies the first when it stops, and goes on once the second is notified.
+    #[cfg(test)]
+    fn pause_next_withdrawal(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let pause = (Arc::default(), Arc::default());
+        *self.inner.pausing.lock().expect("the test's pause") = Some(pause.clone());
+        pause
     }
 
     /// Answers one of the sending methods: `send.text`, `send.retry`, `chat.start`, `draft.set`,
