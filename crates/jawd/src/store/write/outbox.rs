@@ -3994,12 +3994,12 @@ mod tests {
             db.query_row("SELECT pinned, v FROM chats WHERE id = ?1", [chat], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
         };
         let (_, before) = pinned(&db);
-        let refused = Step::Refused {
+        let refused = |error: &str| Step::Refused {
             outbox: outbox[0],
-            error: "server returned error 400".into(),
+            error: error.into(),
             undo: Some(Undo::Pin { chat: chat.into() }),
         };
-        written(&db, &[Change::Outbox(refused.clone())]);
+        written(&db, &[Change::Outbox(refused("server returned error 400"))]);
         type Kept = (String, String, String, Vec<u8>);
         let kept: Kept = db
             .query_row("SELECT source, ref, error, raw FROM quarantine", [], |r| {
@@ -4016,8 +4016,103 @@ mod tests {
         let (now, after) = pinned(&db);
         assert_eq!(now, 0, "what it set is put back");
         assert!(after > before, "with a new version, so every window is sent it");
+        written(&db, &[Change::Chat(Chat { id: chat.into(), pinned: Some(9), ..Chat::default() })]);
+        let echoed = pinned(&db);
+        assert_eq!(echoed.0, 9, "pinned again, as a later patch's echo pins it");
+        written(&db, &[Change::Outbox(refused("server returned error 500"))]);
+        assert_eq!(pinned(&db), echoed, "done once: applied again, it puts nothing back");
+        let errors: Vec<String> = db
+            .prepare("SELECT error FROM quarantine")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(errors, ["server returned error 400"], "and keeps the first error");
+    }
+
+    #[test]
+    fn a_refusal_naming_a_messages_row_an_actions_row_or_app_state_that_failed_leaves_each_as_it_was() {
+        let mut db = Connection::open_in_memory().unwrap();
+        schema::migrate(&mut db).unwrap();
+        written(
+            &db,
+            &[
+                Change::Remember { key: "me".into(), value: ME_JID.into() },
+                Change::Message(from_ana(ANA, "m1", 1_000)),
+                Change::Chat(Chat { id: ANA.into(), pinned: Some(5), ..Chat::default() }),
+            ],
+        );
+        written(&db, &[sending(ANA, "mine", 2_000, None)]);
+        written(&db, &[acting(ANA, "m1", "r1", Amendment::React { emoji: "❤️".into() }, 3_000)]);
+        // No step leaves app state failed, so the row is made so by hand.
+        let failed = app_state_row(&db, ANA, "3EB0F1", b"the patch").unwrap();
+        db.execute("UPDATE outbox SET state = 'failed', error = 'refused before' WHERE n = ?1", [failed]).unwrap();
+        let row_of =
+            |id: &str| -> i64 { db.query_row("SELECT n FROM outbox WHERE id = ?1", [id], |r| r.get(0)).unwrap() };
+        let everything = |db: &Connection| {
+            let rows: Vec<String> = db
+                .prepare(
+                    "SELECT json_array(n, message, target, jid, id, kind, hex(raw), state, attempts, next_at,
+                        created_at, error, effect) FROM outbox ORDER BY n",
+                )
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let shown: Vec<serde_json::Value> = ["mine", "m1"]
+                .iter()
+                .map(|id| serde_json::to_value(crate::store::read::message(db, ANA, id).unwrap().unwrap().0).unwrap())
+                .collect();
+            let chat: (i64, i64) = db
+                .query_row("SELECT pinned, v FROM chats WHERE id = ?1", [ANA], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap();
+            let kept: i64 = db.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0)).unwrap();
+            (rows, shown, chat, kept)
+        };
+        for (what, outbox) in
+            [("a message's row", row_of("mine")), ("an action's row", row_of("r1")), ("app state that failed", failed)]
+        {
+            let before = everything(&db);
+            let refused = Step::Refused { outbox, error: "refused".into(), undo: Some(Undo::Pin { chat: ANA.into() }) };
+            written(&db, &[Change::Outbox(refused)]);
+            assert_eq!(everything(&db), before, "{what} is left as it was");
+        }
+    }
+
+    #[test]
+    fn a_refused_deletion_for_you_is_kept_in_quarantine_and_its_message_stays_deleted_here() {
+        let mut db = Connection::open_in_memory().unwrap();
+        schema::migrate(&mut db).unwrap();
+        written(&db, &[Change::Message(from_ana(ANA, "m1", 1_000))]);
+        let delete = Step::DeleteForMe {
+            chat: ANA.into(),
+            target: "m1".into(),
+            id: "3EB0D1".into(),
+            raw: b"the deletion".to_vec(),
+            key: None,
+            written: Written::default(),
+        };
+        written(&db, &[Change::Outbox(delete)]);
+        let outbox: i64 = db.query_row("SELECT n FROM outbox WHERE id = '3EB0D1'", [], |r| r.get(0)).unwrap();
+        let refused = Step::Refused { outbox, error: "server returned error 409".into(), undo: None };
         written(&db, &[Change::Outbox(refused)]);
-        let quarantined: i64 = db.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0)).unwrap();
-        assert_eq!(quarantined, 1, "done once");
+        type Kept = (String, String, String, Vec<u8>);
+        let kept: Kept = db
+            .query_row("SELECT source, ref, error, raw FROM quarantine", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap();
+        assert_eq!(
+            kept,
+            (REFUSED.into(), format!("{ANA} 3EB0D1"), "server returned error 409".into(), b"the deletion".to_vec()),
+            "kept with why, never dropped"
+        );
+        let rows: i64 = db.query_row("SELECT count(*) FROM outbox", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "and out of the outbox's thousand");
+        written(&db, &[Change::Message(Message { live: false, ..from_ana(ANA, "m1", 1_000) })]);
+        let messages: i64 = db.query_row("SELECT count(*) FROM messages WHERE id = 'm1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(messages, 0, "its message stays deleted here, though a copy comes from history");
     }
 }
