@@ -2631,6 +2631,77 @@ async fn a_reaction_or_an_edit_named_in_its_chat_or_not_is_refused_while_your_de
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_or_an_edit_whose_message_is_deleted_for_everyone_once_it_has_found_it_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.chats(&[ANA]).await;
+    for id in ["m1", "m2"] {
+        let message = Message { chat: ANA.into(), ..mine_message(id, now_ms() - 60_000) };
+        running.store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+    }
+    running.arrives(ANA, ANA, "a1", now_ms() - 60_000).await;
+    // Each action finds its message as it was, and its message is then deleted for everyone before
+    // its step: by you, from another interface at the same moment, or by Ana.
+    let asked = [
+        ("react", json!({ "message": "m1", "chat": ANA, "emoji": "👍" }), true),
+        ("edit", json!({ "message": "m2", "chat": ANA, "text": "chego às 21h" }), true),
+        ("react", json!({ "message": "a1", "chat": ANA, "emoji": "👍" }), false),
+    ];
+    for (method, params, yours) in asked {
+        let id = params["message"].as_str().unwrap().to_string();
+        let (stopped, go) = running.sending.pause_next_action();
+        let sending = running.sending.clone();
+        let asking = tokio::spawn(async move { sending.call(method, params).await });
+        stopped.notified().await;
+        if yours {
+            running.call("delete", json!({ "message": id, "chat": ANA, "for": "everyone" })).await.unwrap();
+        } else {
+            let hers = Amend { what: Amendment::Revoke, ..other_of(ANA, &id) };
+            running.store.apply(Lane::Live, vec![Change::Amend(hers)]).await.unwrap();
+        }
+        go.notify_one();
+        let refused = asking.await.unwrap().unwrap_err();
+        assert_eq!(refused.code, code::NOT_ALLOWED, "{method} {id}: {}", refused.message);
+    }
+    let queued = ("revoke".to_string(), "queued".to_string());
+    assert_eq!(outbox_rows(&running).await.0, [queued.clone(), queued], "nothing written behind your deletions");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_or_an_edit_in_a_chat_merging_away_is_refused_while_the_copy_kept_is_being_deleted() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    let lid = "100000000001@lid";
+    // Your message is in both of Ana's chats, and her LID's is the older, so an action that names
+    // no chat finds its copy there first.
+    running.chats(&[lid, ANA]).await;
+    for chat in [lid, ANA] {
+        let message = Message { chat: chat.into(), ..mine_message("m1", now_ms() - 60_000) };
+        running.store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+    }
+    running.call("delete", json!({ "message": "m1", "chat": ANA, "for": "everyone" })).await.unwrap();
+    // Her LID and number turn out to be one person's, so her LID's chat starts merging into her
+    // number's, whose copy your deletion is aimed at; the copy in her LID's chat shows as it was.
+    let both = Person { jids: vec![ANA.into(), lid.into()], ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
+    let copies: i64 =
+        running.query(|db| Ok(db.query_row("SELECT count(*) FROM messages WHERE id = 'm1'", [], |r| r.get(0))?)).await;
+    assert_eq!(copies, 2, "the merge is still to move the copy in her LID's chat");
+    for chat in [Some(lid), None] {
+        let named = |mut params: Value| {
+            if let Some(chat) = chat {
+                params["chat"] = json!(chat);
+            }
+            params
+        };
+        let reacted = running.call("react", named(json!({ "message": "m1", "emoji": "👍" }))).await.unwrap_err();
+        let edited = running.call("edit", named(json!({ "message": "m1", "text": "chego às 21h" }))).await.unwrap_err();
+        assert_eq!((reacted.code, edited.code), (code::NOT_ALLOWED, code::NOT_ALLOWED), "named in {chat:?}");
+    }
+    assert_eq!(outbox_rows(&running).await.0, [("revoke".to_string(), "queued".to_string())], "nothing written");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_action_on_a_message_still_to_go_from_a_chat_being_merged_goes_after_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;

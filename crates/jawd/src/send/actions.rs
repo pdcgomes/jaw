@@ -190,6 +190,10 @@ pub(super) async fn enqueue(inner: &Arc<Inner>, step: Step, written: Written, wh
         }
         Some(Enqueued::Full { waiting, failed }) => Err(full(waiting, failed)),
         Some(Enqueued::Gone) => Err(Error::new(code::NOT_FOUND, "the message went before jawd could do that")),
+        Some(Enqueued::Deleted) => Err(Error::new(
+            code::NOT_ALLOWED,
+            "it's deleted for everyone, or being deleted, so it can't be reacted to or edited",
+        )),
         Some(Enqueued::Many(_)) | None => {
             Err(Error::new(code::INTERNAL, format!("jawd kept nothing, so it couldn't {what}")))
         }
@@ -231,6 +235,8 @@ async fn act(
         key,
         written: written.clone(),
     };
+    #[cfg(test)]
+    super::paused(&inner.acting).await;
     enqueue(inner, step, written, what).await
 }
 

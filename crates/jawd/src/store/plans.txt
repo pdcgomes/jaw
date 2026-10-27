@@ -913,6 +913,12 @@ SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n
       SEARCH a USING INDEX outbox_by_target (target=?)
 
 -- src/store/write/outbox.rs
+SELECT m.deleted OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed') FROM messages m WHERE m.n = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH a USING INDEX outbox_by_target (target=?)
+
+-- src/store/write/outbox.rs
 DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote') AND created_at < ?1
     SCAN outbox
 

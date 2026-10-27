@@ -117,7 +117,26 @@ struct Inner {
     /// Stops the next attempt that withdraws an action, between reading its row and withdrawing it:
     /// it notifies the first when it stops, and goes on once the second is notified.
     #[cfg(test)]
-    pausing: std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+    pausing: Pause,
+    /// Stops the next action on a message, between finding the message and its step, as `pausing`
+    /// does.
+    #[cfg(test)]
+    acting: Pause,
+}
+
+/// Where a test stops jawd the next time it gets there, with what it notifies as it stops and
+/// what it waits for to go on.
+#[cfg(test)]
+type Pause = std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>;
+
+/// Stops at `pause`, if a test asked to.
+#[cfg(test)]
+async fn paused(pause: &Pause) {
+    let pausing = pause.lock().expect("the test's pause").take();
+    if let Some((stopped, go)) = pausing {
+        stopped.notify_one();
+        go.notified().await;
+    }
 }
 
 impl Sending {
@@ -151,7 +170,9 @@ impl Sending {
             typing: typing::Typists::new(),
             pushes: notices,
             #[cfg(test)]
-            pausing: std::sync::Mutex::default(),
+            pausing: Pause::default(),
+            #[cfg(test)]
+            acting: Pause::default(),
         });
         typing::start(&inner);
         regroup::start(&inner);
@@ -173,6 +194,15 @@ impl Sending {
     fn pause_next_withdrawal(&self) -> (Arc<Notify>, Arc<Notify>) {
         let pause = (Arc::default(), Arc::default());
         *self.inner.pausing.lock().expect("the test's pause") = Some(pause.clone());
+        pause
+    }
+
+    /// Stops the next reaction, edit or deletion for everyone between finding its message and its
+    /// step: it notifies the first when it stops, and goes on once the second is notified.
+    #[cfg(test)]
+    fn pause_next_action(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let pause = (Arc::default(), Arc::default());
+        *self.inner.acting.lock().expect("the test's pause") = Some(pause.clone());
         pause
     }
 

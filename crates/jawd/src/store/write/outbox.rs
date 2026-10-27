@@ -146,6 +146,8 @@ pub enum Enqueued {
     Full { waiting: u64, failed: u64 },
     /// The message an action names has gone, so nothing was written.
     Gone,
+    /// The message a reaction or an edit names shows deleted for everyone, so nothing was written.
+    Deleted,
     /// What each message of a forward came to, in order.
     Many(Vec<Enqueued>),
 }
@@ -252,6 +254,11 @@ const UNRETRYABLE: &str = "DELETE FROM outbox WHERE message = ?1 AND state = 'fa
 /// Whether message ?1 can be sent again by hand: not deleted for everyone, nor being.
 const RETRYABLE: &str =
     "SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke')
+    FROM messages m WHERE m.n = ?1";
+/// Whether message ?1 shows deleted for everyone, as windows show it: it is, or your deletion of it
+/// for everyone is on its way.
+const SHOWN_DELETED: &str = "SELECT m.deleted
+        OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed')
     FROM messages m WHERE m.n = ?1";
 /// The actions kept for a late receipt that are past ACTION_KEPT_MS, and how many are kept.
 const PRUNE_KEPT: &str =
@@ -456,7 +463,10 @@ fn full(db: &Connection, written: &Written) -> Result<bool> {
 }
 
 /// Queues an action, done to its message once WhatsApp has it. Windows show it meanwhile, so its
-/// message, and its chat when it's the chat's newest, change now.
+/// message, and its chat when it's the chat's newest, change now. A reaction or an edit on a message
+/// shown deleted for everyone isn't taken: `react` and `edit` check on a reader, but a deletion can
+/// commit after that read, and while a chat merges, the copy they read may not be the one found
+/// here, which a deletion is aimed at.
 fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String>, written: &Written) -> Result<bool> {
     if keyed_before(db, key, written)? || full(db, written)? {
         return Ok(false);
@@ -466,6 +476,12 @@ fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String
         written.put(Enqueued::Gone);
         return Ok(false);
     };
+    if matches!(acting.effect, Amendment::React { .. } | Amendment::Edit { .. })
+        && db.prepare_cached(SHOWN_DELETED)?.query_row([n], |r| r.get::<_, bool>(0))?
+    {
+        written.put(Enqueued::Deleted);
+        return Ok(false);
+    }
     let now = now_ms();
     let effect = serde_json::to_string(acting.effect)?;
     let outbox: i64 = db.prepare_cached(ACT)?.query_row(
@@ -1373,6 +1389,11 @@ mod tests {
             (
                 "retryable",
                 RETRYABLE,
+                "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)",
+            ),
+            (
+                "shown deleted",
+                SHOWN_DELETED,
                 "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)",
             ),
             ("prune kept actions", PRUNE_KEPT, "SCAN outbox"),
