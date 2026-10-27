@@ -1086,7 +1086,7 @@ mod tests {
         assert!(matches!(&results[1].hit, Hit::Person(p) if p.phone.as_deref() == Some("+351913000031")));
         assert!(matches!(&results[2].hit, Hit::Folder(f) if f.id == "archived"));
         let Hit::Message(m) = &results[3].hit else { panic!("{:?}", results[3]) };
-        assert_eq!((m.chat.as_str(), m.from.as_ref().unwrap().id.as_str()), ("120363000000000001@g.us", "12"));
+        assert_eq!((m.chat.as_str(), m.from.as_ref().unwrap().id.as_str()), ("120363000000000001@g.us", "person:12"));
         assert_eq!(results[3].chat_name.as_deref(), Some("Lisbon Climbing"));
         let counts: Counts = serde_json::from_value(v["result"]["counts"].clone()).unwrap();
         assert_eq!(counts[&FoundKind::Message], 214);

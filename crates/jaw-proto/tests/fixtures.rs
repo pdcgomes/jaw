@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use jaw_proto::find::{ChatOpened, Find, Found};
+use jaw_proto::find::{ChatOpened, Find, Found, Kind};
 use jaw_proto::layout::{LayoutGet, LayoutSet, Saved};
 use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
@@ -12,7 +12,8 @@ use jaw_proto::send::{
 };
 use jaw_proto::sync::{HistoryMore, Notice};
 use jaw_proto::windows::{
-    ChatsPush, ChatsWatch, ChatsWatched, MessagesPush, MessagesWatch, MessagesWatched, Watch, WatchMove,
+    ChatRow, ChatsPush, ChatsWatch, ChatsWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, Watch,
+    WatchMove,
 };
 use jaw_proto::{Connection, Focus, FromJawd, Hello, Outcome, Push, Reply, Request, Status, Welcome};
 use serde::Serialize;
@@ -99,7 +100,17 @@ fn every_fixture_reads_and_writes_back_the_same() {
                 match method {
                     "hello" => params::<Welcome>(&name, result),
                     "status" => params::<Status>(&name, result),
-                    "find" => params::<Found>(&name, result),
+                    "find" => {
+                        // A chat's or a message's row is as its window sends it.
+                        let found: Found = same_as(&name, result);
+                        for hit in &found.results {
+                            match hit.kind {
+                                Kind::Chat => params::<ChatRow>(&name, &hit.row),
+                                Kind::Message => params::<MessageRow>(&name, &hit.row),
+                                _ => {}
+                            }
+                        }
+                    }
                     "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
                     | "typing" | "react" | "edit" | "delete" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")

@@ -18,6 +18,7 @@ use rusqlite::Connection;
 use tokio::sync::watch;
 
 use self::index::{Index, NameHit, Query};
+use crate::feed;
 use crate::store::{Change, Opened, Store, read};
 use crate::work::Priority;
 
@@ -213,7 +214,7 @@ impl Finder {
                     field: None,
                     chat_name: index.chat_name_of(&row.chat),
                     folders: Vec::new(),
-                    row: serde_json::to_value(&row)?,
+                    row: serde_json::to_value(feed::message_row(row))?,
                 });
             }
         }
@@ -244,7 +245,7 @@ impl Finder {
         for hit in hits {
             let row = match (hit.chat, hit.row) {
                 (Some(_), _) => match rows.next().flatten() {
-                    Some(chat) => serde_json::to_value(&chat)?,
+                    Some(chat) => serde_json::to_value(feed::chat_row(chat))?,
                     None => continue,
                 },
                 (None, Some(row)) => row,

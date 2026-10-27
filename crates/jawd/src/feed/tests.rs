@@ -2806,6 +2806,37 @@ async fn a_finds_reply_coming_while_another_reply_waits_for_room_neither_takes_i
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_chat_and_a_message_find_finds_come_as_their_windows_send_them() {
+    let bed = Bed::new(brisk());
+    let ana = Person { jids: vec![OPEN.into()], name: Some("Ana Ribeiro".into()), ..Person::default() };
+    let group = Chat { id: GROUP.into(), name: Some("Jantar de sexta".into()), ..Chat::default() };
+    bed.apply(vec![
+        Change::Person(ana),
+        Change::Chat(group),
+        Change::Message(text(GROUP, "j1", 1_000, Some(OPEN), "o jantar foi ótimo")),
+    ])
+    .await;
+    bed.store.indexed().await.unwrap();
+    let socket = serve_all(&bed).await;
+    let (chats, messages, found) = tokio::task::spawn_blocking(move || {
+        let (mut line, _) = Line::open(&socket, None);
+        let chats = line.call("chats.watch", json!({"around": "top", "after": 5}));
+        let messages = line.call("messages.watch", json!({"chat": GROUP, "around": "newest", "before": 5}));
+        (chats, messages, line.call("find", json!({"query": "jantar"})))
+    })
+    .await
+    .unwrap();
+
+    // Interfaces read a hit's row as they read their windows' rows: the chat list's sort, the
+    // sender's person and colour, a message's detail flattened, and nothing of jaw.db's own.
+    let hit = |kind: &str| found["results"].as_array().unwrap().iter().find(|hit| hit["kind"] == kind);
+    let chat = chats["rows"].as_array().unwrap().iter().find(|row| row["id"] == GROUP);
+    assert_eq!(hit("chat").map(|hit| &hit["row"]), chat, "the chat, as chats.watch sends it: {found}");
+    let message = messages["rows"].as_array().unwrap().first();
+    assert_eq!(hit("message").map(|hit| &hit["row"]), message, "the message, as messages.watch sends it: {found}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_long_request_holds_up_neither_the_lane_nor_watches_and_a_connection_has_64_at_most() {
     let bed = Bed::new(brisk());
     bed.apply(vec![Change::Message(text(OPEN, "o0", 1_000, Some(OPEN), "hi"))]).await;
