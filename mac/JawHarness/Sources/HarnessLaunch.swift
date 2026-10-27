@@ -31,7 +31,8 @@ struct HarnessLaunch: Equatable {
     @MainActor
     static func parse(_ arguments: [String]) -> HarnessLaunch {
         func value(_ flag: String) -> String? {
-            arguments.firstIndex(of: flag).flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }
+            guard let i = arguments.firstIndex(of: flag), i + 1 < arguments.count, !arguments[i + 1].hasPrefix("--") else { return nil }
+            return arguments[i + 1]
         }
         var launch = HarnessLaunch()
         launch.scene = value("--scene")
@@ -49,17 +50,18 @@ struct HarnessLaunch: Equatable {
         if let density = value("--density").flatMap(Density.init(rawValue:)) {
             launch.conditions.density = density
         }
-        if let size = value("--text-size").flatMap(Double.init) {
+        if let size = value("--text-size").flatMap(Double.init), size.isFinite {
             let sizes = Preferences.textSizes
-            launch.conditions.textSize = min(max(CGFloat(size), sizes.lowerBound), sizes.upperBound)
+            launch.conditions.textSize = min(max(CGFloat(size.rounded()), sizes.lowerBound), sizes.upperBound)
         }
         if let font = value("--font").flatMap(MessageFont.init(rawValue:)) {
             launch.conditions.font = font
         }
         launch.conditions.reduceMotion = arguments.contains("--reduce-motion")
-        let size = value("--window")?.split(separator: "x").compactMap { Double($0) } ?? []
-        if size.count == 2 {
-            launch.window = Size(width: size[0], height: size[1])
+        if let parts = value("--window")?.split(separator: "x", omittingEmptySubsequences: false), parts.count == 2,
+           let width = Double(parts[0]), let height = Double(parts[1]), width.isFinite, height.isFinite, width > 0, height > 0
+        {
+            launch.window = Size(width: width, height: height)
         }
         launch.stageOnly = arguments.contains("--stage-only")
         launch.snapshot = value("--snapshot")

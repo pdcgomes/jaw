@@ -58,3 +58,37 @@ func scratch(_ name: String) -> URL {
         try await Pictures.snapshot(launch, catalog: catalog, to: folder.appending(path: "nope.png"))
     }
 }
+
+@MainActor @Test func `a sweep draws each scene in each of its variants and says what each picture is`() async throws {
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    catalog.register(block("looks", axes: .look))
+    let folder = scratch("sweep")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let manifest = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    #expect(manifest.scenes.map(\.id) == ["block", "looks"])
+    #expect(manifest.scenes[0].pictures.map(\.file) == ["block/dark.png", "block/light.png"])
+    #expect(manifest.scenes[1].pictures.map(\.variant) == ["dark-bubbles", "dark-lines", "light-bubbles", "light-lines"])
+    #expect(manifest.scenes[0].pictures[0].points == [148, 98] && manifest.scenes[0].pictures[0].pixels == [296, 196])
+    #expect(manifest.scenes[0].synopsis == "a block of the accent" && manifest.scenes[0].section == "Foundations")
+    for picture in manifest.scenes.flatMap(\.pictures) {
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: picture.file).path), "\(picture.file)")
+    }
+    let written = try JSONDecoder().decode(Pictures.Manifest.self, from: Data(contentsOf: folder.appending(path: "manifest.json")))
+    #expect(written == manifest)
+    let again = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    #expect(again.scenes == manifest.scenes, "a sweep of the same scenes draws the same pictures")
+}
+
+@MainActor @Test func `a sweep never empties a folder it didn't make`() async throws {
+    let folder = scratch("keep")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data("mine".utf8).write(to: folder.appending(path: "notes.txt"))
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    await #expect(throws: Pictures.PictureError.self) {
+        try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    }
+    #expect(FileManager.default.fileExists(atPath: folder.appending(path: "notes.txt").path))
+}

@@ -25,3 +25,15 @@ import Testing
     ])
     #expect(launch == HarnessLaunch.parse(["JawHarness"]))
 }
+
+@MainActor @Test func `a value that isn't one is refused rather than half read`() {
+    let defaults = HarnessLaunch.parse(["JawHarness"])
+    #expect(HarnessLaunch.parse(["JawHarness", "--text-size", "nan"]) == defaults)
+    #expect(HarnessLaunch.parse(["JawHarness", "--text-size", "14.6"]).conditions.textSize == 15, "whole points, as Settings' slider steps")
+    #expect(HarnessLaunch.parse(["JawHarness", "--text-size", "3"]).conditions.textSize == 11)
+    for window in ["1200xfoox800", "0x0", "-5x-5", "nanxnan", "1200x", "x800"] {
+        #expect(HarnessLaunch.parse(["JawHarness", "--window", window]).window == nil, "\(window)")
+    }
+    #expect(HarnessLaunch.parse(["JawHarness", "--snapshot", "--sweep", "/x"]).snapshot == nil, "a flag isn't a value")
+    #expect(HarnessLaunch.parse(["JawHarness", "--density", "roomy", "--font", "comic"]) == defaults)
+}

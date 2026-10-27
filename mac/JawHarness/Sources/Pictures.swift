@@ -16,11 +16,13 @@ enum Pictures {
     enum PictureError: Error, CustomStringConvertible {
         case noScene(String)
         case cantDraw(String)
+        case notASweep(String)
 
         var description: String {
             switch self {
             case let .noScene(id): "there's no scene called \(id)"
             case let .cantDraw(id): "\(id) couldn't be drawn"
+            case let .notASweep(path): "\(path) has files a sweep didn't make in it; sweep into an empty folder, or one a sweep made"
             }
         }
     }
@@ -36,8 +38,8 @@ enum Pictures {
     }
 
     /// Draws `scene` in `conditions`, in a window of its own off the screen, once it has had `settle`
-    /// to do what it does after it's made. It sets the app-wide `Motion.reduced` for as long as it
-    /// draws, so draws in different Reduce Motion conditions mustn't overlap.
+    /// to do what it does after it's made. It holds the app-wide `Motion.reduced` for as long as it
+    /// draws, so draws mustn't overlap.
     static func draw(_ scene: HarnessScene, _ conditions: Conditions) async throws -> Drawn {
         let reduced = Motion.reduced
         Motion.reduced = { conditions.reduceMotion }
@@ -83,6 +85,73 @@ enum Pictures {
         let drawn = try await draw(scene, launch.conditions)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try drawn.png.write(to: url)
+    }
+
+    /// What a sweep drew, as `manifest.json` has it: each scene with its notes and its pictures.
+    struct Manifest: Codable, Equatable {
+        struct Picture: Codable, Equatable {
+            let variant: String
+            /// From the sweep's folder: `<scene>/<variant>.png`.
+            let file: String
+            let points: [Double]
+            let pixels: [Int]
+            let hash: String
+        }
+
+        struct Scene: Codable, Equatable {
+            let id: String
+            let section: String
+            let title: String
+            let synopsis: String
+            let notes: [Note]
+            let pictures: [Picture]
+        }
+
+        let made: String
+        let scenes: [Scene]
+    }
+
+    /// `--sweep`: every scene in each of its variants, as `<scene>/<variant>.png` under `folder`, with
+    /// `manifest.json` saying what each is. A folder a sweep made is emptied first; one with anything
+    /// else in it is left as it is, and the sweep fails.
+    @discardableResult
+    static func sweep(_ catalog: HarnessCatalog, conditions: Conditions, to folder: URL) async throws -> Manifest {
+        try clear(folder)
+        var scenes: [Manifest.Scene] = []
+        for scene in catalog.scenes {
+            try FileManager.default.createDirectory(at: folder.appending(path: scene.id), withIntermediateDirectories: true)
+            var pictures: [Manifest.Picture] = []
+            var notes: [Note] = []
+            for variant in scene.variants {
+                let drawn = try await draw(scene, variant.applied(to: conditions))
+                let file = "\(scene.id)/\(variant.name).png"
+                try drawn.png.write(to: folder.appending(path: file))
+                pictures.append(Manifest.Picture(variant: variant.name, file: file,
+                                                 points: [Double(drawn.points.width), Double(drawn.points.height)],
+                                                 pixels: drawn.pixels, hash: drawn.hash))
+                if notes.isEmpty { notes = drawn.notes }
+            }
+            scenes.append(Manifest.Scene(id: scene.id, section: scene.section.rawValue, title: scene.title,
+                                         synopsis: scene.synopsis, notes: notes, pictures: pictures))
+        }
+        let manifest = Manifest(made: ISO8601DateFormatter().string(from: Date()), scenes: scenes)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(manifest).write(to: folder.appending(path: "manifest.json"))
+        return manifest
+    }
+
+    /// Readies `folder` for a sweep: one a sweep made is emptied, a missing one made, and one with
+    /// anything else in it refused, so a mistyped path can't lose what's there.
+    private static func clear(_ folder: URL) throws {
+        let fm = FileManager.default
+        let inside = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { !$0.hasPrefix(".") }
+        if inside.contains("manifest.json") {
+            try fm.removeItem(at: folder)
+        } else if !inside.isEmpty {
+            throw PictureError.notASweep(folder.path)
+        }
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
     }
 }
 

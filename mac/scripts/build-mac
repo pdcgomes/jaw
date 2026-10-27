@@ -7,6 +7,8 @@
 #   mac/scripts/build-mac build [<Scheme>]                       # jaw by default
 #   mac/scripts/build-mac snapshot <out.png> [app options]       # Jaw.app --demo drawn into a picture
 #   mac/scripts/build-mac shot <scene> <out.png> [harness options]  # one harness scene drawn into a picture
+#   mac/scripts/build-mac sweep [harness options]                   # every harness scene in each variant, into mac/build/review
+#   mac/scripts/build-mac harness [scene] [harness options]         # the harness, built there and opened here
 #   mac/scripts/build-mac references                             # the snapshot tests' pictures, back here
 #   mac/scripts/build-mac release <folder>                       # Jaw.app in Release, unsigned, back here
 #
@@ -32,6 +34,16 @@ if ! ssh_ true 2>/dev/null; then
             "$here/mac/$harness" --scene "$scene" --snapshot "$out" "$@"
             echo "==> $out"
             exit 0
+            ;;
+        sweep)
+            "$here/mac/scripts/check" build JawHarness | grep -q 'BUILD SUCCEEDED' || { "$here/mac/scripts/check" build JawHarness | tail -20; exit 1; }
+            "$here/mac/$harness" --sweep "$here/mac/build/review" "$@"
+            exit 0
+            ;;
+        harness)
+            "$here/mac/scripts/check" build JawHarness | grep -q 'BUILD SUCCEEDED' || { "$here/mac/scripts/check" build JawHarness | tail -20; exit 1; }
+            if [ $# -gt 0 ]; then scene="$1"; shift; set -- --scene "$scene" "$@"; fi
+            exec open -n "$here/mac/build/DerivedData/Build/Products/Debug/JawHarness.app" --args "$@"
             ;;
         *) echo "$what needs $host" >&2; exit 1 ;;
     esac
@@ -66,6 +78,19 @@ case "$what" in
         run "scripts/check build JawHarness | grep -q 'BUILD SUCCEEDED' || { scripts/check build JawHarness | tail -20; exit 1; }; $harness --scene $scene --snapshot build/shot.png $*"
         scp -q -o BatchMode=yes "$host:$remote/mac/build/shot.png" "$out" && echo "==> $out"
         ;;
+    sweep)
+        run "scripts/check build JawHarness | grep -q 'BUILD SUCCEEDED' || { scripts/check build JawHarness | tail -20; exit 1; }; $harness --sweep build/review $*"
+        mkdir -p "$here/mac/build/review"
+        rsync -a --delete -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/review/" "$here/mac/build/review/"
+        echo "==> $here/mac/build/review"
+        ;;
+    harness)
+        run "scripts/check build JawHarness | grep -q 'BUILD SUCCEEDED' || { scripts/check build JawHarness | tail -20; exit 1; }"
+        mkdir -p "$here/mac/build/harness"
+        rsync -a --delete -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/DerivedData/Build/Products/Debug/JawHarness.app/" "$here/mac/build/harness/JawHarness.app/"
+        if [ $# -gt 0 ]; then scene="$1"; shift; set -- --scene "$scene" "$@"; fi
+        open -n "$here/mac/build/harness/JawHarness.app" --args "$@"
+        ;;
     release)
         out="$1"
         run "xcodebuild build -workspace Jaw.xcworkspace -scheme jaw -configuration Release -destination 'platform=macOS,arch=arm64' -derivedDataPath build/DerivedData-release -quiet CODE_SIGN_IDENTITY=- 2>&1 | grep -E 'error|BUILD' || true"
@@ -76,7 +101,7 @@ case "$what" in
         rsync -a -e "ssh -o BatchMode=yes" "$host:$remote/mac/Tests/JawUITests/References/" "$here/mac/Tests/JawUITests/References/"
         ;;
     *)
-        echo "usage: mac/scripts/build-mac test|build|snapshot|shot|references" >&2
+        echo "usage: mac/scripts/build-mac test|build|snapshot|shot|sweep|harness|references" >&2
         exit 2
         ;;
 esac

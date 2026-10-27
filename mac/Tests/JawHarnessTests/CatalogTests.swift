@@ -38,10 +38,16 @@ func stub(_ id: String, _ section: HarnessSection, axes: Axes = []) -> HarnessSc
     var mine = Conditions()
     mine.textSize = 15
     mine.look = .lines
-    let light = Variant(dark: false, look: nil, density: nil).applied(to: mine)
-    #expect(!light.dark && light.look == .lines && light.textSize == 15)
-    let compact = Variant(dark: true, look: .bubbles, density: .compact).applied(to: mine)
-    #expect(compact.dark && compact.look == .bubbles && compact.style.compact)
+    mine.density = .compact
+    mine.font = .mono
+    mine.reduceMotion = true
+    var expected = mine
+    expected.dark = false
+    #expect(Variant(dark: false, look: nil, density: nil).applied(to: mine) == expected)
+    expected = mine
+    expected.look = .bubbles
+    expected.density = .comfortable
+    #expect(Variant(dark: true, look: .bubbles, density: .comfortable).applied(to: mine) == expected)
 }
 
 @Test func `a scene is drawn in the app's own style, in the theme's roles`() {
