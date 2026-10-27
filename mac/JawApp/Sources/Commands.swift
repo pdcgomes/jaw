@@ -70,39 +70,9 @@ extension AppModel {
 
         // Chat
         let isChat: @MainActor @Sendable () -> Bool = { chat() != nil }
-        let now = Double(Format.now())
-        for (id, name, until) in [("mute.8h", "For 8 Hours", now + 8 * 3_600_000), ("mute.week", "For a Week", now + 7 * 86_400_000),
-                                  ("mute.always", "Always", -1)]
-        {
-            add(Command(id, name, phrase: "Mute this chat \(name.lowercased())", detail: "no notifications from it", place: .chat,
-                        submenu: "Mute", enabled: { chat().map { !$0.muted } ?? false }) { [weak self] in
-                    guard let c = chat() else { return }
-                    self?.jawd.chatAction("chat.mute", chat: c.id, ["until": .number(until)], what: "muting")
-                })
+        for c in chatCommands(for: chat) {
+            add(c)
         }
-        add(Command("unmute", "Unmute", phrase: "Unmute this chat", detail: "its notifications back", place: .chat, submenu: "Mute",
-                    enabled: { chat()?.muted ?? false }) { [weak self] in
-                guard let c = chat() else { return }
-                self?.jawd.chatAction("chat.mute", chat: c.id, ["until": .null], what: "unmuting")
-            })
-        add(Command("archive", "Archived", says: { (chat()?.archived ?? false ? "Unarchive this chat" : "Archive this chat", "as on the phone") },
-                    place: .chat, group: 1, enabled: isChat, on: { chat()?.archived ?? false }) { [weak self] in
-                guard let c = chat() else { return }
-                self?.jawd.chatAction("chat.archive", chat: c.id, ["archived": .bool(!c.archived)], what: "archiving")
-            })
-        add(Command("pin", "Pinned", says: { (chat()?.pinned ?? false ? "Unpin this chat" : "Pin this chat", "at the top of the list") },
-                    place: .chat, group: 1, enabled: isChat, on: { chat()?.pinned ?? false }) { [weak self] in
-                guard let c = chat() else { return }
-                self?.jawd.chatAction("chat.pin", chat: c.id, ["pinned": .bool(!c.pinned)], what: "pinning")
-            })
-        let isUnread: @MainActor @Sendable () -> Bool = { chat().map { $0.unread > 0 || $0.markedUnread } ?? false }
-        add(Command("mark", "Unread", says: { (isUnread() ? "Mark this chat read" : "Mark this chat unread", "as on the phone") },
-                    place: .chat, group: 1, enabled: isChat, on: isUnread) { [weak self] in
-                guard let c = chat() else { return }
-                let unread = isUnread()
-                self?.jawd.chatAction("chat.mark_unread", chat: c.id, ["unread": .bool(!unread)],
-                                      what: unread ? "marking a chat read" : "marking a chat unread")
-            })
         // The box's + menu: attachments, and what's composed.
         for (id, title, phrase, detail, symbol, key, later) in [
             ("attach.photos", "Photos & Videos…", "Send photos or videos", "from Finder or Photos", "photo.on.rectangle", Shortcut("o") as Shortcut?,
