@@ -2895,6 +2895,10 @@ SELECT a.at, a.echo_by, EXISTS (SELECT 1 FROM outbox o WHERE o.n = a.outbox) FRO
 DELETE FROM app_state_awaiting WHERE key = ?1
     SEARCH app_state_awaiting USING PRIMARY KEY (key=?)
 
+-- src/store/write/chat_actions.rs
+DELETE FROM app_state_awaiting WHERE echo_by IS NOT NULL AND echo_by <= ?1
+    SEARCH app_state_awaiting USING INDEX app_state_awaiting_by_echo (echo_by>? AND echo_by<?)
+
 -- src/store/write/kinds.rs
 SELECT n, NOT deleted AND (kind = 'unknown' OR text IS NULL AND summary = 'jaw can''t show this yet') FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)

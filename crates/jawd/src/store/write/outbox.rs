@@ -1123,13 +1123,15 @@ pub fn settled_messages(db: &Connection, most: usize) -> Result<Vec<i64>> {
     Ok(db.prepare_cached(SETTLED_ROWS)?.query_map([most as i64], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
-/// An attempt at a queued message failed; one that's still queued after it is still pending.
+/// An attempt at a queued message failed; one that's still queued after it is still pending. App
+/// state that gives up has gone without going, so its index waits for it no more, as with a refusal.
 fn failed(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, next_at: Option<i64>) -> Result<bool> {
     let Some(row) = outboxed(db, outbox)? else { return Ok(false) };
     if db.prepare_cached(ATTEMPTED)?.execute(params![outbox, error, next_at])? == 0 || next_at.is_some() {
         return Ok(false);
     }
     if let Some(action) = action(db, outbox)? {
+        db.prepare_cached(RELEASED)?.execute([outbox])?;
         return acted(db, stamps, outbox, action, false);
     }
     match row {

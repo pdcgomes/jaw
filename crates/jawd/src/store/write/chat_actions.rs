@@ -37,6 +37,8 @@ const AWAIT: &str = "INSERT INTO app_state_awaiting (key, at, outbox) VALUES (?1
 const AWAITED: &str = "SELECT a.at, a.echo_by, EXISTS (SELECT 1 FROM outbox o WHERE o.n = a.outbox)
     FROM app_state_awaiting a WHERE a.key = ?1";
 const WAITED: &str = "DELETE FROM app_state_awaiting WHERE key = ?1";
+/// The waits whose echo had to be at or before an inbox row the converter has drained.
+const PASSED: &str = "DELETE FROM app_state_awaiting WHERE echo_by IS NOT NULL AND echo_by <= ?1";
 
 /// A chat action as the writer takes it: the chat as the interface named it, what to do, and where
 /// to say what it came to. Each patch is an AppStatePatch the caller made, carrying the time it's
@@ -285,6 +287,14 @@ pub(super) fn held_back(db: &Connection, key: &str, seq: i64, at: i64) -> Result
     }
     db.prepare_cached(WAITED)?.execute([key])?;
     Ok(false)
+}
+
+/// Inbox row `seq` is drained, and the converter has gone past every row before it: an echo that
+/// had to be at or before it would have ended its wait, so a wait still on there is over. A patch
+/// still to go has no `echo_by`, and waits however far the converter has got.
+pub(super) fn passed(db: &Connection, seq: i64) -> Result<()> {
+    db.prepare_cached(PASSED)?.execute([seq])?;
+    Ok(())
 }
 
 /// Stars message `id` in chat `jid`, or takes its star off, unless it's so already, and queues its
@@ -993,9 +1003,27 @@ mod tests {
         assert_eq!(awaited(&db, &index), Some((AT, outbox[0], Some(7))), "its echo is at 7 or before");
         let pinned = chat(&db, ANA);
         arrives(&db, &index, &pin_value(false, AT - 5), 6);
+        assert!(awaited(&db, &index).is_some(), "held back, and the wait goes on");
         arrives(&db, &index, &pin_value(false, AT - 1), 7);
         assert_eq!(chat(&db, ANA), pinned, "at 7 or before, another time came before jaw's patch: held back");
-        assert!(awaited(&db, &index).is_some(), "and the wait goes on");
+        assert_eq!(awaited(&db, &index), None, "and, the converter past where its echo had to be, the wait is over");
+        arrives(&db, &index, &pin_value(false, AT + 1), 8);
+        assert_eq!(chat(&db, ANA).0, 0, "past 7, it came after: applied");
+    }
+
+    #[test]
+    fn what_comes_past_where_an_echo_had_to_be_is_applied_while_a_row_before_it_waits_in_the_inbox() {
+        let db = db();
+        chats(&db, &[ANA]);
+        let index = ["pin_v1", ANA];
+        let Acted::Queued { outbox, .. } = acted(&db, ANA, pin_at(ANA, true, AT, "p1")) else { panic!("not queued") };
+        inboxed(&db, &[6, 7]);
+        sent(&db, outbox[0]);
+        let pinned = chat(&db, ANA);
+        arrives(&db, &index, &pin_value(false, AT - 5), 6);
+        assert_eq!(chat(&db, ANA), pinned, "held back");
+        // Row 7, a history notification, stays in the inbox until its blob is in, so the converter
+        // goes past it without draining it.
         arrives(&db, &index, &pin_value(false, AT + 1), 8);
         assert_eq!(
             (chat(&db, ANA).0, awaited(&db, &index)),
@@ -1005,14 +1033,63 @@ mod tests {
     }
 
     #[test]
+    fn the_converter_passing_where_an_echo_had_to_be_ends_its_wait_but_not_one_still_to_go() {
+        let db = db();
+        chats(&db, &[ANA, RUI]);
+        let (pin, mute, rui) = (["pin_v1", ANA], ["mute", ANA], ["pin_v1", RUI]);
+        let Acted::Queued { outbox: pinned, .. } = acted(&db, ANA, pin_at(ANA, true, AT, "p1")) else {
+            panic!("not queued")
+        };
+        let muting =
+            Does::Set(Setting::Mute { until: FOREVER, patch: patch_of(&mute, &mute_value(FOREVER, AT + 1), "m1") });
+        let Acted::Queued { outbox: muted, .. } = acted(&db, ANA, muting) else { panic!("not queued") };
+        assert!(matches!(acted(&db, RUI, pin_at(RUI, true, AT + 2, "r1")), Acted::Queued { .. }));
+        inboxed(&db, &[6]);
+        sent(&db, pinned[0]);
+        inboxed(&db, &[7]);
+        sent(&db, muted[0]);
+        let echo_by = |index: &[&str]| awaited(&db, index).map(|(.., echo_by)| echo_by);
+        assert_eq!((echo_by(&pin), echo_by(&mute), echo_by(&rui)), (Some(Some(6)), Some(Some(7)), Some(None)));
+        written(&db, &[Change::Drained(Drained::Inbox(5))]);
+        assert_eq!(
+            (echo_by(&pin), echo_by(&mute)),
+            (Some(Some(6)), Some(Some(7))),
+            "before where either echo had to be, both wait"
+        );
+        written(&db, &[Change::Drained(Drained::Inbox(6))]);
+        assert_eq!(
+            (echo_by(&pin), echo_by(&mute)),
+            (None, Some(Some(7))),
+            "at 6, the pin's echo would have ended its wait: it's over"
+        );
+        written(&db, &[Change::Drained(Drained::Inbox(8))]);
+        assert_eq!(echo_by(&mute), None, "past 7, so is the mute's");
+        assert_eq!(echo_by(&rui), Some(None), "and Rui's pin, still to go, waits however far the converter has got");
+    }
+
+    #[test]
+    fn a_patch_that_gives_up_as_failed_ends_its_indexs_wait_with_it() {
+        let db = db();
+        chats(&db, &[ANA]);
+        let index = ["pin_v1", ANA];
+        let Acted::Queued { outbox, .. } = acted(&db, ANA, pin_at(ANA, true, AT, "p1")) else { panic!("not queued") };
+        let failed = |next_at| Step::Failed { outbox: outbox[0], error: "websocket not connected".into(), next_at };
+        written(&db, &[Change::Outbox(failed(Some(AT + 1_000)))]);
+        assert_eq!(awaited(&db, &index), Some((AT, outbox[0], None)), "one to try again still waits");
+        written(&db, &[Change::Outbox(failed(None))]);
+        assert_eq!((queued(&db).len(), awaited(&db, &index)), (0, None), "its row gone, unsent, and the wait with it");
+        arrives(&db, &index, &pin_value(false, AT - 1), 1);
+        assert_eq!(chat(&db, ANA).0, 0, "so what comes is applied");
+    }
+
+    #[test]
     fn once_jaws_patch_has_gone_without_going_what_comes_for_its_index_is_applied() {
         let db = db();
         chats(&db, &[ANA]);
         let index = ["pin_v1", ANA];
         let Acted::Queued { outbox, .. } = acted(&db, ANA, pin_at(ANA, true, AT, "p1")) else { panic!("not queued") };
-        let failed = Step::Failed { outbox: outbox[0], error: "its app state doesn't decode".into(), next_at: None };
-        written(&db, &[Change::Outbox(failed)]);
-        assert_eq!((queued(&db).len(), awaited(&db, &index)), (0, Some((AT, outbox[0], None))), "its row gone, unsent");
+        // No step leaves a wait whose outbox row has gone, so the row is taken out by hand.
+        db.execute("DELETE FROM outbox WHERE n = ?1", [outbox[0]]).unwrap();
         arrives(&db, &index, &pin_value(false, AT - 1), 1);
         assert_eq!((chat(&db, ANA).0, awaited(&db, &index)), (0, None), "so what comes is applied, the wait over");
     }
@@ -1081,6 +1158,11 @@ mod tests {
                 "SEARCH a USING PRIMARY KEY (key=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH o USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("an index's wait over", WAITED, "SEARCH app_state_awaiting USING PRIMARY KEY (key=?)"),
+            (
+                "the waits the converter has gone past",
+                PASSED,
+                "SEARCH app_state_awaiting USING INDEX app_state_awaiting_by_echo (echo_by>? AND echo_by<?)",
+            ),
             (
                 "the indexes awaiting, for jawd status",
                 "SELECT count(*) FROM app_state_awaiting",

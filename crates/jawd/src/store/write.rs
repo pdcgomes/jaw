@@ -732,11 +732,13 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
             }
         }
         Change::Members(members) => set_members(db, stamps, members),
-        // A row drained has been converted, so what an earlier failure kept of it goes too.
+        // A row drained has been converted, so what an earlier failure kept of it goes too, as does
+        // a wait for an echo that had to come by it.
         Change::Drained(Drained::Inbox(seq)) => {
             db.prepare_cached("DELETE FROM inbox WHERE seq = ?1")?.execute([seq])?;
             db.prepare_cached("DELETE FROM quarantine WHERE source = 'inbox' AND ref = ?1")?
                 .execute([seq.to_string()])?;
+            chat_actions::passed(db, *seq)?;
             Ok(false)
         }
         Change::Drained(Drained::History { chat, id }) => {

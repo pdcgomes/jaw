@@ -1492,8 +1492,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // changes, so it needs neither a data step's backup nor its check of every foreign key.
     COMMUNITIES_GATHERED,
     // 29: what WhatsApp sends for an app-state index while jaw's own patch for it is on its way,
-    // held back, a schema step: one new table, which costs the same however big jaw.db is, and
-    // which nothing refers to.
+    // held back, a schema step: one new table and an index on it, which cost the same however big
+    // jaw.db is, and which nothing refers to.
     "
     -- Class: jaw's own. For each app-state index jaw has queued a patch for, its latest patch:
     -- WhatsApp sends app state back in the order it took it, so what it sends for the index before
@@ -1511,6 +1511,10 @@ pub(super) const MIGRATIONS: &[&str] = &[
         -- Once WhatsApp has taken it, the inbox's last seq then: its echo is at or before it.
         echo_by INTEGER
     ) STRICT, WITHOUT ROWID;
+    -- Class: an index, derived from app_state_awaiting's own column; it holds nothing the table
+    -- doesn't, so it can always be built again from it. The rows whose patch WhatsApp has taken,
+    -- by where their echo has to be, so the converter ends the waits it has gone past.
+    CREATE INDEX app_state_awaiting_by_echo ON app_state_awaiting (echo_by) WHERE echo_by IS NOT NULL;
     ",
 ];
 
