@@ -293,7 +293,11 @@ public enum MenuEntry: Equatable, Sendable {
 /// tests stand in for `run`.
 @MainActor
 struct MenuPopUp {
-    var run: (NSMenu, NSPoint, NSView) -> Void = { menu, point, view in menu.popUp(positioning: nil, at: point, in: view) }
+    /// On the run loop's next turn: a menu opened in the turn an accessibility call started in
+    /// doesn't post that it opened, so VoiceOver wouldn't announce it or move into it.
+    var run: @MainActor (NSMenu, NSPoint, NSView) -> Void = { menu, point, view in
+        DispatchQueue.main.async { menu.popUp(positioning: nil, at: point, in: view) }
+    }
 
     /// Pops `menu` up at `point` in `view`; false when there's no menu.
     func show(_ menu: NSMenu?, at point: NSPoint, in view: NSView) -> Bool {
