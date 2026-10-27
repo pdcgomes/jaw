@@ -16,6 +16,7 @@
 
 mod actions;
 pub mod bench;
+mod chat_actions;
 pub(crate) mod compose;
 mod contact;
 mod events;
