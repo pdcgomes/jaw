@@ -1,0 +1,27 @@
+---
+description: jaw's build folders fill the Mac's shared disk. When and how to run make prune-builds, and what it doesn't replace.
+alwaysApply: true
+---
+
+# Disk space
+
+Every project and agent on this Mac shares its disk, and on 27 October jaw's build folders took 321 GB of it. A macOS debug build keeps its debug info in object files beside the binary, and every incremental rebuild writes new ones without deleting the old: on 27 October the worktrees held 125 GB of objects no binary used, and gathered about 8 GB more an hour. `make prune-builds` deletes those from every worktree's `target/`, and nothing rebuilds after (`scripts/prune-builds.py` says how).
+
+## When
+
+- A coordinator looking after jaw's agents runs it on every round, at least every half hour.
+- An agent that built in a worktree runs it before its final report, and between rounds of anything that rebuilds over and over: mutation tests, flake hunts, bisects, benches across revisions.
+- Anyone runs it first when `df -h /System/Volumes/Data` shows less than 150 GB free, before anything else that writes, and says so if that didn't free enough.
+
+## How
+
+- `make prune-builds`, from any checkout that has it (origin/main since ae37609): it covers every worktree, whichever one it runs in. `python3 scripts/prune-builds.py --dry-run` only counts.
+- Nothing needs stopping or waiting for: it leaves a worktree alone while cargo, rustc or the linker runs there, and objects touched in the last hour, for the next run. Two runs at once are safe.
+- The main checkout's `target/` is included, safely: the owner's jawd and jaw keep every object they name.
+- A build folder outside the worktrees, such as an audit's under `/tmp/jaw-audits/`, is pruned only when named: `python3 scripts/prune-builds.py /tmp/jaw-audits/<topic>/jaw/target`. Audits' gathered under 0.3 GB each on 27 October, so it's worth it only in a long audit that rebuilds a lot.
+
+## What it doesn't replace
+
+- A landed branch's worktree is removed (`git worktree remove`, which takes its `target/` with it), and an audit's scratch goes when the audit ends.
+- Never make room by deleting another agent's `target/` or running `cargo clean` in its worktree: it costs that agent a full rebuild, so it's the owner's call. Never point two checkouts at one target folder.
+- Never change the script to delete an object a binary still names, or to run while a build does.
