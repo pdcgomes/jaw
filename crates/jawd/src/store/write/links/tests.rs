@@ -577,12 +577,20 @@ async fn a_message_still_waiting_to_be_indexed_when_the_backfill_links_it_gets_o
     ))
     .unwrap();
     store.apply(Lane::Background, vec![Change::Backfill(LINKS)]).await.unwrap();
-    let (linked, documents): (i64, i64) = db
-        .query_row("SELECT (SELECT count(DISTINCT message) FROM links), (SELECT count(*) FROM links_fts)", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    // The writer indexes what waits as soon as it's idle, so it may have taken some of the step's
+    // messages by now: each of those has its document, and none still waiting has one.
+    let (linked, indexed, documents, waiting): (i64, i64, i64, i64) = db
+        .query_row(
+            "SELECT (SELECT count(DISTINCT message) FROM links),
+                (SELECT count(DISTINCT message) FROM links WHERE message NOT IN (SELECT n FROM fts_backlog)),
+                (SELECT count(*) FROM links_fts),
+                (SELECT count(*) FROM links_fts WHERE rowid IN (SELECT m.t FROM fts_backlog b JOIN messages m ON m.n = b.n))",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
         .unwrap();
-    assert_eq!((linked, documents), (STEP / 3 + 1, 0), "the first step's links are in, their words wait");
+    assert_eq!(linked, STEP / 3 + 1, "the first step's links are in");
+    assert_eq!((documents, waiting), (indexed, 0), "their words wait for the index step");
     while backfill_left(&store).await.is_some() {
         store.apply(Lane::Background, vec![Change::Backfill(LINKS)]).await.unwrap();
     }
