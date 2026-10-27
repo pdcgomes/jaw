@@ -845,9 +845,9 @@ Append to `MIGRATIONS` in `crates/jawd/src/store/schema.rs`, after migration 12'
     -- setting without a row has its default. `value` is the setting's JSON, and `at` when it was
     -- chosen, in milliseconds.
     CREATE TABLE settings (
-        domain TEXT NOT NULL,
-        key TEXT NOT NULL,
-        value TEXT NOT NULL CHECK (json_valid(value)),
+        domain TEXT NOT NULL CHECK (octet_length(domain) BETWEEN 1 AND 64),
+        key TEXT NOT NULL CHECK (octet_length(key) BETWEEN 1 AND 64),
+        value TEXT NOT NULL CHECK (json_valid(value) AND octet_length(value) <= 4096),
         at INTEGER NOT NULL,
         PRIMARY KEY (domain, key)
     ) STRICT, WITHOUT ROWID;
