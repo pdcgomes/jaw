@@ -86,21 +86,21 @@ public enum Samples {
         let at = now - 20000
         let rows = """
         [
-          {"id":"K1","v":1,"sort":"1","chat":"g","at":\(at),"from":{"id":"person:7","name":"Rui","colour":2},"kind":"video",
+          {"id":"K1","v":1,"sort":"\(at)~000101","chat":"g","at":\(at),"from":{"id":"person:7","name":"Rui","colour":2},"kind":"video",
            "spans":[{"t":"text","s":"the last move"}],"media":{"w":1080,"h":1920,"seconds":42,"bytes":12500000,"mime":"video/mp4"}},
-          {"id":"K2","v":1,"sort":"2","chat":"g","at":\(at + 1000),"mine":true,"status":"delivered","kind":"document",
+          {"id":"K2","v":1,"sort":"\(at + 1000)~000102","chat":"g","at":\(at + 1000),"mine":true,"status":"delivered","kind":"document",
            "spans":[{"t":"text","s":"Sintra topo.pdf"}],"media":{"name":"Sintra topo.pdf","bytes":2400000,"mime":"application/pdf","pages":12}},
-          {"id":"K3","v":1,"sort":"3","chat":"g","at":\(at + 2000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"location",
+          {"id":"K3","v":1,"sort":"\(at + 2000)~000103","chat":"g","at":\(at + 2000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"location",
            "location":{"lat":38.7876,"lon":-9.3906,"name":"Cabo da Roca","address":"Colares, Sintra"}},
-          {"id":"K4","v":1,"sort":"4","chat":"g","at":\(at + 3000),"from":{"id":"person:9","name":"Inês","colour":0},"kind":"poll",
+          {"id":"K4","v":1,"sort":"\(at + 3000)~000104","chat":"g","at":\(at + 3000),"from":{"id":"person:9","name":"Inês","colour":0},"kind":"poll",
            "poll":{"question":"Which day?","max":1,"options":[{"name":"Saturday","votes":3,"mine":true},{"name":"Sunday","votes":1}]}},
-          {"id":"K5","v":1,"sort":"5","chat":"g","at":\(at + 4000),"from":{"id":"person:7","name":"Rui","colour":2},"kind":"contact",
+          {"id":"K5","v":1,"sort":"\(at + 4000)~000105","chat":"g","at":\(at + 4000),"from":{"id":"person:7","name":"Rui","colour":2},"kind":"contact",
            "contact":{"name":"Climbing shop"}},
-          {"id":"K6","v":1,"sort":"6","chat":"g","at":\(at + 5000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"text",
+          {"id":"K6","v":1,"sort":"\(at + 5000)~000106","chat":"g","at":\(at + 5000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"text",
            "spans":[{"t":"link","s":"climb.pt/sintra","url":"https://climb.pt/sintra"}],
            "link":{"url":"https://climb.pt/sintra","title":"Sintra: the routes","description":"Granite slabs above the sea, from 4 to 7b"}},
-          {"id":"K7","v":1,"sort":"7","chat":"g","at":\(at + 6000),"mine":true,"status":"read","kind":"voice","media":{"seconds":14}},
-          {"id":"K8","v":1,"sort":"8","chat":"g","at":\(at + 7000),"from":{"id":"person:9","name":"Inês","colour":0},"kind":"album",
+          {"id":"K7","v":1,"sort":"\(at + 6000)~000107","chat":"g","at":\(at + 6000),"mine":true,"status":"read","kind":"voice","media":{"seconds":14}},
+          {"id":"K8","v":1,"sort":"\(at + 7000)~000108","chat":"g","at":\(at + 7000),"from":{"id":"person:9","name":"Inês","colour":0},"kind":"album",
            "album":{"items":[{"id":"a","kind":"image"},{"id":"b","kind":"image"},{"id":"c","kind":"video"},{"id":"d","kind":"image"},{"id":"e","kind":"image"}]}}
         ]
         """
