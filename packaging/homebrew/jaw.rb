@@ -42,9 +42,9 @@ class Jaw < Formula
       30.times do
         sleep 1
         frame = pipe_output("#{bin}/jaw snapshot --width 120 --height 30 2>&1")
-        break if frame.include?("Ana Ribeiro")
+        break if frame.include?("Lisbon Climbing")
       end
-      assert_match "Ana Ribeiro", frame, (testpath/"jawd.log").read
+      assert_match "Lisbon Climbing", frame, (testpath/"jawd.log").read
       status = shell_output("#{bin}/jaw status")
       assert_match(/^jawd +#{Regexp.escape(said)} \(protocol /, status)
       refute_match "another build", status
