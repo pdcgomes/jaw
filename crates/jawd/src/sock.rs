@@ -27,8 +27,8 @@ use crate::state::State;
 use crate::sync::Refused;
 
 /// Lines waiting for an interface to read them. Window updates wait in their windows instead, so a
-/// slow interface never holds anything else up, and a reply or a `layout` push that finds no room
-/// waits on its own, one at most.
+/// slow interface never holds anything else up, and a reply, a `layout` push or a `settings` push
+/// that finds no room waits on its own, one at most.
 const WAITING_LINES: usize = 64;
 /// Requests a connection's lane holds, waiting or being answered, before it reads no more.
 pub const LANE_MOST: usize = 64;
@@ -77,8 +77,8 @@ impl Lanes {
         Lanes::count(&self.full)
     }
 
-    /// The connections whose reply, or `layout` push, waits for room in the queue to their
-    /// interface.
+    /// The connections whose reply, `layout` push or `settings` push waits for room in the queue to
+    /// their interface.
     pub fn waiting(&self) -> u64 {
         Lanes::count(&self.waiting)
     }
@@ -101,9 +101,9 @@ impl Lanes {
 }
 
 /// What a connection owes its interface: the requests it has sent down its lane and not had back,
-/// those being answered on tasks of their own, and the reply or `layout` push waiting for room in
-/// the queue, one at most. It's counted in `Lanes` for as long as the connection lasts, each change
-/// as it's made.
+/// those being answered on tasks of their own, and the reply, `layout` push or `settings` push
+/// waiting for room in the queue, one at most. It's counted in `Lanes` for as long as the
+/// connection lasts, each change as it's made.
 struct Owed<'a> {
     lanes: &'a Lanes,
     in_lane: usize,
@@ -203,12 +203,13 @@ pub async fn serve(state: Arc<State>, listener: UnixListener) -> Result<()> {
 /// One connection. Its windows, hello and focus are answered on its own task; a find, and any
 /// request that can take long, on a task of its own; and every other request down the
 /// connection's lane, in the order sent, so a watch never waits on jaw.db's writer, the engine or
-/// a search, nor a send on a long request. Requests go ahead of the windows' flushes. A reply, or
-/// a `layout` push, that finds the queue to the interface full waits, and meanwhile no request is
-/// read, no other reply or push is sent, and the windows send nothing, so nothing goes ahead of
-/// the watch a reply may be the result of; but they still take their changes, so an interface
-/// that leaves its queue full is told to watch again, a reply waiting or not. Once the interface
-/// has sent all it will, every request it sent is still answered before the connection ends.
+/// a search, nor a send on a long request. Requests go ahead of the windows' flushes. A reply, a
+/// `layout` push or a `settings` push that finds the queue to the interface full waits, and
+/// meanwhile no request is read, no other reply or push is sent, and the windows send nothing, so
+/// nothing goes ahead of the watch a reply may be the result of; but they still take their
+/// changes, so an interface that leaves its queue full is told to watch again, a reply waiting or
+/// not. Once the interface has sent all it will, every request it sent is still answered before
+/// the connection ends.
 async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
     let peer = match stream.peer_cred() {
         Ok(credentials) => credentials.uid(),
@@ -366,8 +367,8 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
     }
 }
 
-/// Puts `line`, a reply or a `layout` push, in the queue to the interface, or, with no room there,
-/// keeps it waiting and holds the windows.
+/// Puts `line`, a reply, a `layout` push or a `settings` push, in the queue to the interface, or,
+/// with no room there, keeps it waiting and holds the windows.
 fn send(
     out: &mpsc::Sender<Vec<u8>>,
     line: &impl serde::Serialize,
@@ -1586,7 +1587,8 @@ mod tests {
             id
         }
 
-        /// The connections whose reply or `layout` push waits for room, as `status` says.
+        /// The connections whose reply, `layout` push or `settings` push waits for room, as `status`
+        /// says.
         fn waiting(&mut self) -> u64 {
             let status = self.call("status", Value::Null);
             status["result"]["interfaces"]["replies_waiting"].as_u64().unwrap_or_else(|| panic!("{status}"))

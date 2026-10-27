@@ -315,8 +315,9 @@ pub struct Interfaces {
     pub lane_most: u64,
     #[serde(default)]
     pub lanes_full: u64,
-    /// The connections whose reply, or `layout` push, waits for room in the queue to their
-    /// interface, one each at most, which jawd reads nothing from and sends nothing else meanwhile.
+    /// The connections whose reply, `layout` push or `settings` push waits for room in the queue to
+    /// their interface, one each at most, which jawd reads nothing from and sends nothing else
+    /// meanwhile.
     #[serde(default)]
     pub replies_waiting: u64,
     /// The requests being answered on tasks of their own, finds and saves, and the most a

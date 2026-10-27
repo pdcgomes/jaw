@@ -3146,7 +3146,7 @@ git commit -m "The settings in the protocol, the design and the README: settings
 ### Task 11: The gate, the audit and the measurements
 
 **Files:**
-- Create: `docs/audits/2026-10-26-settings.md` (written by the database expert)
+- Create: `docs/audits/YYYY-MM-DD-settings.md`, dated the day it's written (written by the database expert)
 - Modify: whatever the audit asks for
 
 - [ ] **Step 1: Catch up with main**
@@ -3165,16 +3165,18 @@ Build release binaries on this branch and on `origin/main` (in a scratch worktre
 
 - [ ] **Step 4: The audit**
 
-Launch the `database-expert` subagent with the worktree path `/Users/pedrogomes/src/jaw-settings` and the range `origin/main..HEAD`, asking it to audit the settings branch against the data-integrity rules and write `docs/audits/2026-10-26-settings.md`. Fix everything it marks as data loss or inconsistency, each with a test that fails without the fix, then launch a fresh auditor for the next look. Repeat until the note ends `Verdict: approved`.
+Launch the `database-expert` subagent with the worktree path `/Users/pedrogomes/src/jaw-settings` and the range `origin/main..HEAD`, asking it to audit the settings branch against the data-integrity rules and write `docs/audits/YYYY-MM-DD-settings.md`, dated the day it writes it. Fix everything it marks as data loss or inconsistency, each with a test that fails without the fix, then launch a fresh auditor for the next look. Repeat until the note ends `Verdict: approved`.
 
 - [ ] **Step 5: The trailers**
 
-Write the note's commit message to `/tmp/jaw-settings-audit-message.txt` first, in the project's voice, as the earlier audits' commits read (`git log --grep "database expert's audit" -3`): how many looks it took, what each found, what was done about it and what's left as follow-ups. Commit the note, then give every commit that touches the data layer its trailer:
+Write the note's commit message to `/tmp/jaw-settings-audit/message.txt` first, in a folder of its own that goes once the note is committed, in the project's voice, as the earlier audits' commits read (`git log --grep "database expert's audit" -3`): how many looks it took, what each found, what was done about it and what's left as follow-ups. Commit the note, then give every commit that touches the data layer its trailer, naming the note as the auditor dated it:
 
 ```bash
-git add docs/audits/2026-10-26-settings.md
-git commit -F /tmp/jaw-settings-audit-message.txt
-git rebase origin/main -x 'python3 scripts/check-data-audit.py HEAD~1 HEAD >/dev/null 2>&1 || git commit --amend --no-edit --trailer "Data-Audit: docs/audits/2026-10-26-settings.md"'
+note=docs/audits/YYYY-MM-DD-settings.md
+git add "$note"
+git commit -F /tmp/jaw-settings-audit/message.txt
+rm -rf /tmp/jaw-settings-audit
+git rebase origin/main -x "python3 scripts/check-data-audit.py HEAD~1 HEAD >/dev/null 2>&1 || git commit --amend --no-edit --trailer 'Data-Audit: $note'"
 make check-audit
 ```
 
