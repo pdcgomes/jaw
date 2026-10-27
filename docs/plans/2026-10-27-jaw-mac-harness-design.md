@@ -181,9 +181,9 @@ A small set is committed and checked in every `make mac-test`: the five conversa
 
 Each is planned on its own, the next in detail once the one before has landed, and each lands into `mac-m1` when it's done.
 
-1. **The shell and the loop.** The SwiftUI app: the catalog, the stage, the specimens, the controls, the launch flags, `--snapshot` and `--sweep`; the fixtures; today's six scenes ported; `build-mac harness`, `shot` and `sweep`; the canvas; and `check-harness` with its first rule. Done when the owner reviews the six scenes on the canvas.
+1. **The shell and the loop.** The SwiftUI app: the catalog, the stage, the specimens, the controls, the launch flags, `--snapshot` and `--sweep`; the fixtures' first form, `Samples` and the protocol's fixtures; today's six scenes ported; `build-mac harness`, `shot` and `sweep`; the canvas; and `check-harness` with its first rule. Done when the owner reviews the six scenes on the canvas.
 2. **Screens from values.** The move into `JawUI`; `Situation` and its tests; the Screens section; `check-harness`'s second rule. Done when every screen in the table draws from a value, and the app draws as it did before the move.
-3. **Every component.** The rest of the scenes; `check-harness`'s third rule; the pinned references and `--check` in `make mac-test`; the README's section. Done when `check-harness` passes with nothing left out.
+3. **Every component.** The rest of the scenes, with the account written longhand and the avatars and previews drawn for the purpose, which they're the scenes to need (Owner, 27 Oct); `check-harness`'s third rule; the pinned references and `--check` in `make mac-test`; the README's section. Done when `check-harness` passes with nothing left out.
 4. **Live.** The scripted feed, the hosts that log, the four Live scenes and their checklists.
 5. **Performance.** The run-loop observer and its two scenes.
 

@@ -21,7 +21,7 @@
 - A variant's name is `dark` or `light`, then `-bubbles` or `-lines` for a scene drawn in both looks, then `-compact` for its compact variant: `dark-bubbles-compact`. Variants run dark before light, bubbles before lines, comfortable before compact.
 - A scene is drawn `width` points wide (960 unless it says) and as tall as it needs, with 24 points (`Space.xxl`) of its surface around it, at 2×.
 - A sweep writes `<folder>/<scene-id>/<variant>.png` and `<folder>/manifest.json`; `build-mac sweep` sweeps into `mac/build/review/`. The canvas is `.atelier/mac-harness.canvas.tsx`, its data `.atelier/mac-harness.data.ts`, and the owner's marks are kept in its state under `marks`, by scene id, each `{ state: "right" | "needs-work", note, hashes, at }`.
-- Phase one builds only what the spec's first phase lists. The spec's later building blocks and fields (`AppKitSpecimen`, `ScreenSpecimen`, `Knob`, `fillsStage`, `pinned`, `--check`, `--record`, screen sizes, `check-harness`'s second and third rules) come with the phases that use them.
+- Phase one builds only what the spec's first phase lists. The spec's later building blocks and fields (`AppKitSpecimen`, `ScreenSpecimen`, `Knob`, `fillsStage`, `pinned`, `--check`, `--record`, screen sizes, `check-harness`'s second and third rules) come with the phases that use them, and so do the account written longhand and the avatars and previews drawn for the purpose, which come with phase three's scenes (Owner, 27 Oct).
 
 ## File structure
 
