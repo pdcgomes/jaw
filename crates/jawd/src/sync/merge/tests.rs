@@ -795,6 +795,47 @@ async fn a_draft_and_a_pin_an_earlier_jawd_put_on_the_middle_chat_of_a_chain_end
     assert_eq!(frecency, [1.0], "the old number's one open, counted once");
 }
 
+/// What jaw.db holds of each chat that the digest leaves out: its draft, its pin, until when it's
+/// muted, its frecency and how far WhatsApp was told it's read.
+async fn settings_and_told(store: &Store) -> Vec<String> {
+    query(store, |db| {
+        Ok(db
+            .prepare(
+                "SELECT id, coalesce(draft, ''), pinned, muted_until, round(frecency, 9), told_at, told_n
+                FROM chats ORDER BY id",
+            )?
+            .query_map([], |r| {
+                let (id, draft, pinned, muted): (String, String, i64, i64) =
+                    (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+                let (frecency, told): (f64, (Option<i64>, Option<i64>)) = (r.get(4)?, (r.get(5)?, r.get(6)?));
+                Ok(format!("settings {id} {draft:?} {pinned} {muted} {frecency} {told:?}"))
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chain_an_earlier_jawd_left_ends_the_same_whichever_commit_jawd_is_killed_after() {
+    for (name, first) in [("x1-chain", OLD), ("ended-chain", OLD), ("standing-chain", LID)] {
+        let home = from_before(name);
+        let store = Store::open(home.path()).unwrap();
+        // The flatten's one commit, then each step's, as the merging task takes them; a kill
+        // before the flatten's leaves the jaw.db just opened.
+        let mut kills = vec![killed(home.path())];
+        while step(&store, first).await {
+            kills.push(killed(home.path()));
+        }
+        let want = [digest(&store).await, settings_and_told(&store).await].concat();
+        for (k, copy) in kills.iter().enumerate() {
+            let started = Store::open(copy.path()).unwrap();
+            merged(&started, first).await;
+            let got = [digest(&started).await, settings_and_told(&started).await].concat();
+            same(&want, &got, &format!("{name}, killed after commit {k}"));
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_draft_an_earlier_jawd_put_on_a_middle_chat_whose_first_merge_had_ended_ends_in_the_chat_that_stays() {
     let home = from_before("ended-chain");
