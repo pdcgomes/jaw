@@ -3731,6 +3731,43 @@ mod tests {
         assert_eq!(at, 6, "a value that changes is chosen anew");
     }
 
+    #[test]
+    fn the_settings_table_is_strict_and_holds_json_and_a_time() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        schema::migrate(&mut db).unwrap();
+        let insert = |key: &str, value: &str, at: rusqlite::types::Value| {
+            db.execute(
+                "INSERT INTO settings (domain, key, value, at) VALUES ('jaw', ?1, ?2, ?3)",
+                rusqlite::params![key, value, at],
+            )
+        };
+        assert!(insert("theme", "\"nord\"", 1.into()).is_ok());
+        assert!(insert("messages", "irc", 1.into()).is_err(), "a value that isn't JSON");
+        assert!(insert("font", "\"x\"", "soon".to_string().into()).is_err(), "a time that isn't an integer");
+        assert!(insert("size", "\"x\"", rusqlite::types::Value::Null).is_err(), "no time");
+    }
+
+    #[test]
+    fn the_settings_table_holds_names_of_1_to_64_bytes_and_values_of_4_kib_at_most() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        schema::migrate(&mut db).unwrap();
+        let insert = |domain: &str, key: &str, value: &str| {
+            db.execute(
+                "INSERT INTO settings (domain, key, value, at) VALUES (?1, ?2, ?3, 1)",
+                rusqlite::params![domain, key, value],
+            )
+        };
+        assert!(
+            insert(&"d".repeat(64), &"k".repeat(64), &format!("\"{}\"", "x".repeat(4_094))).is_ok(),
+            "64, 64 and 4,096 bytes"
+        );
+        assert!(insert("", "theme", "\"x\"").is_err(), "no domain");
+        assert!(insert(&"d".repeat(65), "theme", "\"x\"").is_err(), "a domain of 65 bytes");
+        assert!(insert("jaw", "", "\"x\"").is_err(), "no key");
+        assert!(insert("jaw", &"k".repeat(65), "\"x\"").is_err(), "a key of 65 bytes");
+        assert!(insert("jaw", "long", &format!("\"{}\"", "x".repeat(4_095))).is_err(), "4,097 bytes");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_settings_change_that_fails_is_quarantined_with_its_json_so_it_can_be_read_back() {
         let home = tempfile::tempdir().unwrap();
