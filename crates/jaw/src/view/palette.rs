@@ -9,6 +9,8 @@ use crate::composer::Composer;
 use crate::data::{Chat, Counts, Found, FoundKind, Hit, Mark, MarkKind};
 use crate::find;
 use crate::fmt;
+use jaw_proto::settings::{Messages, SettingsSet};
+use jaw_proto::themes;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
@@ -87,6 +89,10 @@ pub enum Does {
     Sidebar,
     /// Ctrl-L's library, across all chats.
     Library,
+    /// Ctrl-,'s settings panel; on the theme list; your messages set as asked.
+    Settings,
+    Theme,
+    Messages(Messages),
     /// The experimental quick look, the focused mode, and the split panes' actions.
     QuickLook,
     FocusMode,
@@ -625,6 +631,22 @@ impl View {
             let verb = if unread { "Mark this chat read" } else { "Mark this chat unread" };
             all.push(Action::new(verb, name, Does::MarkUnread(id, !unread)));
         }
+        let shown = self.settings_shown();
+        all.push(Action::new("Settings", "the theme, where your messages sit", Does::Settings).key("ctrl-,"));
+        let theme = themes::or_default(&shown.theme).name.clone();
+        all.push(Action::new("Change the theme", format!("{theme} now; previewed as you move"), Does::Theme));
+        all.push(match shown.messages {
+            Messages::Bubbles => Action::new(
+                "Your messages on the left, as IRC",
+                "under \"You\", as everyone's are",
+                Does::Messages(Messages::Irc),
+            ),
+            Messages::Irc => Action::new(
+                "Your messages on the right",
+                "a third of the way across",
+                Does::Messages(Messages::Bubbles),
+            ),
+        });
         all.extend([
             Action::new("New poll", "in this chat", Does::Later("polls come with M2")).key("/poll").later("M2"),
             Action::new("New group", "with people you pick", Does::Later("groups come with M2")).later("M2"),
@@ -1199,6 +1221,18 @@ impl View {
             Does::Library => {
                 close(self);
                 self.open_library(None, None, "");
+            }
+            Does::Settings => {
+                close(self);
+                self.open_settings(false);
+            }
+            Does::Theme => {
+                close(self);
+                self.open_settings(true);
+            }
+            Does::Messages(messages) => {
+                close(self);
+                self.ask_settings(SettingsSet { theme: None, messages: Some(messages) });
             }
             Does::QuickLook => {
                 close(self);

@@ -11,6 +11,7 @@ mod library;
 mod palette;
 mod panes;
 mod quick_look;
+mod settings;
 mod sidebar;
 mod status_line;
 mod voice;
@@ -160,8 +161,6 @@ pub struct View {
     settings: Settings,
     settings_asked: Option<Settings>,
     settings_owed: usize,
-    /// The theme the screen is drawn in, by ID.
-    theme_id: String,
     /// When the view was made, so the first frame waits for jawd at most `FIRST_FRAME_WAIT`.
     born: Instant,
     jawd: Box<dyn Jawd>,
@@ -287,6 +286,8 @@ pub struct View {
     pub experiments: crate::experiments::Experiments,
     focus_mode: bool,
     quick_look: Option<quick_look::QuickLook>,
+    /// The settings panel, while it's open.
+    settings_panel: Option<settings::Panel>,
     /// The panes once the conversation is split, each other than the one with the keys holding
     /// its chat's state.
     panes: panes::Panes,
@@ -311,7 +312,6 @@ impl View {
             settings: Settings::default(),
             settings_asked: None,
             settings_owed: 0,
-            theme_id: jaw_proto::themes::DEFAULT.to_string(),
             born: Instant::now(),
             jawd,
             reach: Reach::Waiting,
@@ -389,6 +389,7 @@ impl View {
             experiments: crate::experiments::Experiments::at_start(),
             focus_mode: false,
             quick_look: None,
+            settings_panel: None,
             panes: panes::Panes::default(),
             layout_kept: panes::LayoutKept::default(),
             effects: vec![],
@@ -497,6 +498,7 @@ impl View {
                 if linked && !self.watching {
                     self.start_watching();
                 } else if !linked && self.logged_out.is_none() {
+                    self.close_settings();
                     self.start_linking();
                 }
             }
@@ -712,11 +714,12 @@ impl View {
     }
 
     /// jawd says the account is logged out: the screen says why and offers to link again, without
-    /// linking until asked.
+    /// linking until asked. The settings panel goes with the screen it was on.
     fn told_logged_out(&mut self, reason: Option<String>) {
         self.link = None;
         self.link_asked = false;
         self.logged_out = Some(reason);
+        self.close_settings();
     }
 
     /// The settings the screen shows: what was last asked of jawd while its answer is on the way,
@@ -748,7 +751,6 @@ impl View {
     }
 
     /// Asks jawd to keep `change` for the terminal, showing it meanwhile.
-    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests ask for a change until the settings panel does"))]
     fn ask_settings(&mut self, change: SettingsSet) {
         let mut asked = self.settings_shown().clone();
         if let Some(theme) = &change.theme {
@@ -763,13 +765,13 @@ impl View {
         self.restyle();
     }
 
-    /// Draws the screen in the theme it shows; a theme that changes lays every message and chat
-    /// row out again, in its colours, and draws every picture again on its ground.
+    /// Draws the screen in the theme it shows, or the one the settings panel previews; a theme
+    /// drawn differently lays every message and chat row out again, in its colours, and draws
+    /// every picture again on its ground.
     fn restyle(&mut self) {
-        let id = self.settings_shown().theme.clone();
-        if id != self.theme_id {
-            self.theme = Theme::named(&id, self.theme.truecolor);
-            self.theme_id = id;
+        let theme = Theme::named(self.previewed().unwrap_or(&self.settings_shown().theme), self.theme.truecolor);
+        if theme != self.theme {
+            self.theme = theme;
             self.laid.clear();
             self.rows_laid.clear();
             self.restyle_panes();

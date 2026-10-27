@@ -282,6 +282,9 @@ impl View {
                 ("esc", "closes", true),
             ];
         }
+        if self.settings_panel.is_some() {
+            return self.settings_hints();
+        }
         if self.library.is_some() {
             return self.library_hints();
         }
@@ -388,17 +391,24 @@ impl View {
             self.draw_sidebar(f, side);
             rest = after;
         }
+        let settings = self.settings_panel.is_some();
         if rest.width < NARROW {
-            if self.picking || self.open.is_none() {
+            if settings {
+                self.draw_settings(f, rest);
+            } else if self.picking || self.open.is_none() {
                 self.draw_list(f, rest, true);
             } else {
                 self.draw_conversation(f, rest);
             }
-        } else if self.focused() {
+        } else if self.focused() && !settings {
             self.draw_conversation(f, rest);
         } else {
             let [list, conversation] = Layout::horizontal([Constraint::Length(LIST), Constraint::Min(20)]).areas(rest);
-            self.draw_list(f, list, false);
+            if settings {
+                self.draw_settings(f, list);
+            } else {
+                self.draw_list(f, list, false);
+            }
             self.draw_conversation(f, conversation);
         }
         if over {
@@ -553,7 +563,8 @@ impl View {
             return self.draw_library(f, area);
         }
         let t = self.theme;
-        let selecting = matches!(self.focus, Focus::Message(_)) && self.overlay.is_none();
+        let selecting =
+            matches!(self.focus, Focus::Message(_)) && self.overlay.is_none() && self.settings_panel.is_none();
         let block = self
             .panel(if selecting { t.focus } else { t.gutter })
             .title(self.conversation_title())
@@ -638,7 +649,7 @@ impl View {
             return self.draw_recorder(f, area);
         }
         let t = self.theme;
-        let typing = self.focus == Focus::Typing && self.overlay.is_none();
+        let typing = self.focus == Focus::Typing && self.overlay.is_none() && self.settings_panel.is_none();
         let block = self.panel(if typing { t.focus } else { t.gutter }).padding(Padding::horizontal(1));
         let block = self.composer_titles(block, area.width);
         let inner = block.inner(area);
@@ -1132,7 +1143,7 @@ impl View {
             }
             Line::from(spans)
         };
-        let mut lines = vec![
+        let typing = vec![
             head("typing", "a selected message"),
             pair(("⏎", "send", true), Some(("↑ ↓", "the one before, after", true))),
             pair(("alt-⏎", "a new line", true), Some(("home end", "the oldest, the newest", true))),
@@ -1147,27 +1158,36 @@ impl View {
             pair(("ctrl-o", "attach · M4", false), Some(("s", "save · M3", false))),
             pair(("ctrl-r", "record a voice message", true), Some(("← →  x", "seek, speed of a voice one", true))),
             pair(("/search", "words in this chat", true), Some(("esc", "back to typing", true))),
-            Line::default(),
+        ];
+        let mut moving = vec![
             head("moving", "anywhere"),
             pair(("ctrl-k", "the palette: anything", true), Some(("?", "these keys", true))),
             pair(("alt-↑ ↓", "the chat before, after", true), Some(("the mouse", "click, scroll, open", true))),
             pair(("alt-⇧-↑ ↓", "the folder before, after", true), Some(("ctrl-b", "folders and people", true))),
             pair(("esc", "the chat list, when narrow", true), Some(("ctrl-c", "quit", true))),
+            pair(("ctrl-,", "settings: theme, messages", true), None),
         ];
         let (focus, look) = (self.experiments.focus, self.experiments.quick_look);
         if focus || look {
-            lines.push(pair(
+            moving.push(pair(
                 ("ctrl-f", "one chat, or all again", focus),
                 Some(("ctrl-g", "a quick look elsewhere", look)),
             ));
         }
         if self.experiments.panes {
-            lines.push(pair(
+            moving.push(pair(
                 ("ctrl-p % \"", "split across, down", true),
                 Some(("ctrl-p 1-6", "a pane; o the next", true)),
             ));
-            lines.push(pair(("ctrl-p x", "close the pane", true), Some(("ctrl-p { }", "swap; alt-←→↑↓ size", true))));
+            moving.push(pair(("ctrl-p x", "close the pane", true), Some(("ctrl-p { }", "swap; alt-←→↑↓ size", true))));
         }
+        // A blank line between the sections only where the screen has room for every line and it.
+        let room = f.area().height.saturating_sub(4) as usize;
+        let mut lines = typing;
+        if lines.len() + 1 + moving.len() <= room {
+            lines.push(Line::default());
+        }
+        lines.extend(moving);
         let w = 84.min(f.area().width.saturating_sub(2));
         let h = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));
         let area = Rect::new((f.area().width - w) / 2, (f.area().height - h) / 2, w, h);

@@ -517,11 +517,10 @@ impl Wire {
                             }
                         }
                     }
-                    (Asked::Settings, Ok(result)) => {
-                        if let Ok(kept) = serde_json::from_value::<SettingsKept>(result) {
-                            out.push(Update::SettingsKept(kept.settings));
-                        }
-                    }
+                    (Asked::Settings, Ok(result)) => out.push(match serde_json::from_value::<SettingsKept>(result) {
+                        Ok(kept) => Update::SettingsKept(kept.settings),
+                        Err(_) => Update::SettingsRefused("jaw couldn't read jawd's answer".into()),
+                    }),
                     (asked, Err(failure)) => out.extend(self.refused(asked, &failure)),
                     _ => {}
                 }

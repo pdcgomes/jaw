@@ -714,8 +714,8 @@ impl View {
                 title.push(Span::styled(format!("· {} ", self.who_types(chat)), Style::new().fg(t.online)));
             }
         }
-        let block =
-            self.panel(if keys { t.focus } else { t.gutter }).title(Line::from(title)).padding(Padding::horizontal(1));
+        let border = if keys && self.settings_panel.is_none() { t.focus } else { t.gutter };
+        let block = self.panel(border).title(Line::from(title)).padding(Padding::horizontal(1));
         let inner = block.inner(area);
         f.render_widget(block, area);
         if self.open.is_none() || inner.height == 0 {

@@ -83,6 +83,10 @@ impl View {
             self.on_palette_key(k);
             return;
         }
+        if self.settings_panel.is_some() {
+            self.on_settings_key(k);
+            return;
+        }
         if self.quick_look.is_some() {
             self.on_quick_look_key(k);
             return;
@@ -96,6 +100,10 @@ impl View {
         }
         if ctrl && k.code == KeyCode::Char('k') && self.reach == super::Reach::Up && !self.linking() {
             self.palette_open();
+            return;
+        }
+        if ctrl && k.code == KeyCode::Char(',') && self.reach == super::Reach::Up && !self.linking() {
+            self.open_settings(false);
             return;
         }
         if k.code == KeyCode::F(1) {
@@ -429,6 +437,10 @@ impl View {
             self.palette_paste(s);
             return;
         }
+        // The box gives up its cursor while the settings panel has the keys.
+        if self.settings_panel.is_some() {
+            return;
+        }
         if let Some(number) = self.phone.as_mut() {
             number.extend(s.chars().filter(char::is_ascii_digit));
             return;
@@ -476,6 +488,11 @@ impl View {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 self.close_quick_look();
             }
+            return;
+        }
+        // The settings panel takes no clicks, and while it has the keys neither does the chat list
+        // it covers nor the sidebar or the conversation beside it.
+        if self.settings_panel.is_some() {
             return;
         }
         if inside(self.areas.sidebar, x, y) {

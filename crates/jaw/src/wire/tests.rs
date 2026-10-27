@@ -157,6 +157,7 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             let data = json!({ "param": "theme", "allowed": ["gruvbox", "nord"] });
             return error(code::INVALID_PARAMS, "theme takes one of gruvbox, nord", data);
         }
+        "settings.set" if params["theme"] == "garbled" => json!({}),
         "settings.set" if kept.settings.is_some() => {
             let was = kept.settings.clone().unwrap_or_default();
             let mut settings = was.clone();
@@ -524,6 +525,22 @@ fn the_settings_come_in_each_hello_and_jawds_answer_and_push_and_one_it_refuses_
     jawd.kept.lock().unwrap().settings = None;
     again(&mut wire, &mut said);
     assert_eq!(hello(&said), Some(Settings::default()), "a hello without settings is the defaults: {said:?}");
+}
+
+/// An answer to `settings.set` that doesn't read as the settings jawd kept still answers the
+/// change, as not kept, so the screen doesn't wait for good on an answer that has come.
+#[test]
+fn an_answer_to_a_settings_change_that_cant_be_read_says_so() {
+    let jawd = scripted();
+    let (tx, rx) = channel();
+    let mut wire = Wire::connect(jawd.socket.clone(), tx);
+    let mut said = vec![];
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+    wire.set_settings(&SettingsSet { theme: Some("garbled".into()), messages: None });
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::SettingsRefused(_))));
+    let answered: Vec<&Update> =
+        said.iter().filter(|u| matches!(u, Update::SettingsKept(_) | Update::SettingsRefused(_))).collect();
+    assert_eq!(answered, [&Update::SettingsRefused("jaw couldn't read jawd's answer".into())], "{said:?}");
 }
 
 #[test]

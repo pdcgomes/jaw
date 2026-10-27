@@ -243,9 +243,15 @@ fn the_keys_show_on_question_mark_and_any_key_closes_them() {
 
 #[test]
 fn at_80_by_24_the_keys_show_every_line_and_say_where_folders_are() {
+    // The sheet's rows with something on them, so the blank line between its sections, which a
+    // short screen leaves out, isn't counted.
     let rows = |screen: &str| {
+        let lines: Vec<&str> = screen.lines().collect();
         let top = row_of(screen, "╭ keys ─").unwrap_or_else(|| panic!("{screen}"));
-        row_of(screen, " any key closes ─").unwrap_or_else(|| panic!("{screen}")) - top - 1
+        let bottom = row_of(screen, " any key closes ─").unwrap_or_else(|| panic!("{screen}"));
+        let left = lines[top][..lines[top].find("╭ keys ─").unwrap()].chars().count();
+        let said = |line: &str| line.chars().skip(left + 1).take_while(|&c| c != '│').any(|c| c != ' ');
+        lines[top + 1..bottom].iter().filter(|line| said(line)).count()
     };
     let (mut v, rx) = view(80, 24);
     press(&mut v, &rx, "?");
@@ -262,6 +268,27 @@ fn at_80_by_24_the_keys_show_every_line_and_say_where_folders_are() {
         assert!(screen.contains(said), "{said}:\n{screen}");
     }
     assert!(!screen.contains("sidebar"), "{screen}");
+}
+
+/// The keys sheet lists Ctrl-,, and where it doesn't fit the screen, as at 80 × 24, it drops the
+/// blank line between its sections so every line shows.
+#[test]
+fn the_keys_sheet_lists_settings_and_shows_every_line_at_80_by_24() {
+    let after = |screen: &str, text: &str| screen.lines().skip_while(|l| !l.contains(text)).nth(1).unwrap().to_string();
+    let (mut v, rx) = view(100, 30);
+    press(&mut v, &rx, "?");
+    let screen = frame(&mut v);
+    assert!(screen.contains("ctrl-,     settings: theme, messages"), "{screen}");
+    assert!(!after(&screen, "back to typing").contains("moving"), "a blank line between the sections:\n{screen}");
+    let (mut v, rx) = view(80, 24);
+    press(&mut v, &rx, "?");
+    let screen = frame(&mut v);
+    for line in
+        ["typing", "⏎          send", "back to typing", "ctrl-b     folders and people", "ctrl-,     settings: theme"]
+    {
+        assert!(screen.contains(line), "{line}:\n{screen}");
+    }
+    assert!(after(&screen, "back to typing").contains("moving"), "no blank line between them:\n{screen}");
 }
 
 #[test]
@@ -655,6 +682,21 @@ fn a_change_shows_while_jawd_keeps_it_and_one_it_doesnt_keep_goes_back_and_says_
     assert!(frame(&mut v).lines().last().unwrap().contains("not kept: jaw.db can't be written"));
     v.apply(Update::Settings(Settings { theme: "kanagawa".into(), messages: Messages::Bubbles }));
     assert_eq!(v.theme, Theme::named("kanagawa", true), "another interface's change shows here too");
+}
+
+/// A theme jaw doesn't know is drawn as Tokyo Night, so moving between one and Tokyo Night changes
+/// nothing on screen and lays nothing out again.
+#[test]
+fn a_theme_jaw_doesnt_know_drawn_as_tokyo_night_lays_nothing_out_again() {
+    let (mut v, _rx) = view(140, 40);
+    frame(&mut v);
+    let laid = (v.laid.len(), v.rows_laid.len());
+    assert!(laid.0 > 0 && laid.1 > 0, "{laid:?}");
+    for theme in ["solarized", "tokyo-night"] {
+        v.apply(Update::Settings(Settings { theme: theme.into(), messages: Messages::Bubbles }));
+        assert_eq!(v.theme, Theme::with(true), "{theme}");
+        assert_eq!((v.laid.len(), v.rows_laid.len()), laid, "{theme}: every layout still cached");
+    }
 }
 
 /// Changes asked one after another: the last asked stays shown while the answers and pushes for

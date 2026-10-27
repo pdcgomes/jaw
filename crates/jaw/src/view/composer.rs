@@ -60,7 +60,7 @@ impl View {
             return self.draw_recorder(f, area);
         }
         let t = self.theme;
-        let typing = self.focus == Focus::Typing && self.overlay.is_none();
+        let typing = self.focus == Focus::Typing && self.overlay.is_none() && self.settings_panel.is_none();
         let name = self.open.as_deref().and_then(|id| self.chat_known(id)).map_or_else(String::new, |c| c.name.clone());
         let to = Line::from(vec![
             Span::styled(" to ", Style::new().fg(t.comment)),
