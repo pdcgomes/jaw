@@ -101,7 +101,7 @@ A chat row:
 | `unread`, `mentions` | Unread messages, and how many mention you |
 | `pinned`, `muted_until`, `archived`, `marked_unread` | As on the phone |
 | `draft` | What's typed in its box, from any interface |
-| `typing` | Who's typing or recording now, by person `id`; empty until jawd sends others' typing (see Presence) |
+| `typing` | Who's typing or recording now, by person `id`; empty until jawd sends others' typing (see Presence, and "Presence and typing in chats (proposed)", which may move it to a push) |
 | `community` | For a group in a community, the community's `id`; for a community, its groups' unread total in `children_unread` |
 
 ### messages.watch
@@ -276,7 +276,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 
 ## Other pushes
 
-`typing` and `presence` aren't sent yet; see Presence.
+`typing` and `presence` aren't sent yet; see Presence, and "Presence and typing in chats (proposed)" for what they would carry.
 
 | Push | Params |
 | --- | --- |
@@ -432,7 +432,90 @@ jawd tells WhatsApp you're online once an interface's `focus` has been true for 
 
 It follows the presence of the people in roster windows and open chats, while some interface has focus, at most 20 new people a minute and 200 per connection to WhatsApp, favourites first; subscribing to everyone is what presence trackers do. Past the limit, rows show their last known state.
 
-Others' typing, and the presence of the person in a one-to-one chat, aren't sent outside the roster yet: chat rows' `typing` stays empty, and the `typing` and `presence` pushes don't come. They come in the step after M6 (jaw's design, "Presence and typing in chats"), whose proposal settles which of the three stay.
+Others' typing, and the presence of the person in a one-to-one chat, aren't sent outside the roster yet: chat rows' `typing` stays empty, and the `typing` and `presence` pushes don't come. They come in the step after M6 (jaw's design, "Presence and typing in chats"), whose proposal, below, settles which stay.
+
+## Presence and typing in chats (proposed)
+
+Proposed for the step after M6 (jaw's design, "Presence and typing in chats"), for the owner to choose A or B before it's built; the Mac app's first milestone needs it (its P7). Every chat, groups included, shows who's typing or recording in it now, in its chat-list row, its header and the status line, and a one-to-one chat's header and status line show the person's presence. The way not chosen leaves the protocol: under A, the `typing` and `presence` pushes; under B, chat rows' `typing`. **Recommended: B.**
+
+**Either way:**
+
+- **Where it comes from.** Typing is WhatsApp's chat presence. WhatsApp says it for every chat you're in, groups included, while you're online (while some interface has focus, and for 30 seconds after), and the engine forwards it from M6 with the chat, who, and `composing`, `recording` or `paused`. Online and last seen come only for the people jawd follows, as M6 follows them (see Presence): within its limits, only while an interface has focus. Nobody new is followed: the person of an open one-to-one chat is already among the first.
+- **Who's typing** is a list, oldest first, each with `id` (`person:` and a number), `name` (as a message from them would show it) and `state` (`typing` or `recording`). Your own other devices aren't shown typing.
+- **When it ends.** Typing fades 25 seconds after it was last said, as the phones let it fade. `paused` ends it at once, and so does a message from them in that chat, as on the phones. All of it ends at once when jawd tells WhatsApp you're away or WhatsApp can't be reached, since nothing more would come, and jawd starts with nobody typing. jawd says when typing ends, so an interface runs no timer for it.
+- **Presence** is the roster's: `state` `online`, `seen` with `at`, or `hidden` (they hide it, or WhatsApp hasn't said), and `known`. `known` is false while jawd isn't following them: nobody's looking, WhatsApp can't be reached, or they're past the limits. The interface then draws the last known state faintly, as the roster does. The roster's other two states, typing and recording, show from the chat's typing, so the two never disagree. Typing is never faint, since it shows only while jawd hears it.
+- **Nothing written for it.** Who's typing lives in jawd's memory only. Presence is what M6 keeps on people's rows for the roster's order: online, last seen, and whether jawd follows them.
+- **Busy groups.** jawd takes the engine's typing without waiting, and drops and counts what comes faster than it can take. Each chat's typing reaches an interface at most every 50 ms: the newest replaces what wasn't sent yet, and the first change after a quiet spell goes at once, as window updates do. `jawd status` gains `typing`: the `chats` with someone typing now, and how many changes were `heard`, `dropped` for coming too fast, `sent`, and `merged` into a newer one before they went.
+
+### A: on chat rows
+
+```json
+{"id":"120363012345678901@g.us","v":81240,"…":"…","typing":[{"id":"person:12","name":"Ana","state":"typing"}]}
+{"id":"351912345678@s.whatsapp.net","v":81241,"…":"…","typing":[],"presence":{"state":"seen","at":1792145000000,"known":true}}
+```
+
+- **Watching.** Rows carry `typing`, and a one-to-one chat's row its person's `presence`, as they are now. A watch again from `since`, after `resync` or after a reconnect brings each row whose typing or presence changed since, as it brings any change. An interface applies rows and keeps nothing else.
+- **Faint** is the row's `presence.known` false.
+- **Ending typing** is a row change: the row comes again without them 25 seconds after they last said it, or at once on `paused`.
+- **Busy groups** coalesce as rows do, a window sending its rows' newest every 50 ms at most. But every change is also a write (below), so jawd would coalesce before writing too, say one change of a chat's typing every 250 ms, counting what it drops.
+- **What it costs.** A row's `v` is the feed's `seq`, so every change of typing (each start, pause, fade and clear) is written to jaw.db, as the chat's `v` and an `events` row. The writes land on the one writer that also makes the inbox's commits, which WhatsApp's acks wait for, in the floods the budgets are about.
+  - The feed's 7 days fill with typing, each window showing the chat reads it again, and re-watches bring rows changed only by typing.
+  - After jawd restarts, a row that showed typing has to change again to clear it, so jawd also keeps in jaw.db which chats had typing.
+  - The design keeps no typing in jaw.db, so A needs the owner to allow it.
+  - Presence costs little more: when M6 writes someone's presence, their one-to-one chat's row takes a new `v` in the same transaction.
+- **Whom jawd follows:** as M6 does. The row mirrors the person's presence on their roster row.
+- **The Mac app** gets the chat list's "typing…" from rows. Its header and status line need the open chat's row, which a chat outside every chat-list window doesn't have. So it also watches a window of that one row: `chats.watch` around it, with `before` and `after` 0.
+
+### B: the `typing` and `presence` pushes
+
+```json
+{"id":3,"result":{"watch":"w2","seq":81233,"…":"…","typing":{"351912345678@s.whatsapp.net":[{"id":"person:12","name":"Ana","state":"typing"}]},"presence":{"person":"person:12","state":"online","known":true}}}
+{"method":"typing","params":{"chat":"120363012345678901@g.us","who":[{"id":"person:12","name":"Ana","state":"typing"},{"id":"person:4","name":"Rui","state":"recording"}]}}
+{"method":"typing","params":{"chat":"120363012345678901@g.us","who":[]}}
+{"method":"presence","params":{"chat":"351912345678@s.whatsapp.net","person":"person:12","state":"seen","at":1792145000000,"known":true}}
+```
+
+- **Watching.** The answers to `chats.watch`, `messages.watch` and `watch.move` carry `typing`: who's typing in each chat of the window where someone is. It replaces what the interface held for every chat in the window, so a chat left out has nobody typing. A `messages.watch` of a one-to-one chat also carries its person's `presence`.
+- **After the answer:** `typing` comes for a chat the connection's windows show when its typing changes, or when it comes into a window with someone typing. `presence` comes when the presence of the person of a one-to-one chat the connection has open changes.
+- **What an interface keeps:**
+  - typing for the chats its windows show, forgotten as a chat leaves them;
+  - presence for the one-to-one chats it has open, forgotten at `unwatch`;
+  - nothing of either once its connection ends.
+
+  Neither has a `v`. A watch again from `since`, after `resync` or after a reconnect says how things are now, whatever `since` is, so nothing is left over.
+- **Faint** is `presence`'s `known` false.
+- **Ending typing** is a `typing` push without them, 25 seconds after they last said it or at once on `paused`.
+- **Busy groups** cost each connection at most one unsent typing per chat it shows: a newer one replaces it. It waits with the window updates while the interface isn't reading (see The connection), so a slow interface holds nothing up and gets the newest once it reads.
+- **What it costs.** Typing goes from the engine into jawd's memory and out to the sockets, never to the writer. Nothing is written, no `v` moves, the feed and re-watches are as they are, and a message's ack costs what it does now. Presence comes from the rows M6 already writes, when a person's `v` changes.
+- **Whom jawd follows:** as M6 does. The person of each one-to-one chat open in a `messages.watch` window is already among them.
+- **The Mac app** keeps typing by chat and presence by open chat. From them it draws its chat list's "typing…", its header's who's typing and online or last seen, and its status line's left half, for any open chat, whether a chat list shows it or not.
+
+### Why B
+
+- **Typing lasts seconds, and in a busy group it changes several times a second.** In A, each change is a write and an event in jaw.db, which is the only way to make a re-watch exact, and the design keeps no typing there. B writes nothing for it.
+- **The writer stays as it is.** A's writes land beside the inbox's commits in the floods the budgets measure. B's typing never reaches the writer, the feed or a re-watch.
+- **Headers need the open chat, not a chat-list row.** In B the chat's own window brings its typing and presence. In A an interface watches an extra row for a chat outside its list.
+- **What B costs.** Interfaces keep two small maps by the rules above. Presence also reaches them two ways: on roster rows (which sort by it) and in `presence`, both from the same people's rows. Presence alone could ride on chat rows cheaply, as the roster's does, but B keeps it with typing, and gets a header its presence without a chat row.
+
+### What B's build needs
+
+- **The engine:** nothing new. M6 forwards `ChatPresence` as `Typing` (chat, sender, and `composing`, `recording` or `paused`) for every chat, groups included, and `Presence` for those jawd follows.
+- **jawd:**
+  - **Who's typing, in memory:** per chat, who and until when, ended by the fade, `paused`, a message from them, you going away or WhatsApp becoming unreachable, as above. Names are given as for messages, read once while someone types. It's fed from the engine without waiting, through a bounded queue whose overflow is counted.
+  - **`typing` and `presence`** in the watches' answers and as pushes, per connection, only for what its windows show, coalesced per chat and per person, and held with its window updates.
+  - **Presence from M6's rows,** with the open one-to-one chat's person followed first. M6's `follow` puts favourites first, ahead of open chats' people, though its module's comment and this step's design put open chats first.
+  - **`typing` in `jawd status`.**
+  - **The protocol:** chat rows lose `typing`, and "Other pushes", "Presence" and "Reconnecting" say what B says. Fixtures for both pushes and the answers' fields, and jaw-proto's types. No migration, and nothing new in jaw.db.
+- **The terminal:** keeps typing by chat and presence by open chat by the rules above. It draws who's typing in its chat list, its conversation's title and its status line, and a one-to-one chat's online or last seen in the last two, faint when not `known`.
+- **The demo engine:** types and records in groups and one-to-one chats, pausing, and leaving some to fade. It also has the people jawd follows come online and go, with a last seen, so `jawd demo` shows all of it through the real socket.
+- **Tests:**
+  - the fade at 25 seconds; `paused` and a message ending typing at once; going away or losing WhatsApp ending all of it;
+  - the feed's tests: watching again from `since`, after `resync` and after a reconnect holds what a fresh watch gives, typing and presence included, with typing started, stopped and faded meanwhile, and after jawd restarts;
+  - pushes only for what a connection shows; a busy group's burst coalesced to one push per chat each 50 ms; a slow connection holding one per chat; what's dropped counted;
+  - nothing written: jaw.db's `seq` doesn't move through a burst of typing;
+  - the flood bench with typing in many chats, acks and a message's way to interfaces within their budgets;
+  - the interfaces' end-to-end tests on `jawd demo`: the terminal's wire tests, jaw-client's, and the Mac app's when it comes.
+- **The audit:** the feed and the socket, and presence's reads of M6's rows.
 
 ## Versioning
 
