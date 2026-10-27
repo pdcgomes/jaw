@@ -2813,14 +2813,21 @@ mod tests {
         let rows = pouring(&store, stop.clone());
         let stopping = AtomicBool::new(false);
         let _ = tokio::time::timeout(Duration::from_secs(1), converting(&store, &stopping)).await;
+        // Room for a try at the edge, which waits up to RESTART_MOST for the checkpointer's pass
+        // before its own copy and flushes.
+        let ack_most = Duration::from_secs(2) + RESTART_MOST;
         // A reader whose snapshot needs the WAL's frames, as a long query's would, held until the
         // WAL is well past its bound, and past WAL_EASY frames waiting, so the checkpointer looks
-        // again and again behind it as the writer tries to start the WAL again.
+        // again and again behind it as the writer tries to start the WAL again, and for a second
+        // longer than an ack may take, so acks held up for the whole hold would show.
         let reader = Connection::open_with_flags(home.path().join("jaw.db"), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         reader.execute_batch("BEGIN").unwrap();
         let _: i64 = reader.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
         let (held_from, flushed) = (Instant::now(), store.wal.flushed.load(Ordering::Relaxed));
-        converting_until(&store, |store| store.storage().wal_frames > 2 * WAL_EASY).await;
+        converting_until(&store, move |store| {
+            store.storage().wal_frames > 2 * WAL_EASY && held_from.elapsed() > ack_most + Duration::from_secs(1)
+        })
+        .await;
         let (held, flushes) = (store.storage().wal_peak_frames, store.wal.flushed.load(Ordering::Relaxed) - flushed);
         let tries: Vec<_> =
             store.wal.restarts.lock().unwrap().iter().filter(|t| t.began >= held_from).copied().collect();
@@ -2832,7 +2839,7 @@ mod tests {
         let (rows, acked, slowest) = rows.join().unwrap();
         let storage = store.storage();
         assert_eq!(acked, rows);
-        assert!(slowest < Duration::from_secs(2), "an ack of {rows} took {slowest:?}");
+        assert!(slowest < ack_most, "an ack of {rows} took {slowest:?}");
         assert!(held > 2 * WAL_EASY, "the reader never held the WAL past its bound: {held} frames");
         assert!(tries.len() >= 2 && tries.iter().all(|t| !t.restarted), "{tries:?} behind the reader");
         // The WAL grew from short of WAL_HARD to past the edge.
@@ -3032,11 +3039,29 @@ mod tests {
         last.0
     }
 
+    /// Live writes all the while, and among them bursts long enough to copy for one of those
+    /// writes to land in their pass, until the checkpointer has flushed jaw.db after one, however
+    /// busy the machine, or for 60 s.
+    async fn outrunning_a_pass(store: &Store) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let writes = {
+            let (store, stop) = (store.clone(), stop.clone());
+            tokio::spawn(async move { converting(&store, &stop).await })
+        };
+        let (began, mut n) = (Instant::now(), 100_000);
+        while store.wal.flushed.load(Ordering::Relaxed) == 0 && began.elapsed() < Duration::from_secs(60) {
+            store.apply(Lane::Live, burst(n, 4_000)).await.unwrap();
+            n += 4_000;
+        }
+        stop.store(true, Ordering::Relaxed);
+        writes.await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn the_checkpointer_flushes_jaw_db_after_a_pass_the_writer_outran_and_not_after_one_that_reached_the_end() {
         let home = tempfile::tempdir().unwrap();
         let store = roomy_store(home.path());
-        converting_until(&store, |store| store.wal.flushed.load(Ordering::Relaxed) > 0).await;
+        outrunning_a_pass(&store).await;
         let flushed = flushes_settled(&store).await;
         assert!(flushed > 0, "the checkpointer never flushed jaw.db while the writer appended");
         // A burst it copies with nothing appended meanwhile, so SQLite flushes jaw.db at the end.
@@ -3111,7 +3136,7 @@ mod tests {
         let beside = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let _: i64 = beside.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
         assert!(!taken_elsewhere(&path), "another process took jaw.db from under this one's connections");
-        converting_until(&store, |store| store.wal.flushed.load(Ordering::Relaxed) > 0).await;
+        outrunning_a_pass(&store).await;
         assert!(store.wal.flushed.load(Ordering::Relaxed) > 0, "the checkpointer never flushed jaw.db");
         // The writer and the checkpointer each let go of the WAL's state as they end, once the
         // store has gone.
