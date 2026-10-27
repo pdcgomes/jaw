@@ -160,3 +160,8 @@ struct HarnessCatalog {
         scenes.first { $0.id == id }
     }
 }
+
+extension HarnessCatalog {
+    /// The harness's own scenes, made once for the life of the app.
+    @MainActor static let shared = BuiltInScenes.catalog()
+}

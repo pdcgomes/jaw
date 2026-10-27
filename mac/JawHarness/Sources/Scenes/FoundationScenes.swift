@@ -1,0 +1,104 @@
+import JawThemes
+import JawUI
+import SwiftUI
+
+extension HarnessScene {
+    static var roles: HarnessScene {
+        HarnessScene(
+            id: "roles", title: "Roles", symbol: "swatchpalette",
+            synopsis: "Every colour the app asks for by what it's for, with the contrast of what's drawn on it",
+            section: .foundations, covers: [],
+        ) { RolesScene(roles: $0.roles) }
+    }
+
+    static var mimic: HarnessScene {
+        HarnessScene(
+            id: "mimic", title: "The Mimic", symbol: "mouth",
+            synopsis: "Jaw's creature awake, mid-chomp and asleep, at whole multiples of its pixels",
+            section: .foundations, covers: [MimicImage.self, MimicView.self],
+        ) { MimicScene(roles: $0.roles) }
+    }
+}
+
+/// The theme's roles as swatches: each with "Aa" in the text colour and the contrast it reads at, and
+/// the senders' colours with the contrast they read at on the surface their names sit on.
+private struct RolesScene: View {
+    let roles: Roles
+
+    var named: [(String, RGBA)] {
+        [
+            ("ground", roles.ground), ("surface", roles.surface), ("selection", roles.selection), ("text", roles.text),
+            ("secondary", roles.secondary), ("tertiary", roles.tertiary), ("separator", roles.separator),
+            ("accent", roles.accent), ("yours", roles.yours), ("mention", roles.mention), ("online", roles.online),
+            ("failed", roles.failed),
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SpecimenGroup(
+                title: "The roles",
+                note: "Each with \"Aa\" in the text colour. The grounds text sits on (ground, surface, selection, yours) want 4.5:1 or more; the others aren't for text, so a low ratio on them is right.",
+                roles: roles,
+            ) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: Space.l)], spacing: Space.l) {
+                    ForEach(named, id: \.0) { name, colour in
+                        Specimen(caption: "\(name) · " + String(format: "%.1f:1", roles.text.contrast(with: colour)), roles: roles) {
+                            RoundedRectangle(cornerRadius: Radius.control).fill(colour.color).frame(height: 50)
+                                .overlay(Text("Aa").textStyle(.body).tone(.primary, roles))
+                        }
+                    }
+                }
+            }
+            SpecimenGroup(
+                title: "The senders",
+                note: "Names in a group, by the index jawd gives each member, on the surface their bubbles are. Each should read at 4.5:1 or more there; one under it is a name that's hard to read.",
+                roles: roles,
+            ) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: Space.l)], spacing: Space.l) {
+                    ForEach(Array(roles.senders.enumerated()), id: \.offset) { index, colour in
+                        Specimen(caption: "sender \(index) · " + String(format: "%.1f:1", colour.contrast(with: roles.surface)), roles: roles) {
+                            RoundedRectangle(cornerRadius: Radius.control).fill(roles.surface.color).frame(height: 50)
+                                .overlay(Text("Ana Ribeiro").textStyle(.body).foregroundStyle(colour.color))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The Mimic's three looks at 4×, as empty states and linking draw it, and the scales it's drawn at,
+/// with a button that makes it chomp.
+private struct MimicScene: View {
+    let roles: Roles
+    @State private var chomps = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SpecimenGroup(
+                title: "Its looks",
+                note: "Awake in empty chats and linking, mid-chomp when a message comes into an empty chat, asleep (grey, eyes shut) when jawd is out of reach. Every pixel is a whole square: a soft edge means it was scaled by something other than a whole number.",
+                roles: roles,
+            ) {
+                HStack(alignment: .bottom, spacing: Space.xxl) {
+                    Specimen(caption: "awake", roles: roles) { MimicImage(look: .awake, scale: 4, chomps: chomps) }
+                    Specimen(caption: "mid-chomp", roles: roles) { MimicImage(look: .chomp, scale: 4) }
+                    Specimen(caption: "asleep", roles: roles) { MimicImage(look: .asleep, scale: 4) }
+                    Button("Chomp") { chomps += 1 }
+                }
+            }
+            SpecimenGroup(
+                title: "Its scales",
+                note: "1×, 2× and 8× its pixels. Each is crisp at its own size, with no pixel wider than its neighbours.",
+                roles: roles,
+            ) {
+                HStack(alignment: .bottom, spacing: Space.xxl) {
+                    Specimen(caption: "1×", roles: roles) { MimicImage(look: .awake, scale: 1) }
+                    Specimen(caption: "2×", roles: roles) { MimicImage(look: .awake, scale: 2) }
+                    Specimen(caption: "8×", roles: roles) { MimicImage(look: .awake, scale: 8) }
+                }
+            }
+        }
+    }
+}
