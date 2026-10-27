@@ -1,0 +1,71 @@
+import JawKit
+
+/// How long a chat is muted for, from its Mute menu.
+public enum MuteLength: CaseIterable, Sendable {
+    case eightHours, week, always
+
+    public var id: String {
+        switch self {
+        case .eightHours: "mute.8h"
+        case .week: "mute.week"
+        case .always: "mute.always"
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .eightHours: "For 8 Hours"
+        case .week: "For a Week"
+        case .always: "Always"
+        }
+    }
+
+    /// Until when, in milliseconds since the epoch, counted from `now`, the moment it's chosen; -1 is
+    /// for ever, as jawd's `chat.mute` takes it.
+    public func until(now: Int64) -> Int64 {
+        switch self {
+        case .eightHours: now + 8 * 3_600_000
+        case .week: now + 7 * 86_400_000
+        case .always: -1
+        }
+    }
+}
+
+/// What a chat's right-click menus offer, from its row as they open: each item says what it will
+/// do (Unpin on a pinned chat, Unmute on a muted one), and a community, whose groups carry these,
+/// has none of them.
+public enum ChatMenu {
+    /// The command that opens a chat in a pane of its own, the app's.
+    public static let openInNewPane = "chat.open.pane"
+
+    /// The end of a message's menu, an empty pane's whole menu, and the start of a pane's.
+    public static let splits: [MenuEntry] = [.command("split.across"), .command("split.down"), .command("pane.close")]
+
+    /// The chat list's menu for `chat`.
+    public static func list(_ chat: ChatRow) -> [MenuEntry] {
+        let own = actions(chat)
+        return own.isEmpty ? [] : [.command(openInNewPane), .separator] + own
+    }
+
+    /// The pane's menu, on its header and around its messages: its splits and Swap, greyed with no
+    /// other pane to swap with, then its chat's actions and searching it.
+    public static func pane(_ chat: ChatRow) -> [MenuEntry] {
+        let swap: MenuEntry = .submenu("Swap", [
+            .command("swap.left", title: "Left"), .command("swap.right", title: "Right"),
+            .command("swap.up", title: "Up"), .command("swap.down", title: "Down"),
+        ])
+        return splits + [swap, .separator] + actions(chat) + [.separator, .command("search.chat")]
+    }
+
+    /// Pin, Mute, Archive and Mark as Read or Unread, as the chat stands.
+    public static func actions(_ chat: ChatRow) -> [MenuEntry] {
+        guard chat.kind != .community else { return [] }
+        let unread = chat.unread > 0 || chat.markedUnread
+        return [
+            .command("pin", title: chat.pinned ? "Unpin" : "Pin"),
+            chat.muted ? .command("unmute") : .submenu("Mute", MuteLength.allCases.map { .command($0.id) }),
+            .command("archive", title: chat.archived ? "Unarchive" : "Archive"),
+            .command("mark", title: unread ? "Mark as Read" : "Mark as Unread"),
+        ]
+    }
+}
