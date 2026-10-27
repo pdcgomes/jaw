@@ -1413,6 +1413,83 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_full_when_its_change_is_answered_hears_the_answer_before_the_later_changes_push() {
+        // Each round the asking connection's change is held once it's published, while answers it
+        // leaves unread fill the queue to it until one waits, so its loop takes nothing more; then
+        // the change is answered and another connection's is published, and once it reads, its
+        // answer and the later push are ready at once. The bias towards answers sends the answer
+        // first, and so does the drain before a push; without both, the select takes either, so in
+        // twelve rounds it all but surely sends the push first in one.
+        const ROUNDS: usize = 12;
+        let (_home, socket, store, settings) = serving_settings(Vec::new()).await;
+        let gates = settings.clone();
+        let checked = tokio::task::spawn_blocking(move || {
+            let themes = jaw_proto::themes::all();
+            let theme = |settings: &Value| settings["theme"].as_str().unwrap_or_default().to_string();
+            let mut asker = Lines::open(&socket, TERMINAL);
+            let mut other = Lines::open(&socket, TERMINAL);
+            let mut last = "";
+            for round in 0..ROUNDS {
+                let first = themes[2 * round % themes.len()].id.as_str();
+                let later = themes[(2 * round + 1) % themes.len()].id.as_str();
+                let (open, gate) = tokio::sync::oneshot::channel();
+                gates.gate_next(gate);
+                let asked = asker.send("settings.set", json!({ "theme": first }));
+                loop {
+                    let line = asker.within(Duration::from_secs(10)).expect("its change is published");
+                    assert_ne!(line["id"], asked, "round {round}: answered while it was held: {line}");
+                    if line["method"] == "settings" {
+                        assert_eq!(line["params"]["theme"], first, "round {round}: {line}");
+                        break;
+                    }
+                }
+                let mut unread = 0;
+                while other.waiting() == 0 {
+                    assert!(unread < 400, "round {round}: no answer waited for room");
+                    for _ in 0..8 {
+                        asker.send("themes", Value::Null);
+                    }
+                    unread += 8;
+                }
+                let kept = other.send("settings.set", json!({ "theme": later }));
+                open.send(()).unwrap();
+                loop {
+                    let line = other.within(Duration::from_secs(10)).expect("the later change is kept");
+                    if line["id"] == kept {
+                        assert_eq!(line["result"]["settings"]["theme"], later, "round {round}: {line}");
+                        break;
+                    }
+                }
+                // What it hears once it reads, the answers to themes left out.
+                let mut heard: Vec<String> = Vec::new();
+                while !heard.iter().any(|line| line.starts_with("answered"))
+                    || !heard.contains(&format!("pushed {later}"))
+                {
+                    let line = asker.within(Duration::from_secs(10)).expect("its answer and the later change's push");
+                    match (line["id"].as_u64(), line["method"].as_str()) {
+                        (Some(id), _) if id == asked => {
+                            heard.push(format!("answered {}", theme(&line["result"]["settings"])))
+                        }
+                        (None, Some("settings")) => heard.push(format!("pushed {}", theme(&line["params"]))),
+                        _ => {}
+                    }
+                }
+                assert_eq!(
+                    heard,
+                    [format!("answered {first}"), format!("pushed {later}")],
+                    "round {round}: the answer, as the change left them, then the later change's push"
+                );
+                last = later;
+            }
+            last
+        });
+        let last =
+            tokio::time::timeout(Duration::from_secs(120), checked).await.expect("nothing went missing").unwrap();
+        assert_eq!(store.setting(TERMINAL, "theme").unwrap(), Some(format!("\"{last}\"")), "jaw.db agrees");
+        assert_eq!(settings.current().theme, last);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_connection_that_reads_nothing_while_settings_change_ends_on_the_latest() {
         // The themes asked for and their answers left unread: fewer than its queue holds, so it's
         // left in its loop rather than waiting on an answer, and more than a socket takes, so the
