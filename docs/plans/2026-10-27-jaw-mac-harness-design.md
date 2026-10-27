@@ -148,7 +148,7 @@ What isn't built has no scene yet: media's download states, the viewer, the libr
 
 - **Where:** `.atelier/mac-harness.canvas.tsx` at the repository's root, committed with the harness. The sweep writes its data, `.atelier/mac-harness.data.ts`, from the manifest, and Atelier keeps the owner's marks beside it; git ignores both. The canvas shows the sweep of the checkout it's in: the harness's worktree until the first phase lands, `jaw-mac-m1` after, and the main checkout once `mac-m1` lands on main. Marks stay with the checkout they were made in.
 - **What it shows:** a tab for each section, and in it a panel for each scene, with its title, its synopsis, its notes and its pictures by variant side by side, each opening full size. Along the top, how many scenes are right, need work, have changed since they were marked, or haven't been looked at yet, each a filter.
-- **The marks:** on each scene, Right, or Needs work with a note, kept under `mark:<scene>` with the hashes of the pictures it was made on. When a sweep changes a scene's pictures, its mark shows as "changed since your mark" and the scene asks again.
+- **The marks:** on each scene, Right, or Needs work with a note, kept in the canvas's state under `marks`, by the scene's id, with the hashes of the pictures it was made on, one map so the counts along the top read every mark at once. When a sweep changes a scene's pictures, its mark shows as "changed since your mark" and the scene asks again.
 
 ### The loop
 
