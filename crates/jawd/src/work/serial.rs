@@ -178,6 +178,18 @@ mod tests {
         }
     }
 
+    /// Whether `holds` comes to hold within a generous while.
+    async fn eventually(mut holds: impl FnMut() -> bool) -> bool {
+        let end = Instant::now() + Duration::from_secs(30);
+        while !holds() {
+            if Instant::now() > end {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        true
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn each_key_keeps_its_order_and_keys_run_side_by_side_up_to_the_limit() {
         let serial = Serial::new("sends", 3);
@@ -237,7 +249,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         assert_eq!(*log.lock().unwrap(), ["other"], "the only place went to another key while stuck waited");
-        assert_eq!(serial.report().queued_background, 1);
+        // A job that asks to run again gives up its place a moment before it's counted as waiting.
+        let waiting = || serial.report().queued_background;
+        assert!(eventually(|| waiting() == 1).await, "{} waiting", waiting());
         open.send_replace(true);
         settle(&serial).await;
         assert_eq!(*log.lock().unwrap(), ["other", "stuck, at last", "stuck's next"]);
