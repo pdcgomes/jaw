@@ -86,6 +86,7 @@ The design leaves these open, or the code forced them; the audit checks them.
 - **Starring a line about the chat or a message deleted for everyone is error 4**, as reacting to one is; a star can always be taken off.
 - **Unarchiving a pinned chat while three others are pinned unpins it** (decided after task 4's review, to keep the limit of three): its `pin_v1` off is queued after the archive patch, as archiving does. The handler builds the unpin patch for every archive request, and the writer queues it only when it unpins: archiving a pinned chat, or unarchiving one past the limit.
 - **A mark read on a chat jaw holds none of the messages of reads it at the patch's time** (decided after task 4's review, so asking again is already so): the writer applies, in the same transaction, the read WhatsApp's echo will apply, so the phone's count clears at once and the echo changes nothing.
+- **A refused mark read leaves the chat read here** (decided after task 5's review): its undo clears the mark it cleared, and when jaw held none of the chat's messages, the phone's count it cleared isn't brought back, since app state carries no counts and keeping the count for the undo would need a column the plan doesn't add; the chat's next message is counted from the read as any is. The design's account of how a refused patch is put back says so (task 12), and the audit weighs it.
 
 ---
 
