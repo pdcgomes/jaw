@@ -23,23 +23,28 @@ pub const KINDS: &str = "kinds";
 /// next goes on from the first it didn't take.
 pub(super) const CONVERTING: Duration = Duration::from_millis(1);
 
-/// The next messages, each with whether jawd couldn't show it when it came: one of kind unknown,
-/// or a system line saying so, as `kinds::UNKNOWN` does, that isn't deleted. It reads no raw
-/// protobuf, which a step would otherwise read whole for every message it looks at.
+/// The next messages, each with whether jawd couldn't show it when it came: one of kind unknown, or
+/// one saying so, as `kinds::UNKNOWN` does, whatever its kind, as a copy of a message keeps an
+/// earlier edit's words, those of an edit jaw couldn't read among them; that isn't deleted. It reads
+/// no raw protobuf, which a step would otherwise read whole for every message it looks at.
 pub(super) const NEXT_UNSHOWN: &str = "SELECT n,
-        NOT deleted AND (kind = 'unknown' OR kind = 'system' AND summary = 'jaw can''t show this yet')
+        NOT deleted AND (kind = 'unknown' OR summary = 'jaw can''t show this yet')
     FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
 const UNSHOWN: &str = "SELECT chat, id, raw FROM messages WHERE n = ?1";
 const NAMED: &str = "SELECT c.id, m.id, m.raw FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1";
 const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 /// A message as it converts now. Text a later edit gave it stays, an edit's time being past any
 /// a message that isn't one has, unless jaw couldn't show that either: an edit after the one a row
-/// stands in for left no raw protobuf of its own.
+/// stands in for left no raw protobuf of its own. A row whose raw protobuf is an edit standing in
+/// for its message (?15) keeps what the message itself brought, as its copy may have since: its
+/// quote, forwarding, expiry, view-once and mention of you, which an edit doesn't carry.
 const SHOWN: &str = "UPDATE messages SET kind = ?2,
         text = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, text, ?3),
         spans = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, spans, ?4),
         summary = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, summary, iif(?5 IS ?3, NULL, ?5)),
-        reply = ?6, detail = ?7, forwarded = ?8, expires_at = ?9, view_once = ?10, mentions_me = ?11, v = ?14
+        reply = iif(?15, reply, ?6), detail = ?7, forwarded = iif(?15, forwarded, ?8),
+        expires_at = iif(?15, expires_at, ?9), view_once = iif(?15, view_once, ?10),
+        mentions_me = iif(?15, mentions_me, ?11), v = ?14
     WHERE n = ?1 AND NOT deleted";
 const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2";
 /// The raw protobufs of what's kept for `target` from the same moment, among them a copy's.
@@ -89,14 +94,15 @@ fn converted_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool>
         let why = panic.downcast_ref::<&str>().copied().or(panic.downcast_ref::<String>().map(String::as_str));
         anyhow!("converting it panicked: {}", why.unwrap_or("for no reason it gave"))
     })?;
+    // What it shows, and whether that's an edit standing in for its message.
     let shown = changes.iter().find_map(|change| match change {
-        Change::Message(message) if message.id == id => Some(message),
-        Change::Edited { shown, .. } if shown.id == id => Some(shown.as_ref()),
+        Change::Message(message) if message.id == id => Some((message, false)),
+        Change::Edited { shown, .. } if shown.id == id => Some((shown.as_ref(), true)),
         _ => None,
     });
     let changed = match shown {
-        Some(message) if unshown(message) => false,
-        Some(message) => show(db, stamps, chat, n, message)?,
+        Some((message, _)) if unshown(message) => false,
+        Some((message, standing_in)) => show(db, stamps, (chat, n), message, standing_in)?,
         None => wait(db, stamps, (chat, n, &id), &raw, changes)?,
     };
     #[cfg(test)]
@@ -111,7 +117,7 @@ fn converted_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool>
 
 /// Whether a converted message is one jawd still can't show.
 fn unshown(message: &Message) -> bool {
-    message.kind == "unknown" || message.kind == "system" && message.summary == UNKNOWN
+    message.kind == "unknown" || message.summary == UNKNOWN
 }
 
 fn account(db: &Connection) -> Result<Me> {
@@ -121,8 +127,14 @@ fn account(db: &Connection) -> Result<Me> {
 
 /// Message `n` in `chat` shows as `message`, with a new version, and so does its chat if it's the
 /// chat's newest; the chat's unread messages and mentions are counted again, as what the message is
-/// may count where it didn't.
-fn show(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, message: &Message) -> Result<bool> {
+/// may count where it didn't. `standing_in`: `message` is an edit standing in for it.
+fn show(
+    db: &Connection,
+    stamps: &mut Stamps,
+    (chat, n): (i64, i64),
+    message: &Message,
+    standing_in: bool,
+) -> Result<bool> {
     let seq = stamps.seq(MESSAGE, Some(n));
     let changed = db.prepare_cached(SHOWN)?.execute(params![
         n,
@@ -139,6 +151,7 @@ fn show(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, message: &Messa
         message.edited_at,
         UNKNOWN,
         seq,
+        standing_in,
     ])?;
     if changed == 0 {
         return Ok(false);

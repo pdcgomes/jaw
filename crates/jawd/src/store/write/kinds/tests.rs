@@ -172,6 +172,124 @@ async fn a_step_meeting_many_to_convert_ends_once_it_has_converted_for_a_while_a
     assert_eq!(store.count("messages WHERE kind = 'text'").unwrap(), 64);
 }
 
+/// Meta AI's answer `id` in Ana's chat, saying `said`, quoting a question of yours, mentioning you
+/// and disappearing in 90 days.
+fn answer(id: &str, said: &str) -> WebMessageInfo {
+    let context = e2e::ContextInfo {
+        stanza_id: Some("3EB0Q".into()),
+        participant: Some(ME.into()),
+        quoted_message: Some(Box::new(e2e::Message {
+            conversation: Some("where is it?".into()),
+            ..Default::default()
+        })),
+        mentioned_jid: vec![ME.into()],
+        expiration: Some(7_776_000),
+        ..Default::default()
+    };
+    let answer = e2e::AiRichResponseMessage {
+        submessages: vec![AiRichResponseSubMessage {
+            message_type: Some(AiRichResponseSubMessageType::AiRichResponseText as i32),
+            message_text: Some(said.into()),
+            ..Default::default()
+        }],
+        context_info: Some(Box::new(context)),
+        ..Default::default()
+    };
+    web(ANA, id, Some(ANA), Some(e2e::Message { rich_response_message: Some(Box::new(answer)), ..Default::default() }))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_coming_onto_an_earlier_jawds_unreadable_stand_in_shows_and_keeps_what_it_brought() {
+    let home = tempfile::tempdir().unwrap();
+    {
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        for migration in &schema::MIGRATIONS[..15] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", 15).unwrap();
+        db.execute_batch(&format!(
+            "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 0);
+            INSERT INTO person_jids (n, jid, person) VALUES (1, '{ANA}', 1);
+            INSERT INTO chats (n, id, kind, person, v) VALUES (1, '{ANA}', 'direct', 1, 0);
+            INSERT INTO sync_state (key, value) VALUES ('me', '{ME}');"
+        ))
+        .unwrap();
+        // Two of Meta AI's edits, each standing in for its answer, which an earlier jawd couldn't read.
+        for (n, id) in [(1, "ai1"), (2, "ai2")] {
+            let raw = packed(&answer_edit(&format!("x{n}"), id, AT + 5, "Lisbon is the capital."));
+            db.execute(
+                "INSERT INTO messages (n, chat, id, at, t, sender, kind, summary, edited_at, raw, v)
+                VALUES (?1, 1, ?2, ?3, ?1, 1, 'unknown', ?4, ?5, ?6, 0)",
+                params![n, id, AT, UNKNOWN, AT + 5, raw],
+            )
+            .unwrap();
+        }
+    }
+    let store = Store::open(home.path()).unwrap();
+    // Before the backfill reaches them, the answers come: ai1 live, with the engine's envelope, so
+    // its row keeps the edit's raw protobuf; ai2 by history, whose raw protobuf its row takes.
+    let me = Me::new([ME.to_string()]);
+    // The live one a few seconds after what history brings, which history's copy reads past.
+    let mut ai1 = answer("ai1", "Lisbon is a city.");
+    ai1.message_timestamp = Some((AT + 10_000) as u64 / 1000);
+    let mut live = convert::message(&ai1, &me, true);
+    for change in &mut live {
+        if let Change::Message(message) = change {
+            message.envelope = Some(Packed::new(b"the engine's event"));
+        }
+    }
+    store.apply(Lane::Live, live).await.unwrap();
+    store.apply(Lane::Background, convert::message(&answer("ai2", "Lisbon is a city."), &me, false)).await.unwrap();
+    type Read = (String, Option<String>, Option<String>, Option<String>, bool, Option<i64>, Option<i64>);
+    let read = |n: i64| {
+        let store = store.clone();
+        async move {
+            query(&store, move |db| {
+                Ok(db.query_row(
+                    "SELECT kind, text, summary, reply ->> 'id', mentions_me, expires_at, edited_at FROM messages WHERE n = ?1",
+                    [n],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                )?)
+            })
+            .await
+        }
+    };
+    // What each copy brought: its quote, its mention of you, its expiry from when it was sent.
+    let brought = |n: i64| {
+        let sent = if n == 1 { AT + 10_000 } else { AT };
+        (Some("3EB0Q".to_string()), true, Some(sent + 7_776_000_000), Some(AT + 5))
+    };
+    let mentions = |store: &Store| {
+        let store = store.clone();
+        async move {
+            query(&store, |db| Ok(db.query_row("SELECT mentions FROM chats WHERE n = 1", [], |r| r.get::<_, i64>(0))?))
+                .await
+        }
+    };
+    for n in [1, 2] {
+        let (kind, text, summary, reply, mentions, at, edited_at): Read = read(n).await;
+        assert_eq!(
+            (kind.as_str(), text, summary.as_deref()),
+            ("text", None, Some(UNKNOWN)),
+            "{n}, as the copy left it"
+        );
+        assert_eq!((reply, mentions, at, edited_at), brought(n), "{n} has what its copy brought");
+    }
+    let mentioned = mentions(&store).await;
+    assert!(mentioned >= 1, "the live answer mentions you, after where history's copy read to");
+
+    while store.backfill_left(KINDS).unwrap() > 0 {
+        backfill(&store).await;
+    }
+    for (n, said) in [(1, "Lisbon is the capital."), (2, "Lisbon is a city.")] {
+        let (kind, text, summary, reply, mentions, at, edited_at): Read = read(n).await;
+        assert_eq!((kind.as_str(), text.as_deref(), summary), ("text", Some(said), None), "{n} shows what jaw can now");
+        assert_eq!((reply, mentions, at, edited_at), brought(n), "{n} keeps what its copy brought");
+    }
+    assert_eq!(mentions(&store).await, mentioned, "and its chat counts the mention still");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_rolled_back_leaves_its_chat_no_version_without_an_event() {
     let home = tempfile::tempdir().unwrap();

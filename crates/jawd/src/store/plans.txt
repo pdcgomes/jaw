@@ -594,7 +594,7 @@ SELECT count(*) FROM sqlite_schema
     SCAN sqlite_master
 
 -- src/store/write/kinds.rs
-SELECT n, NOT deleted AND (kind = 'unknown' OR kind = 'system' AND summary = 'jaw can''t show this yet') FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
+SELECT n, NOT deleted AND (kind = 'unknown' OR summary = 'jaw can''t show this yet') FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
 
 -- src/store/write/kinds.rs
@@ -611,7 +611,7 @@ SELECT value FROM sync_state WHERE key = 'me'
     SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/write/kinds.rs
-UPDATE messages SET kind = ?2, text = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, text, ?3), spans = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, spans, ?4), summary = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, summary, iif(?5 IS ?3, NULL, ?5)), reply = ?6, detail = ?7, forwarded = ?8, expires_at = ?9, view_once = ?10, mentions_me = ?11, v = ?14 WHERE n = ?1 AND NOT deleted
+UPDATE messages SET kind = ?2, text = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, text, ?3), spans = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, spans, ?4), summary = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, summary, iif(?5 IS ?3, NULL, ?5)), reply = iif(?15, reply, ?6), detail = ?7, forwarded = iif(?15, forwarded, ?8), expires_at = iif(?15, expires_at, ?9), view_once = iif(?15, view_once, ?10), mentions_me = iif(?15, mentions_me, ?11), v = ?14 WHERE n = ?1 AND NOT deleted
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/kinds.rs
