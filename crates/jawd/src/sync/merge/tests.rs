@@ -910,3 +910,27 @@ async fn an_open_by_a_jid_being_merged_or_merged_away_counts_in_the_chat_that_st
     assert_eq!(store.count("quarantine").unwrap(), 0);
     assert_eq!(frecency().await, [2.0]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_read_naming_the_chat_by_a_jid_merged_into_it_never_cancels_the_receipts_the_merge_left_owed() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let mut changes: Vec<Change> = (0..5).map(|i| message(NEW, &format!("n{i}"), AT + i)).collect();
+    changes.extend((0..5).map(|i| message(LID, &format!("l{i}"), AT + 10 + i)));
+    store.apply(Lane::Live, changes).await.unwrap();
+    // The LID's chat read on the phone past every message, and the number's never read.
+    let on_the_phone = |at| Change::Read(Read { chat: LID.into(), at, ..Read::default() });
+    store.apply(Lane::Live, vec![on_the_phone(AT + 5_000)]).await.unwrap();
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    merged(&store, LID).await;
+    let mut all = [ids("n", 0..5), ids("l", 0..5)].concat();
+    assert_eq!(owed(&store, NEW).await, all, "whether the phone read the number's can't be known");
+    // The same read again, as a resync sends it, now naming the chat the LID's merged into.
+    store.apply(Lane::Live, vec![on_the_phone(AT + 5_000)]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, all, "still owed after the same read again");
+    // Nor does one further on, past a message that came since.
+    store.apply(Lane::Live, vec![message(LID, "l5", AT + 6_000)]).await.unwrap();
+    store.apply(Lane::Live, vec![on_the_phone(AT + 7_000)]).await.unwrap();
+    all.push("l5".into());
+    assert_eq!(owed(&store, NEW).await, all, "still owed after a read further on");
+}

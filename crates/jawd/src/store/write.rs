@@ -910,8 +910,12 @@ fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsett
 /// phone's own counts stand in for it, the position is taken as said, even if it's earlier;
 /// after that it only moves forward. WhatsApp saying so means it knows, and unmarks the chat;
 /// your reading it here owes it receipts for what that reads, and leaves the mark to the phone.
+/// WhatsApp saying so of a chat merged into this one, by its JID, says nothing of whether this
+/// one's messages were read, so how far WhatsApp was told doesn't move for it.
 fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
-    let chat = ensure_chat(db, stamps, &chat_jid(db, &read.chat)?)?;
+    let jid = chat_jid(db, &read.chat)?;
+    let own = user_jid(&read.chat) == jid;
+    let chat = ensure_chat(db, stamps, &jid)?;
     let mut at = (read.at, THROUGH);
     if !read.ids.is_empty() {
         if merging_into(db, chat)? {
@@ -945,8 +949,11 @@ fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     } else if taken {
         let (phone_unread, phone_mentions) = read.phone.map_or((None, None), |(u, m)| (Some(u.into()), Some(m.into())));
         (now.at, now.known, now.phone_unread, now.phone_mentions) = (Some(at), true, phone_unread, phone_mentions);
-        (now.marked, now.told) = (false, None);
-    } else {
+        now.marked = false;
+        if own {
+            now.told = None;
+        }
+    } else if own {
         // jaw is further on; WhatsApp now knows the chat is read this far.
         now.told = now.told.map(|told| told.max(at));
     }
