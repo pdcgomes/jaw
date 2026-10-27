@@ -268,7 +268,7 @@ func stillMotion(_ body: () async throws -> Void) async rethrows {
     await stillMotion {
         let (c, _) = await pane(typing: ["person:7"])
         let count = c.rows.count
-        // After the samples' cards, whose sorts are 1 to 8.
+        // After the samples' cards, the newest, whose sorts start with their times, 1792159300000 to 1792159307000.
         var ana = Samples.m(98, [Span(.text, "I'm in")], at: Samples.now + 30000, from: Samples.ana)
         ana.sort = "9~1"
         await applied(c, Update(seq: 300, upsert: [ana], total: UInt64(count + 1), newer: 0))
