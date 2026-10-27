@@ -394,17 +394,23 @@ final class ChatCell: NSView {
         return out
     }
 
+    /// A count, a blank or an @ in a pill 18 high, round for one digit; an even height, so a digit, 8
+    /// pixels high at 1x, can sit in its middle. Its text is centred by its ink, leaving out a count's
+    /// commas, which hang below its digits.
     @discardableResult
     func badge(_ text: String, right: CGFloat, fill: RGBA, _ roles: Roles) -> CGFloat {
-        let s = NSAttributedString(string: text, attributes: [
+        let attributes: [NSAttributedString.Key: Any] = [
             .font: TextStyle.caption.emphasised,
             .foregroundColor: (roles.isDark ? roles.ground : RGBA(0xFFFFFF)).nsColor,
-        ])
+        ]
+        let s = NSAttributedString(string: text, attributes: attributes)
         let w = max(s.size().width + 10, 18)
-        let rect = NSRect(x: right - w, y: 30, width: w, height: 17)
+        let rect = NSRect(x: right - w, y: 29, width: w, height: 18)
         fill.nsColor.setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 8.5, yRadius: 8.5).fill()
-        s.draw(at: NSPoint(x: rect.midX - s.size().width / 2, y: rect.minY + 1))
+        NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
+        let ink = NSAttributedString(string: text.filter { $0 != "," }, attributes: attributes).boundingRect(with: .zero, options: .usesDeviceMetrics)
+        // Without .usesLineFragmentOrigin, the point drawn at is the baseline's.
+        s.draw(with: NSRect(x: rect.midX - s.size().width / 2, y: (rect.midY + ink.midY).rounded(), width: 0, height: 0), options: [], context: nil)
         return w
     }
 
