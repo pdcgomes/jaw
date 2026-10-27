@@ -484,7 +484,7 @@ mac/
   JawThemes/                Redlamp's families (copied), jaw's own, the roles
   JawUI/                    AppKit: chat list, conversation, cells, layout cache, pictures, the box, library grid, sidebar
   JawApp/                   the app: windows, panes, palette, viewer, settings, linking, states, agent, notifications
-  JawHarness/               every screen and state from fixtures, as RedlampHarness's gallery, light and dark, in any theme
+  JawHarness/               the harness: an app for building and reviewing the interface from fixtures (2026-10-27-jaw-mac-harness-design.md)
   Tests/                    fixtures, window models, live on jawd demo, snapshots, the bench
 scripts/sync-themes         jaw's copy of Redlamp's catalog against darkroom's
 ```
@@ -494,7 +494,7 @@ scripts/sync-themes         jaw's copy of Redlamp's catalog against darkroom's
 - **The protocol:** every fixture decodes, and every request JawKit writes equals its fixture.
 - **Window models:** jaw-client's tests, ported: a reference model under shuffled and repeated updates; anchors; the hold; what arrived since a move.
 - **Live, on `jawd demo`** in a temporary folder, never the owner's: watching, paging at depth, sending with keys, a flood of 2,000 a second, jawd killed mid-stream and the windows checked against a fresh watch.
-- **Screens:** the harness draws every state from fixtures (each message kind, each media state, each empty and failing state, the palette's modes, panes) to images at fixed sizes, in both looks, in jaw's theme light and dark and two of Redlamp's, compared with references, as `jaw snapshot --demo` pins the terminal's frames.
+- **Screens:** the harness, an app for building and reviewing the interface in isolation, as [its design](2026-10-27-jaw-mac-harness-design.md) has it, draws every state from fixtures (each message kind, each media state, each empty and failing state, the palette's modes, panes) to images at fixed sizes, in both looks, in jaw's theme light and dark and two of Redlamp's, compared with references, as `jaw snapshot --demo` pins the terminal's frames.
 - **The bench:** `jaw-mac bench` times launch, opens, keys in a flood, scrolling with photos, memory and idle wake-ups against `jawd demo`, as `jaw bench` does, and `make perf-mac` writes its table.
 - **CI:** macOS runners on main and by hand, as jaw's design keeps them, since macOS minutes count ten times.
 

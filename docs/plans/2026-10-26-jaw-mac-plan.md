@@ -55,7 +55,7 @@ The owner reads and sends text in jaw for the Mac, all day, on his own account.
 9. **The palette, first form:** ⌘K over chats, people, folders and messages, the counts strip, Enter opens, Esc closes; start a chat by number.
 10. **States:** starting jawd, jawd unreachable (the Mimic asleep), connecting, catching up, phone offline, offline, engine restarting, logged out (link again with `jaw` until Mac-M5), update needed, banned; empty states with the Mimic, still.
 11. **jaw's theme and Settings, first form:** ooze's Tokyo Night, dark and light, following the system's appearance by default (Owner, 26 Oct), every colour asked for by its role, so Redlamp's families drop in at Mac-M5; a Settings window with Appearance (dark, light or the system's) and Messages (the look, comfortable or compact, the text size, the system font or SF Mono).
-12. **The harness:** every state above drawn from fixtures in both looks, light and dark, and snapshot tests of them.
+12. **The harness:** Jaw Harness, an app for building and reviewing the interface in isolation, as [its design](2026-10-27-jaw-mac-harness-design.md) has it: every state above drawn from fixtures in both looks, light and dark, and snapshot tests of them.
 13. **The bench:** `jaw-mac bench` for launch, opens, keys in a flood, scrolling, memory and idle wake-ups, in each look.
 
 **Done when** the owner has used it for a whole day for text on his own account, in the look he picks, and switching looks in Settings keeps his place; the conformance, window-model and live suites pass; and every budget below is measured in both looks and in the README.
