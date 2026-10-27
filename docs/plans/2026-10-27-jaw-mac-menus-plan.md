@@ -38,7 +38,7 @@
 
 ### Task 1: Right-click menus made from entries
 
-Amended after its review (3f630c9): an item under an entry's own title says what it will do, so it has no tick, never "✓ Unpin", neither as `Menus.items` makes it nor when a menu that enables its items checks it (`CommandBox.ticks`, read by `CommandTarget.validateMenuItem`); an item is enabled and ticked by that one rule; and the tests cover a separator where two met, a submenu that can run and a setting that's off.
+Amended after its review: an item under an entry's own title says what it will do, so it has no tick, never "✓ Unpin", neither as `Menus.items` makes it nor when a menu that enables its items checks it (`CommandBox.ticks`, read by `CommandTarget.validateMenuItem`); an item is enabled and ticked by that one rule; and the tests cover a separator where two met, a submenu that can run and a setting that's off.
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Commands/Command.swift` (after `Menus.menu(_:title:)`, and a new enum at the end of the file)
@@ -475,6 +475,8 @@ git commit -m "The chat's actions are written once, in chatCommands(for:), and b
 
 ### Task 4: The chat list's menu
 
+Amended after the branch's review: a chat's row answers VoiceOver's Show Menu, which makes no click for the table's menu to be filled for, with that chat's menu from `menuItems(forRow:)` under the row (`ChatCell.accessibilityPerformShowMenu()`), and a community's row, which has none, says so.
+
 **Files:**
 - Modify: `mac/JawUI/Sources/ChatList/ChatListController.swift` (the `ChatListHost` protocol, `loadView`, and a new menu section)
 - Modify: `mac/JawApp/Sources/AppModel.swift` (the `extension AppModel: ChatListHost` at the end)
@@ -603,7 +605,7 @@ git commit -m "The chat list has a right-click menu: its table's menu is filled 
 
 ### Task 5: The chat's menus
 
-Amended after its review: a message answers a right click only on itself, its body, its regions or the buttons it shows while hovered (`Laid.contains`, which left clicks use too). A right click on the blank space beside, between or under the messages goes on to the transcript's table and the pane's menu, as the design has it, where the plan's `MessageView` answered anywhere in its row. Building a menu doesn't move the focus: the right click's entry points, `menu(for view:)` and `paneMenuShown()`, give the pane the keys, and `menu(for m:)` and `menu(forRow:)` only build, so the snapshot's log changes nothing and the plan's `host.focused == 1` after `c.menu(for: text)` is 0. The slot frame gives a pane showing a chat its whole menu on the strips and controls no view claims, and an empty pane its splits, where the plan's frame offered only the splits. The tests send real right clicks through AppKit's hit test in an offscreen window. After the branch's review, VoiceOver's Show Menu, which has no pointer to hit-test, opens a message's menu under its bubble through `menu(for view:)`, so the pane takes the keys first (`MessageView.accessibilityPerformShowMenu()`, whose pop-up the test stands in for).
+Amended after its review: a message answers a right click only on itself, its body, its regions or the buttons it shows while hovered (`Laid.contains`, which left clicks use too). A right click on the blank space beside, between or under the messages goes on to the transcript's table and the pane's menu, as the design has it, where the plan's `MessageView` answered anywhere in its row. Building a menu doesn't move the focus: the right click's entry points, `menu(for view:)` and `paneMenuShown()`, give the pane the keys, and `menu(for m:)` and `menu(forRow:)` only build, so the snapshot's log changes nothing and the plan's `host.focused == 1` after `c.menu(for: text)` is 0. The slot frame gives a pane showing a chat its whole menu on the strips and controls no view claims, and an empty pane its splits, where the plan's frame offered only the splits. The tests send real right clicks through AppKit's hit test in an offscreen window. After the branch's review, VoiceOver's Show Menu, which has no pointer to hit-test, opens a message's menu under its bubble through `menu(for view:)`, so the pane takes the keys first (`MessageView.accessibilityPerformShowMenu()`, whose pop-up the test stands in for). The header answers Show Menu too, with the pane's menu once the pane has the keys; a message, the header and a chat's row all pop their menus up through `MenuPopUp`, which opens a menu on the run loop's next turn so VoiceOver announces it, and the header isn't yet an accessibility element VoiceOver lands on, which is the owner's call.
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Conversation/ConversationController.swift` (`headerMenu`, `let table`, `loadView()`, `menu(for:)`, `HeaderView`, a new `TranscriptTable`)
