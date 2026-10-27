@@ -14,6 +14,17 @@ func block(_ id: String = "block", axes: Axes = []) -> HarnessScene {
     }
 }
 
+/// Two bands, each with its note.
+func noted() -> HarnessScene {
+    HarnessScene(id: "noted", title: "Noted", symbol: "note", synopsis: "", section: .foundations, covers: [],
+                 width: 300) { c in
+        VStack(alignment: .leading, spacing: 0) {
+            SpecimenGroup(title: "One", note: "the first", roles: c.roles) { Text("1").textStyle(.body) }
+            SpecimenGroup(title: "Two", note: "the second", roles: c.roles) { Text("2").textStyle(.body) }
+        }
+    }
+}
+
 /// A folder of the test's own, which it deletes.
 func scratch(_ name: String) -> URL {
     FileManager.default.temporaryDirectory.appending(path: "jaw-harness-tests-\(name)-\(UUID().uuidString)")
@@ -33,14 +44,7 @@ func scratch(_ name: String) -> URL {
 }
 
 @MainActor @Test func `a picture carries the notes of the bands drawn in it`() async throws {
-    let scene = HarnessScene(id: "noted", title: "Noted", symbol: "note", synopsis: "", section: .foundations, covers: [],
-                             width: 300) { c in
-        VStack(alignment: .leading, spacing: 0) {
-            SpecimenGroup(title: "One", note: "the first", roles: c.roles) { Text("1").textStyle(.body) }
-            SpecimenGroup(title: "Two", note: "the second", roles: c.roles) { Text("2").textStyle(.body) }
-        }
-    }
-    let drawn = try await Pictures.draw(scene, Conditions())
+    let drawn = try await Pictures.draw(noted(), Conditions())
     #expect(drawn.notes == [Note(title: "One", note: "the first"), Note(title: "Two", note: "the second")])
 }
 
@@ -63,8 +67,9 @@ func scratch(_ name: String) -> URL {
     var catalog = HarnessCatalog()
     catalog.register(block())
     catalog.register(block("looks", axes: .look))
-    let folder = scratch("sweep")
-    defer { try? FileManager.default.removeItem(at: folder) }
+    let root = scratch("sweep")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appending(path: "review")
     let manifest = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
     #expect(manifest.scenes.map(\.id) == ["block", "looks"])
     #expect(manifest.scenes[0].pictures.map(\.file) == ["block/dark.png", "block/light.png"])
@@ -214,4 +219,47 @@ func scratch(_ name: String) -> URL {
     #expect(written == next)
     let beside = try FileManager.default.contentsOfDirectory(atPath: root.path)
     #expect(beside == ["review"])
+}
+
+@MainActor @Test func `a sweep leaves alone a folder it made once a folder is put beside its scenes`() async throws {
+    let root = scratch("drafts")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appending(path: "review")
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    try FileManager.default.createDirectory(at: folder.appending(path: "drafts"), withIntermediateDirectories: true)
+    await #expect(throws: Pictures.PictureError.self) {
+        try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    }
+    #expect(FileManager.default.fileExists(atPath: folder.appending(path: "drafts").path))
+}
+
+@MainActor @Test func `a sweep writes the notes of each scene's bands into its manifest`() async throws {
+    let root = scratch("notes")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appending(path: "review")
+    var catalog = HarnessCatalog()
+    catalog.register(noted())
+    let manifest = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    let notes = [Note(title: "One", note: "the first"), Note(title: "Two", note: "the second")]
+    #expect(manifest.scenes.map(\.notes) == [notes])
+    let written = try JSONDecoder().decode(Pictures.Manifest.self, from: Data(contentsOf: folder.appending(path: "manifest.json")))
+    #expect(written.scenes.map(\.notes) == [notes])
+}
+
+@MainActor @Test func `a sweep knows a folder an earlier sweep made by the scenes and pictures its manifest lists alone`() async throws {
+    let root = scratch("earlier")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appending(path: "review")
+    try FileManager.default.createDirectory(at: folder.appending(path: "block"), withIntermediateDirectories: true)
+    let earlier = #"{"scenes": [{"id": "block", "pictures": [{"file": "block/dark.png"}, {"file": "block/light.png"}]}]}"#
+    try Data(earlier.utf8).write(to: folder.appending(path: "manifest.json"))
+    try Data("png".utf8).write(to: folder.appending(path: "block/dark.png"))
+    try Data("png".utf8).write(to: folder.appending(path: "block/light.png"))
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    let manifest = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    let written = try JSONDecoder().decode(Pictures.Manifest.self, from: Data(contentsOf: folder.appending(path: "manifest.json")))
+    #expect(written == manifest, "the earlier sweep's folder is replaced by this one")
 }
