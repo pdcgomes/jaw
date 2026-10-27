@@ -68,7 +68,7 @@ enum Bench {
     }
 
     /// Presses each shortcut, as `cmd+shift+d`, through the app's own event handling half a second
-    /// apart, and says the panes after each.
+    /// apart, and says the panes after each, or a menu step's menu in their place.
     static func press(_ keys: [String], model: AppModel, then: @escaping @MainActor () -> Void) {
         guard let key = keys.first else { return then() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -76,16 +76,15 @@ enum Bench {
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:")
-            if key.hasPrefix("menu:") {
-                FileHandle.standardError.write(Data("\(key): \(menuSaid(String(key.dropFirst(5)), model: model))\n".utf8))
-            }
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
-                if parts.count == 3, let i = Int(parts[1]), let list = model.window?.chatList.all, i < list.count, let slot = model.focusedSlot,
-                   let zone = zones[String(parts[2])]
-                {
-                    model.drop(list[i].id, on: slot, zone)
+                if parts.count == 3, let i = Int(parts[1]), let slot = model.focusedSlot, let zone = zones[String(parts[2])] {
+                    if let row = listRow(i, model: model) {
+                        model.drop(row.id, on: slot, zone)
+                    } else {
+                        FileHandle.standardError.write(Data("\(key): no row \(i)\n".utf8))
+                    }
                 }
             }
             if key.hasPrefix("save:") { model.saveLayoutAs(String(key.dropFirst(5))) }
@@ -120,45 +119,57 @@ enum Bench {
                 NSApp.sendEvent(event)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                let palette = (model.window?.palette.isVisible ?? false) ? " · palette at \(model.window?.palette.model.index ?? -1) of \(model.window?.palette.model.items.count ?? 0)" : ""
-                let glance = model.glance.isOpen ? model.window?.window.map { w in
-                    " · glance centre \(Int(model.glance.panel.frame.midX - w.frame.midX)),\(Int(model.glance.panel.frame.midY - w.frame.midY)) from the window's"
-                } ?? "" : ""
-                let said = palette + glance + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
-                let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
-                FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
+                if key.hasPrefix("menu:") {
+                    FileHandle.standardError.write(Data("\(key): \(menuSaid(String(key.dropFirst(5)), model: model))\n".utf8))
+                } else {
+                    let palette = (model.window?.palette.isVisible ?? false) ? " · palette at \(model.window?.palette.model.index ?? -1) of \(model.window?.palette.model.items.count ?? 0)" : ""
+                    let glance = model.glance.isOpen ? model.window?.window.map { w in
+                        " · glance centre \(Int(model.glance.panel.frame.midX - w.frame.midX)),\(Int(model.glance.panel.frame.midY - w.frame.midY)) from the window's"
+                    } ?? "" : ""
+                    let said = palette + glance + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
+                    let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
+                    FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
+                }
                 press(Array(keys.dropFirst()), model: model, then: then)
             }
         }
     }
 
+    /// The chat list's row `i`, counting from 0, or nil when it has no such row.
+    static func listRow(_ i: Int, model: AppModel) -> ChatRow? {
+        guard let list = model.window?.chatList.all, list.indices.contains(i) else { return nil }
+        return list[i]
+    }
+
     /// A right-click menu's items for the snapshot's log, as `menu:list:3` (the chat list's fourth
-    /// row), `menu:header` (the focused pane's) or `menu:message:5` (its sixth message) makes it.
+    /// row), `menu:header` (the focused pane's) or `menu:message:5` (the sixth row of its
+    /// transcript) makes it; anything else is an unknown step.
     static func menuSaid(_ what: String, model: AppModel) -> String {
-        let parts = what.split(separator: ":").map(String.init)
-        let row = parts.count > 1 ? Int(parts[1]) : nil
+        let parts = what.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        let row = parts.count == 2 ? Int(parts[1]) : nil
         switch (parts.first, row) {
         case let ("list", i?):
-            guard let list = model.window?.chatList.all, i < list.count else { return "no row \(i)" }
-            return said(model.chatMenuItems(for: list[i]))
-        case ("header", _):
+            guard let chat = listRow(i, model: model) else { return "no row \(i)" }
+            return words(model.chatMenuItems(for: chat))
+        case ("header", _) where parts.count == 1:
             guard let c = model.conversation else { return "no pane" }
-            return said(model.paneMenu(for: c).items)
+            return words(model.paneMenu(for: c).items)
         case let ("message", i?):
             guard let menu = model.conversation?.menu(forRow: i) else { return "no message \(i)" }
-            return said(menu.items)
+            return words(menu.items)
         default:
-            return "menu:list:<row>, menu:header or menu:message:<row>"
+            return "unknown step: menu:\(what) (the menu steps are menu:list:<row>, menu:header and menu:message:<row>)"
         }
     }
 
-    /// Menu items as words: greyed ones in brackets, a submenu's items after it.
-    static func said(_ items: [NSMenuItem]) -> String {
-        items.map { item in
+    /// Menu items as words, as the menu shows them: hidden ones left out, greyed ones in brackets, a
+    /// submenu's items after it.
+    static func words(_ items: [NSMenuItem]) -> String {
+        items.filter { !$0.isHidden }.map { item in
             if item.isSeparatorItem { return "—" }
             let title = item.isEnabled ? item.title : "[\(item.title)]"
             guard let sub = item.submenu else { return title }
-            return "\(title) ▸ (\(said(sub.items)))"
+            return "\(title) ▸ (\(words(sub.items)))"
         }.joined(separator: " | ")
     }
 
