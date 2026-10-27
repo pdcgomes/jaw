@@ -16,12 +16,7 @@ final class AppModel {
     var jawd: Jawd!
     weak var window: MainWindowController?
 
-    enum Reach: Equatable {
-        case waiting
-        case starting(failed: String?)
-        case up
-        case unreachable(why: String, retry: Int)
-    }
+    typealias Reach = Situation.Reach
 
     var reach: Reach = .waiting
     var welcome: Welcome?
@@ -221,69 +216,31 @@ final class AppModel {
 
     // MARK: - What the screen says
 
+    /// jawd's situation as this model has it, which says what the screen says.
+    var situation: Situation {
+        Situation(reach: reach, linked: linked, connection: connection, link: link,
+                  said: notice.map { Situation.Said($0.text, until: $0.until, warn: $0.warn) })
+    }
+
     /// The status line's left half: jawd's state when it isn't online, as the terminal's header says it.
     var stateLine: (String, Bool)? {
-        switch reach {
-        case .waiting: return ("connecting to jawd…", false)
-        case .starting(nil): return ("starting jawd…", false)
-        case .starting: return ("jawd didn't start", true)
-        case let .unreachable(_, retry): return ("can't reach jawd · trying again in \(retry) s", true)
-        case .up: break
-        }
-        if !linked { return ("not linked", true) }
-        switch connection.state {
-        case .online: return nil
-        case .connecting: return ("connecting", false)
-        case .catchingUp:
-            guard let done = connection.done, let total = connection.total else { return ("catching up", false) }
-            return ("catching up \(Format.num(done)) of \(Format.num(total))", false)
-        case .phoneOffline: return ("phone offline: photos and older history wait for it", true)
-        case .offline: return ("offline: what you send waits until it's back", true)
-        case .updateNeeded: return ("update needed: WhatsApp wants a newer Jaw · reading still works", true)
-        case .banned: return ("temporarily banned until \(connection.until.map { Format.until($0) } ?? "later")", true)
-        case .engineRestarting: return ("reconnecting: the engine restarted", true)
-        case .loggedOut: return ("logged out", true)
-        case .other: return ("connection: \(connection.reason ?? "a state this Jaw doesn't know")", true)
-        }
+        situation.stateLine.map { ($0.text, $0.warn) }
     }
 
     /// How the focused chat is, without its name, which its box and header already say.
     var chatLine: String? {
-        if let notice, notice.until > Date() { return notice.text }
-        guard let chat = conversation?.chat else { return nil }
-        var parts: [String] = []
-        if !chat.typing.isEmpty { parts.append(chat.kind.isGroup ? "someone's typing…" : "typing…") }
-        if chat.muted { parts.append("muted") }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        situation.chatLine(focused: conversation?.chat, now: Date())
     }
 
     /// The chats that need you, those no pane shows: mentions first, then people, then groups, each
     /// by its unread, as the spike's status line reads them from the chat list it already watches.
     var needs: [ChatRow] {
-        let shown = Set(panes.keys)
-        let waiting = (window?.chatList.all ?? []).filter {
-            !shown.contains($0.id) && !$0.muted && !$0.archived && $0.kind != .community && ($0.unread > 0 || $0.markedUnread)
-        }
-        func rank(_ c: ChatRow) -> Int {
-            c.mentions > 0 ? 0 : c.kind.isGroup ? 2 : 1
-        }
-        return waiting.sorted { (rank($0), -$0.unread) < (rank($1), -$1.unread) }
+        Situation.needs(window?.chatList.all ?? [], shown: Set(panes.keys))
     }
 
     /// What fills the panes' place, when it isn't chats.
     var stateView: StateView.Kind? {
-        switch reach {
-        case let .starting(failed): return .starting(failed: failed)
-        case let .unreachable(why, retry) where window?.chatList.all.isEmpty ?? true: return .asleep(why: why, retryIn: retry)
-        default: break
-        }
-        if reach == .up, !linked {
-            return .linking(step: link, loggedOut: connection.state == .loggedOut ? (connection.reason ?? "logged out from the phone") : nil)
-        }
-        if grid == nil {
-            return (window?.chatList.all.isEmpty ?? true) && reach == .up ? .noChats : .noChat
-        }
-        return nil
+        situation.stateView(hasChats: !(window?.chatList.all.isEmpty ?? true), hasPanes: grid != nil)
     }
 
     // MARK: - Panes
