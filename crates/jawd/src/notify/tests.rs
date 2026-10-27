@@ -42,6 +42,10 @@ struct Running {
 
 impl Running {
     async fn new() -> Running {
+        Running::with(TIMING).await
+    }
+
+    async fn with(timing: Timing) -> Running {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         let attention = Arc::new(Attention::default());
@@ -55,7 +59,7 @@ impl Running {
             Arc::new(move || flag.load(Ordering::SeqCst)),
             pushes.subscribe(),
             Arc::new(Fake(to)),
-            TIMING,
+            timing,
         );
         let running = Running { _home: home, store, attention, catching_up, pushes, sent };
         for (chat, name, kind) in [(ANA, "Ana Ribeiro", "direct"), (CLIMBING, "Lisbon Climbing", "group")] {
@@ -96,7 +100,7 @@ impl Running {
 
     /// The next notification, however long a hold makes it wait.
     async fn next(&mut self) -> Notice {
-        tokio::time::timeout(Duration::from_secs(5), self.sent.recv()).await.unwrap().unwrap()
+        tokio::time::timeout(Duration::from_secs(30), self.sent.recv()).await.unwrap().unwrap()
     }
 
     /// The next `n` notifications however long they take, then anything more until things settle.
@@ -137,7 +141,10 @@ fn notice(title: &str, subtitle: Option<&str>, body: &str) -> Notice {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_burst_in_a_chat_is_one_notification_with_its_newest_message() {
-    let mut running = Running::new().await;
+    // Quiet for long enough that the burst's three commits fall within it, however long the
+    // machine makes each take.
+    let mut running =
+        Running::with(Timing { quiet: Duration::from_secs(1), most: Duration::from_secs(5), ..TIMING }).await;
     for (n, text) in ["are you", "coming", "tonight?"].iter().enumerate() {
         running.arrives(ANA, ANA, &format!("m{n}"), text).await;
     }
@@ -187,7 +194,9 @@ async fn the_chat_an_interface_in_front_is_reading_stays_quiet() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn what_comes_during_a_hold_goes_as_one_when_it_ends() {
-    let mut running = Running::new().await;
+    // A hold long enough to take the first notification and two writes after it however slow the
+    // machine makes them, and still be told from the quiet that would send the two without it.
+    let mut running = Running::with(Timing { hold: Duration::from_secs(3), ..TIMING }).await;
     running.arrives(ANA, ANA, "m1", "one").await;
     assert_eq!(running.expect(1).await, vec![notice("Ana Ribeiro", None, "one")]);
     running.arrives(ANA, ANA, "m2", "two").await;
@@ -195,7 +204,7 @@ async fn what_comes_during_a_hold_goes_as_one_when_it_ends() {
     running.arrives(ANA, ANA, "m3", "three").await;
     let started = Instant::now();
     assert_eq!(running.next().await, notice("Ana Ribeiro", Some("3 unread"), "three"));
-    assert!(started.elapsed() >= Duration::from_millis(150), "it went before the hold ended");
+    assert!(started.elapsed() >= Duration::from_secs(1), "it went before the hold ended");
     assert_eq!(running.sent().await, Vec::new());
 }
 
@@ -220,7 +229,9 @@ async fn a_catch_up_waits_and_ends_in_one_summary() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn what_came_while_jawd_was_off_is_one_summary_once_its_first_catch_up_ends() {
-    let mut running = Running::new().await;
+    // The catch-up settles for long enough that the write after its end falls within it, however
+    // long the machine makes it take.
+    let mut running = Running::with(Timing { most: Duration::from_secs(3), ..TIMING }).await;
     let muted = "351914444444@s.whatsapp.net";
     let archived = "351915555555@s.whatsapp.net";
     let mum = "351916666666@s.whatsapp.net";
