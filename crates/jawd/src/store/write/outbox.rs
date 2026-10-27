@@ -646,6 +646,12 @@ fn bumped(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<()>
     touched(db, stamps, chat, n, seq)
 }
 
+/// Queues `raw`, an AppStatePatch for chat `chat` (its JID as jaw keeps it), as an outbox row of its
+/// own, `id`, which counts toward OUTBOX_MOST.
+pub(super) fn app_state_row(db: &Connection, chat: &str, id: &str, raw: &[u8]) -> Result<i64> {
+    Ok(db.prepare_cached(APP_STATE)?.query_row(params![chat, id, raw, now_ms()], |r| r.get(0))?)
+}
+
 /// A message deleted for you, as `delete_for_me` writes it.
 struct Forgetting<'a> {
     chat: &'a str,
@@ -688,7 +694,7 @@ fn delete_for_me(
         return Ok(false);
     }
     let now = now_ms();
-    let outbox: i64 = db.prepare_cached(APP_STATE)?.query_row(params![chat, id, raw, now], |r| r.get(0))?;
+    let outbox = app_state_row(db, &chat, id, raw)?;
     db.prepare_cached(PRUNE_KEYS)?.execute(params![now - KEY_KEPT_MS, KEYS_PRUNED])?;
     if let Some(key) = key {
         db.prepare_cached(KEEP_KEY)?.execute(params![key, None::<i64>, chat, id, now])?;

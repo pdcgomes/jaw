@@ -4,6 +4,7 @@
 //! only the rows whose `v` is past S.
 
 mod again;
+pub mod chat_actions;
 pub mod contacts;
 pub mod copies;
 mod events;
@@ -87,6 +88,9 @@ pub enum Change {
     MergeStep(Option<Merging>),
     /// Sending and reading: the outbox and read positions.
     Outbox(outbox::Step),
+    /// A chat pinned, archived, muted or marked, or a message starred, from jaw, with the app-state
+    /// patches that tell your other devices queued in the same transaction.
+    ChatAction(chat_actions::Act),
     /// What an interface keeps of how it was laid out.
     Layout(layout::Keep),
     /// One step of a backfill a migration left (`links::BACKFILLS`), from where the last left off.
@@ -632,6 +636,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
             ("merge", merging.as_ref().map(|m| m.reference.clone()).unwrap_or_default(), None)
         }
         Some(Change::Outbox(step)) => outbox::provenance(step),
+        Some(Change::ChatAction(act)) => chat_actions::provenance(act),
         Some(Change::Layout(keep)) => layout::provenance(keep),
         Some(Change::Backfill(name)) => ("backfill", name.to_string(), None),
         Some(Change::Opening) => ("opening", String::new(), None),
@@ -776,6 +781,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         }
         Change::MergeStep(merging) => merge_step(db, stamps, merging.as_ref().map(|m| m.gone)),
         Change::Outbox(step) => outbox::apply(db, stamps, step),
+        Change::ChatAction(act) => chat_actions::apply(db, stamps, act),
         Change::Layout(keep) => layout::apply(db, keep),
         Change::Backfill(name) => links::backfill(db, stamps, name),
         Change::Opening => events::step(db, stamps),

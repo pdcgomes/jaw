@@ -2852,6 +2852,17 @@ UPDATE people SET about_at = ?2 WHERE n = ?1 AND (about_at IS NULL OR about_at <
 -- src/store/write/folders.rs
 UPDATE people SET about = ?2, roster_v = max(roster_v, ?3) WHERE n = ?1 AND about IS NOT ?2 AND about_at = ?4
     SEARCH people USING INTEGER PRIMARY KEY (rowid=?)
+-- src/store/write/chat_actions.rs
+SELECT n, kind, pinned, archived, muted_until, marked_unread, unread FROM chats WHERE id = ?1
+    SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
+
+-- src/store/write/chat_actions.rs
+SELECT count(*) FROM chats WHERE archived = 0 AND sort >= '1~' AND n <> ?1
+    SEARCH chats USING INDEX chats_by_sort (archived=? AND sort>?)
+
+-- src/store/write/chat_actions.rs
+SELECT starred FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/kinds.rs
 SELECT n, NOT deleted AND (kind = 'unknown' OR text IS NULL AND summary = 'jaw can''t show this yet') FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
