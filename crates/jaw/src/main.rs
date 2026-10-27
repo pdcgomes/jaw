@@ -18,6 +18,7 @@ mod theme;
 mod view;
 mod wire;
 
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
@@ -45,10 +46,11 @@ enum Command {
         #[arg(long)]
         phone: Option<String>,
     },
-    /// The terminal's settings, or changes them: jaw settings theme=gruvbox messages=irc
+    /// Prints the terminal's settings, or changes them: jaw settings theme=gruvbox messages=irc
     Settings {
         /// Settings to change, each as name=value
-        changes: Vec<String>,
+        #[arg(value_name = "NAME=VALUE", value_parser = pair)]
+        changes: Vec<(String, String)>,
     },
     /// The terminal interface on a made-up account, to try jaw without one
     Demo {
@@ -131,7 +133,10 @@ fn main() -> Result<()> {
         None => run::run(|tx| view::View::new(Box::new(wire::Wire::start(&jaw_proto::local::home(), tx)))),
         Some(Command::Status) => status(),
         Some(Command::Link { phone }) => link(phone),
-        Some(Command::Settings { changes }) => settings(changes),
+        Some(Command::Settings { changes }) => {
+            println!("{}", settings(&jaw_proto::local::socket(&jaw_proto::local::home()), &changes)?);
+            Ok(())
+        }
         Some(Command::Demo { state, flood }) => run::run(|tx| {
             let demo = demo::Demo::start(tx, demo::Clock::Wall, state, true);
             demo.answer_on_a_thread();
@@ -210,20 +215,19 @@ fn main() -> Result<()> {
     }
 }
 
-fn connect() -> Result<(jaw_client::Connection, jaw_proto::Welcome)> {
-    let socket = jaw_proto::local::socket(&jaw_proto::local::home());
-    jaw_client::Connection::open(&socket, TERMINAL, env!("CARGO_PKG_VERSION"))
+fn connect(socket: &Path) -> Result<(jaw_client::Connection, jaw_proto::Welcome)> {
+    jaw_client::Connection::open(socket, TERMINAL, env!("CARGO_PKG_VERSION"))
 }
 
 fn status() -> Result<()> {
-    let (mut connection, _) = connect()?;
+    let (mut connection, _) = connect(&jaw_proto::local::socket(&jaw_proto::local::home()))?;
     let status: jaw_proto::Status = serde_json::from_value(connection.call("status", serde_json::Value::Null)?)?;
     println!("{}", jaw_client::describe(&status));
     Ok(())
 }
 
 fn link(phone: Option<String>) -> Result<()> {
-    let (mut connection, welcome) = connect()?;
+    let (mut connection, welcome) = connect(&jaw_proto::local::socket(&jaw_proto::local::home()))?;
     if welcome.account.state == AccountState::Linked {
         let who = welcome.account.me.map(|me| me.phone).unwrap_or_default();
         println!("jaw is already linked to {who}; jaw unlink comes later, or remove it on the phone");
@@ -260,26 +264,41 @@ fn link(phone: Option<String>) -> Result<()> {
     }
 }
 
-fn settings(changes: Vec<String>) -> Result<()> {
-    let (mut connection, welcome) = connect()?;
+/// The terminal's settings as `jaw settings` prints them: those hello brings, or with `changes`,
+/// jawd's answer to one `settings.set` asking for them all. A setting named twice is refused before
+/// jawd is asked.
+fn settings(socket: &Path, changes: &[(String, String)]) -> Result<String> {
+    let asked = asked_settings(changes)?;
+    let (mut connection, welcome) = connect(socket)?;
     let now = if changes.is_empty() {
         welcome.settings.unwrap_or_default()
     } else {
-        let kept = connection.call("settings.set", asked_settings(&changes)?)?;
+        let kept = connection.call("settings.set", asked)?;
         serde_json::from_value::<jaw_proto::settings::SettingsKept>(kept)?.settings
     };
-    println!("{}", describe_settings(&now));
-    Ok(())
+    Ok(describe_settings(&now))
 }
 
-/// `name=value` pairs as `settings.set`'s params; jawd checks the names and the values.
-fn asked_settings(changes: &[String]) -> Result<serde_json::Value> {
+/// One of `jaw settings`'s arguments as a setting's name and its value, each trimmed. Only its form
+/// is checked here, as clap reads it; jawd checks the name and the value.
+fn pair(arg: &str) -> Result<(String, String), String> {
+    let Some((name, value)) = arg.split_once('=') else {
+        return Err("it isn't a name=value pair, such as theme=gruvbox".into());
+    };
+    if name.trim().is_empty() {
+        return Err("it names no setting before =, such as theme=gruvbox".into());
+    }
+    Ok((name.trim().to_string(), value.trim().to_string()))
+}
+
+/// The changes as `settings.set`'s params, a setting named twice refused; jawd checks the names and
+/// the values.
+fn asked_settings(changes: &[(String, String)]) -> Result<serde_json::Value> {
     let mut asked = serde_json::Map::new();
-    for change in changes {
-        let Some((name, value)) = change.split_once('=') else {
-            bail!("{change} isn't a name=value pair, such as theme=gruvbox");
-        };
-        asked.insert(name.trim().to_string(), serde_json::Value::from(value.trim()));
+    for (name, value) in changes {
+        if asked.insert(name.clone(), serde_json::Value::from(value.as_str())).is_some() {
+            bail!("{name} is asked for twice; give each setting once");
+        }
     }
     Ok(serde_json::Value::Object(asked))
 }
@@ -288,14 +307,30 @@ fn asked_settings(changes: &[String]) -> Result<serde_json::Value> {
 fn describe_settings(settings: &jaw_proto::settings::Settings) -> String {
     let themes: Vec<&str> = jaw_proto::themes::all().iter().map(|t| t.id.as_str()).collect();
     let messages = jaw_proto::settings::Messages::ALL.map(|m| m.name());
-    format!(
-        "theme     {} ({})\n          one of {}\nmessages  {}\n          one of {}",
-        settings.theme,
-        jaw_proto::themes::or_default(&settings.theme).name,
-        themes.join(", "),
-        settings.messages.name(),
-        messages.join(", "),
-    )
+    [
+        format!("theme     {} ({})", settings.theme, jaw_proto::themes::or_default(&settings.theme).name),
+        one_of(&themes),
+        format!("messages  {}", settings.messages.name()),
+        one_of(&messages),
+    ]
+    .join("\n")
+}
+
+/// The values a setting takes, after "one of" and under the names' indent, wrapped at 80 columns,
+/// so a terminal of any width and a script read the same lines.
+fn one_of(values: &[&str]) -> String {
+    let mut lines = vec!["          one of".to_string()];
+    for (n, value) in values.iter().enumerate() {
+        let value = if n + 1 < values.len() { format!("{value},") } else { value.to_string() };
+        match lines.last_mut() {
+            Some(line) if line.len() + 1 + value.len() <= 80 => {
+                line.push(' ');
+                line.push_str(&value);
+            }
+            _ => lines.push(format!("          {value}")),
+        }
+    }
+    lines.join("\n")
 }
 
 /// The code as half-block characters, light on dark, so a terminal with a dark background shows a
@@ -312,19 +347,63 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
+    use jaw_proto::settings::{Messages, Settings};
+    use serde_json::json;
 
-    #[test]
-    fn settings_are_asked_as_name_value_pairs_for_jawd_to_check() {
-        let asked = asked_settings(&["theme=gruvbox".into(), " messages = irc ".into()]).unwrap();
-        assert_eq!(asked, serde_json::json!({"theme": "gruvbox", "messages": "irc"}));
-        assert!(asked_settings(&["gruvbox".into()]).unwrap_err().to_string().contains("name=value"));
+    /// The changes as clap reads them from `jaw settings`'s arguments.
+    pub fn changes(args: &[&str]) -> Vec<(String, String)> {
+        args.iter().map(|arg| pair(arg).unwrap()).collect()
     }
 
     #[test]
-    fn settings_are_said_with_the_values_each_takes() {
-        let said = describe_settings(&jaw_proto::settings::Settings::default());
-        assert!(said.starts_with("theme     tokyo-night (Tokyo Night)\n"), "{said}");
-        assert!(said.contains("catppuccin, catppuccin-latte, ethereal"), "{said}");
-        assert!(said.contains("messages  bubbles\n          one of bubbles, irc"), "{said}");
+    fn clap_reads_each_change_as_a_name_and_a_value_and_refuses_one_without_a_name_as_it_reads_it() {
+        let Some(Command::Settings { changes }) =
+            Cli::try_parse_from(["jaw", "settings", "theme=gruvbox", " messages = irc "]).unwrap().command
+        else {
+            panic!("jaw settings is the settings command");
+        };
+        assert_eq!(changes, [("theme".into(), "gruvbox".into()), ("messages".into(), "irc".into())]);
+        for (arg, why) in [
+            ("gruvbox", "it isn't a name=value pair"),
+            ("=gruvbox", "it names no setting"),
+            (" =x", "it names no setting"),
+        ] {
+            let Err(refused) = Cli::try_parse_from(["jaw", "settings", arg]) else { panic!("{arg} is refused") };
+            assert_eq!((refused.kind(), refused.exit_code()), (ErrorKind::ValueValidation, 2), "{arg}");
+            let said = refused.to_string();
+            assert!(said.contains(&format!("invalid value '{arg}' for '[NAME=VALUE]...': {why}")), "{said}");
+        }
+        let Err(help) = Cli::try_parse_from(["jaw", "settings", "--help"]) else { panic!("--help is its help") };
+        let help = help.to_string();
+        assert!(
+            help.starts_with("Prints the terminal's settings, or changes them: jaw settings theme=gruvbox"),
+            "{help}"
+        );
+        assert!(help.contains("Usage: jaw settings [NAME=VALUE]..."), "{help}");
+    }
+
+    #[test]
+    fn the_changes_are_asked_as_given_for_jawd_to_check_and_a_setting_named_twice_is_refused() {
+        let asked = asked_settings(&changes(&["theme=gruvbox", "messages=irc"])).unwrap();
+        assert_eq!(asked, json!({"theme": "gruvbox", "messages": "irc"}));
+        assert_eq!(asked_settings(&changes(&["colour=blue"])).unwrap(), json!({"colour": "blue"}), "jawd checks them");
+        let twice = asked_settings(&changes(&["theme=nord", "theme=gruvbox"])).unwrap_err();
+        assert_eq!(twice.to_string(), "theme is asked for twice; give each setting once");
+    }
+
+    #[test]
+    fn settings_are_said_with_the_values_each_takes_wrapped_at_80_columns_under_the_indent() {
+        let takes = "          one of catppuccin, catppuccin-latte, ethereal, everforest,
+          flexoki-light, gruvbox, hackerman, kanagawa, last-horizon, lumon,
+          lupine, matte-black, miasma, nord, osaka-jade, retro-82, ristretto,
+          rose-pine, solitude, starship, tokyo-night, vantablack, white";
+        let defaults = describe_settings(&Settings::default());
+        let said =
+            format!("theme     tokyo-night (Tokyo Night)\n{takes}\nmessages  bubbles\n          one of bubbles, irc");
+        assert_eq!(defaults, said);
+        let nord = describe_settings(&Settings { theme: "nord".into(), messages: Messages::Irc });
+        assert_eq!(nord, format!("theme     nord (Nord)\n{takes}\nmessages  irc\n          one of bubbles, irc"));
+        assert!(defaults.lines().chain(nord.lines()).all(|line| line.len() <= 80), "{defaults}");
     }
 }

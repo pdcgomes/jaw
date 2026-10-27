@@ -530,6 +530,37 @@ fn the_settings_come_in_each_hello_and_jawds_answer_and_push_and_one_it_refuses_
     assert_eq!(hello(&said), Some(Settings::default()), "a hello without settings is the defaults: {said:?}");
 }
 
+/// `jaw settings` on the scripted jawd: without changes it prints what hello brings, saying hello as
+/// the terminal, and asks for no change; changes go in one `settings.set` and what it prints is
+/// jawd's answer, every setting in it; a change jawd refuses fails with jawd's own message; and
+/// with nothing on the socket it says jawd isn't running.
+#[test]
+fn jaw_settings_prints_what_hello_brings_or_jawds_answer_to_one_change_and_fails_with_jawds_message() {
+    let jawd = scripted();
+    let changes = crate::tests::changes;
+    let said = crate::settings(&jawd.socket, &[]).unwrap();
+    assert!(
+        said.starts_with("theme     tokyo-night (Tokyo Night)\n") && said.contains("\nmessages  bubbles\n"),
+        "{said}"
+    );
+    assert!(jawd.asked("settings.set").is_empty(), "nothing is changed without changes");
+
+    let said = crate::settings(&jawd.socket, &changes(&["theme=gruvbox", "messages=irc"])).unwrap();
+    assert_eq!(jawd.asked("settings.set"), [json!({ "theme": "gruvbox", "messages": "irc" })], "one settings.set");
+    assert!(said.starts_with("theme     gruvbox (Gruvbox)\n") && said.contains("\nmessages  irc\n"), "{said}");
+    let said = crate::settings(&jawd.socket, &changes(&["theme=nord"])).unwrap();
+    assert!(said.starts_with("theme     nord (Nord)\n") && said.contains("\nmessages  irc\n"), "jawd's answer: {said}");
+    let said = crate::settings(&jawd.socket, &[]).unwrap();
+    assert!(said.starts_with("theme     nord (Nord)\n") && said.contains("\nmessages  irc\n"), "hello's: {said}");
+    assert_eq!(jawd.asked("settings.set").len(), 2, "and reading them changes nothing");
+    assert!(jawd.asked("hello").iter().all(|hello| hello["client"] == TERMINAL), "{:?}", jawd.asked("hello"));
+
+    let refused = crate::settings(&jawd.socket, &changes(&["theme=solarized"])).unwrap_err();
+    assert_eq!(refused.to_string(), "theme takes one of gruvbox, nord", "the scripted jawd's own list, not jaw's");
+    let away = crate::settings(&jawd.socket.with_file_name("nobody.sock"), &[]).unwrap_err();
+    assert!(away.to_string().starts_with("jawd isn't running"), "{away}");
+}
+
 /// Whether an update answers a settings change.
 fn answers_settings(u: &Update) -> bool {
     matches!(u, Update::SettingsKept(_) | Update::SettingsRefused(_) | Update::SettingsUnconfirmed(_))
