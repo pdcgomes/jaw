@@ -596,6 +596,18 @@ fn a_jawd_from_another_build_is_said_in_the_header_with_what_to_do_until_jaws_ow
     let screen = frame(&mut v);
     let said = format!("jaw  online · jawd is 0.1.0 and jaw {jaw}: kill 8376, then start jaw again");
     assert!(screen.lines().next().unwrap().contains(&said), "{screen}");
+    // Narrower, it says less rather than crowd out the connection's state.
+    for (width, said, unsaid) in [
+        (80, "jaw  online · jawd is another build: kill 8376 ─", "then start"),
+        (64, "jaw  online · jawd is another build ─", "kill"),
+        (50, "jaw  online ─", "jawd is"),
+    ] {
+        v.resize(width, 30);
+        let screen = frame(&mut v);
+        let header = screen.lines().next().unwrap();
+        assert!(header.contains(said) && !header.contains(unsaid), "at {width} columns:\n{screen}");
+    }
+    v.resize(140, 30);
     v.apply(hello(Some(OtherJawd { version: "0.1.0".into(), pid: None })));
     let screen = frame(&mut v);
     let said = format!("jawd is 0.1.0 and jaw {jaw}: stop jawd, then start jaw again");

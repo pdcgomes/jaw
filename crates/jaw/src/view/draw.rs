@@ -240,19 +240,25 @@ impl View {
         }
     }
 
-    /// That the jawd answering is from another build than this jaw, and what to do about it.
-    fn header_other_jawd(&self) -> Vec<Span<'static>> {
+    /// That the jawd answering is from another build than this jaw, and what to do about it, as
+    /// fully as `room` columns allow, so it never crowds out the connection's state; the header's
+    /// orange says it where none of it fits.
+    fn header_other_jawd(&self, room: usize) -> Vec<Span<'static>> {
         let t = &self.theme;
-        match &self.other_jawd {
-            Some(other) if self.reach == Reach::Up => vec![
-                Span::styled(" · ", Style::new().fg(t.comment)),
-                Span::styled(
-                    format!("jawd is {} and jaw {}: {}", other.version, jaw_version::VERSION, other.remedy()),
-                    Style::new().fg(t.warn),
-                ),
-            ],
-            _ => vec![],
-        }
+        let Some(other) = self.other_jawd.as_ref().filter(|_| self.reach == Reach::Up) else {
+            return vec![];
+        };
+        let short = other.pid.map_or("restart it".to_string(), |pid| format!("kill {pid}"));
+        let said = [
+            format!("jawd is {} and jaw {}: {}", other.version, jaw_version::VERSION, other.remedy()),
+            format!("jawd is another build: {short}"),
+            "jawd is another build".to_string(),
+        ];
+        let gap = Span::styled(" · ", Style::new().fg(t.comment));
+        let Some(said) = said.into_iter().map(Span::raw).find(|said| gap.width() + said.width() <= room) else {
+            return vec![];
+        };
+        vec![gap, said.style(Style::new().fg(t.warn))]
     }
 
     fn draw_header(&self, buf: &mut Buffer, area: Rect) {
@@ -262,8 +268,6 @@ impl View {
         let pill = Span::styled(" jaw ", Style::new().bg(t.brand).fg(t.bg).add_modifier(Modifier::BOLD));
         let mut left = vec![Span::styled("╭ ", border), pill, Span::raw(" ")];
         left.extend(self.header_state(w));
-        left.extend(self.header_other_jawd());
-        left.push(Span::raw(" "));
         let mut right = vec![Span::raw(" ")];
         let unread: u32 =
             self.chats.rows().filter(|c| c.kind != crate::data::ChatKind::Community).map(|c| c.unread).sum();
@@ -273,6 +277,9 @@ impl View {
         }
         right.push(Span::styled(fmt::clock(self.now(), self.tz), Style::new().fg(t.text)));
         right.push(Span::styled(" ╮", border));
+        let used: usize = left.iter().chain(&right).map(|s| s.width()).sum();
+        left.extend(self.header_other_jawd(w.saturating_sub(used + 1)));
+        left.push(Span::raw(" "));
         let used: usize = left.iter().chain(&right).map(|s| s.width()).sum();
         if used > w {
             left.truncate(3);

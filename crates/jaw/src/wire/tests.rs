@@ -53,6 +53,8 @@ struct Kept {
     /// A change another interface makes after a connection's hello, kept before the next
     /// `settings.set`'s own, so its answer brings a setting that connection's hello didn't.
     meanwhile: Option<Value>,
+    /// The version it says it is at hello, if not jaw's own.
+    version: Option<String>,
 }
 
 /// A jawd that answers hello, the windows and find with the protocol's fixtures, takes messages
@@ -97,6 +99,7 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             if let Some(settings) = kept.settings.clone().filter(|_| params["client"] == TERMINAL) {
                 hello["settings"] = settings;
             }
+            hello["jawd"] = json!(kept.version.as_deref().unwrap_or(jaw_version::VERSION));
             hello
         }
         "chats.watch" => fixture("chats.watch.result")["result"].clone(),
@@ -680,6 +683,24 @@ fn find_goes_through_the_client_and_its_answer_to_the_palette() {
     let screen = until(&mut v, &rx, "Artur Reis");
     assert!(screen.contains("Artur Reis") && screen.contains("Archived") && screen.contains("Arrábida"), "{screen}");
     assert!(screen.contains("messages 214"), "jawd's counts on the strip:\n{screen}");
+}
+
+/// A jawd from another build is told apart at hello, with its process as its socket says: here the
+/// test's own, since the scripted jawd is a thread of it.
+#[test]
+fn a_jawd_from_another_build_is_told_apart_at_hello_with_its_process() {
+    let jawd = scripted();
+    let other = |jawd: &Scripted| {
+        let (tx, rx) = channel();
+        let mut wire = Wire::connect(jawd.socket.clone(), tx);
+        let mut said = vec![];
+        drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+        said.into_iter().find_map(|u| if let Update::Hello { other, .. } = u { Some(other) } else { None })
+    };
+    assert_eq!(other(&jawd), Some(None), "jaw's own build");
+    jawd.kept.lock().unwrap().version = Some("0.1.0".into());
+    let pid = Some(std::process::id());
+    assert_eq!(other(&jawd), Some(Some(OtherJawd { version: "0.1.0".into(), pid })), "another build");
 }
 
 #[test]
