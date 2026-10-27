@@ -92,3 +92,84 @@ func scratch(_ name: String) -> URL {
     }
     #expect(FileManager.default.fileExists(atPath: folder.appending(path: "notes.txt").path))
 }
+
+@MainActor @Test func `a sweep leaves alone a folder whose manifest isn't a sweep's`() async throws {
+    let root = scratch("foreign")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appending(path: "review")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data(#"{"name": "a web app"}"#.utf8).write(to: folder.appending(path: "manifest.json"))
+    try Data("<html>".utf8).write(to: folder.appending(path: "index.html"))
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    await #expect(throws: Pictures.PictureError.self) {
+        try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    }
+    let manifest = try String(contentsOf: folder.appending(path: "manifest.json"), encoding: .utf8)
+    #expect(manifest == #"{"name": "a web app"}"#)
+    #expect(FileManager.default.fileExists(atPath: folder.appending(path: "index.html").path))
+    let beside = try FileManager.default.contentsOfDirectory(atPath: root.path)
+    #expect(beside == ["review"], "nothing is made beside it either")
+}
+
+@MainActor @Test func `a sweep leaves alone a folder it made once something else is put in it`() async throws {
+    let root = scratch("added")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appending(path: "review")
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    let first = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    try Data("mine".utf8).write(to: folder.appending(path: "block/notes.txt"))
+    await #expect(throws: Pictures.PictureError.self) {
+        try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    }
+    #expect(FileManager.default.fileExists(atPath: folder.appending(path: "block/notes.txt").path))
+    let kept = try? JSONDecoder().decode(Pictures.Manifest.self, from: Data(contentsOf: folder.appending(path: "manifest.json")))
+    #expect(kept == first, "the sweep it made is as it was")
+}
+
+@MainActor @Test func `a sweep clears what a stopped sweep left beside the folder, and leaves nothing there itself`() async throws {
+    let root = scratch("left")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appending(path: "review")
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    let left = root.appending(path: ".review.sweeping")
+    try FileManager.default.createDirectory(at: left.appending(path: "block"), withIntermediateDirectories: true)
+    try Data("stray".utf8).write(to: left.appending(path: "block/stray.txt"))
+    var next = HarnessCatalog()
+    next.register(block("looks", axes: .look))
+    let manifest = try await Pictures.sweep(next, conditions: Conditions(), to: folder)
+    let beside = try FileManager.default.contentsOfDirectory(atPath: root.path)
+    #expect(beside == ["review"], "the stopped sweep's folder is gone, and the sweep left none of its own")
+    let written = try JSONDecoder().decode(Pictures.Manifest.self, from: Data(contentsOf: folder.appending(path: "manifest.json")))
+    #expect(written == manifest && written.scenes.map(\.id) == ["looks"])
+    let inside = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+    #expect(Set(inside) == ["looks", "manifest.json"])
+    let looks = try FileManager.default.contentsOfDirectory(atPath: folder.appending(path: "looks").path)
+    #expect(Set(looks) == ["dark-bubbles.png", "dark-lines.png", "light-bubbles.png", "light-lines.png"])
+}
+
+@MainActor @Test func `a sweep that's stopped leaves the last whole one where it was, and one that finishes leaves nothing beside it`() async throws {
+    let root = scratch("stopped")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appending(path: "review")
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    let first = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    let beside = try FileManager.default.contentsOfDirectory(atPath: root.path)
+    #expect(beside == ["review"], "a sweep that finishes leaves nothing beside the folder")
+    let stopped = Task { try await Pictures.sweep(catalog, conditions: Conditions(), to: folder) }
+    stopped.cancel()
+    await #expect(throws: CancellationError.self) { try await stopped.value }
+    let kept = try? JSONDecoder().decode(Pictures.Manifest.self, from: Data(contentsOf: folder.appending(path: "manifest.json")))
+    #expect(kept == first, "the last whole sweep is where it was")
+    for picture in first.scenes.flatMap(\.pictures) {
+        #expect(FileManager.default.fileExists(atPath: folder.appending(path: picture.file).path), "\(picture.file)")
+    }
+    let next = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    #expect(next.scenes == first.scenes)
+    let after = try FileManager.default.contentsOfDirectory(atPath: root.path)
+    #expect(after == ["review"], "nor does one after a sweep that was stopped")
+}
