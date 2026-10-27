@@ -1244,14 +1244,19 @@ fn without_colour_photos_are_their_summary_lines() {
 #[test]
 fn scrolling_leaves_nothing_of_an_escape_drawn_picture_behind() {
     let (mut v, rx) = pictured(Protocol::Iterm, 140, 50);
-    press(&mut v, &rx, "<a-down><a-down><a-down><up><pgup><pgup>");
+    press(&mut v, &rx, "<a-down><a-down><a-down><up>");
     let mut term = ratatui::Terminal::new(TestBackend::new(140, 50)).unwrap();
     let mut draw = |v: &mut View| {
         let buf = term.draw(|f| v.draw(f)).unwrap().buffer.clone();
         (buf, String::from_utf8_lossy(&v.take_writes()).to_string(), term.backend().buffer().clone())
     };
+    // Drawn as the first page up moves the pictures, before what it brings is settled, which can
+    // take longer than a picture takes to stand still.
+    v.on_input(Input::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)));
     let (buf, writes, _) = draw(&mut v);
     assert!(writes.is_empty() && buf.content.iter().all(|c| c.diff_option == CellDiffOption::None));
+    run::settle(&mut v, &rx);
+    press(&mut v, &rx, "<pgup>");
     std::thread::sleep(crate::graphics::STILL + std::time::Duration::from_millis(20));
     let (buf, writes, _) = draw(&mut v);
     assert_eq!(writes.matches("\x1b]1337;File=").count(), 4, "the tiles, the sticker and the poster, once still");
