@@ -94,13 +94,14 @@ public final class Command {
         shortcut?.display ?? hint
     }
 
-    /// A menu item that runs the command, enabled and checked as it says.
+    /// A menu item that runs the command, enabled and checked as it says; under a title of its own,
+    /// which says what it will do (Unpin), it has no tick.
     public func menuItem(title: String? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title ?? self.title, action: send ?? #selector(CommandTarget.runCommand(_:)),
                               keyEquivalent: shortcut?.menuKey ?? "")
         item.keyEquivalentModifierMask = shortcut?.modifiers ?? []
         item.target = send == nil ? CommandTarget.shared : nil
-        item.representedObject = CommandBox(self)
+        item.representedObject = CommandBox(self, ticks: title == nil)
         if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: self.title) }
         return item
     }
@@ -131,9 +132,12 @@ public final class Command {
 /// Holds a command in a menu item, which keeps its represented object strongly.
 final class CommandBox: NSObject {
     let command: Command
+    /// Whether the item shows the command's tick: not when its title says what it will do (Unpin).
+    let ticks: Bool
 
-    @MainActor init(_ command: Command) {
+    @MainActor init(_ command: Command, ticks: Bool = true) {
         self.command = command
+        self.ticks = ticks
     }
 }
 
@@ -148,9 +152,9 @@ final class CommandTarget: NSObject, NSMenuItemValidation {
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        guard let command = (item.representedObject as? CommandBox)?.command else { return true }
-        if let on = command.on { item.state = on() ? .on : .off }
-        return command.enabled()
+        guard let box = item.representedObject as? CommandBox else { return true }
+        if box.ticks, let on = box.command.on { item.state = on() ? .on : .off }
+        return box.command.enabled()
     }
 }
 
@@ -205,6 +209,7 @@ public enum Menus {
     /// A right-click menu from its entries, each command found by `command`: an entry with no command
     /// is left out, a submenu with nothing in it too, and a separator only stands between items.
     /// Items are enabled and ticked as things stand when it's made, which is as it opens.
+    /// A command sent along the responder chain (copy:) doesn't belong in one: nothing asks the chain.
     public static func menu(_ entries: [MenuEntry], command: (String) -> Command?) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -221,9 +226,9 @@ public enum Menus {
             switch entry {
             case let .command(id, title):
                 guard let c = command(id) else { continue }
+                assert(c.send == nil, "\(id) goes along the responder chain, which a right-click menu doesn't ask")
                 let item = c.menuItem(title: title)
-                item.isEnabled = c.enabled()
-                if let on = c.on { item.state = on() ? .on : .off }
+                item.isEnabled = CommandTarget.shared.validateMenuItem(item)
                 out.append(item)
             case let .submenu(title, inner):
                 let made = items(inner, command: command)
