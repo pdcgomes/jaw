@@ -1,8 +1,9 @@
 //! The backfill that converts again the messages jawd couldn't show when they came, now that it
-//! knows more kinds: a row of kind unknown, or a system line jawd had no sentence for, takes what
-//! its raw protobuf converts to now, and one that turns out to change another message, as an
-//! encrypted edit does, leaves the chat to wait in `pending` with its raw protobuf, as it would
-//! arriving now. A row's raw protobuf is left as it is.
+//! knows more kinds: a row of kind unknown, or one saying it couldn't be shown with no text,
+//! whatever its kind (a system line jawd had no sentence for, or a copy that kept an unreadable
+//! edit's words), takes what its raw protobuf converts to now, and one that turns out to change
+//! another message, as an encrypted edit does, leaves the chat to wait in `pending` with its raw
+//! protobuf, as it would arriving now. A row's raw protobuf is left as it is.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
@@ -24,24 +25,27 @@ pub const KINDS: &str = "kinds";
 pub(super) const CONVERTING: Duration = Duration::from_millis(1);
 
 /// The next messages, each with whether jawd couldn't show it when it came: one of kind unknown, or
-/// one saying so, as `kinds::UNKNOWN` does, whatever its kind, as a copy of a message keeps an
-/// earlier edit's words, those of an edit jaw couldn't read among them; that isn't deleted. It reads
-/// no raw protobuf, which a step would otherwise read whole for every message it looks at.
+/// one saying so with no text, as `kinds::UNKNOWN` says it, whatever its kind, as a copy of a
+/// message keeps an earlier edit's words, those of an edit jaw couldn't read among them; that isn't
+/// deleted. A message whose own words sum up to that sentence has its text. It reads no raw
+/// protobuf, which a step would otherwise read whole for every message it looks at.
 pub(super) const NEXT_UNSHOWN: &str = "SELECT n,
-        NOT deleted AND (kind = 'unknown' OR summary = 'jaw can''t show this yet')
+        NOT deleted AND (kind = 'unknown' OR text IS NULL AND summary = 'jaw can''t show this yet')
     FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
 const UNSHOWN: &str = "SELECT chat, id, raw FROM messages WHERE n = ?1";
 const NAMED: &str = "SELECT c.id, m.id, m.raw FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1";
 const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 /// A message as it converts now. Text a later edit gave it stays, an edit's time being past any
-/// a message that isn't one has, unless jaw couldn't show that either: an edit after the one a row
-/// stands in for left no raw protobuf of its own. A row whose raw protobuf is an edit standing in
-/// for its message (?15) keeps what the message itself brought, as its copy may have since: its
-/// quote, forwarding, expiry, view-once and mention of you, which an edit doesn't carry.
+/// a message that isn't one has, unless jaw couldn't show that either, which leaves no text and the
+/// sentence saying so, as no words of an edit do, though they may sum up to it: an edit after the
+/// one a row stands in for left no raw protobuf of its own. A row whose raw protobuf is an edit
+/// standing in for its message (?15) keeps what the message itself brought, as its copy may have
+/// since: its quote, forwarding, expiry, view-once and mention of you, which an edit doesn't carry.
 const SHOWN: &str = "UPDATE messages SET kind = ?2,
-        text = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, text, ?3),
-        spans = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, spans, ?4),
-        summary = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, summary, iif(?5 IS ?3, NULL, ?5)),
+        text = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), text, ?3),
+        spans = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), spans, ?4),
+        summary = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), summary,
+            iif(?5 IS ?3, NULL, ?5)),
         reply = iif(?15, reply, ?6), detail = ?7, forwarded = iif(?15, forwarded, ?8),
         expires_at = iif(?15, expires_at, ?9), view_once = iif(?15, view_once, ?10),
         mentions_me = iif(?15, mentions_me, ?11), v = ?14
@@ -115,9 +119,9 @@ fn converted_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool>
     Ok(changed)
 }
 
-/// Whether a converted message is one jawd still can't show.
+/// Whether a converted message is one jawd still can't show, as it says with no text.
 fn unshown(message: &Message) -> bool {
-    message.kind == "unknown" || message.summary == UNKNOWN
+    message.kind == "unknown" || message.text.is_none() && message.summary == UNKNOWN
 }
 
 fn account(db: &Connection) -> Result<Me> {

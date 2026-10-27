@@ -172,8 +172,8 @@ async fn a_step_meeting_many_to_convert_ends_once_it_has_converted_for_a_while_a
     assert_eq!(store.count("messages WHERE kind = 'text'").unwrap(), 64);
 }
 
-/// Meta AI's answer `id` in Ana's chat, saying `said`, quoting a question of yours, mentioning you
-/// and disappearing in 90 days.
+/// Meta AI's answer `id` in Ana's chat, saying `said`, quoting a question of yours, mentioning you,
+/// disappearing in 90 days, forwarded twice and to be seen once.
 fn answer(id: &str, said: &str) -> WebMessageInfo {
     let context = e2e::ContextInfo {
         stanza_id: Some("3EB0Q".into()),
@@ -184,6 +184,8 @@ fn answer(id: &str, said: &str) -> WebMessageInfo {
         })),
         mentioned_jid: vec![ME.into()],
         expiration: Some(7_776_000),
+        is_forwarded: Some(true),
+        forwarding_score: Some(2),
         ..Default::default()
     };
     let answer = e2e::AiRichResponseMessage {
@@ -195,7 +197,9 @@ fn answer(id: &str, said: &str) -> WebMessageInfo {
         context_info: Some(Box::new(context)),
         ..Default::default()
     };
-    web(ANA, id, Some(ANA), Some(e2e::Message { rich_response_message: Some(Box::new(answer)), ..Default::default() }))
+    let answer = e2e::Message { rich_response_message: Some(Box::new(answer)), ..Default::default() };
+    let once = e2e::FutureProofMessage { message: Some(Box::new(answer)) };
+    web(ANA, id, Some(ANA), Some(e2e::Message { view_once_message_v2: Some(Box::new(once)), ..Default::default() }))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -241,24 +245,29 @@ async fn a_copy_coming_onto_an_earlier_jawds_unreadable_stand_in_shows_and_keeps
     }
     store.apply(Lane::Live, live).await.unwrap();
     store.apply(Lane::Background, convert::message(&answer("ai2", "Lisbon is a city."), &me, false)).await.unwrap();
-    type Read = (String, Option<String>, Option<String>, Option<String>, bool, Option<i64>, Option<i64>);
+    // What a copy brought: its quote, forwarding, mention of you, expiry and view-once, and when
+    // the message was edited.
+    type Brought = (Option<String>, i64, bool, Option<i64>, bool, Option<i64>);
     let read = |n: i64| {
         let store = store.clone();
         async move {
             query(&store, move |db| {
                 Ok(db.query_row(
-                    "SELECT kind, text, summary, reply ->> 'id', mentions_me, expires_at, edited_at FROM messages WHERE n = ?1",
+                    "SELECT kind, text, summary, reply ->> 'id', forwarded, mentions_me, expires_at, view_once, edited_at
+                    FROM messages WHERE n = ?1",
                     [n],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                    |r| {
+                        let brought: Brought = (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?);
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, brought))
+                    },
                 )?)
             })
             .await
         }
     };
-    // What each copy brought: its quote, its mention of you, its expiry from when it was sent.
-    let brought = |n: i64| {
+    let brought = |n: i64| -> Brought {
         let sent = if n == 1 { AT + 10_000 } else { AT };
-        (Some("3EB0Q".to_string()), true, Some(sent + 7_776_000_000), Some(AT + 5))
+        (Some("3EB0Q".to_string()), 2, true, Some(sent + 7_776_000_000), true, Some(AT + 5))
     };
     let mentions = |store: &Store| {
         let store = store.clone();
@@ -268,13 +277,13 @@ async fn a_copy_coming_onto_an_earlier_jawds_unreadable_stand_in_shows_and_keeps
         }
     };
     for n in [1, 2] {
-        let (kind, text, summary, reply, mentions, at, edited_at): Read = read(n).await;
+        let (kind, text, summary, has) = read(n).await;
         assert_eq!(
             (kind.as_str(), text, summary.as_deref()),
             ("text", None, Some(UNKNOWN)),
             "{n}, as the copy left it"
         );
-        assert_eq!((reply, mentions, at, edited_at), brought(n), "{n} has what its copy brought");
+        assert_eq!(has, brought(n), "{n} has what its copy brought");
     }
     let mentioned = mentions(&store).await;
     assert!(mentioned >= 1, "the live answer mentions you, after where history's copy read to");
@@ -283,9 +292,9 @@ async fn a_copy_coming_onto_an_earlier_jawds_unreadable_stand_in_shows_and_keeps
         backfill(&store).await;
     }
     for (n, said) in [(1, "Lisbon is the capital."), (2, "Lisbon is a city.")] {
-        let (kind, text, summary, reply, mentions, at, edited_at): Read = read(n).await;
+        let (kind, text, summary, has) = read(n).await;
         assert_eq!((kind.as_str(), text.as_deref(), summary), ("text", Some(said), None), "{n} shows what jaw can now");
-        assert_eq!((reply, mentions, at, edited_at), brought(n), "{n} keeps what its copy brought");
+        assert_eq!(has, brought(n), "{n} keeps what its copy brought");
     }
     assert_eq!(mentions(&store).await, mentioned, "and its chat counts the mention still");
 }
@@ -372,9 +381,14 @@ async fn a_message_whose_conversion_fails_or_panics_is_kept_in_quarantine_and_th
 
 /// Ana's business template `id` in `chat`, which an earlier jawd couldn't show.
 fn monday(chat: &str, id: &str) -> WebMessageInfo {
+    template_saying(chat, id, MONDAY)
+}
+
+/// Ana's business template `id` in `chat`, saying `words`.
+fn template_saying(chat: &str, id: &str, words: &str) -> WebMessageInfo {
     let template = e2e::TemplateMessage {
         hydrated_template: Some(Box::new(e2e::template_message::HydratedFourRowTemplate {
-            hydrated_content_text: Some(MONDAY.into()),
+            hydrated_content_text: Some(words.into()),
             ..Default::default()
         })),
         ..Default::default()
@@ -402,6 +416,14 @@ fn said(message: &WebMessageInfo) -> (Option<String>, Option<String>, Option<Str
 
 /// Ana's edit, made at `at`, of her message `target` in `chat`, to say `TUESDAY`.
 fn tuesday(chat: &str, target: &str, at: i64) -> WebMessageInfo {
+    edited_to(chat, target, at, TUESDAY)
+}
+
+/// An edit's words that sum up to the sentence jawd says of what it can't show.
+const SAYS: &str = "*jaw* can't show this yet";
+
+/// Ana's edit, made at `at`, of her message `target` in `chat`, to say `words`.
+fn edited_to(chat: &str, target: &str, at: i64, words: &str) -> WebMessageInfo {
     let edit = e2e::ProtocolMessage {
         key: Some(MessageKey {
             remote_jid: Some(chat.into()),
@@ -410,7 +432,7 @@ fn tuesday(chat: &str, target: &str, at: i64) -> WebMessageInfo {
             participant: None,
         }),
         r#type: Some(e2e::protocol_message::Type::MessageEdit as i32),
-        edited_message: Some(Box::new(e2e::Message { conversation: Some(TUESDAY.into()), ..Default::default() })),
+        edited_message: Some(Box::new(e2e::Message { conversation: Some(words.into()), ..Default::default() })),
         timestamp_ms: Some(at),
         ..Default::default()
     };
@@ -688,6 +710,53 @@ fn before_kinds(home: &std::path::Path) -> Vec<Left> {
             false,
             Some(packed(&monday(GROUP, "t17"))),
         ),
+        // Ana's template, and a message jaw showed, each edited later to words that sum up to the
+        // sentence jawd says of what it can't show; their spans and summary are set below.
+        (
+            18,
+            1,
+            "t18",
+            Some(1),
+            false,
+            "unknown",
+            Some(SAYS),
+            None,
+            Some(AT + 80),
+            false,
+            Some(packed(&monday(GROUP, "t18"))),
+        ),
+        (
+            19,
+            1,
+            "t19",
+            Some(1),
+            false,
+            "text",
+            Some(SAYS),
+            None,
+            Some(AT + 90),
+            false,
+            Some(packed(&web(
+                GROUP,
+                "t19",
+                Some(ANA),
+                Some(e2e::Message { conversation: Some("olá de novo".into()), ..Default::default() }),
+            ))),
+        ),
+        // A template whose own words sum up to that sentence.
+        (
+            20,
+            1,
+            "t20",
+            Some(1),
+            false,
+            "unknown",
+            None,
+            unknown,
+            None,
+            false,
+            Some(packed(&template_saying(GROUP, "t20", SAYS))),
+        ),
     ];
     let mut insert = db
         .prepare(
@@ -701,9 +770,15 @@ fn before_kinds(home: &std::path::Path) -> Vec<Left> {
             .execute(params![n, chat, id, AT + n, sender, mine, kind, text, summary, detail, edited_at, deleted, raw])
             .unwrap();
     }
-    // Row 14's edit came first, so the row reads as the edit does, spans and summary too.
-    let (_, spans, summary) = said(&tuesday(GROUP, "t14", AT + 50));
-    db.execute("UPDATE messages SET spans = ?1, summary = ?2 WHERE n = 14", params![spans, summary]).unwrap();
+    // Rows 14, 18 and 19 read as their edits do, spans and summary too.
+    for (n, edit) in [
+        (14, tuesday(GROUP, "t14", AT + 50)),
+        (18, edited_to(GROUP, "t18", AT + 80, SAYS)),
+        (19, edited_to(GROUP, "t19", AT + 90, SAYS)),
+    ] {
+        let (_, spans, summary) = said(&edit);
+        db.execute("UPDATE messages SET spans = ?1, summary = ?2 WHERE n = ?3", params![spans, summary, n]).unwrap();
+    }
     db.execute_batch(
         "UPDATE chats SET last_message = 11, last_at = 1792000000011 WHERE n = 1;
         UPDATE chats SET last_message = 1, last_at = 1792000000001 WHERE n = 2;
@@ -728,11 +803,13 @@ async fn backfill(store: &Store) -> Applied {
     store.apply(Lane::Background, vec![Change::Backfill(KINDS)]).await.unwrap()
 }
 
-/// How many messages read as jaw can't show them: of kind unknown, and system lines saying so.
+/// How many messages read as jaw can't show them: of kind unknown, and of any other kind saying so
+/// with no text, system lines jawd couldn't word among them, as the backfill takes them.
 async fn unshown_count(store: &Store) -> (i64, i64) {
     query(store, |db| {
         Ok(db.query_row(
-            "SELECT count(*) FILTER (WHERE kind = 'unknown'), count(*) FILTER (WHERE kind = 'system' AND summary = ?1)
+            "SELECT count(*) FILTER (WHERE kind = 'unknown'),
+                count(*) FILTER (WHERE kind <> 'unknown' AND text IS NULL AND summary = ?1)
             FROM messages WHERE NOT deleted",
             [UNKNOWN],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -845,9 +922,10 @@ async fn measure_the_kinds_backfill() {
     let waiting: i64 =
         query(&store, move |db| Ok(db.query_row("SELECT count(*) - ?1 FROM pending", [pending], |r| r.get(0))?)).await;
     eprintln!(
-        "{messages} messages, {} of kind unknown and {} lines jawd couldn't word: migrated in {:.1} ms; backfilled in \
+        "{messages} messages, {} of kind unknown and {} of other kinds saying so: migrated in {:.1} ms; backfilled in \
          {:.2} s ({:.0} messages a second), {changed} steps changing some, in {transactions} transactions, each {:.2} ms p50 and \
-         {:.2} ms p99 with its commit; {} of kind unknown and {} such lines left, {waiting} more waiting in pending",
+         {:.2} ms p99 with its commit (the writer's last 1,024 transactions, not its steps); {} of kind unknown and \
+         {} of others saying so left, {waiting} more waiting in pending",
         before.0,
         before.1,
         migrated.as_secs_f64() * 1e3,
@@ -896,7 +974,7 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     let home = tempfile::tempdir().unwrap();
     let left = before_kinds(home.path());
     let store = Store::open(home.path()).unwrap();
-    assert_eq!(store.backfill_left(KINDS).unwrap(), 17, "the migration leaves the backfill to do, as status says");
+    assert_eq!(store.backfill_left(KINDS).unwrap(), 20, "the migration leaves the backfill to do, as status says");
 
     // A copy of Rui's encrypted edit converted since waits already, and isn't kept twice.
     let me = Me::new([ME.to_string()]);
@@ -950,25 +1028,36 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
         Some(("system".into(), Some("Open WhatsApp on your phone to see this message".into())))
     );
     // A template edited after it came keeps its edit's words, spans and summary, whichever way
-    // round they came, and none of the template's links; one edited by an edit jaw couldn't read,
-    // which left nothing to keep, reads as the template does, its links and all. Each keeps when
-    // it was edited.
+    // round they came, and none of the template's links, as does one whose edit's words sum up to
+    // the sentence jawd says of what it can't show; one edited by an edit jaw couldn't read, which
+    // left nothing to keep, reads as the template does, its links and all. Each keeps when it was
+    // edited, if it was. A template whose own words sum up to that sentence is text saying them.
     let edit = said(&tuesday(GROUP, "t15", AT + 60));
     let template = said(&monday(GROUP, "t17"));
+    let says = said(&edited_to(GROUP, "t18", AT + 80, SAYS));
+    let saying = said(&template_saying(GROUP, "t20", SAYS));
     assert!(edit.1.is_some() && edit.2.is_some() && template.1.is_some() && template.2.is_some());
-    for (n, words, edited_at) in [(14, &edit, AT + 50), (15, &edit, AT + 60), (17, &template, AT + 70)] {
+    assert_eq!((says.0.as_deref(), says.2.as_deref()), (Some(SAYS), Some(UNKNOWN)), "its words sum up to the sentence");
+    assert_eq!(saying, says, "the template's own words, alike");
+    for (n, words, edited_at) in [
+        (14, &edit, Some(AT + 50)),
+        (15, &edit, Some(AT + 60)),
+        (17, &template, Some(AT + 70)),
+        (18, &says, Some(AT + 80)),
+        (20, &saying, None),
+    ] {
         let kept: (String, Option<String>, Option<String>, Option<String>, Option<i64>) = query(&store, move |db| {
             Ok(db.query_row("SELECT kind, text, spans, summary, edited_at FROM messages WHERE n = ?1", [n], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })?)
         })
         .await;
-        let expected = ("text".to_string(), words.0.clone(), words.1.clone(), words.2.clone(), Some(edited_at));
+        let expected = ("text".to_string(), words.0.clone(), words.1.clone(), words.2.clone(), edited_at);
         assert_eq!(kept, expected, "message {n}");
     }
     assert_eq!(row(16).map(|r| r.1), Some("poll".into()), "a comment that's a poll is a poll");
     assert_eq!(store.count("poll_options WHERE message = 16").unwrap(), 2, "with its options");
-    for n in [1, 2, 5, 6, 12, 14, 15, 16, 17] {
+    for n in [1, 2, 5, 6, 12, 14, 15, 16, 17, 18, 20] {
         assert!(row(n).unwrap().4 > was(n).4, "message {n} takes a new version");
     }
 
@@ -988,14 +1077,15 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
         }
     };
     let chat_of = |n: i64| left.iter().find(|row| row.0 == n).map(|row| row.1);
-    for n in [1, 2, 5, 6, 12, 14, 15, 16, 17] {
+    for n in [1, 2, 5, 6, 12, 14, 15, 16, 17, 18, 20] {
         assert_eq!(event("message", n).await, (Some(row(n).unwrap().4), chat_of(n)), "message {n}'s event");
     }
     for n in [3, 4] {
         assert_eq!(event("message", n).await.1, Some(1), "message {n}, gone, has its event");
     }
     // A row whose raw protobuf converts to nothing at all stays, so nothing it said is lost.
-    for n in [7, 8, 9, 10, 11, 13] {
+    // Nor is one jaw shows whose later edit's words sum up to the sentence (19) taken at all.
+    for n in [7, 8, 9, 10, 11, 13, 19] {
         assert_eq!(row(n), Some(was(n)), "message {n}, which still can't be shown or was shown, is as it was");
     }
     assert!(row(3).is_none() && row(4).is_none(), "encrypted edits are no rows");
@@ -1080,7 +1170,7 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     // Taken again from the start, it changes nothing.
     let settled = shown(&store).await;
     let raw = Connection::open(home.path().join("jaw.db")).unwrap();
-    raw.execute("INSERT INTO backfills (name, after, upto) VALUES ('kinds', 0, 17)", []).unwrap();
+    raw.execute("INSERT INTO backfills (name, after, upto) VALUES ('kinds', 0, 20)", []).unwrap();
     drop(raw);
     let again = backfill(&store).await;
     assert_eq!((again.changed, again.quarantined), (0, 0), "{again:?}");
