@@ -447,6 +447,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             case .retry: host?.conversation(self, retry: m.id)
             case .showMore: unfold(m.id)
             case let .quote(id): go(to: id)
+            case let .open(url): host?.conversation(self, open: url)
             }
             return
         }

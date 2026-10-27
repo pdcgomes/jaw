@@ -205,6 +205,8 @@ public struct MessageRow: WindowRow, Decodable, Hashable {
     public var album: Album?
     public var link: LinkPreview?
     public var poll: Poll?
+    public var location: Location?
+    public var contact: Contact?
 
     /// The text as one string, for copying and for the box when editing.
     public var plain: String {
@@ -237,6 +239,8 @@ public struct MessageRow: WindowRow, Decodable, Hashable {
         album = try? c.decodeIfPresent(Album.self, forKey: .album)
         link = try? c.decodeIfPresent(LinkPreview.self, forKey: .link)
         poll = try? c.decodeIfPresent(Poll.self, forKey: .poll)
+        location = try? c.decodeIfPresent(Location.self, forKey: .location)
+        contact = try? c.decodeIfPresent(Contact.self, forKey: .contact)
     }
 
     public init(id: String, v: UInt64, sort: String, chat: String, at: Int64, from: Sender? = nil, mine: Bool = false,
@@ -267,11 +271,13 @@ public struct MessageRow: WindowRow, Decodable, Hashable {
         album = nil
         link = nil
         poll = nil
+        location = nil
+        contact = nil
     }
 
     enum Keys: String, CodingKey {
         case id, v, sort, chat, at, from, mine, kind, spans, reply, forwarded, reactions, status, edited, deleted
-        case starred, system, media, voice, album, link, poll
+        case starred, system, media, voice, album, link, poll, location, contact
         case expiresAt = "expires_at"
         case viewOnce = "view_once"
     }
@@ -376,6 +382,24 @@ public struct Media: Decodable, Sendable, Hashable {
     public var bytes: Int64?
     public var name: String?
     public var mime: String?
+    /// A document's pages.
+    public var pages: Int?
+    /// jawd's previews by their size ("256", "768"), paths under its root, once it downloads media.
+    public var previews: [String: String]?
+}
+
+/// Where a location message points.
+public struct Location: Decodable, Sendable, Hashable {
+    public var lat: Double?
+    public var lon: Double?
+    public var name: String?
+    public var address: String?
+    public var url: String?
+}
+
+/// A contact card.
+public struct Contact: Decodable, Sendable, Hashable {
+    public var name: String?
 }
 
 public struct Voice: Decodable, Sendable, Hashable {
@@ -396,8 +420,40 @@ public struct Album: Decodable, Sendable, Hashable {
 public struct LinkPreview: Decodable, Sendable, Hashable {
     public var url: String
     public var title: String?
+    public var description: String?
 }
 
 public struct Poll: Decodable, Sendable, Hashable {
     public var question: String
+    public var options: [Option]
+    /// How many options a vote may choose.
+    public var max: Int
+
+    public struct Option: Decodable, Sendable, Hashable {
+        public var name: String
+        public var votes: Int
+        public var mine: Bool
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            name = try c.decode(String.self, forKey: .name)
+            votes = try c.decodeIfPresent(Int.self, forKey: .votes) ?? 0
+            mine = try c.decodeIfPresent(Bool.self, forKey: .mine) ?? false
+        }
+
+        enum Keys: String, CodingKey {
+            case name, votes, mine
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        question = try c.decode(String.self, forKey: .question)
+        options = (try? c.decodeIfPresent([Option].self, forKey: .options)) ?? []
+        max = try c.decodeIfPresent(Int.self, forKey: .max) ?? 1
+    }
+
+    enum Keys: String, CodingKey {
+        case question, options, max
+    }
 }

@@ -172,3 +172,11 @@ func differing(_ a: [UInt8], _ b: [UInt8]) -> Int {
     #expect(Format.num(1204) == "1,204" && Format.length(74) == "1:14")
     #expect(Format.ago(now - 5 * 60000, now: now, tz: tz) == "5 min ago")
 }
+
+@Test func `every kind jawd draws a card for decodes into its sample, and lays out with its card`() {
+    let kinds = Samples.kinds
+    #expect(kinds.map(\.kind) == [.video, .document, .location, .poll, .contact, .text, .voice, .album])
+    #expect(kinds[0].media?.seconds == 42 && kinds[1].media?.pages == 12 && kinds[2].location?.name == "Cabo da Roca")
+    #expect(kinds[3].poll?.options.count == 2 && kinds[3].poll?.options.first?.mine == true && kinds[4].contact?.name == "Climbing shop")
+    #expect(kinds[5].link?.description != nil && kinds[7].album?.items.count == 5)
+}
