@@ -1,4 +1,5 @@
 import AppKit
+import JawUI
 import SwiftUI
 
 /// Jaw Harness: the app's components and screens in the states worth reviewing, drawn from made-up
@@ -7,6 +8,12 @@ import SwiftUI
 @main
 struct HarnessApp: App {
     @NSApplicationDelegateAdaptor(HarnessDelegate.self) private var delegate
+
+    /// The scenes draw as of `Samples.now`, not the system's clock, so the times and days they show,
+    /// and so their pictures, are the same whatever day they're drawn.
+    init() {
+        Format.currentTime = { Samples.now }
+    }
 
     var body: some Scene {
         // One window: the appearance and Reduce Motion it sets are the app's, not a window's.

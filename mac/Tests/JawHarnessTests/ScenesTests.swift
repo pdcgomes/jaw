@@ -12,6 +12,10 @@ import Testing
     #expect(Fixtures.members.map(\.name) == ["Ana Ribeiro", "Rui Costa", "Inês Gomes"])
 }
 
+@MainActor @Test func `the harness draws as of Samples' now, so a picture taken today compares with last week's`() {
+    #expect(Format.now() == Samples.now)
+}
+
 @MainActor @Test func `every scene draws as wide as it says, says what to look for, and is named for a script`() async throws {
     #expect(HarnessCatalog.shared.scenes.map(\.id) == ["roles", "mimic", "chat-list", "conversation", "palette", "states"])
     for scene in HarnessCatalog.shared.scenes {
