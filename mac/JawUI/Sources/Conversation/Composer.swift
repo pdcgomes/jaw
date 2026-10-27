@@ -30,7 +30,12 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         self?.dropMode()
     }
 
-    let placeholder = Labels.make("", .body)
+    let placeholder = Labels.make("Message", .body)
+    /// The chat this box writes to, always shown at the start of the field.
+    let chip = ChatChip()
+    var avatar: NSImage? {
+        didSet { showChip() }
+    }
     let completions = CompletionView()
     var heightConstraint: NSLayoutConstraint!
     /// The field's top: just under the panes, or under the strip while there is one, so a box with
@@ -105,7 +110,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         completions.isHidden = true
         completions.picked = { [weak self] in self?.take($0) }
 
-        for v in [bar, barClose, field, scroll, placeholder, completions] as [NSView] {
+        for v in [bar, barClose, field, chip, scroll, placeholder, completions] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -118,17 +123,19 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
             barClose.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             barClose.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
             scrollTop,
-            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            field.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Space.l),
+            chip.leadingAnchor.constraint(equalTo: field.leadingAnchor, constant: Space.xs),
+            chip.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
+            scroll.leadingAnchor.constraint(equalTo: chip.trailingAnchor, constant: Space.xxs),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -Space.m),
             heightConstraint,
             field.topAnchor.constraint(equalTo: scroll.topAnchor),
             field.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
-            field.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
             field.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
             placeholder.leadingAnchor.constraint(equalTo: scroll.leadingAnchor, constant: 9),
             placeholder.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
-            completions.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            completions.leadingAnchor.constraint(equalTo: field.leadingAnchor),
             completions.bottomAnchor.constraint(equalTo: scroll.topAnchor, constant: -4),
             completions.widthAnchor.constraint(equalToConstant: 280),
         ])
@@ -147,6 +154,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         textView.textColor = roles.text.nsColor
         textView.insertionPointColor = roles.accent.nsColor
         placeholder.textColor = roles.tertiary.nsColor
+        showChip()
         bar.textColor = unsentWhy == nil ? roles.secondary.nsColor : roles.failed.nsColor
         barClose.roles = roles
         completions.roles = roles
@@ -171,8 +179,13 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
             : scroll.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: Space.xs)
         scrollTop.isActive = true
         barClose.isHidden = mode == .writing && unsentWhy == nil
-        placeholder.stringValue = "to \(chat.name)"
+        showChip()
         colour()
+    }
+
+    func showChip() {
+        guard isViewLoaded, let roles else { return }
+        chip.show(chat, image: avatar, roles: roles)
     }
 
     public static func summary(_ m: MessageRow) -> String {
@@ -248,7 +261,7 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
     /// has changed since its own last draft.
     func chatChanged(_ row: ChatRow) {
         chat = row
-        placeholder.stringValue = "to \(row.name)"
+        showChip()
         let theirs = row.draft ?? ""
         if case .writing = mode, textView.string == draftSent, theirs != draftSent, textView.window?.firstResponder !== textView {
             textView.string = theirs

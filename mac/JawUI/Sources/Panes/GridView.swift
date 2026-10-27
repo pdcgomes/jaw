@@ -368,6 +368,9 @@ final class Shade: NSView {
         nil
     }
 
+    /// How far inside the pane's edge the outline runs.
+    static let inset = Space.xs
+
     override func draw(_: NSRect) {
         guard let roles, many else { return }
         if !focused, look.dim > 0 {
@@ -375,7 +378,7 @@ final class Shade: NSView {
             bounds.fill()
         }
         if focused, let outline = look.outline {
-            let r = bounds.insetBy(dx: Space.xs, dy: Space.xs)
+            let r = bounds.insetBy(dx: Self.inset, dy: Self.inset)
             let path = NSBezierPath(roundedRect: r, xRadius: Radius.field, yRadius: Radius.field)
             path.lineWidth = Stroke.hairline
             outline.opacity(0.7).nsColor.setStroke()

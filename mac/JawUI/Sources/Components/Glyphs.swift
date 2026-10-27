@@ -101,3 +101,64 @@ public final class AvatarView: NSView {
         Avatar.draw(name, id: id, image: image, in: bounds, roles: roles)
     }
 }
+
+/// A chat named in a chip, its picture beside its name in the accent: the box's "to whom".
+@MainActor
+public final class ChatChip: NSView {
+    let avatar = AvatarView()
+    let name = Labels.make("", .callout)
+    public var roles: Roles? {
+        didSet { needsDisplay = true }
+    }
+
+    public static let height: CGFloat = 22
+
+    override public init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        name.font = TextStyle.callout.emphasised
+        for v in [avatar, name] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        let side = Self.height - Space.xs * 2 + 2
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: Self.height),
+            avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.xs - 1),
+            avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
+            avatar.widthAnchor.constraint(equalToConstant: side),
+            avatar.heightAnchor.constraint(equalToConstant: side),
+            name.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: Space.xs + 1),
+            name.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            name.centerYAnchor.constraint(equalTo: centerYAnchor),
+            widthAnchor.constraint(lessThanOrEqualToConstant: 200),
+        ])
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    public func show(_ chat: ChatRow, image: NSImage?, roles: Roles) {
+        self.roles = roles
+        name.stringValue = chat.name
+        name.textColor = roles.accent.nsColor
+        avatar.show(chat.name, id: chat.id, image: image, roles: roles)
+        toolTip = "Writing to \(chat.name)"
+        setAccessibilityLabel("Writing to \(chat.name)")
+        needsDisplay = true
+    }
+
+    override public var wantsUpdateLayer: Bool {
+        true
+    }
+
+    override public func updateLayer() {
+        guard let roles, let layer else { return }
+        layer.cornerRadius = Self.height / 2
+        layer.backgroundColor = roles.accent.opacity(roles.isDark ? 0.16 : 0.12).cgColor
+    }
+}

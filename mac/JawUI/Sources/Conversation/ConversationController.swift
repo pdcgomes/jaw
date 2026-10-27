@@ -61,7 +61,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
 
     /// The chat's picture, from the chat list's cache.
     public var avatar: NSImage? {
-        didSet { header.avatar.show(chat.name, id: chat.id, image: avatar, roles: spec.style.roles) }
+        didSet {
+            header.avatar.show(chat.name, id: chat.id, image: avatar, roles: spec.style.roles)
+            composer.avatar = avatar
+        }
     }
 
     let scroll = NSScrollView()
@@ -948,7 +951,9 @@ final class HeaderView: NSView {
             blur.leadingAnchor.constraint(equalTo: leadingAnchor), blur.trailingAnchor.constraint(equalTo: trailingAnchor),
             tint.topAnchor.constraint(equalTo: topAnchor), tint.bottomAnchor.constraint(equalTo: bottomAnchor),
             tint.leadingAnchor.constraint(equalTo: leadingAnchor), tint.trailingAnchor.constraint(equalTo: trailingAnchor),
-            rule.leadingAnchor.constraint(equalTo: leadingAnchor), rule.trailingAnchor.constraint(equalTo: trailingAnchor),
+            // The rule ends where the focused pane's outline runs, inside the pane's edge.
+            rule.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Shade.inset),
+            rule.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Shade.inset),
             rule.bottomAnchor.constraint(equalTo: bottomAnchor), rule.heightAnchor.constraint(equalToConstant: Stroke.hairline),
             lead,
             avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
