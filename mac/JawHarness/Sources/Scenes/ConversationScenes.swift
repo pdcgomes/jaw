@@ -21,7 +21,7 @@ private struct ConversationScene: View {
     var body: some View {
         SpecimenGroup(
             title: "Lisbon Climbing, at the newest",
-            note: "Your messages pending, sent, edited and failed with Retry, a photo with reactions, and a card for each kind jawd sends: a video, a document, a place, a poll, a contact, a link's preview, a voice message and an album of five. Runs of one sender sit closer than messages between senders; in lines, yours start a third of the way across; no card overlaps the text around it.",
+            note: "Your messages pending, sent, edited and failed with Retry, a photo with reactions, and a card for each kind jawd sends: a video, a document, a place, a poll, a contact, a link's preview, a voice message and an album of five; after the newest, Rui's typing bubble, its three dots still, as in a window that isn't key, and the dots alone in lines. Runs of one sender sit closer than messages between senders; in lines, yours start a third of the way across; no card overlaps the text around it.",
             roles: conditions.roles,
         ) {
             ControllerSpecimen {
