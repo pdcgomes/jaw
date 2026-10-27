@@ -2,8 +2,9 @@
 //! Each is done to its row at once, in one synced commit with the app-state patches that tell your
 //! other devices, before it answers (store::chat_actions); the patches then go through the outbox
 //! after the chat's earlier sends, as a deletion for you does. Each patch is built as whatsmeow's
-//! builders build it and carries the time jawd wrote, so WhatsApp's echo of it through app state
-//! finds the row as it is.
+//! builders build it and carries the time jawd wrote, later than any chat action's before it, so
+//! WhatsApp's echo of it through app state is known by that time and finds the row as it is; what
+//! WhatsApp sends for its index before the echo is held back (store::chat_actions).
 
 use std::sync::Arc;
 
@@ -173,53 +174,71 @@ fn pinned_most() -> Error {
     error
 }
 
-/// A patch to queue, with an ID of its own for its outbox row.
+/// A patch to queue, with an ID of its own for its outbox row, and the index and time it carries.
 fn queued(patch: pb::AppStatePatch) -> Result<Patch, Error> {
     let id = message_id().map_err(|e| internal("make an ID for the patch", e.into()))?;
-    Ok(Patch { id, raw: patch.encode_to_vec() })
+    let key = serde_json::to_string(&patch.index).map_err(|e| internal("name the patch's index", e.into()))?;
+    let value =
+        SyncActionValue::decode(patch.value.as_slice()).map_err(|e| internal("read the patch's time", e.into()))?;
+    Ok(Patch { id, raw: patch.encode_to_vec(), key, at: value.timestamp.unwrap_or_default() })
 }
 
 pub(super) async fn pin(inner: &Arc<Inner>, pin: ChatPin) -> Result<Value, Error> {
     linked(inner)?;
     let chat = named(inner, &pin.chat).await?;
-    let at = now_ms();
-    let setting = Setting::Pin { at: pin.pinned.then_some(at), patch: queued(pinned(&chat.id, pin.pinned, at))? };
-    act(inner, chat.id, Does::Set(setting), if pin.pinned { "pin the chat" } else { "unpin the chat" }).await
+    let doing = if pin.pinned { "pin the chat" } else { "unpin the chat" };
+    act(inner, chat.id.clone(), doing, |at| {
+        let patch = queued(pinned(&chat.id, pin.pinned, at))?;
+        Ok(Does::Set(Setting::Pin { at: pin.pinned.then_some(at), patch }))
+    })
+    .await
 }
 
 pub(super) async fn archive(inner: &Arc<Inner>, archive: ChatArchive) -> Result<Value, Error> {
     linked(inner)?;
     let chat = named(inner, &archive.chat).await?;
-    let at = now_ms();
-    let range = range(&chat.id, chat.group, chat.newest.as_ref(), at);
-    let unpin = Some(queued(pinned(&chat.id, false, at))?);
-    let patch = queued(archived(&chat.id, archive.archived, range, at))?;
-    let setting = Setting::Archive { archived: archive.archived, patch, unpin };
     let doing = if archive.archived { "archive the chat" } else { "unarchive the chat" };
-    act(inner, chat.id, Does::Set(setting), doing).await
+    act(inner, chat.id.clone(), doing, |at| {
+        let range = range(&chat.id, chat.group, chat.newest.as_ref(), at);
+        let unpin = Some(queued(pinned(&chat.id, false, at))?);
+        let patch = queued(archived(&chat.id, archive.archived, range, at))?;
+        Ok(Does::Set(Setting::Archive { archived: archive.archived, patch, unpin }))
+    })
+    .await
 }
 
 pub(super) async fn mute(inner: &Arc<Inner>, mute: ChatMute) -> Result<Value, Error> {
-    let at = now_ms();
     let until = match mute.until {
         None => 0,
         Some(until) if until == -1 || until >= FOREVER => FOREVER,
-        Some(until) if until <= at => {
+        Some(until) if until <= now_ms() => {
             return Err(bad_param("until", "that time has passed; mute until a later one, or -1 for ever"));
         }
         Some(until) => until,
     };
     linked(inner)?;
     let chat = named(inner, &mute.chat).await?;
-    let setting = Setting::Mute { until, patch: queued(muted(&chat.id, until, at))? };
-    act(inner, chat.id, Does::Set(setting), if until == 0 { "unmute the chat" } else { "mute the chat" }).await
+    let doing = if until == 0 { "unmute the chat" } else { "mute the chat" };
+    act(inner, chat.id.clone(), doing, |at| {
+        Ok(Does::Set(Setting::Mute { until, patch: queued(muted(&chat.id, until, at))? }))
+    })
+    .await
 }
 
 /// Commits a chat action, synced, and queues the patches it wrote after the chat's earlier sends.
-async fn act(inner: &Arc<Inner>, chat: String, does: Does, doing: &str) -> Result<Value, Error> {
+/// `does` makes the action done at `at`, later than every chat action jawd has done since it
+/// started, so no two of jaw's patches for an index carry one time, which its echo is known by.
+async fn act(
+    inner: &Arc<Inner>,
+    chat: String,
+    doing: &str,
+    does: impl FnOnce(i64) -> Result<Does, Error>,
+) -> Result<Value, Error> {
     let outcome = Outcome::default();
-    let _order = inner.enqueue.lock().await;
-    let act = Act { chat: chat.clone(), does, outcome: outcome.clone() };
+    let mut last = inner.enqueue.lock().await;
+    let at = now_ms().max(*last + 1);
+    *last = at;
+    let act = Act { chat: chat.clone(), does: does(at)?, outcome: outcome.clone() };
     durably(inner, vec![Change::ChatAction(act)], doing).await?;
     match outcome.take() {
         Some(Acted::Queued { chat, outbox, .. }) => {
@@ -337,6 +356,17 @@ mod tests {
         assert_eq!(value(&unread).mark_chat_as_read_action.unwrap().read, Some(false));
         let empty = range(ANA, false, None, AT);
         assert_eq!((empty.last_message_timestamp, empty.messages.len()), (Some(AT / 1000), 0), "no message: now");
+    }
+
+    #[test]
+    fn a_queued_patch_names_the_index_and_carries_the_time_of_the_patch_it_queues() {
+        let range = range(GROUP, true, None, AT + 2);
+        for patch in [pinned(ANA, true, AT), muted(ANA, FOREVER, AT + 1), archived(GROUP, true, range, AT + 2)] {
+            let queued = queued(patch).unwrap();
+            let raw = pb::AppStatePatch::decode(queued.raw.as_slice()).unwrap();
+            let carried = (serde_json::to_string(&raw.index).unwrap(), value(&raw).timestamp.unwrap());
+            assert_eq!((queued.key, queued.at), carried, "{:?}", raw.index);
+        }
     }
 
     #[test]

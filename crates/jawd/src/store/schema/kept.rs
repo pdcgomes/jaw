@@ -92,6 +92,7 @@ const CLASSES: &[(&str, Class, &[&str])] = &[
     ("event_answers", Own, &[]),
     ("openings", Own, &[]),
     ("unopened", Own, &[]),
+    ("app_state_awaiting", Own, &[]),
     ("events", Derived, &[]),
     ("fts_backlog", Derived, &[]),
     ("messages_fts", Derived, &[]),
@@ -454,6 +455,15 @@ const SEEDS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     ("outgoing_drop", &[("path", "'media/outgoing/m0.jpg'")]),
+    (
+        "app_state_awaiting",
+        &[
+            ("key", "'[\"mute\",\"351910000002@s.whatsapp.net\"]'"),
+            ("at", "1790000000990"),
+            ("outbox", "1"),
+            ("echo_by", "7"),
+        ],
+    ),
 ];
 
 /// Columns of jaw's own or raw a migration dropped by decision, by its number: the table, the

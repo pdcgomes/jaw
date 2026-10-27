@@ -116,8 +116,9 @@ struct Inner {
     engine: Option<Supervisor>,
     sends: Arc<Serial>,
     timing: Timing,
-    /// Enqueues one at a time, so a chat's sends are queued in the order they were committed.
-    enqueue: Mutex<()>,
+    /// Enqueues one at a time, so a chat's sends are queued in the order they were committed; it
+    /// holds the time the last chat action was done at, so each is later than the one before.
+    enqueue: Mutex<i64>,
     /// Each chat's place for a message being made, held from its request to its enqueue, so one
     /// that waits for its link preview isn't overtaken by the next sent there.
     composing: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -194,7 +195,7 @@ impl Sending {
             engine,
             sends: Serial::new("sends", CHATS_AT_ONCE),
             timing,
-            enqueue: Mutex::new(()),
+            enqueue: Mutex::new(0),
             composing: std::sync::Mutex::default(),
             previews,
             online: Notify::new(),

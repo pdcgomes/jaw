@@ -67,9 +67,14 @@ pub fn convert_rows(rows: &[Row], me: &Me) -> Converted {
             "app_state" => match pb::AppState::decode(row.payload.as_slice()) {
                 Ok(state) => {
                     let applied = app_state::mutation(&state.index, &state.value);
-                    out.changes.extend(applied.changes);
                     out.my_name = applied.my_name.or(out.my_name.take());
-                    out.changes.push(Change::AppState { index: state.index, value: state.value });
+                    out.changes.push(Change::AppState {
+                        index: state.index,
+                        value: state.value,
+                        seq: row.seq,
+                        at: applied.at,
+                        changes: applied.changes,
+                    });
                     true
                 }
                 Err(e) => undecodable(row, e),

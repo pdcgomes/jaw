@@ -70,10 +70,15 @@ pub enum Change {
         reference: String,
         error: String,
     },
-    /// An app-state mutation's index and its raw SyncActionValue, kept as the latest for its index.
+    /// An app-state mutation from inbox row `seq`: its index and its raw SyncActionValue, kept as
+    /// the latest for its index, and `changes`, what it changes, made unless jaw has a patch for
+    /// the index on its way (chat_actions::held_back). `at` is its time.
     AppState {
         index: Vec<String>,
         value: Vec<u8>,
+        seq: i64,
+        at: i64,
+        changes: Vec<Change>,
     },
     /// Where a chat was read up to.
     Read(Read),
@@ -621,7 +626,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
         Some(Change::Chat(c)) => ("chat", c.id.clone(), None),
         Some(Change::Person(p)) => ("person", p.jids.join(" "), None),
         Some(Change::Members(m)) => ("members", m.chat.clone(), None),
-        Some(Change::AppState { index, value }) => ("app_state", index.join(" "), Some(value.as_slice())),
+        Some(Change::AppState { index, value, .. }) => ("app_state", index.join(" "), Some(value.as_slice())),
         Some(Change::Remember { key, .. }) => ("remember", key.clone(), None),
         Some(Change::Settings { domain, values, .. }) => {
             let change = serde_json::json!({ "domain": domain, "values": values }).to_string();
@@ -691,8 +696,8 @@ fn now_ms() -> i64 {
 }
 
 /// Whether making `changes` may write to FTS5 itself, where a new message's text and links wait in
-/// fts_backlog: an edit, a deletion, a send or a merge may change a message that's indexed, and the
-/// links backfill indexes the links of messages that are.
+/// fts_backlog: an edit, a deletion (one for you comes through app state), a send or a merge may
+/// change a message that's indexed, and the links backfill indexes the links of messages that are.
 pub(super) fn touches_fts(changes: &[Change]) -> bool {
     changes.iter().any(|change| match change {
         Change::Amend(amend) => {
@@ -704,6 +709,7 @@ pub(super) fn touches_fts(changes: &[Change]) -> bool {
         | Change::Outbox(_)
         | Change::Backfill(_)
         | Change::Opening => true,
+        Change::AppState { changes, .. } => touches_fts(changes),
         _ => false,
     })
 }
@@ -765,10 +771,18 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
             record_quarantine(db, source, reference, error, None)?;
             Ok(false)
         }
-        Change::AppState { index, value } => {
+        Change::AppState { index, value, seq, at, changes } => {
+            let key = serde_json::to_string(index)?;
             db.prepare_cached("INSERT OR REPLACE INTO app_state (key, value) VALUES (?1, ?2)")?
-                .execute(params![serde_json::to_string(index)?, value])?;
-            Ok(false)
+                .execute(params![key, value])?;
+            if chat_actions::held_back(db, &key, *seq, *at)? {
+                return Ok(false);
+            }
+            let mut changed = false;
+            for change in changes {
+                changed |= apply(db, stamps, change)?;
+            }
+            Ok(changed)
         }
         Change::Read(read) => set_read(db, stamps, read),
         Change::HistoryKept { id, raw } => {
@@ -2828,6 +2842,24 @@ mod tests {
         assert_eq!(user_jid("351910000001:7@hosted"), "351910000001@hosted");
         assert_eq!(user_jid("9988776655:7@hosted.lid"), "9988776655@hosted.lid");
         assert_eq!(user_jid("120363000000000001@g.us"), "120363000000000001@g.us");
+    }
+
+    #[test]
+    fn a_deletion_for_you_through_app_state_may_write_to_fts_itself() {
+        let chat = "351910000002@s.whatsapp.net";
+        let index: Vec<String> = ["deleteMessageForMe", chat, "m1", "0", "0"].map(String::from).into();
+        let state = |changes| Change::AppState { index: index.clone(), value: Vec::new(), seq: 1, at: 1, changes };
+        let deletion = Amend {
+            chat: chat.into(),
+            target: "m1".into(),
+            sender: None,
+            mine: false,
+            at: 1,
+            what: Amendment::DeleteForMe,
+            raw: None,
+        };
+        assert!(touches_fts(&[state(vec![Change::Amend(deletion)])]));
+        assert!(!touches_fts(&[state(vec![Change::Chat(Chat { id: chat.into(), ..Chat::default() })])]));
     }
 
     #[test]

@@ -7,7 +7,6 @@ use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, watch};
-#[expect(unused_imports)]
 use wa_proto::wa_web_protobuf_sync_action::{PinAction, SyncActionValue};
 
 use super::*;
@@ -3916,14 +3915,6 @@ async fn until_echoed(running: &Running, patch: &pb::AppStatePatch) {
     .await;
 }
 
-/// Waits until every patch asked for so far has been answered and the echo of the last has been
-/// converted, and with it every earlier one's. An echo converted after the next action on its chat
-/// sets the row back as its patch had it, until the later patch's own echo comes.
-async fn until_all_echoed(running: &Running) {
-    until_stored(running).await;
-    until_echoed(running, patches_sent(running).last().expect("a patch sent")).await;
-}
-
 /// Fills the outbox with `rows` reactions waiting to send, which nothing sends.
 fn fill_outbox(home: &Path, rows: i64) {
     let mut db = Connection::open(home.join("jaw.db")).unwrap();
@@ -4003,7 +3994,6 @@ async fn archiving_a_pinned_chat_unpins_it_and_tells_your_other_devices_in_two_p
     let at = now_ms() - 60_000;
     running.arrives(CLIMBING, RUI, "g1", at).await;
     running.call("chat.pin", json!({ "chat": CLIMBING, "pinned": true })).await.unwrap();
-    until_all_echoed(&running).await;
     running.call("chat.archive", json!({ "chat": CLIMBING, "archived": true })).await.unwrap();
     let group = chat_row(&running, CLIMBING).await;
     assert!(group.archived && !group.pinned, "archived, and unpinned as WhatsApp's apps do");
@@ -4035,11 +4025,9 @@ async fn a_mute_lasts_until_a_time_or_for_ever_and_a_time_already_past_is_refuse
     let until = now_ms() + 8 * 3_600_000;
     running.call("chat.mute", json!({ "chat": ANA, "until": until })).await.unwrap();
     assert_eq!(chat_row(&running, ANA).await.muted_until, Some(until));
-    until_all_echoed(&running).await;
     running.call("chat.mute", json!({ "chat": ANA, "until": -1 })).await.unwrap();
     let forever = crate::convert::app_state::FOREVER;
     assert_eq!(chat_row(&running, ANA).await.muted_until, Some(forever), "for ever");
-    until_all_echoed(&running).await;
     running.call("chat.mute", json!({ "chat": ANA, "until": i64::MAX })).await.unwrap();
     running.call("chat.mute", json!({ "chat": ANA, "until": null })).await.unwrap();
     assert_eq!(chat_row(&running, ANA).await.muted_until, None, "unmuted");
@@ -4060,6 +4048,54 @@ async fn a_mute_lasts_until_a_time_or_for_ever_and_a_time_already_past_is_refuse
         "the largest time was for ever already"
     );
     assert!(sent.iter().all(|p| (p.name.as_str(), p.version) == ("regular_high", 2)));
+}
+
+/// The latest patch the engine was asked to send for `index`.
+fn latest_for(running: &Running, index: [&str; 2]) -> pb::AppStatePatch {
+    patches_sent(running).into_iter().rev().find(|patch| patch.index == index).expect("a patch for the index")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinning_unpinning_and_pinning_again_at_once_ends_pinned_here_and_on_every_device() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    for pinned in [true, false, true] {
+        running.call("chat.pin", json!({ "chat": ANA, "pinned": pinned })).await.unwrap();
+    }
+    let pinned = chat_row(&running, ANA).await;
+    assert!(pinned.pinned, "pinned, as asked last");
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    assert_eq!(sent.len(), 3, "none taken as so already");
+    until_echoed(&running, &sent[2]).await;
+    assert_eq!(chat_row(&running, ANA).await.v, pinned.v, "the echoes changed nothing");
+    let latest = value_of(&latest_for(&running, ["pin_v1", ANA]));
+    assert_eq!(latest.pin_action, Some(PinAction { pinned: Some(true) }), "and WhatsApp's latest pins it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn toggling_a_pin_while_whatsapp_cant_be_reached_ends_as_asked_last_once_it_can() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    until_offline(&running).await;
+    for pinned in [true, false, true, false, true] {
+        running.call("chat.pin", json!({ "chat": ANA, "pinned": pinned })).await.unwrap();
+    }
+    let asked = chat_row(&running, ANA).await;
+    assert!(asked.pinned, "pinned, as asked last");
+    assert!(patches_sent(&running).is_empty(), "nothing goes while WhatsApp can't be reached");
+    running.connection(jaw_proto::ConnectionState::Online);
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    let pins: Vec<Option<bool>> = sent.iter().map(|p| value_of(p).pin_action.unwrap().pinned).collect();
+    assert_eq!(pins, [Some(true), Some(false), Some(true), Some(false), Some(true)], "each, in the order asked");
+    until_echoed(&running, &sent[4]).await;
+    let ana = chat_row(&running, ANA).await;
+    assert_eq!((ana.pinned, ana.v), (true, asked.v), "as asked last, the earlier echoes changing nothing");
+    let latest = value_of(&latest_for(&running, ["pin_v1", ANA]));
+    assert_eq!(latest.pin_action, Some(PinAction { pinned: Some(true) }), "and WhatsApp's latest pins it");
 }
 
 #[tokio::test(flavor = "multi_thread")]

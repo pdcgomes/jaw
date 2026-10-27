@@ -264,6 +264,7 @@ impl State {
                     actions_kept: store
                         .count("outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote')")
                         .ok()?,
+                    awaiting: store.count("app_state_awaiting").ok()?,
                     tombstones: store.count("tombstones").ok()?,
                     recipients: store.count("recipients").ok()?,
                     regroup: store.count("regroup").ok()?,

@@ -3,14 +3,18 @@
 //! and the app-state patches that tell your other devices go into the outbox in the same
 //! transaction, to go after the chat's earlier sends, as a deletion for you does. What's already so
 //! changes nothing and queues nothing, so asking again after a lost answer, or two interfaces asking
-//! at once, end the same. A patch WhatsApp refuses for good is undone here (`undo`): what it set goes
-//! back to how a chat is when nothing has set it, since fetching its collection again brings only
-//! what WhatsApp holds, and the fetch then sets it as the phone has it.
+//! at once, end the same. Each patch queued is its index's latest until its echo comes back
+//! (`app_state_awaiting`), and WhatsApp sends app state back in the order it took it, so what it
+//! sends for that index meanwhile came before the patch: it's kept raw but not applied
+//! (`held_back`), since the patch sets every device as the row already is. A patch WhatsApp refuses
+//! for good, while it's its index's latest, is undone here (`undo`): what it set goes back to how a
+//! chat is when nothing has set it, since fetching its collection again brings only what WhatsApp
+//! holds, and the fetch then sets it as the phone has it.
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use super::outbox::{OUTBOX_MOST, app_state_row, waiting};
 use super::{Amendment, Chat, Doing, Read, Stamps, apply_amendment, chat_jid, located, now_ms, set_read, upsert_chat};
@@ -25,6 +29,14 @@ const CHAT_STATE: &str =
 const PINNED_ELSEWHERE: &str = "SELECT count(*) FROM chats WHERE archived = 0 AND sort >= '1~' AND n <> ?1
     AND NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = chats.n)";
 const STARRED: &str = "SELECT starred FROM messages WHERE n = ?1";
+const AWAITED_AT: &str = "SELECT at FROM app_state_awaiting WHERE key = ?1";
+const AWAIT: &str = "INSERT INTO app_state_awaiting (key, at, outbox) VALUES (?1, ?2, ?3)
+    ON CONFLICT (key) DO UPDATE SET at = excluded.at, outbox = excluded.outbox, echo_by = NULL";
+/// What an index waits for: the time jaw's latest patch for it carries, where that patch's echo has
+/// to be once WhatsApp has taken it, and whether its outbox row is still there.
+const AWAITED: &str = "SELECT a.at, a.echo_by, EXISTS (SELECT 1 FROM outbox o WHERE o.n = a.outbox)
+    FROM app_state_awaiting a WHERE a.key = ?1";
+const WAITED: &str = "DELETE FROM app_state_awaiting WHERE key = ?1";
 
 /// A chat action as the writer takes it: the chat as the interface named it, what to do, and where
 /// to say what it came to. Each patch is an AppStatePatch the caller made, carrying the time it's
@@ -60,11 +72,16 @@ pub enum Setting {
     MarkUnread { unread: bool, newest: Option<String>, at: i64, patch: Patch },
 }
 
-/// An app-state patch to queue: its outbox row's own ID, and the AppStatePatch, encoded.
+/// An app-state patch to queue: its outbox row's own ID, the AppStatePatch, encoded, and the index
+/// and time it carries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Patch {
     pub id: String,
     pub raw: Vec<u8>,
+    /// Its index as `app_state` keys it: the index's strings as JSON.
+    pub key: String,
+    /// Its SyncActionValue's timestamp.
+    pub at: i64,
 }
 
 /// What a chat action came to.
@@ -230,9 +247,44 @@ fn set(db: &Connection, stamps: &mut Stamps, jid: &str, setting: &Setting) -> Re
     if let Some(read) = &read {
         changed |= set_read(db, stamps, read)?;
     }
-    let outbox =
-        patches.iter().map(|patch| app_state_row(db, jid, &patch.id, &patch.raw)).collect::<Result<Vec<_>>>()?;
+    let outbox = patches.iter().map(|patch| queue(db, jid, patch)).collect::<Result<Vec<_>>>()?;
     Ok((Acted::Queued { chat: jid.to_string(), chat_n: chat.n, outbox }, changed))
+}
+
+/// Queues `patch` for chat `jid` as an outbox row, and keeps it as its index's latest, which what
+/// WhatsApp sends for the index waits behind until the patch's echo, known by its time, comes.
+fn queue(db: &Connection, jid: &str, patch: &Patch) -> Result<i64> {
+    let outbox = app_state_row(db, jid, &patch.id, &patch.raw)?;
+    let awaited: Option<i64> = db.prepare_cached(AWAITED_AT)?.query_row([&patch.key], |r| r.get(0)).optional()?;
+    if awaited == Some(patch.at) {
+        bail!(
+            "{} awaits jaw's patch at {} already, and no two of its patches for an index carry one time",
+            patch.key,
+            patch.at
+        );
+    }
+    db.prepare_cached(AWAIT)?.execute(params![patch.key, patch.at, outbox])?;
+    Ok(outbox)
+}
+
+/// Whether what WhatsApp sent for index `key`, at inbox row `seq` with its time `at`, is held back:
+/// kept raw, but not applied. While jaw's latest patch for the index waits for its echo, whatever
+/// WhatsApp sends for the index came before that patch, which sets every device as the row already
+/// is. The patch's echo, known by its time, ends the wait; so does a mutation past `echo_by`, where
+/// the echo had to be, or one after the patch's outbox row went without going; and each is applied.
+pub(super) fn held_back(db: &Connection, key: &str, seq: i64, at: i64) -> Result<bool> {
+    let awaited: Option<(i64, Option<i64>, bool)> =
+        db.prepare_cached(AWAITED)?.query_row([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+    let Some((awaited, echo_by, outboxed)) = awaited else { return Ok(false) };
+    let after = match echo_by {
+        Some(echo_by) => seq > echo_by,
+        None => !outboxed,
+    };
+    if at != awaited && !after {
+        return Ok(true);
+    }
+    db.prepare_cached(WAITED)?.execute([key])?;
+    Ok(false)
 }
 
 /// Stars message `id` in chat `jid`, or takes its star off, unless it's so already, and queues its
@@ -256,7 +308,7 @@ fn star(
     let amendment = Amendment::Star { starred };
     let changed =
         apply_amendment(db, stamps, chat, n, Doing { what: &amendment, sender: None, mine: false, at: now_ms() })?;
-    let outbox = app_state_row(db, jid, &patch.id, &patch.raw)?;
+    let outbox = queue(db, jid, patch)?;
     Ok((Acted::Queued { chat: jid.to_string(), chat_n: chat, outbox: vec![outbox] }, changed))
 }
 
@@ -306,8 +358,10 @@ mod tests {
     use wa_proto::wa_web_protobuf_sync_action as action;
 
     use super::*;
+    use crate::convert::app_state::FOREVER;
+    use crate::store::outbox::Step;
     use crate::store::schema;
-    use crate::store::{Amend, Change, Message, Person};
+    use crate::store::{Amend, Change, Drained, Message, Person};
 
     const ANA: &str = "351910000002@s.whatsapp.net";
     const ANA_LID: &str = "100000000002@lid";
@@ -331,8 +385,9 @@ mod tests {
         super::super::settle(db, &mut stamps).unwrap();
     }
 
+    /// A patch standing in for one, for an index of its own.
     fn patch(id: &str) -> Patch {
-        Patch { id: id.into(), raw: id.as_bytes().to_vec() }
+        Patch { id: id.into(), raw: id.as_bytes().to_vec(), key: serde_json::to_string(&[id]).unwrap(), at: AT }
     }
 
     fn pin(at: Option<i64>, id: &str) -> Does {
@@ -352,13 +407,15 @@ mod tests {
     }
 
     /// Does `does` to `chat` as the writer does, for a caller's mistake: it fails, saying nothing of
-    /// what it came to.
+    /// what it came to, and what it did is rolled back, as the writer's savepoint is.
     fn refused(db: &Connection, chat: &str, does: Does) -> anyhow::Error {
         let outcome = Outcome::default();
         let mut stamps = Stamps::load(db).unwrap();
         stamps.begin();
         let act = Change::ChatAction(Act { chat: chat.into(), does, outcome: outcome.clone() });
-        let error = super::super::apply(db, &mut stamps, &act).expect_err("a caller's mistake fails");
+        let tx = db.unchecked_transaction().unwrap();
+        let error = super::super::apply(&tx, &mut stamps, &act).expect_err("a caller's mistake fails");
+        drop(tx);
         assert_eq!(outcome.take(), None);
         error
     }
@@ -776,8 +833,235 @@ mod tests {
         assert_eq!(chats, 1, "a chat that isn't there isn't made");
     }
 
-    /// Each statement a chat action runs, as SQLite plans it on a fresh database with no statistics:
-    /// each reads an index and sorts nothing.
+    /// A chat pinned at `at`, or unpinned, as jaw's patch and the phone's own mutation carry it.
+    fn pin_value(pinned: bool, at: i64) -> action::SyncActionValue {
+        action::SyncActionValue {
+            timestamp: Some(at),
+            pin_action: Some(action::PinAction { pinned: Some(pinned) }),
+            ..Default::default()
+        }
+    }
+
+    /// A chat muted until `until`, for ever at FOREVER, or unmuted at 0.
+    fn mute_value(until: i64, at: i64) -> action::SyncActionValue {
+        let mute = match until {
+            0 => action::MuteAction { muted: Some(false), ..Default::default() },
+            FOREVER => action::MuteAction { muted: Some(true), mute_end_timestamp: Some(-1), ..Default::default() },
+            until => action::MuteAction { muted: Some(true), mute_end_timestamp: Some(until), ..Default::default() },
+        };
+        action::SyncActionValue { timestamp: Some(at), mute_action: Some(mute), ..Default::default() }
+    }
+
+    /// jaw's patch for `index` carrying `value`, as the handler queues it, `id` for its outbox row.
+    fn patch_of(index: &[&str], value: &action::SyncActionValue, id: &str) -> Patch {
+        Patch {
+            id: id.into(),
+            raw: value.encode_to_vec(),
+            key: serde_json::to_string(index).unwrap(),
+            at: value.timestamp.unwrap(),
+        }
+    }
+
+    /// Chat `chat` pinned from jaw at `at`, or unpinned.
+    fn pin_at(chat: &str, pinned: bool, at: i64, id: &str) -> Does {
+        let patch = patch_of(&["pin_v1", chat], &pin_value(pinned, at), id);
+        Does::Set(Setting::Pin { at: pinned.then_some(at), patch })
+    }
+
+    /// What WhatsApp sends for `index`, converted from inbox row `seq` as the drain converts it.
+    fn arrives(db: &Connection, index: &[&str], value: &action::SyncActionValue, seq: i64) {
+        let index: Vec<String> = index.iter().map(|part| part.to_string()).collect();
+        let value = value.encode_to_vec();
+        let applied = crate::convert::app_state::mutation(&index, &value);
+        let state = Change::AppState { index, value, seq, at: applied.at, changes: applied.changes };
+        written(db, &[state, Change::Drained(Drained::Inbox(seq))]);
+    }
+
+    /// Engine events waiting in the inbox as rows `seqs`.
+    fn inboxed(db: &Connection, seqs: &[i64]) {
+        for seq in seqs {
+            db.execute("INSERT INTO inbox (seq, kind, at, payload) VALUES (?1, 'app_state', 0, x'')", [seq]).unwrap();
+        }
+    }
+
+    /// WhatsApp has taken the patch at outbox row `outbox`, as the engine's answer says.
+    fn sent(db: &Connection, outbox: i64) {
+        written(db, &[Change::Outbox(Step::Sent { outbox })]);
+    }
+
+    /// What `index` waits for of jaw's: the time its latest patch carries, that patch's outbox row,
+    /// and where its echo has to be.
+    fn awaited(db: &Connection, index: &[&str]) -> Option<(i64, i64, Option<i64>)> {
+        db.query_row(
+            "SELECT at, outbox, echo_by FROM app_state_awaiting WHERE key = ?1",
+            [serde_json::to_string(index).unwrap()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// What `app_state` keeps raw for `index`.
+    fn kept(db: &Connection, index: &[&str]) -> Option<Vec<u8>> {
+        db.query_row("SELECT value FROM app_state WHERE key = ?1", [serde_json::to_string(index).unwrap()], |r| {
+            r.get(0)
+        })
+        .optional()
+        .unwrap()
+    }
+
+    #[test]
+    fn an_echo_from_before_jaws_next_change_is_held_back_so_asking_again_isnt_so_already() {
+        let db = db();
+        chats(&db, &[ANA]);
+        let index = ["pin_v1", ANA];
+        let (t1, t2, t3) = (AT, AT + 1, AT + 2);
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, true, t1, "p1")), Acted::Queued { .. }));
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, false, t2, "p2")), Acted::Queued { .. }));
+        let unpinned = chat(&db, ANA);
+        arrives(&db, &index, &pin_value(true, t1), 1);
+        assert_eq!(chat(&db, ANA), unpinned, "the pin's echo, taken before the unpin, leaves the row as it is");
+        assert_eq!(kept(&db, &index), Some(pin_value(true, t1).encode_to_vec()), "and is kept raw");
+        let again = acted(&db, ANA, pin_at(ANA, true, t3, "p3"));
+        assert!(matches!(again, Acted::Queued { .. }), "pinning again isn't so already: {again:?}");
+        let pinned = chat(&db, ANA);
+        assert_eq!(pinned.0, t3);
+        arrives(&db, &index, &pin_value(false, t2), 2);
+        assert_eq!(chat(&db, ANA), pinned, "the unpin's echo changes nothing");
+        arrives(&db, &index, &pin_value(true, t3), 3);
+        assert_eq!(chat(&db, ANA), pinned, "nor does the third pin's");
+        assert_eq!(awaited(&db, &index), None, "which ends the wait");
+    }
+
+    #[test]
+    fn an_earlier_echo_cant_unpin_a_chat_pinned_again_so_a_fourth_is_still_refused() {
+        let db = db();
+        let [a, b, c, d] = [
+            "351910000041@s.whatsapp.net",
+            "351910000042@s.whatsapp.net",
+            "351910000043@s.whatsapp.net",
+            "351910000044@s.whatsapp.net",
+        ];
+        chats(&db, &[a, b, c, d]);
+        for (n, id) in [a, b, c].into_iter().enumerate() {
+            assert!(matches!(acted(&db, id, pin_at(id, true, AT + n as i64, id)), Acted::Queued { .. }), "{id}");
+        }
+        assert!(matches!(acted(&db, a, pin_at(a, false, AT + 10, "a unpinned")), Acted::Queued { .. }));
+        assert!(matches!(acted(&db, a, pin_at(a, true, AT + 11, "a again")), Acted::Queued { .. }));
+        let pinned = chat(&db, a);
+        let index = ["pin_v1", a];
+        arrives(&db, &index, &pin_value(true, AT), 1);
+        arrives(&db, &index, &pin_value(false, AT + 10), 2);
+        assert_eq!(chat(&db, a), pinned, "its earlier echoes change nothing");
+        assert_eq!(acted(&db, d, pin_at(d, true, AT + 12, "d")), Acted::Pinned, "so three are pinned still");
+        arrives(&db, &index, &pin_value(true, AT + 11), 3);
+        assert_eq!((chat(&db, a), pinned_unarchived(&db)), (pinned, 3), "and stay so once its last echo comes");
+    }
+
+    #[test]
+    fn what_the_phone_sets_while_jaws_patch_is_on_its_way_is_kept_raw_but_held_back_until_its_echo() {
+        let db = db();
+        chats(&db, &[ANA]);
+        let index = ["mute", ANA];
+        let mute = Does::Set(Setting::Mute { until: FOREVER, patch: patch_of(&index, &mute_value(FOREVER, AT), "m1") });
+        assert!(matches!(acted(&db, ANA, mute), Acted::Queued { .. }));
+        let muted = chat(&db, ANA);
+        // The phone unmutes it meanwhile, by a later clock; WhatsApp takes jaw's mute after it all the same.
+        let phone = mute_value(0, AT + 5_000);
+        arrives(&db, &index, &phone, 1);
+        assert_eq!(chat(&db, ANA), muted, "held back, since jaw's mute is what every device ends with");
+        assert_eq!(kept(&db, &index), Some(phone.encode_to_vec()), "but kept raw");
+        arrives(&db, &index, &mute_value(FOREVER, AT), 2);
+        assert_eq!(
+            (chat(&db, ANA), awaited(&db, &index)),
+            (muted, None),
+            "jaw's echo changes nothing and ends the wait"
+        );
+        arrives(&db, &index, &mute_value(0, AT + 9_000), 3);
+        assert_eq!(chat(&db, ANA).2, 0, "the phone's next change is applied as it comes");
+    }
+
+    #[test]
+    fn once_whatsapp_has_taken_jaws_patch_what_comes_past_where_its_echo_had_to_be_is_applied() {
+        let db = db();
+        chats(&db, &[ANA]);
+        let index = ["pin_v1", ANA];
+        let Acted::Queued { outbox, .. } = acted(&db, ANA, pin_at(ANA, true, AT, "p1")) else { panic!("not queued") };
+        // WhatsApp answers once the patch's echo is in the inbox, here with a row after it.
+        inboxed(&db, &[6, 7]);
+        sent(&db, outbox[0]);
+        assert_eq!(awaited(&db, &index), Some((AT, outbox[0], Some(7))), "its echo is at 7 or before");
+        let pinned = chat(&db, ANA);
+        arrives(&db, &index, &pin_value(false, AT - 5), 6);
+        arrives(&db, &index, &pin_value(false, AT - 1), 7);
+        assert_eq!(chat(&db, ANA), pinned, "at 7 or before, another time came before jaw's patch: held back");
+        assert!(awaited(&db, &index).is_some(), "and the wait goes on");
+        arrives(&db, &index, &pin_value(false, AT + 1), 8);
+        assert_eq!(
+            (chat(&db, ANA).0, awaited(&db, &index)),
+            (0, None),
+            "past 7, it came after: applied, the wait over"
+        );
+    }
+
+    #[test]
+    fn once_jaws_patch_has_gone_without_going_what_comes_for_its_index_is_applied() {
+        let db = db();
+        chats(&db, &[ANA]);
+        let index = ["pin_v1", ANA];
+        let Acted::Queued { outbox, .. } = acted(&db, ANA, pin_at(ANA, true, AT, "p1")) else { panic!("not queued") };
+        let failed = Step::Failed { outbox: outbox[0], error: "its app state doesn't decode".into(), next_at: None };
+        written(&db, &[Change::Outbox(failed)]);
+        assert_eq!((queued(&db).len(), awaited(&db, &index)), (0, Some((AT, outbox[0], None))), "its row gone, unsent");
+        arrives(&db, &index, &pin_value(false, AT - 1), 1);
+        assert_eq!((chat(&db, ANA).0, awaited(&db, &index)), (0, None), "so what comes is applied, the wait over");
+    }
+
+    #[test]
+    fn a_refused_patch_is_put_back_only_while_it_is_the_latest_for_its_index() {
+        let db = db();
+        chats(&db, &[ANA, RUI]);
+        let refused = |outbox: i64, chat: &str| {
+            let undo = Some(Undo::Pin { chat: chat.into() });
+            Change::Outbox(Step::Refused { outbox, error: "server returned error 400".into(), undo })
+        };
+        let Acted::Queued { outbox, .. } = acted(&db, ANA, pin_at(ANA, true, AT, "a1")) else { panic!("not queued") };
+        written(&db, &[refused(outbox[0], ANA)]);
+        assert_eq!(
+            (chat(&db, ANA).0, awaited(&db, &["pin_v1", ANA])),
+            (0, None),
+            "the latest: put back, its wait over"
+        );
+        let Acted::Queued { outbox: first, .. } = acted(&db, RUI, pin_at(RUI, true, AT + 1, "r1")) else {
+            panic!("not queued")
+        };
+        assert!(matches!(acted(&db, RUI, pin_at(RUI, false, AT + 2, "r2")), Acted::Queued { .. }));
+        assert!(matches!(acted(&db, RUI, pin_at(RUI, true, AT + 3, "r3")), Acted::Queued { .. }));
+        let pinned = chat(&db, RUI);
+        written(&db, &[refused(first[0], RUI)]);
+        assert_eq!(
+            chat(&db, RUI),
+            pinned,
+            "one a later patch superseded puts nothing back: the later one's intent stands"
+        );
+        assert_eq!(awaited(&db, &["pin_v1", RUI]).map(|(at, ..)| at), Some(AT + 3), "whose wait goes on");
+        let kept: i64 = db.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 2, "and both are kept in quarantine");
+    }
+
+    #[test]
+    fn a_patch_carrying_the_time_its_index_already_awaits_is_refused() {
+        let db = db();
+        chats(&db, &[ANA]);
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, true, AT, "p1")), Acted::Queued { .. }));
+        let error = refused(&db, ANA, pin_at(ANA, false, AT, "p2"));
+        assert!(error.to_string().contains("carry one time"), "{error}");
+        assert_eq!((chat(&db, ANA).0, queued(&db).len()), (AT, 1), "nothing written or queued");
+    }
+
+    /// Each statement a chat action runs, and what the converter and jawd status read of what each
+    /// index waits for, as SQLite plans them on a fresh database with no statistics: each reads an
+    /// index and sorts nothing. The count is store.count's, of a table with a row an index at most.
     #[test]
     fn every_statement_a_chat_action_runs_reads_an_index_and_sorts_nothing() {
         let db = db();
@@ -789,6 +1073,19 @@ mod tests {
                 "SEARCH chats USING INDEX chats_by_sort (archived=? AND sort>?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("starred", STARRED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("the time an index awaits", AWAITED_AT, "SEARCH app_state_awaiting USING PRIMARY KEY (key=?)"),
+            ("an index awaiting a patch", AWAIT, ""),
+            (
+                "what an index awaits",
+                AWAITED,
+                "SEARCH a USING PRIMARY KEY (key=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH o USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
+            ("an index's wait over", WAITED, "SEARCH app_state_awaiting USING PRIMARY KEY (key=?)"),
+            (
+                "the indexes awaiting, for jawd status",
+                "SELECT count(*) FROM app_state_awaiting",
+                "SCAN app_state_awaiting USING COVERING INDEX sqlite_autoindex_app_state_awaiting_2",
+            ),
         ];
         for (what, sql, expected) in statements {
             let mut explain = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();

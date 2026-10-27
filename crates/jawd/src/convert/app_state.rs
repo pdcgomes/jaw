@@ -16,17 +16,20 @@ fn ms(seconds: i64) -> i64 {
     if seconds.abs() < 100_000_000_000 { seconds.saturating_mul(1000) } else { seconds }
 }
 
-/// What one app-state mutation changes, and the account's own name if it's that.
+/// What one app-state mutation changes, the account's own name if it's that, and its time.
 #[derive(Default)]
 pub struct Applied {
     pub changes: Vec<Change>,
     pub my_name: Option<String>,
+    /// Its SyncActionValue's timestamp; 0 when it has none or doesn't decode.
+    pub at: i64,
 }
 
 pub fn mutation(index: &[String], value: &[u8]) -> Applied {
     let mut applied = Applied::default();
     let Ok(value) = SyncActionValue::decode(value) else { return applied };
     let at = value.timestamp.unwrap_or_default();
+    applied.at = at;
     let jid = index.get(1).filter(|jid| !jid.is_empty()).map(String::as_str);
     let chat = |chat: Chat| Change::Chat(Chat { id: jid.map(user_jid).unwrap_or_default(), ..chat });
     match (index.first().map(String::as_str), jid) {

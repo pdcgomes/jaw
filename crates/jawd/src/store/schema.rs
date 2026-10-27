@@ -1491,6 +1491,27 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // (`measure_the_communities_migration`). It drops no table, and nothing refers to what it
     // changes, so it needs neither a data step's backup nor its check of every foreign key.
     COMMUNITIES_GATHERED,
+    // 29: what WhatsApp sends for an app-state index while jaw's own patch for it is on its way,
+    // held back, a schema step: one new table, which costs the same however big jaw.db is, and
+    // which nothing refers to.
+    "
+    -- Class: jaw's own. For each app-state index jaw has queued a patch for, its latest patch:
+    -- WhatsApp sends app state back in the order it took it, so what it sends for the index before
+    -- that patch's echo came before the patch, and is kept raw in app_state but not applied. A row
+    -- goes when its patch's echo is converted, when the converter passes echo_by without it, when
+    -- its outbox row has gone without going, or with its patch's refusal. Never dropped or rebuilt;
+    -- any rebuild copies it as it is. One row an index at most.
+    CREATE TABLE app_state_awaiting (
+        -- The index as app_state keys it: serde_json of the index's strings.
+        key TEXT PRIMARY KEY CHECK (json_valid(key)),
+        -- The time jaw's latest patch for it carries, its SyncActionValue.timestamp.
+        at INTEGER NOT NULL,
+        -- That patch's outbox row (outbox.n, never reused).
+        outbox INTEGER NOT NULL UNIQUE,
+        -- Once WhatsApp has taken it, the inbox's last seq then: its echo is at or before it.
+        echo_by INTEGER
+    ) STRICT, WITHOUT ROWID;
+    ",
 ];
 
 /// Migration 28's text, named so the tests that check and measure it find it whatever number it
@@ -2772,6 +2793,28 @@ mod tests {
             backup.as_secs_f64(),
         );
         assert!(super::super::lists::drift(&db).unwrap().is_empty(), "it counts what it holds");
+    }
+
+    #[test]
+    fn migration_13_keeps_one_wait_an_index_for_one_outbox_row_each() {
+        let mut db = at(None, 12);
+        migrate(&mut db).unwrap();
+        let wait = |key: &str, outbox: i64| {
+            db.execute(
+                "INSERT INTO app_state_awaiting (key, at, outbox) VALUES (?1, 5, ?2)",
+                rusqlite::params![key, outbox],
+            )
+        };
+        let ana = r#"["pin_v1","351910000002@s.whatsapp.net"]"#;
+        wait(ana, 1).unwrap();
+        assert!(wait(ana, 2).is_err(), "one wait an index");
+        assert!(wait(r#"["mute","351910000002@s.whatsapp.net"]"#, 1).is_err(), "one index an outbox row");
+        assert!(wait("pin_v1 351910000002@s.whatsapp.net", 3).is_err(), "keyed as app_state is, by the index as JSON");
+        let late = db.execute("INSERT INTO app_state_awaiting (key, at, outbox) VALUES ('[\"x\"]', 'soon', 4)", []);
+        assert!(late.is_err(), "a time is a number");
+        let echo_by: Option<i64> = db.query_row("SELECT echo_by FROM app_state_awaiting", [], |r| r.get(0)).unwrap();
+        assert_eq!(echo_by, None, "until WhatsApp has taken it");
+        assert_eq!(rows(&db), (1, 1), "the inbox and history as they were");
     }
 
     #[test]

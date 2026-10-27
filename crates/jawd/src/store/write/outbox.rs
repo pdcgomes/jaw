@@ -121,7 +121,7 @@ pub enum Step {
     Unsent { outbox: i64, error: String },
     /// App state at outbox row `outbox` that WhatsApp refused for good, or that ran out of tries:
     /// the row goes into quarantine with `error` and its patch, never dropped, and `undo` puts back
-    /// what it set.
+    /// what it set, while it's its index's latest patch.
     Refused { outbox: i64, error: String, undo: Option<Undo> },
 }
 
@@ -294,6 +294,11 @@ const ACT: &str = "INSERT INTO outbox (target, jid, id, kind, raw, effect, next_
 const APP_STATE: &str =
     "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'app_state', ?3, ?4, ?4) RETURNING n";
 const REFUSED_ROW: &str = "SELECT jid, id, raw FROM outbox WHERE n = ?1 AND kind = 'app_state' AND state = 'queued'";
+/// Both engines answer a patch only once its echo is in the inbox, so it's at or before the inbox's
+/// last row now; an empty inbox has converted it already, and 0 lets what comes next through.
+const ECHO_BY: &str =
+    "UPDATE app_state_awaiting SET echo_by = (SELECT coalesce(max(seq), 0) FROM inbox) WHERE outbox = ?1";
+const RELEASED: &str = "DELETE FROM app_state_awaiting WHERE outbox = ?1";
 const OWN_ID: &str = "INSERT OR IGNORE INTO tombstones (chat, id, at) VALUES (?1, ?2, ?3)";
 const TOMBSTONED: &str = "SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2";
 /// An action's row, with its message's chat.
@@ -569,16 +574,18 @@ fn withdrawn(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> 
 }
 
 /// App state WhatsApp won't take goes into quarantine with why and its patch, in place of its row,
-/// and what it set is put back. A row that's gone, or isn't app state still to send, is left alone.
+/// and what it set is put back while it's its index's latest patch, since a later one's intent
+/// stands. A row that's gone, or isn't app state still to send, is left alone.
 fn refused(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, undo: Option<&Undo>) -> Result<bool> {
     let row: Option<(String, String, Vec<u8>)> =
         db.prepare_cached(REFUSED_ROW)?.query_row([outbox], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
     let Some((jid, id, raw)) = row else { return Ok(false) };
     super::record_quarantine(db, REFUSED, &format!("{jid} {id}"), error, Some(&raw))?;
     db.prepare_cached(DROP_ROW)?.execute([outbox])?;
+    let latest = db.prepare_cached(RELEASED)?.execute([outbox])? > 0;
     match undo {
-        Some(undo) => chat_actions::undo(db, stamps, undo),
-        None => Ok(false),
+        Some(undo) if latest => chat_actions::undo(db, stamps, undo),
+        _ => Ok(false),
     }
 }
 
@@ -1062,9 +1069,11 @@ pub(super) fn touched(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, s
 }
 
 /// The message's time stays when you sent it, as the phone shows it, rather than the server's,
-/// which would move it among the messages around it and away from where search keeps it.
+/// which would move it among the messages around it and away from where search keeps it. App state
+/// WhatsApp has taken says where its echo has to be, for what its index waits for.
 fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     if let Some(action) = action(db, outbox)? {
+        db.prepare_cached(ECHO_BY)?.execute([outbox])?;
         return acted(db, stamps, outbox, action, true);
     }
     let (n, chat, status) = match outboxed(db, outbox)? {
@@ -1703,6 +1712,16 @@ mod tests {
             ("an action", ACT, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
             ("app state", APP_STATE, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
             ("a refused row", REFUSED_ROW, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
+            (
+                "where an echo has to be",
+                ECHO_BY,
+                "SEARCH app_state_awaiting USING COVERING INDEX sqlite_autoindex_app_state_awaiting_2 (outbox=?)\nSCALAR SUBQUERY 1\nSEARCH inbox",
+            ),
+            (
+                "a refused patch's index released",
+                RELEASED,
+                "SEARCH app_state_awaiting USING COVERING INDEX sqlite_autoindex_app_state_awaiting_2 (outbox=?)",
+            ),
             ("an action's own ID", OWN_ID, ""),
             ("tombstoned", TOMBSTONED, "SEARCH tombstones USING PRIMARY KEY (chat=? AND id=?)"),
             (
@@ -3983,7 +4002,8 @@ mod tests {
         let chat = "a@s.whatsapp.net";
         written(&db, &[Change::Chat(Chat { id: chat.into(), ..Chat::default() })]);
         let outcome = chat_actions::Outcome::default();
-        let patch = chat_actions::Patch { id: "3EB0P1".into(), raw: b"the patch".to_vec() };
+        let key = serde_json::to_string(&["pin_v1", chat]).unwrap();
+        let patch = chat_actions::Patch { id: "3EB0P1".into(), raw: b"the patch".to_vec(), key, at: 5 };
         let pin = chat_actions::Does::Set(chat_actions::Setting::Pin { at: Some(5), patch });
         written(
             &db,
@@ -4045,8 +4065,17 @@ mod tests {
         );
         written(&db, &[sending(ANA, "mine", 2_000, None)]);
         written(&db, &[acting(ANA, "m1", "r1", Amendment::React { emoji: "❤️".into() }, 3_000)]);
-        // No step leaves app state failed, so the row is made so by hand.
-        let failed = app_state_row(&db, ANA, "3EB0F1", b"the patch").unwrap();
+        let key = serde_json::to_string(&["mute", ANA]).unwrap();
+        let patch = chat_actions::Patch { id: "3EB0F1".into(), raw: b"the patch".to_vec(), key, at: 4_000 };
+        let outcome = chat_actions::Outcome::default();
+        let mute = chat_actions::Does::Set(chat_actions::Setting::Mute { until: 9_000, patch });
+        written(
+            &db,
+            &[Change::ChatAction(chat_actions::Act { chat: ANA.into(), does: mute, outcome: outcome.clone() })],
+        );
+        let Some(chat_actions::Acted::Queued { outbox, .. }) = outcome.take() else { panic!("not queued") };
+        // No step leaves app state failed, so the row the writer queued is made so by hand.
+        let failed = outbox[0];
         db.execute("UPDATE outbox SET state = 'failed', error = 'refused before' WHERE n = ?1", [failed]).unwrap();
         let row_of =
             |id: &str| -> i64 { db.query_row("SELECT n FROM outbox WHERE id = ?1", [id], |r| r.get(0)).unwrap() };
@@ -4069,7 +4098,14 @@ mod tests {
                 .query_row("SELECT pinned, v FROM chats WHERE id = ?1", [ANA], |r| Ok((r.get(0)?, r.get(1)?)))
                 .unwrap();
             let kept: i64 = db.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0)).unwrap();
-            (rows, shown, chat, kept)
+            let awaiting: Vec<String> = db
+                .prepare("SELECT json_array(key, at, outbox, echo_by) FROM app_state_awaiting ORDER BY key")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            (rows, shown, chat, kept, awaiting)
         };
         for (what, outbox) in
             [("a message's row", row_of("mine")), ("an action's row", row_of("r1")), ("app state that failed", failed)]
