@@ -113,11 +113,12 @@ enum Pictures {
 
     /// `--sweep`: every scene in each of its variants, as `<scene>/<variant>.png` under `folder`, with
     /// `manifest.json` saying what each is. It draws them into a hidden folder beside `folder`,
-    /// `.<name>.sweeping`, made afresh each time, and puts that in `folder`'s place only once every
-    /// picture and the manifest are written, so a sweep that's stopped or fails leaves the last whole
-    /// one where it was, and the next sweep clears what it left. It replaces only a missing or empty
-    /// folder, or one a sweep made, which it checks before it draws and again before it replaces it;
-    /// one with anything else in it is left as it is, and the sweep fails.
+    /// `.<name>.sweeping`, made afresh each time, and only once every picture and the manifest are
+    /// written does it put that in `folder`'s place, through `replaceItemAt` where there's an old one,
+    /// so no moment leaves neither, and nothing is left beside it. A sweep that's stopped or fails
+    /// leaves the last whole one where it was, and the next sweep clears what it left. It replaces
+    /// only a missing or empty folder, or one a sweep made, which it checks before it draws and again
+    /// before it replaces it; one with anything else in it is left as it is, and the sweep fails.
     @discardableResult
     static func sweep(_ catalog: HarnessCatalog, conditions: Conditions, to folder: URL) async throws -> Manifest {
         let fm = FileManager.default
@@ -148,27 +149,32 @@ enum Pictures {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(manifest).write(to: sweeping.appending(path: "manifest.json"))
         try checkReplaceable(folder)
-        if fm.fileExists(atPath: folder.path) { try fm.removeItem(at: folder) }
-        try fm.moveItem(at: sweeping, to: folder)
+        if fm.fileExists(atPath: folder.path) {
+            _ = try fm.replaceItemAt(folder, withItemAt: sweeping)
+            if fm.fileExists(atPath: sweeping.path) { try fm.removeItem(at: sweeping) }
+        } else {
+            try fm.moveItem(at: sweeping, to: folder)
+        }
         return manifest
     }
 
     /// Refuses `folder` unless a sweep may replace it: it's missing or empty, or it's one a sweep made,
     /// whose `manifest.json` decodes as a manifest and which holds nothing else but a folder for each
-    /// of the scenes it lists, each with only that scene's pictures in it, dotfiles aside. So a
-    /// mistyped path can't lose what's there.
+    /// of the scenes it lists, each with only that scene's pictures in it. Only the `.DS_Store` the
+    /// Finder drops anywhere is overlooked, in it or in a scene's folder; any other hidden entry, such
+    /// as a `.git`, counts. So a mistyped path can't lose what's there.
     private static func checkReplaceable(_ folder: URL) throws {
         let fm = FileManager.default
         func isFolder(_ url: URL) -> Bool {
             var directory: ObjCBool = false
             return fm.fileExists(atPath: url.path, isDirectory: &directory) && directory.boolValue
         }
-        func visible(_ url: URL) throws -> [String] {
-            try fm.contentsOfDirectory(atPath: url.path).filter { !$0.hasPrefix(".") }
+        func entries(_ url: URL) throws -> [String] {
+            try fm.contentsOfDirectory(atPath: url.path).filter { $0 != ".DS_Store" }
         }
         guard fm.fileExists(atPath: folder.path) else { return }
         guard isFolder(folder) else { throw PictureError.notASweep(folder.path) }
-        let inside = try visible(folder)
+        let inside = try entries(folder)
         guard !inside.isEmpty else { return }
         let listed = try? JSONDecoder().decode(Manifest.self, from: Data(contentsOf: folder.appending(path: "manifest.json")))
         guard let manifest = listed else { throw PictureError.notASweep(folder.path) }
@@ -177,7 +183,7 @@ enum Pictures {
         for entry in inside where entry != "manifest.json" {
             let scene = folder.appending(path: entry)
             guard scenes.contains(entry), isFolder(scene),
-                  try visible(scene).allSatisfy({ pictures.contains("\(entry)/\($0)") && !isFolder(scene.appending(path: $0)) })
+                  try entries(scene).allSatisfy({ pictures.contains("\(entry)/\($0)") && !isFolder(scene.appending(path: $0)) })
             else { throw PictureError.notASweep(folder.path) }
         }
     }

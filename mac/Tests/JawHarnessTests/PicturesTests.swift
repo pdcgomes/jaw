@@ -173,3 +173,45 @@ func scratch(_ name: String) -> URL {
     let after = try FileManager.default.contentsOfDirectory(atPath: root.path)
     #expect(after == ["review"], "nor does one after a sweep that was stopped")
 }
+
+@MainActor @Test func `a sweep leaves alone a folder with any other hidden entry, in it or in a scene's folder`() async throws {
+    let root = scratch("hidden")
+    defer { try? FileManager.default.removeItem(at: root) }
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    let repository = root.appending(path: "repository")
+    try FileManager.default.createDirectory(at: repository.appending(path: ".git"), withIntermediateDirectories: true)
+    try Data("ref: refs/heads/main\n".utf8).write(to: repository.appending(path: ".git/HEAD"))
+    await #expect(throws: Pictures.PictureError.self) {
+        try await Pictures.sweep(catalog, conditions: Conditions(), to: repository)
+    }
+    #expect(FileManager.default.fileExists(atPath: repository.appending(path: ".git/HEAD").path))
+    let folder = root.appending(path: "review")
+    try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    try Data("mine".utf8).write(to: folder.appending(path: "block/.notes"))
+    await #expect(throws: Pictures.PictureError.self) {
+        try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    }
+    #expect(FileManager.default.fileExists(atPath: folder.appending(path: "block/.notes").path))
+    let beside = try FileManager.default.contentsOfDirectory(atPath: root.path)
+    #expect(Set(beside) == ["repository", "review"], "nothing is made beside them either")
+}
+
+@MainActor @Test func `a sweep overlooks the Finder's DS_Store, in the folder and in a scene's folder`() async throws {
+    let root = scratch("finder")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let folder = root.appending(path: "review")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data("finder".utf8).write(to: folder.appending(path: ".DS_Store"))
+    var catalog = HarnessCatalog()
+    catalog.register(block())
+    let first = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    try Data("finder".utf8).write(to: folder.appending(path: ".DS_Store"))
+    try Data("finder".utf8).write(to: folder.appending(path: "block/.DS_Store"))
+    let next = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
+    #expect(next.scenes == first.scenes)
+    let written = try JSONDecoder().decode(Pictures.Manifest.self, from: Data(contentsOf: folder.appending(path: "manifest.json")))
+    #expect(written == next)
+    let beside = try FileManager.default.contentsOfDirectory(atPath: root.path)
+    #expect(beside == ["review"])
+}
