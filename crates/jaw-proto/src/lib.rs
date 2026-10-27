@@ -461,6 +461,14 @@ pub struct Stored {
     /// Polls jaw.db held before votes were kept that are still to be given their options.
     #[serde(default)]
     pub polls_backfill: u64,
+    /// Messages jaw.db held from before jawd knew their kinds, still to be looked at for those it
+    /// couldn't show, to convert them again.
+    #[serde(default)]
+    pub kinds_backfill: u64,
+    /// Edits and answers to events encrypted with their message's secret, which jawd can't read
+    /// yet, kept for a later jawd with what they change.
+    #[serde(default)]
+    pub encrypted_kept: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -106,6 +106,45 @@ pub fn body(m: &e2e::Message, mentioned: &[String]) -> Body {
     if let Some(x) = m.album_message.as_deref() {
         return album(x);
     }
+    if let Some(x) = m.template_message.as_deref() {
+        return template(x, mentioned);
+    }
+    if let Some(x) = m.interactive_message.as_deref() {
+        return interactive(x, mentioned);
+    }
+    if let Some(x) = m.buttons_message.as_deref() {
+        return buttons(x, mentioned);
+    }
+    if let Some(x) = m.list_message.as_deref() {
+        return list(x, mentioned);
+    }
+    if let Some(chosen) = answer(m) {
+        return Body::with_text("text", Some(chosen), mentioned, "");
+    }
+    if let Some(x) = m.rich_response_message.as_deref() {
+        return rich_response(x, mentioned);
+    }
+    if let Some(x) = m.newsletter_follower_invite_message_v2.as_deref() {
+        let channel = Channel { jid: x.newsletter_jid.as_deref(), name: x.newsletter_name.as_deref(), expires: None };
+        return channel_invite(&channel, false, x.caption.as_deref(), mentioned);
+    }
+    if let Some(x) = m.newsletter_admin_invite_message.as_deref() {
+        let channel = Channel {
+            jid: x.newsletter_jid.as_deref(),
+            name: x.newsletter_name.as_deref(),
+            expires: x.invite_expiration,
+        };
+        return channel_invite(&channel, true, x.caption.as_deref(), mentioned);
+    }
+    if let Some(x) = m.message_history_notice.as_deref() {
+        return shared_history(x.message_history_metadata.as_ref());
+    }
+    if let Some(x) = m.message_history_bundle.as_deref() {
+        return shared_history(x.message_history_metadata.as_ref());
+    }
+    if m.placeholder_message.is_some() {
+        return line("Open WhatsApp on your phone to see this message");
+    }
     if let Some(x) = m.keep_in_chat_message.as_ref() {
         let kept = x.keep_type == Some(e2e::KeepType::KeepForAll as i32);
         let sentence = if kept { "A message was kept in the chat" } else { "A message is no longer kept" };
@@ -381,6 +420,136 @@ fn album(x: &e2e::AlbumMessage) -> Body {
     }
     let summary = if parts.is_empty() { "Album".to_string() } else { format!("Album: {}", parts.join(" and ")) };
     Body::new("album", summary).detail(json!({ "album": { "photos": photos, "videos": videos } }))
+}
+
+/// A line in the chat that isn't anyone's message.
+fn line(sentence: &str) -> Body {
+    Body::new("system", sentence).detail(json!({ "system": sentence }))
+}
+
+/// A business's message as text: its parts that say something, a paragraph each, its first line
+/// its summary; one with nothing to say is still one jaw can't show.
+fn paragraphs(parts: &[Option<&str>], mentioned: &[String]) -> Body {
+    let said: Vec<&str> = parts.iter().flatten().map(|part| part.trim()).filter(|part| !part.is_empty()).collect();
+    if said.is_empty() {
+        return Body::new("unknown", UNKNOWN);
+    }
+    Body::with_text("text", Some(&said.join("\n\n")), mentioned, "")
+}
+
+/// A business's template: its title, its text and its footer, whichever form it came in.
+fn template(x: &e2e::TemplateMessage, mentioned: &[String]) -> Body {
+    use e2e::template_message::{Format, hydrated_four_row_template::Title};
+    let hydrated = match &x.format {
+        Some(Format::HydratedFourRowTemplate(t)) => Some(t.as_ref()),
+        Some(Format::InteractiveMessageTemplate(t)) => return interactive(t, mentioned),
+        _ => x.hydrated_template.as_deref(),
+    };
+    let Some(t) = hydrated else { return Body::new("unknown", UNKNOWN) };
+    let title = match &t.title {
+        Some(Title::HydratedTitleText(title)) => Some(title.as_str()),
+        _ => None,
+    };
+    paragraphs(&[title, t.hydrated_content_text.as_deref(), t.hydrated_footer_text.as_deref()], mentioned)
+}
+
+fn interactive(x: &e2e::InteractiveMessage, mentioned: &[String]) -> Body {
+    let title = x.header.as_deref().and_then(|header| header.title.as_deref());
+    let body = x.body.as_ref().and_then(|body| body.text.as_deref());
+    let footer = x.footer.as_deref().and_then(|footer| footer.text.as_deref());
+    paragraphs(&[title, body, footer], mentioned)
+}
+
+fn buttons(x: &e2e::ButtonsMessage, mentioned: &[String]) -> Body {
+    use e2e::buttons_message::Header;
+    let header = match &x.header {
+        Some(Header::Text(text)) => Some(text.as_str()),
+        _ => None,
+    };
+    paragraphs(&[header, x.content_text.as_deref(), x.footer_text.as_deref()], mentioned)
+}
+
+/// A business's list: what it says, then its options a line each, since they're chosen on the phone.
+fn list(x: &e2e::ListMessage, mentioned: &[String]) -> Body {
+    let options: Vec<String> = x
+        .sections
+        .iter()
+        .flat_map(|section| &section.rows)
+        .filter_map(|row| row.title.as_deref().map(str::trim).filter(|title| !title.is_empty()))
+        .map(|title| format!("- {title}"))
+        .collect();
+    let options = (!options.is_empty()).then(|| options.join("\n"));
+    paragraphs(&[x.title.as_deref(), x.description.as_deref(), x.footer_text.as_deref(), options.as_deref()], mentioned)
+}
+
+/// What an answer to a business's list, buttons or template says: the option chosen.
+fn answer(m: &e2e::Message) -> Option<&str> {
+    use e2e::buttons_response_message::Response;
+    m.list_response_message
+        .as_deref()
+        .and_then(|x| x.title.as_deref().or(x.description.as_deref()))
+        .or_else(|| m.template_button_reply_message.as_deref().and_then(|x| x.selected_display_text.as_deref()))
+        .or_else(|| {
+            m.buttons_response_message
+                .as_deref()
+                .and_then(|x| x.response.as_ref().map(|Response::SelectedDisplayText(text)| text.as_str()))
+        })
+        .or_else(|| m.interactive_response_message.as_deref().and_then(|x| x.body.as_ref()?.text.as_deref()))
+        .filter(|chosen| !chosen.trim().is_empty())
+}
+
+/// Meta AI's answer: the text of each part of it that's text.
+fn rich_response(x: &e2e::AiRichResponseMessage, mentioned: &[String]) -> Body {
+    use wa_proto::waai_common_deprecated::AiRichResponseSubMessageType as Part;
+    let text: Vec<Option<&str>> = x
+        .submessages
+        .iter()
+        .filter(|part| part.message_type.is_none_or(|t| t == Part::AiRichResponseText as i32))
+        .map(|part| part.message_text.as_deref())
+        .collect();
+    paragraphs(&text, mentioned)
+}
+
+/// A channel an invitation names, and when the invitation runs out, in seconds.
+struct Channel<'a> {
+    jid: Option<&'a str>,
+    name: Option<&'a str>,
+    expires: Option<i64>,
+}
+
+/// An invitation to follow a channel, or to be one of its admins.
+fn channel_invite(channel: &Channel, admin: bool, caption: Option<&str>, mentioned: &[String]) -> Body {
+    let name = channel.name.filter(|name| !name.is_empty());
+    let fallback = match (admin, name) {
+        (false, Some(name)) => format!("Invitation to follow {name}"),
+        (false, None) => "Invitation to follow a channel".to_string(),
+        (true, Some(name)) => format!("Invitation to be an admin of {name}"),
+        (true, None) => "Invitation to be a channel's admin".to_string(),
+    };
+    let mut invite = serde_json::Map::new();
+    if let Some(jid) = channel.jid.filter(|jid| !jid.is_empty()) {
+        invite.insert("channel".into(), json!(jid));
+    }
+    if let Some(name) = name {
+        invite.insert("name".into(), json!(name));
+    }
+    if let Some(expires) = channel.expires.filter(|&seconds| seconds > 0) {
+        invite.insert("expires".into(), json!(expires * 1000));
+    }
+    if admin {
+        invite.insert("admin".into(), json!(true));
+    }
+    Body::with_text("invite", caption, mentioned, &fallback).detail(json!({ "invite": invite }))
+}
+
+/// Recent messages a member shared with those who joined after them.
+fn shared_history(metadata: Option<&e2e::MessageHistoryMetadata>) -> Body {
+    let sentence = match metadata.and_then(|metadata| metadata.message_count).filter(|&n| n > 0) {
+        Some(1) => "1 recent message shared with new members".to_string(),
+        Some(n) => format!("{n} recent messages shared with new members"),
+        None => "Recent messages shared with new members".to_string(),
+    };
+    line(&sentence)
 }
 
 fn capitalised(s: &str) -> String {

@@ -253,6 +253,8 @@ fn context(info: Option<&e2e::ContextInfo>) -> Context {
 #[derive(Default)]
 struct Wrapped {
     view_once: bool,
+    /// For a comment on a community's announcement, the announcement it's on.
+    comment_on: Option<MessageKey>,
 }
 
 /// The message inside its wrappers.
@@ -271,6 +273,9 @@ fn unwrap(mut message: &e2e::Message) -> (&e2e::Message, Wrapped) {
         {
             wrapped.view_once = true;
             m.message.as_deref()
+        } else if let Some(m) = message.comment_message.as_deref() {
+            wrapped.comment_on = m.target_message_key.clone();
+            m.message.as_deref()
         } else if let Some(m) = message
             .document_with_caption_message
             .as_deref()
@@ -279,6 +284,8 @@ fn unwrap(mut message: &e2e::Message) -> (&e2e::Message, Wrapped) {
             .or(message.lottie_sticker_message.as_deref())
             .or(message.associated_child_message.as_deref())
             .or(message.bot_invoke_message.as_deref())
+            .or(message.group_status_message.as_deref())
+            .or(message.group_status_message_v2.as_deref())
         {
             m.message.as_deref()
         } else {
@@ -328,14 +335,26 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         );
         return;
     }
+    if let Some(kept) = encrypted_amendment(envelope, message, me) {
+        changes.push(Change::Amend(kept));
+        changes.extend(own_action(envelope));
+        return;
+    }
     if let Some(pin) = message.pin_in_chat_message.as_ref() {
         changes.extend(pin.key.as_ref().and_then(|key| keep(envelope, key, "pin", me)).map(Change::Amend));
+    }
+    if let Some(sentence) = status_sentence(message, envelope.from.mine) {
+        changes.push(Change::Message(system(envelope, "system", sentence)));
+        return;
     }
     let body = kinds::body(message, &context_of(message).map(|c| c.mentioned_jid.clone()).unwrap_or_default());
     if body.kind == kinds::NOTHING {
         return;
     }
-    let context = context(context_of(message));
+    let mut context = context(context_of(message));
+    if context.reply.is_none() {
+        context.reply = wrapped.comment_on.as_ref().and_then(commented);
+    }
     let mentions_me = context.mentioned.iter().any(|jid| me.is(jid));
     let info = envelope.info;
     let status = envelope.from.mine.then(|| status(info.status));
@@ -367,6 +386,33 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         poll: body.poll,
         ..Message::default()
     }));
+}
+
+/// An edit or an answer to an event encrypted with its message's secret, which jawd can't read yet:
+/// it waits in `pending` with its protobuf, for a later jawd, rather than showing as a row.
+fn encrypted_amendment(envelope: &Envelope, message: &e2e::Message, me: &Me) -> Option<Amend> {
+    if let Some(x) = message.secret_encrypted_message.as_ref() {
+        return keep(envelope, x.target_message_key.as_ref()?, "secret", me);
+    }
+    let x = message.enc_event_response_message.as_ref()?;
+    keep(envelope, x.event_creation_message_key.as_ref()?, "rsvp", me)
+}
+
+/// What a mention in a status, or an answer to one, says in the chat it reaches.
+fn status_sentence(message: &e2e::Message, mine: bool) -> Option<&'static str> {
+    if message.status_mention_message.is_some() {
+        return Some(if mine { "You mentioned them in your status" } else { "Mentioned you in their status" });
+    }
+    message
+        .status_notification_message
+        .as_ref()
+        .map(|_| if mine { "You responded to their status" } else { "Responded to your status" })
+}
+
+/// The quote of a comment: the announcement it's on, which the comment doesn't carry the words of.
+fn commented(on: &MessageKey) -> Option<String> {
+    let id = on.id.as_deref().filter(|id| !id.is_empty())?;
+    Some(json!({ "id": id, "from": on.participant.as_deref().map(user_jid), "summary": "" }).to_string())
 }
 
 /// The poll a message creates, out of its wrappers, whichever version it was sent as.
@@ -479,6 +525,17 @@ fn context_of(m: &e2e::Message) -> Option<&e2e::ContextInfo> {
         .or_else(|| kinds::poll(m).and_then(|x| x.context_info.as_deref()))
         .or_else(|| m.event_message.as_deref().and_then(|x| x.context_info.as_deref()))
         .or_else(|| m.group_invite_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.template_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.interactive_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.buttons_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.list_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.list_response_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.buttons_response_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.template_button_reply_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.interactive_response_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.rich_response_message.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.newsletter_follower_invite_message_v2.as_deref().and_then(|x| x.context_info.as_deref()))
+        .or_else(|| m.newsletter_admin_invite_message.as_deref().and_then(|x| x.context_info.as_deref()))
 }
 
 fn status(status: Option<i32>) -> &'static str {
@@ -665,6 +722,7 @@ fn stub_line(envelope: &Envelope, stub: i32) -> Message {
     use web_message_info::StubType;
     let parameters = &envelope.info.message_stub_parameters;
     let first = parameters.first().map(String::as_str).unwrap_or_default();
+    let nth = |i: usize| parameters.get(i).map(|p| p.trim()).filter(|p| !p.is_empty());
     let (kind, sentence) = match StubType::try_from(stub).ok() {
         Some(StubType::Revoke) => ("system", "This message was deleted".to_string()),
         Some(StubType::Ciphertext) => ("system", "Waiting for this message".to_string()),
@@ -688,9 +746,119 @@ fn stub_line(envelope: &Envelope, stub: i32) -> Message {
         Some(StubType::ChangeEphemeralSetting) => {
             ("system", kinds::ephemeral_sentence(first.parse().unwrap_or_default()))
         }
+        Some(StubType::GroupParticipantLinkedGroupJoin) => {
+            ("system", members_sentence("joined from the community", parameters))
+        }
+        // Joining the community's general chat, its first parameter saying how.
+        Some(StubType::GeneralChatAdd) if first == "linked_group_join" => {
+            ("system", format!("{} joined from the community", who(envelope)))
+        }
+        Some(StubType::CommunityLinkSubGroup | StubType::CommunityLinkSiblingGroup) => {
+            ("system", named(nth(1), "Group added to the community: ", "A group was added to the community"))
+        }
+        Some(StubType::CommunityUnlinkSubGroup | StubType::CommunityUnlinkSiblingGroup) => {
+            ("system", named(nth(1), "Group removed from the community: ", "A group was removed from the community"))
+        }
+        Some(StubType::CommunityLinkParentGroup | StubType::CommunityLinkParentGroupRich) => {
+            ("system", named(nth(1), "This group was added to the community ", "This group was added to a community"))
+        }
+        Some(StubType::CommunityUnlinkParentGroup) => (
+            "system",
+            named(nth(1), "This group was removed from the community ", "This group was removed from its community"),
+        ),
+        Some(StubType::CommunityParentGroupDeleted) => (
+            "system",
+            nth(0).map_or_else(
+                || "The community was deactivated".into(),
+                |name| format!("The community {name} was deactivated"),
+            ),
+        ),
+        Some(StubType::CommunityCreate) => ("system", named(nth(1), "Community created: ", "Community created")),
+        Some(StubType::CommunityParticipantPromote) => ("system", members_sentence("made community admin", parameters)),
+        Some(StubType::CommunityParticipantDemote) => {
+            ("system", members_sentence("no longer community admin", parameters))
+        }
+        Some(StubType::CommunityParticipantAddRich) => {
+            ("system", named(nth(1), "You were added to the community ", "You were added to the community"))
+        }
+        Some(StubType::SubGroupParticipantAddRich) => {
+            ("system", named(nth(1), "You were added to the group ", "You were added to a group"))
+        }
+        Some(StubType::CagMaskedThreadCreated) => ("system", "A thread was started".to_string()),
+        Some(StubType::PinnedMessageInChat) => ("system", members_sentence("pinned a message", parameters)),
+        Some(StubType::ChangeUsername) => ("system", username_sentence(parameters)),
+        Some(
+            StubType::BizPrivacyModeInitFb
+            | StubType::BizPrivacyModeToFb
+            | StubType::BizCoexPrivacyInit
+            | StubType::BizCoexPrivacyTransition,
+        ) => ("system", "This business uses a secure service from Meta to manage this chat".to_string()),
+        Some(StubType::BizPrivacyModeInitBsp | StubType::BizPrivacyModeToBsp) => {
+            ("system", "This business works with other companies to manage this chat".to_string())
+        }
+        Some(StubType::BlockContact) if first == "true" => ("system", "You blocked this contact".to_string()),
+        Some(StubType::BlockContact) if first == "false" => ("system", "You unblocked this contact".to_string()),
+        Some(StubType::DisappearingMode) if first.parse::<u32>().is_ok() => {
+            ("system", kinds::ephemeral_sentence(first.parse().unwrap_or_default()))
+        }
+        Some(StubType::ChangeLimitSharing) if first == "true" => {
+            ("system", "Advanced chat privacy turned on".to_string())
+        }
+        Some(StubType::ChangeLimitSharing) if first == "false" => {
+            ("system", "Advanced chat privacy turned off".to_string())
+        }
+        Some(StubType::GroupMembershipJoinApprovalMode) if nth(1) == Some("true") => {
+            ("system", "New members need admin approval to join".to_string())
+        }
+        Some(StubType::GroupMembershipJoinApprovalMode) if nth(1) == Some("false") => {
+            ("system", "New members don't need admin approval to join".to_string())
+        }
+        Some(StubType::EventUpdated) => ("system", named(nth(0), "Event updated: ", "Event updated")),
+        Some(StubType::EventCanceled) => ("system", named(nth(0), "Event cancelled: ", "Event cancelled")),
+        Some(StubType::ScheduledMessageCreated) => ("system", "Message scheduled".to_string()),
+        Some(StubType::BroadcastCreate) => (
+            "system",
+            match first.parse::<u32>() {
+                Ok(1) => "Broadcast list created with 1 recipient".to_string(),
+                Ok(n) => format!("Broadcast list created with {n} recipients"),
+                Err(_) => "Broadcast list created".to_string(),
+            },
+        ),
+        Some(StubType::IndividualChangeNumber) => ("system", "This contact changed their number".to_string()),
         _ => ("system", kinds::UNKNOWN.to_string()),
     };
     system(envelope, kind, &sentence)
+}
+
+/// `prefix` and the name a stub gives, or `without` when it gives none.
+fn named(name: Option<&str>, prefix: &str, without: &str) -> String {
+    name.map_or_else(|| without.to_string(), |name| format!("{prefix}{name}"))
+}
+
+/// Who a line's own event is by, until names are resolved: you, or their number.
+fn who(envelope: &Envelope) -> String {
+    if envelope.from.mine {
+        return "You".into();
+    }
+    envelope.from.jid.as_deref().map_or_else(|| "Someone".into(), shown_jid)
+}
+
+/// A username set, changed or removed: the stub gives the old and the new username, the person's
+/// JID, and their name as the phone showed it, which reads better than a LID.
+fn username_sentence(parameters: &[String]) -> String {
+    let nth = |i: usize| parameters.get(i).map(|p| p.trim()).filter(|p| !p.is_empty());
+    let who = nth(3)
+        .map(|name| name.trim_start_matches('~').trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| nth(2).map(shown_jid))
+        .unwrap_or_else(|| "Someone".into());
+    let handle = |name: &str| if name.starts_with('@') { name.to_string() } else { format!("@{name}") };
+    match (nth(0), nth(1)) {
+        (None, Some(new)) => format!("{who} set their username to {}", handle(new)),
+        (Some(_), Some(new)) => format!("{who} changed their username to {}", handle(new)),
+        (_, None) => format!("{who} removed their username"),
+    }
 }
 
 fn members_sentence(what: &str, jids: &[String]) -> String {

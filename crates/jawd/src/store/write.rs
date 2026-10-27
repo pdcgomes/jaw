@@ -3,6 +3,7 @@
 //! it last changed: interfaces converge however updates arrive, and a client that saw seq S needs
 //! only the rows whose `v` is past S.
 
+pub mod kinds;
 pub mod layout;
 pub mod links;
 pub mod outbox;
@@ -1022,14 +1023,19 @@ fn delete_message(db: &Connection, stamps: &mut Stamps, chat: &str, id: &str) ->
     delete_row(db, stamps, chat, n)
 }
 
-/// Deletes a message for me, leaving a tombstone so a copy arriving later doesn't bring it back. A
-/// chat whose newest it was shows the one before it, and keeps its place.
+/// Deletes a message for me, leaving a tombstone so a copy arriving later doesn't bring it back.
 fn delete_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
     db.prepare_cached(
         "INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM messages WHERE n = ?1",
     )?
     .execute(params![n, now_ms()])?;
     outbox::deleted_for_you(db, n)?;
+    remove_row(db, stamps, chat, n)
+}
+
+/// Takes message `n` out of `chat`, with its event, so windows let it go. A chat whose newest it
+/// was shows the one before it, and keeps its place.
+fn remove_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
     if db.prepare_cached("DELETE FROM messages WHERE n = ?1")?.execute([n])? == 0 {
         return Ok(false);
     }
@@ -1971,6 +1977,10 @@ fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<
         ),
         _ => {
             let raw = amend.raw.as_ref().map_or(&[][..], |packed| packed.0.as_slice());
+            // What's kept for a later jawd never applies, so a copy of it arriving again waits once.
+            if matches!(amend.what, Amendment::Keep { .. }) && kinds::kept_already(db, &chat, amend, raw)? {
+                return Ok(false);
+            }
             db.prepare_cached(
                 "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?

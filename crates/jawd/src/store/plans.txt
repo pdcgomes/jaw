@@ -581,6 +581,10 @@ SELECT EXISTS (SELECT 1 FROM messages WHERE chat = (SELECT n FROM chats WHERE id
         SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
 
 -- src/store/schema.rs
+INSERT INTO backfills (name, after, upto) SELECT 'kinds', 0, seq FROM sqlite_sequence WHERE name = 'messages' AND seq > 0;
+    SCAN sqlite_sequence
+
+-- src/store/schema.rs
 SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name
     SCAN sqlite_schema
     USE TEMP B-TREE FOR ORDER BY
@@ -588,6 +592,30 @@ SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_
 -- src/store/schema.rs
 SELECT count(*) FROM sqlite_schema
     SCAN sqlite_master
+
+-- src/store/write/kinds.rs
+SELECT n, NOT deleted AND raw IS NOT NULL AND (kind = 'unknown' OR kind = 'system' AND summary = 'jaw can''t show this yet') FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
+
+-- src/store/write/kinds.rs
+SELECT chat, id, raw FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/kinds.rs
+SELECT value FROM sync_state WHERE key = 'me'
+    SEARCH sync_state USING PRIMARY KEY (key=?)
+
+-- src/store/write/kinds.rs
+UPDATE messages SET kind = ?2, text = iif(edited_at > ?12 AND summary IS NOT ?13, text, ?3), spans = iif(edited_at > ?12 AND summary IS NOT ?13, spans, ?4), summary = iif(edited_at > ?12 AND summary IS NOT ?13, summary, iif(?5 IS ?3, NULL, ?5)), reply = ?6, detail = ?7, forwarded = ?8, expires_at = ?9, view_once = ?10, mentions_me = ?11, v = ?14 WHERE n = ?1 AND NOT deleted
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/kinds.rs
+UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/kinds.rs
+SELECT raw FROM pending WHERE chat = ?1 AND target = ?2 AND at = ?3 AND kind = ?4
+    SEARCH pending USING INDEX pending_by_target_at (chat=? AND target=? AND at=?)
 
 -- src/store/write/layout.rs
 SELECT v FROM interface_state WHERE interface = ?1 AND key = ?2

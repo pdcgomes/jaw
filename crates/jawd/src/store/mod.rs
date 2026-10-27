@@ -60,7 +60,7 @@ pub use self::write::{
     Amend, Amendment, Change, Chat, Drained, Members, Merging, Message, Opened, Packed, Person, Read, frecency,
     merge_reference,
 };
-pub use self::write::{links, outbox, polls};
+pub use self::write::{kinds, links, outbox, polls};
 use crate::engine::Ack;
 use crate::work::{Report, Samples};
 

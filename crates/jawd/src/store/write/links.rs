@@ -5,6 +5,7 @@
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::kinds::{self, KINDS};
 use super::{CHAT, MESSAGE, Stamps, chat_jid, located, now_ms};
 
 /// The backfill that links the messages jaw.db held when links began to be kept.
@@ -12,7 +13,7 @@ pub const LINKS: &str = "links";
 /// The backfill that gives the polls jaw.db held before votes were kept their options.
 pub const POLLS: &str = "polls";
 /// The backfills this jawd knows, which a migration may leave rows for.
-pub const BACKFILLS: &[&str] = &[LINKS, POLLS];
+pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS];
 /// How many messages one step of a backfill looks at: most are none of its business, and a look at
 /// one that isn't is a read of its row.
 const STEP: i64 = 64;
@@ -58,6 +59,7 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
     let (next, take): (&str, Take) = match name {
         LINKS => (NEXT_LINKED, link),
         POLLS => (NEXT_POLLS, super::polls::backfilled),
+        KINDS => (kinds::NEXT_UNSHOWN, kinds::backfilled),
         other => bail!("jawd doesn't know the backfill {other}"),
     };
     let rows: Vec<(i64, Option<bool>)> = db

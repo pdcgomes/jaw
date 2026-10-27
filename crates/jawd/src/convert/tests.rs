@@ -638,6 +638,495 @@ fn a_push_name_names_the_sender_and_a_live_lid_chat_goes_under_its_number() {
     assert_eq!((m.chat.as_str(), m.sender.as_deref()), (ANA, Some(ANA)));
 }
 
+const COMMUNITY: &str = "120363000000000009@g.us";
+const ANNOUNCEMENTS: &str = "120363000000000008@g.us";
+
+/// What history keeps of `stub` in `chat`, with `parameters`, from 100000000001@lid in a group.
+fn stub(chat: &str, stub: StubType, parameters: &[&str]) -> WebMessageInfo {
+    let mut info = info(chat, e2e::Message::default());
+    info.message = None;
+    info.message_stub_type = Some(stub as i32);
+    info.message_stub_parameters = parameters.iter().map(|p| p.to_string()).collect();
+    info
+}
+
+#[test]
+fn community_events_and_the_other_stubs_history_brings_read_as_what_happened() {
+    let (natal, bairro) = ("Festa de Natal", "Bairro de Alvalade");
+    let cases: &[(&str, StubType, &[&str], &str)] = &[
+        (
+            GROUP,
+            StubType::GroupParticipantLinkedGroupJoin,
+            &["351910000003@s.whatsapp.net"],
+            "+351910000003 joined from the community",
+        ),
+        (
+            GROUP,
+            StubType::GeneralChatAdd,
+            &["linked_group_join", "Geral", "true"],
+            "100000000001 joined from the community",
+        ),
+        (COMMUNITY, StubType::CommunityLinkSubGroup, &[GROUP, natal], "Group added to the community: Festa de Natal"),
+        (
+            ANNOUNCEMENTS,
+            StubType::CommunityLinkSiblingGroup,
+            &[GROUP, natal],
+            "Group added to the community: Festa de Natal",
+        ),
+        (
+            COMMUNITY,
+            StubType::CommunityUnlinkSubGroup,
+            &[GROUP, natal],
+            "Group removed from the community: Festa de Natal",
+        ),
+        (
+            ANNOUNCEMENTS,
+            StubType::CommunityUnlinkSiblingGroup,
+            &[GROUP, natal],
+            "Group removed from the community: Festa de Natal",
+        ),
+        (
+            GROUP,
+            StubType::CommunityLinkParentGroupRich,
+            &[COMMUNITY, bairro],
+            "This group was added to the community Bairro de Alvalade",
+        ),
+        (
+            GROUP,
+            StubType::CommunityLinkParentGroup,
+            &[COMMUNITY, bairro],
+            "This group was added to the community Bairro de Alvalade",
+        ),
+        (
+            GROUP,
+            StubType::CommunityUnlinkParentGroup,
+            &[COMMUNITY, bairro],
+            "This group was removed from the community Bairro de Alvalade",
+        ),
+        (
+            ANNOUNCEMENTS,
+            StubType::CommunityParentGroupDeleted,
+            &[bairro],
+            "The community Bairro de Alvalade was deactivated",
+        ),
+        (ANNOUNCEMENTS, StubType::CommunityCreate, &[COMMUNITY, bairro], "Community created: Bairro de Alvalade"),
+        (
+            ANNOUNCEMENTS,
+            StubType::CommunityParticipantPromote,
+            &["100000000003@lid"],
+            "100000000003 made community admin",
+        ),
+        (
+            ANNOUNCEMENTS,
+            StubType::CommunityParticipantDemote,
+            &["100000000003@lid"],
+            "100000000003 no longer community admin",
+        ),
+        (
+            ANNOUNCEMENTS,
+            StubType::CommunityParticipantAddRich,
+            &[COMMUNITY, bairro],
+            "You were added to the community Bairro de Alvalade",
+        ),
+        (
+            ANNOUNCEMENTS,
+            StubType::SubGroupParticipantAddRich,
+            &[GROUP, natal],
+            "You were added to the group Festa de Natal",
+        ),
+        (ANNOUNCEMENTS, StubType::CagMaskedThreadCreated, &[], "A thread was started"),
+        (GROUP, StubType::PinnedMessageInChat, &["351910000003@s.whatsapp.net"], "+351910000003 pinned a message"),
+        (
+            GROUP,
+            StubType::ChangeUsername,
+            &["", "ana.ribeiro", "100000000003@lid", "~Ana"],
+            "Ana set their username to @ana.ribeiro",
+        ),
+        (
+            GROUP,
+            StubType::ChangeUsername,
+            &["ana", "@ana.ribeiro", "100000000003@lid", "Ana Ribeiro"],
+            "Ana Ribeiro changed their username to @ana.ribeiro",
+        ),
+        (
+            ANA,
+            StubType::ChangeUsername,
+            &["ana.ribeiro", "", "100000000003@lid", ""],
+            "100000000003 removed their username",
+        ),
+        (ANA, StubType::BizPrivacyModeToFb, &[""], "This business uses a secure service from Meta to manage this chat"),
+        (
+            ANA,
+            StubType::BizPrivacyModeInitFb,
+            &[""],
+            "This business uses a secure service from Meta to manage this chat",
+        ),
+        (ANA, StubType::BizCoexPrivacyInit, &[""], "This business uses a secure service from Meta to manage this chat"),
+        (
+            ANA,
+            StubType::BizCoexPrivacyTransition,
+            &[""],
+            "This business uses a secure service from Meta to manage this chat",
+        ),
+        (ANA, StubType::BizPrivacyModeInitBsp, &[""], "This business works with other companies to manage this chat"),
+        (ANA, StubType::BizPrivacyModeToBsp, &[""], "This business works with other companies to manage this chat"),
+        (ANA, StubType::BlockContact, &["true"], "You blocked this contact"),
+        (ANA, StubType::BlockContact, &["false"], "You unblocked this contact"),
+        (ANA, StubType::DisappearingMode, &["7776000", "100000000002@lid"], "Disappearing messages turned on: 90 days"),
+        (GROUP, StubType::ChangeLimitSharing, &["true", "1", "100000000003@lid"], "Advanced chat privacy turned on"),
+        (ANA, StubType::ChangeLimitSharing, &["false", "1", "100000000002@lid"], "Advanced chat privacy turned off"),
+        (GROUP, StubType::GroupMembershipJoinApprovalMode, &["on", "true"], "New members need admin approval to join"),
+        (
+            GROUP,
+            StubType::GroupMembershipJoinApprovalMode,
+            &["on", "false"],
+            "New members don't need admin approval to join",
+        ),
+        (ANNOUNCEMENTS, StubType::EventUpdated, &["Magusto"], "Event updated: Magusto"),
+        (ANNOUNCEMENTS, StubType::EventCanceled, &["Magusto"], "Event cancelled: Magusto"),
+        (ANA, StubType::ScheduledMessageCreated, &[], "Message scheduled"),
+        ("1792000000@broadcast", StubType::BroadcastCreate, &["2"], "Broadcast list created with 2 recipients"),
+        (
+            ANA,
+            StubType::IndividualChangeNumber,
+            &["351910000004@s.whatsapp.net", "100000000002@lid"],
+            "This contact changed their number",
+        ),
+    ];
+    for &(chat, kind, parameters, said) in cases {
+        let m = rows(&stub(chat, kind, parameters), false).remove(0);
+        assert_eq!((m.kind, m.summary.as_str()), ("system", said), "{kind:?} {parameters:?}");
+        assert_eq!(m.detail, Some(json!({ "system": said }).to_string()), "{kind:?}");
+        assert!(m.raw.is_some(), "{kind:?} keeps its protobuf");
+    }
+    let m = rows(&stub(GROUP, StubType::GroupChangeNoFrequentlyForwarded, &[]), false).remove(0);
+    assert_eq!((m.kind, m.summary.as_str()), ("system", kinds::UNKNOWN), "a stub jawd doesn't know yet says so");
+}
+
+/// The kind, text and summary of the row converting `m` from Ana gives.
+fn business(m: e2e::Message) -> (&'static str, Option<String>, String) {
+    let m = row(m);
+    (m.kind, m.text, m.summary)
+}
+
+#[test]
+fn a_businesss_templates_buttons_lists_and_answers_to_them_are_their_text() {
+    use e2e::template_message::{Format, HydratedFourRowTemplate, hydrated_four_row_template::Title};
+    let hydrated = HydratedFourRowTemplate {
+        title: Some(Title::HydratedTitleText("Your order has shipped".into())),
+        hydrated_content_text: Some("It arrives on Thursday.".into()),
+        hydrated_footer_text: Some("Reply STOP to stop".into()),
+        ..Default::default()
+    };
+    let template = e2e::TemplateMessage {
+        format: Some(Format::HydratedFourRowTemplate(Box::new(hydrated.clone()))),
+        ..Default::default()
+    };
+    assert_eq!(
+        business(e2e::Message { template_message: Some(Box::new(template)), ..Default::default() }),
+        (
+            "text",
+            Some("Your order has shipped\n\nIt arrives on Thursday.\n\nReply STOP to stop".into()),
+            "Your order has shipped It arrives on Thursday. Reply STOP to stop".into()
+        ),
+    );
+    let video_titled = HydratedFourRowTemplate {
+        title: Some(Title::VideoMessage(Default::default())),
+        hydrated_content_text: Some("Our new range".into()),
+        ..Default::default()
+    };
+    let template = e2e::TemplateMessage { hydrated_template: Some(Box::new(video_titled)), ..Default::default() };
+    assert_eq!(
+        business(e2e::Message { template_message: Some(Box::new(template)), ..Default::default() }),
+        ("text", Some("Our new range".into()), "Our new range".into()),
+        "the hydrated template outside the format, with a video for its title"
+    );
+
+    let interactive = e2e::InteractiveMessage {
+        header: Some(Box::new(e2e::interactive_message::Header {
+            title: Some("Welcome".into()),
+            ..Default::default()
+        })),
+        body: Some(e2e::interactive_message::Body { text: Some("Choose a plan".into()) }),
+        footer: Some(Box::new(e2e::interactive_message::Footer {
+            text: Some("Cancel any time".into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let expected = (
+        "text",
+        Some("Welcome\n\nChoose a plan\n\nCancel any time".into()),
+        "Welcome Choose a plan Cancel any time".into(),
+    );
+    assert_eq!(
+        business(e2e::Message { interactive_message: Some(Box::new(interactive.clone())), ..Default::default() }),
+        expected
+    );
+    let template = e2e::TemplateMessage {
+        format: Some(Format::InteractiveMessageTemplate(Box::new(interactive))),
+        ..Default::default()
+    };
+    assert_eq!(business(e2e::Message { template_message: Some(Box::new(template)), ..Default::default() }), expected);
+
+    let buttons = e2e::ButtonsMessage {
+        header: Some(e2e::buttons_message::Header::Text("Delivery".into())),
+        content_text: Some("When suits you?".into()),
+        footer_text: Some("Pick one".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        business(e2e::Message { buttons_message: Some(Box::new(buttons)), ..Default::default() }),
+        ("text", Some("Delivery\n\nWhen suits you?\n\nPick one".into()), "Delivery When suits you? Pick one".into())
+    );
+
+    let day = |title: &str| e2e::list_message::Row { title: Some(title.into()), ..Default::default() };
+    let list = e2e::ListMessage {
+        description: Some("Which day?".into()),
+        button_text: Some("See days".into()),
+        sections: vec![e2e::list_message::Section { title: None, rows: vec![day("Monday"), day("Tuesday")] }],
+        ..Default::default()
+    };
+    let (kind, text, summary) = business(e2e::Message { list_message: Some(Box::new(list)), ..Default::default() });
+    assert_eq!((kind, text.as_deref()), ("text", Some("Which day?\n\n- Monday\n- Tuesday")));
+    assert!(summary.starts_with("Which day?") && summary.contains("Tuesday"), "{summary}");
+
+    let quoted = context(|c| {
+        c.stanza_id = Some("3EB0LIST".into());
+        c.participant = Some(ANA.into());
+    });
+    let chose =
+        e2e::ListResponseMessage { title: Some("Tuesday".into()), context_info: quoted.clone(), ..Default::default() };
+    let m = row(e2e::Message { list_response_message: Some(Box::new(chose)), ..Default::default() });
+    assert_eq!((m.kind, m.text.as_deref()), ("text", Some("Tuesday")));
+    assert!(m.reply.as_deref().is_some_and(|r| r.contains("3EB0LIST")), "an answer replies to what it answers");
+    let pressed = e2e::TemplateButtonReplyMessage {
+        selected_display_text: Some("Track my order".into()),
+        context_info: quoted.clone(),
+        ..Default::default()
+    };
+    let m = row(e2e::Message { template_button_reply_message: Some(Box::new(pressed)), ..Default::default() });
+    assert_eq!((m.text.as_deref(), m.reply.is_some()), (Some("Track my order"), true));
+    let pressed = e2e::ButtonsResponseMessage {
+        response: Some(e2e::buttons_response_message::Response::SelectedDisplayText("Morning".into())),
+        context_info: quoted,
+        ..Default::default()
+    };
+    let m = row(e2e::Message { buttons_response_message: Some(Box::new(pressed)), ..Default::default() });
+    assert_eq!((m.text.as_deref(), m.reply.is_some()), (Some("Morning"), true));
+    let answered = e2e::InteractiveResponseMessage {
+        body: Some(e2e::interactive_response_message::Body { text: Some("Plan B".into()), ..Default::default() }),
+        ..Default::default()
+    };
+    assert_eq!(
+        business(e2e::Message { interactive_response_message: Some(Box::new(answered)), ..Default::default() }),
+        ("text", Some("Plan B".into()), "Plan B".into())
+    );
+}
+
+#[test]
+fn meta_ais_answers_are_their_text_and_so_are_their_edits() {
+    use wa_proto::waai_common_deprecated::{AiRichResponseSubMessage, AiRichResponseSubMessageType};
+    let part = |text: &str| AiRichResponseSubMessage {
+        message_type: Some(AiRichResponseSubMessageType::AiRichResponseText as i32),
+        message_text: Some(text.into()),
+        ..Default::default()
+    };
+    let answer = e2e::Message {
+        rich_response_message: Some(Box::new(e2e::AiRichResponseMessage {
+            submessages: vec![part("Lisbon is the capital."), part("It has seven hills.")],
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let m = row(answer.clone());
+    let said = "Lisbon is the capital. It has seven hills.";
+    assert_eq!(
+        (m.kind, m.text.as_deref(), m.summary.as_str()),
+        ("text", Some("Lisbon is the capital.\n\nIt has seven hills."), said)
+    );
+    let edit = e2e::Message {
+        protocol_message: Some(Box::new(e2e::ProtocolMessage {
+            key: Some(key("3EB0AI")),
+            r#type: Some(e2e::protocol_message::Type::MessageEdit as i32),
+            edited_message: Some(Box::new(answer)),
+            timestamp_ms: Some(AT + 5),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let changes = message(&info(ANA, edit), &me(), false);
+    let Some(Change::Edited { shown, .. }) = changes.iter().find(|c| matches!(c, Change::Edited { .. })) else {
+        panic!("an edit: {changes:?}")
+    };
+    assert_eq!((shown.kind, shown.summary.as_str()), ("text", said), "what stands in for it");
+}
+
+#[test]
+fn a_comment_on_an_announcement_is_its_message_replying_to_the_announcement() {
+    let comment = e2e::Message {
+        comment_message: Some(Box::new(e2e::CommentMessage {
+            message: Some(Box::new(e2e::Message { conversation: Some("count me in".into()), ..Default::default() })),
+            target_message_key: Some(MessageKey {
+                remote_jid: Some(ANNOUNCEMENTS.into()),
+                from_me: Some(false),
+                id: Some("3EB0NEWS".into()),
+                participant: Some("100000000004@lid".into()),
+            }),
+        })),
+        ..Default::default()
+    };
+    let m = rows(&info(ANNOUNCEMENTS, comment), false).remove(0);
+    assert_eq!((m.kind, m.text.as_deref()), ("text", Some("count me in")));
+    let reply: serde_json::Value = serde_json::from_str(m.reply.as_deref().expect("a reply")).unwrap();
+    assert_eq!(reply, json!({ "id": "3EB0NEWS", "from": "100000000004@lid", "summary": "" }));
+}
+
+#[test]
+fn shared_history_placeholders_and_status_notices_are_lines() {
+    let metadata = || e2e::MessageHistoryMetadata { message_count: Some(50), ..Default::default() };
+    let notice = e2e::Message {
+        message_history_notice: Some(Box::new(e2e::MessageHistoryNotice {
+            message_history_metadata: Some(metadata()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let bundle = e2e::Message {
+        message_history_bundle: Some(Box::new(e2e::MessageHistoryBundle {
+            message_history_metadata: Some(metadata()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    for m in [notice, bundle] {
+        let m = rows(&info(GROUP, m), false).remove(0);
+        assert_eq!((m.kind, m.summary.as_str()), ("system", "50 recent messages shared with new members"));
+    }
+    let placeholder = e2e::Message { placeholder_message: Some(Default::default()), ..Default::default() };
+    assert_eq!(
+        (row(placeholder.clone()).kind, row(placeholder).summary.as_str()),
+        ("system", "Open WhatsApp on your phone to see this message")
+    );
+
+    let mention = e2e::Message {
+        status_mention_message: Some(Box::new(e2e::FutureProofMessage {
+            message: Some(Box::new(e2e::Message {
+                protocol_message: Some(Box::new(e2e::ProtocolMessage {
+                    key: Some(MessageKey {
+                        remote_jid: Some("status@broadcast".into()),
+                        from_me: Some(false),
+                        id: Some("3EB0STATUS".into()),
+                        participant: None,
+                    }),
+                    r#type: Some(e2e::protocol_message::Type::StatusMentionMessage as i32),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+        })),
+        ..Default::default()
+    };
+    let response = e2e::Message { status_notification_message: Some(Default::default()), ..Default::default() };
+    for (message, theirs, yours) in [
+        (mention, "Mentioned you in their status", "You mentioned them in your status"),
+        (response, "Responded to your status", "You responded to their status"),
+    ] {
+        let m = rows(&info(ANA, message.clone()), false).remove(0);
+        assert_eq!((m.kind, m.summary.as_str()), ("system", theirs));
+        let mut mine = info(ANA, message);
+        mine.key.from_me = Some(true);
+        assert_eq!(rows(&mine, false).remove(0).summary, yours);
+    }
+}
+
+#[test]
+fn an_invitation_to_follow_or_run_a_channel_is_an_invite() {
+    let follow = e2e::Message {
+        newsletter_follower_invite_message_v2: Some(Box::new(e2e::NewsletterFollowerInviteMessage {
+            newsletter_jid: Some("120363000000000007@newsletter".into()),
+            newsletter_name: Some("Jaw news".into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let m = row(follow);
+    assert_eq!((m.kind, m.summary.as_str()), ("invite", "Invitation to follow Jaw news"));
+    let detail: serde_json::Value = serde_json::from_str(m.detail.as_deref().unwrap()).unwrap();
+    assert_eq!(detail, json!({ "invite": { "channel": "120363000000000007@newsletter", "name": "Jaw news" } }));
+    let admin = e2e::Message {
+        newsletter_admin_invite_message: Some(Box::new(e2e::NewsletterAdminInviteMessage {
+            newsletter_jid: Some("120363000000000007@newsletter".into()),
+            newsletter_name: Some("Jaw news".into()),
+            caption: Some("help me run it?".into()),
+            invite_expiration: Some(1_792_600_000),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let m = row(admin);
+    assert_eq!((m.kind, m.text.as_deref(), m.summary.as_str()), ("invite", Some("help me run it?"), "help me run it?"));
+    let detail: serde_json::Value = serde_json::from_str(m.detail.as_deref().unwrap()).unwrap();
+    assert_eq!(detail["invite"]["expires"], json!(1_792_600_000_000_i64));
+    assert_eq!(detail["invite"]["admin"], json!(true));
+}
+
+#[test]
+fn a_status_shared_with_a_group_is_what_it_shows() {
+    let status = e2e::Message {
+        group_status_message_v2: Some(Box::new(e2e::FutureProofMessage {
+            message: Some(Box::new(e2e::Message {
+                image_message: Some(Box::new(e2e::ImageMessage {
+                    caption: Some("sunset".into()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+        })),
+        ..Default::default()
+    };
+    let m = rows(&info(GROUP, status), false).remove(0);
+    assert_eq!((m.kind, m.text.as_deref()), ("image", Some("sunset")));
+}
+
+#[test]
+fn encrypted_edits_and_answers_to_events_wait_for_their_message_and_make_no_row() {
+    let target = MessageKey {
+        remote_jid: Some(GROUP.into()),
+        from_me: Some(true),
+        id: Some("3EB0EVENT".into()),
+        participant: Some("100000000001@lid".into()),
+    };
+    let edit = e2e::Message {
+        secret_encrypted_message: Some(e2e::SecretEncryptedMessage {
+            target_message_key: Some(target.clone()),
+            enc_payload: Some(vec![1, 2, 3]),
+            secret_enc_type: Some(e2e::secret_encrypted_message::SecretEncType::MessageEdit as i32),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let answer = e2e::Message {
+        enc_event_response_message: Some(e2e::EncEventResponseMessage {
+            event_creation_message_key: Some(target),
+            enc_payload: Some(vec![4, 5, 6]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for (message, kind) in [(edit, "secret"), (answer, "rsvp")] {
+        let theirs = info(GROUP, message.clone());
+        assert!(rows(&theirs, false).is_empty(), "{kind} makes no row");
+        let [kept] = amends(&theirs).try_into().unwrap();
+        assert_eq!((kept.target.as_str(), &kept.what), ("3EB0EVENT", &Amendment::Keep { kind: kind.into() }));
+        assert!(kept.raw.is_some(), "{kind} keeps its protobuf to wait with");
+        let mut mine = info(GROUP, message);
+        mine.key.from_me = Some(true);
+        let own = amends(&mine).into_iter().find(|a| a.target == "3EB0AA").map(|a| a.what);
+        assert_eq!(own, Some(Amendment::DeleteForMe), "a {kind} of yours leaves its own ID no row to wait for");
+    }
+}
+
 /// A message row's own fields, as the protocol's fixture of one has them with a sender: a detail
 /// key named alike would come twice in the row, since its detail is flattened into it.
 fn row_fields() -> HashSet<String> {
@@ -679,6 +1168,13 @@ fn no_kind_of_message_has_a_detail_key_named_like_one_of_its_rows_own_fields() {
         e2e::Message { album_message: Some(Default::default()), ..Default::default() },
         e2e::Message { keep_in_chat_message: Some(Default::default()), ..Default::default() },
         e2e::Message { pin_in_chat_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { newsletter_follower_invite_message_v2: Some(Default::default()), ..Default::default() },
+        e2e::Message { newsletter_admin_invite_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { message_history_notice: Some(Default::default()), ..Default::default() },
+        e2e::Message { message_history_bundle: Some(Default::default()), ..Default::default() },
+        e2e::Message { placeholder_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { status_mention_message: Some(Default::default()), ..Default::default() },
+        e2e::Message { status_notification_message: Some(Default::default()), ..Default::default() },
     ];
     let mut with_detail = 0;
     for m in kinds {

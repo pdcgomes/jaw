@@ -925,6 +925,15 @@ pub(super) const MIGRATIONS: &[&str] = &[
     INSERT INTO backfills (name, after, upto) SELECT 'polls', 0, seq FROM sqlite_sequence
         WHERE name = 'messages' AND seq > 0;
     ",
+    // 16, a schema step: the messages jawd couldn't show when they came, of kind unknown or system
+    // lines saying so, are converted again from their raw protobufs by a backfill, now that jawd
+    // knows community events and the other kinds it didn't; one that changes another message, an
+    // encrypted edit or an answer to an event, goes to wait in `pending`. It leaves one row in
+    // `backfills`, jaw's own, so it costs the same however many messages there are.
+    "
+    INSERT INTO backfills (name, after, upto) SELECT 'kinds', 0, seq FROM sqlite_sequence
+        WHERE name = 'messages' AND seq > 0;
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.
