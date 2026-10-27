@@ -2609,6 +2609,28 @@ async fn an_edit_of_a_message_youre_deleting_for_everyone_is_refused_while_your_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_or_an_edit_named_in_its_chat_or_not_is_refused_while_your_deletion_is_on_its_way() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.chats(&[ANA]).await;
+    let message = Message { chat: ANA.into(), ..mine_message("m1", now_ms() - 60_000) };
+    running.store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+    running.call("delete", json!({ "message": "m1", "chat": ANA, "for": "everyone" })).await.unwrap();
+    for chat in [Some(ANA), None] {
+        let named = |mut params: Value| {
+            if let Some(chat) = chat {
+                params["chat"] = json!(chat);
+            }
+            params
+        };
+        let reacted = running.call("react", named(json!({ "message": "m1", "emoji": "👍" }))).await.unwrap_err();
+        let edited = running.call("edit", named(json!({ "message": "m1", "text": "chego às 21h" }))).await.unwrap_err();
+        assert_eq!((reacted.code, edited.code), (code::NOT_ALLOWED, code::NOT_ALLOWED), "named in {chat:?}");
+    }
+    assert_eq!(outbox_rows(&running).await.0, [("revoke".to_string(), "queued".to_string())], "nothing written");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_action_on_a_message_still_to_go_from_a_chat_being_merged_goes_after_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
