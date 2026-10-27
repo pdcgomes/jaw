@@ -62,9 +62,9 @@ Migration 13 is a schema step: one new table, which costs the same however big j
 -- row for each setting chosen: never dropped or rebuilt, and copied as they are by any rebuild. A
 -- setting without a row has its default.
 CREATE TABLE settings (
-    domain TEXT NOT NULL,
-    key TEXT NOT NULL,
-    value TEXT NOT NULL CHECK (json_valid(value)),
+    domain TEXT NOT NULL CHECK (octet_length(domain) BETWEEN 1 AND 64),
+    key TEXT NOT NULL CHECK (octet_length(key) BETWEEN 1 AND 64),
+    value TEXT NOT NULL CHECK (json_valid(value) AND octet_length(value) <= 4096),
     at INTEGER NOT NULL,
     PRIMARY KEY (domain, key)
 ) STRICT, WITHOUT ROWID;
@@ -76,7 +76,7 @@ CREATE TABLE settings (
 - **Bounded.** jawd writes only domains and settings it knows, so the table holds at most one row for each, two today; `jawd status` reports what's in effect and anything ignored.
 - **Kept when not understood.** A row whose value this jawd doesn't take, written by a newer jawd within the compatibility window or naming a theme a later Omarchy drops, is left as it is and read as the default, and `status` says so. A row for a domain or a setting this jawd doesn't know is left alone and not read. Being jaw's own, neither is ever dropped.
 - **Not in the feed.** The feed keeps windows current, and settings aren't a window: hello and the push deliver them. So a change to the settings writes no `events` row; the rule that a change and its event commit together is about the feed's rows.
-- **A change that can't be kept** publishes nothing, and the answer says why; one waiting for a jaw.db that can't be written yet waits, as every write does.
+- **A change that can't be kept** publishes nothing, and the answer says why; one waiting for a jaw.db that can't be written yet waits, as every write does. Its JSON goes to quarantine, in one row for the domain that the next failure replaces, so the row is the last change refused for the domain, not one waiting: nothing replays it, and a later change that's kept leaves it there.
 - **Backups.** The design's daily backup of jaw's own tables, still to be built, includes `settings`.
 - **The audit.** `crates/jawd/src/settings` joins the data-layer paths in `scripts/check-data-audit.py`, and the database expert audits the branch before it lands.
 
