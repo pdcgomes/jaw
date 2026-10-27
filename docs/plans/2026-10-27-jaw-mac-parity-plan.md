@@ -11,7 +11,7 @@
 ## How the terminal is tracked
 
 - **`make check-parity`** (`scripts/check-parity.py`) reads which of jawd's requests each interface sends and which of its pushes it reads, from their source (the terminal's in `crates/jaw` and `crates/jaw-client`, the Mac's in `mac/`), and which requests jawd serves. Every one the terminal uses and the Mac doesn't is listed in [`mac/parity.toml`](../../mac/parity.toml) with the step below that brings it. The check fails on a gap the list doesn't have, and on one the Mac has closed that it still holds, so the list always says what's left and why.
-- **Ahead of main:** `make check-parity ARGS="--terminal <branch>"` reads a terminal branch against the Mac on main, so what's being built is queued before it lands. Rows from a branch whose names main's protocol doesn't have yet say which branch (`from`); `library.shown` and `settings.set` are queued that way now.
+- **Ahead of main:** `make check-parity ARGS="--terminal <branch>"` reads a terminal branch against the Mac on main, so what's being built is queued before it lands. Rows from a branch whose names main's protocol doesn't have yet say which branch (`from`); `library.shown` and the `library` push are queued that way now.
 - **What a request can't show:** a feature that needs no new request, such as the terminal's folder keys or the IRC layout. Those come from each terminal branch's commits and the parity canvas, which is brought up to date whenever main moves; the canvas is the whole picture, and the check is the guard.
 - **When it runs:** whenever main moves, with each terminal or jawd branch that lands, and at the start and end of every Mac step. Something new from the terminal becomes a row in the list and a line in its step below, in the same commit.
 - **In CI** (Owner, 27 Oct): the check runs on every push, beside the data-audit check, once CI runs again; not in the pre-push hook, so the Mac never holds a terminal branch up.
@@ -134,11 +134,11 @@ The Mac draws every state already. Once `failure-states` lands (the engine resta
 
 ### 3.5 Settings kept by jawd
 
-On `settings`, the terminal's settings move into jawd, a domain for each frontend (`settings.set`, the `settings` push and `themes`), with Omarchy's 23 themes and the IRC layout. The Mac keeps its own preferences, as its design has them, and already has two looks.
+Since `settings` landed on 27 October (ebbd905), the terminal's settings are jawd's, a domain for each frontend (`settings.set`, the `settings` push and `themes`), with Omarchy's 23 themes and the IRC layout, so this step can start whenever the Mac builder reaches it. The Mac keeps its own preferences, as its design has them, and already has two looks.
 
 - **What jawd can keep, jawd keeps** (Owner, 27 Oct): the settings that are jawd's (what downloads by itself, the cache's size, notifications, P5) are set from the Mac's Settings through jawd and shared with the terminal; the Mac's look (bubbles or lines, density, text size, the panes' outline) stays in its own preferences.
 - **Both sets of themes** (Owner, 27 Oct): once `settings` lands, the Appearance pane lists Omarchy's 23, read from jawd's `themes` and mapped onto the Mac's roles as the terminal maps them onto its own, beside jaw's Tokyo Night; Redlamp's families join them in Mac-M5.
-- **The check:** `settings.set` and the `settings` push (both from `settings`).
+- **The check:** `settings.set` and the `settings` push.
 
 ### 3.6 Scheduled messages and reminders
 

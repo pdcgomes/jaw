@@ -28,7 +28,7 @@
 "voice.stop" = "2.7"
 "voice.send" = "2.7"
 "voice.cancel" = "2.7"
-"settings.set" = { step = "3.5", from = "settings" }
+"settings.set" = "3.5"
 
 [pushes]
 "layout" = "1.1"
@@ -40,7 +40,7 @@
 "recording" = "2.7"
 "typing" = "3.1"
 "presence" = "3.1"
-"settings" = { step = "3.5", from = "settings" }
+"settings" = "3.5"
 
 # What the terminal uses that the Mac never will, each with why:
 # [not_for_the_mac]

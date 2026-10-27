@@ -4,8 +4,8 @@
 
 ## Where it starts
 
-- **The Mac leads in 14** of the 149 features the parity canvas compares (`jaw-feature-parity.canvas.tsx`, its "Mac ahead" filter).
-- **Four are being built** on the terminal's branches already: asking the phone for older messages (`failure-states`), how messages are laid out (`settings`' IRC layout), a settings panel (`settings`), and who's typing (`presence-typing`).
+- **The Mac led in 14** of the 149 features the parity canvas compares (`jaw-feature-parity.canvas.tsx`, its "Mac ahead" filter), and leads in 12 since `settings` landed (ebbd905).
+- **Four were being built** on the terminal's branches: asking the phone for older messages (`failure-states`), how messages are laid out (`settings`' IRC layout, landed), a settings panel (`settings`, landed), and who's typing (`presence-typing`).
 - **Seven are in the terminal's design and not built:** the cards for documents, link previews, places and contact cards; polls with their bars; view-once said so; and emoji completed after a colon.
 - **Three aren't in it:** chats' pictures, an emoji picker, and named layouts on a grid.
 - **By the requests each sends,** the Mac asks jawd for two things the terminal doesn't (`make check-parity` lists them): `history.more`, which `failure-states` brings, and `link.cancel`, which the terminal has had no use for: its linking screen stays until jawd is linked.
@@ -15,8 +15,8 @@
 These need nothing more than their branches, and are listed so nothing drops.
 
 - **Older messages asked of the phone:** `history.more` when scrolling past a chat's oldest message, on `failure-states`.
-- **How messages are laid out:** on the right as now, or under "You" as IRC clients put them, on `settings`.
-- **A settings panel:** Ctrl-, in the chat list's place, and `jaw settings`, on `settings`.
+- **How messages are laid out:** on the right as now, or under "You" as IRC clients put them; landed with `settings` (ebbd905).
+- **A settings panel:** Ctrl-, in the chat list's place, and `jaw settings`; landed with `settings` (ebbd905).
 - **Who's typing:** the chat list's row, the conversation's title and the status line, on `presence-typing`, as P7's typing half.
 
 ## In the terminal's design, to build
