@@ -334,11 +334,27 @@ fn engine(kind: EngineKind, home: &Path) -> Chosen {
     match kind {
         EngineKind::Demo => Ok(Arc::new(DemoEngine::new())),
         EngineKind::DemoUnlinked => Ok(Arc::new(DemoEngine::unlinked())),
-        EngineKind::Go => match GoEngine::find() {
+        EngineKind::Go => match engine_program() {
             Some(program) => Ok(Arc::new(GoEngine::new(program, home.to_path_buf()))),
-            None => Err(("go", "jaw-engine isn't beside jawd or on PATH; make build builds it".into())),
+            None => Err((
+                "go",
+                "jaw-engine isn't beside jawd, in libexec/jaw/ beside its folder or on PATH; make build builds it"
+                    .into(),
+            )),
         },
     }
+}
+
+/// Where jaw-engine is: `JAW_ENGINE` if set; beside jawd, in libexec/jaw/ beside jawd's folder as
+/// `make install` and Homebrew put it, or in target/engine/ when jawd runs from a checkout's
+/// target/, each looked for from where jawd really is; then as `GoEngine::find` looks, which
+/// ends on PATH.
+fn engine_program() -> Option<std::path::PathBuf> {
+    if std::env::var_os("JAW_ENGINE").is_some() {
+        return GoEngine::find();
+    }
+    jaw_proto::local::beside(&["jaw-engine", "../libexec/jaw/jaw-engine", "../engine/jaw-engine"])
+        .or_else(GoEngine::find)
 }
 
 fn run(home: &Path, kind: EngineKind, no_notify: bool) -> Result<()> {

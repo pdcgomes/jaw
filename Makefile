@@ -8,7 +8,13 @@ BUF := github.com/bufbuild/buf/cmd/buf@v1.74.0
 # tarball (scripts/version says how; crates/jaw-version gives the Rust programs the same).
 JAW_VERSION ?= $(shell sh scripts/version)
 
-.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit check-parity hooks perf clean prune-builds mac mac-test
+# Where make install puts jaw: jaw and jawd in bin/, and the engine, which only jawd runs, in
+# libexec/jaw/, where jawd looks for it beside its own folder. DESTDIR stages it elsewhere.
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+LIBEXECDIR ?= $(PREFIX)/libexec/jaw
+
+.PHONY: build engine rust release install uninstall test lint fmt proto sync-protos check-generated check-audit check-parity hooks perf clean prune-builds mac mac-test
 
 build: engine rust
 
@@ -17,6 +23,23 @@ engine:
 
 rust:
 	$(CARGO) build --workspace
+
+# What make install installs: target/release/jaw and jawd, and the engine.
+release: engine
+	$(CARGO) build --release --locked -p jaw -p jawd
+
+# As root, as with sudo, it installs what make release built and builds nothing: cargo and go
+# would start again in root's caches, without the crates and modules you've downloaded.
+install: $(if $(filter 0,$(shell id -u)),,release)
+	@test -x target/release/jaw && test -x target/release/jawd && test -x target/engine/jaw-engine || \
+		{ echo "nothing to install yet: run make release first, as yourself"; exit 1; }
+	install -d "$(DESTDIR)$(BINDIR)" "$(DESTDIR)$(LIBEXECDIR)"
+	install -m 755 target/release/jaw target/release/jawd "$(DESTDIR)$(BINDIR)"
+	install -m 755 target/engine/jaw-engine "$(DESTDIR)$(LIBEXECDIR)"
+
+uninstall:
+	rm -f "$(DESTDIR)$(BINDIR)/jaw" "$(DESTDIR)$(BINDIR)/jawd" "$(DESTDIR)$(LIBEXECDIR)/jaw-engine"
+	rmdir "$(DESTDIR)$(LIBEXECDIR)" 2>/dev/null || true
 
 test: engine
 	cd engine && $(GO) test -race ./...

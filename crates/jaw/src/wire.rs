@@ -180,10 +180,9 @@ fn library(asked: u64, v: &Value, whole: bool) -> Update {
     Update::Library { asked, window }
 }
 
-/// Where jawd is: beside jaw, as `make install` and cargo put them, or on the PATH.
+/// Where jawd is: beside jaw, as `make install`, Homebrew and cargo put them, or on the PATH.
 pub fn jawd_binary() -> PathBuf {
-    let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("jawd")));
-    beside.filter(|p| p.exists()).unwrap_or_else(|| PathBuf::from("jawd"))
+    jaw_proto::local::beside(&["jawd"]).unwrap_or_else(|| PathBuf::from("jawd"))
 }
 
 /// Starts jawd on `home`, on its own, so it goes on when jaw quits; its output goes to a log
