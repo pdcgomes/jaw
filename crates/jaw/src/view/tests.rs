@@ -697,7 +697,7 @@ fn a_change_shows_while_jawd_keeps_it_and_one_it_doesnt_keep_goes_back_and_says_
 #[test]
 fn a_change_whose_answer_was_lost_or_unreadable_goes_back_and_says_it_isnt_confirmed() {
     let (mut v, _rx) = view(140, 40);
-    let lost = "jawd went away before answering; you'll see what it kept when it's back";
+    let lost = "jawd went away; you'll see what it kept when it's back";
     let unreadable = "jaw couldn't read jawd's answer";
     for (answer, said) in [
         (Update::SettingsUnconfirmed(lost.into()), format!("not confirmed: {lost}")),
@@ -711,6 +711,23 @@ fn a_change_whose_answer_was_lost_or_unreadable_goes_back_and_says_it_isnt_confi
         assert_eq!((v.settings_owed, &v.settings_asked), (0, &None), "{said}: nothing left on its way");
         let screen = frame(&mut v);
         assert!(screen.lines().last().unwrap().contains(&said), "{said}:\n{screen}");
+    }
+}
+
+/// The footer is one line: a notice too long for it, as jawd's refusal of a theme with all 23 in
+/// it is at 80 columns, ends in an ellipsis where it's cut, and one that fits with its padding is
+/// shown as it is.
+#[test]
+fn a_notice_too_long_for_the_footer_ends_in_an_ellipsis_and_one_that_fits_is_shown_whole() {
+    let (mut v, _rx) = view(80, 24);
+    let themes: Vec<&str> = jaw_proto::themes::all().iter().map(|t| t.id.as_str()).collect();
+    let refused = format!("theme takes one of {}", themes.join(", "));
+    v.apply(Update::SettingsRefused(refused.clone()));
+    let said = format!("not kept: {refused}");
+    assert_eq!(frame(&mut v).lines().last().unwrap(), format!(" {}…", &said[..77]), "cut, and saying so");
+    for (columns, shown) in [(78, format!(" {}", "x".repeat(78))), (79, format!(" {}…", "x".repeat(77)))] {
+        v.apply(Update::Notice("x".repeat(columns)));
+        assert_eq!(frame(&mut v).lines().last().unwrap(), shown, "{columns} columns");
     }
 }
 

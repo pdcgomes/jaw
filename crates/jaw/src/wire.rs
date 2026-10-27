@@ -386,9 +386,13 @@ impl Wire {
             Asked::Did(what) => Some(Update::Notice(why_not(failure, what))),
             Asked::StartChat => Some(Update::NotStarted(failure.to_string())),
             Asked::Voice => Some(Update::VoiceRefused(why_not(failure, "voice"))),
-            Asked::Settings if matches!(failure, Failure::Lost) => Some(Update::SettingsUnconfirmed(
-                "jawd went away before answering; you'll see what it kept when it's back".into(),
-            )),
+            // Shorter than the failure's own words, so the footer holds them whole at 80 columns.
+            Asked::Settings if matches!(failure, Failure::Lost) => {
+                Some(Update::SettingsUnconfirmed("jawd went away; you'll see what it kept when it's back".into()))
+            }
+            Asked::Settings if matches!(failure, Failure::Unreachable) => {
+                Some(Update::SettingsRefused("jawd isn't connected; try again in a moment".into()))
+            }
             Asked::Settings => Some(Update::SettingsRefused(why_not(failure, "settings"))),
             Asked::Info(message) => Some(Update::Info { message, info: Err(why_not(failure, "a message's info")) }),
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),

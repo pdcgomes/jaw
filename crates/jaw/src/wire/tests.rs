@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::data::Tick;
+use crate::demo::{Clock, Demo, State};
 use crate::run;
 use crate::theme::Theme;
 use crate::view::View;
@@ -566,6 +567,17 @@ fn answers_settings(u: &Update) -> bool {
     matches!(u, Update::SettingsKept(_) | Update::SettingsRefused(_) | Update::SettingsUnconfirmed(_))
 }
 
+/// The footer at 80 columns once `update` has come, on the made-up account.
+fn footer_at_80(update: &Update) -> String {
+    let (tx, rx) = channel();
+    let mut v = View::new(Box::new(Demo::start(tx, Clock::Fixed(NOW), State::Online, false)));
+    v.clock = Some(NOW);
+    v.resize(80, 24);
+    run::settle(&mut v, &rx);
+    v.apply(update.clone());
+    frame(&mut v).lines().last().unwrap_or_default().to_string()
+}
+
 /// An answer to `settings.set` that doesn't read as the settings jawd kept still answers the
 /// change, as not confirmed, so the screen doesn't wait for good on an answer that has come.
 #[test]
@@ -583,7 +595,7 @@ fn an_answer_to_a_settings_change_that_cant_be_read_says_so() {
 
 /// A settings change whose answer the connection lost may have been kept: it's said as not
 /// confirmed, and jawd's hello once it's back brings what it kept. One asked while jawd is away is
-/// never sent, so it's not kept.
+/// never sent, so it's not kept. The footer says each whole at 80 columns.
 #[test]
 fn a_settings_change_whose_answer_is_lost_is_unconfirmed_and_one_never_sent_is_not_kept() {
     let jawd = scripted();
@@ -595,9 +607,10 @@ fn a_settings_change_whose_answer_is_lost_is_unconfirmed_and_one_never_sent_is_n
     jawd.kept.lock().unwrap().swallow = true;
     wire.set_settings(&SettingsSet { theme: Some("gruvbox".into()), messages: None });
     drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
-    let lost = "jawd went away before answering; you'll see what it kept when it's back";
+    let lost = "jawd went away; you'll see what it kept when it's back";
     let answered: Vec<&Update> = said.iter().filter(|u| answers_settings(u)).collect();
     assert_eq!(answered, [&Update::SettingsUnconfirmed(lost.into())], "{said:?}");
+    assert_eq!(footer_at_80(answered[0]), format!(" not confirmed: {lost}"), "whole at 80 columns");
     let gruvbox = Settings { theme: "gruvbox".into(), messages: Messages::Bubbles };
     let hello = said.iter().find_map(|u| if let Update::Hello { settings, .. } = u { Some(settings) } else { None });
     assert_eq!(hello, Some(&gruvbox), "back, what jawd kept: {said:?}");
@@ -608,8 +621,9 @@ fn a_settings_change_whose_answer_is_lost_is_unconfirmed_and_one_never_sent_is_n
     wire.set_settings(&SettingsSet { theme: Some("nord".into()), messages: None });
     drive(&mut wire, &rx, &mut said, |s| s.iter().any(answers_settings));
     let answered: Vec<&Update> = said.iter().filter(|u| answers_settings(u)).collect();
-    let unsent = "jawd isn't connected; jaw is trying to reach it, so try again in a moment";
+    let unsent = "jawd isn't connected; try again in a moment";
     assert_eq!(answered, [&Update::SettingsRefused(unsent.into())], "{said:?}");
+    assert_eq!(footer_at_80(answered[0]), format!(" not kept: {unsent}"), "whole at 80 columns");
 }
 
 #[test]
