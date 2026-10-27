@@ -22,6 +22,13 @@ What's there today, on `mac-m1`, is a first step: one AppKit file with six scene
 - **Pinned references, not the whole sweep, in git** (Owner, 27 Oct): about 30 pictures committed and checked in `make mac-test`. The sweep's pictures are drawn again each time and never committed; the five references there today take 3.4 MB on their own.
 - **Screens from values come second** (Owner, 27 Oct), after the shell and the loop: the move is the one part that touches the Mac app's chat's files, and they grow every hour.
 
+Decided while phase one was built:
+
+- **A component that draws wrong in a picture is fixed in `JawUI`, not excused in the harness** (Owner, 27 Oct). `MimicView` gave its image to its layer with nearest-neighbour scaling, which `cacheDisplay` ignores, so every picture smoothed the Mimic; it now draws its pixels itself, never smoothed, at a whole multiple, on the screen and in pictures alike. Not chosen: notes saying crispness is judged in the app.
+- **A sweep never loses what it didn't make** (Owner, 27 Oct). A folder is a sweep's only when its manifest lists exactly what's in it, `.DS_Store` aside; anything else is refused and left as it is. A sweep draws into a hidden folder beside the one asked for and swaps it in only when whole, and `build-mac sweep` copies the build Mac's sweep aside and swaps it in the same way, with `mac/scripts/take-sweep`, so a stopped sweep or copy leaves the last whole one where it was. Not chosen: `mac/build/review` as a plain mirror of the build Mac's last sweep.
+- **The account written longhand, and the avatars and previews drawn for the purpose, come with phase three's scenes** (Owner, 27 Oct), the ones to need them; phase one's fixtures are `Samples` and the protocol's own.
+- **What `JawUI` read from the system it now reads as a value the harness sets:** the Mimic's chomp asks `Motion.reduced`, and `Format.now()` asks `Format.currentTime`, the system's clock unless set, which the harness sets to `Samples.now` before any view is made, so a picture is the same whatever day it's drawn. `Samples`' cards sort by their times, among the newest messages.
+
 ## The boundary
 
 Everything drawn lives in `JawUI` and is made from values: rows, window updates, state kinds and models. What the user does goes out through a host protocol or closures, as `ChatListHost` and `ConversationHost` already have it. `AppModel` is the only code that talks to jawd: it turns jawd's windows into those values, and what the views report into requests.
@@ -143,17 +150,17 @@ What isn't built has no scene yet: media's download states, the viewer, the libr
 
 ### The sweep
 
-`mac/scripts/build-mac sweep` builds the harness on the build Mac and runs `JawHarness --sweep` there, in one run of the app, then brings the pictures back to `mac/build/review/` in the checkout it was run from. Each picture is `<scene>/<variant>.png`, and `manifest.json` gives, for each, its scene's id, section, title, synopsis and notes, its variant, its size in points and pixels, and a hash of its pixels. Each sweep replaces the last, in a folder git ignores: about 250 pictures and under 100 MB, to be measured in the first phase. Live and Performance scenes are interactive and aren't swept. When the build Mac doesn't answer, the sweep runs here, as `build-mac`'s builds do.
+`mac/scripts/build-mac sweep` builds the harness on the build Mac and runs `JawHarness --sweep` there, in one run of the app, then brings the pictures back to `mac/build/review/` in the checkout it was run from. Each picture is `<scene>/<variant>.png`, and `manifest.json` gives, for each, its scene's id, section, title, synopsis and notes, its variant, its size in points and pixels, and a hash of its pixels. Each sweep replaces the last, in a folder git ignores, only once it's whole, and never a folder holding anything a sweep didn't make (`SweepFolder`, and `mac/scripts/take-sweep` for the copy back). Phase one's six scenes sweep into 18 pictures, 5.6 MB, the same each time; at about 250 pictures that's some 72 MB, under the 100 MB first estimated. Live and Performance scenes are interactive and aren't swept. When the build Mac doesn't answer, the sweep runs here, as `build-mac`'s builds do.
 
 ### The canvas
 
-- **Where:** `.atelier/mac-harness.canvas.tsx` at the repository's root, committed with the harness. The sweep writes its data, `.atelier/mac-harness.data.ts`, from the manifest, and Atelier keeps the owner's marks beside it; git ignores both. The canvas shows the sweep of the checkout it's in: the harness's worktree until the first phase lands, `jaw-mac-m1` after, and the main checkout once `mac-m1` lands on main. Marks stay with the checkout they were made in.
+- **Where:** `.atelier/mac-harness.canvas.tsx` at the repository's root, committed with the harness. The sweep writes its data, `.atelier/mac-harness.data.ts`, from the manifest, and Atelier keeps the owner's marks beside it; git ignores both. The canvas shows the sweep of the checkout it's in, and marks stay with the checkout they were made in, so the owner marks one: the harness's worktree while the harness's phases are built there, and the Mac app's checkout once they're done. A checkout's canvas opens once that checkout has been swept.
 - **What it shows:** a tab for each section, and in it a panel for each scene, with its title, its synopsis, its notes and its pictures by variant side by side, each opening full size. Along the top, how many scenes are right, need work, have changed since they were marked, or haven't been looked at yet, each a filter.
 - **The marks:** on each scene, Right, or Needs work with a note, kept in the canvas's state under `marks`, by the scene's id, with the hashes of the pictures it was made on, one map so the counts along the top read every mark at once. When a sweep changes a scene's pictures, its mark shows as "changed since your mark" and the scene asks again.
 
 ### The loop
 
-The owner marks. An agent, the Mac app's chat or any other, reads the marks with Atelier's `canvas_state`, fixes each "needs work", and sweeps again; the canvas updates in place, and what it fixed shows as changed for the owner to look at again.
+The owner marks. An agent, the Mac app's chat or any other, reads the marks with `mac/scripts/review-marks`, which applies the canvas's rule (a mark counts only while its hashes are the scene's pictures' hashes, in order, in the last sweep's manifest; otherwise the scene has changed since it was marked; no mark is not looked at), fixes each "needs work", and sweeps again; the canvas updates in place, and what it fixed shows as changed for the owner to look at again.
 
 ### Pinned references
 
@@ -163,9 +170,11 @@ A small set is committed and checked in every `make mac-test`: the five conversa
 
 `scripts/check-harness` runs on every build, beside `check-components`, and fails when:
 
-- the harness names `Jawd`, from the first phase;
+- the harness names `Jawd`, or JawKit's `Client`, which opens jawd's socket itself, from the first phase;
 - the app target defines a view or a view controller of its own, from the second;
 - a public `JawUI` type that draws (declared as an `NSView` or one of its kinds, an `NSViewController`, an `NSWindow` or `NSPanel`, or a SwiftUI `View`) isn't in any scene's `covers`, from the third.
+
+And `mac/scripts/check`, which every build and test runs, exits 1 unless its action succeeded, so `build-mac` and `make mac-test` fail when a build or the tests do.
 
 ### One scene by hand
 
