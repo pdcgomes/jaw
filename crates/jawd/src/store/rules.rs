@@ -204,9 +204,7 @@ async fn a_persons_two_chats_become_one_when_their_number_and_lid_are_joined() {
     .await;
     assert_eq!(query(&store, |db| read::chats(db, false, None, 10)).await.len(), 2);
     apply(&store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
-    while query(&store, |db| Ok(db.query_row("SELECT EXISTS (SELECT 1 FROM chat_merges)", [], |r| r.get(0))?)).await {
-        store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
-    }
+    merged(&store).await;
     let chats = query(&store, |db| read::chats(db, false, None, 10)).await;
     assert_eq!(chats.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), [ANA]);
     assert!(chats[0].pinned, "the LID chat's pin");
@@ -230,10 +228,15 @@ async fn merging(store: &Store) -> bool {
     query(store, |db| Ok(db.query_row("SELECT EXISTS (SELECT 1 FROM chat_merges)", [], |r| r.get(0))?)).await
 }
 
+/// Takes merge steps until no merge waits, failing rather than going on for ever when one never ends.
 async fn merged(store: &Store) {
-    while merging(store).await {
+    for _ in 0..50 {
+        if !merging(store).await {
+            return;
+        }
         store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
     }
+    panic!("the merge never finished");
 }
 
 #[tokio::test(flavor = "multi_thread")]
