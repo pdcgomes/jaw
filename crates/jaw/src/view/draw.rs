@@ -993,10 +993,18 @@ impl View {
         let inner = block.inner(area);
         f.render_widget(block, area);
         let mut lines = vec![Line::from("Starting jawd, which keeps your messages and talks to WhatsApp.")];
-        lines.push(match failed {
-            Some(why) => Line::from(Span::styled(format!("It didn't start: {why}"), Style::new().fg(t.warn))),
-            None => Line::from(Span::styled("If it can't start, this says why.", Style::new().fg(t.comment))),
-        });
+        match failed {
+            Some(why) => {
+                let width = (inner.width as usize).saturating_sub(4);
+                let said = layout::wrap(&[(format!("It didn't start: {why}"), Style::new().fg(t.warn))], width, width);
+                lines.extend(said.into_iter().map(|line| {
+                    Line::from(line.into_iter().map(|(text, style)| Span::styled(text, style)).collect::<Vec<_>>())
+                }));
+            }
+            None => {
+                lines.push(Line::from(Span::styled("If it can't start, this says why.", Style::new().fg(t.comment))))
+            }
+        }
         f.render_widget(centred(lines, inner), inner);
     }
 

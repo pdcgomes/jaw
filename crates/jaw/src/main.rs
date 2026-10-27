@@ -71,6 +71,10 @@ enum Command {
         /// The made-up account, rather than the jawd on jaw's folder
         #[arg(long)]
         demo: bool,
+        /// Starts jawd first if nothing answers on jaw's folder, as jaw does, and waits for it to
+        /// answer or stop
+        #[arg(long, conflicts_with = "demo")]
+        start: bool,
         #[arg(long, value_enum, default_value_t = demo::State::Online)]
         state: demo::State,
         /// Keys to press first: text types itself, \n is Enter, and <up>, <esc>, <a-down>,
@@ -152,15 +156,17 @@ fn main() -> Result<()> {
             }
             view::View::new(Box::new(demo))
         }),
-        Some(Command::Snapshot { width, height, demo, state, keys, ansi }) => {
+        Some(Command::Snapshot { width, height, demo, start, state, keys, ansi }) => {
             let (tx, rx) = std::sync::mpsc::channel();
             let now = chrono::Utc::now().timestamp_millis();
+            let home = jaw_proto::local::home();
             let mut view = if demo {
                 let account = demo::Demo::start(tx, demo::Clock::Fixed(now), state, false);
                 view::View::new(Box::new(account))
+            } else if start {
+                view::View::new(Box::new(wire::Wire::start(&home, tx)))
             } else {
-                let socket = jaw_proto::local::socket(&jaw_proto::local::home());
-                view::View::new(Box::new(wire::Wire::connect(socket, tx)))
+                view::View::new(Box::new(wire::Wire::connect(jaw_proto::local::socket(&home), tx)))
             };
             view.clock = Some(now);
             view.images = graphics::Images::here(graphics::Protocol::Blocks, (8, 16));
@@ -169,7 +175,10 @@ fn main() -> Result<()> {
                 run::settle(&mut view, &rx);
                 run::press(&mut view, &rx, &keys)?;
             } else {
-                run::settle_live(&mut view, &rx, Duration::from_secs(5));
+                // A jawd being started is waited for until it answers or stops, or a while before
+                // jaw would stop waiting for it.
+                let most = if start { wire::PATIENCE - Duration::from_secs(3) } else { Duration::from_secs(5) };
+                run::settle_live(&mut view, &rx, most);
                 run::press_live(&mut view, &rx, &keys)?;
             }
             let frame = if ansi {

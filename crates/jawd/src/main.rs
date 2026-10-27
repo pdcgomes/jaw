@@ -222,9 +222,17 @@ enum Bench {
     },
 }
 
-fn main() -> Result<()> {
+fn main() {
     unblock_signals();
-    let cli = Cli::parse();
+    // On one line, its causes after it, so jaw, having started a jawd that stopped, says the whole
+    // of why from the log's last line.
+    if let Err(e) = jawd(Cli::parse()) {
+        eprintln!("jawd: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn jawd(cli: Cli) -> Result<()> {
     let home = jaw_proto::local::home();
     let demo = matches!(cli.command, Some(Command::Demo { .. }));
     if cli.fail.is_some() && !demo && !matches!(cli.engine, EngineKind::Demo | EngineKind::DemoUnlinked) {

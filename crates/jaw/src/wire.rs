@@ -26,7 +26,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 
 /// How long jaw waits for a jawd it started to answer before it says it can't reach it.
-const PATIENCE: Duration = Duration::from_secs(15);
+pub const PATIENCE: Duration = Duration::from_secs(15);
 /// How long after a message or an action was first asked for jaw asks for it again with its key.
 /// jawd keeps a key for a day, so past that a second ask could do it twice.
 const KEY_KEPT: Duration = Duration::from_secs(20 * 60 * 60);
@@ -135,6 +135,8 @@ pub struct Wire {
     /// The client's id for each `find`, to the interface's.
     finds: HashMap<u64, u64>,
     starting: Option<Starting>,
+    /// Why the jawd jaw started stopped as it started, said until a jawd answers.
+    didnt_start: Option<String>,
 }
 
 /// What a jawd from before settings is said to be when it's asked to keep them.
@@ -180,8 +182,12 @@ fn library(asked: u64, v: &Value, whole: bool) -> Update {
     Update::Library { asked, window }
 }
 
-/// Where jawd is: beside jaw, as `make install`, Homebrew and cargo put them, or on the PATH.
+/// Where jawd is: `JAWD` if set, beside jaw, as `make install`, Homebrew and cargo put them, or on
+/// the PATH.
 pub fn jawd_binary() -> PathBuf {
+    if let Some(jawd) = std::env::var_os("JAWD") {
+        return PathBuf::from(jawd);
+    }
     jaw_proto::local::beside(&["jawd"]).unwrap_or_else(|| PathBuf::from("jawd"))
 }
 
@@ -211,10 +217,12 @@ fn start_jawd(home: &Path) -> Result<Starting, String> {
     Ok(Starting { child, since: Instant::now(), log })
 }
 
-/// The end of a log, for why a jawd that stopped as it started did.
+/// The end of a log, for why a jawd that stopped as it started did: jawd says that on its last
+/// line.
 fn tail(log: &Path) -> String {
     let text = std::fs::read_to_string(log).unwrap_or_default();
-    text.lines().rev().find(|l| !l.trim().is_empty()).map(|l| format!(": {}", l.trim())).unwrap_or_default()
+    let last = text.lines().rev().map(str::trim).find(|l| !l.is_empty());
+    last.map(|l| format!(": {}", l.strip_prefix("jawd: ").unwrap_or(l))).unwrap_or_default()
 }
 
 fn kind(k: FoundKind) -> Kind {
@@ -254,6 +262,7 @@ impl Wire {
             owed: HashMap::new(),
             finds: HashMap::new(),
             starting: None,
+            didnt_start: None,
         }
     }
 
@@ -426,13 +435,19 @@ impl Wire {
         }
     }
 
-    /// The client couldn't reach jawd: while the jawd jaw started starts, that's starting.
+    /// The client couldn't reach jawd: while the jawd jaw started starts, that's starting, and once
+    /// it has stopped as it started, why it did, until a jawd answers.
     fn unreachable(&mut self, why: String, retry_in: Duration, out: &mut Vec<Update>) {
+        if let Some(failed) = &self.didnt_start {
+            out.push(Update::Starting { failed: Some(failed.clone()) });
+            return;
+        }
         if let Some(s) = self.starting.as_mut() {
             match s.child.try_wait() {
                 Ok(Some(status)) => {
                     let failed = format!("jawd stopped as it started ({status}){}", tail(&s.log));
                     self.starting = None;
+                    self.didnt_start = Some(failed.clone());
                     out.push(Update::Starting { failed: Some(failed) });
                     return;
                 }
@@ -450,6 +465,7 @@ impl Wire {
         match e {
             From::Connected(w) => {
                 self.starting = None;
+                self.didnt_start = None;
                 if self.folders.take().is_some() {
                     self.watch_folders();
                 }
