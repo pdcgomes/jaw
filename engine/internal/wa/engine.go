@@ -34,6 +34,7 @@ type Engine struct {
 	acks      *link.Acks
 	log       waLog.Logger
 	container *sqlstore.Container
+	echoes    echoes
 	// told is the connection state the engine told jawd last, so the keepalive's aren't said out of
 	// order (keepalive.go).
 	told told
@@ -205,6 +206,10 @@ func (e *Engine) durable(event *enginepb.Event) bool {
 func (e *Engine) keep(event *enginepb.Event) {
 	if !e.durable(event) {
 		select {}
+	}
+	// Only once jawd has it, from whichever client, may a patch waiting for this echo be answered.
+	if state := event.GetAppState(); state != nil {
+		e.echoes.kept(state)
 	}
 }
 

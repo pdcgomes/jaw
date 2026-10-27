@@ -149,7 +149,12 @@ func (e *Engine) pollVote(c *enginepb.PollVote) *enginepb.Reply {
 // or slow, or WhatsApp having a moment. A refusal won't: a number that isn't on WhatsApp, a group
 // you're not in or can't write in, a chat that can't be sent to, a message the server won't take
 // (too large, blocked and the like, which it answers with a 4xx code), or one that can't be encoded.
+// An app-state patch WhatsApp took, which whatsmeow then couldn't fetch back, is sent again whatever
+// the fetch's error, since app state is the same however often it's sent.
 func retryable(err error) bool {
+	if strings.Contains(err.Error(), "failed to fetch app state after sending update") {
+		return true
+	}
 	switch {
 	case errors.Is(err, whatsmeow.ErrRecipientADJID),
 		errors.Is(err, whatsmeow.ErrUnknownServer),

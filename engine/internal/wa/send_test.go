@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/pdcgomes/jaw/engine/internal/link"
@@ -77,6 +80,8 @@ func TestASendThatMightWorkLaterIsTriedAgainAndOneThatCantIsNot(t *testing.T) {
 		fmt.Errorf("failed to get devices: %w", &whatsmeow.IQError{Code: 503}),
 		context.DeadlineExceeded,
 		errors.New("failed to get user info for 351910000002@s.whatsapp.net to fill LID cache"),
+		fmt.Errorf("failed to fetch app state after sending update: %w",
+			fmt.Errorf("failed to fetch app state regular_low patches: %w", &whatsmeow.IQError{Code: 404})),
 	} {
 		if !retryable(err) {
 			t.Errorf("%v isn't tried again", err)
@@ -214,5 +219,66 @@ func TestAnAppStatePatchCarriesTheTimeJawdWroteForItsEchoToFindTheRowAsItIs(t *t
 	}
 	if !bare.Timestamp.IsZero() {
 		t.Errorf("a value without a time gave the patch %v; whatsmeow then uses the time it encodes", bare.Timestamp)
+	}
+}
+
+// pinnedAt is a chat pinned at `at`, as jawd's patch carries it and its echo brings it back.
+func pinnedAt(at int64) *waSyncAction.SyncActionValue {
+	return &waSyncAction.SyncActionValue{Timestamp: proto.Int64(at), PinAction: &waSyncAction.PinAction{Pinned: proto.Bool(true)}}
+}
+
+// SendAppState can't be faked here, so the patch's wait is tested as appStatePatch starts it once
+// the patch has gone, and ended by the handler that hands its echo to jawd.
+func TestAPatchIsAnsweredOnceJawdHasKeptItsEchoAndNoOtherIndexOrTimeEndsItsWait(t *testing.T) {
+	e, jawd, _, closeLink := engineWithoutSession(t, link.Protocol)
+	defer closeLink()
+	const at = 1_792_000_000_123
+	ana := []string{"pin_v1", "351910000002@s.whatsapp.net"}
+	answered := make(chan *enginepb.Reply, 1)
+	echo := e.echoes.expect(ana, at)
+	go func() { answered <- e.echoed(echo, "pin_v1", time.Minute) }()
+	waiting := func(after string) {
+		t.Helper()
+		select {
+		case reply := <-answered:
+			t.Fatalf("the patch was answered %v after %s", reply, after)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	handled(t, e, jawd, &events.AppState{Index: []string{"pin_v1", "351910000003@s.whatsapp.net"}, SyncActionValue: pinnedAt(at)})
+	waiting("another chat pinned at its time")
+	handled(t, e, jawd, &events.AppState{Index: ana, SyncActionValue: pinnedAt(at - 1)})
+	waiting("its chat pinned at another time")
+	go e.handle(&events.AppState{Index: ana, SyncActionValue: pinnedAt(at)})
+	frame, err := jawd.Recv()
+	if err != nil || frame.GetEvent().GetAppState() == nil {
+		t.Fatalf("its echo came as %v, %v", frame, err)
+	}
+	waiting("its echo, before jawd had kept it")
+	if err := jawd.Send(&enginepb.Frame{Body: &enginepb.Frame_Ack{Ack: &enginepb.Ack{Seq: frame.GetEvent().Seq}}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case reply := <-answered:
+		if reply.GetDone() == nil {
+			t.Fatalf("its echo, kept, gave %v", reply)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("its echo, kept, didn't end the wait")
+	}
+}
+
+func TestAPatchWhoseEchoDoesntComeBackIsAFailureToTryAgainAndItsWaitIsForgotten(t *testing.T) {
+	e := newEngine(context.Background(), nil, NewLogger("test", "error"))
+	const at = 1_792_000_000_123
+	mute := []string{"mute", "351910000002@s.whatsapp.net"}
+	echo := e.echoes.expect(mute, at)
+	failure := e.echoed(echo, "mute", 10*time.Millisecond).GetFailure()
+	if failure == nil || !failure.Retry || !strings.Contains(failure.Message, "didn't come back") {
+		t.Fatalf("an echo that didn't come back gave %v", failure)
+	}
+	e.echoes.forget(echo)
+	if len(e.echoes.waiting) != 0 {
+		t.Fatalf("%d waits are left once the patch was answered", len(e.echoes.waiting))
 	}
 }
