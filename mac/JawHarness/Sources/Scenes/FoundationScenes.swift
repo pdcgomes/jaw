@@ -63,7 +63,7 @@ private struct RolesScene: View {
                 note: "Secondary and tertiary text, the accent's links and counts, mentions, online and failed, each as it's drawn on the ground and on the surface. Each is text, so each wants 4.5:1 on both; one under it is a colour to look at.",
                 roles: roles,
             ) {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: Space.l)], spacing: Space.l) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: Space.l)], spacing: Space.l) {
                     ForEach(textColours, id: \.0) { name, colour in
                         let ground = String(format: "%.1f:1", colour.contrast(with: roles.ground))
                         let surface = String(format: "%.1f:1", colour.contrast(with: roles.surface))

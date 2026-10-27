@@ -31,6 +31,7 @@ if ! ssh_ true 2>/dev/null; then
             "$here/mac/scripts/check" build JawHarness | grep -q 'BUILD SUCCEEDED' || { "$here/mac/scripts/check" build JawHarness | tail -20; exit 1; }
             "$here/mac/$harness" --scene "$scene" --snapshot "$out" "$@"
             echo "==> $out"
+            exit 0
             ;;
         *) echo "$what needs $host" >&2; exit 1 ;;
     esac

@@ -36,7 +36,8 @@ enum Pictures {
     }
 
     /// Draws `scene` in `conditions`, in a window of its own off the screen, once it has had `settle`
-    /// to do what it does after it's made.
+    /// to do what it does after it's made. It sets the app-wide `Motion.reduced` for as long as it
+    /// draws, so draws in different Reduce Motion conditions mustn't overlap.
     static func draw(_ scene: HarnessScene, _ conditions: Conditions) async throws -> Drawn {
         let reduced = Motion.reduced
         Motion.reduced = { conditions.reduceMotion }
