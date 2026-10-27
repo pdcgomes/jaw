@@ -8,12 +8,12 @@ import JawUI
 /// the chat it was opened on.
 extension AppModel {
     func chatCommands(for chat: @escaping @MainActor @Sendable () -> ChatRow?) -> [Command] {
-        let isChat: @MainActor @Sendable () -> Bool = { chat().map { $0.kind != .community } ?? false }
+        let hasActions: @MainActor @Sendable () -> Bool = { chat()?.hasChatActions ?? false }
         var out: [Command] = []
         for length in MuteLength.allCases {
             out.append(Command(length.id, length.title, phrase: "Mute this chat \(length.title.lowercased())",
                                detail: "no notifications from it", place: .chat, submenu: "Mute",
-                               enabled: { chat().map { !$0.muted && $0.kind != .community } ?? false })
+                               enabled: { chat().map { $0.hasChatActions && !$0.muted } ?? false })
             { [weak self] in
                 guard let c = chat() else { return }
                 let until = Double(length.until(now: Format.now()))
@@ -21,31 +21,31 @@ extension AppModel {
             })
         }
         out.append(Command("unmute", "Unmute", phrase: "Unmute this chat", detail: "its notifications back", place: .chat,
-                           submenu: "Mute", enabled: { chat()?.muted ?? false })
+                           submenu: "Mute", enabled: { chat().map { $0.hasChatActions && $0.muted } ?? false })
         { [weak self] in
             guard let c = chat() else { return }
             self?.jawd.chatAction("chat.mute", chat: c.id, ["until": .null], what: "unmuting")
         })
         out.append(Command("archive", "Archived",
                            says: { (chat()?.archived ?? false ? "Unarchive this chat" : "Archive this chat", "as on the phone") },
-                           place: .chat, group: 1, enabled: isChat, on: { chat()?.archived ?? false })
+                           place: .chat, group: 1, enabled: hasActions, on: { chat()?.archived ?? false })
         { [weak self] in
             guard let c = chat() else { return }
             self?.jawd.chatAction("chat.archive", chat: c.id, ["archived": .bool(!c.archived)], what: "archiving")
         })
         out.append(Command("pin", "Pinned",
                            says: { (chat()?.pinned ?? false ? "Unpin this chat" : "Pin this chat", "at the top of the list") },
-                           place: .chat, group: 1, enabled: isChat, on: { chat()?.pinned ?? false })
+                           place: .chat, group: 1, enabled: hasActions, on: { chat()?.pinned ?? false })
         { [weak self] in
             guard let c = chat() else { return }
             self?.jawd.chatAction("chat.pin", chat: c.id, ["pinned": .bool(!c.pinned)], what: "pinning")
         })
-        let isUnread: @MainActor @Sendable () -> Bool = { chat().map { $0.unread > 0 || $0.markedUnread } ?? false }
-        out.append(Command("mark", "Unread", says: { (isUnread() ? "Mark this chat read" : "Mark this chat unread", "as on the phone") },
-                           place: .chat, group: 1, enabled: isChat, on: isUnread)
+        let readsAsUnread: @MainActor @Sendable () -> Bool = { chat()?.readsAsUnread ?? false }
+        out.append(Command("mark", "Unread", says: { (readsAsUnread() ? "Mark this chat read" : "Mark this chat unread", "as on the phone") },
+                           place: .chat, group: 1, enabled: hasActions, on: readsAsUnread)
         { [weak self] in
             guard let c = chat() else { return }
-            let unread = isUnread()
+            let unread = c.readsAsUnread
             self?.jawd.chatAction("chat.mark_unread", chat: c.id, ["unread": .bool(!unread)],
                                   what: unread ? "marking a chat read" : "marking a chat unread")
         })
@@ -64,9 +64,10 @@ extension AppModel {
 
     /// The chat list's menu for `chat`, its actions acting on it.
     func chatMenuItems(for chat: ChatRow) -> [NSMenuItem] {
-        let open = Command(ChatMenu.openInNewPane, "Open in New Pane", phrase: "Open \(chat.name) in a new pane", place: nil,
-                           palette: false) { [weak self] in self?.openInNewPane(chat) }
-        let bound = chatCommands(for: { chat }) + [open]
+        let inNewPane = Command(ChatMenu.openInNewPane, "Open in New Pane", place: nil, palette: false) { [weak self] in
+            self?.openInNewPane(chat)
+        }
+        let bound = chatCommands(for: { chat }) + [inNewPane]
         return Menus.items(ChatMenu.list(chat)) { id in bound.first { $0.id == id } }
     }
 

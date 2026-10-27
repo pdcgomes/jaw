@@ -9,7 +9,8 @@ import Testing
 /// or call line opens the pane's whole menu. A right click gives the pane the keys first, so the menu
 /// acts on it; making a menu, as the snapshot's log does, leaves the keys where they are. The right
 /// clicks go through AppKit's hit test in an offscreen window, then up the responders, as a right
-/// mouse-down goes, to the first view with a menu for it.
+/// mouse-down goes, to the first view with a menu for it. VoiceOver's Show Menu, which has no
+/// pointer, opens a message's menu under its bubble.
 
 @MainActor
 final class PaneHost: ConversationHost {
@@ -148,6 +149,29 @@ func rightClick(_ window: NSWindow, at point: NSPoint) throws -> NSMenu? {
     let menu = try rightClick(window, at: view.convert(NSPoint(x: bar.midX, y: bar.midY), to: nil))
     #expect(menu?.items.first?.title == "Reply")
     #expect(host.focused == 1)
+}
+
+@MainActor
+@Test func `VoiceOver's Show Menu opens a short message's menu under its bubble, and with no menu says so`() async throws {
+    let host = PaneHost()
+    let mine = try #require(Samples.messages.first { $0.id.hasSuffix("14") })
+    let call = try #require(Samples.messages.first { $0.kind == .call })
+    let (c, _) = await shown([call, mine], host)
+    c.paneMenu = { nil }
+    let view = try messageView(c, #require(c.rows.firstIndex { $0.id == mine.id }))
+    let body = try #require(view.laid).body
+    try #require(!body.contains(NSPoint(x: view.bounds.midX, y: view.bounds.midY)), "a bubble clear of its row's middle")
+    var popped: [(NSMenu, NSPoint)] = []
+    view.popUp = { menu, point, _ in popped.append((menu, point)) }
+    #expect(view.accessibilityPerformShowMenu())
+    #expect(popped.first?.0.items.first?.title == "Reply", "the message's menu")
+    #expect(popped.first?.1 == NSPoint(x: body.minX, y: body.maxY), "under its bubble")
+    #expect(host.focused == 1, "the pane takes the keys first, as for a right click")
+
+    let line = try messageView(c, #require(c.rows.firstIndex { $0.id == call.id }))
+    line.popUp = { menu, point, _ in popped.append((menu, point)) }
+    #expect(!line.accessibilityPerformShowMenu(), "a call line has the pane's menu, and here there's none")
+    #expect(popped.count == 1)
 }
 
 @MainActor

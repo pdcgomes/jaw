@@ -77,8 +77,8 @@ final class Glance: NSObject {
     func go(_ chat: ChatRow, newPane: Bool) {
         panel.close()
         guard let model else { return }
-        if newPane, model.grid != nil, model.panes[chat.id] == nil {
-            model.split(.across, with: chat)
+        if newPane {
+            model.openInNewPane(chat)
         } else {
             model.open(chat, opened: true)
         }

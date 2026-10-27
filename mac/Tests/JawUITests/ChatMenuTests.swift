@@ -29,11 +29,29 @@ func titles(_ entries: [MenuEntry]) -> [String] {
     #expect(titles(ChatMenu.actions(chat)).last == "Mark as Read", "a chat marked unread is read by it")
 }
 
-@Test func `a community's row has none of a chat's actions, and its groups have them`() {
-    let community = ChatRow(id: "c", v: 1, sort: "1", kind: .community, name: "Bairro Alto")
+@Test func `a community's row has none of a chat's actions, pinned, muted and unread as it is, and its announcements have them all`() {
+    var community = ChatRow(id: "c", v: 1, sort: "1", kind: .community, name: "Bairro Alto", unread: 3, pinned: true)
+    community.mutedUntil = -1
     #expect(ChatMenu.list(community).isEmpty)
-    let group = ChatRow(id: "g", v: 1, sort: "1", kind: .group, name: "Bairro Alto: Announcements", community: "c")
-    #expect(titles(ChatMenu.list(group)).contains("Pin"))
+    #expect(ChatMenu.actions(community).isEmpty)
+    let announcements = ChatRow(id: "g", v: 1, sort: "1", kind: .announcement, name: "Bairro Alto: Announcements", community: "c")
+    #expect(titles(ChatMenu.list(announcements)) == [
+        "chat.open.pane", "—", "Pin", "Mute ▸ mute.8h, mute.week, mute.always", "Archive", "Mark as Unread",
+    ])
+}
+
+@Test func `only a community has none of a chat's actions, and a chat reads as unread with unread messages or marked unread`() {
+    for kind in [ChatKind.direct, .group, .announcement, .broadcast, .`self`, .unknown] {
+        #expect(ChatRow(id: "x", v: 1, sort: "1", kind: kind, name: "X").hasChatActions, "\(kind)")
+    }
+    #expect(!ChatRow(id: "c", v: 1, sort: "1", kind: .community, name: "C").hasChatActions)
+    var chat = ChatRow(id: "ana", v: 1, sort: "1", name: "Ana")
+    #expect(!chat.readsAsUnread)
+    chat.unread = 2
+    #expect(chat.readsAsUnread)
+    chat.unread = 0
+    chat.markedUnread = true
+    #expect(chat.readsAsUnread)
 }
 
 @Test func `the pane's menu has its splits and Swap, then its chat's actions`() {

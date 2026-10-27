@@ -43,8 +43,8 @@ public enum ChatMenu {
 
     /// The chat list's menu for `chat`.
     public static func list(_ chat: ChatRow) -> [MenuEntry] {
-        let own = actions(chat)
-        return own.isEmpty ? [] : [.command(openInNewPane), .separator] + own
+        guard chat.hasChatActions else { return [] }
+        return [.command(openInNewPane), .separator] + actions(chat)
     }
 
     /// The pane's menu, on its header and around its messages: its splits and Swap, greyed with no
@@ -59,13 +59,28 @@ public enum ChatMenu {
 
     /// Pin, Mute, Archive and Mark as Read or Unread, as the chat stands.
     public static func actions(_ chat: ChatRow) -> [MenuEntry] {
-        guard chat.kind != .community else { return [] }
-        let unread = chat.unread > 0 || chat.markedUnread
+        guard chat.hasChatActions else { return [] }
         return [
             .command("pin", title: chat.pinned ? "Unpin" : "Pin"),
             chat.muted ? .command("unmute") : .submenu("Mute", MuteLength.allCases.map { .command($0.id) }),
             .command("archive", title: chat.archived ? "Unarchive" : "Archive"),
-            .command("mark", title: unread ? "Mark as Read" : "Mark as Unread"),
+            .command("mark", title: chat.readsAsUnread ? "Mark as Read" : "Mark as Unread"),
         ]
+    }
+}
+
+/// The rules a chat's actions follow, written once for its right-click menus and for the app's
+/// commands in the menu bar and the palette.
+public extension ChatRow {
+    /// Whether it has a chat's actions, Pin, Mute, Archive and Mark: a community's groups carry
+    /// them, so a community has none.
+    var hasChatActions: Bool {
+        kind != .community
+    }
+
+    /// Whether it reads as unread, so Mark makes it read: it has unread messages, or was marked
+    /// unread.
+    var readsAsUnread: Bool {
+        unread > 0 || markedUnread
     }
 }
