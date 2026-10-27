@@ -212,6 +212,15 @@ The step after M6, on a branch of its own with its own audit. M1 tells WhatsApp 
 - **Bounded.** Typing in busy groups can come several times a second. It's coalesced like any change to a window's rows, adds nothing to a message's ack beyond the budgets in a flood with typing in many chats, and what's dropped for coming too fast is counted in `jawd status`.
 - **Tested end to end.** The demo engine types in groups and one-to-one chats and has the people followed come online and go, so `jawd demo` shows all of it through the real socket, where the interfaces' end-to-end tests check it. Feed tests watch again from `since` and must hold what a fresh watch gives, as M6's do.
 
+### Chat actions from jaw
+
+A step of its own, now, on a branch with its own audit, as the owner decided on 27 October. jawd reads the pins, archives, mutes, unread marks and stars the phone sets (Sync's app state); this step sets them from any interface, so the terminal's palette and the Mac's menus, which already send `chat.pin`, `chat.archive`, `chat.mute` and `chat.mark_unread`, do what they say.
+
+- **What it sets.** A chat pinned, three at most as WhatsApp allows, or unpinned; archived, which unpins it, or not; muted until a time or for ever, or unmuted; marked unread, or read up to its newest message with read receipts as reading sends them; and a message starred or not.
+- **The chat first, then WhatsApp, through the outbox.** Each change and the app-state patch that tells your other devices are written in one synced commit before jawd answers, and the patch goes through the outbox to the engine's `AppStatePatch`, as deleting a message for you does. Asking again changes nothing, and WhatsApp's echo of the patch finds the row as jawd wrote it.
+- **Refused for good.** A patch WhatsApp won't take is quarantined, never dropped, and jawd fetches that app-state collection again, so the chat ends as the phone has it, and every interface is told why.
+- **Its requests and tests** are in [the Mac's menus and folders design](2026-10-27-jaw-mac-menus-and-folders-design.md); the protocol's text and fixtures come with the step. Deleting and clearing a chat, which lose messages, are a later step of their own.
+
 ### Finding anything
 
 - **One search behind the palette.** `find` takes what's typed and answers, best first, with chats, people, folders, messages, links, media and files, each result saying what it is. Interfaces add their own actions to it, since those are theirs.
@@ -294,6 +303,7 @@ Makefile                build, test, install, demo, perf, proto
 - **M2 Everything in a message:** replies, mentions, reactions, edits, deletes, forwards, link previews both ways, polls, locations, contact cards, disappearing and view-once, system and call lines, group senders and members, communities, app state; links kept as they're converted, and findable in the palette.
 - **M3 Media in**, with the library of photos, videos, voice messages, files and links, across chats and in one; **M4 Media out**, **M5 Voice**, **M6 Folders and the roster**.
 - **Presence and typing in chats,** the step after M6, on its own branch with its own audit: who's typing in every chat, groups included, and a one-to-one chat's online and last seen, in every interface (see "Presence and typing in chats").
+- **Chat actions from jaw,** now, on its own branch with its own audit: pinning, archiving, muting, marking read or unread and starring from any interface, as the phone does (see "Chat actions from jaw").
 - **M7 A second engine:** whatsapp-rust wired in as `RustEngine`, run beside the Go engine on the spare number, and compared on the contract suite, the live checklist, the load harness, reconnects and logouts, and build size and time; the default is picked for M8.
 - **M8 Ready to live with:** full load runs, every failure state, a README with pictures, `make install` and a Homebrew tap; before going public, a look at WhatsApp's terms and Meta's rules on side projects.
 

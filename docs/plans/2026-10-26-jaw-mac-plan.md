@@ -3,7 +3,7 @@
 26 October 2026. The build order for [the Mac design](2026-10-26-jaw-mac-design.md): the shortest path to an app the owner uses every day (reading and sending text in a fast chat list and conversation), then every inline kind, the palette, split panels, and polish. Each milestone says what it needs from jawd, its steps in order, when it's done, and its budgets. The owner answered the design's questions on 26 October; the decisions the plan rests on come first.
 
 - **Every milestone closes with `make perf-mac`** against `jawd demo`'s million messages, its table in the README beside the terminal's, with the load average beside each number, as `make perf` does.
-- **Nothing here touches jawd's data layer.** The proposals the app needs (P1 to P7 in the design) are jawd changes, built on jawd's branches by jawd's builders and audited by the database expert before they land; a milestone that needs one says what it does until it lands.
+- **Nothing here touches jawd's data layer.** The proposals the app needs (P1 to P8 in the design) are jawd changes, built on jawd's branches by jawd's builders and audited by the database expert before they land; a milestone that needs one says what it does until it lands.
 - **The owner's account is never used for tests.** Tests and benches run on `jawd demo` in a folder of their own; the owner tries each milestone's build on his own account once it's done.
 
 ## Building on the owner's Mac
@@ -99,7 +99,7 @@ Every kind of message shows inline as the design draws it, in both looks, and th
 
 Everything the terminal's palette finds and does, the app's does, with its keys; and sending media and voice.
 
-**Needs from jawd:** `find` (served; links, media and files as jawd's find returns them); `forward` (served); `chat.pin`, `chat.archive`, `chat.mute` and `chat.mark_unread` for those actions, as jawd serves app state; `send.media`, M4; `voice.record` and the rest of recording, M5. An action jawd doesn't serve yet says so when chosen, as the terminal's does.
+**Needs from jawd:** `find` (served; links, media and files as jawd's find returns them); `forward` (served); `chat.pin`, `chat.archive`, `chat.mute` and `chat.mark_unread` for those actions, and `star`, which jawd's step "Chat actions from jaw" serves (P8), being built now on `chat-actions`; `send.media`, M4; `voice.record` and the rest of recording, M5. An action jawd doesn't serve yet says so when chosen, as the terminal's does.
 
 1. **Every kind in the results,** the counts strip, Tab narrowing and stepping through kinds, Enter doing the obvious thing for each kind.
 2. **The app's actions, each with its key:** start a chat, go to unread, search messages, search here, mute for how long, archive, pin, mark unread, record, attach, react, delete, forward, the sidebar, the library, the theme, settings, the keys.
@@ -125,7 +125,7 @@ Several chats at once, the spike's status line, focus mode and glance, and the s
 1. **Panes,** by the rules the terminal's follow behind its `panes` switch (f4fed0a): the layout as a tree of splits with ratios; split across (⌘D) and down (⌘⇧D), the new pane taking the next chat no pane shows; move (⌘⌥ arrows), go to (⌥⌘1 to ⌥⌘9), swap (⌘⇧ arrows), close (⌘W); a chat dragged onto a pane's edge or middle; a chat in one pane at most, so picking one another pane shows goes there; each pane's header, box and draft; only the focused pane reading its chat; the focused pane's outline; twelve panes at most.
 2. **The layout kept** with P1, or in preferences, and restored at launch.
 3. **The status line's right half (what needs you elsewhere), focus mode (⌘⇧↩) and the glance (⌘J),** as the spike drew them, the glance's windows watched only while it's open.
-4. **Folders and the roster:** the tree with its counts, smart folders, filing by drag and with m, the palette's filing and folder modes, favourites on ⌘1 to ⌘9, the roster with presence, faint where jawd isn't following someone now.
+4. **Folders and the roster:** the tree with its counts, smart folders, filing by drag and with m, the palette's filing and folder modes, favourites on ⌘1 to ⌘9, the roster with presence, faint where jawd isn't following someone now. Brought forward on 27 October and built now, on `mac-menus`, with the right-click menus, as [the menus and folders design](2026-10-27-jaw-mac-menus-and-folders-design.md) has them; the palette lists the folder actions by name rather than in modes.
 
 **Done when** the owner has worked a day in three panes, relaunching brings them back, and the sidebar's counts agree with the phone's.
 
@@ -162,6 +162,6 @@ Redlamp's themes, the animations, the Mimic, linking, the app's own notification
 
 ## Alongside
 
-- **jawd's proposals,** each on a jawd branch with its audit: P1 (an interface's saved state) now, on `interface-state`, for the terminal's panes and the Mac's alike, as the owner asked; P6 (what an interface owes, and the schema) before Mac-M1 ends, since JawKit checks against it; P3 by Mac-M1 for the badge, or with M6's folders; P4 by Mac-M2; P2 and P5 by Mac-M5; P7 in jawd's step after its M6, drawn as soon as it's served.
+- **jawd's proposals,** each on a jawd branch with its audit: P1 (an interface's saved state) now, on `interface-state`, for the terminal's panes and the Mac's alike, as the owner asked; P6 (what an interface owes, and the schema) before Mac-M1 ends, since JawKit checks against it; P3 by Mac-M1 for the badge, or with M6's folders; P4 by Mac-M2; P2 and P5 by Mac-M5; P7 in jawd's step after its M6, drawn as soon as it's served; P8 (chat actions from jaw) now, on `chat-actions`, with the Mac's right-click menus.
 - **The terminal's `jaw agent`** learns of the app's agent in Mac-M1, as step 3 needs.
 - **`scripts/sync-themes`** comes with Mac-M5's themes and runs in CI after it.
