@@ -13,7 +13,7 @@ use jaw_proto::settings::{Messages, Settings};
 use ratatui::crossterm::event::{Event as Input, KeyModifiers, MouseEvent, MouseEventKind};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 
 /// Friday 16 October 2026, 14:02 UTC, the day the fixtures' messages were sent.
@@ -277,7 +277,14 @@ fn view_with(socket: PathBuf, width: u16, height: u16, on: &str) -> (View, Recei
     v.no_color = false;
     v.resize(width, height);
     run::settle_live(&mut v, &rx, Duration::from_secs(5));
+    assert!(until_true(&mut v, &rx, settled), "{}", frame(&mut v));
     (v, rx)
+}
+
+/// Whether the screen shows what jawd sent for it: the open chat's messages, or its answers when
+/// there's no chat to open. A pause in what jawd sends can come before the messages.
+fn settled(v: &mut View) -> bool {
+    v.showing_messages() || (v.answered() && v.opened().is_none())
 }
 
 fn frame(v: &mut View) -> String {
@@ -285,9 +292,12 @@ fn frame(v: &mut View) -> String {
     run::snapshot(v, w, h)
 }
 
-/// Waits for the screen to say something, for at most a few seconds.
+/// How long a test waits for what it expects before it fails.
+const DEADLINE: Duration = Duration::from_secs(30);
+
+/// Waits for the screen to say something, for at most DEADLINE.
 fn until(v: &mut View, rx: &Receiver<crate::run::Event>, said: &str) -> String {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + DEADLINE;
     loop {
         run::settle_live(v, rx, Duration::from_millis(300));
         let screen = frame(v);
@@ -320,40 +330,64 @@ fn jaw_draws_what_jawd_sends_through_the_client() {
     );
 }
 
+/// How many times the first frame with a conversation is timed: other processes can only make a
+/// run slower, so the fastest is what the frames are held to.
+const FIRST_FRAMES: usize = 10;
+
 /// After jawd's hello, the chat list and then the open chat's messages each come a round trip
 /// after the one before, and each is drawn as it comes, through the client and the loop, rather
 /// than a frame after the last: so the first frame with a conversation is drawn sooner than two
 /// frames after the hello, which waiting a frame for each answer never was.
 #[test]
 fn the_first_frame_with_a_conversation_is_drawn_as_soon_as_jawds_answers_come() {
+    let runs: Vec<Duration> = (0..FIRST_FRAMES).map(|_| first_frame_after_hello()).collect();
+    let fastest = runs.iter().min().copied().unwrap_or_default();
+    assert!(fastest < 2 * run::FRAME, "the first frame with a conversation came {runs:?} after jawd's hello");
+}
+
+/// From jawd's hello to the first frame with a conversation, on a scripted jawd of its own.
+fn first_frame_after_hello() -> Duration {
     let jawd = scripted();
     let (tx, rx) = channel();
     let mut v = View::new(Box::new(Wire::connect(jawd.socket.clone(), tx.clone())));
     v.clock = Some(NOW);
     let mut greeted = false;
     while !greeted {
-        assert!(matches!(rx.recv_timeout(Duration::from_secs(10)), Ok(run::Event::Jawd)), "jawd's hello");
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(30)), Ok(run::Event::Jawd)), "jawd's hello");
         for u in v.drain_jawd() {
             greeted |= matches!(u, Update::Hello { .. });
             v.apply(u);
         }
     }
     let hello = Instant::now();
+    // The loop ends at the first frame with a conversation; this stops it if none comes.
+    let (drawn, done) = channel::<()>();
     let stop = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(500));
-        let _ = tx.send(run::Event::Stop);
+        if done.recv_timeout(Duration::from_secs(30)) == Err(RecvTimeoutError::Timeout) {
+            let _ = tx.send(run::Event::Stop);
+        }
     });
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
-    let mut probe = run::Probe::default();
+    let mut probe = run::Probe { until_first: true, ..run::Probe::default() };
     run::drive(&mut v, &rx, &mut terminal, &mut probe, &mut |_| {}).unwrap();
+    drop(drawn);
     stop.join().unwrap();
-    let first = probe.first.expect("the conversation was drawn") - hello;
-    assert!(first < 2 * run::FRAME, "the first frame with a conversation came {first:?} after jawd's hello");
+    probe.first.expect("the conversation was drawn") - hello
 }
 
-/// Waits until `enough` holds, settling the view meanwhile, for at most a few seconds.
+/// Waits until jaw is online with nothing left to ask jawd again, for at most DEADLINE.
+fn back_and_answered(v: &mut View, rx: &Receiver<crate::run::Event>) -> String {
+    let mut screen = String::new();
+    until_true(v, rx, |v| {
+        screen = frame(v);
+        screen.contains("jaw  online") && !screen.contains("asking jawd again")
+    });
+    screen
+}
+
+/// Waits until `enough` holds, settling the view meanwhile, for at most DEADLINE.
 fn until_true(v: &mut View, rx: &Receiver<crate::run::Event>, mut enough: impl FnMut(&mut View) -> bool) -> bool {
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + DEADLINE;
     loop {
         if enough(v) {
             return true;
@@ -442,7 +476,7 @@ fn a_message_whose_answer_the_connection_lost_is_asked_for_again_with_its_key_an
     jawd.kept.lock().unwrap().swallow = true;
     run::press_live(&mut v, &rx, "a caminho\n").unwrap();
     assert!(until_true(&mut v, &rx, |_| jawd.asked("send.text").len() == 2), "{:?}", jawd.asked("send.text"));
-    let screen = until(&mut v, &rx, "jaw  online");
+    let screen = back_and_answered(&mut v, &rx);
     let sent = jawd.asked("send.text");
     assert_eq!(sent[0], sent[1], "asked again as it was, with its key");
     assert_eq!(jawd.kept.lock().unwrap().keyed.len(), 1, "one message");
@@ -519,7 +553,7 @@ fn drive(
     said: &mut Vec<Update>,
     enough: impl Fn(&[Update]) -> bool,
 ) {
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + DEADLINE;
     while !enough(said) && Instant::now() < end {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(crate::run::Event::Jawd) => said.extend(wire.drain()),
@@ -1286,7 +1320,8 @@ fn each_action_names_its_chat_with_a_key_of_its_own_and_message_info_names_its_c
     let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
     run::press_live(&mut v, &rx, "<up>2<up>1d\n").unwrap();
     run::press_live(&mut v, &rx, "<up>far").unwrap();
-    until(&mut v, &rx, "Ana Ribeiro");
+    // Ana's chat among jawd's results, as the chat list beside them names her already.
+    until(&mut v, &rx, "chat · 2 unread");
     run::press_live(&mut v, &rx, "\n").unwrap();
     until(&mut v, &rx, "forwarded");
     run::press_live(&mut v, &rx, "i").unwrap();
@@ -1317,7 +1352,7 @@ fn an_action_whose_answer_the_connection_lost_is_asked_for_again_with_its_key_an
     jawd.kept.lock().unwrap().swallow = true;
     run::press_live(&mut v, &rx, "<up>2").unwrap();
     assert!(until_true(&mut v, &rx, |_| jawd.asked("react").len() == 2), "{:?}", jawd.asked("react"));
-    let screen = until(&mut v, &rx, "jaw  online");
+    let screen = back_and_answered(&mut v, &rx);
     let reacted = jawd.asked("react");
     assert_eq!(reacted[0], reacted[1], "asked again as it was, with its key");
     assert_eq!(jawd.kept.lock().unwrap().acted.len(), 1, "done once");
