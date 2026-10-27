@@ -4,7 +4,7 @@ GO ?= go
 CARGO ?= cargo
 BUF := github.com/bufbuild/buf/cmd/buf@v1.74.0
 
-.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit hooks perf clean mac mac-test
+.PHONY: build engine rust test lint fmt proto sync-protos check-generated check-audit hooks perf clean prune-builds mac mac-test
 
 build: engine rust
 
@@ -69,3 +69,9 @@ mac-test:
 
 clean:
 	$(CARGO) clean
+
+# Deletes from every worktree's target/ the object files no binary names any more, which debug builds
+# leave by the tens of GB a day where tests rebuild all day; nothing rebuilds after
+# (scripts/prune-builds.py says why).
+prune-builds:
+	python3 scripts/prune-builds.py
