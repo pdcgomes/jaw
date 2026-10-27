@@ -79,9 +79,11 @@ case "$what" in
         scp -q -o BatchMode=yes "$host:$remote/mac/build/shot.png" "$out" && echo "==> $out"
         ;;
     sweep)
-        run "scripts/check build JawHarness | grep -q 'BUILD SUCCEEDED' || { scripts/check build JawHarness | tail -20; exit 1; }; $harness --sweep build/review $*"
-        mkdir -p "$here/mac/build/review"
-        rsync -a --delete -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/review/" "$here/mac/build/review/"
+        run "scripts/check build JawHarness | grep -q 'BUILD SUCCEEDED' || { scripts/check build JawHarness | tail -20; exit 1; }; caffeinate -i $harness --sweep build/review $*"
+        rm -rf "$here/mac/build/.review.incoming"
+        mkdir -p "$here/mac/build/.review.incoming"
+        rsync -a -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/review/" "$here/mac/build/.review.incoming/"
+        "$here/mac/scripts/take-sweep" "$here/mac/build/.review.incoming" "$here/mac/build/review"
         echo "==> $here/mac/build/review"
         ;;
     harness)

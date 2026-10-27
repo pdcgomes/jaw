@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Puts the sweep the build Mac drew, copied here into <incoming>, in the place of the last one,
+<review>, as the harness's own sweep puts its folder in place, so nothing in the review folder is
+lost: it takes only a whole sweep, replaces only a missing or empty folder or one a sweep made, and
+renames the new one in rather than copying it over the old.
+
+    mac/scripts/take-sweep <incoming> <review>
+
+A folder is a sweep's when its manifest.json reads as a listing of scenes, each with an id and its
+pictures, each with a file; every entry in it but the Finder's .DS_Store is manifest.json or the
+folder of a scene it lists; and each of those holds only the pictures it lists for that scene,
+.DS_Store aside. The harness's mac/JawHarness/Sources/SweepFolder.swift knows a sweep's folder by
+the same rule, and the two must agree.
+"""
+
+import json
+import shutil
+import sys
+from pathlib import Path
+
+FINDER = ".DS_Store"
+
+
+def listing(folder: Path) -> tuple[set[str], set[str]] | None:
+    """The scene ids and picture files the manifest.json in `folder` lists, or None if it doesn't read
+    as a sweep's."""
+    try:
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    scenes = manifest.get("scenes") if isinstance(manifest, dict) else None
+    if not isinstance(scenes, list):
+        return None
+    ids: set[str] = set()
+    files: set[str] = set()
+    for scene in scenes:
+        if not isinstance(scene, dict) or not isinstance(scene.get("id"), str) or not isinstance(scene.get("pictures"), list):
+            return None
+        ids.add(scene["id"])
+        for picture in scene["pictures"]:
+            if not isinstance(picture, dict) or not isinstance(picture.get("file"), str):
+                return None
+            files.add(picture["file"])
+    return ids, files
+
+
+def entries(folder: Path) -> list[str]:
+    """What's in `folder` but the Finder's .DS_Store, hidden entries included."""
+    return [entry.name for entry in folder.iterdir() if entry.name != FINDER]
+
+
+def replaceable(folder: Path) -> bool:
+    """Whether a sweep may replace `folder`: it's missing or empty, or it's one a sweep made."""
+    if not folder.exists():
+        return True
+    if not folder.is_dir():
+        return False
+    inside = entries(folder)
+    if not inside:
+        return True
+    listed = listing(folder)
+    if listed is None:
+        return False
+    ids, files = listed
+    for entry in inside:
+        if entry == "manifest.json":
+            continue
+        scene = folder / entry
+        if entry not in ids or not scene.is_dir():
+            return False
+        if any(f"{entry}/{name}" not in files or (scene / name).is_dir() for name in entries(scene)):
+            return False
+    return True
+
+
+def incomplete(folder: Path) -> str | None:
+    """Why `folder` isn't a whole sweep, or None when it is: its manifest.json reads as a sweep's, and
+    every picture it lists is there."""
+    listed = listing(folder)
+    if listed is None:
+        return "its manifest.json doesn't read as a sweep's"
+    missing = sorted(file for file in listed[1] if not (folder / file).is_file())
+    if missing:
+        return f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} missing"
+    return None
+
+
+def remove(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        sys.exit("usage: mac/scripts/take-sweep <incoming> <review>")
+    incoming, review = Path(sys.argv[1]), Path(sys.argv[2])
+    try:
+        why = incomplete(incoming)
+        if why:
+            sys.exit(f"take-sweep: {incoming} isn't a whole sweep: {why}; {review} is left as it is")
+        if not replaceable(review):
+            sys.exit(f"take-sweep: {review} has files a sweep didn't make in it; it's left as it is")
+        old = review.parent / f".{review.name}.old"
+        remove(old)
+        if review.exists():
+            review.rename(old)
+        incoming.rename(review)
+        remove(old)
+    except OSError as error:
+        sys.exit(f"take-sweep: {error}")
+
+
+if __name__ == "__main__":
+    main()
