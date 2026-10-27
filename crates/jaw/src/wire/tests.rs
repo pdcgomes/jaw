@@ -333,22 +333,26 @@ fn jaw_draws_what_jawd_sends_through_the_client() {
 
 /// How many times the first frame with a conversation is timed: other processes can only make a
 /// run slower, so the fastest is what the frames are held to.
-const FIRST_FRAMES: usize = 20;
+const FIRST_FRAMES: usize = 10;
 
 /// After jawd's hello, the chat list and then the open chat's messages each come a round trip
 /// after the one before, and each is drawn as it comes, through the client and the loop, rather
-/// than a frame after the last: so the first frame with a conversation is drawn sooner than two
-/// frames after the hello, which waiting a frame for each answer never was.
+/// than a frame after the last: so no frame waits for its turn before the first frame with a
+/// conversation, and the loop's part of the time to it is under two frames, which waiting a frame
+/// for each answer never was. Its part is the time from the hello less the time it waited for
+/// jawd's answers: those come through other threads, which other processes can hold up.
 #[test]
 fn the_first_frame_with_a_conversation_is_drawn_as_soon_as_jawds_answers_come() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    let runs: Vec<Duration> = (0..FIRST_FRAMES).map(|_| first_frame_after_hello()).collect();
-    let fastest = runs.iter().min().copied().unwrap_or_default();
-    assert!(fastest < 2 * run::FRAME, "the first frame with a conversation came {runs:?} after jawd's hello");
+    let runs: Vec<(Duration, u64)> = (0..FIRST_FRAMES).map(|_| first_frame_after_hello()).collect();
+    assert!(runs.iter().all(|&(_, paced)| paced == 0), "a frame waited for its turn: {runs:?}");
+    let fastest = runs.iter().map(|&(took, _)| took).min().unwrap_or_default();
+    assert!(fastest < 2 * run::FRAME, "the loop took {runs:?} to draw the first frame with a conversation");
 }
 
-/// From jawd's hello to the first frame with a conversation, on a scripted jawd of its own.
-fn first_frame_after_hello() -> Duration {
+/// From jawd's hello to the first frame with a conversation, on a scripted jawd of its own, less
+/// the time the loop waited for jawd's answers; and the frames it drew only once one came due.
+fn first_frame_after_hello() -> (Duration, u64) {
     let jawd = scripted();
     let (tx, rx) = channel();
     let mut v = View::new(Box::new(Wire::connect(jawd.socket.clone(), tx.clone())));
@@ -374,7 +378,8 @@ fn first_frame_after_hello() -> Duration {
     run::drive(&mut v, &rx, &mut terminal, &mut probe, &mut |_| {}).unwrap();
     drop(drawn);
     stop.join().unwrap();
-    probe.first.expect("the conversation was drawn") - hello
+    let first = probe.first.expect("the conversation was drawn") - hello;
+    (first.saturating_sub(probe.waited), probe.paced)
 }
 
 /// Waits until jaw is online with nothing left to ask jawd again, for at most DEADLINE.

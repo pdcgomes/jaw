@@ -45,6 +45,10 @@ pub struct Probe {
     pub frames: u64,
     /// When the first frame with the open chat's messages was drawn.
     pub first: Option<Instant>,
+    /// Until then: how long the loop waited for something to come, and the frames it drew only
+    /// because a frame had come due since the last, rather than at once.
+    pub waited: Duration,
+    pub paced: u64,
     pub last: Option<Instant>,
     /// How long each chat a key opened took to show its messages, from the key.
     pub opens: Vec<Duration>,
@@ -92,6 +96,9 @@ where
             },
             None => rx.recv().ok(),
         };
+        if probe.first.is_none() {
+            probe.waited += now.elapsed();
+        }
         let take = |e: Event,
                     view: &mut View,
                     waiting: &mut VecDeque<Update>,
@@ -146,6 +153,9 @@ where
         view.tick();
         let due = last_frame.is_none_or(|t| t.elapsed() >= FRAME);
         if view.dirty && !view.first_frame_waits() && (!keys.is_empty() || view.awaited || due) {
+            if probe.first.is_none() && last_frame.is_some() && keys.is_empty() && !view.awaited {
+                probe.paced += 1;
+            }
             view.dirty = false;
             view.awaited = false;
             let sent = view.take_writes();
