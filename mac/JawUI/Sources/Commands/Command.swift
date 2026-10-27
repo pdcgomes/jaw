@@ -202,6 +202,51 @@ public enum Menus {
         return menu
     }
 
+    /// A right-click menu from its entries, each command found by `command`: an entry with no command
+    /// is left out, a submenu with nothing in it too, and a separator only stands between items.
+    /// Items are enabled and ticked as things stand when it's made, which is as it opens.
+    public static func menu(_ entries: [MenuEntry], command: (String) -> Command?) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for item in items(entries, command: command) {
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    /// The items `menu(_:command:)` makes, to go on the end of another menu.
+    public static func items(_ entries: [MenuEntry], command: (String) -> Command?) -> [NSMenuItem] {
+        var out: [NSMenuItem] = []
+        for entry in entries {
+            switch entry {
+            case let .command(id, title):
+                guard let c = command(id) else { continue }
+                let item = c.menuItem(title: title)
+                item.isEnabled = c.enabled()
+                if let on = c.on { item.state = on() ? .on : .off }
+                out.append(item)
+            case let .submenu(title, inner):
+                let made = items(inner, command: command)
+                guard !made.isEmpty else { continue }
+                let sub = NSMenu(title: title)
+                sub.autoenablesItems = false
+                for item in made {
+                    sub.addItem(item)
+                }
+                let holder = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                holder.submenu = sub
+                holder.isEnabled = made.contains(where: \.isEnabled)
+                out.append(holder)
+            case .separator:
+                if let last = out.last, !last.isSeparatorItem { out.append(.separator()) }
+            }
+        }
+        while out.last?.isSeparatorItem == true {
+            out.removeLast()
+        }
+        return out
+    }
+
     /// What's wrong with a list of commands: two with one key, a key with no menu to show it, a
     /// command twice. Debug builds stop on any at launch, and the tests run it.
     public static func problems(_ commands: [Command]) -> [String] {
@@ -227,4 +272,13 @@ public enum Menus {
             return rows.isEmpty ? nil : (place.rawValue, rows)
         }
     }
+}
+
+/// One entry of a right-click menu: a command by its id, under a title of its own when that says
+/// what it will do (Unpin); a submenu; a separator. A menu's entries are worked out from rows, so
+/// what it offers is tested without AppKit, and made into items as it opens.
+public enum MenuEntry: Equatable, Sendable {
+    case command(String, title: String? = nil)
+    case submenu(String, [MenuEntry])
+    case separator
 }
