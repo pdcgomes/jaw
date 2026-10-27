@@ -33,6 +33,9 @@ fn quick() -> Timing {
     }
 }
 
+/// How long a test's jawd waits for the demo engine to connect as it starts.
+const CONNECTING: Duration = Duration::from_secs(10);
+
 /// jawd's sending on a jaw.db in `home`, with the demo engine on `world`, connected.
 struct Running {
     store: Store,
@@ -117,7 +120,7 @@ impl Running {
                     }
                 }
             };
-            tokio::time::timeout(Duration::from_secs(10), online).await.expect("the demo engine never connected");
+            tokio::time::timeout(CONNECTING, online).await.expect("the demo engine never connected");
         }
         Running { store, sending, world, pushes, supervisor, attention, live, typing }
     }
@@ -761,8 +764,9 @@ async fn a_refused_resend_with_no_receipt_fails_once_its_time_has_passed_and_can
 async fn a_restart_gives_a_message_waiting_for_a_receipt_only_the_time_it_had_left() {
     let home = tempfile::tempdir().unwrap();
     let id = crash(home.path(), "held").await;
-    // As a refused resend leaves it, with 1.5 s of its wait left when jawd starts again.
-    let until = now_ms() + 1_500;
+    // As a refused resend leaves it, with more of its wait left when jawd starts again than jawd
+    // can take to start, so it's still waiting once it has.
+    let until = now_ms() + (CONNECTING + Duration::from_secs(2)).as_millis() as i64;
     let db = Connection::open(home.path().join("jaw.db")).unwrap();
     db.execute("UPDATE outbox SET state = 'unconfirmed', attempts = 1, error = 'refused', next_at = ?1", [until])
         .unwrap();
