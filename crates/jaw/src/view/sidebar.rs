@@ -228,7 +228,8 @@ impl View {
     /// Alt-Shift-Up and Alt-Shift-Down: the folder before or after, in the tree's order with every
     /// folder open, picked as Enter picks it, the folders it's in opened so the sidebar shows it.
     /// At either end it stays, as Alt-Up and Alt-Down do. With neither the chat list nor the
-    /// sidebar drawn, the footer names it and the key that shows its chats.
+    /// sidebar drawn, the footer names it, and the key that shows its chats where that's what the
+    /// key does next: Esc while typing with no edit, reply or names open, Ctrl-F whenever focused.
     pub(super) fn step_folder(&mut self, by: isize) {
         let order: Vec<String> = self
             .tree_open(|_| true)
@@ -249,8 +250,16 @@ impl View {
         self.pick_folder(&id);
         self.sidebar.at = self.tree_row(&id).unwrap_or(self.sidebar.at);
         if self.areas.list.is_empty() && self.areas.sidebar.is_empty() {
-            let shows = if self.narrow() { "esc" } else { "ctrl-f" };
-            self.say(format!("{}: {shows} shows its chats", self.folder_name(&id)));
+            let name = self.folder_name(&id);
+            let typing = self.focus == Focus::Typing
+                && self.editing.is_none()
+                && self.replying.is_none()
+                && self.naming().is_none();
+            self.say(match (self.narrow(), typing) {
+                (true, true) => format!("{name}: esc shows its chats"),
+                (true, false) => name,
+                (false, _) => format!("{name}: ctrl-f shows its chats"),
+            });
         }
     }
 

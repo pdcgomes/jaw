@@ -276,12 +276,15 @@ fn ctrl_f_folds_the_sidebar_and_the_list_away_for_one_chat_and_brings_them_back(
 
 #[test]
 fn focused_the_folder_key_names_the_folder_and_the_key_that_shows_its_chats() {
-    let (mut v, rx, _) = view_with("focus", State::Online, 160, 45);
-    press(&mut v, &rx, "<c-f><a-s-down>");
-    let screen = frame(&mut v);
-    assert!(screen.lines().last().unwrap_or_default().contains("Unread: ctrl-f shows its chats"), "{screen}");
-    press(&mut v, &rx, "<c-f>");
-    assert!(frame(&mut v).contains("╭ chats · Unread"));
+    for keys in ["", "<up>", "<up>r", "<up><up>e"] {
+        let (mut v, rx, _) = view_with("focus", State::Online, 160, 45);
+        press(&mut v, &rx, &format!("<c-f>{keys}<a-s-down>"));
+        let screen = frame(&mut v);
+        let footer = screen.lines().last().unwrap_or_default();
+        assert!(footer.contains("Unread: ctrl-f shows its chats"), "after {keys:?}:\n{screen}");
+        press(&mut v, &rx, "<c-f>");
+        assert!(frame(&mut v).contains("╭ chats · Unread"), "Ctrl-F shows them after {keys:?} too");
+    }
 }
 
 #[test]

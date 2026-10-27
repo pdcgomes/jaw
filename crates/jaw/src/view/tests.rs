@@ -1922,6 +1922,25 @@ fn with_neither_the_list_nor_the_sidebar_drawn_the_folder_key_names_the_folder_i
 }
 
 #[test]
+fn below_90_columns_the_folder_keys_notice_names_esc_only_where_esc_shows_the_chat_list_next() {
+    for (state, keys, said) in [
+        ("typing", "\n", "Unread: esc shows its chats"),
+        ("a message selected", "\n<up>", "Unread"),
+        ("an edit open", "\n<up><up>e", "Unread"),
+        ("the names showing", "<down><down><down>\n@In", "Unread"),
+        ("a reply open", "\n<up>r", "Unread"),
+    ] {
+        let (mut v, rx) = view(80, 40);
+        press(&mut v, &rx, keys);
+        press(&mut v, &rx, "<a-s-down>");
+        let notice = v.notice.clone().map(|(n, _)| n);
+        assert_eq!(notice.as_deref(), Some(said), "{state}:\n{}", frame(&mut v));
+        press(&mut v, &rx, "<esc>");
+        assert_eq!(v.picking, said.contains("esc"), "{state}: Esc shows the list next only where it's named");
+    }
+}
+
+#[test]
 fn m_files_the_open_chat_into_folders_ticked_with_space() {
     let (mut v, rx) = view(140, 44);
     press(&mut v, &rx, "<up>m");
