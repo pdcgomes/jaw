@@ -1,6 +1,6 @@
 # Jaw for the Mac: the box's attachments, emoji, GIFs and Send
 
-27 October 2026. A design. It extends the box in the grid layouts design (on the `mac-m1` branch until it lands) and [the Mac design](2026-10-26-jaw-mac-design.md)'s "The box". The owner's answers are marked "Owner, 27 Oct".
+27 October 2026. A design. It extends the box in [the grid layouts design](2026-10-26-jaw-mac-grid-layouts-design.md) and [the Mac design](2026-10-26-jaw-mac-design.md)'s "The box". The owner's answers are marked "Owner, 27 Oct".
 
 ## What it is
 
