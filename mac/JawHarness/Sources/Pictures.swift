@@ -38,6 +38,9 @@ enum Pictures {
     /// Draws `scene` in `conditions`, in a window of its own off the screen, once it has had `settle`
     /// to do what it does after it's made.
     static func draw(_ scene: HarnessScene, _ conditions: Conditions) async throws -> Drawn {
+        let reduced = Motion.reduced
+        Motion.reduced = { conditions.reduceMotion }
+        defer { Motion.reduced = reduced }
         let taker = NoteTaker()
         let canvas = SceneCanvas(scene: scene, conditions: conditions)
             .onPreferenceChange(NotesKey.self) { notes in
@@ -55,11 +58,12 @@ enum Pictures {
         try await Task.sleep(for: settle)
         host.layoutSubtreeIfNeeded()
         let bounds = host.bounds
+        let wide = Int((bounds.width * scale).rounded())
         guard bounds.width >= 1, bounds.height >= 1,
-              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int((bounds.width * scale).rounded()),
+              let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: wide,
                                          pixelsHigh: Int((bounds.height * scale).rounded()), bitsPerSample: 8,
                                          samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
-                                         bytesPerRow: 0, bitsPerPixel: 0)
+                                         bytesPerRow: wide * 4, bitsPerPixel: 32)
         else { throw PictureError.cantDraw(scene.id) }
         rep.size = bounds.size
         host.cacheDisplay(in: bounds, to: rep)

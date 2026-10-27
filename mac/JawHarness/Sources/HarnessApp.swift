@@ -9,7 +9,8 @@ struct HarnessApp: App {
     @NSApplicationDelegateAdaptor(HarnessDelegate.self) private var delegate
 
     var body: some Scene {
-        WindowGroup("Jaw Harness") {
+        // One window: the appearance and Reduce Motion it sets are the app's, not a window's.
+        Window("Jaw Harness", id: "harness") {
             HarnessRootView()
                 .frame(minWidth: 900, minHeight: 600)
         }

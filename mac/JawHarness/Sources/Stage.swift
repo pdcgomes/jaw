@@ -61,8 +61,8 @@ struct Stage: View {
     var body: some View {
         ScrollView([.horizontal, .vertical]) {
             SceneCanvas(scene: scene, conditions: settings.conditions, surface: settings.surface)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .defaultScrollAnchor(.topLeading, for: .alignment)
         .background(settings.surface.color(settings.conditions.roles))
         // AppKit views take their colours when they're made, so other conditions make them again.
         .id(StageIdentity(scene: scene.id, conditions: settings.conditions))

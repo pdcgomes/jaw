@@ -20,8 +20,9 @@ extension HarnessScene {
     }
 }
 
-/// The theme's roles as swatches: each with "Aa" in the text colour and the contrast it reads at, and
-/// the senders' colours with the contrast they read at on the surface their names sit on.
+/// The theme's roles as swatches, each with "Aa" in the text colour and the contrast it reads at; the
+/// colours text is drawn in, each on the ground and on the surface with the contrast it reads at
+/// there; and the senders' colours with the contrast they read at on the surface their names sit on.
 private struct RolesScene: View {
     let roles: Roles
 
@@ -34,11 +35,18 @@ private struct RolesScene: View {
         ]
     }
 
+    var textColours: [(String, RGBA)] {
+        [
+            ("text", roles.text), ("secondary", roles.secondary), ("tertiary", roles.tertiary), ("accent", roles.accent),
+            ("mention", roles.mention), ("online", roles.online), ("failed", roles.failed),
+        ]
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             SpecimenGroup(
                 title: "The roles",
-                note: "Each with \"Aa\" in the text colour. The grounds text sits on (ground, surface, selection, yours) want 4.5:1 or more; the others aren't for text, so a low ratio on them is right.",
+                note: "Each with \"Aa\" in the text colour. The grounds text sits on (ground, surface, selection, yours) want 4.5:1 or more; the others aren't grounds for text, so a low ratio on them is right.",
                 roles: roles,
             ) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: Space.l)], spacing: Space.l) {
@@ -46,6 +54,24 @@ private struct RolesScene: View {
                         Specimen(caption: "\(name) · " + String(format: "%.1f:1", roles.text.contrast(with: colour)), roles: roles) {
                             RoundedRectangle(cornerRadius: Radius.control).fill(colour.color).frame(height: 50)
                                 .overlay(Text("Aa").textStyle(.body).tone(.primary, roles))
+                        }
+                    }
+                }
+            }
+            SpecimenGroup(
+                title: "The text colours",
+                note: "Secondary and tertiary text, the accent's links and counts, mentions, online and failed, each as it's drawn on the ground and on the surface. Each is text, so each wants 4.5:1 on both; one under it is a colour to look at.",
+                roles: roles,
+            ) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: Space.l)], spacing: Space.l) {
+                    ForEach(textColours, id: \.0) { name, colour in
+                        let ground = String(format: "%.1f:1", colour.contrast(with: roles.ground))
+                        let surface = String(format: "%.1f:1", colour.contrast(with: roles.surface))
+                        Specimen(caption: "\(name) · \(ground) on the ground · \(surface) on the surface", roles: roles) {
+                            HStack(spacing: Space.s) {
+                                swatch(name, colour, on: roles.ground)
+                                swatch(name, colour, on: roles.surface)
+                            }
                         }
                     }
                 }
@@ -65,6 +91,12 @@ private struct RolesScene: View {
                 }
             }
         }
+    }
+
+    /// `name` in `colour` on a swatch of `ground`.
+    func swatch(_ name: String, _ colour: RGBA, on ground: RGBA) -> some View {
+        RoundedRectangle(cornerRadius: Radius.control).fill(ground.color).frame(height: 50)
+            .overlay(Text(name).textStyle(.body).foregroundStyle(colour.color))
     }
 }
 
