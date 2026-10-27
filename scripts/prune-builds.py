@@ -141,13 +141,14 @@ def plan(target: str, min_age: float) -> Plan:
 
 def remove(stale: list):
     for path, inode in stale:
+        # Another prune running at the same time may delete it first.
         try:
             st = os.lstat(path)
+            # A build since the plan may have put another object under the same name.
+            if (st.st_dev, st.st_ino) == inode:
+                os.unlink(path)
         except FileNotFoundError:
-            continue
-        # A build since the plan may have put another object under the same name.
-        if (st.st_dev, st.st_ino) == inode:
-            os.unlink(path)
+            pass
 
 
 @functools.lru_cache(maxsize=None)
@@ -226,9 +227,10 @@ def main() -> int:
 
     done = "to delete" if args.dry_run else "deleted"
     total = 0
-    for target in [os.path.realpath(t) for t in args.targets] or worktree_targets():
+    named = [os.path.realpath(t) for t in args.targets]
+    for target in named or worktree_targets():
         checkout = os.path.dirname(target)
-        label = os.path.basename(checkout) if os.path.basename(target) == "target" else target
+        label = target.replace(str(Path.home()), "~", 1) if named else os.path.basename(checkout)
         why = busy(checkout)
         if why:
             print(f"{label}: left alone, {why}")
