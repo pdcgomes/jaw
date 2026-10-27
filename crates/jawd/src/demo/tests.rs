@@ -17,6 +17,7 @@ fn plan(folder: &Path, report: &Path) -> Plan {
         exit: true,
         notify: false,
         fail: None,
+        without: Vec::new(),
     }
 }
 

@@ -93,21 +93,18 @@ fn ready(home: &Path) -> bool {
         && connection.call("chats.watch", watch).is_ok_and(|v| v["rows"].as_array().is_some_and(played))
 }
 
-/// A jawd on a folder of its own with the demo engine, failing as `fail` says, ended when dropped.
+/// A jawd on a folder of its own with the demo engine and `args`, ended when dropped.
 struct Jawd {
     child: Child,
     home: tempfile::TempDir,
 }
 
 impl Jawd {
-    fn demo(fail: Option<&str>) -> Jawd {
+    fn demo(args: &[&str]) -> Jawd {
         let home = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(home.path().join("jawd.log")).unwrap();
         let mut jawd = command(jawd_binary(), home.path());
-        jawd.args(["--engine", "demo"]).stdout(log.try_clone().unwrap()).stderr(log);
-        if let Some(fail) = fail {
-            jawd.args(["--fail", fail]);
-        }
+        jawd.args(["--engine", "demo"]).args(args).stdout(log.try_clone().unwrap()).stderr(log);
         let jawd = Jawd { child: jawd.spawn().expect("jawd starts"), home };
         until("jawd to serve the demo's chats", || ready(jawd.home.path()));
         jawd
@@ -228,7 +225,7 @@ fn a_jawd_that_cant_start_says_why_and_jaw_keeps_saying_it() {
 
 #[test]
 fn an_engine_that_crashes_shows_reconnecting_with_the_chats_kept_until_jawd_has_started_it_again() {
-    let jawd = Jawd::demo(Some("crash"));
+    let jawd = Jawd::demo(&["--fail", "crash"]);
     let before = jawd.snapshot("");
     assert!(header(&before).contains("jaw  online"), "{before}");
     jawd.toggle();
@@ -253,7 +250,7 @@ fn an_engine_that_crashes_shows_reconnecting_with_the_chats_kept_until_jawd_has_
 
 #[test]
 fn with_whatsapp_out_of_reach_the_header_says_so_and_a_message_waits_with_its_clock_until_it_can_go() {
-    let jawd = Jawd::demo(Some("offline"));
+    let jawd = Jawd::demo(&["--fail", "offline"]);
     jawd.toggle();
     jawd.until("WhatsApp to be out of reach", |s| s.connection.state == ConnectionState::Offline);
     let frame = jawd.snapshot("on my way\n");
@@ -287,7 +284,7 @@ fn with_jawd_itself_out_of_reach_the_mimic_sleeps() {
 
 #[test]
 fn logged_out_from_the_phone_jaw_says_why_keeps_the_messages_and_links_again_from_a_qr_code() {
-    let jawd = Jawd::demo(Some("logout"));
+    let jawd = Jawd::demo(&["--fail", "logout"]);
     let stored = status_of(jawd.home()).and_then(|s| s.stored).expect("jawd says what it stores");
     jawd.toggle();
     jawd.until("the phone to log jaw out", |s| {
@@ -315,7 +312,7 @@ fn logged_out_from_the_phone_jaw_says_why_keeps_the_messages_and_links_again_fro
 
 #[test]
 fn when_whatsapp_wants_a_newer_jaw_the_header_says_update_needed_and_reading_still_works() {
-    let jawd = Jawd::demo(Some("outdated"));
+    let jawd = Jawd::demo(&["--fail", "outdated"]);
     jawd.toggle();
     jawd.until("WhatsApp to want a newer jaw", |s| s.connection.state == ConnectionState::UpdateNeeded);
     let frame = jawd.snapshot("hi\n");
@@ -324,4 +321,18 @@ fn when_whatsapp_wants_a_newer_jaw_the_header_says_update_needed_and_reading_sti
     let sent = lines_with(&frame, " hi ");
     assert!(!sent.is_empty() && sent.iter().all(|line| line.contains('◷')), "what's sent waits:\n{frame}");
     assert!(jawd.status().contains("whatsapp  WhatsApp wants a newer version of jaw"));
+}
+
+#[test]
+fn with_no_ffmpeg_text_still_goes_and_comes_and_jawd_status_says_what_is_missing() {
+    let jawd = Jawd::demo(&["--without", "ffmpeg", "--without", "ffprobe"]);
+    let frame = jawd.snapshot("still works\n");
+    assert!(frame.contains("the one at the lake"), "what arrived:\n{frame}");
+    jawd.until("the message to go", |s| s.stored.is_some_and(|stored| stored.outbox == 0));
+    let frame = jawd.snapshot("");
+    let sent = lines_with(&frame, "still works");
+    assert!(!sent.is_empty() && sent.iter().all(|line| line.contains('✓')), "{frame}");
+    let said = jawd.status();
+    assert!(said.contains("missing   ffmpeg, for sending videos, GIFs and audio files, and video posters"), "{said}");
+    assert!(said.contains("missing   ffprobe, for reading what a file to send is"), "{said}");
 }

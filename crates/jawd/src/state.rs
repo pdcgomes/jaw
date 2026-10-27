@@ -63,7 +63,7 @@ impl State {
             home: home.to_path_buf(),
             owner,
             engine,
-            missing: missing(),
+            missing: missing(&[]),
             pools,
             live,
             store,
@@ -94,6 +94,13 @@ impl State {
     /// Whether any interface is in front.
     pub fn focused(&self) -> bool {
         self.attention.focused()
+    }
+
+    /// Takes the programs in `without` for missing, whether or not they're installed, as a machine
+    /// without them would.
+    pub fn without(mut self, without: &[String]) -> State {
+        self.missing = missing(without);
+        self
     }
 
     /// Says in `status` where notifications go, or why they don't.
@@ -289,8 +296,8 @@ impl State {
 }
 
 /// The programs jawd uses but doesn't carry, looked for on PATH and where Homebrew puts them, since
-/// a LaunchAgent's PATH doesn't include it.
-fn missing() -> Vec<Missing> {
+/// a LaunchAgent's PATH doesn't include it; those in `without` are missing however they're found.
+fn missing(without: &[String]) -> Vec<Missing> {
     let wanted = [
         ("ffmpeg", "sending videos, GIFs and audio files, and video posters"),
         ("ffprobe", "reading what a file to send is"),
@@ -300,7 +307,9 @@ fn missing() -> Vec<Missing> {
     folders.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
     wanted
         .into_iter()
-        .filter(|(program, _)| !folders.iter().any(|folder| folder.join(program).is_file()))
+        .filter(|(program, _)| {
+            without.iter().any(|w| w == program) || !folders.iter().any(|folder| folder.join(program).is_file())
+        })
         .map(|(program, needed_for)| Missing { what: program.into(), needed_for: needed_for.into() })
         .collect()
 }

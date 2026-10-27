@@ -50,6 +50,9 @@ struct Cli {
     /// Sends no notifications; JAW_NOTIFY=off does the same
     #[arg(long)]
     no_notify: bool,
+    /// Behaves as if a program jawd uses weren't installed, to try and test what interfaces show
+    #[arg(long, value_name = "PROGRAM", value_parser = ["ffmpeg", "ffprobe"], global = true, hide = true)]
+    without: Vec<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -279,6 +282,7 @@ fn jawd(cli: Cli) -> Result<()> {
             exit,
             notify,
             fail: cli.fail,
+            without: cli.without.clone(),
         }),
         Some(Command::Bench(Bench::Link { count, size, commit })) => bench_link(cli.engine, count, size, commit),
         Some(Command::Bench(Bench::Lanes { background, interactive })) => bench_lanes(background, interactive),
@@ -295,7 +299,7 @@ fn jawd(cli: Cli) -> Result<()> {
         Some(Command::Bench(Bench::Send { count, trips, chats })) => {
             bench_send(send::bench::Plan { count, trips, chats })
         }
-        None => run(&home, cli.engine, cli.fail, cli.no_notify),
+        None => run(&home, cli.engine, cli.fail, cli.no_notify, &cli.without),
     }
 }
 
@@ -382,7 +386,7 @@ fn engine_program() -> Option<std::path::PathBuf> {
         .or_else(GoEngine::find)
 }
 
-fn run(home: &Path, kind: EngineKind, fail: Option<Failure>, no_notify: bool) -> Result<()> {
+fn run(home: &Path, kind: EngineKind, fail: Option<Failure>, no_notify: bool, without: &[String]) -> Result<()> {
     std::fs::create_dir_all(home).with_context(|| format!("can't make {}", home.display()))?;
     std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
     let runtime = runtime()?;
@@ -391,7 +395,7 @@ fn run(home: &Path, kind: EngineKind, fail: Option<Failure>, no_notify: bool) ->
         let socket = jaw_proto::local::socket(home);
         let (lock, listener) = open(home, &socket)?;
         let started = tokio::select! {
-            started = start_on(home, &socket, lock, engine(kind, home, fail), no_notify) => started?,
+            started = start_on(home, &socket, lock, engine(kind, home, fail), no_notify, without) => started?,
             signal = signals.next() => {
                 eprintln!("jawd: {signal} while starting, so it stops");
                 let _ = std::fs::remove_file(&socket);
@@ -468,15 +472,28 @@ type Chosen = Result<Arc<dyn Engine>, (&'static str, String)>;
 
 /// Starts jawd listening on `socket`, removing the socket if it can't start, so a jawd that fails
 /// leaves nothing an interface would try to reach.
-async fn start_on(home: &Path, socket: &Path, lock: std::fs::File, engine: Chosen, no_notify: bool) -> Result<Started> {
-    let started = start(home, lock, engine, no_notify).await;
+async fn start_on(
+    home: &Path,
+    socket: &Path,
+    lock: std::fs::File,
+    engine: Chosen,
+    no_notify: bool,
+    without: &[String],
+) -> Result<Started> {
+    let started = start(home, lock, engine, no_notify, without).await;
     if started.is_err() {
         let _ = std::fs::remove_file(socket);
     }
     started
 }
 
-async fn start(home: &Path, lock: std::fs::File, engine: Chosen, no_notify: bool) -> Result<Started> {
+async fn start(
+    home: &Path,
+    lock: std::fs::File,
+    engine: Chosen,
+    no_notify: bool,
+    without: &[String],
+) -> Result<Started> {
     let store = store::Store::open(home)?;
     std::fs::create_dir_all(home.join("spool"))?;
     sync::running(&store).await?;
@@ -515,7 +532,8 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, no_notify: bool
         .with_sending(sending)
         .with_layouts(layout::Layouts::new(store.clone()))
         .with_settings(settings)
-        .with_notifications(says);
+        .with_notifications(says)
+        .without(without);
     let state = Arc::new(state);
     let _ = state.finder.set(finder);
     let notifications = notifier.ok().map(|notifier| {
@@ -782,7 +800,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), true).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), true, &[]).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let link = tokio::task::spawn_blocking(move || {
@@ -818,7 +836,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), true).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), true, &[]).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let path = socket.clone();
         let polls = tokio::task::spawn_blocking(move || {
@@ -894,7 +912,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());
         let (lock, listener) = open(home.path(), &socket).unwrap();
-        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), true).await.unwrap();
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), true, &[]).await.unwrap();
         tokio::spawn(sock::serve(started.state.clone(), listener));
         let store = started.state.store().unwrap().clone();
         let chat = "120363012345678901@g.us";
@@ -973,7 +991,7 @@ mod tests {
         let socket = jaw_proto::local::socket(home.path());
         let (lock, _listener) = open(home.path(), &socket).unwrap();
         assert!(socket.exists());
-        let failed = start_on(home.path(), &socket, lock, engine(EngineKind::Demo, home.path(), None), true).await;
+        let failed = start_on(home.path(), &socket, lock, engine(EngineKind::Demo, home.path(), None), true, &[]).await;
         assert!(failed.is_err(), "jaw.db isn't one");
         assert!(!socket.exists(), "the socket went with the start that failed");
     }
