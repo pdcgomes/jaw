@@ -28,6 +28,12 @@ impl Samples {
         let at = |q: usize| sorted[(sorted.len() * q / 100).min(sorted.len() - 1)];
         Some(jaw_proto::Percentiles { p50_us: at(50), p99_us: at(99) })
     }
+
+    /// The longest of the latest, in microseconds; none before the first.
+    #[cfg(test)]
+    pub fn most(&self) -> Option<u64> {
+        self.recent.iter().copied().max()
+    }
 }
 
 #[cfg(test)]

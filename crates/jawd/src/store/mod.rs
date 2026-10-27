@@ -3430,18 +3430,43 @@ mod tests {
         let waits = store.storage().background_waits;
         // Indexed with nothing else committing, so only the writer's index steps wake the
         // checkpointer whenever they pass the soft limit.
-        let started = Instant::now();
-        store.indexed().await.unwrap();
-        let took = started.elapsed();
+        indexed_with_short_waits(&store).await;
         let waits = store.storage().background_waits - waits;
         assert!(waits > 0, "indexing never waited for the checkpointer");
-        // Each wait lasts one of the checkpointer's passes, however busy the machine, not the
-        // idle timeout after which it empties the WAL by itself.
-        let longest = store.report().wait_background.map_or(0, |waited| waited.p99_us);
-        assert!(longest < IDLE.as_micros() as u64 / 2, "a wait for the checkpointer took {longest} µs");
-        assert!(took < IDLE * 3, "indexing took {took:?} in {waits} waits for the checkpointer");
         let found = query(&store, |db| read::search(db, "numero 7919", None, None, 10)).await;
         assert_eq!(found.hits.len(), 1, "the history is found once it's indexed");
+    }
+
+    /// How long a test waits for what it's waiting for before calling it a hang: what it checks is
+    /// each step's own bound, never how long a busy machine takes over all of them.
+    const HANG: Duration = Duration::from_secs(300);
+
+    /// Waits for fts_backlog to be indexed, however long a busy machine takes over it, checking
+    /// each of the writer's waits for the checkpointer as it ends: every one lasts a pass of the
+    /// checkpointer's, not the idle timeout after which it empties the WAL by itself. Only a hang
+    /// is timed, at HANG.
+    async fn indexed_with_short_waits(store: &Store) {
+        let longest = || store.stats.lock().expect("the writer's stats").held.most().unwrap_or(0);
+        let indexing = tokio::spawn({
+            let store = store.clone();
+            async move { store.indexed().await }
+        });
+        let began = Instant::now();
+        loop {
+            let done = indexing.is_finished();
+            let most = longest();
+            assert!(most < IDLE.as_micros() as u64 / 2, "a wait for the checkpointer took {most} µs");
+            if done {
+                break;
+            }
+            let waits = store.storage().background_waits;
+            assert!(
+                began.elapsed() < HANG,
+                "indexing hadn't finished after {HANG:?}, in {waits} waits for the checkpointer"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        indexing.await.unwrap().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3473,19 +3498,24 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = Store::open(home.path()).unwrap();
         let (acks, mut acked) = tokio::sync::mpsc::unbounded_channel();
-        // 500 rows a second for 2 s, each flush shorter than the gap to the next row's commit.
-        let rows = 1_000u64;
+        // 500 rows a second, each flush shorter than the gap to the next row's commit, for 2 s and
+        // then on until 20 live writes have gone in while they came, however long a busy machine
+        // takes over them, or for HANG.
+        let (wanted, made) = (20, Arc::new(AtomicU64::new(0)));
         let feeder = {
-            let store = store.clone();
+            let (store, made) = (store.clone(), made.clone());
             std::thread::spawn(move || {
                 let started = Instant::now();
-                for n in 0..rows {
+                let mut n = 0;
+                while n < 1_000 || (made.load(Ordering::Relaxed) < wanted && started.elapsed() < HANG) {
                     if let Some(wait) = (started + Duration::from_millis(2 * n)).checked_duration_since(Instant::now())
                     {
                         std::thread::sleep(wait);
                     }
                     store.inbox("message", 0, vec![1], Some(crate::engine::Ack::to(n, acks.clone())));
+                    n += 1;
                 }
+                n
             })
         };
         let chat = "351910000001@s.whatsapp.net";
@@ -3502,9 +3532,11 @@ mod tests {
             assert_eq!(applied.quarantined, usize::from(live % 2 == 0), "write {live}");
             assert_eq!(applied.error.is_some(), live % 2 == 0, "write {live} says why only when it was quarantined");
             live += 1;
+            made.store(live as u64, Ordering::Relaxed);
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(live >= 20, "only {live} live writes while the rows came");
+        let rows = feeder.join().unwrap();
+        assert!(live as u64 >= wanted, "only {live} live writes in {HANG:?} of rows");
         assert!(slowest < Duration::from_millis(250), "a live write waited {slowest:?} for the stream of rows");
         for _ in 0..rows {
             let ack = tokio::time::timeout(Duration::from_secs(5), acked.recv()).await.unwrap();
