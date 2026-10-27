@@ -8,7 +8,7 @@ import Testing
 
 @Test func `the type scale is the one every surface draws with`() {
     let sizes = TextStyle.allCases.map { "\($0):\(Int($0.size))\($0.weight == .semibold ? "b" : "")\($0.monospaced ? "m" : "")" }
-    #expect(sizes == ["title:17b", "heading:15b", "body:13", "callout:12", "caption:11", "micro:10", "mono:11m", "key:11bm", "display:34bm"])
+    #expect(sizes == ["title:17b", "heading:15b", "body:13", "callout:12", "caption:11", "micro:10", "mono:11m", "key:11bm", "display:34bm", "emoji:22"])
     #expect(TextStyle.body.nsFont.pointSize == 13)
     #expect(TextStyle.mono.nsFont.fontDescriptor.symbolicTraits.contains(.monoSpace))
 }
@@ -47,4 +47,24 @@ import Testing
     var ran = false
     Motion.run { ran = true }
     #expect(ran, "the change is made at once")
+}
+
+@MainActor
+@Test func `the emoji picker finds by name, moves on its grid, keeps a tone and puts recents first`() throws {
+    let defaults = try #require(UserDefaults(suiteName: "jaw.tests.emoji"))
+    defaults.removePersistentDomain(forName: "jaw.tests.emoji")
+    let picker = EmojiPickerModel(defaults: defaults)
+    picker.query = "thumbs"
+    #expect(picker.shown.contains("👍"))
+    picker.query = ""
+    picker.move(-1, -1)
+    #expect(picker.index == 0, "the grid's first")
+    picker.move(1, 1)
+    #expect(picker.index == EmojiPickerModel.columns + 1)
+    picker.tone = 3
+    #expect(picker.toned("👍") == "👍🏽" && picker.toned("🎉") == "🎉", "a tone only where it's taken")
+    let thumbs = picker.shown.firstIndex(of: "👍")!
+    #expect(picker.pick(thumbs) == "👍🏽")
+    #expect(picker.shown.first == "👍" && picker.recents.first == "👍")
+    #expect(EmojiPickerModel(defaults: defaults).tone == 3 && EmojiPickerModel(defaults: defaults).recents == ["👍"], "both kept")
 }

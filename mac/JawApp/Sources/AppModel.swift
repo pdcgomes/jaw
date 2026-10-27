@@ -338,6 +338,13 @@ final class AppModel {
         c.host = self
         c.notice = { [weak self] in self?.say($0) }
         c.avatar = window?.chatList.avatar(for: chat)
+        c.composer.plusMenu = { [weak self] in
+            self.map { m in
+                Menus.menu(["attach.photos", "attach.document", "attach.camera", "attach.contact", "compose.poll", "compose.event", "attach.location"]
+                    .compactMap(m.command))
+            }
+        }
+        c.composer.gif = { [weak self] in self?.command("box.gif")?.run() }
         c.headerMenu = Menus.menu(["split.across", "split.down", "pane.close", "swap.left", "swap.right", "swap.up", "swap.down"]
             .compactMap(command))
         _ = c.view

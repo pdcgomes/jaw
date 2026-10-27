@@ -34,6 +34,11 @@ public final class IconButton: NSControl {
         }
     }
 
+    /// Drawn as a circle in the accent, its symbol in the ground: the box's Send.
+    public var filled = false {
+        didSet { needsDisplay = true }
+    }
+
     /// A menu a click opens, above the button when it sits low in the window.
     public var menuToOpen: (() -> NSMenu?)?
     /// Run on a click with the button, for a menu shown from it elsewhere.
@@ -80,33 +85,41 @@ public final class IconButton: NSControl {
     }
 
     var titleFont: NSFont {
-        TextStyle.caption.nsFont
+        symbol.isEmpty ? TextStyle.caption.emphasised : TextStyle.caption.nsFont
     }
 
     override public var intrinsicContentSize: NSSize {
         guard let title, !title.isEmpty else { return NSSize(width: size.side, height: size.side) }
-        let symbolWidth = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(configuration)?.size.width ?? 0
+        let symbolWidth = symbol.isEmpty ? 0
+            : (NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(configuration)?.size.width ?? 0) + Space.xs
         let text = (title as NSString).size(withAttributes: [.font: titleFont]).width
-        return NSSize(width: ceil(symbolWidth + Space.xs + text + Space.m * 2), height: size.side)
+        return NSSize(width: ceil(symbolWidth + text + Space.m * 2), height: size.side)
     }
 
     override public func draw(_: NSRect) {
         guard let roles else { return }
-        if hovering {
+        if filled {
+            (hovering ? roles.accent.mixed(with: roles.text, 0.15) : roles.accent).nsColor.setFill()
+            NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
+        } else if hovering {
             roles.selection.nsColor.setFill()
             NSBezierPath(roundedRect: bounds, xRadius: Radius.small, yRadius: Radius.small).fill()
         }
-        let colour = (hovering ? Tone.primary : tone).color(roles).nsColor
-        guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
-            .withSymbolConfiguration(configuration.applying(.init(paletteColors: [colour])))
-        else { return }
-        let s = image.size
-        let x = title == nil ? (bounds.width - s.width) / 2 : Space.m
-        image.draw(in: NSRect(x: x.rounded(), y: ((bounds.height - s.height) / 2).rounded(), width: s.width, height: s.height))
+        let colour = filled ? (roles.isDark ? roles.ground : RGBA(0xFFFFFF)).nsColor : (hovering ? Tone.primary : tone).color(roles).nsColor
+        var x = Space.m
+        if let image = symbol.isEmpty ? nil : NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(configuration.applying(.init(hierarchicalColor: colour)))
+        {
+            let s = image.size
+            x = title == nil ? (bounds.width - s.width) / 2 : Space.m
+            image.draw(in: NSRect(x: x.rounded(), y: ((bounds.height - s.height) / 2).rounded(), width: s.width, height: s.height))
+            x += s.width + Space.xs
+        }
         if let title {
             let text = NSAttributedString(string: title, attributes: [.font: titleFont, .foregroundColor: colour])
             let t = text.size()
-            text.draw(at: NSPoint(x: x + s.width + Space.xs, y: ((bounds.height - t.height) / 2).rounded()))
+            if symbol.isEmpty { x = ((bounds.width - t.width) / 2).rounded() }
+            text.draw(at: NSPoint(x: x, y: ((bounds.height - t.height) / 2).rounded()))
         }
     }
 

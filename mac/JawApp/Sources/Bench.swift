@@ -130,7 +130,7 @@ enum Bench {
 
     static func draw(to path: String, model: AppModel) {
         // The window's frame view, so the toolbar is drawn too.
-        let glance = model.glance.isOpen ? model.glance.panel.contentView : nil
+        let glance = model.glance.isOpen ? model.glance.panel.contentView : EmojiPicker.shared.panel.isVisible ? EmojiPicker.shared.panel.contentView : nil
         guard let view = glance ?? model.window?.editorSheet?.contentView ?? model.window?.settings?.contentView ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
         let rect = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }

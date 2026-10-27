@@ -103,15 +103,31 @@ extension AppModel {
                 self?.jawd.chatAction("chat.mark_unread", chat: c.id, ["unread": .bool(!unread)],
                                       what: unread ? "marking a chat read" : "marking a chat unread")
             })
-        for (id, title, phrase, detail, key, later) in [
-            ("attach", "Attach Files…", "Attach files", "comes with jawd's M4", Shortcut("o"), "attaching comes with jawd's M4"),
-            ("record", "Record a Voice Message", "Record a voice message", "comes with jawd's M5", Shortcut("r"), "recording comes with jawd's M5"),
-            ("library", "Library", "Library", "comes with jawd's M3", Shortcut("l"), "the library comes with jawd's M3"),
+        // The box's + menu: attachments, and what's composed.
+        for (id, title, phrase, detail, symbol, key, later) in [
+            ("attach.photos", "Photos & Videos…", "Send photos or videos", "from Finder or Photos", "photo.on.rectangle", Shortcut("o") as Shortcut?,
+             "sending photos and videos comes with jawd's M4"),
+            ("attach.document", "Document…", "Send a document", "any file", "doc", Shortcut("o", [.command, .shift]),
+             "sending documents comes with jawd's M4"),
+            ("attach.camera", "Camera…", "Take a photo with the iPhone", "Continuity Camera", "camera", nil, "the camera comes with jawd's M4"),
+            ("attach.contact", "Contact…", "Send a contact", "from Contacts", "person.crop.circle", nil, "sending contacts comes with jawd's send.contact"),
+            ("compose.poll", "Poll…", "New poll", "a question and its options", "chart.bar.xaxis", nil, "polls come with jawd's send.poll"),
+            ("compose.event", "Event…", "New event", "a time, a place, a call link", "calendar", nil, "events come with jawd's send.event"),
+            ("attach.location", "Location…", "Send a place", "a search, or where you are", "mappin.and.ellipse", nil,
+             "sending places comes with jawd's send.location"),
         ] {
-            add(Command(id, title, phrase: phrase, detail: detail, key: key, place: .chat, group: 2) { [weak self] in self?.say(later) })
+            add(Command(id, title, phrase: phrase, detail: detail, symbol: symbol, key: key, place: .chat, group: 2, enabled: isChat)
+                { [weak self] in self?.say(later) })
         }
-        add(Command("poll", "New Poll", phrase: "New poll", detail: "comes with jawd's polls", place: .chat, group: 2)
-            { [weak self] in self?.say("polls come later") })
+        add(Command("box.emoji", "Emoji…", phrase: "Emoji", detail: "find one by name", symbol: "face.smiling",
+                    key: Shortcut("e", [.control, .command]), place: .chat, group: 3, enabled: isChat)
+            { [weak self] in self?.conversation?.composer.showEmoji() })
+        add(Command("box.gif", "GIFs…", phrase: "GIFs", detail: "from Giphy, through jawd", key: Shortcut("g", [.control, .command]), place: .chat,
+                    group: 3, enabled: isChat) { [weak self] in self?.say("GIF search comes with jawd's gif.search") })
+        add(Command("record", "Record a Voice Message", phrase: "Record a voice message", detail: "comes with jawd's M5", key: Shortcut("r"),
+                    place: .chat, group: 3) { [weak self] in self?.say("recording comes with jawd's M5") })
+        add(Command("library", "Library", phrase: "Library", detail: "comes with jawd's M3", key: Shortcut("l"), place: .chat, group: 3)
+            { [weak self] in self?.say("the library comes with jawd's M3") })
 
         // Message: keys the conversation takes itself while a message is selected.
         for (id, title, phrase, key) in [

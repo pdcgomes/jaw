@@ -37,6 +37,26 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         didSet { showChip() }
     }
     let completions = CompletionView()
+    lazy var plus = IconButton(symbol: "plus", label: "Attach, or make a poll or an event", tone: .secondary) {}
+    lazy var emojiButton = IconButton(symbol: "face.smiling", label: "Emoji", shortcut: Shortcut("e", [.control, .command]), size: .small,
+                                      tone: .secondary) { [weak self] in self?.showEmoji() }
+    lazy var gifButton = IconButton(symbol: "", label: "GIFs", shortcut: Shortcut("g", [.control, .command]), size: .small, tone: .secondary,
+                                    title: "GIF") { [weak self] in self?.gif?() }
+    lazy var sendButton = IconButton(symbol: "arrow.up", label: "Send", shortcut: Shortcut("↩", [])) { [weak self] in self?.send() }
+    /// The + button's menu: attachments, a poll, an event, a place.
+    public var plusMenu: (() -> NSMenu?)? {
+        didSet { plus.menuToOpen = plusMenu }
+    }
+
+    /// The GIF button.
+    public var gif: (() -> Void)?
+
+    public func showGIFs() {
+        gif?()
+    }
+    /// The field's trailing edge: before Send while it shows, at the box's edge when it doesn't.
+    var fieldToSend: NSLayoutConstraint!
+    var fieldToEdge: NSLayoutConstraint!
     var heightConstraint: NSLayoutConstraint!
     /// The field's top: just under the panes, or under the strip while there is one, so a box with
     /// nothing to say above it keeps no room for it.
@@ -110,11 +130,14 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         completions.isHidden = true
         completions.picked = { [weak self] in self?.take($0) }
 
-        for v in [bar, barClose, field, chip, scroll, placeholder, completions] as [NSView] {
+        sendButton.filled = true
+        for v in [bar, barClose, field, plus, chip, scroll, emojiButton, gifButton, sendButton, placeholder, completions] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
         heightConstraint = scroll.heightAnchor.constraint(equalToConstant: 30)
+        fieldToSend = field.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -Space.s)
+        fieldToEdge = field.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Space.l)
         scrollTop = scroll.topAnchor.constraint(equalTo: root.topAnchor, constant: Space.s)
         NSLayoutConstraint.activate([
             bar.topAnchor.constraint(equalTo: root.topAnchor, constant: 6),
@@ -123,16 +146,24 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
             barClose.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             barClose.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
             scrollTop,
-            field.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Space.l),
+            plus.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Space.m),
+            plus.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
+            field.leadingAnchor.constraint(equalTo: plus.trailingAnchor, constant: Space.xs),
             chip.leadingAnchor.constraint(equalTo: field.leadingAnchor, constant: Space.xs),
             chip.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
             scroll.leadingAnchor.constraint(equalTo: chip.trailingAnchor, constant: Space.xxs),
-            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            scroll.trailingAnchor.constraint(equalTo: emojiButton.leadingAnchor, constant: -Space.xxs),
+            emojiButton.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
+            gifButton.leadingAnchor.constraint(equalTo: emojiButton.trailingAnchor, constant: Space.xxs),
+            gifButton.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
+            gifButton.trailingAnchor.constraint(equalTo: field.trailingAnchor, constant: -Space.xs),
+            sendButton.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
+            sendButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Space.m - 2),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -Space.m),
             heightConstraint,
             field.topAnchor.constraint(equalTo: scroll.topAnchor),
             field.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
-            field.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+
             placeholder.leadingAnchor.constraint(equalTo: scroll.leadingAnchor, constant: 9),
             placeholder.centerYAnchor.constraint(equalTo: scroll.topAnchor, constant: 15),
             completions.leadingAnchor.constraint(equalTo: field.leadingAnchor),
@@ -157,6 +188,9 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
         showChip()
         bar.textColor = unsentWhy == nil ? roles.secondary.nsColor : roles.failed.nsColor
         barClose.roles = roles
+        for b in [plus, emojiButton, gifButton, sendButton] {
+            b.roles = roles
+        }
         completions.roles = roles
     }
 
@@ -215,7 +249,28 @@ public final class ComposerController: NSViewController, NSTextViewDelegate {
 
     func changed() {
         placeholder.isHidden = !textView.string.isEmpty
+        showSend()
         resize()
+    }
+
+    /// Send shows while there's something to send; a microphone will take its place when the box
+    /// is empty, once jawd records voice (M5).
+    func showSend() {
+        guard isViewLoaded, fieldToSend != nil else { return }
+        let something = !textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard sendButton.isHidden == something || !(fieldToSend.isActive || fieldToEdge.isActive) else { return }
+        sendButton.isHidden = !something
+        fieldToEdge.isActive = !something
+        fieldToSend.isActive = something
+    }
+
+    public func showEmoji() {
+        guard let roles else { return }
+        EmojiPicker.shared.show(above: emojiButton, roles: roles) { [weak self] emoji in
+            guard let self else { return }
+            view.window?.makeFirstResponder(textView)
+            textView.insertText(emoji, replacementRange: textView.selectedRange())
+        }
     }
 
     // MARK: - Drafts and typing

@@ -22,10 +22,13 @@ public enum TextStyle: CaseIterable, Sendable {
     case key
     /// A code to type on the phone.
     case display
+    /// An emoji in a picker's grid.
+    case emoji
 
     public var size: CGFloat {
         switch self {
         case .display: 34
+        case .emoji: 22
         case .title: 17
         case .heading: 15
         case .body: 13
@@ -38,7 +41,7 @@ public enum TextStyle: CaseIterable, Sendable {
     public var weight: NSFont.Weight {
         switch self {
         case .title, .heading, .key, .display: .semibold
-        case .body, .callout, .caption, .micro, .mono: .regular
+        case .body, .callout, .caption, .micro, .mono, .emoji: .regular
         }
     }
 

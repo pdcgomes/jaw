@@ -10,6 +10,8 @@ public final class FloatingPanel: NSPanel {
         case centre
         /// Near the top of the window, as the palette sits.
         case top
+        /// Above a rect on the screen, its right edges lined up: a picker over its button.
+        case above(NSRect)
     }
 
     /// A key, before the panel's views see it; true when it was taken.
@@ -66,8 +68,13 @@ public final class FloatingPanel: NSPanel {
         content.autoresizingMask = [.width, .height]
         contentView = content
         let f = window.frame
-        let y = place == .centre ? f.midY - size.height / 2 : f.maxY - 60 - size.height
-        setFrame(NSRect(x: (f.midX - size.width / 2).rounded(), y: y.rounded(), width: size.width, height: size.height), display: true)
+        var origin: NSPoint
+        switch place {
+        case .centre: origin = NSPoint(x: f.midX - size.width / 2, y: f.midY - size.height / 2)
+        case .top: origin = NSPoint(x: f.midX - size.width / 2, y: f.maxY - 60 - size.height)
+        case let .above(r): origin = NSPoint(x: min(max(r.maxX - size.width, f.minX + Space.s), f.maxX - size.width - Space.s), y: r.maxY + Space.s)
+        }
+        setFrame(NSRect(x: origin.x.rounded(), y: origin.y.rounded(), width: size.width, height: size.height), display: true)
         if parent !== window { window.addChildWindow(self, ordered: .above) }
         makeKeyAndOrderFront(nil)
     }
