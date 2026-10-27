@@ -623,7 +623,7 @@ async fn a_merge_that_failed_before_it_went_on_into_another_chat_is_quarantined_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_chain_of_merges_jaw_db_already_holds_ends_in_one_chat_with_what_was_sent_meanwhile() {
+async fn a_chain_of_merges_made_after_jaw_db_opened_still_ends_in_one_chat_with_what_was_sent_meanwhile() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
     let changes = vec![
@@ -635,8 +635,9 @@ async fn a_chain_of_merges_jaw_db_already_holds_ends_in_one_chat_with_what_was_s
     store.apply(Lane::Live, changes).await.unwrap();
     store.apply(Lane::Live, vec![join(OLD, LID)]).await.unwrap();
     store.apply(Lane::Live, vec![join(LID, NEW)]).await.unwrap();
-    // As a jawd that didn't point merges on left it: the LID's chat merging into the old
-    // number's, itself merging into the new number's.
+    // A chain jaw.db is opened with is flattened (the tests below, from jaw.dbs an earlier jawd
+    // made); one made by hand after that still ends at the middle chat's last step: the LID's chat
+    // merging into the old number's, itself merging into the new number's.
     let side = Connection::open(home.path().join("jaw.db")).unwrap();
     side.busy_timeout(Duration::from_secs(5)).unwrap();
     side.execute(
@@ -665,4 +666,111 @@ async fn a_chain_of_merges_jaw_db_already_holds_ends_in_one_chat_with_what_was_s
     let reactions = "SELECT m.id || ' ' || r.emoji FROM reactions r JOIN messages m ON m.n = r.message";
     assert_eq!(column::<String>(&store, reactions).await, ["later 👍"]);
     assert_eq!(store.count("pending").unwrap(), 0);
+}
+
+/// A copy of `name`, a jaw.db that jawd made at 4126db2, before a chat that starts merging away
+/// took the merges going into it with it, in a folder of its own. `tests/fixtures/merge-chains`
+/// keeps them compressed, beside the test that made them (`made-at-4126db2.rs`):
+/// - `x1-chain`: the new number's chat the oldest, then the old number's, then the LID's; the
+///   LID's merge into the old number's, then the old number's into the new number's, a step of
+///   each taken; then, landing on the old number's chat, a draft and a pin for the LID's, and a
+///   reaction to l10, an edit of l30, a deletion for everyone of l25 and one for you of l20, which
+///   had gone on into the new number's chat;
+/// - `ended-chain`: the new number's chat, then the LID's with l0 to l9, read here up to l9, then
+///   the old number's with 205 messages, the numbers' read on the phone; the same two merges, the
+///   LID's ended and a step of the old number's taken, so l0 to l9 wait in the old number's chat;
+/// - `standing-chain`: the same, with one message in the old number's chat and no step taken.
+fn from_before(name: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let packed = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/merge-chains/{name}.db.zst"));
+    let db = zstd::decode_all(std::fs::File::open(packed).unwrap()).unwrap();
+    std::fs::write(home.path().join("jaw.db"), db).unwrap();
+    home
+}
+
+async fn query<T: Send + 'static>(
+    store: &Store,
+    query: impl FnOnce(&Connection) -> anyhow::Result<T> + Send + 'static,
+) -> T {
+    store.reads().query(Priority::Interactive, query).await.unwrap()
+}
+
+/// Each chat, by JID, with how many unread messages it shows.
+async fn unread(store: &Store) -> Vec<(String, i64)> {
+    query(store, |db| {
+        Ok(db
+            .prepare("SELECT id, unread FROM chats ORDER BY n")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await
+}
+
+/// The messages chat `jid` owes read receipts for, once nothing merges into it.
+async fn owed(store: &Store, jid: &'static str) -> Vec<String> {
+    let owed = query(store, move |db| {
+        let n: i64 = db.query_row("SELECT n FROM chats WHERE id = ?1", [jid], |r| r.get(0))?;
+        outbox::owed(db, n)
+    })
+    .await;
+    match owed {
+        Owing::Receipts(owed) => owed.messages.into_iter().map(|(id, _)| id).collect(),
+        Owing::Nothing => Vec::new(),
+        Owing::Merging { into } => panic!("{jid}'s chat is still merging, into chat {into}"),
+    }
+}
+
+fn ids(prefix: &str, n: std::ops::Range<i64>) -> Vec<String> {
+    n.map(|i| format!("{prefix}{i}")).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chain_of_merges_an_earlier_jawd_left_is_flattened_so_reading_the_chat_that_stays_reads_every_chat_in_it() {
+    let home = from_before("x1-chain");
+    let store = Store::open(home.path()).unwrap();
+    let person = |new, old, lid| vec![(NEW.to_string(), new), (OLD.to_string(), old), (LID.to_string(), lid)];
+    assert_eq!(unread(&store).await, person(200, 5, 10));
+    let on_the_phone = Change::Read(Read { chat: NEW.into(), at: AT + 5_000, ..Read::default() });
+    store.apply(Lane::Live, vec![on_the_phone]).await.unwrap();
+    assert_eq!(unread(&store).await, person(0, 0, 0), "read on the phone, the LID's chat with the rest");
+    let both = [(OLD.to_string(), NEW.to_string()), (LID.to_string(), NEW.to_string())];
+    assert_eq!(merging(&store).await, both, "each merge goes into the chat that stays");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pane_naming_the_first_chat_of_a_chain_an_earlier_jawd_left_opens_the_chat_that_stays() {
+    let home = from_before("x1-chain");
+    let store = Store::open(home.path()).unwrap();
+    let named = query(&store, |db| crate::store::read::chat_named(db, LID)).await;
+    assert_eq!(named.as_deref(), Some(NEW), "never the old number's chat, which is being merged away");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn merges_that_go_round_in_a_circle_keep_jawd_from_opening_jaw_db_and_change_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    store.apply(Lane::Live, vec![message(OLD, "o0", AT), message(LID, "l0", AT + 1)]).await.unwrap();
+    let copy = killed(home.path());
+    let db = Connection::open(copy.path().join("jaw.db")).unwrap();
+    // The old number's chat and the LID's, each merging into the other, which no jawd makes.
+    db.execute("INSERT INTO chat_merges (gone, keep) VALUES (1, 2), (2, 1)", []).unwrap();
+    drop(db);
+    let refused = Store::open(copy.path()).err().expect("jaw.db isn't opened");
+    assert!(format!("{refused:#}").contains("go round in a circle"), "{refused:#}");
+    let db = Connection::open(copy.path().join("jaw.db")).unwrap();
+    let merges: i64 = db.query_row("SELECT count(*) FROM chat_merges WHERE gone <> keep", [], |r| r.get(0)).unwrap();
+    assert_eq!(merges, 2, "nothing written");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn receipts_owed_by_the_first_chat_of_a_chain_an_earlier_jawd_left_are_owed_by_the_chat_that_stays() {
+    let home = from_before("standing-chain");
+    let store = Store::open(home.path()).unwrap();
+    // As jaw.db opens, before any step: WhatsApp hasn't been told of l0, the oldest.
+    let told: Option<i64> =
+        query(&store, |db| Ok(db.query_row("SELECT told_at FROM chats WHERE id = ?1", [NEW], |r| r.get(0))?)).await;
+    assert!(told.is_some_and(|at| at <= AT + 1_000), "the new number's chat told up to {told:?}");
+    merged(&store, LID).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
+    assert_eq!(owed(&store, NEW).await, ids("l", 0..10), "l0 to l9, read here");
 }

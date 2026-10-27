@@ -1558,6 +1558,59 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     Ok(true)
 }
 
+/// The most merges a chain can hold: one for each of a person's chats but the one that stays.
+const CHAIN_MOST: usize = 64;
+
+/// Whether jaw.db holds a chain of merges, which an earlier jawd made: a chat kept by one merge
+/// that's being merged into another itself.
+pub(super) fn chained(db: &Connection) -> Result<bool> {
+    Ok(middle(db)?.is_some())
+}
+
+/// The first chat kept by one merge and being merged into another itself, and the chat it goes into.
+fn middle(db: &Connection) -> Result<Option<(i64, i64)>> {
+    Ok(db
+        .prepare_cached(
+            "SELECT m.gone, m.keep FROM chat_merges m
+            WHERE m.gone > 0 AND EXISTS (SELECT 1 FROM chat_merges i WHERE i.keep = m.gone) ORDER BY m.gone LIMIT 1",
+        )?
+        .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?)
+}
+
+/// Points every merge in a chain at the chat the chain ends in, before the writer takes any
+/// change. An earlier jawd let a chat kept by one merge start merging into another, and until the
+/// chat in the middle went, a write for the first chat's JID stopped at it, one merge on, as
+/// everything that finds a chat through chat_merges follows one: it landed on a chat about to be
+/// removed, and reading the chat that stays didn't read the first. Each merge going into a chat in
+/// the middle goes into the chat that stays, as start_merge now leaves it, with where its chat was
+/// read merged into that one's. Says how many chats were in the middle of a chain.
+pub(super) fn flatten(db: &Connection, stamps: &mut Stamps) -> Result<usize> {
+    let mut flattened = 0;
+    while let Some((chat, next)) = middle(db)? {
+        let mut top = next;
+        for hop in 0.. {
+            let Some(further) = db
+                .prepare_cached("SELECT gone, keep FROM chat_merges WHERE gone = ?1")?
+                .query_row([top], |r| r.get::<_, i64>(1))
+                .optional()?
+            else {
+                break;
+            };
+            if hop == CHAIN_MOST {
+                bail!("the merges from chat {chat} on go round in a circle");
+            }
+            top = further;
+        }
+        let id = |n: i64| -> Result<String> {
+            Ok(db.prepare_cached("SELECT id FROM chats WHERE n = ?1")?.query_row([n], |r| r.get(0))?)
+        };
+        repoint(db, stamps, (chat, &id(chat)?), (top, &id(top)?))?;
+        flattened += 1;
+    }
+    Ok(flattened)
+}
+
 /// Has chat `chat` show its newest message, and sort by it, as its rows now are: for the two chats
 /// of a merge, whose messages move between them.
 fn show_newest(db: &Connection, stamps: &mut Stamps, chat: i64) -> Result<()> {

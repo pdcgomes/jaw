@@ -491,6 +491,39 @@ fn note_frames(_: &WalFile, frames: c_int) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Points every merge in a chain an earlier jawd left at the chat that stays (`write::flatten`), in a
+/// transaction of its own before the writer takes any change; a jaw.db without one costs a search.
+/// It's done again from the start at the next open if it fails or jawd stops before it commits.
+fn flatten(db: &mut Connection, stamps: &mut Stamps) -> Result<()> {
+    if !write::chained(db)? {
+        return Ok(());
+    }
+    stamps.begin();
+    let flattened = (|| {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let chats = write::flatten(&tx, stamps)?;
+        write::settle(&tx, stamps)?;
+        tx.commit()?;
+        anyhow::Ok(chats)
+    })();
+    match flattened {
+        Ok(1) => {
+            eprintln!("jawd: pointed the merges going into a chat being merged itself at the chat that stays");
+            Ok(())
+        }
+        Ok(chats) => {
+            eprintln!(
+                "jawd: pointed the merges going into {chats} chats being merged themselves at the chats that stay"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            stamps.rolled_back();
+            Err(e.context("can't point jaw.db's chains of merges at the chats that stay"))
+        }
+    }
+}
+
 /// Runs a checkpoint, saying (busy, frames in the WAL, frames in jaw.db).
 fn wal_checkpoint(db: &Connection, mode: &str) -> Result<(bool, u64, u64)> {
     Ok(db.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| {
@@ -563,7 +596,8 @@ impl Store {
         let fenced = vfs::fenced(&db);
         pragma(&db, "busy_timeout", limits.busy_ms)?;
         schema::migrate(&mut db)?;
-        let stamps = Stamps::load(&db)?;
+        let mut stamps = Stamps::load(&db)?;
+        flatten(&mut db, &mut stamps)?;
         let reads = Reads::open(&path)?;
         let checkpointer = connect(&path, Role::Checkpointer)?;
         let (realtime, realtime_rx) = unbounded();

@@ -1463,6 +1463,11 @@ DELETE FROM chats WHERE n = ?1
     SEARCH group_members USING PRIMARY KEY (chat=?)
 
 -- src/store/write.rs
+SELECT m.gone, m.keep FROM chat_merges m WHERE m.gone > 0 AND EXISTS (SELECT 1 FROM chat_merges i WHERE i.keep = m.gone) ORDER BY m.gone LIMIT 1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid>?)
+    SEARCH i EXISTS USING COVERING INDEX chat_merges_by_keep (keep=?)
+
+-- src/store/write.rs
 UPDATE chats SET last_message = (SELECT n FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), last_at = coalesce((SELECT at FROM messages WHERE chat = ?1 ORDER BY at DESC, n DESC LIMIT 1), 0), v = ?2 WHERE n = ?1
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
     SCALAR SUBQUERY 2

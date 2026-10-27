@@ -23,6 +23,7 @@ DATA_PATHS = (
     "crates/jawd/src/layout.rs",
     "crates/jawd/src/layout/",
     "crates/jawd/src/settings",
+    "crates/jawd/tests/fixtures/",
     "engine/internal/wa/",
     "proto/engine/",
     "crates/jaw-voice/src/record/",
