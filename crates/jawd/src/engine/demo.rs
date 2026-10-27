@@ -539,7 +539,7 @@ fn now_ms() -> i64 {
 /// Writes `data` to `path` as jaw-engine writes a history blob: through a .part file synced to the
 /// disk before it's renamed into place, and the folder synced after, so after a power cut the file
 /// is either whole or not there.
-fn write_whole(path: &Path, data: &[u8]) -> std::io::Result<()> {
+pub(super) fn write_whole(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let folder = path.parent().filter(|f| !f.as_os_str().is_empty()).unwrap_or(Path::new("."));
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(folder)?;
     let mut part = path.as_os_str().to_owned();

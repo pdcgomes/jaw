@@ -16,6 +16,7 @@ fn plan(folder: &Path, report: &Path) -> Plan {
         report: Some(report.to_path_buf()),
         exit: true,
         notify: false,
+        fail: None,
     }
 }
 

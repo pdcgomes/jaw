@@ -26,6 +26,7 @@ use self::account::{Account, Shape};
 use self::probe::{Asker, Expected, PAGE, Watcher};
 use self::usage::Sampler;
 use crate::engine::demo::{self, DemoEngine, World};
+use crate::engine::failing::{Failing, Failure};
 use crate::engine::{Engine, pb};
 use crate::state::State;
 use crate::store::Store;
@@ -47,6 +48,8 @@ pub struct Plan {
     pub report: Option<PathBuf>,
     pub exit: bool,
     pub notify: bool,
+    /// How the demo engine fails, from the first SIGUSR1 until the next.
+    pub fail: Option<Failure>,
 }
 
 /// The folder a demo uses unless told otherwise, kept between runs so its history comes once.
@@ -206,7 +209,10 @@ async fn serve(plan: Plan, shape: Shape, history: bool, ended: Option<i64>) -> R
     }
     let engine = DemoEngine::for_account(script, account.clone());
     let world = engine.world();
-    let engine: Arc<dyn Engine> = Arc::new(engine);
+    let engine: Arc<dyn Engine> = match plan.fail {
+        Some(failure) => Arc::new(Failing::new(engine, failure)),
+        None => Arc::new(engine),
+    };
     let folder = plan.folder.clone();
     let socket = jaw_proto::local::socket(&folder);
     let mut signals = crate::Signals::new()?;

@@ -1,8 +1,10 @@
 //! The engine jawd reaches WhatsApp through, behind one trait, so engines can be swapped and
-//! compared: `GoEngine` runs jaw-engine on whatsmeow, `DemoEngine` is a made-up account, and a
-//! whatsapp-rust engine comes in M7. proto/engine/engine.proto is the link they all speak.
+//! compared: `GoEngine` runs jaw-engine on whatsmeow, `DemoEngine` is a made-up account, `Failing`
+//! is that account failing as a real one can, and a whatsapp-rust engine comes in M7.
+//! proto/engine/engine.proto is the link they all speak.
 
 pub mod demo;
+pub mod failing;
 pub mod frame;
 pub mod go;
 pub mod supervisor;
