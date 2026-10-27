@@ -2,6 +2,8 @@
 //! the messages jaw.db held before links were kept, a short step at a time from where the last one
 //! left off, and the thumbnails of link previews, whose rows go in once their files are whole.
 
+use std::time::{Duration, Instant};
+
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -56,24 +58,34 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
     else {
         return Ok(false);
     };
-    let (next, take): (&str, Take) = match name {
-        LINKS => (NEXT_LINKED, link),
-        POLLS => (NEXT_POLLS, super::polls::backfilled),
-        KINDS => (kinds::NEXT_UNSHOWN, kinds::backfilled),
+    // How long a step may take messages for, past the first, when taking one costs much.
+    let (next, take, taking): (&str, Take, Option<Duration>) = match name {
+        LINKS => (NEXT_LINKED, link, None),
+        POLLS => (NEXT_POLLS, super::polls::backfilled, None),
+        KINDS => (kinds::NEXT_UNSHOWN, kinds::backfilled, Some(kinds::CONVERTING)),
         other => bail!("jawd doesn't know the backfill {other}"),
     };
     let rows: Vec<(i64, Option<bool>)> = db
         .prepare_cached(next)?
         .query_map(params![after, upto, STEP], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    let mut changed = false;
-    for &(n, wanted) in &rows {
-        if wanted == Some(true) {
-            changed |= take(db, stamps, n)?;
+    let began = Instant::now();
+    let (mut changed, mut took) = (false, false);
+    let mut looked = rows.len();
+    for (i, &(n, wanted)) in rows.iter().enumerate() {
+        if wanted != Some(true) {
+            continue;
         }
+        if took && taking.is_some_and(|most| began.elapsed() >= most) {
+            looked = i;
+            break;
+        }
+        changed |= take(db, stamps, n)?;
+        took = true;
     }
-    match rows.last() {
-        Some(&(last, _)) if rows.len() as i64 == STEP && last < upto => {
+    // A step that stopped before the end of what it read goes on, next time, from where it stopped.
+    match rows[..looked].last() {
+        Some(&(last, _)) if (looked < rows.len() || rows.len() as i64 == STEP) && last < upto => {
             db.prepare_cached(BACKFILLED)?.execute(params![name, last])?;
         }
         _ => {

@@ -97,6 +97,161 @@ fn answer_edit(id: &str, target: &str, at: i64, said: &str) -> WebMessageInfo {
     web(ANA, id, Some(ANA), Some(e2e::Message { protocol_message: Some(Box::new(edit)), ..Default::default() }))
 }
 
+const TUESDAY: &str = "It ships on Tuesday now";
+/// The ID of a message whose conversion panics, as `backfilled` does for it in tests.
+pub(super) const PANICS: &str = "3EB0PANICS";
+/// The ID of a message whose conversion fails once it has written, as `backfilled` does for it in
+/// tests.
+pub(super) const FAILS: &str = "3EB0FAILS";
+
+/// A jaw.db at version 15 holding, in a group, Ana's templates with `ids`, each of kind unknown as
+/// an earlier jawd left it, its n its place among them.
+fn templates(home: &std::path::Path, ids: &[String]) -> Vec<Vec<u8>> {
+    let db = Connection::open(home.join("jaw.db")).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    for migration in &schema::MIGRATIONS[..15] {
+        db.execute_batch(migration).unwrap();
+    }
+    db.pragma_update(None, "user_version", 15).unwrap();
+    db.execute_batch(&format!(
+        "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 0);
+        INSERT INTO person_jids (n, jid, person) VALUES (1, '{ANA}', 1);
+        INSERT INTO chats (n, id, kind, v) VALUES (1, '{GROUP}', 'group', 0);
+        INSERT INTO sync_state (key, value) VALUES ('me', '{ME}');"
+    ))
+    .unwrap();
+    let mut raws = Vec::new();
+    for (i, id) in ids.iter().enumerate() {
+        let (n, raw) = (i as i64 + 1, packed(&monday(GROUP, id)));
+        db.execute(
+            "INSERT INTO messages (n, chat, id, at, t, sender, kind, summary, raw, v)
+            VALUES (?1, 1, ?2, ?3, ?1, 1, 'unknown', ?4, ?5, 0)",
+            params![n, id, AT + n, UNKNOWN, raw],
+        )
+        .unwrap();
+        raws.push(raw);
+    }
+    raws
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_meeting_many_to_convert_ends_once_it_has_converted_for_a_while_and_the_next_goes_on() {
+    let home = tempfile::tempdir().unwrap();
+    templates(home.path(), &(1..=64).map(|n| format!("t{n}")).collect::<Vec<_>>());
+    let store = Store::open(home.path()).unwrap();
+    backfill(&store).await;
+    let (after, converted): (i64, i64) = query(&store, |db| {
+        Ok(db.query_row(
+            "SELECT (SELECT after FROM backfills WHERE name = 'kinds'),
+                (SELECT count(*) FROM messages WHERE kind = 'text'),
+                (SELECT max(n) FROM messages WHERE kind = 'text')",
+            [],
+            |r| {
+                assert_eq!(r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, "what it converted is the first in a row");
+                Ok((r.get(0)?, r.get(1)?))
+            },
+        )?)
+    })
+    .await;
+    assert!((1..64).contains(&converted), "a step converting 64 in a row ends once it has for a while: {converted}");
+    assert_eq!(after, converted, "and the next goes on from the first it didn't convert");
+    while store.backfill_left(KINDS).unwrap() > 0 {
+        backfill(&store).await;
+    }
+    assert_eq!(store.count("messages WHERE kind = 'text'").unwrap(), 64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_whose_conversion_fails_or_panics_is_kept_in_quarantine_and_the_rest_are_converted() {
+    let home = tempfile::tempdir().unwrap();
+    let ids: Vec<String> = ["t1", PANICS, "t3", FAILS, "t5"].iter().map(|id| id.to_string()).collect();
+    let raws = templates(home.path(), &ids);
+    let store = Store::open(home.path()).unwrap();
+    while store.backfill_left(KINDS).unwrap() > 0 {
+        assert_eq!(backfill(&store).await.quarantined, 0, "no step fails for one message");
+    }
+    let rows: Vec<(String, String, i64)> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT id, kind, v FROM messages ORDER BY n")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    let kinds: Vec<(&str, &str)> = rows.iter().map(|(id, kind, _)| (id.as_str(), kind.as_str())).collect();
+    assert_eq!(kinds, [("t1", "text"), (PANICS, "unknown"), ("t3", "text"), (FAILS, "unknown"), ("t5", "text")]);
+    assert!(rows[1].2 == 0 && rows[3].2 == 0, "what failed, after writing too, is as it was");
+    let events = store.count("events WHERE type = 'message' AND key IN (2, 4)").unwrap();
+    assert_eq!(events, 0, "with no event");
+    let kept: Vec<(String, Vec<u8>)> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT ref, raw FROM quarantine WHERE source = 'kinds' ORDER BY ref")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    assert_eq!(
+        kept,
+        [(format!("{GROUP} {FAILS}"), raws[3].clone()), (format!("{GROUP} {PANICS}"), raws[1].clone())],
+        "each kept in quarantine with its raw protobuf"
+    );
+}
+
+/// Ana's business template `id` in `chat`, which an earlier jawd couldn't show.
+fn monday(chat: &str, id: &str) -> WebMessageInfo {
+    let template = e2e::TemplateMessage {
+        hydrated_template: Some(Box::new(e2e::template_message::HydratedFourRowTemplate {
+            hydrated_content_text: Some("Your order ships on Monday".into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    web(chat, id, Some(ANA), Some(e2e::Message { template_message: Some(Box::new(template)), ..Default::default() }))
+}
+
+/// Ana's edit, made at `at`, of her message `target` in `chat`, to say `TUESDAY`.
+fn tuesday(chat: &str, target: &str, at: i64) -> WebMessageInfo {
+    let edit = e2e::ProtocolMessage {
+        key: Some(MessageKey {
+            remote_jid: Some(chat.into()),
+            from_me: Some(true),
+            id: Some(target.into()),
+            participant: None,
+        }),
+        r#type: Some(e2e::protocol_message::Type::MessageEdit as i32),
+        edited_message: Some(Box::new(e2e::Message { conversation: Some(TUESDAY.into()), ..Default::default() })),
+        timestamp_ms: Some(at),
+        ..Default::default()
+    };
+    web(
+        chat,
+        &format!("{target}-edit"),
+        Some(ANA),
+        Some(e2e::Message { protocol_message: Some(Box::new(edit)), ..Default::default() }),
+    )
+}
+
+/// Rui's comment on an announcement, a poll.
+fn poll_comment(id: &str) -> WebMessageInfo {
+    let option =
+        |name: &str| e2e::poll_creation_message::Option { option_name: Some(name.into()), ..Default::default() };
+    let poll = e2e::PollCreationMessage {
+        name: Some("Jantar?".into()),
+        options: vec![option("Ramen"), option("Pizza")],
+        selectable_options_count: Some(1),
+        ..Default::default()
+    };
+    let comment = e2e::CommentMessage {
+        message: Some(Box::new(e2e::Message { poll_creation_message: Some(Box::new(poll)), ..Default::default() })),
+        target_message_key: Some(MessageKey {
+            remote_jid: Some(GROUP.into()),
+            from_me: Some(false),
+            id: Some("3EB0NEWS".into()),
+            participant: Some(ANA.into()),
+        }),
+    };
+    web(GROUP, id, Some(RUI), Some(e2e::Message { comment_message: Some(Box::new(comment)), ..Default::default() }))
+}
+
 /// A row as an earlier jawd left it: its n, chat, ID, sender's JID n, whether it's yours, kind,
 /// text, summary, when it was last edited, whether it's deleted, and its raw protobuf.
 type Left = (
@@ -309,6 +464,24 @@ fn before_kinds(home: &std::path::Path) -> Vec<Left> {
                 Some(e2e::Message { sender_key_distribution_message: Some(Default::default()), ..Default::default() }),
             ))),
         ),
+        // Ana's template, then her edit of it, the other way round: the edit first standing in
+        // for it, and the template keeping the edit's words when history brought it.
+        (
+            14,
+            1,
+            "t14",
+            Some(1),
+            false,
+            "unknown",
+            Some(TUESDAY),
+            None,
+            Some(AT + 50),
+            false,
+            Some(packed(&monday(GROUP, "t14"))),
+        ),
+        // The same template, which the test edits through this jawd's own writer.
+        (15, 1, "t15", Some(1), false, "unknown", None, unknown, None, false, Some(packed(&monday(GROUP, "t15")))),
+        (16, 1, "c16", Some(2), false, "unknown", None, unknown, None, false, Some(packed(&poll_comment("c16")))),
     ];
     let mut insert = db
         .prepare(
@@ -361,17 +534,21 @@ async fn unshown_count(store: &Store) -> (i64, i64) {
 
 /// Measures the backfill, on a copy of a real jaw.db in `JAW_MEASURE_HOME` (opened with no engine,
 /// so nothing else writes to it), or on one made of `JAW_MEASURE_MESSAGES` messages from before,
-/// one in a thousand of a kind jawd couldn't show and one in a thousand a line it couldn't word:
+/// one in a thousand of a kind jawd couldn't show and one in a thousand a line it couldn't word, or
+/// with `JAW_MEASURE_DENSE` set, that many first in a row, a business's templates with two links,
+/// each step then timed in a transaction of its own:
 /// `JAW_MEASURE_MESSAGES=1000000 cargo test --release -p jawd measure_the_kinds -- --ignored --nocapture`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "a measurement, a minute long at a million messages"]
 async fn measure_the_kinds_backfill() {
     let made = tempfile::tempdir().unwrap();
+    let dense: i64 = std::env::var("JAW_MEASURE_DENSE").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
     let home = match std::env::var_os("JAW_MEASURE_HOME") {
         Some(home) => std::path::PathBuf::from(home),
         None => {
             let messages: i64 =
                 std::env::var("JAW_MEASURE_MESSAGES").ok().and_then(|n| n.parse().ok()).unwrap_or(200_000);
+            let special = |x: i64| if dense > 0 { x <= dense } else { x % 1000 == 1 || x % 1000 == 2 };
             let db = Connection::open(made.path().join("jaw.db")).unwrap();
             db.pragma_update(None, "journal_mode", "WAL").unwrap();
             for migration in &schema::MIGRATIONS[..15] {
@@ -393,21 +570,27 @@ async fn measure_the_kinds_backfill() {
                     "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {messages})
                     INSERT INTO messages (n, chat, id, at, t, sender, kind, text, summary, detail, raw, v)
                     SELECT x, 1 + x % 2000, printf('3EB0%016d', x), {AT} + x * 1000, ({AT} + x * 1000) << 20, 1 + x % 2000,
-                        CASE x % 1000 WHEN 1 THEN 'unknown' WHEN 2 THEN 'system' ELSE 'text' END,
-                        iif(x % 1000 IN (1, 2), NULL, 'mensagem ' || x),
-                        iif(x % 1000 IN (1, 2), ?1, NULL),
-                        iif(x % 1000 = 2, json_object('system', ?1), NULL),
+                        CASE WHEN x <= ?2 OR ?2 = 0 AND x % 1000 = 1 THEN 'unknown'
+                            WHEN ?2 = 0 AND x % 1000 = 2 THEN 'system' ELSE 'text' END,
+                        iif(x <= ?2 OR ?2 = 0 AND x % 1000 IN (1, 2), NULL, 'mensagem ' || x),
+                        iif(x <= ?2 OR ?2 = 0 AND x % 1000 IN (1, 2), ?1, NULL),
+                        iif(?2 = 0 AND x % 1000 = 2, json_object('system', ?1), NULL),
                         randomblob(300), x
                     FROM c"
                 ),
-                params![UNKNOWN],
+                params![UNKNOWN, dense],
             )
             .unwrap();
             // Each of those keeps the raw protobuf it came as: a business's template from the
             // chat's person, or a group linked into a community.
+            let said = if dense > 0 {
+                "Your order has shipped: https://jaw.example/track, and https://jaw.example/help if it hasn't come"
+            } else {
+                "Your order has shipped"
+            };
             let template = e2e::TemplateMessage {
                 hydrated_template: Some(Box::new(e2e::template_message::HydratedFourRowTemplate {
-                    hydrated_content_text: Some("Your order has shipped".into()),
+                    hydrated_content_text: Some(said.into()),
                     ..Default::default()
                 })),
                 ..Default::default()
@@ -415,9 +598,9 @@ async fn measure_the_kinds_backfill() {
             let template = e2e::Message { template_message: Some(Box::new(template)), ..Default::default() };
             db.execute_batch("BEGIN").unwrap();
             let mut raw = db.prepare("UPDATE messages SET raw = ?2 WHERE n = ?1").unwrap();
-            for x in (1..=messages).filter(|x| x % 1000 == 1 || x % 1000 == 2) {
+            for x in (1..=messages).filter(|&x| special(x)) {
                 let (chat, id) = (format!("3519{:08}@s.whatsapp.net", 1 + x % 2000), format!("3EB0{x:016}"));
-                let info = if x % 1000 == 1 {
+                let info = if dense > 0 || x % 1000 == 1 {
                     web(&chat, &id, Some(&chat), Some(template.clone()))
                 } else {
                     stub(&chat, &id, &chat, StubType::CommunityLinkSubGroup, &[GROUP, "Festa"])
@@ -441,8 +624,9 @@ async fn measure_the_kinds_backfill() {
     let before = unshown_count(&store).await;
     let began = std::time::Instant::now();
     let (mut transactions, mut changed) = (0, 0);
+    let steps = if dense > 0 { 1 } else { 64 };
     while store.backfill_left(KINDS).unwrap() > 0 {
-        let applied = store.apply(Lane::Background, vec![Change::Backfill(KINDS); 64]).await.unwrap();
+        let applied = store.apply(Lane::Background, vec![Change::Backfill(KINDS); steps]).await.unwrap();
         assert_eq!(applied.quarantined, 0, "a step failed");
         (transactions, changed) = (transactions + applied.transactions, changed + applied.changed);
     }
@@ -503,16 +687,34 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     let home = tempfile::tempdir().unwrap();
     let left = before_kinds(home.path());
     let store = Store::open(home.path()).unwrap();
-    assert_eq!(store.backfill_left(KINDS).unwrap(), 13, "the migration leaves the backfill to do, as status says");
-    let before = shown(&store).await;
+    assert_eq!(store.backfill_left(KINDS).unwrap(), 16, "the migration leaves the backfill to do, as status says");
 
     // A copy of Rui's encrypted edit converted since waits already, and isn't kept twice.
-    let copy = convert::message(&secret_edit(GROUP, "e3", Some(RUI)), &Me::new([ME.to_string()]), true);
+    let me = Me::new([ME.to_string()]);
+    let copy = convert::message(&secret_edit(GROUP, "e3", Some(RUI)), &me, true);
     store.apply(Lane::Live, copy.into_iter().filter(|c| matches!(c, Change::Amend(_))).collect()).await.unwrap();
+    // Ana edits her template t15 through this jawd before the backfill reaches it.
+    store.apply(Lane::Live, convert::message(&tuesday(GROUP, "t15", AT + 60), &me, true)).await.unwrap();
+    let edited: (String, Option<String>, Option<i64>) = query(&store, |db| {
+        Ok(db.query_row("SELECT kind, text, edited_at FROM messages WHERE n = 15", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?)
+    })
+    .await;
+    assert_eq!(
+        edited,
+        ("unknown".into(), Some(TUESDAY.into()), Some(AT + 60)),
+        "the edit lands, on a row jaw can't show"
+    );
+    let before = shown(&store).await;
 
-    let applied = backfill(&store).await;
-    assert!(applied.changed > 0 && applied.quarantined == 0, "{applied:?}");
-    assert_eq!(store.backfill_left(KINDS).unwrap(), 0, "a step looks at more messages than these, and it's done");
+    let mut changed = 0;
+    while store.backfill_left(KINDS).unwrap() > 0 {
+        let applied = backfill(&store).await;
+        assert_eq!(applied.quarantined, 0, "{applied:?}");
+        changed += applied.changed;
+    }
+    assert!(changed > 0);
     let after = shown(&store).await;
     let row = |n: i64| after.iter().find(|row| row.0 == n).cloned();
     let was = |n: i64| before.iter().find(|row| row.0 == n).cloned().unwrap();
@@ -538,8 +740,47 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
         row(12).map(|r| (r.1, r.3)),
         Some(("system".into(), Some("Open WhatsApp on your phone to see this message".into())))
     );
-    for n in [1, 2, 5, 6, 12] {
+    // A template edited after it came keeps its edit's words, whichever way round they came.
+    for (n, edited_at) in [(14, AT + 50), (15, AT + 60)] {
+        let at: Option<i64> =
+            query(
+                &store,
+                move |db| Ok(db.query_row("SELECT edited_at FROM messages WHERE n = ?1", [n], |r| r.get(0))?),
+            )
+            .await;
+        assert_eq!(
+            (row(n).map(|r| (r.1, r.2)), at),
+            (Some(("text".into(), Some(TUESDAY.into()))), Some(edited_at)),
+            "{n}"
+        );
+    }
+    assert_eq!(row(16).map(|r| r.1), Some("poll".into()), "a comment that's a poll is a poll");
+    assert_eq!(store.count("poll_options WHERE message = 16").unwrap(), 2, "with its options");
+    for n in [1, 2, 5, 6, 12, 14, 15, 16] {
         assert!(row(n).unwrap().4 > was(n).4, "message {n} takes a new version");
+    }
+
+    // Each converted row's event, at its new version, names its chat, so windows on it show it; so
+    // does each removed row's, so they let it go, and the chat's whose newest it was.
+    let event = |kind: &'static str, key: i64| {
+        let store = store.clone();
+        async move {
+            query(&store, move |db| {
+                Ok(db.query_row(
+                    "SELECT max(seq), chat FROM events WHERE type = ?1 AND key = ?2",
+                    params![kind, key],
+                    |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+                )?)
+            })
+            .await
+        }
+    };
+    let chat_of = |n: i64| left.iter().find(|row| row.0 == n).map(|row| row.1);
+    for n in [1, 2, 5, 6, 12, 14, 15, 16] {
+        assert_eq!(event("message", n).await, (Some(row(n).unwrap().4), chat_of(n)), "message {n}'s event");
+    }
+    for n in [3, 4] {
+        assert_eq!(event("message", n).await.1, Some(1), "message {n}, gone, has its event");
     }
     // A row whose raw protobuf converts to nothing at all stays, so nothing it said is lost.
     for n in [7, 8, 9, 10, 11, 13] {
@@ -593,6 +834,9 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     .await;
     assert!(chats[1].1 > 0, "the community's newest message changed, so it takes a new version");
     assert_eq!(chats[2].2, 2, "Ana's two answers count, her placeholder no longer");
+    for (chat, v) in [(2, chats[1].1), (3, chats[2].1)] {
+        assert_eq!(event("chat", chat).await, (Some(v), Some(chat)), "chat {chat}'s event");
+    }
 
     // Search finds what a template said, and its link is kept.
     store.indexed().await.unwrap();
@@ -615,7 +859,7 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     // Taken again from the start, it changes nothing.
     let settled = shown(&store).await;
     let raw = Connection::open(home.path().join("jaw.db")).unwrap();
-    raw.execute("INSERT INTO backfills (name, after, upto) VALUES ('kinds', 0, 13)", []).unwrap();
+    raw.execute("INSERT INTO backfills (name, after, upto) VALUES ('kinds', 0, 16)", []).unwrap();
     drop(raw);
     let again = backfill(&store).await;
     assert_eq!((again.changed, again.quarantined), (0, 0), "{again:?}");

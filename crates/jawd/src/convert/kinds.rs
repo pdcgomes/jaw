@@ -534,7 +534,7 @@ fn channel_invite(channel: &Channel, admin: bool, caption: Option<&str>, mention
         invite.insert("name".into(), json!(name));
     }
     if let Some(expires) = channel.expires.filter(|&seconds| seconds > 0) {
-        invite.insert("expires".into(), json!(expires * 1000));
+        invite.insert("expires".into(), json!(expires.saturating_mul(1000)));
     }
     if admin {
         invite.insert("admin".into(), json!(true));

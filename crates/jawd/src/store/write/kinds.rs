@@ -4,32 +4,41 @@
 //! encrypted edit does, leaves the chat to wait in `pending` with its raw protobuf, as it would
 //! arriving now. A row's raw protobuf is left as it is.
 
-use anyhow::Result;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::Duration;
+
+use anyhow::{Result, anyhow};
 use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension, params};
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
-use super::{CHAT, MESSAGE, Packed, Stamps, amend_message, remove_row, unpack};
+use super::{CHAT, MESSAGE, Packed, Stamps, amend_message, polls, record_quarantine, remove_row, transient, unpack};
 use crate::convert::{self, Me, kinds::UNKNOWN};
 use crate::store::{Amend, Amendment, Change, Message};
 
 /// The backfill that converts again the messages jawd couldn't show when they came.
 pub const KINDS: &str = "kinds";
+/// How long a step converts for: a conversion costs far more than a look at a message, so a step
+/// meeting many in a row ends once its conversions have had this long, after one at least, and the
+/// next goes on from the first it didn't take.
+pub(super) const CONVERTING: Duration = Duration::from_millis(1);
 
 /// The next messages, each with whether jawd couldn't show it when it came: one of kind unknown,
-/// or a system line saying so, as `kinds::UNKNOWN` does, that isn't deleted and has its raw
-/// protobuf.
-pub(super) const NEXT_UNSHOWN: &str = "SELECT n, NOT deleted AND raw IS NOT NULL
-        AND (kind = 'unknown' OR kind = 'system' AND summary = 'jaw can''t show this yet')
+/// or a system line saying so, as `kinds::UNKNOWN` does, that isn't deleted. It reads no raw
+/// protobuf, which a step would otherwise read whole for every message it looks at.
+pub(super) const NEXT_UNSHOWN: &str = "SELECT n,
+        NOT deleted AND (kind = 'unknown' OR kind = 'system' AND summary = 'jaw can''t show this yet')
     FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
 const UNSHOWN: &str = "SELECT chat, id, raw FROM messages WHERE n = ?1";
+const NAMED: &str = "SELECT c.id, m.id, m.raw FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1";
 const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
-/// A message as it converts now. Text a later edit gave it stays, unless jaw couldn't show that
-/// either: an edit that came after the one a row stands in for left no raw protobuf of its own.
+/// A message as it converts now. Text a later edit gave it stays, an edit's time being past any
+/// a message that isn't one has, unless jaw couldn't show that either: an edit after the one a row
+/// stands in for left no raw protobuf of its own.
 const SHOWN: &str = "UPDATE messages SET kind = ?2,
-        text = iif(edited_at > ?12 AND summary IS NOT ?13, text, ?3),
-        spans = iif(edited_at > ?12 AND summary IS NOT ?13, spans, ?4),
-        summary = iif(edited_at > ?12 AND summary IS NOT ?13, summary, iif(?5 IS ?3, NULL, ?5)),
+        text = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, text, ?3),
+        spans = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, spans, ?4),
+        summary = iif(edited_at > coalesce(?12, -1) AND summary IS NOT ?13, summary, iif(?5 IS ?3, NULL, ?5)),
         reply = ?6, detail = ?7, forwarded = ?8, expires_at = ?9, view_once = ?10, mentions_me = ?11, v = ?14
     WHERE n = ?1 AND NOT deleted";
 const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2";
@@ -38,25 +47,61 @@ const KEPT_ALIKE: &str = "SELECT raw FROM pending WHERE chat = ?1 AND target = ?
 
 /// Converts message `n` again, if jawd couldn't show it when it came: it takes what its raw
 /// protobuf converts to now, or, if that's an amendment to another message, leaves the chat to wait
-/// in `pending`. One that still can't be shown, or whose raw protobuf doesn't read, is left as it is.
+/// in `pending`. One that still can't be shown, or whose raw protobuf doesn't read, is left as it is,
+/// and one whose conversion fails, or panics, is kept in quarantine with its raw protobuf while the
+/// step goes on, so no message holds up the rest.
 pub(super) fn backfilled(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
-    let row: Option<(i64, String, Vec<u8>)> =
+    let mark = stamps.mark();
+    db.execute_batch("SAVEPOINT kinds_message")?;
+    match converted_again(db, stamps, n) {
+        Ok(changed) => {
+            db.execute_batch("RELEASE kinds_message")?;
+            Ok(changed)
+        }
+        Err(e) if transient(&e) => Err(e),
+        Err(e) => {
+            db.execute_batch("ROLLBACK TO kinds_message; RELEASE kinds_message")?;
+            stamps.undo(mark);
+            let (chat, id, raw): (String, String, Option<Vec<u8>>) =
+                db.prepare_cached(NAMED)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            eprintln!("jawd: kept message {id} in {chat} in quarantine, as converting it again failed: {e:#}");
+            record_quarantine(db, KINDS, &format!("{chat} {id}"), &format!("{e:#}"), raw.as_deref())?;
+            Ok(false)
+        }
+    }
+}
+
+fn converted_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
+    let row: Option<(i64, String, Option<Vec<u8>>)> =
         db.prepare_cached(UNSHOWN)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-    let Some((chat, id, raw)) = row else { return Ok(false) };
+    let Some((chat, id, Some(raw))) = row else { return Ok(false) };
     let Some(info) = unpack(&raw).ok().and_then(|plain| WebMessageInfo::decode(plain.as_slice()).ok()) else {
         return Ok(false);
     };
-    let changes = convert::message(&info, &account(db)?, false);
+    let me = account(db)?;
+    // The writer catches nothing, and every commit and ack waits on it.
+    let changes = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        assert_ne!(id, tests::PANICS, "a conversion that panics, as a test asks");
+        convert::message(&info, &me, false)
+    }))
+    .map_err(|panic| {
+        let why = panic.downcast_ref::<&str>().copied().or(panic.downcast_ref::<String>().map(String::as_str));
+        anyhow!("converting it panicked: {}", why.unwrap_or("for no reason it gave"))
+    })?;
     let shown = changes.iter().find_map(|change| match change {
         Change::Message(message) if message.id == id => Some(message),
         Change::Edited { shown, .. } if shown.id == id => Some(shown.as_ref()),
         _ => None,
     });
-    match shown {
-        Some(message) if unshown(message) => Ok(false),
-        Some(message) => show(db, stamps, chat, n, message),
-        None => wait(db, stamps, (chat, n, &id), &raw, changes),
-    }
+    let changed = match shown {
+        Some(message) if unshown(message) => false,
+        Some(message) => show(db, stamps, chat, n, message)?,
+        None => wait(db, stamps, (chat, n, &id), &raw, changes)?,
+    };
+    #[cfg(test)]
+    anyhow::ensure!(id != tests::FAILS, "a conversion that fails once it has written, as a test asks");
+    Ok(changed)
 }
 
 /// Whether a converted message is one jawd still can't show.
@@ -92,6 +137,9 @@ fn show(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, message: &Messa
     ])?;
     if changed == 0 {
         return Ok(false);
+    }
+    if !message.poll.is_empty() {
+        polls::options(db, n, &message.poll)?;
     }
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
     let seq = stamps.seq(CHAT, Some(chat));
