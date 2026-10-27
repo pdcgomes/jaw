@@ -202,6 +202,16 @@ These are rules; every builder follows them, the tests listed check them, and th
 - **Presence is bounded,** because subscribing to everyone is what presence trackers do, and WhatsApp polices it. jawd subscribes to the people in a roster window or an open chat, only while an interface has focus (which is also the only time WhatsApp sends presence), at most 20 new subscriptions a minute and 200 per connection, favourites first.
 - Folders, favourites and frecency are jaw's own, kept in `jaw.db` and shared by every interface; WhatsApp never sees them.
 
+### Presence and typing in chats
+
+The step after M6, on a branch of its own with its own audit. M1 tells WhatsApp your own presence and typing, and M6 shows others' in the roster; this step shows them where you chat, in every interface.
+
+- **What shows.** Every chat, groups included, shows who's typing or recording in it now, in its chat-list row and its header. A one-to-one chat's header, and the status line while it's the chat you're in, show the person's presence: online, typing or recording, last seen, or nothing when they hide it, faint when jawd isn't following them, as the roster draws it. The terminal draws them in its chat list, its conversation's title and its status line, and the Mac app in its chat list, header and status line (its proposal P7).
+- **Where it comes from.** Typing is whatsmeow's `ChatPresence`, which WhatsApp sends while you're online, groups included, and which the engine forwards from M6; online and last seen come only for people jawd subscribes to (`Presence`), within the limits above, an open one-to-one chat's person first, as M6 follows them. Typing fades 25 seconds after it was last said, and a pause ends it at once.
+- **Settled before it's built.** Its protocol proposal comes first, as M6's did, and settles what the protocol leaves open: whether typing and presence ride on chat rows (`typing`, and the person's `presence` on a one-to-one chat's row), which a re-watch brings up to date, or come as the `typing` and `presence` pushes, with a new watch told how things are now. Either way, an interface that watches again or reconnects shows them as they are, never a "typing…" or "online" left over; and whichever of chat rows' `typing` and those two pushes isn't chosen leaves the protocol, so it lists nothing jawd doesn't send.
+- **Bounded.** Typing in busy groups can come several times a second. It's coalesced like any change to a window's rows, adds nothing to a message's ack beyond the budgets in a flood with typing in many chats, and what's dropped for coming too fast is counted in `jawd status`.
+- **Tested end to end.** The demo engine types in groups and one-to-one chats and has the people followed come online and go, so `jawd demo` shows all of it through the real socket, where the interfaces' end-to-end tests check it. Feed tests watch again from `since` and must hold what a fresh watch gives, as M6's do.
+
 ### Finding anything
 
 - **One search behind the palette.** `find` takes what's typed and answers, best first, with chats, people, folders, messages, links, media and files, each result saying what it is. Interfaces add their own actions to it, since those are theirs.
@@ -283,6 +293,7 @@ Makefile                build, test, install, demo, perf, proto
 - **M1 Text, fast:** store, history, catch-up, windows and fan-out, people, sending text with ticks, typing, presence, read receipts, drafts, search, notifications, the agent; the client crate and the terminal interface; the command palette over chats, people, folders, actions and messages; budgets measured.
 - **M2 Everything in a message:** replies, mentions, reactions, edits, deletes, forwards, link previews both ways, polls, locations, contact cards, disappearing and view-once, system and call lines, group senders and members, communities, app state; links kept as they're converted, and findable in the palette.
 - **M3 Media in**, with the library of photos, videos, voice messages, files and links, across chats and in one; **M4 Media out**, **M5 Voice**, **M6 Folders and the roster**.
+- **Presence and typing in chats,** the step after M6, on its own branch with its own audit: who's typing in every chat, groups included, and a one-to-one chat's online and last seen, in every interface (see "Presence and typing in chats").
 - **M7 A second engine:** whatsapp-rust wired in as `RustEngine`, run beside the Go engine on the spare number, and compared on the contract suite, the live checklist, the load harness, reconnects and logouts, and build size and time; the default is picked for M8.
 - **M8 Ready to live with:** full load runs, every failure state, a README with pictures, `make install` and a Homebrew tap; before going public, a look at WhatsApp's terms and Meta's rules on side projects.
 

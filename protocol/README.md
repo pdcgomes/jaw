@@ -101,7 +101,7 @@ A chat row:
 | `unread`, `mentions` | Unread messages, and how many mention you |
 | `pinned`, `muted_until`, `archived`, `marked_unread` | As on the phone |
 | `draft` | What's typed in its box, from any interface |
-| `typing` | Who's typing or recording now, by person `id` |
+| `typing` | Who's typing or recording now, by person `id`; empty until jawd sends others' typing (see Presence) |
 | `community` | For a group in a community, the community's `id`; for a community, its groups' unread total in `children_unread` |
 
 ### messages.watch
@@ -274,6 +274,8 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 
 ## Other pushes
 
+`typing` and `presence` aren't sent yet; see Presence.
+
 | Push | Params |
 | --- | --- |
 | `link` | `state`: `qr` with `code` and `expires`, `code` with the phone `code` to type, `done`, or `failed` with `reason` |
@@ -409,6 +411,8 @@ jawd sends them itself, so they come with no interface open: Notification Center
 jawd tells WhatsApp you're online once an interface's `focus` has been true for half a second, and away 30 seconds after the last one loses it (or its connection ends), so your phone keeps its notifications while you're not looking and switching windows doesn't flicker. It says so again each time the connection to WhatsApp comes back. WhatsApp only sends others' presence while you're online.
 
 It follows the presence of the people in roster windows and open chats, while some interface has focus, at most 20 new people a minute and 200 per connection to WhatsApp, favourites first; subscribing to everyone is what presence trackers do. Past the limit, rows show their last known state.
+
+Others' typing, and the presence of the person in a one-to-one chat, aren't sent outside the roster yet: chat rows' `typing` stays empty, and the `typing` and `presence` pushes don't come. They come in the step after M6 (jaw's design, "Presence and typing in chats"), whose proposal settles which of the three stay.
 
 ## Versioning
 

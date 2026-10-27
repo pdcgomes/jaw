@@ -3,7 +3,7 @@
 26 October 2026. The build order for [the Mac design](2026-10-26-jaw-mac-design.md): the shortest path to an app the owner uses every day (reading and sending text in a fast chat list and conversation), then every inline kind, the palette, split panels, and polish. Each milestone says what it needs from jawd, its steps in order, when it's done, and its budgets. The owner answered the design's questions on 26 October; the decisions the plan rests on come first.
 
 - **Every milestone closes with `make perf-mac`** against `jawd demo`'s million messages, its table in the README beside the terminal's, with the load average beside each number, as `make perf` does.
-- **Nothing here touches jawd's data layer.** The proposals the app needs (P1 to P6 in the design) are jawd changes, built on jawd's branches by jawd's builders and audited by the database expert before they land; a milestone that needs one says what it does until it lands.
+- **Nothing here touches jawd's data layer.** The proposals the app needs (P1 to P7 in the design) are jawd changes, built on jawd's branches by jawd's builders and audited by the database expert before they land; a milestone that needs one says what it does until it lands.
 - **The owner's account is never used for tests.** Tests and benches run on `jawd demo` in a folder of their own; the owner tries each milestone's build on his own account once it's done.
 
 ## Building on the owner's Mac
@@ -41,7 +41,7 @@ Each with its reason; the design has the detail.
 
 The owner reads and sends text in jaw for the Mac, all day, on his own account.
 
-**Needs from jawd:** nothing new. Everything here is served on main today: hello, focus, `chats.watch` (All and Archived), `messages.watch`, `watch.move`, `find`, `chat.opened`, `send.text` with `reply` and `mentions`, `send.retry`, `chat.start`, `draft.set`, `read`, `typing`, `react`, `edit`, `delete`, `message.info`, `chat.info`, `history.more`, `link.*`, `status`.
+**Needs from jawd:** P7 for others' typing and presence, which jawd brings in its step after M6; until it lands, the chat list, the header and the status line show nobody typing and no online or last seen. Everything else here is served on main today: hello, focus, `chats.watch` (All and Archived), `messages.watch`, `watch.move`, `find`, `chat.opened`, `send.text` with `reply` and `mentions`, `send.retry`, `chat.start`, `draft.set`, `read`, `typing` (yours), `react`, `edit`, `delete`, `message.info`, `chat.info`, `history.more`, `link.*`, `status`.
 
 1. **The project.** `mac/` with Tuist (Swift 6 language mode, macOS 26, warnings as errors), `make mac` building jawd, jaw-engine and jaw for release into `Contents/Helpers`, each signed; a first app icon (the Mimic on Tokyo Night's ground).
 2. **JawKit, the client.** The connection, the rows (chats, messages, `find`, `link`, `connection`, `notice`), the window models ported from jaw-client's `window.rs` with their tests, the merge per window between frames, reconnecting with `have`, waking at once for answers and once a frame for pushes, and the interface's half from `wire.rs`: keys, asking again after a lost answer within 20 hours, owed drafts and read positions, the latest `find`. Every fixture in `protocol/fixtures` decodes; a live suite on `jawd demo` kills jawd mid-stream and checks the windows.
@@ -162,6 +162,6 @@ Redlamp's themes, the animations, the Mimic, linking, the app's own notification
 
 ## Alongside
 
-- **jawd's proposals,** each on a jawd branch with its audit: P1 (an interface's saved state) now, on `interface-state`, for the terminal's panes and the Mac's alike, as the owner asked; P6 (what an interface owes, and the schema) before Mac-M1 ends, since JawKit checks against it; P3 by Mac-M1 for the badge, or with M6's folders; P4 by Mac-M2; P2 and P5 by Mac-M5.
+- **jawd's proposals,** each on a jawd branch with its audit: P1 (an interface's saved state) now, on `interface-state`, for the terminal's panes and the Mac's alike, as the owner asked; P6 (what an interface owes, and the schema) before Mac-M1 ends, since JawKit checks against it; P3 by Mac-M1 for the badge, or with M6's folders; P4 by Mac-M2; P2 and P5 by Mac-M5; P7 in jawd's step after its M6, drawn as soon as it's served.
 - **The terminal's `jaw agent`** learns of the app's agent in Mac-M1, as step 3 needs.
 - **`scripts/sync-themes`** comes with Mac-M5's themes and runs in CI after it.
