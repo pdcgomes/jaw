@@ -26,7 +26,7 @@ repo=pdcgomes/jaw
 tap=${JAW_TAP:-pdcgomes/homebrew-jaw}
 tap_folder=~/src/${tap#*/}
 url=${JAW_URL:-https://github.com/$repo/releases/download/$tag/$name.tar.gz}
-dist=target/dist
+dist=$root/target/dist
 tarball=$dist/$name.tar.gz
 
 mkdir -p "$dist"
@@ -75,5 +75,5 @@ and install it with: brew install ${tap%%/*}/${tap#*/homebrew-}/jaw
 
 While $repo is private, Homebrew can't download the release's tarball, since it doesn't sign in
 to GitHub: make the repository public first, or run this again with JAW_URL set to a URL it can
-reach, such as file://$root/$tarball for this Mac alone.
+reach, such as file://$tarball for this Mac alone.
 EOF
