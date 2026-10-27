@@ -94,7 +94,8 @@ mac/JawHarness/Sources/
 
 - **`SpecimenGroup`:** a titled band of specimens with a note on what would be wrong with them, which is what turns a gallery into a review.
 - **`Specimen`:** one component with a monospaced caption.
-- **`AppKitSpecimen`:** an `NSView` or `NSViewController` at a width, at the height it asks for.
+- **`AppKitSpecimen`:** an `NSView` at a width, at the height it asks for.
+- **`ControllerSpecimen`:** an `NSViewController` at the frame it's given: a chat list, a conversation, whose height is the room they're given rather than one they ask for.
 - **`ScreenSpecimen`:** a `WindowContent` at a fixed size, as the window would hold it, and an overlay when one is open: the palette, the glance or a sheet, drawn as views where the window puts them (the palette along the top, 620 points wide; the glance in the middle; a sheet from the top edge) rather than in panels of their own, so a picture holds them.
 - **`Knob`:** a labelled slider with its value, for inspectors.
 
