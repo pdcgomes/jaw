@@ -255,7 +255,8 @@ fn macos_major() -> u32 {
 /// The surface's and the selection's indices of the 256, each its nearest unless that's the index
 /// of a role drawn on it or beside it: the selection's dim text and borders, the surface's borders.
 /// Then it's the next-nearest that's none of those, nor the ground's or the other's, and keeps the
-/// ladder's order of contrast: ground, surface, selection, dim text.
+/// ladder's order of contrast: ground, surface, selection, dim text; a selection's is also one the
+/// dim text stands out on no less than the borders beside it do, as in truecolor.
 fn apart_256(r: &Roles) -> (u8, u8) {
     let index = |h: u32| nearest_256((h >> 16) as u8, (h >> 8) as u8, h as u8);
     let (bg, gutter, comment) = (index(r.bg), index(r.gutter), index(r.comment));
@@ -264,7 +265,8 @@ fn apart_256(r: &Roles) -> (u8, u8) {
     if selection == comment || selection == gutter {
         let free = |i: u8| ![bg, surface, gutter, comment].contains(&i);
         let between = |i: u8| on_bg(surface) < on_bg(i) && on_bg(i) < on_bg(comment);
-        selection = next_256(r.selection, |i| free(i) && between(i)).unwrap_or(selection);
+        let legible = |i: u8| contrast(rgb_256(i), rgb_256(comment)) >= contrast(rgb_256(i), rgb_256(gutter));
+        selection = next_256(r.selection, |i| free(i) && between(i) && legible(i)).unwrap_or(selection);
     }
     if surface == gutter {
         let free = |i: u8| ![bg, selection, gutter].contains(&i);
@@ -368,13 +370,20 @@ mod tests {
                 c(selection),
                 c(comment)
             );
+            let on_selection = |i: u8| contrast(rgb_256(i), rgb_256(selection));
+            assert!(
+                on_selection(comment) >= on_selection(gutter),
+                "{id}: on the selection, dim text {:.2} and borders {:.2}",
+                on_selection(comment),
+                on_selection(gutter)
+            );
         }
     }
 
     #[test]
     fn in_256_colours_only_the_four_themes_whose_nearest_collide_move_each_to_its_next_nearest() {
         let moved = [
-            ("last-horizon", "selection", 239, 240),
+            ("last-horizon", "selection", 239, 238),
             ("osaka-jade", "selection", 237, 238),
             ("retro-82", "selection", 23, 237),
             ("white", "surface", 250, 251),
@@ -406,6 +415,8 @@ mod tests {
             let on_surface = contrast(r.selection, r.surface);
             assert!(on_surface >= 1.15, "{id}: the selection on the surface {on_surface:.2}, as overlays draw it");
             assert!(contrast(r.fg, r.selection) >= 4.5, "{id}: text on the selection");
+            let (dim, borders) = (contrast(r.comment, r.selection), contrast(r.gutter, r.selection));
+            assert!(dim > borders, "{id}: on the selection, dim text {dim:.2} and borders {borders:.2}");
         }
     }
 
