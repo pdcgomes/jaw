@@ -32,7 +32,7 @@ private struct ConversationScene: View {
                 DispatchQueue.main.async { c.apply(Samples.update) }
                 return c
             }
-            .frame(width: 640, height: 1500)
+            .frame(width: 640, height: 1900)
         }
     }
 }

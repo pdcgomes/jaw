@@ -6,38 +6,60 @@ import JawKit
 /// jawd's shapes.
 enum Fixtures {
     /// `find`'s answer in `protocol/fixtures/find.result.json`: a chat, a person, a folder and a message.
-    static var found: Found {
-        result("find.result")
-    }
+    static let found: Found = result("find.result")
 
     /// The members of `Samples.group`, for `@` in its box.
     static let members: [ChatInfo.Member] = decode("""
     [{"person":"person:4","name":"Ana Ribeiro","admin":false},
      {"person":"person:7","name":"Rui Costa","admin":true},
      {"person":"person:9","name":"Inês Gomes","admin":false}]
-    """)
+    """, from: "Fixtures.members")
 
-    /// The `result` of an answer in `protocol/fixtures/<name>.json`.
+    /// The `result` of an answer in `protocol/fixtures/<name>.json`; a fixture that can't be read stops
+    /// the harness, saying which file and why.
     static func result<T: Decodable>(_ name: String, as _: T.Type = T.self) -> T {
-        decode(file(name), as: Answer<T>.self).result
+        do {
+            return try read(name)
+        } catch {
+            fatalError("\(error)")
+        }
+    }
+
+    /// The `result` of an answer in `protocol/fixtures/<name>.json`, or an error naming the file.
+    static func read<T: Decodable>(_ name: String, as _: T.Type = T.self) throws -> T {
+        let file = "protocol/fixtures/\(name).json"
+        guard let url = Bundle.main.url(forResource: name, withExtension: "json"),
+              let text = try? String(contentsOf: url, encoding: .utf8)
+        else { throw FixtureError.missing(file) }
+        do {
+            return try JSONDecoder().decode(Answer<T>.self, from: Data(text.utf8)).result
+        } catch {
+            throw FixtureError.undecodable(file, as: "\(T.self)", error)
+        }
+    }
+
+    /// Why a fixture can't be had, naming where it was read from.
+    enum FixtureError: Error, CustomStringConvertible {
+        case missing(String)
+        case undecodable(String, as: String, any Error)
+
+        var description: String {
+            switch self {
+            case let .missing(file): "\(file) isn't in the harness's bundle"
+            case let .undecodable(source, type, error): "\(source) doesn't decode as \(type): \(error)"
+            }
+        }
     }
 
     private struct Answer<T: Decodable>: Decodable {
         let result: T
     }
 
-    private static func file(_ name: String) -> String {
-        guard let url = Bundle.main.url(forResource: name, withExtension: "json"),
-              let text = try? String(contentsOf: url, encoding: .utf8)
-        else { fatalError("protocol/fixtures/\(name).json isn't in the harness's bundle") }
-        return text
-    }
-
-    private static func decode<T: Decodable>(_ text: String, as _: T.Type = T.self) -> T {
+    private static func decode<T: Decodable>(_ text: String, as _: T.Type = T.self, from source: String) -> T {
         do {
             return try JSONDecoder().decode(T.self, from: Data(text.utf8))
         } catch {
-            fatalError("a fixture doesn't decode as \(T.self): \(error)")
+            fatalError("\(FixtureError.undecodable(source, as: "\(T.self)", error))")
         }
     }
 }

@@ -25,7 +25,7 @@ private struct PaletteScene: View {
     var body: some View {
         SpecimenGroup(
             title: "\"ar\" typed",
-            note: "A chat, a person, a folder and a message, under the strip of counts (all, chats 1, people 2, folders 1, messages 214). The letters that matched are marked in each, each kind has its heading, and the first row is selected.",
+            note: "A chat, a person, a folder and a message, under the strip of counts (all, chats 1, people 2, folders 1, messages 214). The letters that matched are marked in each, each kind has its heading, and the first row is selected. The field selects what's in it when it opens with a query, so \"ar\" shows selected, where typing would leave the caret after it.",
             roles: roles,
         ) {
             PaletteView(model: model, roles: roles) {}

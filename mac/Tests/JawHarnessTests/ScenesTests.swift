@@ -12,6 +12,13 @@ import Testing
     #expect(Fixtures.members.map(\.name) == ["Ana Ribeiro", "Rui Costa", "Inês Gomes"])
 }
 
+@MainActor @Test func `a fixture that isn't in the bundle, or doesn't decode as what's asked, says which file it was reading`() {
+    let missing = #expect(throws: Fixtures.FixtureError.self) { try Fixtures.read("nope", as: Found.self) }
+    #expect(missing?.description == "protocol/fixtures/nope.json isn't in the harness's bundle")
+    let wrong = #expect(throws: Fixtures.FixtureError.self) { try Fixtures.read("find.result", as: ChatInfo.self) }
+    #expect(wrong?.description.hasPrefix("protocol/fixtures/find.result.json doesn't decode as ChatInfo: ") == true)
+}
+
 @MainActor @Test func `the harness draws as of Samples' now, so a picture taken today compares with last week's`() {
     #expect(Format.now() == Samples.now)
 }
