@@ -2857,8 +2857,10 @@ SELECT n, kind, pinned, archived, muted_until, marked_unread, unread FROM chats 
     SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
 
 -- src/store/write/chat_actions.rs
-SELECT count(*) FROM chats WHERE archived = 0 AND sort >= '1~' AND n <> ?1
+SELECT count(*) FROM chats WHERE archived = 0 AND sort >= '1~' AND n <> ?1 AND NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = chats.n)
     SEARCH chats USING INDEX chats_by_sort (archived=? AND sort>?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/chat_actions.rs
 SELECT starred FROM messages WHERE n = ?1

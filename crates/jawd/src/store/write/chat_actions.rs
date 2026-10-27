@@ -20,8 +20,10 @@ pub const PINNED_MOST: u64 = 3;
 
 const CHAT_STATE: &str =
     "SELECT n, kind, pinned, archived, muted_until, marked_unread, unread FROM chats WHERE id = ?1";
-/// Pinned chats sort first, so the unarchived ones are a short range of chats_by_sort.
-const PINNED_ELSEWHERE: &str = "SELECT count(*) FROM chats WHERE archived = 0 AND sort >= '1~' AND n <> ?1";
+/// Pinned chats sort first, so the unarchived ones are a short range of chats_by_sort. A chat being
+/// merged away is left out: the chat it goes into has its pin, so the pair counts once.
+const PINNED_ELSEWHERE: &str = "SELECT count(*) FROM chats WHERE archived = 0 AND sort >= '1~' AND n <> ?1
+    AND NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = chats.n)";
 const STARRED: &str = "SELECT starred FROM messages WHERE n = ?1";
 
 /// A chat action as the writer takes it: the chat as the interface named it, what to do, and where
@@ -258,7 +260,8 @@ fn star(
     Ok((Acted::Queued { chat: jid.to_string(), chat_n: chat, outbox: vec![outbox] }, changed))
 }
 
-/// How many chats but `n` are pinned and not archived.
+/// How many chats but `n` are pinned and not archived, a person's two chats counting once while
+/// they merge.
 fn pinned_elsewhere(db: &Connection, n: i64) -> Result<u64> {
     let count: i64 = db.prepare_cached(PINNED_ELSEWHERE)?.query_row([n], |r| r.get(0))?;
     Ok(count.max(0) as u64)
@@ -304,9 +307,10 @@ mod tests {
 
     use super::*;
     use crate::store::schema;
-    use crate::store::{Amend, Change, Message};
+    use crate::store::{Amend, Change, Message, Person};
 
     const ANA: &str = "351910000002@s.whatsapp.net";
+    const ANA_LID: &str = "100000000002@lid";
     const RUI: &str = "351910000003@s.whatsapp.net";
     const COMMUNITY: &str = "120363000000000009@g.us";
     const AT: i64 = 1_792_000_000_000;
@@ -411,6 +415,16 @@ mod tests {
     /// How many chats are pinned and not archived.
     fn pinned_unarchived(db: &Connection) -> i64 {
         db.query_row("SELECT count(*) FROM chats WHERE pinned > 0 AND archived = 0", [], |r| r.get(0)).unwrap()
+    }
+
+    /// Ana's chats under her number and under her LID, both pinned, the second being merged into the
+    /// first, and one more chat pinned: three pinned rows for two conversations.
+    fn pinned_while_merging(db: &Connection) {
+        let pinned = |id: &str| Change::Chat(Chat { id: id.into(), pinned: Some(AT), ..Chat::default() });
+        written(db, &[pinned(ANA), pinned(ANA_LID), pinned(RUI)]);
+        written(db, &[Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]);
+        let merging: i64 = db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get(0)).unwrap();
+        assert_eq!((merging, pinned_unarchived(db)), (1, 3), "Ana's two chats merging, all three pinned");
     }
 
     fn from_ana(id: &str, at: i64) -> Change {
@@ -524,6 +538,29 @@ mod tests {
         let (pinned, archived, ..) = chat(&db, c);
         assert_eq!((pinned, archived), (AT, false), "brought back, and still pinned");
         assert_eq!(pinned_unarchived(&db), 3);
+    }
+
+    #[test]
+    fn a_chat_being_merged_away_isnt_counted_so_another_can_be_pinned_while_a_persons_two_chats_merge() {
+        let db = db();
+        pinned_while_merging(&db);
+        let [d, e] = ["351910000031@s.whatsapp.net", "351910000032@s.whatsapp.net"];
+        chats(&db, &[d, e]);
+        assert!(matches!(acted(&db, d, pin(Some(AT), "d1")), Acted::Queued { .. }), "Ana's two chats count once");
+        assert_eq!(chat(&db, d).0, AT);
+        assert_eq!(acted(&db, e, pin(Some(AT), "e1")), Acted::Pinned, "and they still count");
+    }
+
+    #[test]
+    fn bringing_back_a_pinned_chat_while_a_persons_two_chats_merge_keeps_its_pin() {
+        let db = db();
+        pinned_while_merging(&db);
+        let c = "351910000033@s.whatsapp.net";
+        written(&db, &[Change::Chat(Chat { id: c.into(), pinned: Some(AT), archived: Some(true), ..Chat::default() })]);
+        let Acted::Queued { outbox, .. } = acted(&db, c, archive(false, "c1")) else { panic!("not queued") };
+        assert_eq!(outbox.len(), 1, "its unpin patch isn't used");
+        let (pinned, archived, ..) = chat(&db, c);
+        assert_eq!((pinned, archived), (AT, false), "brought back, and still pinned, as a third");
     }
 
     #[test]
@@ -749,7 +786,7 @@ mod tests {
             (
                 "chats pinned elsewhere",
                 PINNED_ELSEWHERE,
-                "SEARCH chats USING INDEX chats_by_sort (archived=? AND sort>?)",
+                "SEARCH chats USING INDEX chats_by_sort (archived=? AND sort>?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("starred", STARRED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
         ];
