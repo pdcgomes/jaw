@@ -3280,6 +3280,10 @@ INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'ap
     SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
+SELECT jid, id, raw FROM outbox WHERE n = ?1 AND kind = 'app_state' AND state = 'queued'
+    SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
 INSERT OR IGNORE INTO tombstones (chat, id, at) VALUES (?1, ?2, ?3)
 
 -- src/store/write/outbox.rs

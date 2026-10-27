@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::chat_actions::{self, Undo};
 use super::{
     Amendment, CHAT, Doing, MESSAGE, Message, Sent, Stamps, advanced, apply_amendment, chat_jid, delete_row, located,
     now_ms, upsert_message,
@@ -57,6 +58,8 @@ const KEYS_PRUNED: i64 = 64;
 /// outside OUTBOX_MOST, for a receipt that comes later still to do them.
 pub const ACTION_KEPT_MS: i64 = 30 * 24 * 3600 * 1000;
 pub const ACTIONS_KEPT: i64 = 1_000;
+/// The quarantine's source for app state WhatsApp refused, kept by its chat and its row's own ID.
+pub const REFUSED: &str = "app_state_patch";
 
 /// A step for the writer.
 #[derive(Clone, Debug)]
@@ -116,6 +119,10 @@ pub enum Step {
     /// The copy outbox row `outbox` sends couldn't be made or uploaded, as `error` says, or was
     /// cancelled: the row has failed, until `send.retry`, and its message shows so.
     Unsent { outbox: i64, error: String },
+    /// App state at outbox row `outbox` that WhatsApp refused for good, or that ran out of tries:
+    /// the row goes into quarantine with `error` and its patch, never dropped, and `undo` puts back
+    /// what it set.
+    Refused { outbox: i64, error: String, undo: Option<Undo> },
 }
 
 /// A message `send.media` sends: its row, pending, its kind, and the WAWebProtobufsE2E.Message it
@@ -286,6 +293,7 @@ const ACT: &str = "INSERT INTO outbox (target, jid, id, kind, raw, effect, next_
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING n";
 const APP_STATE: &str =
     "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'app_state', ?3, ?4, ?4) RETURNING n";
+const REFUSED_ROW: &str = "SELECT jid, id, raw FROM outbox WHERE n = ?1 AND kind = 'app_state' AND state = 'queued'";
 const OWN_ID: &str = "INSERT OR IGNORE INTO tombstones (chat, id, at) VALUES (?1, ?2, ?3)";
 const TOMBSTONED: &str = "SELECT 1 FROM tombstones WHERE chat = ?1 AND id = ?2";
 /// An action's row, with its message's chat.
@@ -480,7 +488,8 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
         | Step::Unconfirmed { outbox, .. }
         | Step::NoReceipt { outbox, .. }
         | Step::Retry { outbox }
-        | Step::Withdrawn { outbox } => ("outbox", outbox.to_string(), None),
+        | Step::Withdrawn { outbox }
+        | Step::Refused { outbox, .. } => ("outbox", outbox.to_string(), None),
         Step::Told { chat, upto, .. } => ("told", format!("{chat} {} {}", upto.0, upto.1), None),
         Step::Regroup { chat, member } => ("regroup", format!("{chat} {member}"), None),
         Step::LetGo { message } => ("let go", message.to_string(), None),
@@ -534,6 +543,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
         Step::Withdrawn { outbox } => withdrawn(db, stamps, *outbox),
         Step::Attach { sending, key, written } => attach(db, stamps, sending, key, written),
         Step::Unsent { outbox, error } => unsent(db, stamps, *outbox, error),
+        Step::Refused { outbox, error, undo } => refused(db, stamps, *outbox, error, undo.as_ref()),
     }
 }
 
@@ -554,6 +564,20 @@ fn withdrawn(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> 
     }
     match action(db, outbox)? {
         Some(action) => acted(db, stamps, outbox, action, false),
+        None => Ok(false),
+    }
+}
+
+/// App state WhatsApp won't take goes into quarantine with why and its patch, in place of its row,
+/// and what it set is put back. A row that's gone, or isn't app state still to send, is left alone.
+fn refused(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, undo: Option<&Undo>) -> Result<bool> {
+    let row: Option<(String, String, Vec<u8>)> =
+        db.prepare_cached(REFUSED_ROW)?.query_row([outbox], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+    let Some((jid, id, raw)) = row else { return Ok(false) };
+    super::record_quarantine(db, REFUSED, &format!("{jid} {id}"), error, Some(&raw))?;
+    db.prepare_cached(DROP_ROW)?.execute([outbox])?;
+    match undo {
+        Some(undo) => chat_actions::undo(db, stamps, undo),
         None => Ok(false),
     }
 }
@@ -1618,6 +1642,7 @@ pub(super) fn folded(db: &Connection, stamps: &mut Stamps, kept: i64, gone: i64)
 mod tests {
     use super::*;
     use crate::store::schema;
+    use crate::store::{Change, Chat};
 
     /// Every statement sending runs, as SQLite plans it on a fresh database with no statistics, as
     /// jawd's always is: each reads an index, never scans a big table and never sorts in a
@@ -1677,6 +1702,7 @@ mod tests {
             ),
             ("an action", ACT, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
             ("app state", APP_STATE, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("a refused row", REFUSED_ROW, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
             ("an action's own ID", OWN_ID, ""),
             ("tombstoned", TOMBSTONED, "SEARCH tombstones USING PRIMARY KEY (chat=? AND id=?)"),
             (
@@ -3948,5 +3974,50 @@ mod tests {
             merged(&store).await;
             assert_eq!(hd_left(&store).await, 0, "from {from}: nothing of the HD copy is left after the fold");
         }
+    }
+
+    #[test]
+    fn app_state_whatsapp_refused_goes_into_quarantine_with_its_patch_and_what_it_set_is_put_back() {
+        let mut db = Connection::open_in_memory().unwrap();
+        schema::migrate(&mut db).unwrap();
+        let chat = "a@s.whatsapp.net";
+        written(&db, &[Change::Chat(Chat { id: chat.into(), ..Chat::default() })]);
+        let outcome = chat_actions::Outcome::default();
+        let patch = chat_actions::Patch { id: "3EB0P1".into(), raw: b"the patch".to_vec() };
+        let pin = chat_actions::Does::Set(chat_actions::Setting::Pin { at: Some(5), patch });
+        written(
+            &db,
+            &[Change::ChatAction(chat_actions::Act { chat: chat.into(), does: pin, outcome: outcome.clone() })],
+        );
+        let Some(chat_actions::Acted::Queued { outbox, .. }) = outcome.take() else { panic!("not queued") };
+        let pinned = |db: &Connection| -> (i64, i64) {
+            db.query_row("SELECT pinned, v FROM chats WHERE id = ?1", [chat], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+        };
+        let (_, before) = pinned(&db);
+        let refused = Step::Refused {
+            outbox: outbox[0],
+            error: "server returned error 400".into(),
+            undo: Some(Undo::Pin { chat: chat.into() }),
+        };
+        written(&db, &[Change::Outbox(refused.clone())]);
+        type Kept = (String, String, String, Vec<u8>);
+        let kept: Kept = db
+            .query_row("SELECT source, ref, error, raw FROM quarantine", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap();
+        assert_eq!(
+            kept,
+            (REFUSED.into(), format!("{chat} 3EB0P1"), "server returned error 400".into(), b"the patch".to_vec()),
+            "kept with why, never dropped"
+        );
+        let rows: i64 = db.query_row("SELECT count(*) FROM outbox", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "and out of the outbox's thousand");
+        let (now, after) = pinned(&db);
+        assert_eq!(now, 0, "what it set is put back");
+        assert!(after > before, "with a new version, so every window is sent it");
+        written(&db, &[Change::Outbox(refused)]);
+        let quarantined: i64 = db.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0)).unwrap();
+        assert_eq!(quarantined, 1, "done once");
     }
 }
