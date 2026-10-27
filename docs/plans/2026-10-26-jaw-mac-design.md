@@ -205,10 +205,10 @@ The prototype has no window, so as not to put one on the owner's screen at a loa
 
 One window by default, of four columns: the sidebar, the chat list, the conversation and, when split, more conversations. The status line runs along the bottom of the whole window.
 
-- **The sidebar** (220 points, ⌘B): the folder tree with unread counts (All, Unread, Groups, Communities and Archived, the smart folders, then yours), favourites marked with their ⌘ digit, and the roster below it, online first, with presence. It sits on the system's sidebar glass, tinted by the theme. Until jawd serves folders (M6), it shows All and Archived, as jawd serves them now.
-- **The chat list** (300 points, 260 to 420): a folder's chats, pinned first, then newest. Each 56-point row: the avatar; the name, bold when unread; the time; the newest message's line (who wrote it in a group, `Draft:` and the draft in the accent, "typing…" in green, from P7); the unread count, an @ for a mention, the muted and pinned marks, your last message's ticks. A community is one row that opens to its groups, the announcement group first. The list holds its order while the pointer is over it or for 1.5 s after a key moves through it, so nothing moves under the pointer before a click; moves then animate to their places.
+- **The sidebar** (220 points, ⌘B): the folder tree with unread counts (All, Unread, Groups, Communities and Archived, the smart folders, then yours), Scheduled and Reminders under the built-in folders, each opening its list in a pane (P9), favourites marked with their ⌘ digit, and the roster below it, online first, with presence. It sits on the system's sidebar glass, tinted by the theme. Until jawd serves folders (M6), it shows All and Archived, as jawd serves them now.
+- **The chat list** (300 points, 260 to 420): a folder's chats, pinned first, then newest. Each 56-point row: the avatar; the name, bold when unread; the time; the newest message's line (who wrote it in a group, `Draft:` and the draft in the accent, "typing…" in green, from P7); the unread count, an @ for a mention, the muted and pinned marks, a clock when messages are scheduled and a bell when a reminder is due (P9), your last message's ticks. A community is one row that opens to its groups, the announcement group first. The list holds its order while the pointer is over it or for 1.5 s after a key moves through it, so nothing moves under the pointer before a click; moves then animate to their places.
 - **The conversation:** a header (avatar, name, who's typing and online or last seen, both from P7, members for a group; find in chat, info, close for a pane), the messages in the look picked in Settings, bubbles or lines (see "Two looks"), a bubble of three dots after the newest message while someone types (see "Animation"), a "2 new ↓" pill when new messages come below while you read above, and the box.
-- **The box** (one per conversation, Owner, 26 Oct): an `NSTextView` growing to eight lines, then scrolling, its placeholder naming the chat it sends to ("to Lisbon Climbing"), as the spike's border does; above it, the message you're replying to or editing, with Esc to drop it. Enter sends, ⇧↩ or ⌥↩ adds a line, `@` completes the group's members from `chat.info`, `:` completes emoji, ⌘O attaches, files dropped or pasted attach, ⌘R records.
+- **The box** (one per conversation, Owner, 26 Oct): an `NSTextView` growing to eight lines, then scrolling, its placeholder naming the chat it sends to ("to Lisbon Climbing"), as the spike's border does; above it, the message you're replying to or editing, with Esc to drop it. Enter sends, ⇧↩ or ⌥↩ adds a line, `@` completes the group's members from `chat.info`, `:` completes emoji, ⌘O attaches, files dropped or pasted attach, ⌘R records, ⌥⌘↩ sends later (P9).
 - **The toolbar** (the window's, unified): the sidebar button; jawd's state when it's anything but online ("Catching up 1,204 of 5,000"); the palette as a field that opens it; split, library and new chat.
 - **Folding,** as the terminal folds: below 960 points the sidebar folds away, and below 740 the chat list does too, opening over the conversation when asked (⌘0 or the toolbar), as the terminal's narrow picking does.
 - **Typography:** the system font at 13 points for messages (11 to 17 with ⌘+ and ⌘−), 12-point semibold names, 11-point times and the status line in SF Mono, a nod to the terminal; a setting sets messages in SF Mono too.
@@ -235,8 +235,8 @@ One window by default, of four columns: the sidebar, the chat list, the conversa
 
 ### Actions
 
-- **From the keys,** as the terminal's: ↑ from an empty box selects the newest message, ↑ and ↓ move, and r replies, e edits, d deletes, + reacts, f forwards, y copies, Enter opens or plays, s saves, i shows the info, Space looks at a photo, video or document, and Esc goes back to typing.
-- **From the pointer:** hovering a message shows react, reply and more beside it; a right click has the full menu (Reply, React, Copy, Forward, Edit, Delete for Me or for Everyone, Star, Info, Save, Show in Finder, Open With). A two-finger swipe right on a message replies, as the phone's swipe does.
+- **From the keys,** as the terminal's: ↑ from an empty box selects the newest message, ↑ and ↓ move, and r replies, e edits, d deletes, + reacts, f forwards, y copies, Enter opens or plays, s saves, i shows the info, t sets a reminder (P9), Space looks at a photo, video or document, and Esc goes back to typing.
+- **From the pointer:** hovering a message shows react, reply and more beside it; a right click has the full menu (Reply, React, Copy, Forward, Edit, Delete for Me or for Everyone, Star, Remind Me, Info, Save, Show in Finder, Open With). A two-finger swipe right on a message replies, as the phone's swipe does.
 - **Each asks jawd and shows what jawd pushes back:** `send.text` with `reply` and `mentions`, `react`, `edit` (your text within 15 minutes; the box fills, its label says Editing, Enter saves), `delete` (for me, or for everyone within 60 hours, from a two-choice sheet), `forward` (the palette's forward mode, up to five chats), `star`, `message.info` (a sheet of each recipient's delivered, read and played times), `chat.info` (members, admins, the disappearing timer). What jawd refuses is said where you acted, in its words, as the terminal says it.
 
 ### Every inline kind
@@ -334,6 +334,15 @@ As jawd serves them in M6 (`folders.watch`, `roster.watch`, `folder.*`), and as 
 - **Typing** (`typing` `composing`) is said when typing starts and again every 5 s while it goes on, `paused` when the box empties or you leave; jawd paces what WhatsApp hears.
 - **Read receipts** as "Focus, reading and presence" says.
 
+## Scheduled messages and reminders
+
+As jawd's M7 serves them (proposal P9), and as [the scheduled messages and reminders design](2026-10-27-jaw-scheduled-messages-and-reminders-design.md) and its canvas (`scheduled-reminders-wireframes.canvas.tsx`) draw them:
+
+- **Send Later** (⌥⌘↩, the menu of the box's Send button, the box's menu and the Message menu, and beside Send in the poll, event, contact and location sheets of [the box's design](2026-10-27-jaw-mac-box-design.md)): a popover above the box with In 1 Hour, This Evening, Tomorrow Morning and Monday Morning, a field for a typed time with jawd's reading under it, a date and time picker, Repeat and when it ends. Everything jaw sends can be scheduled, once or repeating.
+- **In the conversation,** a chat's scheduled messages sit under its newest message, as bubbles with a dashed outline or as faint lines, each with its time, its repeat, and Send Now and Change Time when one is held; their menu has Edit, Change Time, Send Now, Skip Next and Cancel.
+- **Remind Me ▸** in a message's menu and a chat's, and t from the keys; the message shows a bell and its time, in the accent once due.
+- **The sidebar's Scheduled and Reminders** each open their list in a pane, as the library does; with P2, a reminder's notification has Done and Snooze, and a held message's Send Now.
+
 ## Linking and the states
 
 - **Linking** (`link.start`): the Mimic beside a QR code drawn crisp from jawd's `link` push, with the three steps on the phone (Settings, Linked devices, Link a device). The code is drawn again, crossfading, when jawd sends a new one; "Use a phone number instead" asks the number and shows the code to type on the phone. Once jawd's `link` push says `done`, the Mimic chomps, then "Catching up 1,204 of 5,000" with its progress, and the chat list fills in behind as jawd stores history, since jawd serves what it has at once.
@@ -421,12 +430,13 @@ Nothing animates when nothing happens: no idle breathing, no shimmer but the hea
 | ⌘N | start a chat | the palette |
 | ⌘F, ⌘⇧F | find in this chat, in every chat | `/search` |
 | ↑ from an empty box | select the newest message | the same |
-| r e d + f y Enter s i m | reply, edit, delete, react, forward, copy, open or play, save, info, file into folders | the same |
+| r e d + f y Enter s i m t | reply, edit, delete, react, forward, copy, open or play, save, info, file into folders, a reminder | the same |
 | Space | look at the selected photo, video or document | |
 | Esc | back to typing; close what's open | the same |
 | Enter, ⇧↩ or ⌥↩ | send, a new line | Enter, Alt-Enter or Shift-Enter |
 | `@`, `:` | complete names, emoji | the same |
 | ⌘O, ⌘R | attach, record | Ctrl-O, Ctrl-R |
+| ⌥⌘↩ | send later | Ctrl-T |
 | ⌘D, ⌘⇧D | split across, down | Ctrl-P then % or \|, " or - (the `panes` switch) |
 | ⌘⌥ arrows, ⌥⌘1 to ⌥⌘9, ⌘⇧ arrows, ⌘W | move between panes, go to a pane, swap, close | Ctrl-P then an arrow, a digit, { or }, x |
 | ⌘⇧↩ | focus mode | Ctrl-F in the spike |
@@ -455,6 +465,7 @@ Proposals for jawd's builders. Each is a jawd change; those on the data layer's 
 | P6 | **What an interface owes, written down, and the schema.** A section of `protocol/README.md` with what `wire.rs` does (keys, asking again after a lost answer within the day, owed drafts and reads, the latest `find`, watching again with `have`), and the JSON Schema jaw's design promises, generated from jaw-proto. | the protocol's text and jaw-proto | no | the Swift client's conformance (Mac-M1) |
 | P7 | **Others' typing and presence in chats.** Who's typing or recording in every chat, groups included, and a one-to-one chat's person online or last seen, as jaw's design's "Presence and typing in chats" brings them to every interface, in two halves as the owner decided on 27 October: typing now, and presence once M6 is on main. Both come as the `typing` and `presence` pushes, each watch's answer saying how things are now, as the protocol's section of that name says; chat rows' `typing` goes when typing comes, so `protocol` is 2 from then and the app moves to it with jawd. | the engine's typing for every chat, who's typing kept in memory, whom presence follows, and the feed | yes, by the paths: the feed and presence, though typing writes nothing | the chat list's "typing…", the header's who's typing and online or last seen, the status line's left half (Mac-M1, shown once served) |
 | P8 | **Chat actions from jaw.** `chat.pin`, `chat.archive`, `chat.mute`, `chat.mark_unread` and `star` served, each change written with its app-state patch in one synced commit and sent through the outbox, as jaw's design's step "Chat actions from jaw" has it, as the owner decided on 27 October. | `send`, the store and the outbox, through the engine's `AppStatePatch` | yes: the store and the outbox | Pin, Mute, Archive and Mark as Read in the right-click menus and the Chat menu, and a message's Star ([the menus and folders design](2026-10-27-jaw-mac-menus-and-folders-design.md)); Mac-M3's palette actions |
+| P9 | **Scheduled messages and reminders.** Every send request's `at` and `repeat`, `scheduled.edit`, `scheduled.send_now`, `scheduled.skip`, `scheduled.cancel`, `scheduled.watch` and `when.parse`; `remind` and `reminders.watch`; chat rows' `scheduled`, `next_scheduled` and `reminders_due`, and message rows' `reminder`, as jaw's design's M7 has them, as the owner decided on 27 October ([the scheduled messages and reminders design](2026-10-27-jaw-scheduled-messages-and-reminders-design.md)). With P2, the notifications for a due reminder and a held message carry their actions. | `send`, the store, the outbox, a timer on the wall clock and `notify` | yes: the store, the outbox and the timer | Send Later in the box, scheduled messages in the conversation, Remind Me in the menus, the sidebar's Scheduled and Reminders (Mac-M3); the notifications' Done, Snooze and Send Now (Mac-M5) |
 
 Nothing else is needed: several open chats are several `messages.watch` windows, which jawd already allows (32 a connection) and already counts as being read; voice, media, find, the library, folders and the roster are as the protocol has them, or will have them in jawd's milestones.
 
@@ -494,7 +505,7 @@ The order and each milestone's steps, done-when and budgets are in [the Mac plan
 | --- | --- | --- |
 | Mac-M1 | **Text, every day:** the client, the window, the chat list, the conversation as text in both looks, the box, the message actions jawd serves, chats in the palette | P7 for others' typing and presence, typing now and presence once jawd's M6 is on main, each shown once served |
 | Mac-M2 | **Every inline kind:** photos, albums, stickers, GIFs, videos, video messages, voice, documents, links, locations, contacts, polls; the viewer; the library | jawd's M3 media in, M2's link previews, M5 voice |
-| Mac-M3 | **The palette, whole:** every kind and action, its modes, search in a chat, sending media and voice | jawd's M4 media out, M5 recording |
+| Mac-M3 | **The palette, whole:** every kind and action, its modes, search in a chat, sending media and voice, scheduled messages and reminders | jawd's M4 media out, M5 recording, M7 scheduled messages and reminders (P9) |
 | Mac-M4 | **Split panels:** panes, focus mode, the glance, folders and the roster | jawd's M6 folders, P1 (being built) |
 | Mac-M5 | **Polish, and it's jaw:** Redlamp's themes, the animations, the Mimic, linking, notifications, accessibility, a signed build | P2, P3, P5 |
 
@@ -523,7 +534,8 @@ He also asked for P1, an interface's saved state, to be built now, for the termi
 
 - A chat in a window of its own; a menu bar item with the unread count.
 - One message to several chats (jaw's Later) as a palette action with its multi-select.
-- The catch-up and asking (jaw's M9) as a panel: `catch_up.watch` and `ask` are windows and answers like any other.
+- The catch-up and asking (jaw's M11) as a panel: `catch_up.watch` and `ask` are windows and answers like any other.
+- Settings › Assistants, for jaw's M9, AI assistants over MCP: each grant's folders and powers, Confirm Each Send, its devices and cloud connections, and the log, as [the MCP design](2026-10-27-jaw-mcp-design.md) has them.
 - Shortcuts actions, widgets, sending stickers, group admin, several numbers, transcription.
 - Video that plays while it downloads, if jawd ever puts a file in place before it's whole, which it won't while it checks the hash first.
 

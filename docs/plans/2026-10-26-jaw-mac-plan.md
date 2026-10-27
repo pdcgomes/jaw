@@ -3,7 +3,7 @@
 26 October 2026. The build order for [the Mac design](2026-10-26-jaw-mac-design.md): the shortest path to an app the owner uses every day (reading and sending text in a fast chat list and conversation), then every inline kind, the palette, split panels, and polish. Each milestone says what it needs from jawd, its steps in order, when it's done, and its budgets. The owner answered the design's questions on 26 October; the decisions the plan rests on come first.
 
 - **Every milestone closes with `make perf-mac`** against `jawd demo`'s million messages, its table in the README beside the terminal's, with the load average beside each number, as `make perf` does.
-- **Nothing here touches jawd's data layer.** The proposals the app needs (P1 to P8 in the design) are jawd changes, built on jawd's branches by jawd's builders and audited by the database expert before they land; a milestone that needs one says what it does until it lands.
+- **Nothing here touches jawd's data layer.** The proposals the app needs (P1 to P9 in the design) are jawd changes, built on jawd's branches by jawd's builders and audited by the database expert before they land; a milestone that needs one says what it does until it lands.
 - **The owner's account is never used for tests.** Tests and benches run on `jawd demo` in a folder of their own; the owner tries each milestone's build on his own account once it's done.
 
 ## Building on the owner's Mac
@@ -97,9 +97,9 @@ Every kind of message shows inline as the design draws it, in both looks, and th
 
 ## Mac-M3 · The palette, whole
 
-Everything the terminal's palette finds and does, the app's does, with its keys; and sending media and voice.
+Everything the terminal's palette finds and does, the app's does, with its keys; sending media and voice; and sending later and reminders.
 
-**Needs from jawd:** `find` (served; links, media and files as jawd's find returns them); `forward` (served); `chat.pin`, `chat.archive`, `chat.mute` and `chat.mark_unread` for those actions, and `star`, which jawd's step "Chat actions from jaw" serves (P8), being built now on `chat-actions`; `send.media`, M4; `voice.record` and the rest of recording, M5. An action jawd doesn't serve yet says so when chosen, as the terminal's does.
+**Needs from jawd:** `find` (served; links, media and files as jawd's find returns them); `forward` (served); `chat.pin`, `chat.archive`, `chat.mute` and `chat.mark_unread` for those actions, and `star`, which jawd's step "Chat actions from jaw" serves (P8), being built now on `chat-actions`; `send.media`, M4; `voice.record` and the rest of recording, M5; scheduled messages and reminders, P9, from jawd's M7 ([the scheduled messages and reminders design](2026-10-27-jaw-scheduled-messages-and-reminders-design.md)), until which steps 7 to 9 show nothing. An action jawd doesn't serve yet says so when chosen, as the terminal's does.
 
 1. **Every kind in the results,** the counts strip, Tab narrowing and stepping through kinds, Enter doing the obvious thing for each kind.
 2. **The app's actions, each with its key:** start a chat, go to unread, search messages, search here, mute for how long, archive, pin, mark unread, record, attach, react, delete, forward, the sidebar, the library, the theme, settings, the keys.
@@ -107,8 +107,11 @@ Everything the terminal's palette finds and does, the app's does, with its keys;
 4. **Search in a chat** (⌘F): `find` narrowed to the chat and to messages, each match gone to with `watch.move` and its words marked.
 5. **Sending media:** dropped, pasted and attached files gathered above the box with captions and SD or HD, sent with `send.media`, their progress from `job` pushes and their rows.
 6. **Recording:** ⌘R, jawd's levels and time in the box, Enter to send, ⌘R to stop and listen, Esc to throw it away.
+7. **Send Later** (P9): ⌥⌘↩, the menu of the box's Send button, the box's and the Message menus, and the forms' sheets; the popover with its four times, a typed time read by `when.parse`, the date and time picker, Repeat and when it ends; for text, media, voice, polls and forwards alike.
+8. **Scheduled messages** (P9): under the conversation's newest message, dashed bubbles or faint lines, with their times, repeats and held state; Edit in the box, Change Time, Send Now, Skip Next and Cancel; the clock in the chat list; the sidebar's Scheduled, opening its list in a pane.
+9. **Reminders** (P9): Remind Me ▸ in a message's and a chat's menus, t from the keys, the bell on the message and in the chat list, the sidebar's Reminders in a pane with Done, Snooze and Go to Message.
 
-**Done when** each of the terminal's palette actions and modes works in the app with its key, and the owner sends photos and voice messages from it on his own account.
+**Done when** each of the terminal's palette actions and modes works in the app with its key, the owner sends photos and voice messages from it on his own account, and schedules, edits and cancels a message and sets and finishes a reminder there.
 
 | Budget | |
 | --- | --- |
@@ -162,6 +165,6 @@ Redlamp's themes, the animations, the Mimic, linking, the app's own notification
 
 ## Alongside
 
-- **jawd's proposals,** each on a jawd branch with its audit: P1 (an interface's saved state) now, on `interface-state`, for the terminal's panes and the Mac's alike, as the owner asked; P6 (what an interface owes, and the schema) before Mac-M1 ends, since JawKit checks against it; P3 by Mac-M1 for the badge, or with M6's folders; P4 by Mac-M2; P2 and P5 by Mac-M5; P7's typing now and its presence once jawd's M6 is on main, each drawn as soon as it's served; P8 (chat actions from jaw) now, on `chat-actions`, with the Mac's right-click menus.
+- **jawd's proposals,** each on a jawd branch with its audit: P1 (an interface's saved state) now, on `interface-state`, for the terminal's panes and the Mac's alike, as the owner asked; P6 (what an interface owes, and the schema) before Mac-M1 ends, since JawKit checks against it; P3 by Mac-M1 for the badge, or with M6's folders; P4 by Mac-M2; P2 and P5 by Mac-M5; P7's typing now and its presence once jawd's M6 is on main, each drawn as soon as it's served; P8 (chat actions from jaw) now, on `chat-actions`, with the Mac's right-click menus; P9 (scheduled messages and reminders) with jawd's M7, its Mac screens on a branch beside it.
 - **The terminal's `jaw agent`** learns of the app's agent in Mac-M1, as step 3 needs.
 - **`scripts/sync-themes`** comes with Mac-M5's themes and runs in CI after it.

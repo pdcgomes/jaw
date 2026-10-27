@@ -22,7 +22,7 @@ From left to right, in one row with the field:
 - **+**, opening its menu above the box. Each item has its key: ⌘O Photos & Videos, ⇧⌘O Document, and the rest from the menu and the palette.
 - **The field**, after the chip that names the chat.
 - **Emoji** (⌃⌘E) and **GIF** (⌃⌘G), each opening its picker above the box.
-- **Send** (↩), only when there's text or an attachment.
+- **Send** (↩), only when there's text or an attachment. Its menu, a right click, has Send Later… (⌥⌘↩) once jawd's M7 serves it, as do the forms' sheets beside their Send ([the scheduled messages and reminders design](2026-10-27-jaw-scheduled-messages-and-reminders-design.md)).
 
 ## Attachments
 
