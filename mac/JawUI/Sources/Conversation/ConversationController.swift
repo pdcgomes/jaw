@@ -1076,9 +1076,16 @@ final class HeaderView: NSView {
 
     /// The pane's menu, asked for as a right click opens it.
     var menuFor: (() -> NSMenu?)?
+    var popUp = MenuPopUp()
 
     override func menu(for _: NSEvent) -> NSMenu? {
         menuFor?()
+    }
+
+    /// VoiceOver's Show Menu, which doesn't ask `menu(for:)`: the pane's menu under the header, the
+    /// pane taking the keys first, as for a right click.
+    override func accessibilityPerformShowMenu() -> Bool {
+        popUp.show(menuFor?(), at: NSPoint(x: avatar.frame.minX, y: bounds.minY), in: self)
     }
 
     init() {

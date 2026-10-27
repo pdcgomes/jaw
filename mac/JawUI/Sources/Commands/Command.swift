@@ -287,3 +287,18 @@ public enum MenuEntry: Equatable, Sendable {
     case submenu(String, [MenuEntry])
     case separator
 }
+
+/// How a view pops its right-click menu up for VoiceOver's Show Menu, which has no pointer to place
+/// it by, nor a click for `menu(for:)` or a table's menu. A popped-up menu runs until it closes, so
+/// tests stand in for `run`.
+@MainActor
+struct MenuPopUp {
+    var run: (NSMenu, NSPoint, NSView) -> Void = { menu, point, view in menu.popUp(positioning: nil, at: point, in: view) }
+
+    /// Pops `menu` up at `point` in `view`; false when there's no menu.
+    func show(_ menu: NSMenu?, at point: NSPoint, in view: NSView) -> Bool {
+        guard let menu else { return false }
+        run(menu, point, view)
+        return true
+    }
+}

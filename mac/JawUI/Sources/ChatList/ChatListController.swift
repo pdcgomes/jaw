@@ -213,6 +213,19 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         return host?.chatList(self, menuItemsFor: shown[i]) ?? []
     }
 
+    /// The menu of the chat on `cell`'s row, for VoiceOver's Show Menu, which makes no click for
+    /// the table's menu to be filled for; none on a community's row.
+    func menu(for cell: ChatCell) -> NSMenu? {
+        let items = menuItems(forRow: table.row(for: cell))
+        guard !items.isEmpty else { return nil }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for item in items {
+            menu.addItem(item)
+        }
+        return menu
+    }
+
     // MARK: The table
 
     /// A chat's picture, from the list's cache of jawd's avatars.
@@ -238,6 +251,7 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         let cell = (tableView.makeView(withIdentifier: id, owner: self) as? ChatCell) ?? {
             let c = ChatCell()
             c.identifier = id
+            c.menuFor = { [weak self] cell in self?.menu(for: cell) }
             return c
         }()
         let chat = shown[row]
@@ -302,6 +316,10 @@ final class ChatCell: NSView {
         didSet { if isSelected != oldValue { needsDisplay = true } }
     }
 
+    /// The menu of the chat on this row, from its list.
+    var menuFor: ((ChatCell) -> NSMenu?)?
+    var popUp = MenuPopUp()
+
     override var isFlipped: Bool {
         true
     }
@@ -320,6 +338,12 @@ final class ChatCell: NSView {
         if let last = chat.last { label += ", \(last.from.map { "\($0): " } ?? "")\(last.summary)" }
         setAccessibilityLabel(label)
         needsDisplay = true
+    }
+
+    /// VoiceOver's Show Menu, which makes no click for the table's menu to be filled for: the chat's
+    /// menu under its row, none on a community's.
+    override func accessibilityPerformShowMenu() -> Bool {
+        popUp.show(menuFor?(self), at: NSPoint(x: bounds.minX, y: bounds.maxY), in: self)
     }
 
     override func draw(_: NSRect) {

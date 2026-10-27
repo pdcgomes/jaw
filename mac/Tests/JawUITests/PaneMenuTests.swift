@@ -10,7 +10,7 @@ import Testing
 /// acts on it; making a menu, as the snapshot's log does, leaves the keys where they are. The right
 /// clicks go through AppKit's hit test in an offscreen window, then up the responders, as a right
 /// mouse-down goes, to the first view with a menu for it. VoiceOver's Show Menu, which has no
-/// pointer, opens a message's menu under its bubble.
+/// pointer, opens a message's menu under its bubble, and the pane's under its header.
 
 @MainActor
 final class PaneHost: ConversationHost {
@@ -162,15 +162,39 @@ func rightClick(_ window: NSWindow, at point: NSPoint) throws -> NSMenu? {
     let body = try #require(view.laid).body
     try #require(!body.contains(NSPoint(x: view.bounds.midX, y: view.bounds.midY)), "a bubble clear of its row's middle")
     var popped: [(NSMenu, NSPoint)] = []
-    view.popUp = { menu, point, _ in popped.append((menu, point)) }
+    view.popUp.run = { menu, point, _ in popped.append((menu, point)) }
     #expect(view.accessibilityPerformShowMenu())
     #expect(popped.first?.0.items.first?.title == "Reply", "the message's menu")
     #expect(popped.first?.1 == NSPoint(x: body.minX, y: body.maxY), "under its bubble")
     #expect(host.focused == 1, "the pane takes the keys first, as for a right click")
 
     let line = try messageView(c, #require(c.rows.firstIndex { $0.id == call.id }))
-    line.popUp = { menu, point, _ in popped.append((menu, point)) }
+    line.popUp.run = { menu, point, _ in popped.append((menu, point)) }
     #expect(!line.accessibilityPerformShowMenu(), "a call line has the pane's menu, and here there's none")
+    #expect(popped.count == 1)
+}
+
+@MainActor
+@Test func `VoiceOver's Show Menu on the header opens the pane's menu under it, the pane taking the keys first`() async throws {
+    let host = PaneHost()
+    let rui = try #require(Samples.messages.first { $0.id.hasSuffix("05") })
+    let (c, _) = await shown([rui], host)
+    var focusedWhenAsked: Int?
+    c.paneMenu = {
+        focusedWhenAsked = host.focused
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Pane", action: nil, keyEquivalent: "")
+        return menu
+    }
+    var popped: [(NSMenu, NSPoint)] = []
+    c.header.popUp.run = { menu, point, _ in popped.append((menu, point)) }
+    #expect(c.header.accessibilityPerformShowMenu())
+    #expect(popped.first?.0.items.map(\.title) == ["Pane"], "the pane's menu")
+    #expect(popped.first?.1 == NSPoint(x: c.header.avatar.frame.minX, y: c.header.bounds.minY), "under the header")
+    #expect(focusedWhenAsked == 1, "the pane had the keys before its menu was made")
+
+    c.paneMenu = { nil }
+    #expect(!c.header.accessibilityPerformShowMenu(), "no menu, no pop-up")
     #expect(popped.count == 1)
 }
 

@@ -20,8 +20,7 @@ final class MessageView: NSView {
     /// Told of a click: where it landed in the layout, and how many clicks it was.
     var clicked: ((MessageView, CGPoint, Int) -> Void)?
     var menuFor: ((MessageView) -> NSMenu?)?
-    /// Pops a menu up at a point in the view; it runs until the menu closes, so tests stand in for it.
-    var popUp: (NSMenu, NSPoint, NSView) -> Void = { menu, point, view in menu.popUp(positioning: nil, at: point, in: view) }
+    var popUp = MenuPopUp()
     var hovered: ((MessageView, Bool) -> Void)?
 
     override init(frame: NSRect) {
@@ -105,10 +104,8 @@ final class MessageView: NSView {
     /// Show Menu, which has no pointer for `menu(for:)` to find the message by: the message's menu
     /// under its bubble, the pane taking the keys first, as for a right click.
     override func accessibilityPerformShowMenu() -> Bool {
-        guard let menu = menuFor?(self) else { return false }
         let body = laid?.body ?? bounds
-        popUp(menu, NSPoint(x: body.minX, y: body.maxY), self)
-        return true
+        return popUp.show(menuFor?(self), at: NSPoint(x: body.minX, y: body.maxY), in: self)
     }
 
     override func accessibilityLabel() -> String? {
