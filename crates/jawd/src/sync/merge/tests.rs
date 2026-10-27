@@ -788,6 +788,15 @@ async fn merges_that_go_round_in_a_circle_keep_jawd_from_opening_jaw_db_and_chan
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn receipts_a_first_chat_owed_whose_merge_ended_before_jawd_was_upgraded_are_owed_by_the_chat_that_stays() {
+    let home = from_before("ended-chain");
+    let store = Store::open(home.path()).unwrap();
+    merged(&store, OLD).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
+    assert_eq!(owed(&store, NEW).await, ids("l", 0..10), "l0 to l9, read here");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn receipts_owed_by_the_first_chat_of_a_chain_an_earlier_jawd_left_are_owed_by_the_chat_that_stays() {
     let home = from_before("standing-chain");
     let store = Store::open(home.path()).unwrap();

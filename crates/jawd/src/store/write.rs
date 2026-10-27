@@ -1541,6 +1541,10 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
             .optional()?,
     };
     let Some((gone, keep)) = found else { return Ok(false) };
+    // Where the chat going was read is merged into the kept chat's before each step moves its
+    // messages, since what's owed is found among the messages still there: an earlier jawd let
+    // messages reach a chat after its merge began, through a chain of merges.
+    merge_reads(db, stamps, keep, gone)?;
     let moving: Vec<i64> = db
         .prepare_cached("SELECT n FROM messages WHERE chat = ?1 ORDER BY at, n LIMIT ?2")?
         .query_map(params![gone, MERGE_STEP], |r| r.get(0))?
