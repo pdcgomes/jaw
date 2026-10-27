@@ -1,0 +1,79 @@
+#!/bin/sh
+# Makes jaw's release from a clean tree at a tag like v0.1.0: its source tarball, the tarball's
+# sha256, and the Homebrew formula with both filled in, all in target/dist/. It pushes nothing and
+# makes no repository or release: it prints the commands that do, for you to run.
+#
+#     scripts/release.sh
+#
+# JAW_URL is where Homebrew will download the tarball, the GitHub release's by default, and JAW_TAP
+# the tap's repository, pdcgomes/homebrew-jaw by default.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+fail() {
+	echo "release.sh: $*" >&2
+	exit 1
+}
+
+[ -z "$(git status --porcelain)" ] || fail "the tree has changes: commit or stash them first"
+tag=$(git describe --tags --exact-match --match 'v[0-9]*' HEAD 2>/dev/null) ||
+	fail "HEAD isn't at a release's tag: tag it first, such as with git tag -a v0.1.0 -m 'jaw 0.1.0'"
+version=${tag#v}
+name=jaw-$version
+repo=pdcgomes/jaw
+tap=${JAW_TAP:-pdcgomes/homebrew-jaw}
+tap_folder=~/src/${tap#*/}
+url=${JAW_URL:-https://github.com/$repo/releases/download/$tag/$name.tar.gz}
+dist=target/dist
+tarball=$dist/$name.tar.gz
+
+mkdir -p "$dist"
+git archive --format=tar.gz --prefix="$name/" -o "$tarball" "$tag"
+said=$(tar -xzOf "$tarball" "$name/VERSION")
+[ "$said" = "$tag" ] || fail "the tarball's VERSION says '$said', not $tag: .gitattributes should say VERSION export-subst"
+if command -v shasum >/dev/null; then
+	sha=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
+else
+	sha=$(sha256sum "$tarball" | cut -d' ' -f1)
+fi
+sed -e "s|@URL@|$url|" -e "s|@SHA256@|$sha|" packaging/homebrew/jaw.rb >"$dist/jaw.rb"
+if grep -n '@[A-Z0-9_]*@' "$dist/jaw.rb"; then
+	fail "packaging/homebrew/jaw.rb has a placeholder this doesn't fill"
+fi
+
+cat <<EOF
+$tarball
+sha256 $sha
+
+$dist/jaw.rb, the formula for $tap:
+
+EOF
+cat "$dist/jaw.rb"
+cat <<EOF
+
+Nothing has been pushed or published. To release jaw $version, run these yourself:
+
+  git push origin $tag
+  gh release create $tag $tarball --repo $repo --title "jaw $version" --notes "jaw $version"
+
+The first time, make the tap, private while jaw is:
+
+  gh repo create $tap --private --description "Homebrew tap for jaw"
+  git clone https://github.com/$tap $tap_folder
+
+then, for each release, put the formula in it:
+
+  mkdir -p $tap_folder/Formula
+  cp $dist/jaw.rb $tap_folder/Formula/jaw.rb
+  git -C $tap_folder add Formula/jaw.rb
+  git -C $tap_folder commit -m "jaw $version"
+  git -C $tap_folder push
+
+and install it with: brew install ${tap%%/*}/${tap#*/homebrew-}/jaw
+
+While $repo is private, Homebrew can't download the release's tarball, since it doesn't sign in
+to GitHub: make the repository public first, or run this again with JAW_URL set to a URL it can
+reach, such as file://$root/$tarball for this Mac alone.
+EOF
