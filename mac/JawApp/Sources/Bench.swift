@@ -75,6 +75,10 @@ enum Bench {
             NSApp.activate()
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
+                || key.hasPrefix("menu:")
+            if key.hasPrefix("menu:") {
+                FileHandle.standardError.write(Data("\(key): \(menuSaid(String(key.dropFirst(5)), model: model))\n".utf8))
+            }
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -126,6 +130,36 @@ enum Bench {
                 press(Array(keys.dropFirst()), model: model, then: then)
             }
         }
+    }
+
+    /// A right-click menu's items for the snapshot's log, as `menu:list:3` (the chat list's fourth
+    /// row), `menu:header` (the focused pane's) or `menu:message:5` (its sixth message) makes it.
+    static func menuSaid(_ what: String, model: AppModel) -> String {
+        let parts = what.split(separator: ":").map(String.init)
+        let row = parts.count > 1 ? Int(parts[1]) : nil
+        switch (parts.first, row) {
+        case let ("list", i?):
+            guard let list = model.window?.chatList.all, i < list.count else { return "no row \(i)" }
+            return said(model.chatMenuItems(for: list[i]))
+        case ("header", _):
+            guard let c = model.conversation else { return "no pane" }
+            return said(model.paneMenu(for: c).items)
+        case let ("message", i?):
+            guard let menu = model.conversation?.menu(forRow: i) else { return "no message \(i)" }
+            return said(menu.items)
+        default:
+            return "menu:list:<row>, menu:header or menu:message:<row>"
+        }
+    }
+
+    /// Menu items as words: greyed ones in brackets, a submenu's items after it.
+    static func said(_ items: [NSMenuItem]) -> String {
+        items.map { item in
+            if item.isSeparatorItem { return "—" }
+            let title = item.isEnabled ? item.title : "[\(item.title)]"
+            guard let sub = item.submenu else { return title }
+            return "\(title) ▸ (\(said(sub.items)))"
+        }.joined(separator: " | ")
     }
 
     static func draw(to path: String, model: AppModel) {
