@@ -720,6 +720,16 @@ async fn owed(store: &Store, jid: &'static str) -> Vec<String> {
     }
 }
 
+/// Settings of chat `jid`: its draft, or empty, when it was pinned and until when it's muted.
+async fn settings(store: &Store, jid: &'static str) -> (String, i64, i64) {
+    query(store, move |db| {
+        Ok(db.query_row("SELECT coalesce(draft, ''), pinned, muted_until FROM chats WHERE id = ?1", [jid], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?)
+    })
+    .await
+}
+
 fn ids(prefix: &str, n: std::ops::Range<i64>) -> Vec<String> {
     n.map(|i| format!("{prefix}{i}")).collect()
 }
@@ -768,6 +778,30 @@ async fn what_an_earlier_jawd_parked_on_the_middle_chat_of_a_chain_is_done_to_th
         column::<String>(&store, "SELECT c.id || ' ' || t.id FROM tombstones t JOIN chats c ON c.n = t.chat").await;
     assert_eq!(tombstones, [format!("{NEW} l20")]);
     assert_eq!(store.count("messages").unwrap(), 2 + 5 + 209, "every message but l20, once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_and_a_pin_an_earlier_jawd_put_on_the_middle_chat_of_a_chain_end_in_the_chat_that_stays() {
+    let home = from_before("x1-chain");
+    let store = Store::open(home.path()).unwrap();
+    // What's said of the LID's chat from now on goes to the chat that stays at once.
+    let mute = Change::Chat(Chat { id: LID.into(), muted_until: Some(AT + 9_000), ..Chat::default() });
+    store.apply(Lane::Live, vec![mute]).await.unwrap();
+    assert_eq!(settings(&store, NEW).await, (String::new(), 0, AT + 9_000));
+    merged(&store, OLD).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
+    assert_eq!(settings(&store, NEW).await, ("typed under the LID".into(), AT + 3_000, AT + 9_000));
+    let frecency = column::<f64>(&store, "SELECT frecency FROM chats").await;
+    assert_eq!(frecency, [1.0], "the old number's one open, counted once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_an_earlier_jawd_put_on_a_middle_chat_whose_first_merge_had_ended_ends_in_the_chat_that_stays() {
+    let home = from_before("ended-chain");
+    let store = Store::open(home.path()).unwrap();
+    merged(&store, OLD).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
+    assert_eq!(settings(&store, NEW).await, ("typed under the LID".into(), 0, 0));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -841,4 +875,21 @@ async fn what_waited_under_a_chat_that_starts_merging_is_done_to_the_messages_th
     done().await;
     merged(&store, LID).await;
     done().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_was_undone_in_the_chat_that_stays_during_a_merge_this_jawd_started_stays_undone_when_it_ends() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let lid =
+        Change::Chat(Chat { id: LID.into(), pinned: Some(AT + 60), draft: Some("hello".into()), ..Chat::default() });
+    store.apply(Lane::Live, vec![message(NEW, "n0", AT), message(LID, "l0", AT + 1), lid]).await.unwrap();
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    assert_eq!(settings(&store, NEW).await, ("hello".into(), AT + 60, 0), "the LID chat's, as the merge starts");
+    // Its draft sent, which clears it, and the chat unpinned, while the merge runs.
+    let undone = Change::Chat(Chat { id: NEW.into(), pinned: Some(0), draft: Some(String::new()), ..Chat::default() });
+    store.apply(Lane::Live, vec![undone]).await.unwrap();
+    merged(&store, LID).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
+    assert_eq!(settings(&store, NEW).await, (String::new(), 0, 0), "neither comes back as the merge ends");
 }

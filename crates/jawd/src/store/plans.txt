@@ -1362,6 +1362,9 @@ SELECT count(*) FROM chats WHERE n IN (?1, ?2) AND kind <> 'direct'
 INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)
 
 -- src/store/write.rs
+INSERT OR IGNORE INTO sync_state (key, value) VALUES (?1, '')
+
+-- src/store/write.rs
 UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2
     SEARCH folder_items USING COVERING INDEX folder_items_by_chat (chat=?)
 
@@ -1440,6 +1443,10 @@ DELETE FROM quarantine WHERE source = 'merge' AND ref = ?1
     SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
 
 -- src/store/write.rs
+DELETE FROM sync_state WHERE key = ?1
+    SEARCH sync_state USING PRIMARY KEY (key=?)
+
+-- src/store/write.rs
 DELETE FROM chat_merges WHERE gone = ?1
     SEARCH chat_merges USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -1453,6 +1460,11 @@ DELETE FROM chats WHERE n = ?1
     SEARCH tombstones USING PRIMARY KEY (chat=?)
     SEARCH folder_items USING COVERING INDEX folder_items_by_chat (chat=?)
     SEARCH group_members USING PRIMARY KEY (chat=?)
+
+-- src/store/write.rs
+UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived), muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread), draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar), avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral), opened_at = max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at)), v = ?3 FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1 AND (max(k.pinned, g.pinned), min(k.archived, g.archived), max(k.muted_until, g.muted_until), max(k.marked_unread, g.marked_unread), coalesce(k.draft, g.draft), coalesce(k.name, g.name), coalesce(k.avatar, g.avatar), coalesce(k.avatar_id, g.avatar_id), max(k.ephemeral, g.ephemeral), max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at))) IS NOT (k.pinned, k.archived, k.muted_until, k.marked_unread, k.draft, k.name, k.avatar, k.avatar_id, k.ephemeral, k.opened_at)
+    SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
 SELECT m.gone, m.keep FROM chat_merges m WHERE m.gone > 0 AND EXISTS (SELECT 1 FROM chat_merges i WHERE i.keep = m.gone) ORDER BY m.gone LIMIT 1

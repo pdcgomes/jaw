@@ -1395,6 +1395,8 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
         bail!("only one-to-one chats merge, and {keep_id} or {gone_id} isn't one");
     }
     db.prepare_cached("INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)")?.execute([gone, keep])?;
+    db.prepare_cached("INSERT OR IGNORE INTO sync_state (key, value) VALUES (?1, '')")?
+        .execute([merge_started(*gone)])?;
     repoint(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
     carry(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
     db.prepare_cached("UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
@@ -1412,6 +1414,16 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     .execute(params![keep, gone, seq])?;
     stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
     merge_reads(db, stamps, *keep, *gone)
+}
+
+/// Where sync_state keeps that this jawd started merging chat `gone` away, until the merge ends.
+/// Once this jawd starts merging a chat, what's said of it goes to the chat it goes into and none
+/// of its settings change, so the merge's last step merges none of them into the kept chat again,
+/// which would undo what was done to that chat meanwhile (a draft sent, a pin taken off). A merge
+/// an earlier jawd started has no such row: through a chain of merges, what was said of another of
+/// the person's chats may have landed on its chat.
+fn merge_started(gone: i64) -> String {
+    format!("merge.started.{gone}")
 }
 
 /// Moves what chat `gone` holds for messages it hasn't got into `keep`, each a chat's n and JID:
@@ -1569,11 +1581,45 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     // deletions and what waits that were sent there while they did.
     repoint(db, stamps, (gone, &gone_jid), (keep, &keep_jid))?;
     carry(db, stamps, (gone, &gone_jid), (keep, &keep_jid))?;
+    let started = db.prepare_cached("DELETE FROM sync_state WHERE key = ?1")?.execute([merge_started(gone)])? > 0;
+    if !started {
+        merge_settings_again(db, stamps, keep, gone)?;
+    }
     db.prepare_cached("DELETE FROM chat_merges WHERE gone = ?1")?.execute([gone])?;
     db.prepare_cached("DELETE FROM chats WHERE n = ?1")?.execute([gone])?;
     let seq = stamps.seq(CHAT, Some(gone));
     stamps.record(db, CHAT, gone, Some(gone), seq)?;
     Ok(true)
+}
+
+/// Merges chat `gone`'s settings into `keep`'s again, by start_merge's rules, as a merge an earlier
+/// jawd started ends: a draft or a pin for another of the person's chats may have landed on `gone`
+/// since, through a chain of merges, and a draft.set that was answered is never lost. Its
+/// frecency, which start_merge added to `keep`'s, isn't added twice.
+fn merge_settings_again(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64) -> Result<()> {
+    let seq = stamps.seq(CHAT, Some(keep));
+    let changed = db
+        .prepare_cached(
+            "UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived),
+                muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread),
+                draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar),
+                avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral),
+                opened_at = max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at)), v = ?3
+            FROM (SELECT * FROM chats WHERE n = ?2) AS g
+            WHERE k.n = ?1 AND (max(k.pinned, g.pinned), min(k.archived, g.archived), max(k.muted_until, g.muted_until),
+                max(k.marked_unread, g.marked_unread), coalesce(k.draft, g.draft), coalesce(k.name, g.name),
+                coalesce(k.avatar, g.avatar), coalesce(k.avatar_id, g.avatar_id), max(k.ephemeral, g.ephemeral),
+                max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at)))
+                IS NOT (k.pinned, k.archived, k.muted_until, k.marked_unread, k.draft, k.name, k.avatar, k.avatar_id,
+                k.ephemeral, k.opened_at)",
+        )?
+        .execute(params![keep, gone, seq])?;
+    if changed > 0 {
+        stamps.record(db, CHAT, keep, Some(keep), seq)?;
+        // Marked unread or not is part of what settle writes, for it and the chats merging into it.
+        stamps.unsettle(keep);
+    }
+    Ok(())
 }
 
 /// The most merges a chain can hold: one for each of a person's chats but the one that stays.
