@@ -114,6 +114,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         detail.panes.paneMenu = { [weak model] slot in
             guard let model else { return nil }
             model.focus(slot: slot)
+            if let chat = model.grid?.slot(slot)?.chat, let c = model.panes[chat] { return model.paneMenu(for: c) }
             return Menus.menu(ChatMenu.splits) { id in model.command(id) }
         }
 

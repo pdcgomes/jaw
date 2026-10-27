@@ -71,8 +71,14 @@ final class MessageView: NSView {
         clicked?(self, convert(event.locationInWindow, from: nil), event.clickCount)
     }
 
-    override func menu(for _: NSEvent) -> NSMenu? {
-        menuFor?(self)
+    /// A right click on the message itself, where a left click acts on it, or on the buttons it shows
+    /// while hovered, has the message's menu; one on the blank space around it in its row has none
+    /// here, so it goes on up to the transcript and the pane's menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let onButtons = subviews.contains { $0 is HoverBar && $0.frame.contains(point) }
+        guard onButtons || laid?.contains(point) == true else { return nil }
+        return menuFor?(self)
     }
 
     override func resetCursorRects() {

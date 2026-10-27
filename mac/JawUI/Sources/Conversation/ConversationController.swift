@@ -70,8 +70,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     let scroll = NSScrollView()
     let table = TranscriptTable()
     let header = HeaderView()
-    /// The pane's menu, made as it opens: on the header, around the messages and on system and call
-    /// lines.
+    /// The pane's menu, made as it opens: on the header, on the transcript's blank space under,
+    /// between and beside the messages, and on system and call lines.
     public var paneMenu: (() -> NSMenu?)?
     /// What a message's menu ends with: the pane's splits.
     public var messageMenuTail: (() -> [NSMenuItem])?
@@ -570,7 +570,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         if clicks >= 2 {
             select(m.id)
             open(m)
-        } else if laid.body.contains(point) {
+        } else if laid.contains(point) {
             select(selected == m.id ? nil : m.id)
         } else {
             select(nil)
@@ -852,26 +852,30 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         host?.conversation(self, react: pair[0], emoji: pair[1])
     }
 
+    /// A right click on a message, or its More button: the pane takes the keys first, so the menu
+    /// acts on it.
     func menu(for view: MessageView) -> NSMenu? {
-        menu(for: message(of: view))
+        host?.conversationFocused(self)
+        return menu(for: message(of: view))
     }
 
-    /// The menu a right click on the message at row `i` opens, for the snapshot's log.
+    /// The menu a right click on the message at row `i` opens, for the snapshot's log, made without
+    /// moving the focus.
     public func menu(forRow i: Int) -> NSMenu? {
         guard i >= 0, i < rows.count else { return nil }
         return menu(for: rows[i])
     }
 
-    /// The pane's menu, the pane taking the keys first so the menu acts on it.
+    /// The pane's menu for a right click, the pane taking the keys first so the menu acts on it.
     func paneMenuShown() -> NSMenu? {
         host?.conversationFocused(self)
         return paneMenu?()
     }
 
-    /// A message's menu, the pane taking the keys first: its actions, then the pane's splits. A system
-    /// or call line, which has no actions of its own, has the pane's menu.
+    /// A message's menu: its actions, then the pane's splits. A system or call line, which has no
+    /// actions of its own, has the pane's menu. Making it leaves the focus alone; a right click moves
+    /// it first.
     func menu(for m: MessageRow?) -> NSMenu? {
-        host?.conversationFocused(self)
         guard let m, m.kind != .system, m.kind != .call else { return paneMenu?() }
         let menu = NSMenu()
         func item(_ title: String, _ key: String, _ run: @escaping () -> Void) {
@@ -1169,8 +1173,9 @@ final class HeaderView: NSView {
     }
 }
 
-/// The transcript's table: a right click between or under the messages, or on a line a message
-/// view hands on, opens the pane's menu, as one on a message opens the message's.
+/// The transcript's table: a right click on its blank space, under the messages or beside and between
+/// them, which a message's view hands on, opens the pane's menu, as one on a message opens the
+/// message's.
 final class TranscriptTable: NSTableView {
     var menuFor: (() -> NSMenu?)?
 

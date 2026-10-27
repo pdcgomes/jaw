@@ -134,6 +134,12 @@ public final class Laid: @unchecked Sendable {
         regions.first { $0.0.contains(point) }?.1
     }
 
+    /// Whether a point, in the layout's own coordinates, is on the message itself, its body or one of
+    /// its regions, where a click acts on it; the rest of its row is the transcript's blank space.
+    public func contains(_ point: CGPoint) -> Bool {
+        body.contains(point) || region(at: point) != nil
+    }
+
     /// The link under a point, if the text has one there.
     public func link(at point: CGPoint) -> String? {
         guard let (frame, rect) = text, rect.contains(point) else { return nil }

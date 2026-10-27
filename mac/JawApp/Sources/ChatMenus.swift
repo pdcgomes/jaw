@@ -70,9 +70,10 @@ extension AppModel {
         return Menus.items(ChatMenu.list(chat)) { id in bound.first { $0.id == id } }
     }
 
-    /// A pane's menu, on its header, around its messages and on its system lines. The pane has the
-    /// keys by the time it's asked for, so the splits and Swap act on it; its chat's actions act on
-    /// its chat.
+    /// A pane's menu: on its header, on the transcript's blank space under, between and beside the
+    /// messages, on system and call lines, and on the strips and controls of the pane no view claims.
+    /// The pane has the keys by the time it's asked for, so the splits and Swap act on it; its chat's
+    /// actions act on its chat.
     func paneMenu(for c: ConversationController) -> NSMenu {
         let chat = c.chat
         let bound = chatCommands(for: { chat })
