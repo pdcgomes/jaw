@@ -2,7 +2,12 @@
 //! derived from their source, one chat per person, and copies of a message that never undo what's
 //! newer.
 
+use prost::Message as _;
 use rusqlite::Connection;
+use wa_proto::wa_common::MessageKey;
+use wa_proto::wa_web_protobuf_sync_action::{
+    MarkChatAsReadAction, SyncActionMessage, SyncActionMessageRange, SyncActionValue,
+};
 
 use super::read::{self, Around};
 use super::*;
@@ -843,4 +848,32 @@ async fn a_message_history_keeps_as_deleted_for_everyone_takes_the_copy_jaw_has_
     assert_eq!(store.count("pending").unwrap(), 0);
     let found = query(&store, |db| read::search(db, "segredo", None, None, 10)).await;
     assert!(found.hits.is_empty(), "and search no longer finds what it said");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_read_on_any_device_loses_its_mark_even_where_jaw_had_read_it_already() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(&store, vec![Change::Message(message(ANA, "a", AT, "a"))]).await;
+    let here = Read { chat: ANA.into(), ids: vec!["a".into()], here: true, ..Read::default() };
+    let marked = Change::Chat(Chat { id: ANA.into(), marked_unread: Some(true), ..Chat::default() });
+    apply(&store, vec![Change::Read(here), marked]).await;
+    let ana = chat(&store, ANA).await;
+    assert!(ana.marked_unread && ana.unread == 0, "read here, the mark stays the phone's");
+    // A read naming the message jaw has read up to, as jaw's own mark read comes back.
+    let key =
+        MessageKey { remote_jid: Some(ANA.into()), from_me: Some(false), id: Some("a".into()), participant: None };
+    let range = SyncActionMessageRange {
+        last_message_timestamp: Some(AT / 1000),
+        messages: vec![SyncActionMessage { key: Some(key), timestamp: Some(AT / 1000) }],
+        ..Default::default()
+    };
+    let value = SyncActionValue {
+        timestamp: Some(AT + 5),
+        mark_chat_as_read_action: Some(MarkChatAsReadAction { read: Some(true), message_range: Some(range) }),
+        ..Default::default()
+    };
+    let index = ["markChatAsRead".to_string(), ANA.to_string()];
+    apply(&store, crate::convert::app_state::mutation(&index, &value.encode_to_vec()).changes).await;
+    assert!(!chat(&store, ANA).await.marked_unread, "read on any device, it isn't marked any more");
 }

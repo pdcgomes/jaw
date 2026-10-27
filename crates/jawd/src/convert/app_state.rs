@@ -62,6 +62,8 @@ pub fn mutation(index: &[String], value: &[u8]) -> Applied {
                     phone: None,
                     here: false,
                 }));
+                // Read on any device, the chat isn't marked unread, even where jaw has read as far.
+                applied.changes.push(chat(Chat { marked_unread: Some(false), ..Chat::default() }));
             } else {
                 applied.changes.push(chat(Chat { marked_unread: Some(true), ..Chat::default() }));
             }
@@ -157,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn marking_a_chat_read_reads_it_up_to_the_newest_message_its_range_names() {
+    fn marking_a_chat_read_reads_it_up_to_the_newest_message_its_range_names_and_unmarks_it() {
         let read = value(|v| {
             v.mark_chat_as_read_action = Some(action::MarkChatAsReadAction {
                 read: Some(true),
@@ -172,16 +174,21 @@ mod tests {
             })
         });
         let applied = mutation(&index(&["markChatAsRead", ANA]), &read);
-        let [Change::Read(read)] = applied.changes.as_slice() else { panic!("expected a read position") };
+        let [Change::Read(read), Change::Chat(unmarked)] = applied.changes.as_slice() else {
+            panic!("expected a read position and the chat unmarked")
+        };
         assert_eq!(
             (read.chat.as_str(), read.at, read.ids.as_slice(), read.phone),
             (ANA, 1_791_999_000_000, &["3EB0AA".to_string()][..], None)
         );
+        assert_eq!((unmarked.id.as_str(), unmarked.marked_unread), (ANA, Some(false)));
         let bare = value(|v| {
             v.mark_chat_as_read_action = Some(action::MarkChatAsReadAction { read: Some(true), ..Default::default() })
         });
         let applied = mutation(&index(&["markChatAsRead", ANA]), &bare);
-        let [Change::Read(read)] = applied.changes.as_slice() else { panic!("expected a read position") };
+        let [Change::Read(read), Change::Chat(_)] = applied.changes.as_slice() else {
+            panic!("expected a read position and the chat unmarked")
+        };
         assert_eq!(read.at, 1_792_000_000_000, "without a range, the mutation's own time");
     }
 
