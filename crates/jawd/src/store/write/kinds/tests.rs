@@ -103,10 +103,19 @@ pub(super) const PANICS: &str = "3EB0PANICS";
 /// The ID of a message whose conversion fails once it has written, as `backfilled` does for it in
 /// tests.
 pub(super) const FAILS: &str = "3EB0FAILS";
+/// The ID of a message whose conversion fills the disk once it has written, the first time only.
+pub(super) const FILLS: &str = "3EB0FILLS";
+pub(super) static FILLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A jaw.db at version 15 holding, in a group, Ana's templates with `ids`, each of kind unknown as
 /// an earlier jawd left it, its n its place among them.
 fn templates(home: &std::path::Path, ids: &[String]) -> Vec<Vec<u8>> {
+    group_rows(home, &ids.iter().map(|id| monday(GROUP, id)).collect::<Vec<_>>())
+}
+
+/// A jaw.db at version 15 holding, in a group, Ana's `messages`, each of kind unknown as an earlier
+/// jawd left it, its n its place among them; their raw protobufs.
+fn group_rows(home: &std::path::Path, messages: &[WebMessageInfo]) -> Vec<Vec<u8>> {
     let db = Connection::open(home.join("jaw.db")).unwrap();
     db.pragma_update(None, "journal_mode", "WAL").unwrap();
     for migration in &schema::MIGRATIONS[..15] {
@@ -121,8 +130,8 @@ fn templates(home: &std::path::Path, ids: &[String]) -> Vec<Vec<u8>> {
     ))
     .unwrap();
     let mut raws = Vec::new();
-    for (i, id) in ids.iter().enumerate() {
-        let (n, raw) = (i as i64 + 1, packed(&monday(GROUP, id)));
+    for (i, message) in messages.iter().enumerate() {
+        let (n, id, raw) = (i as i64 + 1, message.key.id.clone().unwrap(), packed(message));
         db.execute(
             "INSERT INTO messages (n, chat, id, at, t, sender, kind, summary, raw, v)
             VALUES (?1, 1, ?2, ?3, ?1, 1, 'unknown', ?4, ?5, 0)",
@@ -159,6 +168,49 @@ async fn a_step_meeting_many_to_convert_ends_once_it_has_converted_for_a_while_a
         backfill(&store).await;
     }
     assert_eq!(store.count("messages WHERE kind = 'text'").unwrap(), 64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_rolled_back_leaves_its_chat_no_version_without_an_event() {
+    let home = tempfile::tempdir().unwrap();
+    // The chat's newest, a template whose conversion fails once it has written, then Ana's
+    // placeholder, which counted as unread and now won't, so the chat is counted again.
+    let placeholder = e2e::Message { placeholder_message: Some(Default::default()), ..Default::default() };
+    group_rows(home.path(), &[monday(GROUP, FAILS), web(GROUP, "p2", Some(ANA), Some(placeholder))]);
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.execute_batch(
+        "UPDATE messages SET at = 1792000000009 WHERE n = 1;
+        UPDATE chats SET last_message = 1, last_at = 1792000000009, unread = 2 WHERE n = 1;",
+    )
+    .unwrap();
+    drop(db);
+    let store = Store::open(home.path()).unwrap();
+    let applied = store.apply(Lane::Background, vec![Change::Backfill(KINDS); 4]).await.unwrap();
+    assert_eq!(applied.transactions, 1, "both in one transaction, which counts the chat again at its end");
+    assert_eq!(store.backfill_left(KINDS).unwrap(), 0);
+    let (v, unread, event): (i64, i64, Option<i64>) = query(&store, |db| {
+        Ok(db.query_row(
+            "SELECT v, unread, (SELECT max(seq) FROM events WHERE type = 'chat' AND key = 1) FROM chats WHERE n = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    })
+    .await;
+    assert_eq!(unread, 1, "her template still counts, her placeholder no longer");
+    assert_eq!(event, Some(v), "the chat's version has its event, so windows learn its count");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disk_filling_as_a_message_converts_fails_its_step_which_is_tried_again_and_converts_it() {
+    let home = tempfile::tempdir().unwrap();
+    templates(home.path(), &["t1".to_string(), FILLS.to_string()]);
+    let store = Store::open(home.path()).unwrap();
+    while store.backfill_left(KINDS).unwrap() > 0 {
+        backfill(&store).await;
+    }
+    assert!(FILLED.load(std::sync::atomic::Ordering::Relaxed), "the disk filled once");
+    assert_eq!(store.count("messages WHERE kind = 'text'").unwrap(), 2, "both converted, that one once it didn't");
+    assert_eq!(store.count("quarantine").unwrap(), 0, "and nothing kept in quarantine for it");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -482,6 +534,20 @@ fn before_kinds(home: &std::path::Path) -> Vec<Left> {
         // The same template, which the test edits through this jawd's own writer.
         (15, 1, "t15", Some(1), false, "unknown", None, unknown, None, false, Some(packed(&monday(GROUP, "t15")))),
         (16, 1, "c16", Some(2), false, "unknown", None, unknown, None, false, Some(packed(&poll_comment("c16")))),
+        // Ana's template, then an edit of it jaw couldn't read, which left nothing to show.
+        (
+            17,
+            1,
+            "t17",
+            Some(1),
+            false,
+            "unknown",
+            None,
+            unknown,
+            Some(AT + 70),
+            false,
+            Some(packed(&monday(GROUP, "t17"))),
+        ),
     ];
     let mut insert = db
         .prepare(
@@ -687,7 +753,7 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     let home = tempfile::tempdir().unwrap();
     let left = before_kinds(home.path());
     let store = Store::open(home.path()).unwrap();
-    assert_eq!(store.backfill_left(KINDS).unwrap(), 16, "the migration leaves the backfill to do, as status says");
+    assert_eq!(store.backfill_left(KINDS).unwrap(), 17, "the migration leaves the backfill to do, as status says");
 
     // A copy of Rui's encrypted edit converted since waits already, and isn't kept twice.
     let me = Me::new([ME.to_string()]);
@@ -754,9 +820,14 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
             "{n}"
         );
     }
+    assert_eq!(
+        row(17).map(|r| (r.1, r.2, r.3)),
+        Some(("text".into(), Some("Your order ships on Monday".into()), None)),
+        "an edit jaw couldn't read left nothing to keep, so the message's words show"
+    );
     assert_eq!(row(16).map(|r| r.1), Some("poll".into()), "a comment that's a poll is a poll");
     assert_eq!(store.count("poll_options WHERE message = 16").unwrap(), 2, "with its options");
-    for n in [1, 2, 5, 6, 12, 14, 15, 16] {
+    for n in [1, 2, 5, 6, 12, 14, 15, 16, 17] {
         assert!(row(n).unwrap().4 > was(n).4, "message {n} takes a new version");
     }
 
@@ -776,7 +847,7 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
         }
     };
     let chat_of = |n: i64| left.iter().find(|row| row.0 == n).map(|row| row.1);
-    for n in [1, 2, 5, 6, 12, 14, 15, 16] {
+    for n in [1, 2, 5, 6, 12, 14, 15, 16, 17] {
         assert_eq!(event("message", n).await, (Some(row(n).unwrap().4), chat_of(n)), "message {n}'s event");
     }
     for n in [3, 4] {
@@ -859,7 +930,7 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     // Taken again from the start, it changes nothing.
     let settled = shown(&store).await;
     let raw = Connection::open(home.path().join("jaw.db")).unwrap();
-    raw.execute("INSERT INTO backfills (name, after, upto) VALUES ('kinds', 0, 16)", []).unwrap();
+    raw.execute("INSERT INTO backfills (name, after, upto) VALUES ('kinds', 0, 17)", []).unwrap();
     drop(raw);
     let again = backfill(&store).await;
     assert_eq!((again.changed, again.quarantined), (0, 0), "{again:?}");

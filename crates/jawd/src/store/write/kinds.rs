@@ -101,6 +101,11 @@ fn converted_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool>
     };
     #[cfg(test)]
     anyhow::ensure!(id != tests::FAILS, "a conversion that fails once it has written, as a test asks");
+    #[cfg(test)]
+    if id == tests::FILLS && !tests::FILLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let full = rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL);
+        return Err(rusqlite::Error::SqliteFailure(full, Some("the disk filled, as a test asks".into())).into());
+    }
     Ok(changed)
 }
 
