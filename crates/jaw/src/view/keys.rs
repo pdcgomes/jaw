@@ -361,12 +361,14 @@ impl View {
         }
     }
 
+    /// The list's selection `by` rows on; with none of its chats selected, as after a folder that
+    /// hasn't the open chat is picked, down lands on the first.
     pub(super) fn move_selection(&mut self, by: isize) {
         let order = self.list_order();
         if order.is_empty() {
             return;
         }
-        let i = self.selected_index().unwrap_or(0) as isize;
+        let i = self.selected_index().map_or(if by > 0 { -1 } else { 0 }, |i| i as isize);
         let next = (i.saturating_add(by)).clamp(0, order.len() as isize - 1) as usize;
         self.selected = Some(order[next].clone());
         self.reveal_selected_chat();

@@ -4,9 +4,9 @@
 //! Picking a folder makes the chat list that folder's window; Tab moves to the roster, whose
 //! Enter opens or starts someone's chat. Alt-Shift-Up and Alt-Shift-Down move between folders
 //! from anywhere, and a click does what Enter does on the folder or person under it, or opens or
-//! closes a folder on its mark, leaving the keys where they were.
+//! closes a folder on its mark, without giving the sidebar the keys.
 
-use super::{Focus, View};
+use super::{Focus, Reach, View};
 use crate::data::Place;
 use crate::data::{FolderRow, PresenceState, RosterRow};
 use crate::fmt;
@@ -227,7 +227,8 @@ impl View {
 
     /// Alt-Shift-Up and Alt-Shift-Down: the folder before or after, in the tree's order with every
     /// folder open, picked as Enter picks it, the folders it's in opened so the sidebar shows it.
-    /// At either end it stays, as Alt-Up and Alt-Down do.
+    /// At either end it stays, as Alt-Up and Alt-Down do. With neither the chat list nor the
+    /// sidebar drawn, the footer names it and the key that shows its chats.
     pub(super) fn step_folder(&mut self, by: isize) {
         let order: Vec<String> = self
             .tree_open(|_| true)
@@ -247,6 +248,10 @@ impl View {
         }
         self.pick_folder(&id);
         self.sidebar.at = self.tree_row(&id).unwrap_or(self.sidebar.at);
+        if self.areas.list.is_empty() && self.areas.sidebar.is_empty() {
+            let shows = if self.narrow() { "esc" } else { "ctrl-f" };
+            self.say(format!("{}: {shows} shows its chats", self.folder_name(&id)));
+        }
     }
 
     pub(super) fn on_folders(&mut self, upsert: Vec<FolderRow>, remove: Vec<String>, whole: bool) {
@@ -356,14 +361,18 @@ impl View {
 
     /// The mouse over the sidebar, wherever it's drawn: a click on a folder shows its chats, on its
     /// mark opens or closes it, and on someone opens their chat, each as Enter does there, without
-    /// giving the sidebar the keys. Neither the tree nor the roster scrolls, so the wheel moves
-    /// nothing, not even the list under the sidebar drawn over it.
+    /// giving the sidebar the keys. While jawd is out of reach a click does none of them, as keys do
+    /// nothing then. Neither the tree nor the roster scrolls, so the wheel moves nothing, not even
+    /// the list under the sidebar drawn over it.
     pub(super) fn on_sidebar_mouse(&mut self, m: MouseEvent) {
         if m.kind != MouseEventKind::Down(MouseButton::Left) {
             return;
         }
         self.dirty = true;
         self.overlay = None;
+        if self.reach != Reach::Up {
+            return;
+        }
         let (at, y) = (Position::new(m.column, m.row), m.row);
         let on_row = |rows: &[(u16, String)]| rows.iter().find(|(row, _)| *row == y).map(|(_, id)| id.clone());
         if let Some(id) = self.areas.folder_marks.iter().find(|(mark, _)| mark.contains(at)).map(|(_, id)| id.clone()) {
@@ -502,8 +511,8 @@ impl View {
             spans.push(Span::raw(" ".repeat(w.saturating_sub(used + right_w))));
             spans.extend(right);
             let band = if self.sidebar.keys == Some(Part::Folders) { i == self.sidebar.at } else { picked };
-            let mark = children.then_some(2 * *depth as u16);
-            lines.push((Line::from(spans), band, Some(Hit::Folder(id.clone(), mark))));
+            let mark_at = children.then_some(2 * *depth as u16);
+            lines.push((Line::from(spans), band, Some(Hit::Folder(id.clone(), mark_at))));
         }
         let roster_title = format!("roster · {}", self.folder_name(&self.folder));
         lines.push((Line::default(), false, None));
@@ -568,8 +577,8 @@ impl View {
                 buf.set_style(Rect::new(area.x + 1, y, area.width - 2, 1), Style::new().bg(t.selection));
             }
             match hit {
-                Some(Hit::Folder(id, mark)) => {
-                    if let Some(x) = mark {
+                Some(Hit::Folder(id, mark_at)) => {
+                    if let Some(x) = mark_at {
                         self.areas.folder_marks.push((Rect::new(inner.x + x, y, 2, 1), id.clone()));
                     }
                     self.areas.folder_rows.push((y, id));

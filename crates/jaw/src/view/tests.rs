@@ -1848,6 +1848,80 @@ fn below_120_columns_a_click_in_the_sidebar_over_the_list_acts_as_enter_and_clos
 }
 
 #[test]
+fn a_click_while_the_sidebar_has_the_keys_moves_its_band_and_its_keys_go_on_from_there() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-b>");
+    let screen = frame(&mut v);
+    mouse(&mut v, &rx, CLICK, cell_of(&screen, "Work"));
+    assert_eq!((v.folder.as_str(), v.sidebar.keys), ("folder:4", Some(sidebar::Part::Folders)));
+    assert_eq!(banded(&mut v), ["Work"]);
+    mouse(&mut v, &rx, CLICK, cell_of(&screen, "▸ Family"));
+    let band = banded(&mut v);
+    assert!(band.len() == 1 && band[0].starts_with("▾ Family") && v.folder == "folder:4", "{band:?}");
+    press(&mut v, &rx, "<down>\n");
+    assert_eq!(v.folder, "folder:2", "down from Family is Parents");
+}
+
+#[test]
+fn below_120_columns_the_folder_key_leaves_the_sidebar_over_the_list_open_and_its_band_follows() {
+    let (mut v, rx) = view(100, 30);
+    press(&mut v, &rx, "<c-b><a-s-down><a-s-down>");
+    assert_eq!((v.folder.as_str(), v.sidebar.keys), ("groups", Some(sidebar::Part::Folders)));
+    assert!(frame(&mut v).contains("╭ folders"));
+    let band = banded(&mut v);
+    assert!(band.len() == 1 && band[0].starts_with("Groups"), "{band:?}");
+}
+
+#[test]
+fn alt_down_in_a_folder_without_the_open_chat_opens_its_first_chat() {
+    for (width, height, keys) in [(100, 30, "<a-s-down>"), (140, 44, "<c-b><down>\n<esc>")] {
+        let (mut v, rx) = view(width, height);
+        press(&mut v, &rx, keys);
+        let listed = v.list_order();
+        assert!(v.folder == "unread" && !listed.iter().any(|c| c == "ana"), "after {keys}: {listed:?}");
+        press(&mut v, &rx, "<a-down>");
+        assert_eq!(v.open.as_ref(), listed.first(), "after {keys}");
+    }
+    let (mut v, rx) = view(80, 24);
+    press(&mut v, &rx, "<a-s-down><a-s-down>");
+    let listed = v.list_order();
+    assert!(v.folder == "groups" && !listed.iter().any(|c| c == "ana"), "{listed:?}");
+    press(&mut v, &rx, "<down>");
+    assert_eq!(v.selected.as_ref(), listed.first(), "and Down in the narrow list");
+}
+
+#[test]
+fn while_jawd_is_out_of_reach_a_click_in_the_sidebar_does_nothing_as_keys_do() {
+    let (mut v, _rx) = view(140, 44);
+    v.apply(Update::Unreachable { why: "it stopped".into(), retry_in: 4_000 });
+    let screen = frame(&mut v);
+    assert!(screen.contains("can't reach jawd") && screen.contains("╭ chats · All"), "{screen}");
+    for text in ["Work", "▸ Family", "● João"] {
+        let (column, row) = cell_of(&screen, text);
+        v.on_input(Input::Mouse(MouseEvent { kind: CLICK, column, row, modifiers: KeyModifiers::NONE }));
+    }
+    assert_eq!((v.folder.as_str(), v.open.as_deref(), v.starting.as_deref()), ("all", Some("ana"), None));
+    assert!(v.sidebar.open.is_empty());
+    let screen = frame(&mut v);
+    assert!(screen.contains("╭ chats · All") && !screen.contains("jawd isn't answering"), "{screen}");
+}
+
+#[test]
+fn with_neither_the_list_nor_the_sidebar_drawn_the_folder_key_names_the_folder_in_the_footer() {
+    let (mut v, rx) = view(80, 24);
+    press(&mut v, &rx, "<down>\n<a-s-down>");
+    let screen = frame(&mut v);
+    assert!(screen.lines().last().unwrap_or_default().contains("Unread: esc shows its chats"), "{screen}");
+    press(&mut v, &rx, "<esc>");
+    assert!(frame(&mut v).contains("╭ chats · Unread"));
+    for (width, keys) in [(80, "<a-s-down>"), (100, "<a-s-down>"), (80, "<down>\n<c-b><a-s-down>")] {
+        let (mut v, rx) = view(width, 24);
+        press(&mut v, &rx, keys);
+        assert!(v.folder == "unread" && v.notice.is_none(), "at {width} after {keys}: {:?}", v.notice);
+    }
+}
+
+#[test]
 fn m_files_the_open_chat_into_folders_ticked_with_space() {
     let (mut v, rx) = view(140, 44);
     press(&mut v, &rx, "<up>m");

@@ -275,6 +275,16 @@ fn ctrl_f_folds_the_sidebar_and_the_list_away_for_one_chat_and_brings_them_back(
 }
 
 #[test]
+fn focused_the_folder_key_names_the_folder_and_the_key_that_shows_its_chats() {
+    let (mut v, rx, _) = view_with("focus", State::Online, 160, 45);
+    press(&mut v, &rx, "<c-f><a-s-down>");
+    let screen = frame(&mut v);
+    assert!(screen.lines().last().unwrap_or_default().contains("Unread: ctrl-f shows its chats"), "{screen}");
+    press(&mut v, &rx, "<c-f>");
+    assert!(frame(&mut v).contains("╭ chats · Unread"));
+}
+
+#[test]
 fn the_quick_look_shows_a_few_lines_of_a_few_chats_and_lets_their_windows_go() {
     let (mut v, rx, demo) = view_with("quick_look", State::Online, 160, 45);
     press(&mut v, &rx, "<c-g>");
