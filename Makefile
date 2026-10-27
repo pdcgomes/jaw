@@ -72,6 +72,7 @@ mac-test:
 	mac/scripts/build-mac test JawKit
 	mac/scripts/build-mac test JawThemes
 	mac/scripts/build-mac test JawUITests
+	mac/scripts/build-mac test JawHarnessTests
 
 clean:
 	$(CARGO) clean

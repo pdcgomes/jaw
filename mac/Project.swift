@@ -135,5 +135,16 @@ let project = Project(
         tests("JawKit", [.target(name: "JawKit")]),
         tests("JawThemes", [.target(name: "JawThemes")]),
         tests("JawUI", [.target(name: "JawUI"), .target(name: "JawKit"), .target(name: "JawThemes")]),
+        // Hosted by the harness, so its scenes, their fixtures and its pictures are tested as it runs them.
+        tests("JawHarness", [.target(name: "JawHarness"), .target(name: "JawKit"), .target(name: "JawThemes"),
+                             .target(name: "JawUI")]),
+    ],
+    schemes: [
+        // Tuist tests JawHarnessTests in JawHarness's scheme; make mac-test runs them in their own.
+        .scheme(
+            name: "JawHarnessTests",
+            buildAction: .buildAction(targets: ["JawHarnessTests"]),
+            testAction: .targets(["JawHarnessTests"]),
+        ),
     ],
 )
