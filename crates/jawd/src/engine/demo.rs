@@ -5,11 +5,13 @@
 //! recipients' phones send delivered and then read, and a message sent again with the same ID is
 //! the same message. A reaction, an edit or a deletion for everyone is a message too, which the
 //! recipients' phones say they have but never read; the server refuses an edit once WhatsApp's
-//! window for it has passed; and app state sent for your other devices is taken. Given an
-//! `Account`, it answers for its contacts and groups, and writes each history blob its phone offers
-//! to the spool as jaw-engine does; events can also be delivered from outside its script, several
-//! waiting for their acks at once. Its people type and record as WhatsApp's chat presence says it,
-//! sent over the link as the `Typing` event jaw-engine sends, in order with the rest.
+//! window for it has passed; and app state sent for your other devices is taken, kept as the latest
+//! for its index and sent back, as whatsmeow fetches a collection again after each patch, unless a
+//! test has it refused. Given an `Account`, it answers for its contacts and groups, and writes each
+//! history blob its phone offers to the spool as jaw-engine does; events can also be delivered from
+//! outside its script, several waiting for their acks at once. Its people type and record as
+//! WhatsApp's chat presence says it, sent over the link as the `Typing` event jaw-engine sends, in
+//! order with the rest.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -132,6 +134,13 @@ pub struct World {
     account: Option<Arc<dyn Account>>,
     /// The full fetches of its app state the engine has played.
     fetched: Mutex<Vec<Fetched>>,
+    /// How many app-state patches to refuse next, as WhatsApp refuses one it won't take.
+    refusing_patches: Mutex<u32>,
+    /// Whether app-state patches are taken without an answer, as a connection that drops does.
+    holding_patches: AtomicBool,
+    /// The app-state patches the server has taken, the latest for each index, which a full fetch of
+    /// their collection brings back, as WhatsApp keeps them for every device.
+    taken: Mutex<Vec<pb::AppStatePatch>>,
     /// The running engine's half of the link, for events delivered from outside its script.
     link: Mutex<Option<WeakLink>>,
     /// Whose presence jawd follows, in the order it asked.
@@ -444,6 +453,19 @@ impl World {
         *self.refusing.lock().expect("the demo world") = n;
     }
 
+    /// Refuses the next `n` app-state patches for good.
+    #[cfg(test)]
+    pub fn refuse_patches(&self, n: u32) {
+        *self.refusing_patches.lock().expect("the demo world") = n;
+    }
+
+    /// Takes app-state patches without answering them, until it's told otherwise.
+    #[cfg(test)]
+    #[expect(dead_code)]
+    pub fn hold_patches(&self, holding: bool) {
+        self.holding_patches.store(holding, Ordering::SeqCst);
+    }
+
     /// Has the server keep message `id` as sent at `at`, as one sent long ago.
     #[cfg(test)]
     pub fn sent_at(&self, id: &str, at: i64) {
@@ -527,6 +549,21 @@ impl World {
     fn ask(&self, kind: pb::command::Kind) {
         self.asked.lock().expect("the demo world").push(kind);
         self.asked_now.notify_waiters();
+    }
+
+    /// The patches taken in collections `names`, or in every collection when it names none, as a
+    /// full fetch brings them.
+    fn taken_in(&self, names: &[String]) -> Vec<pb::Event> {
+        self.taken
+            .lock()
+            .expect("the demo world")
+            .iter()
+            .filter(|patch| names.is_empty() || names.contains(&patch.name))
+            .map(|patch| {
+                let state = pb::AppState { index: patch.index.clone(), value: patch.value.clone() };
+                pb::Event { seq: 0, kind: Some(pb::event::Kind::AppState(state)) }
+            })
+            .collect()
     }
 }
 
@@ -1312,8 +1349,7 @@ impl Sender {
             }
             kind @ (pb::command::Kind::MarkRead(_)
             | pb::command::Kind::ChatPresence(_)
-            | pb::command::Kind::Presence(_)
-            | pb::command::Kind::AppStatePatch(_)) => {
+            | pb::command::Kind::Presence(_)) => {
                 self.world.ask(kind);
                 done
             }
@@ -1340,17 +1376,24 @@ impl Sender {
                     .collect();
                 Ok(pb::reply::Kind::UserInfoList(pb::UserInfoList { users }))
             }
+            pb::command::Kind::AppStatePatch(patch) => {
+                self.world.ask(pb::command::Kind::AppStatePatch(patch.clone()));
+                self.patched(patch).await
+            }
             pb::command::Kind::Contacts(_) => Ok(pb::reply::Kind::ContactList(self.account()?.contacts())),
             pb::command::Kind::Groups(_) => Ok(pb::reply::Kind::GroupList(self.account()?.groups())),
             pb::command::Kind::LidLookup(asked) => {
                 Ok(pb::reply::Kind::LidPairs(self.account()?.lid_pairs(&asked.lids)))
             }
-            // Its app state, if it has any, comes a mutation at a time, each waiting for its ack, as
-            // whatsmeow hands each over as it fetches every collection again in full.
-            pb::command::Kind::AppStateResync(_) => {
-                let account = self.account()?;
+            // Its app state, the account's and what it has taken since, comes a mutation at a time,
+            // each waiting for its ack, as whatsmeow hands each over as it fetches a collection
+            // again in full.
+            pb::command::Kind::AppStateResync(resync) => {
+                self.world.ask(pb::command::Kind::AppStateResync(resync.clone()));
+                let mut mutations = self.world.account.as_ref().map(|account| account.app_state()).unwrap_or_default();
+                mutations.extend(self.world.taken_in(&resync.names));
                 let (began, mut acks) = (Instant::now(), Vec::new());
-                for mutation in account.app_state() {
+                for mutation in mutations {
                     let sent = Instant::now();
                     if !self.send(mutation).await {
                         return Err(EngineError::Gone);
@@ -1670,6 +1713,33 @@ impl Sender {
             .account
             .clone()
             .ok_or_else(|| EngineError::Failed { message: "the demo engine doesn't do that".into(), retry: false })
+    }
+
+    /// WhatsApp takes an app-state patch, unless told to refuse it, and keeps it as the latest for
+    /// its index; whatsmeow then fetches the collection again, so the patch comes back as an
+    /// AppState event, acked before the patch is answered.
+    async fn patched(&self, patch: pb::AppStatePatch) -> Result<pb::reply::Kind, EngineError> {
+        let world = &self.world;
+        {
+            let mut refusing = world.refusing_patches.lock().expect("the demo world");
+            if *refusing > 0 {
+                *refusing -= 1;
+                return Err(EngineError::Failed { message: "server returned error 400".into(), retry: false });
+            }
+        }
+        if world.holding_patches.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        {
+            let mut taken = world.taken.lock().expect("the demo world");
+            taken.retain(|kept| kept.index != patch.index);
+            taken.push(patch.clone());
+        }
+        let echo = pb::AppState { index: patch.index, value: patch.value };
+        if !self.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::AppState(echo)) }).await {
+            return Err(EngineError::Gone);
+        }
+        Ok(pb::reply::Kind::Done(pb::Done {}))
     }
 
     /// Makes the blob a history notification names and writes it to the path jawd chose, whole or
@@ -2117,5 +2187,60 @@ mod tests {
             assert_eq!((starts - OCT_31).rem_euclid(7 * 86_400), 0, "a Saturday at 9:00 from {now}");
             assert!((1..=7).contains(&ahead), "{ahead} days on from {now}");
         }
+    }
+
+    #[tokio::test]
+    async fn an_app_state_patch_comes_back_as_app_state_before_its_answer_and_a_fetch_brings_back_what_was_taken() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let engine = DemoEngine::with(Vec::new());
+        let world = engine.world();
+        let instance = engine.start(tx).await.unwrap();
+        let pin = pb::AppStatePatch {
+            name: "regular_low".into(),
+            index: vec!["pin_v1".into(), ANA.into()],
+            version: 5,
+            value: vec![8, 1],
+        };
+        let answered = AtomicBool::new(false);
+        let patching = async {
+            let reply = instance.commands.call(pb::command::Kind::AppStatePatch(pin.clone())).await;
+            answered.store(true, Ordering::SeqCst);
+            reply
+        };
+        let acking = async {
+            let incoming =
+                tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("no echo came").unwrap();
+            let Some(pb::event::Kind::AppState(echo)) = &incoming.event.kind else { panic!("{:?}", incoming.event) };
+            assert_eq!((&echo.index, &echo.value), (&pin.index, &pin.value), "the patch as it was sent");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!answered.load(Ordering::SeqCst), "answered before its echo was acked");
+            incoming.ack.expect("an echo waits for its ack, as jaw-engine's does").send();
+        };
+        let (reply, ()) = tokio::join!(patching, acking);
+        assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
+        world.refuse_patches(1);
+        let other = pb::AppStatePatch { index: vec!["pin_v1".into(), CLIMBING.into()], ..pin.clone() };
+        let refused = instance.commands.call(pb::command::Kind::AppStatePatch(other)).await;
+        assert!(matches!(refused, Err(EngineError::Failed { retry: false, .. })), "{refused:?}");
+        let fetch = |names: &[&str]| {
+            let names = names.iter().map(|name| name.to_string()).collect();
+            pb::command::Kind::AppStateResync(pb::AppStateResync { names })
+        };
+        let fetching = instance.commands.call(fetch(&["regular_low"]));
+        let acking = async {
+            let incoming =
+                tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("nothing came back").unwrap();
+            let Some(pb::event::Kind::AppState(state)) = &incoming.event.kind else { panic!("{:?}", incoming.event) };
+            assert_eq!(state.index, pin.index, "what WhatsApp took, not what it refused");
+            incoming.ack.expect("a mutation needs an ack").send();
+        };
+        let (reply, ()) = tokio::join!(fetching, acking);
+        assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
+        let elsewhere = instance.commands.call(fetch(&["regular_high"])).await;
+        assert!(matches!(elsewhere, Ok(pb::reply::Kind::Done(_))), "{elsewhere:?}");
+        assert!(rx.try_recv().is_err(), "nothing was taken in regular_high");
+        let fetches =
+            world.asked().into_iter().filter(|kind| matches!(kind, pb::command::Kind::AppStateResync(_))).count();
+        assert_eq!(fetches, 2, "each fetch is noted");
     }
 }
