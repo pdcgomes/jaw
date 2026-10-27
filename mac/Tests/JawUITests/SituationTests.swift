@@ -7,10 +7,10 @@ import Testing
 /// chat is, what fills the panes' place, and the chats that need you, in the app's own words.
 
 func situation(_ state: ConnectionState = .online, reach: Situation.Reach = .up, linked: Bool = true, done: UInt64? = nil,
-               total: UInt64? = nil, until: Int64? = nil, reason: String? = nil) -> Situation
+               total: UInt64? = nil, until: Int64? = nil, reason: String? = nil, link: LinkStep? = nil) -> Situation
 {
     Situation(reach: reach, linked: linked,
-              connection: Connection(state: state, done: done, total: total, until: until, reason: reason))
+              connection: Connection(state: state, done: done, total: total, until: until, reason: reason), link: link)
 }
 
 @Test func `the status line says how jawd is reached and how the connection is, in the app's words`() {
@@ -20,9 +20,14 @@ func situation(_ state: ConnectionState = .online, reach: Situation.Reach = .up,
         (situation(reach: .starting(failed: "status 1")), "jawd didn't start", true),
         (situation(reach: .unreachable(why: "nothing answers", retry: 2)), "can't reach jawd · trying again in 2 s", true),
         (situation(linked: false), "not linked", true),
+        (situation(.loggedOut, reach: .starting(failed: nil), linked: false), "starting jawd…", false),
+        (situation(.loggedOut, reach: .unreachable(why: "nothing answers", retry: 2), linked: false),
+         "can't reach jawd · trying again in 2 s", true),
+        (situation(.loggedOut, linked: false), "not linked", true),
         (situation(.online), nil, false),
         (situation(.connecting), "connecting", false),
         (situation(.catchingUp), "catching up", false),
+        (situation(.catchingUp, total: 5000), "catching up", false),
         (situation(.catchingUp, done: 1204, total: 5000), "catching up 1,204 of 5,000", false),
         (situation(.phoneOffline), "phone offline: photos and older history wait for it", true),
         (situation(.offline), "offline: what you send waits until it's back", true),
@@ -55,6 +60,9 @@ func situation(_ state: ConnectionState = .online, reach: Situation.Reach = .up,
     s.said = Situation.Said("not sent: no connection", until: now.addingTimeInterval(4), warn: true)
     #expect(s.chatLine(focused: direct, now: now) == "not sent: no connection", "what was said comes first while it lasts")
     #expect(s.chatLine(focused: direct, now: now.addingTimeInterval(5)) == "muted", "and goes once it's over")
+    #expect(s.chatLine(focused: direct, now: now.addingTimeInterval(4)) == "muted", "from the moment it ends")
+    #expect(Situation(said: Situation.Said("nothing unread", until: now.addingTimeInterval(4))).chatLine(focused: nil, now: now)
+        == "nothing unread", "what was said shows with no chat focused")
 }
 
 @Test func `the panes' place shows what jawd's situation calls for`() {
@@ -62,17 +70,26 @@ func situation(_ state: ConnectionState = .online, reach: Situation.Reach = .up,
     #expect(situation(reach: .starting(failed: "status 1")).stateView(hasChats: false, hasPanes: false) == .starting(failed: "status 1"))
     let away = situation(reach: .unreachable(why: "nothing answers", retry: 2))
     #expect(away.stateView(hasChats: false, hasPanes: false) == .asleep(why: "nothing answers", retryIn: 2))
+    #expect(away.stateView(hasChats: false, hasPanes: true) == .asleep(why: "nothing answers", retryIn: 2))
     #expect(away.stateView(hasChats: true, hasPanes: true) == nil, "what's drawn stays while jawd is away")
     #expect(away.stateView(hasChats: true, hasPanes: false) == .noChat)
     #expect(situation(linked: false).stateView(hasChats: true, hasPanes: true) == .linking(step: nil, loggedOut: nil))
+    #expect(situation(linked: false).stateView(hasChats: false, hasPanes: false)
+        == .linking(step: nil, loggedOut: nil), "linking comes before no chats yet")
+    let qr = LinkStep.qr(code: "2@abc", expires: Samples.now + 60000)
+    #expect(situation(linked: false, link: qr).stateView(hasChats: false, hasPanes: false) == .linking(step: qr, loggedOut: nil))
     #expect(situation(.loggedOut, linked: false).stateView(hasChats: true, hasPanes: true)
         == .linking(step: nil, loggedOut: "logged out from the phone"))
     #expect(situation(.loggedOut, linked: false, reason: "you logged out on the phone").stateView(hasChats: true, hasPanes: true)
         == .linking(step: nil, loggedOut: "you logged out on the phone"))
+    let awayUnlinked = situation(.loggedOut, reach: .unreachable(why: "nothing answers", retry: 2), linked: false)
+    #expect(awayUnlinked.stateView(hasChats: true, hasPanes: true) == nil, "linking only while jawd is up")
+    #expect(awayUnlinked.stateView(hasChats: true, hasPanes: false) == .noChat)
     #expect(situation().stateView(hasChats: false, hasPanes: false) == .noChats)
     #expect(situation().stateView(hasChats: true, hasPanes: false) == .noChat)
     #expect(situation(reach: .waiting).stateView(hasChats: false, hasPanes: false) == .noChat, "no chats yet only once jawd is up")
     #expect(situation().stateView(hasChats: true, hasPanes: true) == nil)
+    #expect(situation().stateView(hasChats: false, hasPanes: true) == nil)
 }
 
 @Test func `the chats that need you are mentions, then people, then groups, by unread, and none a pane shows`() {
@@ -81,13 +98,15 @@ func situation(_ state: ConnectionState = .online, reach: Situation.Reach = .up,
     }
     var muted = chat("muted", unread: 9)
     muted.mutedUntil = -1
+    var quiet = chat("quiet", .group, unread: 3, mentions: 1)
+    quiet.mutedUntil = -1
     var archived = chat("archived", unread: 9)
     archived.archived = true
     var marked = chat("marked")
     marked.markedUnread = true
     let chats = [
         chat("group", .group, unread: 7), chat("ana", unread: 2), chat("mention", .group, unread: 1, mentions: 1),
-        chat("rui", unread: 5), chat("read"), muted, archived, chat("community", .community, unread: 3), marked,
+        chat("rui", unread: 5), chat("read"), muted, quiet, archived, chat("community", .community, unread: 3), marked,
         chat("shown", unread: 4),
     ]
     #expect(Situation.needs(chats, shown: ["shown"]).map(\.id) == ["mention", "rui", "ana", "marked", "group"])
