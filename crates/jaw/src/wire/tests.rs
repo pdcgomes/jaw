@@ -638,6 +638,40 @@ fn a_settings_change_whose_answer_is_lost_is_unconfirmed_and_one_never_sent_is_n
     assert_eq!(footer_at_80(answered[0]), format!(" not kept: {unsent}"), "whole at 80 columns");
 }
 
+/// A jawd from before settings, whose hello brings none and which doesn't know `settings.set`, is
+/// said to be older and to keep no settings, whole at 80 columns; and `jaw settings` on it says so
+/// and fails, with changes or without, asking it for none, rather than printing the defaults.
+#[test]
+fn a_jawd_from_before_settings_is_said_to_keep_none_in_the_footer_and_by_jaw_settings() {
+    let jawd = scripted();
+    jawd.kept.lock().unwrap().settings = None;
+    let (tx, rx) = channel();
+    let mut wire = Wire::connect(jawd.socket.clone(), tx);
+    let mut said = vec![];
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+    wire.set_settings(&SettingsSet { theme: Some("nord".into()), messages: None });
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(answers_settings));
+    let answered: Vec<&Update> = said.iter().filter(|u| answers_settings(u)).collect();
+    assert_eq!(answered, [&Update::SettingsRefused(OLDER.into())], "{said:?}");
+    assert_eq!(footer_at_80(answered[0]), format!(" not kept: {OLDER}"), "whole at 80 columns");
+    for changes in [vec![], crate::tests::changes(&["theme=nord"])] {
+        let refused = crate::settings(&jawd.socket, &changes).unwrap_err();
+        assert_eq!(refused.to_string(), OLDER, "{changes:?}");
+    }
+    assert_eq!(jawd.asked("settings.set").len(), 1, "only the footer's change was asked");
+}
+
+/// A theme this jaw doesn't know, as a newer jawd may keep, is printed by `jaw settings` by its ID
+/// alone, with no name made up for it.
+#[test]
+fn jaw_settings_prints_a_theme_this_jaw_doesnt_know_by_its_id_alone() {
+    let jawd = scripted();
+    jawd.kept.lock().unwrap().settings = Some(json!({ "theme": "rose-pine-moon", "messages": "irc" }));
+    let said = crate::settings(&jawd.socket, &[]).unwrap();
+    assert!(said.starts_with("theme     rose-pine-moon (not one this jaw knows)\n"), "{said}");
+    assert!(said.contains("\nmessages  irc\n"), "{said}");
+}
+
 #[test]
 fn find_goes_through_the_client_and_its_answer_to_the_palette() {
     let jawd = scripted();

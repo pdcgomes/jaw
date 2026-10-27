@@ -273,12 +273,13 @@ fn link(phone: Option<String>) -> Result<()> {
 
 /// The terminal's settings as `jaw settings` prints them: those hello brings, or with `changes`,
 /// jawd's answer to one `settings.set` asking for them all. A setting named twice is refused before
-/// jawd is asked.
+/// jawd is asked, and a jawd whose hello brings no settings, one from before them, keeps none.
 fn settings(socket: &Path, changes: &[(String, String)]) -> Result<String> {
     let asked = asked_settings(changes)?;
     let (mut connection, welcome) = connect(socket)?;
+    let Some(said) = welcome.settings else { bail!(wire::OLDER) };
     let now = if changes.is_empty() {
-        welcome.settings.unwrap_or_default()
+        said
     } else {
         let kept = connection.call("settings.set", asked)?;
         serde_json::from_value::<jaw_proto::settings::SettingsKept>(kept)
@@ -316,8 +317,9 @@ fn asked_settings(changes: &[(String, String)]) -> Result<serde_json::Value> {
 fn describe_settings(settings: &jaw_proto::settings::Settings) -> String {
     let themes: Vec<&str> = jaw_proto::themes::all().iter().map(|t| t.id.as_str()).collect();
     let messages = jaw_proto::settings::Messages::ALL.map(|m| m.name());
+    let name = jaw_proto::themes::get(&settings.theme).map_or("not one this jaw knows", |t| t.name.as_str());
     [
-        format!("theme     {} ({})", settings.theme, jaw_proto::themes::or_default(&settings.theme).name),
+        format!("theme     {} ({name})", settings.theme),
         one_of(&themes),
         format!("messages  {}", settings.messages.name()),
         one_of(&messages),
@@ -413,5 +415,10 @@ mod tests {
         let nord = describe_settings(&Settings { theme: "nord".into(), messages: Messages::Irc });
         assert_eq!(nord, format!("theme     nord (Nord)\n{takes}\nmessages  irc\n          one of bubbles, irc"));
         assert!(defaults.lines().chain(nord.lines()).all(|line| line.len() <= 80), "{defaults}");
+        let unknown = describe_settings(&Settings { theme: "rose-pine-moon".into(), messages: Messages::Bubbles });
+        assert!(
+            unknown.starts_with("theme     rose-pine-moon (not one this jaw knows)\n"),
+            "no name made up:\n{unknown}"
+        );
     }
 }

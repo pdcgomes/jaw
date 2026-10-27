@@ -34,6 +34,9 @@ pub struct Panel {
 /// The strip of a theme's colours each row of the list shows, a cell to a colour.
 const SWATCHES: usize = 5;
 
+/// What the theme list says first under NO_COLOR, within the 30 columns the panel has inside.
+const NO_COLOURS: &str = "NO_COLOR is set, so no colours";
+
 /// The colours in a theme's strip: its ground, its accent, red, green and blue.
 fn strip(c: &Colors) -> [Rgb; SWATCHES] {
     [c.background, c.accent, c.red, c.green, c.blue]
@@ -146,6 +149,12 @@ impl View {
         f.render_widget(block, area);
         let (w, rows) = (inner.width as usize, inner.height as usize);
         let lines = match panel.choosing {
+            // Without colour every strip looks alike and a preview changes nothing, so the list
+            // says why above the themes.
+            Some(at) if self.no_color => {
+                let note = Line::from(Span::styled(fmt::fit(NO_COLOURS, w), Style::new().fg(t.comment)));
+                std::iter::once((note, false)).chain(self.theme_list(at, w, rows.saturating_sub(1))).collect()
+            }
             Some(at) => self.theme_list(at, w, rows),
             None => self.settings_rows(&panel, w),
         };

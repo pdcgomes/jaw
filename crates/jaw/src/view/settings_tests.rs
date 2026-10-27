@@ -371,6 +371,21 @@ fn the_theme_list_marks_the_row_with_the_keys_in_front_and_the_theme_kept_after_
     assert!(screen.contains("│ ▸ Catppuccin La… ✓ light ■■■■■ │"), "kept, it makes room for its tick:\n{screen}");
 }
 
+/// Under NO_COLOR every strip looks alike and a preview changes nothing on screen, so the theme
+/// list says so on its first line, whole within the panel, above the themes.
+#[test]
+fn under_no_color_the_theme_list_says_first_that_it_shows_no_colours() {
+    let (mut v, rx, _) = view(140, 40);
+    press(&mut v, &rx, "<c-,>\n");
+    assert!(!frame(&mut v).contains("NO_COLOR"), "with colour, it says nothing of it");
+    v.no_color = true;
+    let screen = frame(&mut v);
+    let lines: Vec<&str> = screen.lines().collect();
+    let top = lines.iter().position(|l| l.contains("╭ settings › theme ─")).unwrap_or_else(|| panic!("{screen}"));
+    assert!(lines[top + 1].contains("│ NO_COLOR is set, so no colours │"), "whole, first:\n{screen}");
+    assert!(lines[top + 2..].iter().any(|l| l.contains("│ ▸ Tokyo Night ✓    dark  ■■■■■ │")), "{screen}");
+}
+
 #[test]
 fn enter_switches_your_messages_too_asking_jawd_once() {
     let (mut v, rx, demo) = view(140, 40);

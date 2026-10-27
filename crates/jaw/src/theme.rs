@@ -1,7 +1,8 @@
 //! The look: ooze's, in one of Omarchy's themes, falling back to the nearest of the 256 standard
-//! colours where the terminal has no 24-bit colour. A theme is Omarchy's palette mapped onto what
-//! each colour is for; drawing asks `Theme` for a role, never for a hue, and each role is kept
-//! readable against the ground whatever the palette.
+//! colours where the terminal has no 24-bit colour, the selection and the surface kept off the
+//! colours drawn on them or beside them. A theme is Omarchy's palette mapped onto what each colour
+//! is for; drawing asks `Theme` for a role, never for a hue, and each role is kept readable against
+//! the ground whatever the palette.
 
 use jaw_proto::themes::{Colors, Mode, Rgb};
 use ratatui::style::Color;
@@ -153,10 +154,17 @@ pub struct Theme {
 impl Theme {
     fn new(r: &Roles, mode: Mode, truecolor: bool) -> Theme {
         let c = |h: u32| color(h, truecolor);
+        let (surface, selection) = match truecolor {
+            true => (c(r.surface), c(r.selection)),
+            false => {
+                let (surface, selection) = apart_256(r);
+                (Color::Indexed(surface), Color::Indexed(selection))
+            }
+        };
         Theme {
             bg: c(r.bg),
-            surface: c(r.surface),
-            selection: c(r.selection),
+            surface,
+            selection,
             fg: c(r.fg),
             text: c(r.text),
             muted: c(r.muted),
@@ -244,6 +252,51 @@ fn macos_major() -> u32 {
     0
 }
 
+/// The surface's and the selection's indices of the 256, each its nearest unless that's the index
+/// of a role drawn on it or beside it: the selection's dim text and borders, the surface's borders.
+/// Then it's the next-nearest that's none of those, nor the ground's or the other's, and keeps the
+/// ladder's order of contrast: ground, surface, selection, dim text.
+fn apart_256(r: &Roles) -> (u8, u8) {
+    let index = |h: u32| nearest_256((h >> 16) as u8, (h >> 8) as u8, h as u8);
+    let (bg, gutter, comment) = (index(r.bg), index(r.gutter), index(r.comment));
+    let on_bg = |i: u8| contrast(rgb_256(i), rgb_256(bg));
+    let (mut surface, mut selection) = (index(r.surface), index(r.selection));
+    if selection == comment || selection == gutter {
+        let free = |i: u8| ![bg, surface, gutter, comment].contains(&i);
+        let between = |i: u8| on_bg(surface) < on_bg(i) && on_bg(i) < on_bg(comment);
+        selection = next_256(r.selection, |i| free(i) && between(i)).unwrap_or(selection);
+    }
+    if surface == gutter {
+        let free = |i: u8| ![bg, selection, gutter].contains(&i);
+        let between = |i: u8| 1.0 < on_bg(i) && on_bg(i) < on_bg(selection);
+        surface = next_256(r.surface, |i| free(i) && between(i)).unwrap_or(surface);
+    }
+    (surface, selection)
+}
+
+/// The nearest index of the 256 to `h` that `takes`, by distance in RGB.
+fn next_256(h: u32, takes: impl Fn(u8) -> bool) -> Option<u8> {
+    let distance = |i: u8| {
+        let (a, b) = (h, rgb_256(i));
+        [16, 8, 0].map(|shift| (((a >> shift) & 0xff) as i32 - ((b >> shift) & 0xff) as i32).pow(2)).iter().sum::<i32>()
+    };
+    (16..=255).filter(|&i| takes(i)).min_by_key(|&i| distance(i))
+}
+
+/// The colour index `i` of xterm's 256 stands for, as hex: the 6×6×6 cube from 16, the grey ramp
+/// from 232. The first 16 are the terminal's own, which jaw never picks.
+fn rgb_256(i: u8) -> u32 {
+    const LEVELS: [u32; 6] = [0, 95, 135, 175, 215, 255];
+    match i {
+        232.. => (8 + 10 * u32::from(i - 232)) * 0x01_01_01,
+        16.. => {
+            let n = u32::from(i - 16);
+            (LEVELS[(n / 36) as usize] << 16) | (LEVELS[(n / 6 % 6) as usize] << 8) | LEVELS[(n % 6) as usize]
+        }
+        _ => 0,
+    }
+}
+
 /// The closest colour in xterm's 6×6×6 cube or its grey ramp.
 pub fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
     const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
@@ -275,6 +328,67 @@ mod tests {
         assert_eq!(nearest_256(255, 255, 255), 231);
         assert_eq!(nearest_256(0x1a, 0x1b, 0x26), 234, "Tokyo Night's background is a near-black grey");
         assert_eq!(nearest_256(0x7a, 0xa2, 0xf7), 111, "and its blue a soft blue");
+        for i in 16..=255 {
+            let h = rgb_256(i);
+            assert_eq!(nearest_256((h >> 16) as u8, (h >> 8) as u8, h as u8), i, "index {i} is its own colour");
+        }
+    }
+
+    /// Each role's index of the 256 as the theme draws it without 24-bit colour.
+    fn indices(id: &str) -> [(&'static str, u8); 5] {
+        let t = Theme::named(id, false);
+        [
+            ("ground", t.bg),
+            ("surface", t.surface),
+            ("selection", t.selection),
+            ("borders", t.gutter),
+            ("dim text", t.comment),
+        ]
+        .map(|(role, c)| match c {
+            Color::Indexed(i) => (role, i),
+            other => panic!("{id}: {role} is {other:?}, not one of the 256"),
+        })
+    }
+
+    #[test]
+    fn in_256_colours_the_selection_and_the_surface_keep_off_what_is_drawn_on_or_beside_them_in_the_ladders_order() {
+        for theme in jaw_proto::themes::all() {
+            let id = theme.id.as_str();
+            let [(_, bg), (_, surface), (_, selection), (_, gutter), (_, comment)] = indices(id);
+            for (role, i, apart) in
+                [("selection", selection, &[bg, surface, gutter, comment][..]), ("surface", surface, &[bg, gutter][..])]
+            {
+                assert!(!apart.contains(&i), "{id}: the {role} is index {i}, as what's drawn on or beside it is");
+            }
+            let c = |i: u8| contrast(rgb_256(i), rgb_256(bg));
+            assert!(
+                1.0 < c(surface) && c(surface) < c(selection) && c(selection) < c(comment),
+                "{id}: ground, surface {:.2}, selection {:.2}, dim text {:.2}",
+                c(surface),
+                c(selection),
+                c(comment)
+            );
+        }
+    }
+
+    #[test]
+    fn in_256_colours_only_the_four_themes_whose_nearest_collide_move_each_to_its_next_nearest() {
+        let moved = [
+            ("last-horizon", "selection", 239, 240),
+            ("osaka-jade", "selection", 237, 238),
+            ("retro-82", "selection", 23, 237),
+            ("white", "surface", 250, 251),
+        ];
+        for theme in jaw_proto::themes::all() {
+            let (id, r) = (theme.id.as_str(), Roles::of(&theme.colors));
+            let nearest = |h: u32| nearest_256((h >> 16) as u8, (h >> 8) as u8, h as u8);
+            for ((role, drawn), was) in indices(id).into_iter().zip([r.bg, r.surface, r.selection, r.gutter, r.comment])
+            {
+                let listed = moved.iter().find(|(theme, what, ..)| *theme == id && *what == role);
+                let want = listed.map_or((nearest(was), nearest(was)), |&(.., from, to)| (from, to));
+                assert_eq!((nearest(was), drawn), want, "{id}: {role}");
+            }
+        }
     }
 
     #[test]

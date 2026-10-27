@@ -133,6 +133,9 @@ pub struct Wire {
     starting: Option<Starting>,
 }
 
+/// What a jawd from before settings is said to be when it's asked to keep them.
+pub const OLDER: &str = "this jawd is older and keeps no settings; restart it";
+
 /// What to say about a request jawd turned down: one it doesn't serve yet comes later.
 fn why_not(failure: &Failure, what: &str) -> String {
     match failure {
@@ -393,7 +396,11 @@ impl Wire {
             Asked::Settings if matches!(failure, Failure::Unreachable) => {
                 Some(Update::SettingsRefused("jawd isn't connected; try again in a moment".into()))
             }
-            Asked::Settings => Some(Update::SettingsRefused(why_not(failure, "settings"))),
+            // A jawd from before settings doesn't know settings.set.
+            Asked::Settings if matches!(failure, Failure::Jawd(e) if e.code == code::UNKNOWN_METHOD) => {
+                Some(Update::SettingsRefused(OLDER.into()))
+            }
+            Asked::Settings => Some(Update::SettingsRefused(failure.to_string())),
             Asked::Info(message) => Some(Update::Info { message, info: Err(why_not(failure, "a message's info")) }),
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
             Asked::Folders | Asked::Roster(_) => None,
