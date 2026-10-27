@@ -45,8 +45,8 @@ pub struct Probe {
     pub frames: u64,
     /// When the first frame with the open chat's messages was drawn.
     pub first: Option<Instant>,
-    /// Until then: how long the loop waited for something to come, and the frames it drew only
-    /// because a frame had come due since the last, rather than at once.
+    /// Until then: how long the loop waited for something to come, and how often it waited, with a
+    /// frame to draw, for that frame to come due.
     pub waited: Duration,
     pub paced: u64,
     pub last: Option<Instant>,
@@ -77,16 +77,20 @@ where
     let mut opening: Option<(String, Instant)> = None;
     loop {
         let now = Instant::now();
+        let pacing = view.dirty && !view.first_frame_waits();
         let deadline = if !waiting.is_empty() {
             Some(now)
         } else {
             let wake = Duration::from_millis((view.next_wake() - view.now()).max(0) as u64);
             let mut at = now + wake;
-            if view.dirty && !view.first_frame_waits() {
+            if pacing {
                 at = at.min(last_frame.map_or(now, |t| t + FRAME));
             }
             Some(at)
         };
+        if probe.first.is_none() && pacing && deadline.is_some_and(|at| at > now) {
+            probe.paced += 1;
+        }
         let first = match deadline {
             Some(at) if at <= now => rx.try_recv().ok(),
             Some(at) => match rx.recv_timeout(at - now) {
@@ -153,9 +157,6 @@ where
         view.tick();
         let due = last_frame.is_none_or(|t| t.elapsed() >= FRAME);
         if view.dirty && !view.first_frame_waits() && (!keys.is_empty() || view.awaited || due) {
-            if probe.first.is_none() && last_frame.is_some() && keys.is_empty() && !view.awaited {
-                probe.paced += 1;
-            }
             view.dirty = false;
             view.awaited = false;
             let sent = view.take_writes();
