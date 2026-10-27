@@ -505,6 +505,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn exactly_16_panes_and_16_kib_are_kept_and_one_past_each_is_error_5_with_nothing_quarantined() {
+        let home = tempfile::tempdir().unwrap();
+        let (_store, layouts) = opened(home.path(), &[]).await;
+        let tree =
+            |n: u32| (1..n).fold(chat("0@g.us"), |tree, k| split(How::Down, 500, tree, chat(&format!("{k}@g.us"))));
+        let sixteen = layouts.set("jaw", 1, asked(1, &layout(0, tree(16)))).await.unwrap();
+        assert_eq!(sixteen.kept, Some(true), "16 panes");
+        let e = layouts.set("jaw", 1, asked(2, &layout(0, tree(17)))).await.unwrap_err();
+        assert_eq!(e.code, code::LIMIT, "{}", e.message);
+        // One pane whose JID makes the compact JSON exactly BYTES_MOST bytes, then one byte more.
+        let sized = |bytes: usize| {
+            let empty = serde_json::to_string(&layout(0, chat("@s.whatsapp.net"))).unwrap().len();
+            layout(0, chat(&format!("{}@s.whatsapp.net", "9".repeat(bytes - empty))))
+        };
+        assert_eq!(serde_json::to_string(&sized(BYTES_MOST)).unwrap().len(), BYTES_MOST);
+        let at_most = layouts.set("jaw", 1, asked(3, &sized(BYTES_MOST))).await.unwrap();
+        assert_eq!(at_most.kept, Some(true), "16,384 bytes");
+        let e = layouts.set("jaw", 1, asked(4, &sized(BYTES_MOST + 1))).await.unwrap_err();
+        assert_eq!(e.code, code::LIMIT, "{}", e.message);
+        assert_eq!(count(home.path(), "quarantine"), 0, "refused before the writer, never quarantined");
+        assert_eq!(layouts.status().refused, 2);
+        assert_eq!(layouts.status().largest_bytes, BYTES_MOST as u64);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_layout_asked_again_once_jawd_has_started_again_is_pushed_to_nobody() {
         let home = tempfile::tempdir().unwrap();
         let (store, layouts) = opened(home.path(), &[ANA, CLIMBING]).await;

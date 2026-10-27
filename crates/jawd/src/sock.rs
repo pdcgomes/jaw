@@ -1325,6 +1325,58 @@ mod tests {
             "how": "across", "first": 500, "a": { "chat": ANA }, "b": { "chat": gone } } } })
     }
 
+    /// A line read within `wait`: the line, the end of the connection, or nothing in time.
+    enum Heard {
+        Line(Value),
+        Closed,
+        Nothing,
+    }
+
+    fn heard(lines: &mut Lines, wait: Duration) -> Heard {
+        // macOS refuses a timeout once both sides are shut; the one set before stays.
+        let _ = lines.reader.get_ref().set_read_timeout(Some(wait));
+        let mut line = String::new();
+        match lines.reader.read_line(&mut line) {
+            Ok(0) => Heard::Closed,
+            Ok(_) => Heard::Line(serde_json::from_str(&line).unwrap()),
+            Err(_) => Heard::Nothing,
+        }
+    }
+
+    /// Everything the connection hears until jawd closes it, or nothing comes for `wait`: the
+    /// answers' ids, the pushes' versions, and whether it was closed.
+    fn to_the_end(lines: &mut Lines, wait: Duration) -> (Vec<u64>, Vec<u64>, bool) {
+        let (mut answers, mut pushes) = (Vec::new(), Vec::new());
+        loop {
+            match heard(lines, wait) {
+                Heard::Line(line) => match line["id"].as_u64() {
+                    Some(id) => answers.push(id),
+                    None => pushes.push(line["params"]["v"].as_u64().unwrap_or_else(|| panic!("{line}"))),
+                },
+                Heard::Closed => return (answers, pushes, true),
+                Heard::Nothing => return (answers, pushes, false),
+            }
+        }
+    }
+
+    /// Keeps wide layouts from `setter` until a push to another of its interface's connections
+    /// waits for room, then `more` after it; says the last version kept.
+    fn fill_then(setter: &mut Lines, more: u64) -> u64 {
+        let mut v = 0;
+        while setter.waiting() == 0 {
+            v += 1;
+            assert!(v <= 400, "no push waited for room");
+            let answer = setter.call("layout.set", json!({ "v": v, "layout": wide() }));
+            assert_eq!(answer["result"]["kept"], true, "{answer}");
+        }
+        for _ in 0..more {
+            v += 1;
+            let answer = setter.call("layout.set", json!({ "v": v, "layout": wide() }));
+            assert_eq!(answer["result"]["kept"], true, "{answer}");
+        }
+        v
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_layout_kept_is_pushed_to_its_interfaces_other_connections_and_another_interface_can_read_it() {
         let (_home, socket) = serving_layouts().await;
@@ -1471,6 +1523,46 @@ mod tests {
             // Named anew, it has nothing kept of its own.
             let own = jaw.call("layout.get", Value::Null);
             assert_eq!(own["result"], json!({ "interface": "jaw-mac", "v": 0 }));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_half_closed_connection_owed_nothing_with_a_push_waiting_is_closed_with_nothing_left_waiting() {
+        let (_home, socket) = serving_layouts().await;
+        tokio::task::spawn_blocking(move || {
+            let mut slow = Lines::open(&socket, "jaw");
+            let mut setter = Lines::open(&socket, "jaw");
+            fill_then(&mut setter, 5);
+            slow.reader.get_ref().set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            slow.writer.shutdown(std::net::Shutdown::Write).unwrap();
+            let (answers, pushes, closed) = to_the_end(&mut slow, Duration::from_secs(20));
+            assert!(answers.is_empty());
+            assert!(pushes.is_sorted_by(|a, b| a < b), "{pushes:?}");
+            assert!(closed, "jawd closed it");
+            assert_eq!(setter.waiting(), 0);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_named_anew_is_pushed_its_new_interfaces_layouts_and_not_its_old_ones() {
+        let (_home, socket) = serving_layouts().await;
+        tokio::task::spawn_blocking(move || {
+            let mut renamed = Lines::open(&socket, "jaw");
+            let hello = renamed.call("hello", json!({ "protocol": PROTOCOL, "client": "jaw-mac", "version": "0" }));
+            assert!(hello.get("result").is_some(), "{hello}");
+            let mut jaw = Lines::open(&socket, "jaw");
+            let mut mac = Lines::open(&socket, "jaw-mac");
+            assert_eq!(jaw.call("layout.set", json!({ "v": 5, "layout": halves(5) }))["result"]["kept"], true);
+            assert_eq!(mac.call("layout.set", json!({ "v": 7, "layout": halves(7) }))["result"]["kept"], true);
+            let mut pushes = Vec::new();
+            while let Some(line) = renamed.within(Duration::from_secs(1)) {
+                pushes.push((line["params"]["interface"].clone(), line["params"]["v"].clone()));
+            }
+            assert_eq!(pushes, [(json!("jaw-mac"), json!(7))], "the new name's layout, and not the old one's");
         })
         .await
         .unwrap();

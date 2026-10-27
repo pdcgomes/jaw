@@ -157,6 +157,23 @@ mod tests {
         assert!(typed.is_err(), "a version that isn't a number, which only STRICT refuses");
     }
 
+    #[test]
+    fn the_tables_checks_hold_at_their_edges() {
+        let mut db = Connection::open_in_memory().unwrap();
+        schema::migrate(&mut db).unwrap();
+        let insert = |interface: &str, key: &str, value: &str| {
+            db.execute(
+                "INSERT INTO interface_state (interface, key, value, v, updated_at) VALUES (?1, ?2, ?3, 1, 0)",
+                params![interface, key, value],
+            )
+        };
+        assert!(insert("a", "layout", &format!("\"{}\"", "x".repeat(16_382))).is_ok(), "16,384 bytes");
+        assert!(insert("b", "layout", &format!("\"{}\"", "x".repeat(16_383))).is_err(), "16,385 bytes");
+        assert!(insert("c", "", "{}").is_err(), "no key");
+        assert!(insert("d", &"k".repeat(65), "{}").is_err(), "a key of 65 bytes");
+        assert!(insert("e", &"k".repeat(64), "{}").is_ok(), "a key of 64 bytes");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_layout_that_fails_to_be_written_is_quarantined_with_its_json_and_asking_again_keeps_it() {
         let home = tempfile::tempdir().unwrap();
