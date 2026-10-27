@@ -108,7 +108,9 @@ public enum Mimic {
 }
 
 /// The Mimic drawn at a whole multiple of its pixels. It chomps for 1.2 s when told to, its frames
-/// stepped every 150 ms as the terminal steps them, unless Reduce Motion is on.
+/// stepped every 150 ms as the terminal steps them, unless `Motion` says motion is reduced. It draws
+/// its pixels itself rather than giving them to its layer, whose filter a picture taken with
+/// `cacheDisplay` ignores, so a picture of it is as crisp as the screen.
 public final class MimicView: NSView {
     public var look: Mimic.Look = .awake {
         didSet { show() }
@@ -121,13 +123,13 @@ public final class MimicView: NSView {
     var chompTimer: Timer?
     var chompUntil: Date?
     var shut = false
+    /// The look drawn: `look`, or the chomp's frame while it chomps.
+    var shown = Mimic.Look.awake
 
     public init(scale: CGFloat = 4) {
         self.scale = scale
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.magnificationFilter = .nearest
-        layer?.contentsGravity = .resizeAspect
         show()
     }
 
@@ -140,13 +142,29 @@ public final class MimicView: NSView {
         NSSize(width: Mimic.size.width * scale, height: Mimic.size.height * scale)
     }
 
-    func show(_ shown: Mimic.Look? = nil) {
-        layer?.contents = Mimic.image(shown ?? look)
+    func show(_ frame: Mimic.Look? = nil) {
+        shown = frame ?? look
+        needsDisplay = true
+    }
+
+    /// At the largest whole multiple of its pixels that fits, centred, each pixel a whole square.
+    override public func draw(_: NSRect) {
+        guard let image = Mimic.image(shown), let context = NSGraphicsContext.current else { return }
+        let multiple = floor(min(bounds.width / Mimic.size.width, bounds.height / Mimic.size.height))
+        guard multiple >= 1 else { return }
+        let size = CGSize(width: Mimic.size.width * multiple, height: Mimic.size.height * multiple)
+        context.saveGraphicsState()
+        defer { context.restoreGraphicsState() }
+        context.imageInterpolation = .none
+        context.cgContext.interpolationQuality = .none
+        context.cgContext.draw(image, in: CGRect(x: (bounds.midX - size.width / 2).rounded(.down),
+                                                 y: (bounds.midY - size.height / 2).rounded(.down),
+                                                 width: size.width, height: size.height))
     }
 
     /// Chomps, as when a message comes into an empty chat or linking is done.
     public func chomp() {
-        guard look == .awake, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        guard look == .awake, !Motion.reduced() else { return }
         chompUntil = Date().addingTimeInterval(1.2)
         chompTimer?.invalidate()
         shut = false
