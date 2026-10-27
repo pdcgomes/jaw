@@ -205,6 +205,18 @@ SELECT coalesce(k.id, c.id) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
 
+-- src/send/chat_actions.rs
+SELECT coalesce(k.id, c.id), coalesce(k.kind, c.kind) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n LEFT JOIN chats k ON k.n = m.keep WHERE c.id = ?1
+    SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
+-- src/send/chat_actions.rs
+SELECT m.id, m.at, m.mine, j.jid FROM chats c JOIN messages m ON m.n = c.last_message LEFT JOIN person_jids j ON j.n = m.sender WHERE c.id = ?1
+    SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
 -- src/send/info.rs
 SELECT n, kind, person, community, ephemeral FROM chats WHERE id = ?1
     SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)

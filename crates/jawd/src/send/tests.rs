@@ -7,6 +7,8 @@ use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, watch};
+#[expect(unused_imports)]
+use wa_proto::wa_web_protobuf_sync_action::{PinAction, SyncActionValue};
 
 use super::*;
 use crate::engine::demo::{self, DemoEngine, Replies, World};
@@ -2096,8 +2098,6 @@ async fn deleting_for_everyone_leaves_you_deleted_this_message_once_whatsapp_has
 
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_for_you_is_done_at_once_and_your_other_devices_are_told() {
-    use wa_proto::wa_web_protobuf_sync_action::SyncActionValue;
-
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
     running.members(CLIMBING, &[RUI]).await;
@@ -3818,6 +3818,14 @@ fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
             actions::TARGET_ANYWHERE,
             "SCAN c\nSEARCH m USING INDEX messages_by_id (chat=? AND id=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)",
         ),
+        (
+            chat_actions::CHAT_TO_ACT_ON,
+            "SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+        ),
+        (
+            chat_actions::NEWEST,
+            "SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
+        ),
     ];
     for (sql, expected) in statements {
         let mut explain = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
@@ -3856,4 +3864,254 @@ async fn others_typing_is_heard_only_while_whatsapp_has_been_told_youre_online_a
     drop(terminal);
     until(&mut hearing, false).await;
     assert_eq!(running.online(), [false, true, true, false], "once it's been told you're away");
+}
+
+/// The app-state patches the engine was asked to send, in order.
+fn patches_sent(running: &Running) -> Vec<pb::AppStatePatch> {
+    asked(running, |k| match k {
+        pb::command::Kind::AppStatePatch(patch) => Some(patch),
+        _ => None,
+    })
+}
+
+/// The collections the engine was asked to fetch again, each fetch's names.
+#[expect(dead_code)]
+fn fetched_again(running: &Running) -> Vec<Vec<String>> {
+    asked(running, |k| match k {
+        pb::command::Kind::AppStateResync(resync) => Some(resync.names),
+        _ => None,
+    })
+}
+
+fn value_of(patch: &pb::AppStatePatch) -> SyncActionValue {
+    SyncActionValue::decode(patch.value.as_slice()).unwrap()
+}
+
+/// Chat `id` as the chat list shows it.
+async fn chat_row(running: &Running, id: &str) -> read::ChatRow {
+    let id = id.to_string();
+    running
+        .query(move |db| {
+            let n = read::chat_n(db, &id)?.expect("a chat jawd has");
+            Ok(read::chat(db, n)?.expect("its row"))
+        })
+        .await
+}
+
+/// When chat `id` was pinned, as jaw.db keeps it; 0 when it isn't.
+async fn pinned_at(running: &Running, id: &str) -> i64 {
+    let id = id.to_string();
+    running.query(move |db| Ok(db.query_row("SELECT pinned FROM chats WHERE id = ?1", [id], |r| r.get(0))?)).await
+}
+
+/// Waits until WhatsApp's echo of `patch` through app state has been converted, which keeps its value
+/// as the latest for its index.
+async fn until_echoed(running: &Running, patch: &pb::AppStatePatch) {
+    let (key, value) = (serde_json::to_string(&patch.index).unwrap(), patch.value.clone());
+    eventually(running, "the patch's echo", move |db| {
+        let kept: Option<Vec<u8>> =
+            db.query_row("SELECT value FROM app_state WHERE key = ?1", [&key], |r| r.get(0)).optional()?;
+        Ok(kept.as_ref() == Some(&value))
+    })
+    .await;
+}
+
+/// Waits until every patch asked for so far has been answered and the echo of the last has been
+/// converted, and with it every earlier one's. An echo converted after the next action on its chat
+/// sets the row back as its patch had it, until the later patch's own echo comes.
+async fn until_all_echoed(running: &Running) {
+    until_stored(running).await;
+    until_echoed(running, patches_sent(running).last().expect("a patch sent")).await;
+}
+
+/// Fills the outbox with `rows` reactions waiting to send, which nothing sends.
+fn fill_outbox(home: &Path, rows: i64) {
+    let mut db = Connection::open(home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let tx = db.transaction().unwrap();
+    for n in 0..rows {
+        tx.execute(
+            "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'reaction', x'', 0, 0)",
+            rusqlite::params![ANA, format!("w{n}")],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinning_a_chat_pins_it_now_tells_your_other_devices_and_its_echo_changes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let before = chat_row(&running, ANA).await.v;
+    let asked_at = now_ms();
+    assert_eq!(running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap(), json!({}));
+    let pinned = chat_row(&running, ANA).await;
+    let at = pinned_at(&running, ANA).await;
+    assert!(pinned.pinned && pinned.v > before && at >= asked_at, "pinned now, with a new version");
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        (sent[0].name.as_str(), sent[0].index.as_slice(), sent[0].version),
+        ("regular_low", &["pin_v1".to_string(), ANA.to_string()][..], 5)
+    );
+    let value = value_of(&sent[0]);
+    assert_eq!((value.timestamp, value.pin_action.unwrap().pinned), (Some(at), Some(true)), "the time jawd wrote");
+    until_echoed(&running, &sent[0]).await;
+    let echoed = chat_row(&running, ANA).await;
+    assert_eq!((echoed.v, pinned_at(&running, ANA).await), (pinned.v, at), "the echo found it as it was");
+    assert_eq!(running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap(), json!({}));
+    assert_eq!(chat_row(&running, ANA).await.v, pinned.v, "asked again, nothing changes");
+    assert_eq!((patches_sent(&running).len(), running.store.count("outbox").unwrap()), (1, 0), "nothing goes");
+    running.call("chat.pin", json!({ "chat": ANA, "pinned": false })).await.unwrap();
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    assert_eq!((sent.len(), value_of(&sent[1]).pin_action.unwrap().pinned), (2, Some(false)));
+    assert!(!chat_row(&running, ANA).await.pinned);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn at_most_three_chats_are_pinned_and_archived_ones_dont_count() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let chats: Vec<String> = (1..=5).map(|n| format!("35191000001{n}@s.whatsapp.net")).collect();
+    let ids: Vec<&str> = chats.iter().map(String::as_str).collect();
+    running.chats(&ids).await;
+    // Pinned on the phone and archived there, as jaw shows it.
+    let archived = Chat { id: chats[4].clone(), pinned: Some(1_000), archived: Some(true), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(archived)]).await.unwrap();
+    for id in &ids[..3] {
+        running.call("chat.pin", json!({ "chat": id, "pinned": true })).await.unwrap();
+    }
+    let fourth = running.call("chat.pin", json!({ "chat": ids[3], "pinned": true })).await.unwrap_err();
+    assert_eq!((fourth.code, fourth.data), (code::LIMIT, Some(json!({ "limit": "pinned", "most": 3 }))));
+    assert!(!chat_row(&running, ids[3]).await.pinned, "not pinned");
+    until_stored(&running).await;
+    assert_eq!(patches_sent(&running).len(), 3, "and nothing sent for it");
+    running.call("chat.pin", json!({ "chat": ids[0], "pinned": false })).await.unwrap();
+    running.call("chat.pin", json!({ "chat": ids[3], "pinned": true })).await.unwrap();
+    assert!(chat_row(&running, ids[3]).await.pinned, "once one is unpinned");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archiving_a_pinned_chat_unpins_it_and_tells_your_other_devices_in_two_patches_in_order() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.members(CLIMBING, &[RUI]).await;
+    let at = now_ms() - 60_000;
+    running.arrives(CLIMBING, RUI, "g1", at).await;
+    running.call("chat.pin", json!({ "chat": CLIMBING, "pinned": true })).await.unwrap();
+    until_all_echoed(&running).await;
+    running.call("chat.archive", json!({ "chat": CLIMBING, "archived": true })).await.unwrap();
+    let group = chat_row(&running, CLIMBING).await;
+    assert!(group.archived && !group.pinned, "archived, and unpinned as WhatsApp's apps do");
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    let kinds: Vec<(&str, i32)> = sent.iter().map(|p| (p.index[0].as_str(), p.version)).collect();
+    assert_eq!(kinds, [("pin_v1", 5), ("archive", 3), ("pin_v1", 5)], "the archive, then the unpin");
+    let archive = value_of(&sent[1]).archive_chat_action.unwrap();
+    let named = archive.message_range.unwrap();
+    let key = named.messages[0].key.clone().unwrap();
+    assert_eq!((archive.archived, named.last_message_timestamp), (Some(true), Some(at / 1000)));
+    assert_eq!((key.id.as_deref(), key.participant.as_deref()), (Some("g1"), Some(RUI)), "naming its newest");
+    assert_eq!(value_of(&sent[2]).pin_action.unwrap().pinned, Some(false));
+    until_echoed(&running, &sent[2]).await;
+    assert_eq!(chat_row(&running, CLIMBING).await.v, group.v, "the echoes changed nothing");
+    running.call("chat.archive", json!({ "chat": CLIMBING, "archived": false })).await.unwrap();
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    assert_eq!((sent.len(), value_of(&sent[3]).archive_chat_action.unwrap().archived), (4, Some(false)));
+    let back = chat_row(&running, CLIMBING).await;
+    assert!(!back.archived && !back.pinned, "brought back with one patch, and still unpinned");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mute_lasts_until_a_time_or_for_ever_and_a_time_already_past_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let until = now_ms() + 8 * 3_600_000;
+    running.call("chat.mute", json!({ "chat": ANA, "until": until })).await.unwrap();
+    assert_eq!(chat_row(&running, ANA).await.muted_until, Some(until));
+    until_all_echoed(&running).await;
+    running.call("chat.mute", json!({ "chat": ANA, "until": -1 })).await.unwrap();
+    let forever = crate::convert::app_state::FOREVER;
+    assert_eq!(chat_row(&running, ANA).await.muted_until, Some(forever), "for ever");
+    until_all_echoed(&running).await;
+    running.call("chat.mute", json!({ "chat": ANA, "until": i64::MAX })).await.unwrap();
+    running.call("chat.mute", json!({ "chat": ANA, "until": null })).await.unwrap();
+    assert_eq!(chat_row(&running, ANA).await.muted_until, None, "unmuted");
+    let past = running.call("chat.mute", json!({ "chat": ANA, "until": now_ms() - 1_000 })).await.unwrap_err();
+    assert_eq!((past.code, past.data), (code::INVALID_PARAMS, Some(json!({ "param": "until" }))));
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    let ends: Vec<(Option<bool>, Option<i64>)> = sent
+        .iter()
+        .map(|p| {
+            let action = value_of(p).mute_action.unwrap();
+            (action.muted, action.mute_end_timestamp)
+        })
+        .collect();
+    assert_eq!(
+        ends,
+        [(Some(true), Some(until)), (Some(true), Some(-1)), (Some(false), None)],
+        "the largest time was for ever already"
+    );
+    assert!(sent.iter().all(|p| (p.name.as_str(), p.version) == ("regular_high", 2)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_jawd_doesnt_have_is_not_found_and_a_communitys_own_row_is_not_allowed() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let community = "120363000000000009@g.us";
+    let own = Chat { id: community.into(), kind: Some("community"), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(own)]).await.unwrap();
+    for (chat, expected) in [("351999999999@s.whatsapp.net", code::NOT_FOUND), (community, code::NOT_ALLOWED)] {
+        for (method, params) in [
+            ("chat.pin", json!({ "chat": chat, "pinned": true })),
+            ("chat.archive", json!({ "chat": chat, "archived": true })),
+            ("chat.mute", json!({ "chat": chat, "until": -1 })),
+        ] {
+            assert_eq!(running.call(method, params).await.unwrap_err().code, expected, "{method} {chat}");
+        }
+    }
+    assert_eq!(running.store.count("outbox").unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_action_needs_a_linked_account() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.chats(&[ANA]).await;
+    for (method, params) in [
+        ("chat.pin", json!({ "chat": ANA, "pinned": true })),
+        ("chat.archive", json!({ "chat": ANA, "archived": true })),
+        ("chat.mute", json!({ "chat": ANA, "until": null })),
+    ] {
+        assert_eq!(running.call(method, params).await.unwrap_err().code, code::NOT_LINKED, "{method}");
+    }
+    assert_eq!(running.store.count("outbox").unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn past_a_thousand_waiting_a_chat_action_is_refused_and_nothing_is_written() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA, CLIMBING]).await;
+    running.call("chat.pin", json!({ "chat": CLIMBING, "pinned": true })).await.unwrap();
+    until_stored(&running).await;
+    until_offline(&running).await;
+    fill_outbox(home.path(), 999);
+    let full = |waiting: u64| Some(json!({ "limit": "outbox", "waiting": waiting, "failed": 0 }));
+    let refused = running.call("chat.archive", json!({ "chat": CLIMBING, "archived": true })).await.unwrap_err();
+    assert_eq!((refused.code, refused.data), (code::LIMIT, full(999)), "archiving a pinned chat takes two places");
+    let group = chat_row(&running, CLIMBING).await;
+    assert!(group.pinned && !group.archived, "nothing written");
+    running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
+    let refused = running.call("chat.mute", json!({ "chat": ANA, "until": -1 })).await.unwrap_err();
+    assert_eq!((refused.code, refused.data), (code::LIMIT, full(1_000)));
+    assert_eq!(chat_row(&running, ANA).await.muted_until, None);
 }

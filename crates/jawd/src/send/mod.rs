@@ -10,9 +10,11 @@
 //! name their people as WhatsApp writes them (`quote`); reactions, edits and deletions go as
 //! messages of their own through the outbox (`actions`); `forward` sends messages again as new
 //! ones of yours (`forward`); `message.info` gives each recipient's receipts, and `chat.info` a
-//! chat's members (`info`). Polls (`poll`), places (`places`), events (`events`) and contact cards
-//! (`contact`) go as text does. Text with a URL goes with its page's preview when the page answers
-//! in time (`link`), and the next message to its chat waits for it, so none overtakes another.
+//! chat's members (`info`); and what you set on a chat, or a star, goes to your other devices by
+//! app state through the outbox (`chat_actions`). Polls (`poll`), places (`places`), events
+//! (`events`) and contact cards (`contact`) go as text does. Text with a URL goes with its page's
+//! preview when the page answers in time (`link`), and the next message to its chat waits for it,
+//! so none overtakes another.
 
 mod actions;
 pub mod bench;
@@ -43,8 +45,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jaw_proto::media::SendMedia;
 use jaw_proto::send::{
-    ChatInfo, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, PollVote, React, Read, SendContact, SendEvent,
-    SendLocation, SendPoll, SendRetry, SendText, Typing,
+    ChatArchive, ChatInfo, ChatMute, ChatPin, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, PollVote, React,
+    Read, SendContact, SendEvent, SendLocation, SendPoll, SendRetry, SendText, Typing,
 };
 use jaw_proto::{Error, Push, code};
 use rusqlite::Connection;
@@ -136,6 +138,8 @@ struct Inner {
     /// time one of their copies changes, which a message with a file waits for.
     media: Option<Media>,
     copies: watch::Receiver<u64>,
+    /// The account and the connection as sync keeps them, for what needs a linked account.
+    live: Shared,
     /// Stops the next attempt that withdraws an action, between reading its row and withdrawing it:
     /// it notifies the first when it stops, and goes on once the second is notified.
     #[cfg(test)]
@@ -202,6 +206,7 @@ impl Sending {
             pushes: notices,
             media,
             copies,
+            live,
             #[cfg(test)]
             pausing: Pause::default(),
             #[cfg(test)]
@@ -265,7 +270,7 @@ impl Sending {
     }
 
     /// Answers one of the sending methods: `send.text`, `send.retry`, `chat.start`, `draft.set`,
-    /// `read`, `typing`, `chat.info` and the actions on a message.
+    /// `read`, `typing`, `chat.info`, the actions on a message and the chat actions.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         let inner = &self.inner;
         match method {
@@ -287,6 +292,9 @@ impl Sending {
             "delete" => actions::delete(inner, params_of::<Delete>(method, params)?).await,
             "forward" => result(forward::forward(inner, params_of::<Forward>(method, params)?).await?),
             "message.info" => result(info::message_info(inner, params_of::<MessageInfo>(method, params)?).await?),
+            "chat.pin" => chat_actions::pin(inner, params_of::<ChatPin>(method, params)?).await,
+            "chat.archive" => chat_actions::archive(inner, params_of::<ChatArchive>(method, params)?).await,
+            "chat.mute" => chat_actions::mute(inner, params_of::<ChatMute>(method, params)?).await,
             _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
         }
     }
@@ -311,6 +319,9 @@ impl Sending {
         "delete",
         "forward",
         "message.info",
+        "chat.pin",
+        "chat.archive",
+        "chat.mute",
     ];
 }
 

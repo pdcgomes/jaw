@@ -5,16 +5,33 @@
 //! builders build it and carries the time jawd wrote, so WhatsApp's echo of it through app state
 //! finds the row as it is.
 
+use std::sync::Arc;
+
+use jaw_proto::send::{ChatArchive, ChatMute, ChatPin};
+use jaw_proto::{AccountState, Error, code};
 use prost::Message as _;
+use rusqlite::OptionalExtension;
+use serde_json::Value;
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobuf_sync_action::{
     ArchiveChatAction, MarkChatAsReadAction, MuteAction, PinAction, StarAction, SyncActionMessage,
     SyncActionMessageRange, SyncActionValue,
 };
 
-use super::actions::Target;
+use super::actions::{self, Target};
+use super::outbox::{bad_param, message_id, queue};
+use super::{Inner, durably, internal, no_chat, now_ms, query};
 use crate::convert::app_state::FOREVER;
 use crate::engine::pb;
+use crate::store::Change;
+use crate::store::chat_actions::{Act, Acted, Does, Outcome, PINNED_MOST, Patch, Setting};
+
+/// A chat an action names: the chat it's being merged into, or itself, with its kind.
+pub(super) const CHAT_TO_ACT_ON: &str = "SELECT coalesce(k.id, c.id), coalesce(k.kind, c.kind) FROM chats c
+    LEFT JOIN chat_merges m ON m.gone = c.n LEFT JOIN chats k ON k.n = m.keep WHERE c.id = ?1";
+/// A chat's newest message, with who sent it.
+pub(super) const NEWEST: &str = "SELECT m.id, m.at, m.mine, j.jid FROM chats c JOIN messages m ON m.n = c.last_message
+    LEFT JOIN person_jids j ON j.n = m.sender WHERE c.id = ?1";
 
 /// A chat's newest message, which an archive or a read names.
 #[derive(Clone, Debug)]
@@ -96,6 +113,127 @@ pub(super) fn range(chat: &str, group: bool, newest: Option<&Newest>, at: i64) -
         last_message_timestamp: Some(seconds),
         messages: vec![SyncActionMessage { key: Some(key), timestamp: Some(seconds) }],
         ..Default::default()
+    }
+}
+
+/// The chat an action names.
+struct Named {
+    /// Its JID as jaw keeps it.
+    id: String,
+    group: bool,
+    newest: Option<Newest>,
+}
+
+/// Refuses what needs a linked account while none is.
+fn linked(inner: &Inner) -> Result<(), Error> {
+    match inner.live.lock().expect("live state").account.state {
+        AccountState::Linked => Ok(()),
+        AccountState::Unlinked | AccountState::Linking => {
+            Err(Error::new(code::NOT_LINKED, "the account isn't linked; link it first"))
+        }
+    }
+}
+
+/// The chat `chat` names, with its newest message: error 3 for a chat jawd doesn't have, and 4 for
+/// a community's own row, whose groups carry these.
+async fn named(inner: &Inner, chat: &str) -> Result<Named, Error> {
+    let asked = chat.to_string();
+    let found = query(inner, move |db| {
+        let Some((id, kind)) = db
+            .prepare_cached(CHAT_TO_ACT_ON)?
+            .query_row([&asked], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let newest = db
+            .prepare_cached(NEWEST)?
+            .query_row([&id], |r| Ok(Newest { id: r.get(0)?, at: r.get(1)?, mine: r.get(2)?, sender: r.get(3)? }))
+            .optional()?;
+        Ok(Some((id, kind, newest)))
+    })
+    .await?;
+    match found {
+        None => Err(no_chat(chat)),
+        Some((_, kind, _)) if kind == "community" => Err(community()),
+        Some((id, kind, newest)) => Ok(Named { id, group: matches!(kind.as_str(), "group" | "announcement"), newest }),
+    }
+}
+
+fn community() -> Error {
+    Error::new(code::NOT_ALLOWED, "a community's own row has none of these; its groups do")
+}
+
+fn pinned_most() -> Error {
+    let mut error = Error::new(
+        code::LIMIT,
+        format!("{PINNED_MOST} chats are pinned already, as many as WhatsApp allows; unpin one first"),
+    );
+    error.data = Some(serde_json::json!({ "limit": "pinned", "most": PINNED_MOST }));
+    error
+}
+
+/// A patch to queue, with an ID of its own for its outbox row.
+fn queued(patch: pb::AppStatePatch) -> Result<Patch, Error> {
+    let id = message_id().map_err(|e| internal("make an ID for the patch", e.into()))?;
+    Ok(Patch { id, raw: patch.encode_to_vec() })
+}
+
+pub(super) async fn pin(inner: &Arc<Inner>, pin: ChatPin) -> Result<Value, Error> {
+    linked(inner)?;
+    let chat = named(inner, &pin.chat).await?;
+    let at = now_ms();
+    let setting = Setting::Pin { at: pin.pinned.then_some(at), patch: queued(pinned(&chat.id, pin.pinned, at))? };
+    act(inner, chat.id, Does::Set(setting), if pin.pinned { "pin the chat" } else { "unpin the chat" }).await
+}
+
+pub(super) async fn archive(inner: &Arc<Inner>, archive: ChatArchive) -> Result<Value, Error> {
+    linked(inner)?;
+    let chat = named(inner, &archive.chat).await?;
+    let at = now_ms();
+    let range = range(&chat.id, chat.group, chat.newest.as_ref(), at);
+    let unpin = Some(queued(pinned(&chat.id, false, at))?);
+    let patch = queued(archived(&chat.id, archive.archived, range, at))?;
+    let setting = Setting::Archive { archived: archive.archived, patch, unpin };
+    let doing = if archive.archived { "archive the chat" } else { "unarchive the chat" };
+    act(inner, chat.id, Does::Set(setting), doing).await
+}
+
+pub(super) async fn mute(inner: &Arc<Inner>, mute: ChatMute) -> Result<Value, Error> {
+    let at = now_ms();
+    let until = match mute.until {
+        None => 0,
+        Some(until) if until == -1 || until >= FOREVER => FOREVER,
+        Some(until) if until <= at => {
+            return Err(bad_param("until", "that time has passed; mute until a later one, or -1 for ever"));
+        }
+        Some(until) => until,
+    };
+    linked(inner)?;
+    let chat = named(inner, &mute.chat).await?;
+    let setting = Setting::Mute { until, patch: queued(muted(&chat.id, until, at))? };
+    act(inner, chat.id, Does::Set(setting), if until == 0 { "unmute the chat" } else { "mute the chat" }).await
+}
+
+/// Commits a chat action, synced, and queues the patches it wrote after the chat's earlier sends.
+async fn act(inner: &Arc<Inner>, chat: String, does: Does, doing: &str) -> Result<Value, Error> {
+    let outcome = Outcome::default();
+    let _order = inner.enqueue.lock().await;
+    let act = Act { chat: chat.clone(), does, outcome: outcome.clone() };
+    durably(inner, vec![Change::ChatAction(act)], doing).await?;
+    match outcome.take() {
+        Some(Acted::Queued { chat, outbox, .. }) => {
+            for outbox in outbox {
+                queue(inner, outbox, chat.clone(), false);
+            }
+            Ok(Value::Object(Default::default()))
+        }
+        Some(Acted::Already) => Ok(Value::Object(Default::default())),
+        Some(Acted::Gone) => Err(Error::new(code::NOT_FOUND, format!("{chat} went before jawd could {doing}"))),
+        Some(Acted::Community) => Err(community()),
+        Some(Acted::Pinned) => Err(pinned_most()),
+        Some(Acted::Full { waiting, failed }) => Err(actions::full(waiting, failed)),
+        None => Err(Error::new(code::INTERNAL, format!("jawd kept nothing, so it couldn't {doing}"))),
     }
 }
 
