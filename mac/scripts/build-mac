@@ -30,19 +30,19 @@ if ! ssh_ true 2>/dev/null; then
         build) exec "$here/mac/scripts/check" build "$@" ;;
         shot)
             scene="$1"; out="$2"; shift 2
-            "$here/mac/scripts/check" build JawHarness | grep -q 'BUILD SUCCEEDED' || { "$here/mac/scripts/check" build JawHarness | tail -20; exit 1; }
+            "$here/mac/scripts/check" build JawHarness
             "$here/mac/$harness" --scene "$scene" --snapshot "$out" "$@"
             echo "==> $out"
             exit 0
             ;;
         sweep)
-            "$here/mac/scripts/check" build JawHarness | grep -q 'BUILD SUCCEEDED' || { "$here/mac/scripts/check" build JawHarness | tail -20; exit 1; }
+            "$here/mac/scripts/check" build JawHarness
             "$here/mac/$harness" --sweep "$here/mac/build/review" "$@"
             "$here/mac/scripts/review-data"
             exit 0
             ;;
         harness)
-            "$here/mac/scripts/check" build JawHarness | grep -q 'BUILD SUCCEEDED' || { "$here/mac/scripts/check" build JawHarness | tail -20; exit 1; }
+            "$here/mac/scripts/check" build JawHarness
             if [ $# -gt 0 ]; then scene="$1"; shift; set -- --scene "$scene" "$@"; fi
             exec open -n "$here/mac/build/DerivedData/Build/Products/Debug/JawHarness.app" --args "$@"
             ;;
@@ -76,11 +76,11 @@ case "$what" in
         ;;
     shot)
         scene="$1"; out="$2"; shift 2
-        run "scripts/check build JawHarness | grep -q 'BUILD SUCCEEDED' || { scripts/check build JawHarness | tail -20; exit 1; }; $harness --scene $scene --snapshot build/shot.png $*"
+        run "scripts/check build JawHarness && $harness --scene $scene --snapshot build/shot.png $*"
         scp -q -o BatchMode=yes "$host:$remote/mac/build/shot.png" "$out" && echo "==> $out"
         ;;
     sweep)
-        run "scripts/check build JawHarness | grep -q 'BUILD SUCCEEDED' || { scripts/check build JawHarness | tail -20; exit 1; }; caffeinate -i $harness --sweep build/review $*"
+        run "scripts/check build JawHarness && caffeinate -i $harness --sweep build/review $*"
         rm -rf "$here/mac/build/.review.incoming"
         mkdir -p "$here/mac/build/.review.incoming"
         rsync -a -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/review/" "$here/mac/build/.review.incoming/"
@@ -89,7 +89,7 @@ case "$what" in
         echo "==> $here/mac/build/review"
         ;;
     harness)
-        run "scripts/check build JawHarness | grep -q 'BUILD SUCCEEDED' || { scripts/check build JawHarness | tail -20; exit 1; }"
+        run "scripts/check build JawHarness"
         mkdir -p "$here/mac/build/harness"
         rsync -a --delete -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/DerivedData/Build/Products/Debug/JawHarness.app/" "$here/mac/build/harness/JawHarness.app/"
         if [ $# -gt 0 ]; then scene="$1"; shift; set -- --scene "$scene" "$@"; fi

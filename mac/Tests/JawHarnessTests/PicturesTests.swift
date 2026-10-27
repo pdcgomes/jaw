@@ -7,8 +7,8 @@ import Testing
 /// Scenes drawn into pictures: at their width with the stage's margin around them, at 2×, the same
 /// each time, carrying their bands' notes.
 
-func block(_ id: String = "block", axes: Axes = []) -> HarnessScene {
-    HarnessScene(id: id, title: "Block", symbol: "square", synopsis: "a block of the accent", section: .foundations,
+func block(_ id: String = "block", axes: Axes = [], section: HarnessSection = .foundations) -> HarnessScene {
+    HarnessScene(id: id, title: "Block", symbol: "square", synopsis: "a block of the accent", section: section,
                  covers: [], axes: axes, width: 100) { c in
         Rectangle().fill(c.roles.accent.color).frame(width: 100, height: 50)
     }
@@ -83,6 +83,18 @@ func scratch(_ name: String) -> URL {
     #expect(written == manifest)
     let again = try await Pictures.sweep(catalog, conditions: Conditions(), to: folder)
     #expect(again.scenes == manifest.scenes, "a sweep of the same scenes draws the same pictures")
+}
+
+@MainActor @Test func `a sweep draws the scenes in the sidebar's order, section by section, whatever order they're registered in`() async throws {
+    var catalog = HarnessCatalog()
+    catalog.register(block("asleep", section: .states))
+    catalog.register(block())
+    catalog.register(block("awake", section: .states))
+    let root = scratch("order")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifest = try await Pictures.sweep(catalog, conditions: Conditions(), to: root.appending(path: "review"))
+    #expect(manifest.scenes.map(\.id) == ["block", "asleep", "awake"])
+    #expect(manifest.scenes.map(\.section) == ["Foundations", "States", "States"])
 }
 
 @MainActor @Test func `a sweep never empties a folder it didn't make`() async throws {

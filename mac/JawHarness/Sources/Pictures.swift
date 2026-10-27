@@ -112,19 +112,21 @@ enum Pictures {
     }
 
     /// `--sweep`: every scene in each of its variants, as `<scene>/<variant>.png` under `folder`, with
-    /// `manifest.json` saying what each is. It draws them into the hidden folder `SweepFolder` makes
-    /// beside `folder`, `.<name>.sweeping`, and puts that in `folder`'s place only once every picture
-    /// and the manifest are written, so a sweep that's stopped or fails leaves the last whole one where
-    /// it was, and the next sweep clears what it left. It replaces only a missing or empty folder, or
-    /// one a sweep made, as `SweepFolder` checks before it draws and again before it replaces it; one
-    /// with anything else in it is left as it is, and the sweep fails.
+    /// `manifest.json` saying what each is. It draws the scenes in the sidebar's order, section by
+    /// section, so the manifest and the review canvas's tabs follow the sidebar whatever order the
+    /// scenes are registered in. It draws them into the hidden folder `SweepFolder` makes beside
+    /// `folder`, `.<name>.sweeping`, and puts that in `folder`'s place only once every picture and the
+    /// manifest are written, so a sweep that's stopped or fails leaves the last whole one where it
+    /// was, and the next sweep clears what it left. It replaces only a missing or empty folder, or one
+    /// a sweep made, as `SweepFolder` checks before it draws and again before it replaces it; one with
+    /// anything else in it is left as it is, and the sweep fails.
     @discardableResult
     static func sweep(_ catalog: HarnessCatalog, conditions: Conditions, to folder: URL) async throws -> Manifest {
         let folder = folder.standardizedFileURL
         try SweepFolder.check(folder)
         let sweeping = try SweepFolder.sweeping(beside: folder)
         var scenes: [Manifest.Scene] = []
-        for scene in catalog.scenes {
+        for scene in catalog.sections.flatMap({ catalog.scenes(in: $0) }) {
             try FileManager.default.createDirectory(at: sweeping.appending(path: scene.id), withIntermediateDirectories: true)
             var pictures: [Manifest.Picture] = []
             var notes: [Note] = []

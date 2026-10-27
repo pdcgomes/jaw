@@ -13,6 +13,8 @@ folder of a scene it lists; and each of those holds only the pictures it lists f
 the same rule, and the two must agree.
 """
 
+from __future__ import annotations
+
 import json
 import shutil
 import sys
