@@ -1008,10 +1008,11 @@ fn chats_merging_into(db: &Connection, keep: i64) -> Result<Vec<i64>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// Counts an open in the chat's frecency. An open older than the chat's last counts as decayed
-/// as it would be by now.
+/// Counts an open in the chat's frecency, the chat found as every write finds it, so an open by a
+/// JID being merged, or merged away, counts in the chat that stays. An open older than the chat's
+/// last counts as decayed as it would be by now.
 fn open_chat(db: &Connection, stamps: &mut Stamps, opened: &Opened) -> Result<bool> {
-    let n = ensure_chat(db, stamps, &opened.chat)?;
+    let n = ensure_chat(db, stamps, &chat_jid(db, &opened.chat)?)?;
     let (was, opened_at): (f64, Option<i64>) = db
         .prepare_cached("SELECT frecency, opened_at FROM chats WHERE n = ?1")?
         .query_row([n], |r| Ok((r.get(0)?, r.get(1)?)))?;

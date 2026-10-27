@@ -5,7 +5,7 @@ use rusqlite::types::Value;
 
 use super::*;
 use crate::store::outbox::{self, Owing};
-use crate::store::{Amend, Amendment, Chat, Message, Person, Read};
+use crate::store::{Amend, Amendment, Chat, Message, Opened, Person, Read};
 
 const ANA: &str = "351910000002@s.whatsapp.net";
 const ANA_LID: &str = "100000000002@lid";
@@ -892,4 +892,21 @@ async fn what_was_undone_in_the_chat_that_stays_during_a_merge_this_jawd_started
     merged(&store, LID).await;
     assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
     assert_eq!(settings(&store, NEW).await, (String::new(), 0, 0), "neither comes back as the merge ends");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_by_a_jid_being_merged_or_merged_away_counts_in_the_chat_that_stays() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    store.apply(Lane::Live, vec![message(NEW, "n0", AT), message(LID, "l0", AT + 1)]).await.unwrap();
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    let opened = || Change::Opened(Opened { chat: LID.into(), at: AT + 10 });
+    let frecency = || column::<f64>(&store, "SELECT frecency FROM chats WHERE id = '351910000002@s.whatsapp.net'");
+    store.apply(Lane::Live, vec![opened()]).await.unwrap();
+    assert_eq!(frecency().await, [1.0], "opened by the LID while its chat merges");
+    merged(&store, LID).await;
+    let applied = store.apply(Lane::Live, vec![opened()]).await.unwrap();
+    assert_eq!(applied.quarantined, 0, "opened by the LID once its chat is gone");
+    assert_eq!(store.count("quarantine").unwrap(), 0);
+    assert_eq!(frecency().await, [2.0]);
 }
