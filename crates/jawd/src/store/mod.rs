@@ -736,9 +736,9 @@ impl Store {
         Ok(count.max(0) as u64)
     }
 
-    /// How many interfaces keep a layout and the bytes of the biggest tree, and how many of them
-    /// keep a book and the bytes of the biggest, read on a connection of its own so the writer
-    /// doesn't wait.
+    /// How many interfaces keep a layout and the bytes of the biggest that isn't a book, and how
+    /// many of them keep a book and the bytes of the biggest, read on a connection of its own so
+    /// the writer doesn't wait.
     pub fn layouts_kept(&self) -> Result<LayoutsKept> {
         let db = connect(&self.path, Role::Reader)?;
         let kept: [i64; 4] = db.query_row(

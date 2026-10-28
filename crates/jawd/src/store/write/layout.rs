@@ -201,8 +201,10 @@ mod tests {
     #[test]
     fn rebuilt_to_take_a_book_the_table_keeps_every_row_it_had_as_it_was() {
         let mut db = Connection::open_in_memory().unwrap();
-        // jaw.db as migration 16 left it, with the most it held then: 16 interfaces, one at 16 KiB.
-        let before = schema::MIGRATIONS.len() - 1;
+        // jaw.db as the migration before the rebuild left it, with the most it held then: 16
+        // interfaces, one at 16 KiB.
+        let before =
+            schema::MIGRATIONS.iter().position(|m| m.contains("CREATE TABLE interface_state_rebuilt")).unwrap();
         for migration in &schema::MIGRATIONS[..before] {
             db.execute_batch(migration).unwrap();
         }

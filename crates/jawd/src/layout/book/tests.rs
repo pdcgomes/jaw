@@ -102,7 +102,7 @@ fn a_shape_the_app_couldnt_keep_is_refused_saying_why() {
         (lines(&[0.0, 1.0], &[0.0, 0.0, 1.0]), "rows' lines go from 0 to 1"),
         (two([0, 1, 0, 1], [1, 3, 0, 1]), "slot 2 spans lines the grid doesn't have"),
         (two([0, 1, 0, 1], [1, 1, 0, 1]), "slot 2 spans lines the grid doesn't have, or none"),
-        (two([0, 1, 0, 1], [0, 1, 0, 1]), "no holes and no overlaps"),
+        (two([0, 2, 0, 1], [1, 2, 0, 1]), "no holes and no overlaps"),
         (grid(&[0.0, 0.5, 1.0], &[0.0, 1.0], vec![slot(1, [0, 1, 0, 1], None)]), "no holes and no overlaps"),
         (grid(&[0.0, 0.5, 1.0], &[0.0, 1.0], vec![slot(1, [0, 2, 0, 1], None)]), "every line inside it is"),
         (grid(&[0.0, 0.2, 0.4, 0.6, 1.0], &[0.0, 1.0], vec![slot(1, [0, 4, 0, 1], None)]), "more columns' lines than"),
@@ -784,6 +784,22 @@ async fn a_book_jaw_db_holds_that_jawd_wouldnt_keep_reads_as_no_tree() {
     .unwrap();
     let read = layouts.get("jaw", json!({ "interface": "jaw-mac", "format": 1 })).await.unwrap();
     assert_eq!(kept(&read), (3, None, None));
+    // And a tree whose split takes all of it, read as a grid, still lays out in the square.
+    let all = json!({ "format": 1, "focused": 0, "tree": { "split": { "how": "across", "first": 5000, "a": { "chat": ANA }, "b": { "chat": CLIMBING } } } });
+    db.execute("UPDATE interface_state SET value = ?1, v = 4 WHERE interface = 'jaw-mac'", [all.to_string()]).unwrap();
+    let read = layouts.get("jaw", json!({ "interface": "jaw-mac", "format": 2 })).await.unwrap();
+    let grid = the_book(&read.layout).unnamed.as_ref().unwrap();
+    assert_eq!((holds(grid), grid.cols.as_slice(), grid.slots.len()), (Ok(()), &[0.0, 0.999, 1.0][..], 2));
+    // And a book of more slots than jawd keeps isn't counted out.
+    let row = Book { unnamed_focus: None, ..unnamed(row_of(400)) };
+    db.execute(
+        "UPDATE interface_state SET value = ?1, v = 5 WHERE interface = 'jaw-mac'",
+        [serde_json::to_string(&row).unwrap()],
+    )
+    .unwrap();
+    assert!(serde_json::to_string(&row).unwrap().len() < 65_536);
+    let read = layouts.get("jaw", json!({ "interface": "jaw-mac", "format": 1 })).await.unwrap();
+    assert_eq!((kept(&read), read.dropped.len()), ((5, None, None), 0), "no tree, nor its 400 panes looked for");
 }
 
 #[tokio::test(flavor = "multi_thread")]

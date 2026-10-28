@@ -229,7 +229,8 @@ fn lay_out(node: Node, rect: [f64; 4], panes: &mut Vec<(String, [f64; 4])>) {
         Node::Split(split) => {
             let Split { how, first, a, b } = *split;
             let [x0, x1, y0, y1] = rect;
-            let share = f64::from(first) / 1000.0;
+            // Kept in its range, so a tree written by hand into jaw.db still lays out in the square.
+            let share = f64::from(first.clamp(1, 999)) / 1000.0;
             let (rect_a, rect_b) = match how {
                 How::Across => {
                     let x = x0 + (x1 - x0) * share;
@@ -252,6 +253,10 @@ fn lay_out(node: Node, rect: [f64; 4], panes: &mut Vec<(String, [f64; 4])>) {
 /// no line cuts.
 pub(super) fn tree_of(book: &Book) -> Option<Layout> {
     let (grid, focus) = book.on_screen()?;
+    // A book written by hand into jaw.db may be anything; one past the limits isn't counted out.
+    if grid.slots.len() > SLOTS_MOST {
+        return None;
+    }
     holds(grid).ok()?;
     let slots: Vec<&Slot> = grid.slots.iter().collect();
     let mut order = Vec::new();
