@@ -39,7 +39,9 @@ enum Pictures {
 
     /// Draws `scene` in `conditions`, in a window of its own off the screen, once it has had `settle`
     /// to do what it does after it's made. It holds the app-wide `Motion.reduced` for as long as it
-    /// draws, so draws mustn't overlap.
+    /// draws, so draws mustn't overlap. The window doesn't animate as it comes and goes: off every
+    /// screen that animation never ends, and each kept one of the system's threads for good, so after
+    /// some 80 pictures in one run nothing more was laid out off the main thread.
     static func draw(_ scene: HarnessScene, _ conditions: Conditions) async throws -> Drawn {
         let reduced = Motion.reduced
         Motion.reduced = { conditions.reduceMotion }
@@ -54,6 +56,7 @@ enum Pictures {
         let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -30000, y: -30000), size: size), styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        window.animationBehavior = .none
         window.appearance = NSAppearance(named: conditions.dark ? .darkAqua : .aqua)
         window.contentView = host
         window.orderFront(nil)
