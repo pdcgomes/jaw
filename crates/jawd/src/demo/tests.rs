@@ -15,9 +15,8 @@ fn plan(folder: &Path, report: &Path) -> Plan {
         idle: None,
         report: Some(report.to_path_buf()),
         exit: true,
-        notify: false,
         fail: None,
-        without: Vec::new(),
+        options: crate::Options { no_notify: true, ..crate::Options::default() },
     }
 }
 

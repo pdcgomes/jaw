@@ -789,7 +789,7 @@ async fn history_more(state: &State, id: u64, params: Value) -> Reply {
     let (Some(store), Ok(engine)) = (state.store(), state.engine()) else {
         return failed(id, Error::new(code::ENGINE_UNAVAILABLE, "there's no engine or store to ask the phone with"));
     };
-    match crate::sync::history_more(store, engine, more.chat).await {
+    match crate::sync::history_more(store, engine, state.live(), more.chat).await {
         Ok(()) => succeeded(id, &serde_json::json!({})),
         Err(Refused::NotFound(why)) => failed(id, Error::new(code::NOT_FOUND, why)),
         Err(Refused::Engine(EngineError::Failed { message, retry: false })) => {

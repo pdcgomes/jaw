@@ -47,11 +47,10 @@ pub struct Plan {
     pub idle: Option<f64>,
     pub report: Option<PathBuf>,
     pub exit: bool,
-    pub notify: bool,
     /// How the demo engine fails, from the first SIGUSR1 until the next.
     pub fail: Option<Failure>,
-    /// The programs jawd behaves as if it didn't have.
-    pub without: Vec<String>,
+    /// How its jawd runs; a demo sends no notifications unless asked.
+    pub options: crate::Options,
 }
 
 /// The folder a demo uses unless told otherwise, kept between runs so its history comes once.
@@ -219,7 +218,7 @@ async fn serve(plan: Plan, shape: Shape, history: bool, ended: Option<i64>) -> R
     let socket = jaw_proto::local::socket(&folder);
     let mut signals = crate::Signals::new()?;
     let (lock, listener) = crate::open(&folder, &socket)?;
-    let started = crate::start_on(&folder, &socket, lock, Ok(engine), !plan.notify, &plan.without).await?;
+    let started = crate::start_on(&folder, &socket, lock, Ok(engine), &plan.options).await?;
     tokio::spawn(crate::sock::serve(started.state.clone(), listener));
     let store = started.state.store().context("the demo's jawd has no store")?.clone();
     println!(

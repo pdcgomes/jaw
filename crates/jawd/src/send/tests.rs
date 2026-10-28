@@ -799,6 +799,17 @@ async fn a_message_waits_pending_for_as_long_as_whatsapp_cant_be_reached_and_goe
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn with_the_phone_offline_a_message_still_goes() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    running.chats(&[ANA]).await;
+    running.connection(jaw_proto::ConnectionState::PhoneOffline);
+    let id = running.send(ANA, "the phone can wait").await;
+    running.until_status(ANA, &id, "read").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn past_a_thousand_messages_waiting_a_new_one_is_refused_and_none_is_dropped() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::unconnected(home.path()).await;

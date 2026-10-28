@@ -13,9 +13,10 @@ use tokio::sync::{broadcast, watch};
 use super::{Inner, engine};
 use crate::engine::pb;
 
-/// Whether WhatsApp can hear from jawd now.
+/// Whether WhatsApp can hear from jawd now: with the phone offline it can, as messages still
+/// arrive and send then.
 pub(super) fn connected(connection: &Connection) -> bool {
-    matches!(connection.state, ConnectionState::Online | ConnectionState::CatchingUp)
+    matches!(connection.state, ConnectionState::Online | ConnectionState::CatchingUp | ConnectionState::PhoneOffline)
 }
 
 /// Tells WhatsApp you're online or away as focus comes and goes, once each has held long enough,

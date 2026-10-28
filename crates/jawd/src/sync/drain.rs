@@ -377,6 +377,9 @@ pub async fn inbox(
                 continue;
             }
         }
+        if !converted.offers.is_empty() {
+            super::phone_answered(&live);
+        }
         for offer in converted.offers {
             let _ = offered.send(fetch::Work::Offer(offer));
         }

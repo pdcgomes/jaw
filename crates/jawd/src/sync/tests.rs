@@ -1940,3 +1940,82 @@ async fn what_whatsapp_said_of_the_account_stands_while_the_engine_starts_again(
         running.abort();
     }
 }
+
+/// The phone's message saying older history is ready, as it sends one to its own account.
+fn phone_answers() -> crate::engine::Incoming {
+    let notification = e2e::HistorySyncNotification { direct_path: Some("on-demand".into()), ..Default::default() };
+    let protocol = e2e::ProtocolMessage { history_sync_notification: Some(notification), ..Default::default() };
+    let raw = e2e::Message { protocol_message: Some(Box::new(protocol)), ..Default::default() };
+    let me = "351910000001@s.whatsapp.net";
+    let info = pb::MessageInfo {
+        chat: me.into(),
+        sender: me.into(),
+        from_me: true,
+        id: "3EB0PHONE".into(),
+        ..Default::default()
+    };
+    let message = pb::Message { info: Some(info), raw: raw.encode_to_vec(), ..Default::default() };
+    crate::engine::Incoming { event: pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(message)) }, ack: None }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_the_phone_leaves_unanswered_has_jawd_say_it_is_offline_until_it_answers() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let patience = Duration::from_millis(300);
+    let mut live = starting(&store, true);
+    live.phone_patience = patience;
+    let live: Shared = Arc::new(Mutex::new(live));
+    let (tx, incoming) = mpsc::channel(16);
+    let (pushes, mut told) = broadcast::channel(64);
+    let running = tokio::spawn(run(incoming, store.clone(), live.clone(), pushes, None, home.path().to_path_buf()));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    asked_phone(&live);
+    let asked = std::time::Instant::now();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
+    assert!(asked.elapsed() >= patience, "only once it has had its patience: {:?}", asked.elapsed());
+    tx.send(connection_event(State::Disconnected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Offline));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    let again = next_connection_within(&mut told, WAIT).await;
+    assert_eq!(again, Some(ConnectionState::PhoneOffline), "connected again, the question still waits");
+    tx.send(phone_answers()).await.unwrap();
+    let answered = next_connection_within(&mut told, WAIT).await;
+    assert_eq!(answered, Some(ConnectionState::Online), "the phone's history says it's back");
+    asked_phone(&live);
+    assert_eq!(
+        next_connection_within(&mut told, Duration::from_millis(150)).await,
+        None,
+        "a new question has its patience"
+    );
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
+    drop(tx);
+    running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_put_to_the_phone_before_a_logout_is_forgotten_with_the_device_it_came_from() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let patience = Duration::from_millis(300);
+    let mut live = starting(&store, true);
+    live.phone_patience = patience;
+    let live: Shared = Arc::new(Mutex::new(live));
+    let (tx, incoming) = mpsc::channel(16);
+    let (pushes, mut told) = broadcast::channel(64);
+    let running = tokio::spawn(run(incoming, store.clone(), live.clone(), pushes, None, home.path().to_path_buf()));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    asked_phone(&live);
+    tx.send(connection_event(State::LoggedOut)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::LoggedOut));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online), "linked again");
+    assert_eq!(next_connection_within(&mut told, patience * 3).await, None, "nothing waits for the phone");
+    drop(tx);
+    running.await.unwrap();
+}
