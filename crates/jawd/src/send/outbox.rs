@@ -484,7 +484,7 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
             Ok(patch) => (pb::command::Kind::AppStatePatch(patch.clone()), Some(patch)),
             Err(e) => {
                 let error = format!("its app state doesn't decode: {e}");
-                super::chat_actions::refused(&inner, outbox, None, error, GivenUp::Undecodable).await;
+                super::chat_actions::refused(&inner, &row, None, error, GivenUp::Undecodable).await;
                 return Next::Done;
             }
         }
@@ -545,7 +545,7 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
     let gives_up = !retryable(&failure) || row.attempts + 1 >= ATTEMPTS_MOST;
     if gives_up && app_state {
         let why = if retryable(&failure) { GivenUp::OutOfTries } else { GivenUp::Refused };
-        super::chat_actions::refused(&inner, outbox, patch.as_ref(), failure.to_string(), why).await;
+        super::chat_actions::refused(&inner, &row, patch.as_ref(), failure.to_string(), why).await;
         return Next::Done;
     }
     let step = match (gives_up, may_have_gone) {

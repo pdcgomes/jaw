@@ -31,7 +31,7 @@ use super::{Inner, durably, internal, no_chat, now_ms, query};
 use crate::convert::app_state::FOREVER;
 use crate::engine::{EngineError, pb};
 use crate::store::chat_actions::{Act, Acted, Does, Outcome, PINNED_MOST, Patch, Setting, Undo};
-use crate::store::outbox::Step;
+use crate::store::outbox::{Outboxed, Step};
 use crate::store::{Change, read};
 
 /// A chat an action names: the chat it's being merged into, or itself, with its kind.
@@ -356,16 +356,16 @@ fn notice_for(why: GivenUp, patch: Option<&pb::AppStatePatch>, error: &str) -> S
     }
 }
 
-/// Keeps app-state row `outbox`, given up on for `why`, in quarantine with `error` and its patch,
-/// puts back what the patch set, tells every interface, and fetches the patch's collection again,
-/// so the chat ends as the phone has it. The store puts the field back only while the patch is its
-/// index's latest, since a later patch's intent stands; the fetch then brings back what was held
-/// back for the index. A deletion for you puts nothing back and fetches nothing, its message
+/// Keeps app-state outbox row `row`, given up on for `why`, in quarantine with `error` and its
+/// patch, puts back what the patch set, tells every interface, and fetches the patch's collection
+/// again, so the chat ends as the phone has it. The store puts the field back only while the patch
+/// is its index's latest, since a later patch's intent stands; the fetch then brings back what was
+/// held back for the index. A deletion for you puts nothing back and fetches nothing, its message
 /// staying deleted here; a patch that doesn't decode, whose collection nobody knows, fetches every
 /// collection.
 pub(super) async fn refused(
     inner: &Inner,
-    outbox: i64,
+    row: &Outboxed,
     patch: Option<&pb::AppStatePatch>,
     error: String,
     why: GivenUp,
@@ -378,8 +378,8 @@ pub(super) async fn refused(
         None => Some(Vec::new()),
     };
     let text = notice_for(why, patch, &error);
-    eprintln!("jawd: outbox row {outbox}: {text}");
-    settle(inner, vec![Change::Outbox(Step::Refused { outbox, error, undo })]).await;
+    eprintln!("jawd: app state {} in {}: {text}", row.id, row.chat);
+    settle(inner, vec![Change::Outbox(Step::Refused { outbox: row.outbox, error, undo })]).await;
     super::notice(inner, text, Tone::Warning);
     if let Some(names) = fetch {
         fetch_again(inner, names);
