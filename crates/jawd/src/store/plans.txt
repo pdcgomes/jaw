@@ -1362,18 +1362,6 @@ SELECT count(*) FROM chats WHERE n IN (?1, ?2) AND kind <> 'direct'
 INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)
 
 -- src/store/write.rs
-UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2 RETURNING id
-    SEARCH tombstones USING PRIMARY KEY (chat=?)
-
--- src/store/write.rs
-DELETE FROM tombstones WHERE chat = ?1
-    SEARCH tombstones USING PRIMARY KEY (chat=?)
-
--- src/store/write.rs
-SELECT n FROM messages WHERE chat = ?1 AND id = ?2
-    SEARCH messages USING COVERING INDEX messages_by_id (chat=? AND id=?)
-
--- src/store/write.rs
 UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2
     SEARCH folder_items USING COVERING INDEX folder_items_by_chat (chat=?)
 
@@ -1385,6 +1373,18 @@ DELETE FROM folder_items WHERE chat = ?1
 UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived), muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread), draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar), avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral), frecency = k.frecency + g.frecency, opened_at = max(coalesce(k.opened_at, 0), coalesce(g.opened_at, 0)), v = ?3 FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2 RETURNING id
+    SEARCH tombstones USING PRIMARY KEY (chat=?)
+
+-- src/store/write.rs
+DELETE FROM tombstones WHERE chat = ?1
+    SEARCH tombstones USING PRIMARY KEY (chat=?)
+
+-- src/store/write.rs
+SELECT n FROM messages WHERE chat = ?1 AND id = ?2
+    SEARCH messages USING COVERING INDEX messages_by_id (chat=? AND id=?)
 
 -- src/store/write.rs
 UPDATE chat_merges SET keep = ?1 WHERE keep = ?2 RETURNING gone
@@ -1438,14 +1438,6 @@ SELECT g.id, k.id FROM chats g, chats k WHERE g.n = ?1 AND k.n = ?2
 -- src/store/write.rs
 DELETE FROM quarantine WHERE source = 'merge' AND ref = ?1
     SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
-
--- src/store/write.rs
-UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2
-    SEARCH tombstones USING PRIMARY KEY (chat=?)
-
--- src/store/write.rs
-UPDATE pending SET chat = ?1 WHERE chat = ?2
-    SEARCH pending USING INDEX pending_by_target_at (chat=?)
 
 -- src/store/write.rs
 DELETE FROM chat_merges WHERE gone = ?1

@@ -1396,21 +1396,7 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     }
     db.prepare_cached("INSERT OR REPLACE INTO chat_merges (gone, keep) VALUES (?1, ?2)")?.execute([gone, keep])?;
     repoint(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
-    let deleted: Vec<String> = db
-        .prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2 RETURNING id")?
-        .query_map([keep, gone], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    db.prepare_cached("DELETE FROM tombstones WHERE chat = ?1")?.execute([gone])?;
-    for id in deleted {
-        let found: Option<i64> = db
-            .prepare_cached("SELECT n FROM messages WHERE chat = ?1 AND id = ?2")?
-            .query_row(params![keep, id], |r| r.get(0))
-            .optional()?;
-        if let Some(n) = found {
-            delete_row(db, stamps, *keep, n)?;
-        }
-    }
-    follow(db, stamps, gone_id, (*keep, keep_id))?;
+    carry(db, stamps, (*gone, gone_id), (*keep, keep_id))?;
     db.prepare_cached("UPDATE OR IGNORE folder_items SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
     db.prepare_cached("DELETE FROM folder_items WHERE chat = ?1")?.execute([gone])?;
     let seq = stamps.seq(CHAT, Some(*keep));
@@ -1426,6 +1412,35 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
     .execute(params![keep, gone, seq])?;
     stamps.record(db, CHAT, *keep, Some(*keep), seq)?;
     merge_reads(db, stamps, *keep, *gone)
+}
+
+/// Moves what chat `gone` holds for messages it hasn't got into `keep`, each a chat's n and JID:
+/// the tombstones of messages deleted for you, and what waits for its messages, in pending or set
+/// aside, which `follow` moves. What's for a message `keep` already has is done to it now, since
+/// that message won't arrive or move again to have it done: what waited first, then the deletions,
+/// so nothing is left waiting for a message deleted for you. What's for one still in a chat merging
+/// into `keep` is done as it moves.
+fn carry(db: &Connection, stamps: &mut Stamps, gone: (i64, &str), keep: (i64, &str)) -> Result<()> {
+    let deleted: Vec<String> = db
+        .prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2 RETURNING id")?
+        .query_map([keep.0, gone.0], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    db.prepare_cached("DELETE FROM tombstones WHERE chat = ?1")?.execute([gone.0])?;
+    follow(db, stamps, gone.1, keep)?;
+    for id in &deleted {
+        if let Some(n) = message_in(db, keep.0, id)? {
+            delete_row(db, stamps, keep.0, n)?;
+        }
+    }
+    Ok(())
+}
+
+/// The n of message `id` in chat `chat`, if it's there.
+fn message_in(db: &Connection, chat: i64, id: &str) -> Result<Option<i64>> {
+    Ok(db
+        .prepare_cached("SELECT n FROM messages WHERE chat = ?1 AND id = ?2")?
+        .query_row(params![chat, id], |r| r.get(0))
+        .optional()?)
 }
 
 /// Points the merges going into chat `from`, which is going itself, at `to`, the chat it goes
@@ -1549,8 +1564,7 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     // So are merges still going into it, which a jaw.db from before repoint can hold, and the
     // deletions and what waits that were sent there while they did.
     repoint(db, stamps, (gone, &gone_jid), (keep, &keep_jid))?;
-    db.prepare_cached("UPDATE OR IGNORE tombstones SET chat = ?1 WHERE chat = ?2")?.execute([keep, gone])?;
-    db.prepare_cached("UPDATE pending SET chat = ?1 WHERE chat = ?2")?.execute([&keep_jid, &gone_jid])?;
+    carry(db, stamps, (gone, &gone_jid), (keep, &keep_jid))?;
     db.prepare_cached("DELETE FROM chat_merges WHERE gone = ?1")?.execute([gone])?;
     db.prepare_cached("DELETE FROM chats WHERE n = ?1")?.execute([gone])?;
     let seq = stamps.seq(CHAT, Some(gone));

@@ -746,6 +746,31 @@ async fn a_pane_naming_the_first_chat_of_a_chain_an_earlier_jawd_left_opens_the_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn what_an_earlier_jawd_parked_on_the_middle_chat_of_a_chain_is_done_to_the_messages_the_chat_that_stays_has() {
+    let home = from_before("x1-chain");
+    let store = Store::open(home.path()).unwrap();
+    let reactions = "SELECT m.id || ' ' || r.emoji FROM reactions r JOIN messages m ON m.n = r.message ORDER BY m.id";
+    // What's sent to the LID from now on finds a message that went through at once.
+    store.apply(Lane::Live, vec![react(LID, "l40", AT + 4_000, "🙏")]).await.unwrap();
+    assert_eq!(column::<String>(&store, reactions).await, ["l40 🙏"]);
+    merged(&store, OLD).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
+    assert_eq!(column::<String>(&store, reactions).await, ["l10 👍", "l40 🙏"]);
+    let shown = column::<String>(
+        &store,
+        "SELECT id || ' ' || deleted || ' ' || coalesce(summary, text) FROM messages
+        WHERE id IN ('l20', 'l25', 'l30') ORDER BY id",
+    )
+    .await;
+    assert_eq!(shown, ["l25 1 This message was deleted", "l30 0 edited"], "l20 deleted for you");
+    assert_eq!(store.count("pending").unwrap(), 0, "nothing waits for a message jaw has");
+    let tombstones =
+        column::<String>(&store, "SELECT c.id || ' ' || t.id FROM tombstones t JOIN chats c ON c.n = t.chat").await;
+    assert_eq!(tombstones, [format!("{NEW} l20")]);
+    assert_eq!(store.count("messages").unwrap(), 2 + 5 + 209, "every message but l20, once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn merges_that_go_round_in_a_circle_keep_jawd_from_opening_jaw_db_and_change_nothing() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
@@ -773,4 +798,38 @@ async fn receipts_owed_by_the_first_chat_of_a_chain_an_earlier_jawd_left_are_owe
     merged(&store, LID).await;
     assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
     assert_eq!(owed(&store, NEW).await, ids("l", 0..10), "l0 to l9, read here");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_waited_under_a_chat_that_starts_merging_is_done_to_the_messages_the_chat_it_goes_into_has() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let mut changes: Vec<Change> = (0..4).map(|i| message(NEW, &format!("n{i}"), AT + i)).collect();
+    changes.push(message(LID, "l0", AT + 10));
+    store.apply(Lane::Live, changes).await.unwrap();
+    // Sent to the LID for messages only the number's chat has, before they're known to be one
+    // person's: three wait, and the deletion for you leaves a tombstone.
+    let changes = vec![
+        react(LID, "n0", AT + 20, "👍"),
+        edit(LID, "n1", AT + 21),
+        amend(LID, "n2", AT + 22, Amendment::Revoke),
+        amend(LID, "n3", AT + 23, Amendment::DeleteForMe),
+    ];
+    store.apply(Lane::Live, changes).await.unwrap();
+    assert_eq!(store.count("pending").unwrap(), 3);
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    let done = || async {
+        let shown = column::<String>(
+            &store,
+            "SELECT id || ' ' || deleted || ' ' || coalesce(summary, text) || ' ' || (SELECT count(*) FROM reactions
+                WHERE message = messages.n) FROM messages WHERE id LIKE 'n%' ORDER BY id",
+        )
+        .await;
+        assert_eq!(shown, ["n0 0 n0 1", "n1 0 edited 0", "n2 1 This message was deleted 0"], "n3 deleted for you");
+        assert_eq!(store.count("pending").unwrap(), 0, "nothing waits for a message jaw has");
+    };
+    assert_eq!(store.count("chat_merges").unwrap(), 1, "as the merge starts, before any step");
+    done().await;
+    merged(&store, LID).await;
+    done().await;
 }
