@@ -76,6 +76,15 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     /// What a message's menu ends with: the pane's splits.
     public var messageMenuTail: (() -> [NSMenuItem])?
 
+    /// Where the window's buttons are, in the window's coordinates as `convert(_:to: nil)` gives them,
+    /// or nil when there are none: a header under them starts after them. By default it's the zoom
+    /// button's frame, the last of the three, from the pane's window; a host drawing the pane outside
+    /// a window says where they'd be.
+    public var windowButtons: () -> NSRect? {
+        get { header.windowButtons }
+        set { header.windowButtons = newValue }
+    }
+
     let newPill = PillButton()
     let hover = HoverBar()
     public let composer: ComposerController
@@ -1137,11 +1146,17 @@ final class HeaderView: NSView {
 
     var online = false
 
+    /// Where the window's buttons are, as the conversation's `windowButtons` says: by default its
+    /// window's zoom button, the last of the three.
+    lazy var windowButtons: () -> NSRect? = { [weak self] in
+        guard let zoom = self?.window?.standardWindowButton(.zoomButton), let holder = zoom.superview else { return nil }
+        return holder.convert(zoom.frame, to: nil)
+    }
+
     /// A pane at the window's top left, with the sidebar and the list folded away, would have its
     /// picture under the window's buttons: the header starts after them there.
     func clearWindowButtons() {
-        guard let window, let zoom = window.standardWindowButton(.zoomButton), let holder = zoom.superview else { return }
-        let buttons = holder.convert(zoom.frame, to: nil).insetBy(dx: -Space.xs, dy: -Space.xs)
+        guard let buttons = windowButtons()?.insetBy(dx: -Space.xs, dy: -Space.xs) else { return }
         let mine = convert(bounds, to: nil)
         let inset = mine.intersects(buttons) ? max(buttons.maxX + Space.m - mine.minX, Self.inset) : Self.inset
         if abs(lead.constant - inset) >= 0.5 { lead.constant = inset }
