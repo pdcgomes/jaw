@@ -99,7 +99,7 @@ pub(super) fn holds(grid: &Grid) -> Result<(), String> {
         // Each line inside the grid is the edge of a slot, so there are at most two a slot; checked
         // before the cells are counted, so a grid with many lines costs nothing to refuse.
         if lines.len() - 2 > 2 * grid.slots.len() {
-            return Err("every line inside it is some slot's edge".into());
+            return Err(format!("it has more {axis}' lines than its slots have edges"));
         }
     }
     let (columns, rows) = (grid.cols.len() - 1, grid.rows.len() - 1);

@@ -23,7 +23,7 @@ pub const SLOTS_MOST: usize = 12;
 /// The longest name a book's layout can have, in bytes.
 pub const LAYOUT_NAME_MOST: usize = 64;
 /// The most bytes a book can take, written as jawd keeps it: compact JSON. A book at every other
-/// limit, each shape edited and each slot's chat a JID of 64 bytes, takes about 40 KiB.
+/// limit, each shape edited and each slot's chat a JID of 64 bytes, takes about 30 KiB.
 pub const BOOK_BYTES_MOST: usize = 64 * 1024;
 /// The most interfaces jawd keeps a layout for.
 pub const KEPT_MOST: u64 = 16;

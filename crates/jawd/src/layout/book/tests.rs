@@ -105,7 +105,7 @@ fn a_shape_the_app_couldnt_keep_is_refused_saying_why() {
         (two([0, 1, 0, 1], [0, 1, 0, 1]), "no holes and no overlaps"),
         (grid(&[0.0, 0.5, 1.0], &[0.0, 1.0], vec![slot(1, [0, 1, 0, 1], None)]), "no holes and no overlaps"),
         (grid(&[0.0, 0.5, 1.0], &[0.0, 1.0], vec![slot(1, [0, 2, 0, 1], None)]), "every line inside it is"),
-        (grid(&[0.0, 0.2, 0.4, 0.6, 1.0], &[0.0, 1.0], vec![slot(1, [0, 4, 0, 1], None)]), "every line inside it is"),
+        (grid(&[0.0, 0.2, 0.4, 0.6, 1.0], &[0.0, 1.0], vec![slot(1, [0, 4, 0, 1], None)]), "more columns' lines than"),
         (
             grid(&[0.0, 0.5, 1.0], &[0.0, 1.0], vec![slot(1, [0, 1, 0, 1], None), slot(1, [1, 2, 0, 1], None)]),
             "two slots are numbered 1",
@@ -122,6 +122,16 @@ fn a_shape_the_app_couldnt_keep_is_refused_saying_why() {
         assert_eq!((past, param), (false, "layout.layouts"), "{said}");
         assert!(said.starts_with("\"Work\"'s edited shape: "), "{said}");
     }
+}
+
+#[test]
+fn a_grid_of_more_lines_than_its_slots_have_edges_is_refused_before_its_cells_are_counted() {
+    // A thousand cells each way, which the slot covers; its lines are too many all the same.
+    let lines: Vec<f64> = (0..=1_000).map(|k| f64::from(k) / 1_000.0).collect();
+    let many = grid(&lines, &lines, vec![slot(1, [0, 1_000, 0, 1_000], None)]);
+    let began = std::time::Instant::now();
+    assert_eq!(holds(&many), Err("it has more columns' lines than its slots have edges".to_string()));
+    assert!(began.elapsed() < std::time::Duration::from_millis(100), "{:?}", began.elapsed());
 }
 
 /// A value changed in place, for tables of them.
@@ -524,7 +534,7 @@ async fn a_book_is_kept_with_a_synced_commit_as_its_compact_json_and_read_back_k
         let read = layouts.get("jaw-mac", params.clone()).await.unwrap();
         assert_eq!(kept(&read), (5, None, Some(&Formatted::Book(book()))), "{params}");
     }
-    let json = serde_json::to_value(&layouts.get("jaw-mac", Value::Null).await.unwrap()).unwrap();
+    let json = serde_json::to_value(layouts.get("jaw-mac", Value::Null).await.unwrap()).unwrap();
     assert_eq!(json, json!({ "interface": "jaw-mac", "v": 5, "layout": book() }), "the book as the app wrote it");
     let status = layouts.status();
     let bytes = serde_json::to_string(&book()).unwrap().len() as u64;
@@ -655,7 +665,7 @@ async fn exactly_nine_named_layouts_12_slots_and_64_kib_are_kept_and_one_past_ea
     }
     assert_eq!(long(1).len(), 64);
     let bytes = serde_json::to_string(&biggest).unwrap().len();
-    assert!(bytes < BOOK_BYTES_MOST * 2 / 3, "{bytes} bytes");
+    assert!(bytes < BOOK_BYTES_MOST / 2, "{bytes} bytes");
     assert_eq!(layouts.set("jaw-mac", 1, asked(5, &biggest)).await.unwrap().kept, Some(true));
 }
 

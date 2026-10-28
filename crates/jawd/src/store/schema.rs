@@ -938,7 +938,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // 17, a schema step: what an interface keeps of how it was laid out takes 64 KiB of JSON rather
     // than 16, so a book of layouts on a grid fits, the Mac app's, which at its limits (the unnamed
     // layout and nine named, each named one with its saved and its edited shape, 12 slots in each)
-    // takes about 40 KiB. A CHECK can't be changed in place, so the table is rebuilt and every row
+    // takes about 30 KiB. A CHECK can't be changed in place, so the table is rebuilt and every row
     // copied as it is, as migration 7 rebuilt the outbox. A rebuild of a small table: nothing refers
     // to it, it has no trigger or index of its own, and it holds 16 rows at most.
     "
