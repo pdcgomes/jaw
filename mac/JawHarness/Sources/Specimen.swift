@@ -66,7 +66,8 @@ struct ControllerSpecimen: NSViewControllerRepresentable {
     func updateNSViewController(_: NSViewController, context _: Context) {}
 }
 
-/// A whole window's content at the screen's size, as the window holds it, made from a `Screen`.
+/// A whole window's content at the screen's size, as the window holds it, made from a `Screen`, with
+/// the window's buttons over it where the window puts them.
 struct ScreenSpecimen: View {
     let screen: Screen
     let conditions: Conditions
@@ -74,5 +75,36 @@ struct ScreenSpecimen: View {
     var body: some View {
         ControllerSpecimen { screen.content(conditions) }
             .frame(width: screen.width, height: screen.height)
+            .overlay(alignment: .topLeading) { WindowButtons() }
+    }
+}
+
+/// The window's three buttons where the window puts them: real buttons made for the app's window,
+/// which draw as its own do, grey in a window that isn't key, as a picture's never is. A button made
+/// on its own sends its action to the window with the keys, the harness's, so these send none.
+private struct WindowButtons: NSViewRepresentable {
+    func makeNSView(context _: Context) -> NSView {
+        let view = TopLeft()
+        for (kind, frame) in Screen.titleBar.buttons {
+            guard let button = NSWindow.standardWindowButton(kind, for: Screen.style) else { continue }
+            button.frame = frame
+            button.action = nil
+            view.addSubview(button)
+        }
+        return view
+    }
+
+    func updateNSView(_: NSView, context _: Context) {}
+
+    func sizeThatFits(_: ProposedViewSize, nsView _: NSView, context _: Context) -> CGSize? {
+        let frames = Screen.titleBar.buttons.map(\.frame)
+        return CGSize(width: frames.map(\.maxX).max() ?? 0, height: frames.map(\.maxY).max() ?? 0)
+    }
+}
+
+/// A view whose subviews' frames run from its top left, as SwiftUI's do.
+private final class TopLeft: NSView {
+    override var isFlipped: Bool {
+        true
     }
 }

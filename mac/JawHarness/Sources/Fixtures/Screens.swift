@@ -15,6 +15,39 @@ struct Screen {
     var width: CGFloat = 1180
     var height: CGFloat = 780
 
+    /// The app's window's style, as `MainWindowController` makes it: titled, with the content filling
+    /// the window under its title bar.
+    static let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+
+    /// The app's title bar: how tall it is, and where its three buttons are, from the window's top left.
+    struct TitleBar {
+        let height: CGFloat
+        let buttons: [(kind: NSWindow.ButtonType, frame: NSRect)]
+
+        /// Where the window puts `kind`'s button, in the coordinates of `content`, the window's content.
+        @MainActor
+        func frame(of kind: NSWindow.ButtonType, in content: NSView) -> NSRect? {
+            guard let f = buttons.first(where: { $0.kind == kind })?.frame else { return nil }
+            return content.isFlipped ? f : NSRect(x: f.minX, y: content.bounds.height - f.maxY, width: f.width, height: f.height)
+        }
+    }
+
+    /// The title bar as a window made as the app makes its own has it, measured once from one that's
+    /// never shown.
+    @MainActor static let titleBar: TitleBar = {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780), styleMask: style, backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        let content = window.contentView!
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { kind in
+            window.standardWindowButton(kind).map { button in
+                let f = content.convert(button.frame, from: button.superview)
+                return (kind: kind, frame: NSRect(x: f.minX, y: content.bounds.height - f.maxY, width: f.width, height: f.height))
+            }
+        }
+        return TitleBar(height: window.frame.height - window.contentLayoutRect.height, buttons: buttons)
+    }()
+
     /// The open chats side by side on a grid of one row, each in a slot numbered from 1.
     var grid: PaneGrid? {
         guard !open.isEmpty else { return nil }
@@ -25,16 +58,18 @@ struct Screen {
 
     /// The window's content made from this screen in `conditions`: the sidebar; the chat list holding
     /// `chats`, the first open one selected; a conversation for each open chat, `Samples`' messages in
-    /// the group's, kept alive as the content's children; and the bar, with the layout's name. It's
-    /// laid out at its size once it's folded, so each conversation has its pane's width when its rows
-    /// come on the next turn, which can be before the window lays the content out: rows that come
-    /// before the width are drawn in a different place from one picture to the next.
+    /// the group's, kept alive as the content's children; and the bar, with the layout's name. Its safe
+    /// area leaves the title bar's height at the top, as the app's window leaves it, and each
+    /// conversation's header knows where the window's buttons are. It's laid out at its size once it's
+    /// folded, so each conversation has its pane's width before its rows come on the next turn, as in
+    /// the app, whose window lays the content out before jawd's rows arrive.
     @MainActor
     func content(_ conditions: Conditions) -> WindowContent {
         let roles = conditions.roles
         let list = ChatListController(folder: "all", roles: roles)
         let content = WindowContent(sidebar: SidebarController(), chatList: list, detail: DetailController(), bar: BottomBar(commands: { [] }))
         content.view.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        content.view.additionalSafeAreaInsets.top = Self.titleBar.height
         content.view.wantsLayer = true
         content.view.layer?.backgroundColor = roles.ground.cgColor
         list.apply(Update(seq: 1, upsert: chats, total: UInt64(chats.count)))
@@ -44,6 +79,10 @@ struct Screen {
         var box: NSView?
         for (i, chat) in open.enumerated() {
             let c = ConversationController(chat: chat, spec: spec, layouts: layouts, place: .newest(100))
+            c.windowButtons = { [weak view = content.view] in
+                guard let view, let zoom = Self.titleBar.frame(of: .zoomButton, in: view) else { return nil }
+                return view.convert(zoom, to: nil)
+            }
             content.addChild(c)
             _ = c.view
             let rows = chat.id == Samples.group.id ? Samples.update

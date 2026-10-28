@@ -19,7 +19,7 @@ public struct LinkingView: View {
     @State var phone = ""
     @State var asked = false
     /// What a QR code's seconds are counted from: `Format`'s clock, which the harness holds still.
-    @State var now = Date(timeIntervalSince1970: Double(Format.now()) / 1000)
+    @State var now = Self.clock
     let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     public init(step: LinkStep?, loggedOut: String?, roles: Roles, start: @escaping (String?) -> Void, cancel: @escaping () -> Void) {
@@ -72,8 +72,13 @@ public struct LinkingView: View {
         .foregroundStyle(roles.text.color)
         .onAppear { if loggedOut == nil { begin(nil) } }
         .onDisappear { cancel() }
-        .onReceive(tick) { _ in now = Date(timeIntervalSince1970: Double(Format.now()) / 1000) }
+        .onReceive(tick) { _ in now = Self.clock }
         .focusEffectDisabled()
+    }
+
+    /// `Format`'s clock, as a date.
+    static var clock: Date {
+        Date(timeIntervalSince1970: Double(Format.now()) / 1000)
     }
 
     func begin(_ phone: String?) {
