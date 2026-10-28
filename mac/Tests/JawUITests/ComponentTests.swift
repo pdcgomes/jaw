@@ -40,6 +40,31 @@ import Testing
 }
 
 @MainActor
+@Test func `VoiceOver's press does what a click does: a button's menu opens where a click opens it`() {
+    let ran = Ran()
+    let close = IconButton(symbol: "xmark", label: "Close Pane") { ran.n += 1 }
+    #expect(close.accessibilityPerformPress())
+    #expect(ran.n == 1)
+
+    let menu = NSMenu()
+    menu.addItem(withTitle: "Photos & Videos…", action: nil, keyEquivalent: "")
+    let attach = IconButton(symbol: "plus", label: "Attach") { ran.n += 1 }
+    attach.menuToOpen = { menu }
+    var popped: [(NSMenu, NSPoint)] = []
+    attach.popUp.run = { menu, point, _ in popped.append((menu, point)) }
+    #expect(attach.accessibilityPerformPress())
+    #expect(popped.count == 1 && popped.first?.0 === menu, "the menu a click opens")
+    #expect(popped.first?.1 == attach.menuPoint(menu), "where a click opens it")
+    #expect(ran.n == 1, "rather than pressed")
+
+    var from: IconButton?
+    let layout = IconButton(symbol: "rectangle.3.group", label: "Layouts") { ran.n += 1 }
+    layout.pressedFrom = { from = $0 }
+    #expect(layout.accessibilityPerformPress())
+    #expect(from === layout && ran.n == 1, "given to pressedFrom, as a click is")
+}
+
+@MainActor
 @Test func `nothing moves under Reduce Motion`() {
     let before = Motion.reduced
     defer { Motion.reduced = before }

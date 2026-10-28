@@ -123,16 +123,27 @@ public final class IconButton: NSControl {
         }
     }
 
+    /// How VoiceOver's press pops the button's menu up, which tests stand in for.
+    var popUp = MenuPopUp()
+
     override public func mouseDown(with _: NSEvent) {
         if let menu = menuToOpen?() {
-            let below = (window?.contentView.map { convert(bounds, to: $0).minY } ?? 100) < 200
-            let y = below ? bounds.height + menu.size.height + Space.xs : -Space.xs
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: isFlipped ? -y + bounds.height : y), in: self)
-        } else if let pressedFrom {
-            pressedFrom(self)
+            menu.popUp(positioning: nil, at: menuPoint(menu), in: self)
         } else {
-            pressed()
+            click()
         }
+    }
+
+    /// A click with no menu to open: the button given to `pressedFrom` when there's one, or pressed.
+    func click() {
+        if let pressedFrom { pressedFrom(self) } else { pressed() }
+    }
+
+    /// Where its menu opens: above the button when it sits low in the window, below it otherwise.
+    func menuPoint(_ menu: NSMenu) -> NSPoint {
+        let low = (window?.contentView.map { convert(bounds, to: $0).minY } ?? 100) < 200
+        let y = low ? bounds.height + menu.size.height + Space.xs : -Space.xs
+        return NSPoint(x: 0, y: isFlipped ? -y + bounds.height : y)
     }
 
     override public func mouseEntered(with _: NSEvent) {
@@ -143,8 +154,10 @@ public final class IconButton: NSControl {
         hovering = false
     }
 
+    /// VoiceOver's press does what a click does, a menu opening where a click opens it.
     override public func accessibilityPerformPress() -> Bool {
-        pressed()
+        if let menu = menuToOpen?() { return popUp.show(menu, at: menuPoint(menu), in: self) }
+        click()
         return true
     }
 }
