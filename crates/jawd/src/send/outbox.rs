@@ -500,9 +500,17 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
     } else {
         pb::command::Kind::Send(pb::Send { chat: row.chat.clone(), id: row.id.clone(), raw: row.raw.clone() })
     };
+    // A patch saying a chat is read goes after the chat's read receipts, told before it takes its
+    // turn, which full fetches of app state wait for.
+    let receipts = match &command {
+        pb::command::Kind::AppStatePatch(patch) if super::chat_actions::reads_the_chat(patch) => {
+            super::chat_actions::receipts_first(&inner, &row.chat).await
+        }
+        _ => Ok(()),
+    };
     // A patch holds its turn with sync's full fetches of app state until the engine answers, once
     // the patch's echo is kept; while another has it, it waits as for the connection.
-    let turn = if app_state {
+    let turn = if app_state && receipts.is_ok() {
         let Some(turn) = inner.app_state.try_take() else {
             return Next::After(Box::pin(inner.app_state.free()));
         };
@@ -510,7 +518,10 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
     } else {
         None
     };
-    let answered = engine(&inner, command).await;
+    let answered = match receipts {
+        Ok(()) => engine(&inner, command).await,
+        Err(failure) => Err(failure),
+    };
     drop(turn);
     let failure = match answered {
         Ok(pb::reply::Kind::Sent(sent)) => {

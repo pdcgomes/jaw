@@ -132,6 +132,18 @@ pub(super) fn want(inner: &Arc<Inner>, chat: i64) {
     });
 }
 
+/// Tells WhatsApp at once everything chat `chat` owes, a receipt's worth at a time, for a patch
+/// saying the chat is read, which goes after them.
+pub(super) async fn tell_now(inner: &Inner, chat: i64) -> anyhow::Result<()> {
+    loop {
+        match tell(inner, chat).await? {
+            Told::More => {}
+            Told::All => return Ok(()),
+            Told::Merging { .. } => anyhow::bail!("the chat is being merged; its receipts go once it is"),
+        }
+    }
+}
+
 /// What a lot of receipts came to.
 enum Told {
     All,

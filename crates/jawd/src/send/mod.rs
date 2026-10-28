@@ -45,8 +45,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jaw_proto::media::SendMedia;
 use jaw_proto::send::{
-    ChatArchive, ChatInfo, ChatMute, ChatPin, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, PollVote, React,
-    Read, SendContact, SendEvent, SendLocation, SendPoll, SendRetry, SendText, Typing,
+    ChatArchive, ChatInfo, ChatMarkUnread, ChatMute, ChatPin, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo,
+    PollVote, React, Read, SendContact, SendEvent, SendLocation, SendPoll, SendRetry, SendText, Star, Typing,
 };
 use jaw_proto::{Error, Push, code};
 use rusqlite::Connection;
@@ -302,6 +302,8 @@ impl Sending {
             "chat.pin" => chat_actions::pin(inner, params_of::<ChatPin>(method, params)?).await,
             "chat.archive" => chat_actions::archive(inner, params_of::<ChatArchive>(method, params)?).await,
             "chat.mute" => chat_actions::mute(inner, params_of::<ChatMute>(method, params)?).await,
+            "chat.mark_unread" => chat_actions::mark_unread(inner, params_of::<ChatMarkUnread>(method, params)?).await,
+            "star" => chat_actions::star(inner, params_of::<Star>(method, params)?).await,
             _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
         }
     }
@@ -329,6 +331,8 @@ impl Sending {
         "chat.pin",
         "chat.archive",
         "chat.mute",
+        "chat.mark_unread",
+        "star",
     ];
 }
 

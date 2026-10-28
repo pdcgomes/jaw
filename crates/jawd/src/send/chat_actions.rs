@@ -5,10 +5,12 @@
 //! builders build it and carries the time jawd wrote, later than any chat action's before it, so
 //! WhatsApp's echo of it through app state is known by that time and finds the row as it is; what
 //! WhatsApp sends for its index before the echo is held back (store::chat_actions).
+//! A patch saying a chat is read goes after the chat's read receipts (`receipts_first`); for a chat
+//! jaw holds none of the messages of, its echo is what reads the chat (store::chat_actions).
 
 use std::sync::Arc;
 
-use jaw_proto::send::{ChatArchive, ChatMute, ChatPin};
+use jaw_proto::send::{ChatArchive, ChatMarkUnread, ChatMute, ChatPin, Star};
 use jaw_proto::{AccountState, Error, code};
 use prost::Message as _;
 use rusqlite::OptionalExtension;
@@ -23,9 +25,9 @@ use super::actions::{self, Target};
 use super::outbox::{bad_param, message_id, queue};
 use super::{Inner, durably, internal, no_chat, now_ms, query};
 use crate::convert::app_state::FOREVER;
-use crate::engine::pb;
-use crate::store::Change;
+use crate::engine::{EngineError, pb};
 use crate::store::chat_actions::{Act, Acted, Does, Outcome, PINNED_MOST, Patch, Setting};
+use crate::store::{Change, read};
 
 /// A chat an action names: the chat it's being merged into, or itself, with its kind.
 pub(super) const CHAT_TO_ACT_ON: &str = "SELECT coalesce(k.id, c.id), coalesce(k.kind, c.kind) FROM chats c
@@ -187,7 +189,7 @@ pub(super) async fn pin(inner: &Arc<Inner>, pin: ChatPin) -> Result<Value, Error
     linked(inner)?;
     let chat = named(inner, &pin.chat).await?;
     let doing = if pin.pinned { "pin the chat" } else { "unpin the chat" };
-    act(inner, chat.id.clone(), doing, |at| {
+    act(inner, chat.id.clone(), doing, false, |at| {
         let patch = queued(pinned(&chat.id, pin.pinned, at))?;
         Ok(Does::Set(Setting::Pin { at: pin.pinned.then_some(at), patch }))
     })
@@ -198,7 +200,7 @@ pub(super) async fn archive(inner: &Arc<Inner>, archive: ChatArchive) -> Result<
     linked(inner)?;
     let chat = named(inner, &archive.chat).await?;
     let doing = if archive.archived { "archive the chat" } else { "unarchive the chat" };
-    act(inner, chat.id.clone(), doing, |at| {
+    act(inner, chat.id.clone(), doing, false, |at| {
         let range = range(&chat.id, chat.group, chat.newest.as_ref(), at);
         let unpin = Some(queued(pinned(&chat.id, false, at))?);
         let patch = queued(archived(&chat.id, archive.archived, range, at))?;
@@ -219,19 +221,79 @@ pub(super) async fn mute(inner: &Arc<Inner>, mute: ChatMute) -> Result<Value, Er
     linked(inner)?;
     let chat = named(inner, &mute.chat).await?;
     let doing = if until == 0 { "unmute the chat" } else { "mute the chat" };
-    act(inner, chat.id.clone(), doing, |at| {
+    act(inner, chat.id.clone(), doing, false, |at| {
         Ok(Does::Set(Setting::Mute { until, patch: queued(muted(&chat.id, until, at))? }))
     })
     .await
 }
 
-/// Commits a chat action, synced, and queues the patches it wrote after the chat's earlier sends.
-/// `does` makes the action done at `at`, later than every chat action jawd has done since it
-/// started, so no two of jaw's patches for an index carry one time, which its echo is known by.
+pub(super) async fn mark_unread(inner: &Arc<Inner>, mark: ChatMarkUnread) -> Result<Value, Error> {
+    linked(inner)?;
+    let chat = named(inner, &mark.chat).await?;
+    let doing = if mark.unread { "mark the chat unread" } else { "mark the chat read" };
+    act(inner, chat.id.clone(), doing, !mark.unread, |at| {
+        let range = range(&chat.id, chat.group, chat.newest.as_ref(), at);
+        let patch = queued(marked(&chat.id, mark.unread, range, at))?;
+        let newest = chat.newest.as_ref().map(|newest| newest.id.clone());
+        Ok(Does::Set(Setting::MarkUnread { unread: mark.unread, newest, patch }))
+    })
+    .await
+}
+
+pub(super) async fn star(inner: &Arc<Inner>, star: Star) -> Result<Value, Error> {
+    linked(inner)?;
+    let target = actions::find(inner, star.chat, star.message).await?;
+    if star.starred && matches!(target.kind.as_str(), "system" | "call") {
+        return Err(Error::new(code::NOT_ALLOWED, "a line about the chat can't be starred"));
+    }
+    if star.starred && target.deleted {
+        return Err(Error::new(code::NOT_ALLOWED, "a deleted message can't be starred"));
+    }
+    let doing = if star.starred { "star the message" } else { "unstar the message" };
+    act(inner, target.chat.clone(), doing, false, |at| {
+        let patch = queued(starred(&target, star.starred, at))?;
+        Ok(Does::Star { id: target.id.clone(), starred: star.starred, patch })
+    })
+    .await
+}
+
+/// Whether a patch says its chat is read: it goes after the chat's read receipts, since WhatsApp's
+/// echo of it at jaw's own position settles the receipts jaw owes there.
+pub(super) fn reads_the_chat(patch: &pb::AppStatePatch) -> bool {
+    patch.index.first().is_some_and(|kind| kind == "markChatAsRead")
+        && SyncActionValue::decode(patch.value.as_slice())
+            .ok()
+            .and_then(|value| value.mark_chat_as_read_action)
+            .and_then(|action| action.read)
+            .unwrap_or(false)
+}
+
+/// Sends the read receipts chat `chat` owes, at once, before its patch saying it's read; a failure is
+/// the patch's, tried again as it is. The chat is found as the writer finds it now, as the patch's
+/// echo will find it, since it may have merged into another since the patch was queued.
+pub(super) async fn receipts_first(inner: &Inner, chat: &str) -> Result<(), EngineError> {
+    let failed =
+        |why: String| EngineError::Failed { message: format!("its read receipts didn't go first: {why}"), retry: true };
+    let jid = chat.to_string();
+    let found = query(inner, move |db| match read::chat_named(db, &jid)? {
+        Some(named) => read::chat_n(db, &named),
+        None => Ok(None),
+    });
+    let Some(n) = found.await.map_err(|e| failed(e.message))? else {
+        return Ok(());
+    };
+    super::reads::tell_now(inner, n).await.map_err(|e| failed(format!("{e:#}")))
+}
+
+/// Commits a chat action, synced, and queues the patches it wrote after the chat's earlier sends; a
+/// chat read here owes its read receipts, which `owes_receipts` says. `does` makes the action done
+/// at `at`, later than every chat action jawd has done since it started, so no two of jaw's patches
+/// for an index carry one time, which its echo is known by.
 async fn act(
     inner: &Arc<Inner>,
     chat: String,
     doing: &str,
+    owes_receipts: bool,
     does: impl FnOnce(i64) -> Result<Does, Error>,
 ) -> Result<Value, Error> {
     let outcome = Outcome::default();
@@ -241,9 +303,12 @@ async fn act(
     let act = Act { chat: chat.clone(), does: does(at)?, outcome: outcome.clone() };
     durably(inner, vec![Change::ChatAction(act)], doing).await?;
     match outcome.take() {
-        Some(Acted::Queued { chat, outbox, .. }) => {
+        Some(Acted::Queued { chat, chat_n, outbox }) => {
             for outbox in outbox {
                 queue(inner, outbox, chat.clone(), false);
+            }
+            if owes_receipts {
+                super::reads::want(inner, chat_n);
             }
             Ok(Value::Object(Default::default()))
         }
@@ -383,5 +448,13 @@ mod tests {
         );
         let unstar = starred(&target(ANA, "d1", false, Some(ANA)), false, AT);
         assert_eq!(value(&unstar).star_action.unwrap().starred, Some(false));
+    }
+
+    #[test]
+    fn only_a_patch_saying_the_chat_is_read_goes_after_its_receipts() {
+        let none = range(ANA, false, None, AT);
+        assert!(reads_the_chat(&marked(ANA, false, none.clone(), AT)));
+        assert!(!reads_the_chat(&marked(ANA, true, none, AT)));
+        assert!(!reads_the_chat(&pinned(ANA, true, AT)));
     }
 }

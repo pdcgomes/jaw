@@ -4278,3 +4278,220 @@ async fn past_a_thousand_waiting_a_chat_action_is_refused_and_nothing_is_written
     assert_eq!((refused.code, refused.data), (code::LIMIT, full(1_000)));
     assert_eq!(chat_row(&running, ANA).await.muted_until, None);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marking_a_chat_unread_marks_it_and_marking_it_read_reads_it_its_receipts_going_first() {
+    let home = tempfile::tempdir().unwrap();
+    // A second between a chat's receipts, so a patch that didn't wait would go well before them.
+    let timing = Timing { read_every: Duration::from_secs(1), ..quick() };
+    let running = Running::timed(home.path(), world(), true, true, timing).await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 2_000).await;
+    running.call("read", json!({ "chat": ANA, "up_to": "m1" })).await.unwrap();
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
+    running.arrives(ANA, ANA, "m2", now_ms() - 1_000).await;
+    running.call("chat.mark_unread", json!({ "chat": ANA, "unread": true })).await.unwrap();
+    let marked = chat_row(&running, ANA).await;
+    assert!(marked.marked_unread && marked.unread == 1);
+    running.call("chat.mark_unread", json!({ "chat": ANA, "unread": false })).await.unwrap();
+    let read = chat_row(&running, ANA).await;
+    assert!(!read.marked_unread && read.unread == 0, "the mark gone, and read up to its newest");
+    let receipt = |asked: &[pb::command::Kind]| {
+        asked.iter().position(|k| matches!(k, pb::command::Kind::MarkRead(m) if m.ids == ["m2"]))
+    };
+    tokio::time::timeout(Duration::from_secs(5), running.world.until(|asked| receipt(asked).is_some()))
+        .await
+        .expect("m2's read receipt never went");
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    let reads: Vec<Option<bool>> = sent.iter().map(|p| value_of(p).mark_chat_as_read_action.unwrap().read).collect();
+    assert_eq!(reads, [Some(false), Some(true)]);
+    assert_eq!(
+        (sent[1].name.as_str(), sent[1].index[0].as_str(), sent[1].version),
+        ("regular_low", "markChatAsRead", 3)
+    );
+    let named = value_of(&sent[1]).mark_chat_as_read_action.unwrap().message_range.unwrap();
+    assert_eq!(named.messages[0].key.clone().unwrap().id.as_deref(), Some("m2"));
+    let asked = running.world.asked();
+    let patch = asked.iter().position(|k| matches!(k, pb::command::Kind::AppStatePatch(p) if p == &sent[1]));
+    assert!(matches!((receipt(&asked), patch), (Some(r), Some(p)) if r < p), "its receipt went before it");
+    until_echoed(&running, &sent[1]).await;
+    let echoed = chat_row(&running, ANA).await;
+    assert_eq!((echoed.v, echoed.unread, echoed.marked_unread), (read.v, 0, false), "the echo changed nothing");
+    running.call("chat.mark_unread", json!({ "chat": ANA, "unread": false })).await.unwrap();
+    assert_eq!(patches_sent(&running).len(), 2, "read already, nothing more goes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mark_read_whose_chat_merges_into_another_before_it_goes_sends_the_kept_chats_receipts_first() {
+    let home = tempfile::tempdir().unwrap();
+    // A minute between a chat's receipts, so only the patch's own wait sends them in time.
+    let timing = Timing { read_every: Duration::from_secs(60), ..quick() };
+    let running = Running::timed(home.path(), world(), true, true, timing).await;
+    let lid = "100000000001@lid";
+    running.chats(&[ANA]).await;
+    running.arrives(lid, lid, "l0", now_ms() - 3_000).await;
+    running.call("read", json!({ "chat": lid, "up_to": "l0" })).await.unwrap();
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
+    running.arrives(lid, lid, "l1", now_ms() - 2_000).await;
+    until_offline(&running).await;
+    running.call("chat.mark_unread", json!({ "chat": lid, "unread": false })).await.unwrap();
+    // Ana's LID and number turn out to be one person before the patch can go: her LID's chat merges
+    // into her number's, and goes.
+    let both = Person { jids: vec![ANA.into(), lid.into()], ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
+    let merging =
+        || running.query(|db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get::<_, i64>(0))?));
+    while merging().await > 0 {
+        running.store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+    }
+    assert_eq!(running.query(move |db| read::chat_n(db, lid)).await, None, "the LID's chat has gone");
+    running.connection(jaw_proto::ConnectionState::Online);
+    let receipt = |asked: &[pb::command::Kind]| {
+        asked.iter().position(|k| matches!(k, pb::command::Kind::MarkRead(m) if m.ids.iter().any(|id| id == "l1")))
+    };
+    tokio::time::timeout(Duration::from_secs(5), running.world.until(|asked| receipt(asked).is_some()))
+        .await
+        .expect("l1's read receipt never went");
+    until_stored(&running).await;
+    let asked = running.world.asked();
+    let patch = asked.iter().position(|k| matches!(k, pb::command::Kind::AppStatePatch(_)));
+    assert!(matches!((receipt(&asked), patch), (Some(r), Some(p)) if r < p), "its receipt went before it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marking_read_a_chat_jaw_holds_none_of_the_messages_of_keeps_its_count_until_whatsapps_echo_reads_it() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let phone =
+        crate::store::Read { chat: ANA.into(), at: now_ms() - 60_000, phone: Some((3, 0)), ..Default::default() };
+    running.store.apply(Lane::Live, vec![Change::Read(phone)]).await.unwrap();
+    let before = chat_row(&running, ANA).await;
+    assert_eq!(before.unread, 3, "the phone's count, with none of its messages here");
+    until_offline(&running).await;
+    running.call("chat.mark_unread", json!({ "chat": ANA, "unread": false })).await.unwrap();
+    let asked = chat_row(&running, ANA).await;
+    assert_eq!((asked.unread, asked.v), (3, before.v), "its count kept until the patch's echo, and nothing new");
+    running.connection(jaw_proto::ConnectionState::Online);
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    assert_eq!(sent.len(), 1);
+    until_echoed(&running, &sent[0]).await;
+    let echoed = chat_row(&running, ANA).await;
+    assert_eq!(echoed.unread, 0, "WhatsApp's echo of the patch reads it");
+    let since = before.v;
+    let versions: Vec<i64> = running
+        .query(move |db| {
+            let n = read::chat_n(db, ANA)?.expect("a chat jawd has");
+            Ok(db
+                .prepare("SELECT seq FROM events WHERE type = 'chat' AND key = ?1 AND seq > ?2 ORDER BY seq")?
+                .query_map([n, since], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+    assert_eq!(versions, [echoed.v], "the echo's version is the only new one");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn starring_a_message_stars_it_and_names_it_as_whatsapp_does() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.members(CLIMBING, &[RUI]).await;
+    running.arrives(CLIMBING, RUI, "g1", now_ms() - 3_000).await;
+    running.arrives(ANA, ANA, "d1", now_ms() - 2_000).await;
+    let mine = running.send(ANA, "o meu").await;
+    running.until_status(ANA, &mine, "sent").await;
+    let before = row(&running, CLIMBING, "g1").await.unwrap().v;
+    for (message, chat) in [("g1", Some(CLIMBING)), ("d1", None), (mine.as_str(), Some(ANA))] {
+        let mut params = json!({ "message": message, "starred": true });
+        if let Some(chat) = chat {
+            params["chat"] = json!(chat);
+        }
+        assert_eq!(running.call("star", params).await.unwrap(), json!({}), "{message}");
+    }
+    let g1 = row(&running, CLIMBING, "g1").await.unwrap();
+    assert!(g1.starred && g1.v > before, "starred, with a new version");
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    let indexes: Vec<Vec<String>> = sent.iter().map(|p| p.index.clone()).collect();
+    let index = |parts: [&str; 5]| parts.iter().map(|part| part.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        indexes,
+        [
+            index(["star", CLIMBING, "g1", "0", RUI]),
+            index(["star", ANA, "d1", "0", "0"]),
+            index(["star", ANA, mine.as_str(), "1", "0"]),
+        ]
+    );
+    assert!(sent.iter().all(|p| (p.name.as_str(), p.version) == ("regular_high", 2)));
+    until_echoed(&running, &sent[2]).await;
+    assert_eq!(row(&running, CLIMBING, "g1").await.unwrap().v, g1.v, "the echo changed nothing");
+    running.call("star", json!({ "message": "g1", "starred": true })).await.unwrap();
+    running.call("star", json!({ "message": "g1", "starred": false })).await.unwrap();
+    assert!(!row(&running, CLIMBING, "g1").await.unwrap().starred);
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    assert_eq!((sent.len(), value_of(&sent[3]).star_action.unwrap().starred), (4, Some(false)), "asked again, nothing");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_line_about_the_chat_or_a_deleted_message_isnt_starred_but_a_star_can_always_go() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let line = Message {
+        chat: ANA.into(),
+        id: "s1".into(),
+        at: now_ms() - 3_000,
+        kind: "system",
+        summary: "Ana changed her number".into(),
+        live: true,
+        ..Message::default()
+    };
+    running.store.apply(Lane::Live, vec![Change::Message(line)]).await.unwrap();
+    running.arrives(ANA, ANA, "gone", now_ms() - 2_000).await;
+    running.call("star", json!({ "message": "gone", "starred": true })).await.unwrap();
+    let revoke = Amend {
+        chat: ANA.into(),
+        target: "gone".into(),
+        sender: Some(ANA.into()),
+        mine: false,
+        at: now_ms(),
+        what: Amendment::Revoke,
+        raw: None,
+    };
+    running.store.apply(Lane::Live, vec![Change::Amend(revoke)]).await.unwrap();
+    for message in ["s1", "gone"] {
+        let refused = running.call("star", json!({ "message": message, "starred": true, "chat": ANA })).await;
+        assert_eq!(refused.unwrap_err().code, code::NOT_ALLOWED, "{message}");
+    }
+    running.call("star", json!({ "message": "gone", "starred": false })).await.unwrap();
+    assert!(!row(&running, ANA, "gone").await.unwrap().starred, "a deleted message's star can go");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn marking_and_starring_refuse_what_the_other_chat_actions_refuse() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let community = "120363000000000009@g.us";
+    let own = Chat { id: community.into(), kind: Some("community"), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(own)]).await.unwrap();
+    running.arrives(ANA, ANA, "m1", now_ms() - 1_000).await;
+    let mark = |chat: &str| json!({ "chat": chat, "unread": true });
+    let missing = running.call("chat.mark_unread", mark("351999999999@s.whatsapp.net")).await.unwrap_err();
+    let own_row = running.call("chat.mark_unread", mark(community)).await.unwrap_err();
+    let nothing = running.call("star", json!({ "message": "nope", "starred": true })).await.unwrap_err();
+    assert_eq!((missing.code, own_row.code, nothing.code), (code::NOT_FOUND, code::NOT_ALLOWED, code::NOT_FOUND));
+    until_offline(&running).await;
+    fill_outbox(home.path(), 1_000);
+    let full = Some(json!({ "limit": "outbox", "waiting": 1_000, "failed": 0 }));
+    for (method, params) in [("chat.mark_unread", mark(ANA)), ("star", json!({ "message": "m1", "starred": true }))] {
+        let refused = running.call(method, params).await.unwrap_err();
+        assert_eq!((refused.code, refused.data), (code::LIMIT, full.clone()), "{method}");
+    }
+    assert!(!chat_row(&running, ANA).await.marked_unread && !row(&running, ANA, "m1").await.unwrap().starred);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let unlinked = Running::unconnected(elsewhere.path()).await;
+    unlinked.arrives(ANA, ANA, "m1", now_ms()).await;
+    for (method, params) in [("chat.mark_unread", mark(ANA)), ("star", json!({ "message": "m1", "starred": true }))] {
+        assert_eq!(unlinked.call(method, params).await.unwrap_err().code, code::NOT_LINKED, "{method}");
+    }
+}
