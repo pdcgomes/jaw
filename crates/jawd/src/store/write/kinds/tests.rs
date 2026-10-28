@@ -1177,3 +1177,52 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     assert_eq!(shown(&store).await, settled);
     assert_eq!(store.count("pending WHERE kind = 'secret'").unwrap(), 2);
 }
+
+/// A photo Ana shared in the group's status, with its file's keys and size, which an earlier jawd
+/// couldn't show.
+fn status_photo(id: &str) -> WebMessageInfo {
+    let photo = e2e::ImageMessage {
+        mimetype: Some("image/jpeg".into()),
+        file_sha256: Some(vec![7; 32]),
+        file_enc_sha256: Some(vec![8; 32]),
+        media_key: Some(vec![9; 32]),
+        direct_path: Some("/v/t62.7118-24/status".into()),
+        file_length: Some(2_048),
+        width: Some(640),
+        height: Some(480),
+        ..Default::default()
+    };
+    let shared = e2e::FutureProofMessage {
+        message: Some(Box::new(e2e::Message { image_message: Some(Box::new(photo)), ..Default::default() })),
+    };
+    web(GROUP, id, Some(ANA), Some(e2e::Message { group_status_message: Some(Box::new(shared)), ..Default::default() }))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_converted_again_keeps_its_files_copy_as_one_arriving_would() {
+    let home = tempfile::tempdir().unwrap();
+    group_rows(home.path(), &[status_photo("3EB0STATUS")]);
+    let store = Store::open(home.path()).unwrap();
+    while store.backfill_left(KINDS).unwrap() > 0 {
+        backfill(&store).await;
+    }
+    let copy: String = query(&store, |db| {
+        Ok(db.query_row(
+            "SELECT json_object('kind', m.kind, 'keys', md.keys, 'sha256', hex(md.sha256), 'path', md.direct_path,
+                'bytes', md.bytes, 'w', md.w, 'h', md.h, 'wanted', md.wanted, 'arrived', md.arrived)
+            FROM messages m LEFT JOIN media md ON md.message = m.n AND md.variant = 'sd' WHERE m.id = '3EB0STATUS'",
+            [],
+            |r| r.get(0),
+        )?)
+    })
+    .await;
+    let copy: serde_json::Value = serde_json::from_str(&copy).unwrap();
+    assert_eq!(
+        copy,
+        json!({
+            "kind": "image", "keys": "image", "sha256": "07".repeat(32), "path": "/v/t62.7118-24/status",
+            "bytes": 2_048, "w": 640, "h": 480, "wanted": null, "arrived": 0,
+        }),
+        "its copy, as a photo from history brings one: wanted once it's shown or asked for"
+    );
+}

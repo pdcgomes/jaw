@@ -13,7 +13,9 @@ use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension, params};
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
-use super::{CHAT, MESSAGE, Packed, Stamps, amend_message, polls, record_quarantine, remove_row, transient, unpack};
+use super::{
+    CHAT, MESSAGE, Packed, Stamps, amend_message, media, polls, record_quarantine, remove_row, transient, unpack,
+};
 use crate::convert::{self, Me, kinds::UNKNOWN};
 use crate::store::{Amend, Amendment, Change, Message};
 
@@ -130,8 +132,9 @@ fn account(db: &Connection) -> Result<Me> {
 }
 
 /// Message `n` in `chat` shows as `message`, with a new version, and so does its chat if it's the
-/// chat's newest; the chat's unread messages and mentions are counted again, as what the message is
-/// may count where it didn't. `standing_in`: `message` is an edit standing in for it.
+/// chat's newest; its poll's options and its file's copy are written as a message arriving writes
+/// them; the chat's unread messages and mentions are counted again, as what the message is may count
+/// where it didn't. `standing_in`: `message` is an edit standing in for it.
 fn show(
     db: &Connection,
     stamps: &mut Stamps,
@@ -164,6 +167,10 @@ fn show(
         polls::options(db, n, &message.poll)?;
     }
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+    // Its file, as a copy that nothing wants until it's shown or asked for, as history's are.
+    if let Some(copy) = &message.media {
+        media::upsert(db, stamps, n, chat, "sd", copy, None)?;
+    }
     let seq = stamps.seq(CHAT, Some(chat));
     if db.prepare_cached(CHAT_SHOWS)?.execute(params![chat, n, seq])? > 0 {
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
