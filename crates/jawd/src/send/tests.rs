@@ -2573,6 +2573,10 @@ async fn a_reaction_to_a_message_youre_deleting_for_everyone_is_refused_while_yo
     assert_eq!(refused.code, code::NOT_ALLOWED, "{}", refused.message);
     assert_eq!(outbox_rows(&running).await.0, [("revoke".to_string(), "queued".to_string())], "nothing written");
     running.world.until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count() >= 2).await;
+    eventually(&running, "the deletion's first try failed on the way", |db: &Connection| {
+        Ok(db.query_row("SELECT attempts FROM outbox WHERE kind = 'revoke'", [], |r| r.get::<_, i64>(0))? > 0)
+    })
+    .await;
     running.world.refuse_next(1);
     running.world.stop_failing_chats();
     let revoke_is = |state: &'static str| {
@@ -2710,6 +2714,10 @@ async fn reaction_stopped_while_your_deletion_is(state: &str) -> (Result<Value, 
                 .world
                 .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count() >= 2)
                 .await;
+            eventually(&running, "the deletion's first try failed on the way", |db: &Connection| {
+                Ok(db.query_row("SELECT attempts FROM outbox WHERE kind = 'revoke'", [], |r| r.get::<_, i64>(0))? > 0)
+            })
+            .await;
             running.world.refuse_next(1);
             running.world.stop_failing_chats();
             eventually(&running, "the deletion waiting for a receipt", revoke_is("unconfirmed")).await;
@@ -2925,6 +2933,10 @@ async fn reaction_in_the_chat_kept_while_your_deletion_of_the_copy_merging_in_is
             running.world.fail_chats(&[lid.to_string()]);
             delete().await.unwrap();
             running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Send(_)))).await;
+            eventually(&running, "the deletion's first try failed on the way", |db: &Connection| {
+                Ok(db.query_row("SELECT attempts FROM outbox WHERE kind = 'revoke'", [], |r| r.get::<_, i64>(0))? > 0)
+            })
+            .await;
             running.world.refuse_next(1);
             running.world.stop_failing_chats();
             eventually(&running, "the deletion waiting for a receipt", revoke_is("unconfirmed")).await;
