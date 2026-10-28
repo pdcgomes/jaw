@@ -3,12 +3,17 @@ package wa
 import (
 	"context"
 	"database/sql"
+	"io"
 	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mattn/go-sqlite3"
+
+	"github.com/pdcgomes/jaw/engine/internal/link"
+	"github.com/pdcgomes/jaw/engine/internal/link/enginepb"
 )
 
 func TestEveryConnectionToTheSessionIsSyncedAndCheckpointsReachTheDisk(t *testing.T) {
@@ -60,5 +65,71 @@ func TestASessionSettingThatDidntTakeIsRefused(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "synchronous is") {
 		t.Fatalf("a synchronous that didn't take: %v", err)
+	}
+}
+
+func TestASessionFromANewerWhatsmeowIsSaidAsOutdatedAndTheEngineWaitsForJawd(t *testing.T) {
+	home := t.TempDir()
+	container, err := openSession(context.Background(), home, NewLogger("test", "error"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = container.Close()
+	dsn := (&url.URL{Scheme: "file", Path: filepath.Join(home, "session.db"), RawQuery: sessionDSN}).String()
+	db, err := sql.Open(sessionDriver, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// As a newer whatsmeow leaves it: a schema this one doesn't know, which older ones can't read.
+	if _, err := db.Exec("UPDATE whatsmeow_version SET version = 1000, compat = 1000"); err != nil {
+		t.Fatal(err)
+	}
+	toEngine, fromJawd := io.Pipe()
+	toJawd, fromEngine := io.Pipe()
+	ran := make(chan error, 1)
+	go func() {
+		ran <- Run(context.Background(), link.New(toEngine, fromEngine), home, "jaw-engine test", "v-test", NewLogger("test", "error"))
+	}()
+	jawd := link.New(toJawd, fromJawd)
+	if frame := recv(t, jawd); frame.GetHello() == nil {
+		t.Fatalf("the engine's hello: %v", frame)
+	}
+	if err := jawd.Send(&enginepb.Frame{Body: &enginepb.Frame_Hello{Hello: &enginepb.Hello{Protocol: link.Protocol, Program: "jawd test"}}}); err != nil {
+		t.Fatal(err)
+	}
+	frame := recv(t, jawd)
+	said := frame.GetEvent().GetConnection()
+	if said.GetState() != enginepb.Connection_CLIENT_OUTDATED || !strings.Contains(said.GetReason(), "newer jaw-engine") || !strings.Contains(said.GetReason(), "v1000") {
+		t.Fatalf("a session.db from a newer whatsmeow gave %v", frame)
+	}
+	command(t, jawd, 1, &enginepb.Command{Kind: &enginepb.Command_Ping{Ping: &enginepb.Ping{}}})
+	if reply := recv(t, jawd); reply.GetReply().GetPong() == nil {
+		t.Fatalf("a ping got %v", reply)
+	}
+	command(t, jawd, 2, &enginepb.Command{Kind: &enginepb.Command_LinkStart{LinkStart: &enginepb.LinkStart{}}})
+	if reply := recv(t, jawd); reply.GetReply().GetFailure() == nil {
+		t.Fatalf("linking got %v", reply)
+	}
+	select {
+	case err := <-ran:
+		t.Fatalf("the engine ended with %v while jawd was there", err)
+	default:
+	}
+	_ = fromJawd.Close()
+	select {
+	case err := <-ran:
+		if err != nil {
+			t.Errorf("the engine ended with %v once jawd closed the link", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the engine didn't end once jawd closed the link")
+	}
+	var version, compat int
+	if err := db.QueryRow("SELECT version, compat FROM whatsmeow_version").Scan(&version, &compat); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1000 || compat != 1000 {
+		t.Fatalf("session.db's version is now %d, compatible down to %d", version, compat)
 	}
 }

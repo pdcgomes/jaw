@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.mau.fi/util/dbutil"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
@@ -45,12 +46,19 @@ func (e *Engine) cli() *whatsmeow.Client {
 }
 
 // Run speaks to jawd on l until jawd closes it: hello first, then the session in home/session.db.
+// A session.db from a newer whatsmeow, which this one can't read, is said as WhatsApp saying jaw
+// is outdated, and the engine answers what it can until jawd closes the link, since starting it
+// again wouldn't read it either.
 func Run(ctx context.Context, l *link.Link, home, program, whatsmeowVersion string, log waLog.Logger) error {
 	e := newEngine(ctx, l, log)
 	if err := e.hello(program, whatsmeowVersion); err != nil {
 		return err
 	}
-	if err := e.open(home); err != nil {
+	if err := e.open(home); errors.Is(err, dbutil.ErrUnsupportedDatabaseVersion) {
+		log.Errorf("%v", err)
+		e.connection(enginepb.Connection_CLIENT_OUTDATED, "session.db is from a newer jaw-engine: "+errors.Unwrap(err).Error())
+		return e.serve()
+	} else if err != nil {
 		return err
 	}
 	defer func() { e.cli().Disconnect() }()
