@@ -146,7 +146,8 @@ pub enum Enqueued {
     Full { waiting: u64, failed: u64 },
     /// The message an action names has gone, so nothing was written.
     Gone,
-    /// The message a reaction or an edit names shows deleted for everyone, so nothing was written.
+    /// The message a reaction, an edit or a vote names is deleted for everyone, or being, so
+    /// nothing was written.
     Deleted,
     /// What each message of a forward came to, in order.
     Many(Vec<Enqueued>),
@@ -255,9 +256,9 @@ const UNRETRYABLE: &str = "DELETE FROM outbox WHERE message = ?1 AND state = 'fa
 const RETRYABLE: &str =
     "SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke')
     FROM messages m WHERE m.n = ?1";
-/// Whether message ?1 shows deleted for everyone, as windows show it: it is, or your deletion of it
-/// for everyone is on its way; or, while a chat merges into its own, the copy of it there is, which
-/// the merge folds into it.
+/// Whether message ?1 is deleted for everyone, or being: it is, or your deletion of it for everyone
+/// is on its way, as windows show it then; or, while a chat merges into its own, its copy there is,
+/// which windows of the chat kept show only once the merge folds it in.
 const SHOWN_DELETED: &str = "SELECT m.deleted
         OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed')
         OR EXISTS (SELECT 1 FROM chat_merges cm JOIN messages g ON g.chat = cm.gone AND g.id = m.id
@@ -469,10 +470,10 @@ fn full(db: &Connection, written: &Written) -> Result<bool> {
 
 /// Queues an action, done to its message once WhatsApp has it. Windows show it meanwhile, so its
 /// message, and its chat when it's the chat's newest, change now. A reaction, an edit or a vote on a
-/// message shown deleted for everyone isn't taken: `react`, `edit` and `vote` check on a reader, but
-/// a deletion can commit after that read, and while a chat merges, the copy they read may not be the
-/// one found here, and a deletion can be aimed at either, so the copies merging into this one are
-/// read too.
+/// message deleted for everyone, or being, isn't taken: `react`, `edit` and `vote` check on a
+/// reader, but a deletion can commit after that read, and while a chat merges, the copy they read
+/// may not be the one found here, and a deletion can be aimed at either, so the copies merging into
+/// this one are read too.
 fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String>, written: &Written) -> Result<bool> {
     if keyed_before(db, key, written)? || full(db, written)? {
         return Ok(false);
