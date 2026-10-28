@@ -71,7 +71,7 @@ func (e *Engine) sendMessage(c *enginepb.Send) *enginepb.Reply {
 
 // sendWithID sends message to `to` with the ID jawd made for it, and says what the server answered.
 func (e *Engine) sendWithID(to types.JID, id string, message *waE2E.Message) *enginepb.Reply {
-	resp, err := e.client.SendMessage(e.ctx, to, message, whatsmeow.SendRequestExtra{ID: id})
+	resp, err := e.cli().SendMessage(e.ctx, to, message, whatsmeow.SendRequestExtra{ID: id})
 	if err != nil {
 		return failure(fmt.Sprintf("can't send %s: %v", id, err), retryable(err))
 	}
@@ -95,20 +95,24 @@ func (e *Engine) pollVote(c *enginepb.PollVote) *enginepb.Reply {
 	}
 	var sender types.JID
 	if c.PollFromMe {
-		sender = e.client.Store.ID.ToNonAD()
+		me := e.cli().Store.ID
+		if me == nil {
+			return failure("no account is linked", false)
+		}
+		sender = me.ToNonAD()
 	} else if sender, err = types.ParseJID(c.PollSender); err != nil || sender.User == "" {
 		return failure(fmt.Sprintf("%q isn't who sent the poll", c.PollSender), false)
 	}
 	// The poll's sender as whatsmeow kept its secret, by their number or their LID, says which of
 	// yours the vote is encrypted for, as the chat's other members will decrypt it.
-	if _, kept, err := e.client.Store.MsgSecrets.GetMessageSecret(e.ctx, chat, sender, c.PollId); err == nil && !kept.IsEmpty() {
+	if _, kept, err := e.cli().Store.MsgSecrets.GetMessageSecret(e.ctx, chat, sender, c.PollId); err == nil && !kept.IsEmpty() {
 		sender = kept
 	}
 	poll := &types.MessageInfo{
 		MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsFromMe: c.PollFromMe, IsGroup: chat.Server == types.GroupServer},
 		ID:            c.PollId,
 	}
-	update, err := e.client.EncryptPollVote(e.ctx, poll, &waE2E.PollVoteMessage{SelectedOptions: c.Options})
+	update, err := e.cli().EncryptPollVote(e.ctx, poll, &waE2E.PollVoteMessage{SelectedOptions: c.Options})
 	if err != nil {
 		known := !errors.Is(err, whatsmeow.ErrOriginalMessageSecretNotFound)
 		return failure(fmt.Sprintf("can't vote in %s: %v", c.PollId, err), known && retryable(err))
@@ -192,7 +196,7 @@ func (e *Engine) markRead(c *enginepb.MarkRead) *enginepb.Reply {
 	for i, id := range c.Ids {
 		ids[i] = types.MessageID(id)
 	}
-	if err := e.client.MarkRead(e.ctx, ids, time.UnixMilli(c.AtMs), chat, sender); err != nil {
+	if err := e.cli().MarkRead(e.ctx, ids, time.UnixMilli(c.AtMs), chat, sender); err != nil {
 		return failure(fmt.Sprintf("can't mark %d messages read in %s: %v", len(ids), c.Chat, err), true)
 	}
 	return done()
@@ -213,7 +217,7 @@ func (e *Engine) chatPresence(c *enginepb.ChatPresence) *enginepb.Reply {
 	default:
 		return failure(fmt.Sprintf("there's no chat presence %v", c.State), false)
 	}
-	if err := e.client.SendChatPresence(e.ctx, chat, state, media); err != nil {
+	if err := e.cli().SendChatPresence(e.ctx, chat, state, media); err != nil {
 		return failure(fmt.Sprintf("can't say you're typing in %s: %v", c.Chat, err), true)
 	}
 	return done()
@@ -224,7 +228,7 @@ func (e *Engine) presence(c *enginepb.Presence) *enginepb.Reply {
 	if c.Available {
 		state = types.PresenceAvailable
 	}
-	if err := e.client.SendPresence(e.ctx, state); err != nil {
+	if err := e.cli().SendPresence(e.ctx, state); err != nil {
 		// Without a push name WhatsApp won't take presence; it comes with the first app-state sync.
 		return failure(fmt.Sprintf("can't say you're %s: %v", state, err), !errors.Is(err, whatsmeow.ErrNoPushName))
 	}
@@ -235,7 +239,7 @@ func (e *Engine) onWhatsApp(c *enginepb.OnWhatsApp) *enginepb.Reply {
 	if len(c.Phones) == 0 {
 		return &enginepb.Reply{Kind: &enginepb.Reply_OnWhatsappList{OnWhatsappList: &enginepb.OnWhatsAppList{}}}
 	}
-	answers, err := e.client.IsOnWhatsApp(e.ctx, c.Phones)
+	answers, err := e.cli().IsOnWhatsApp(e.ctx, c.Phones)
 	if err != nil {
 		return failure(fmt.Sprintf("can't ask WhatsApp who's on it: %v", err), true)
 	}

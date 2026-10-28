@@ -31,7 +31,7 @@ func (e *Engine) appStatePatch(c *enginepb.AppStatePatch) *enginepb.Reply {
 		Type:      appstate.WAPatchName(c.Name),
 		Mutations: []appstate.MutationInfo{{Index: c.Index, Version: c.Version, Value: value}},
 	}
-	if err := e.client.SendAppState(e.ctx, patch); err != nil {
+	if err := e.cli().SendAppState(e.ctx, patch); err != nil {
 		return failure(fmt.Sprintf("can't change %s for your other devices: %v", c.Index[0], err), retryable(err))
 	}
 	return done()

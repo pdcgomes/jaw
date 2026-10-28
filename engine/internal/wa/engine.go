@@ -8,11 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -24,11 +28,20 @@ import (
 
 // Engine is one run of jaw-engine: whatsmeow's events out to jawd, jawd's commands in.
 type Engine struct {
-	ctx    context.Context
-	link   *link.Link
-	acks   *link.Acks
-	log    waLog.Logger
-	client *whatsmeow.Client
+	ctx       context.Context
+	link      *link.Link
+	acks      *link.Acks
+	log       waLog.Logger
+	container *sqlstore.Container
+	// client is whatsmeow's client for the device in session.db, replaced by one on a fresh device
+	// once the account is logged out (renew); retired is the last one replaced so.
+	client  atomic.Pointer[whatsmeow.Client]
+	retired atomic.Pointer[whatsmeow.Client]
+}
+
+// cli is the client running now, nil until the session is open.
+func (e *Engine) cli() *whatsmeow.Client {
+	return e.client.Load()
 }
 
 // Run speaks to jawd on l until jawd closes it: hello first, then the session in home/session.db.
@@ -40,7 +53,7 @@ func Run(ctx context.Context, l *link.Link, home, program, whatsmeowVersion stri
 	if err := e.open(home); err != nil {
 		return err
 	}
-	defer e.client.Disconnect()
+	defer func() { e.cli().Disconnect() }()
 	go e.start()
 	return e.serve()
 }
@@ -82,6 +95,18 @@ func (e *Engine) open(home string) error {
 	if err != nil {
 		return fmt.Errorf("can't read whatsmeow's device: %w", err)
 	}
+	client, err := e.newClient(device)
+	if err != nil {
+		return err
+	}
+	e.container = container
+	e.client.Store(client)
+	return nil
+}
+
+// newClient makes whatsmeow's client for device, with jaw's settings, its events handed on by
+// handleFrom.
+func (e *Engine) newClient(device *store.Device) (*whatsmeow.Client, error) {
 	client := whatsmeow.NewClient(device, e.log.Sub("client"))
 	// WhatsApp hears a message arrived only once jawd has stored it, and a message it sends again
 	// after a crash isn't decrypted twice.
@@ -95,22 +120,22 @@ func (e *Engine) open(home string) error {
 	client.UseRetryMessageStore = true
 	if proxy := os.Getenv("HTTPS_PROXY"); proxy != "" {
 		if err := client.SetProxyAddress(proxy); err != nil {
-			return fmt.Errorf("can't use the proxy in HTTPS_PROXY: %w", err)
+			return nil, fmt.Errorf("can't use the proxy in HTTPS_PROXY: %w", err)
 		}
 	}
-	client.AddEventHandler(e.handle)
-	e.client = client
-	return nil
+	client.AddEventHandler(func(evt any) { e.handleFrom(client, evt) })
+	return client, nil
 }
 
 // start connects when an account is linked, and otherwise says there's none.
 func (e *Engine) start() {
-	if e.client.Store.ID == nil {
+	client := e.cli()
+	if client.Store.ID == nil {
 		e.connection(enginepb.Connection_UNLINKED, "")
 		return
 	}
 	e.connection(enginepb.Connection_CONNECTING, "")
-	if err := e.client.Connect(); err != nil {
+	if err := client.Connect(); err != nil {
 		e.connection(enginepb.Connection_CONNECT_FAILED, err.Error())
 	}
 }
@@ -166,8 +191,67 @@ func (e *Engine) keep(event *enginepb.Event) {
 	}
 }
 
-// handle is whatsmeow's event handler. It runs on whatsmeow's one queue, so it hands each event on
-// and returns; what whatsmeow won't send again waits for jawd's ack.
+// handleFrom is whatsmeow's event handler for client. Once the account is logged out, whatsmeow
+// can still have the client say how its connection went (Connected after LoggedOut), which would
+// tell jawd the removed device is linked again, so only what jawd must store goes on from it.
+func (e *Engine) handleFrom(client *whatsmeow.Client, evt any) {
+	if out, ok := evt.(*events.LoggedOut); ok {
+		e.loggedOut(client, out.Reason)
+		return
+	}
+	if (client != e.cli() || client == e.retired.Load()) && !mustKeep(evt) {
+		return
+	}
+	e.handle(evt)
+}
+
+// mustKeep says whether jawd must store evt, which whatsmeow won't send again once it's handled.
+func mustKeep(evt any) bool {
+	switch evt.(type) {
+	case *events.Message, *events.AppState, *events.PushName, *events.JoinedGroup, *events.GroupInfo, *events.Picture, *events.Receipt:
+		return true
+	}
+	return false
+}
+
+// loggedOut tells jawd WhatsApp logged the account out, why in whatsmeow's words without the code
+// ("logged out from another device", not "401: logged out from another device"), and gives the
+// engine a fresh device to link again with. It reads nothing of the device, which whatsmeow is
+// deleting meanwhile, and says it once for each client.
+func (e *Engine) loggedOut(client *whatsmeow.Client, reason events.ConnectFailureReason) {
+	if e.retired.Swap(client) == client {
+		return
+	}
+	why := strings.TrimPrefix(reason.String(), reason.NumberString()+": ")
+	e.send(&enginepb.Event{Kind: &enginepb.Event_Connection{Connection: &enginepb.Connection{State: enginepb.Connection_LOGGED_OUT, Reason: why}}})
+	e.renew(client)
+}
+
+// renew replaces a client whose account is logged out with one on a fresh device, so linking again
+// works without starting the engine again: whatsmeow deletes the device from session.db and won't
+// connect its client again. A device left in session.db would be read as the account at the next
+// start, so none is kept; if one can't be deleted, linking again waits for that start.
+func (e *Engine) renew(old *whatsmeow.Client) {
+	defer old.Disconnect()
+	devices, err := e.container.GetAllDevices(e.ctx)
+	for _, device := range devices {
+		if err == nil {
+			err = e.container.DeleteDevice(e.ctx, device)
+		}
+	}
+	var fresh *whatsmeow.Client
+	if err == nil {
+		fresh, err = e.newClient(e.container.NewDevice())
+	}
+	if err != nil {
+		e.log.Errorf("can't open a fresh device after the logout, so linking again waits for the engine to start again: %v", err)
+		return
+	}
+	e.client.Store(fresh)
+}
+
+// handle hands one of whatsmeow's events to jawd. It runs on whatsmeow's one queue, so it hands
+// each event on and returns; what whatsmeow won't send again waits for jawd's ack.
 func (e *Engine) handle(evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
@@ -199,8 +283,6 @@ func (e *Engine) handle(evt any) {
 		e.connection(enginepb.Connection_DISCONNECTED, "")
 	case *events.KeepAliveTimeout:
 		e.connection(enginepb.Connection_KEEPALIVE_TIMEOUT, fmt.Sprintf("%d keepalives failed", v.ErrorCount))
-	case *events.LoggedOut:
-		e.connection(enginepb.Connection_LOGGED_OUT, v.Reason.String())
 	case *events.StreamReplaced:
 		e.connection(enginepb.Connection_STREAM_REPLACED, "")
 	case *events.ClientOutdated:
@@ -233,10 +315,12 @@ func (e *Engine) handle(evt any) {
 
 func (e *Engine) state(state enginepb.Connection_State, reason string) *enginepb.Connection {
 	c := &enginepb.Connection{State: state, Reason: reason}
-	if e.client != nil && e.client.Store.ID != nil {
-		c.Jid = e.client.Store.ID.String()
-		c.Lid = e.client.Store.LID.String()
-		c.PushName = e.client.Store.PushName
+	if client := e.cli(); client != nil {
+		if id := client.Store.ID; id != nil {
+			c.Jid = id.String()
+			c.Lid = client.Store.LID.String()
+			c.PushName = client.Store.PushName
+		}
 	}
 	return c
 }
@@ -261,13 +345,13 @@ func (e *Engine) message(v *events.Message) *enginepb.Message {
 	var decrypted proto.Message
 	switch {
 	case v.Message.GetPollUpdateMessage() != nil:
-		if vote, err := e.client.DecryptPollVote(e.ctx, v); err == nil {
+		if vote, err := e.cli().DecryptPollVote(e.ctx, v); err == nil {
 			decrypted = vote
 		} else {
 			e.log.Warnf("can't decrypt the poll vote in %s: %v", v.Info.ID, err)
 		}
 	case v.Message.GetEncReactionMessage() != nil:
-		if reaction, err := e.client.DecryptReaction(e.ctx, v); err == nil {
+		if reaction, err := e.cli().DecryptReaction(e.ctx, v); err == nil {
 			decrypted = reaction
 		} else {
 			e.log.Warnf("can't decrypt the reaction in %s: %v", v.Info.ID, err)
@@ -347,19 +431,24 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 	case *enginepb.Command_BenchRun:
 		return e.bench(c.BenchRun.Count, c.BenchRun.Size)
 	}
-	if e.client == nil {
+	client := e.cli()
+	if client == nil {
 		return failure("the engine has no session open", false)
 	}
 	switch c := cmd.Kind.(type) {
 	case *enginepb.Command_LinkStart:
 		return e.linkStart(c.LinkStart.Phone)
 	case *enginepb.Command_LinkCancel:
-		e.client.Disconnect()
+		client.Disconnect()
 		return done()
 	case *enginepb.Command_Logout:
-		if err := e.client.Logout(e.ctx); err != nil {
+		if err := client.Logout(e.ctx); err != nil {
 			return failure(fmt.Sprintf("can't log out: %v", err), true)
 		}
+		// whatsmeow says nothing after a logout jawd asked for, and deletes the device as it does
+		// after the phone's.
+		e.retired.Store(client)
+		e.renew(client)
 		return done()
 	case *enginepb.Command_HistoryDownload:
 		return e.historyDownload(c.HistoryDownload)
@@ -368,7 +457,7 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 	case *enginepb.Command_LidLookup:
 		return e.lidLookup(c.LidLookup)
 	}
-	if e.client.Store.ID == nil {
+	if client.Store.ID == nil {
 		return failure("no account is linked yet", false)
 	}
 	switch c := cmd.Kind.(type) {
@@ -402,15 +491,16 @@ func (e *Engine) step(step *enginepb.Link) {
 // linkStart links an account: by QR codes, or by a code to type on the phone when phone is set,
 // which needs the connection up first, as whatsmeow's PairPhone says.
 func (e *Engine) linkStart(phone string) *enginepb.Reply {
-	if e.client.Store.ID != nil {
+	client := e.cli()
+	if client.Store.ID != nil {
 		return failure("an account is already linked; log out first", false)
 	}
-	e.client.Disconnect()
-	codes, err := e.client.GetQRChannel(e.ctx)
+	client.Disconnect()
+	codes, err := client.GetQRChannel(e.ctx)
 	if err != nil {
 		return failure(fmt.Sprintf("can't start linking: %v", err), true)
 	}
-	if err := e.client.Connect(); err != nil {
+	if err := client.Connect(); err != nil {
 		return failure(fmt.Sprintf("can't reach WhatsApp: %v", err), true)
 	}
 	ready := make(chan struct{})
@@ -447,7 +537,7 @@ func (e *Engine) linkStart(phone string) *enginepb.Reply {
 		return failure("WhatsApp didn't get ready to link within 30 seconds", true)
 	}
 	// The server checks the name is "Browser (OS)" with a browser and system it knows.
-	code, err := e.client.PairPhone(e.ctx, phone, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+	code, err := client.PairPhone(e.ctx, phone, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
 	if err != nil {
 		return failure(fmt.Sprintf("can't get a code for %s: %v", phone, err), true)
 	}
@@ -462,7 +552,7 @@ func (e *Engine) historyDownload(c *enginepb.HistoryDownload) *enginepb.Reply {
 	if err := proto.Unmarshal(c.Notification, notification); err != nil {
 		return failure(fmt.Sprintf("that isn't a history notification: %v", err), false)
 	}
-	history, err := e.client.DownloadHistorySync(e.ctx, notification, true)
+	history, err := e.cli().DownloadHistorySync(e.ctx, notification, true)
 	if err != nil {
 		return failure(fmt.Sprintf("can't download the history: %v", err), !gone(err))
 	}

@@ -322,11 +322,9 @@ pub async fn run(
                 push(&pushes, "connection", pushed);
                 // Waited for, so a logout and a later connection are kept in the order they came. It
                 // holds the loop for one live commit, a synced one for a logout, once a connection.
-                // Follow-up: whatsmeow can dispatch Connected with the removed device's JID after
-                // LoggedOut (it deletes the device while the LoggedOut goroutine runs, and sends
-                // Connected even when the post-connect query fails), which keeps the account here
-                // until the next start's UNLINKED corrects it, as main's live state does; the
-                // engine should drop a Connected after a LoggedOut until a PairSuccess.
+                // whatsmeow can dispatch Connected with the removed device's JID after LoggedOut,
+                // which the engine drops: once an account is logged out, only what jawd must store
+                // goes on from its client.
                 if let Some(account) = account {
                     let forget = account.is_empty();
                     let change = vec![Change::Remember { key: ACCOUNT.into(), value: account }];

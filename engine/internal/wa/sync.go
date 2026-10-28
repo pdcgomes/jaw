@@ -130,7 +130,7 @@ func picture(v *events.Picture) *enginepb.Picture {
 
 // groups answers Groups with every group the account is in.
 func (e *Engine) groups() *enginepb.Reply {
-	groups, err := e.client.GetJoinedGroups(e.ctx)
+	groups, err := e.cli().GetJoinedGroups(e.ctx)
 	if err != nil {
 		return failure(fmt.Sprintf("can't list the groups: %v", err), true)
 	}
@@ -143,7 +143,7 @@ func (e *Engine) groups() *enginepb.Reply {
 
 // contacts answers Contacts from whatsmeow's own store, without asking WhatsApp.
 func (e *Engine) contacts() *enginepb.Reply {
-	all, err := e.client.Store.Contacts.GetAllContacts(e.ctx)
+	all, err := e.cli().Store.Contacts.GetAllContacts(e.ctx)
 	if err != nil {
 		return failure(fmt.Sprintf("can't read the contacts whatsmeow keeps: %v", err), true)
 	}
@@ -153,7 +153,7 @@ func (e *Engine) contacts() *enginepb.Reply {
 			phones = append(phones, j)
 		}
 	}
-	lids, err := e.client.Store.LIDs.GetManyLIDsForPNs(e.ctx, phones)
+	lids, err := e.cli().Store.LIDs.GetManyLIDsForPNs(e.ctx, phones)
 	if err != nil {
 		e.log.Warnf("can't read the LIDs of %d contacts: %v", len(phones), err)
 	}
@@ -182,7 +182,7 @@ func (e *Engine) lidLookup(c *enginepb.LidLookup) *enginepb.Reply {
 		if err != nil || lid.Server != types.HiddenUserServer {
 			continue
 		}
-		pn, err := e.client.Store.LIDs.GetPNForLID(e.ctx, lid)
+		pn, err := e.cli().Store.LIDs.GetPNForLID(e.ctx, lid)
 		if err != nil {
 			return failure(fmt.Sprintf("can't read whatsmeow's LID map: %v", err), true)
 		}
@@ -203,7 +203,7 @@ func (e *Engine) appStateResync(c *enginepb.AppStateResync) *enginepb.Reply {
 		}
 	}
 	for _, name := range names {
-		if err := e.client.FetchAppState(e.ctx, appstate.WAPatchName(name), true, false); err != nil {
+		if err := e.cli().FetchAppState(e.ctx, appstate.WAPatchName(name), true, false); err != nil {
 			return failure(fmt.Sprintf("can't fetch the app state %s: %v", name, err), true)
 		}
 	}
@@ -216,7 +216,7 @@ func (e *Engine) avatar(c *enginepb.Avatar) *enginepb.Reply {
 	if err != nil {
 		return failure(fmt.Sprintf("%q isn't a JID: %v", c.Jid, err), false)
 	}
-	info, err := e.client.GetProfilePictureInfo(e.ctx, target, &whatsmeow.GetProfilePictureParams{
+	info, err := e.cli().GetProfilePictureInfo(e.ctx, target, &whatsmeow.GetProfilePictureParams{
 		ExistingID:  c.ExistingId,
 		IsCommunity: c.Community,
 	})
@@ -298,7 +298,7 @@ func (e *Engine) historyRequest(c *enginepb.HistoryRequest) *enginepb.Reply {
 		ID:            c.OldestId,
 		Timestamp:     time.UnixMilli(c.OldestMs),
 	}
-	if _, err := e.client.SendPeerMessage(e.ctx, e.client.BuildHistorySyncRequest(oldest, count)); err != nil {
+	if _, err := e.cli().SendPeerMessage(e.ctx, e.cli().BuildHistorySyncRequest(oldest, count)); err != nil {
 		return failure(fmt.Sprintf("can't ask the phone for older messages: %v", err), true)
 	}
 	return done()

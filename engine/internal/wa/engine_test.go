@@ -7,6 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waAdv"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/pdcgomes/jaw/engine/internal/link"
 	"github.com/pdcgomes/jaw/engine/internal/link/enginepb"
 )
@@ -131,5 +137,147 @@ func TestJawdGoingReleasesWhatWaits(t *testing.T) {
 	}
 	if err := <-served; err != nil {
 		t.Errorf("serve ended with %v", err)
+	}
+}
+
+// recv is jawd's next frame from the engine, failing the test if none comes in time.
+func recv(t *testing.T, jawd *link.Link) *enginepb.Frame {
+	t.Helper()
+	type received struct {
+		frame *enginepb.Frame
+		err   error
+	}
+	got := make(chan received, 1)
+	go func() {
+		frame, err := jawd.Recv()
+		got <- received{frame, err}
+	}()
+	select {
+	case r := <-got:
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		return r.frame
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine sent jawd nothing")
+		return nil
+	}
+}
+
+// linkedEngine is an engine whose session.db, in a folder of its own, has a device for an account,
+// as one that has linked does, and jawd's end of its link.
+func linkedEngine(t *testing.T) (*Engine, *link.Link, func()) {
+	t.Helper()
+	e, jawd, _, closeLink := engineWithoutSession(t, link.Protocol)
+	if err := e.open(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	device := e.cli().Store
+	device.ID = &types.JID{User: "351910000001", Device: 12, Server: types.DefaultUserServer}
+	// The account's signatures, made up but of the lengths session.db checks.
+	device.Account = &waAdv.ADVSignedDeviceIdentity{
+		Details:             []byte{1},
+		AccountSignature:    make([]byte, 64),
+		AccountSignatureKey: make([]byte, 32),
+		DeviceSignature:     make([]byte, 64),
+	}
+	if err := device.Save(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return e, jawd, closeLink
+}
+
+// returnsAlone says whether fn returns without sending jawd anything, which it couldn't do without
+// jawd reading it from the pipe.
+func returnsAlone(fn func()) bool {
+	returned := make(chan struct{})
+	go func() {
+		fn()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		return true
+	case <-time.After(2 * time.Second):
+		return false
+	}
+}
+
+func devicesIn(t *testing.T, e *Engine) int {
+	t.Helper()
+	devices, err := e.container.GetAllDevices(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(devices)
+}
+
+func TestALogoutGivesAFreshDeviceToLinkAgainWithAndDropsWhatTheOldClientSaysOfItsConnection(t *testing.T) {
+	e, jawd, closeLink := linkedEngine(t)
+	defer closeLink()
+	old := e.cli()
+	// whatsmeow deletes the device as it dispatches LoggedOut.
+	if err := old.Store.Delete(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	go e.handleFrom(old, &events.LoggedOut{Reason: events.ConnectFailureLoggedOut})
+	frame := recv(t, jawd)
+	said := frame.GetEvent().GetConnection()
+	if said.GetState() != enginepb.Connection_LOGGED_OUT || said.GetReason() != "logged out from another device" {
+		t.Fatalf("a logout said %v", frame)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for e.cli() == old && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	fresh := e.cli()
+	if fresh == old || fresh.Store.ID != nil || fresh.Store.Deleted {
+		t.Fatalf("after the logout the client is %p (was %p), its device %v, deleted %v", fresh, old, fresh.Store.ID, fresh.Store.Deleted)
+	}
+	if n := devicesIn(t, e); n != 0 {
+		t.Fatalf("%d devices left in session.db", n)
+	}
+	if !returnsAlone(func() { e.handleFrom(old, &events.Connected{}) }) {
+		t.Fatal("the old client's Connected went to jawd")
+	}
+	if !returnsAlone(func() { e.handleFrom(old, &events.LoggedOut{Reason: events.ConnectFailureLoggedOut}) }) {
+		t.Fatal("the old client's second LoggedOut went to jawd")
+	}
+	kept := &events.Message{
+		Info:    types.MessageInfo{MessageSource: types.MessageSource{Chat: types.NewJID("351912345678", types.DefaultUserServer)}, ID: "3EB0LATE"},
+		Message: &waE2E.Message{Conversation: proto.String("still kept")},
+	}
+	go e.handleFrom(old, kept)
+	frame = recv(t, jawd)
+	if frame.GetEvent().GetMessage().GetInfo().GetId() != "3EB0LATE" || frame.GetEvent().Seq == 0 {
+		t.Fatalf("a message the old client handed over after the logout: %v", frame)
+	}
+	if err := jawd.Send(&enginepb.Frame{Body: &enginepb.Frame_Ack{Ack: &enginepb.Ack{Seq: frame.GetEvent().Seq}}}); err != nil {
+		t.Fatal(err)
+	}
+	go e.handleFrom(fresh, &events.Connected{})
+	if frame = recv(t, jawd); frame.GetEvent().GetConnection().GetState() != enginepb.Connection_CONNECTED {
+		t.Fatalf("the fresh client's Connected: %v", frame)
+	}
+}
+
+func TestALogoutLeavesNoDeviceInTheSessionWhetherOrNotWhatsmeowHasDeletedItYet(t *testing.T) {
+	e, jawd, closeLink := linkedEngine(t)
+	defer closeLink()
+	old := e.cli()
+	go e.handleFrom(old, &events.LoggedOut{Reason: events.ConnectFailureMainDeviceGone})
+	frame := recv(t, jawd)
+	if reason := frame.GetEvent().GetConnection().GetReason(); reason != "primary device was logged out" {
+		t.Fatalf("a logout's reason: %q", reason)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for e.cli() == old && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if e.cli() == old {
+		t.Fatal("no fresh client")
+	}
+	if n := devicesIn(t, e); n != 0 {
+		t.Fatalf("%d devices left in session.db, which the next start would read as the account", n)
 	}
 }
