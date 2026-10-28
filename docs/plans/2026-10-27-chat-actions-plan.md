@@ -3602,7 +3602,7 @@ Expected: at least 60 GB available. If not, stop and say so.
 - [ ] **Step 2: Lint and tests, as CI runs them**
 
 Run: `cd /Users/pedrogomes/src/jaw-chat-actions && export CARGO_INCREMENTAL=0 && make lint && make test`
-Expected: `make lint` prints nothing past cargo's `Finished` lines and exits 0; `make test` ends with `ok  github.com/pdcgomes/jaw/engine/internal/wa` among the Go packages and `test result: ok.` for every Rust test binary. `make check-generated` isn't run here: the engine's proto and generated code are untouched (`git diff origin/main --stat -- proto/ engine/internal/link` prints nothing), and CI runs it.
+Expected: `make lint` prints nothing past cargo's `Finished` lines and exits 0; `make test` ends with `ok  github.com/pdcgomes/jaw/engine/internal/wa` among the Go packages and `test result: ok.` for every Rust test binary. Under a heavy load (the reviews saw load averages near 50) these fail by their timing and pass alone: `indexing_for_search_waiting_for_the_wal_gets_room_with_nothing_else_committing`, `a_reader_that_lets_go_while_a_restart_waits_for_it_doesnt_keep_the_wal_from_starting_again`, `feed::tests::a_lone_change_after_quiet_goes_at_once_rather_than_waiting_to_coalesce`, `the_checkpointer_flushes_jaw_db_after_a_pass_the_writer_outran_and_not_after_one_that_reached_the_end` and `the_checkpointer_flushes_jaw_db_without_letting_go_of_this_processs_locks_on_it`; run one that fails alone and report both results, and any other failure, or one that fails alone, is a failure. `make check-generated` isn't run here: the engine's proto and generated code are untouched (`git diff origin/main --stat -- proto/ engine/internal/link` prints nothing), and CI runs it.
 
 - [ ] **Step 3: The round trip on jawd demo**
 
@@ -3725,6 +3725,11 @@ Beyond your standard checks, look at:
 8. Archive and unpin as two patches in the chat's order, and the outcomes when one of them is refused.
 9. The plans pinned in plans.txt and the module plan tests; one new table, `app_state_awaiting` (migration 13, a schema step, class jaw's own), and no new column.
 10. The hold-back (task 8's fix): while jaw's patch for an index hasn't echoed, what WhatsApp sends for that index is kept raw and not applied; the awaited row goes with its echo, once the drain passes `echo_by`, when its outbox row goes without going, or with its refusal; a refusal undoes only its index's latest patch; the time each patch carries is unique to its index; `stored.awaiting` counts the rows. The engine answers a patch only once its echo is kept, and one lock keeps jawd's app-state patches and its full fetches of app state from overlapping. What's left, a notification's fetch or a 409's conflicting changes, handed over by whatsmeow beside jaw's echo when the phone changes the same setting at the same moment, is weighed as the decision says.
+11. Edges the task reviews found and left for the audit to weigh:
+    - A revoke committed between a star's or a reaction's check and its write stars or reacts to a message deleted for everyone, since the check reads before `act`.
+    - A mark read on a chat jaw holds none of the messages of, in the instant a merge into it has started but its first step hasn't shown its newest message, reads nothing at the write, and its echo settles "told" past the gone chat's moved messages, whose receipts never go.
+    - Receipts a merge moves to the kept chat wait for the next `want` of it or the next start's `reads::resume`, as before this branch; and a WhatsApp read of one chat converted after a merge into another has started settles "told" at that position in the kept chat, as before this branch.
+    - A message reaching jaw between a no-message mark read and its echo, stamped at or before the patch's second, gets no read receipt from jaw; whether the phone sends one is WhatsApp's behaviour.
 ```
 
 - [ ] **Step 2: Fix what it marks, and audit again**
