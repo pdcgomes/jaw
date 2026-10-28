@@ -105,8 +105,7 @@ public struct LinkingView: View {
             }
             .frame(width: 260, height: 260)
         } else if case let .qr(text, _) = step, let image = Self.qr(text) {
-            Image(decorative: image, scale: 1)
-                .interpolation(.none).resizable().frame(width: 260, height: 260)
+            QRCode(image: image).frame(width: 260, height: 260)
                 .padding(14).background(RoundedRectangle(cornerRadius: Radius.panel).fill(.white))
                 .accessibilityLabel("The code to scan with your phone")
         } else {
@@ -120,9 +119,54 @@ public struct LinkingView: View {
         filter.message = Data(text.utf8)
         filter.correctionLevel = "M"
         guard let output = filter.outputImage else { return nil }
-        return CIContext().createCGImage(output, from: output.extent)
+        return context.createCGImage(output, from: output.extent)
     }
 
+    /// One context for every code, made once: the body asks for its code each second.
+    static let context = CIContext()
+}
+
+/// A QR code in SwiftUI, filling the frame it's given.
+struct QRCode: NSViewRepresentable {
+    let image: CGImage
+
+    func makeNSView(context _: Context) -> QRCodeView {
+        let v = QRCodeView()
+        v.image = image
+        return v
+    }
+
+    func updateNSView(_ v: QRCodeView, context _: Context) {
+        v.image = image
+    }
+}
+
+/// A QR code's image, a pixel to a module, drawn into the view's bounds without smoothing, so each
+/// module is a square with hard edges at any scale. It draws the image itself, as `MimicView` draws
+/// its pixels, since a picture taken with `cacheDisplay` ignores a layer's filter.
+final class QRCodeView: NSView {
+    var image: CGImage? {
+        didSet { needsDisplay = true }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_: NSRect) {
+        guard let image, let context = NSGraphicsContext.current else { return }
+        context.saveGraphicsState()
+        defer { context.restoreGraphicsState() }
+        context.imageInterpolation = .none
+        context.cgContext.interpolationQuality = .none
+        context.cgContext.draw(image, in: bounds)
+    }
 }
 
 /// The keys, every command with its own, as the terminal's `?` shows them.
