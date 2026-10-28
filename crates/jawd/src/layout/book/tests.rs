@@ -444,6 +444,26 @@ fn a_book_reads_each_slot_as_jawd_knows_its_chat_emptying_one_gone_or_shown_befo
 }
 
 #[test]
+fn of_two_slots_that_come_to_one_chat_the_one_higher_up_keeps_it_whatever_their_columns() {
+    let known = knowing(&[(ANA, ANA), (ANA_LID, ANA), (CLIMBING, CLIMBING)]);
+    // The group at the top left, Ana by her number below it, and Ana by her LID down the right,
+    // whose slot starts higher than the one below the group.
+    let shape = grid(
+        &[0.0, 0.5, 1.0],
+        &[0.0, 0.5, 1.0],
+        vec![
+            slot(1, [0, 1, 0, 1], Some(CLIMBING)),
+            slot(2, [0, 1, 1, 2], Some(ANA)),
+            slot(3, [1, 2, 0, 2], Some(ANA_LID)),
+        ],
+    );
+    let (read, dropped) = resolved(unnamed(shape), known).unwrap();
+    let chats: Vec<Option<&str>> = read.unnamed.as_ref().unwrap().slots.iter().map(|s| s.chat.as_deref()).collect();
+    assert_eq!(chats, [Some(CLIMBING), None, Some(ANA)], "top to bottom first: the slot on the right starts higher");
+    assert_eq!(dropped, [ANA]);
+}
+
+#[test]
 fn a_reader_of_one_format_is_answered_with_a_layout_kept_in_the_other_left_out_as_a_reader_of_trees_would() {
     let known = || knowing(&[(ANA, ANA), (ANA_LID, ANA), (CLIMBING, CLIMBING)]);
     // A tree with a pane on a chat jaw.db doesn't have: left out, its split closed, then laid out.
