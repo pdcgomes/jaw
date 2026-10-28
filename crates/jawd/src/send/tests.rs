@@ -397,7 +397,7 @@ fn a_scene_of_jawd_to_be_killed() {
                 at(&id);
             }
             "pinned behind a message" => {
-                let running = Running::on(home, phone_with_app_state(), true).await;
+                let running = Running::on(home, phone_with_app_state(Ahead::Names), true).await;
                 until_fetched(&running, 1).await;
                 // Ana has no picture, as the avatars looked for once the engine connects find, so
                 // jawd started again looks for none.
@@ -4120,12 +4120,22 @@ async fn toggling_a_pin_while_whatsapp_cant_be_reached_ends_as_asked_last_once_i
     assert_eq!(latest.pin_action, Some(PinAction { pinned: Some(true) }), "and WhatsApp's latest pins it");
 }
 
-/// How many people's names the phone's app state holds ahead of Ana's chat.
+/// How many mutations the phone's app state holds ahead of Ana's chat.
 const NAMES: usize = 300;
 
-/// A phone whose app state holds NAMES people's names and, after them, Ana's chat unpinned an hour
-/// ago, so a full fetch of it reaches her chat only once every name is in.
-struct Phone;
+/// What the phone's app state holds ahead of Ana's chat.
+#[derive(Clone, Copy)]
+enum Ahead {
+    /// NAMES people's names, in a collection of their own.
+    Names,
+    /// NAMES other chats unpinned, in her chat's collection, so a fetch of it alone reaches her
+    /// chat only once every one of them is in.
+    Chats,
+}
+
+/// A phone whose app state holds NAMES mutations and, after them, Ana's chat unpinned an hour ago,
+/// so a full fetch of it reaches her chat only once every one of them is in.
+struct Phone(Ahead);
 
 impl demo::Account for Phone {
     fn contacts(&self) -> pb::ContactList {
@@ -4154,27 +4164,31 @@ impl demo::Account for Phone {
             seq: 0,
             kind: Some(pb::event::Kind::AppState(pb::AppState { index: index.into(), value: value.encode_to_vec() })),
         };
-        let mut events: Vec<pb::Event> = (0..NAMES)
-            .map(|n| {
-                let named = ContactAction { full_name: Some(format!("Person {n}")), ..Default::default() };
-                let value =
-                    SyncActionValue { timestamp: an_hour_ago, contact_action: Some(named), ..Default::default() };
-                mutation(["contact".into(), format!("35192{n:07}@s.whatsapp.net")], value)
-            })
-            .collect();
         let unpinned = SyncActionValue {
             timestamp: an_hour_ago,
             pin_action: Some(PinAction { pinned: Some(false) }),
             ..Default::default()
         };
+        let mut events: Vec<pb::Event> = (0..NAMES)
+            .map(|n| {
+                let jid = format!("35192{n:07}@s.whatsapp.net");
+                if let Ahead::Chats = self.0 {
+                    return mutation(["pin_v1".into(), jid], unpinned.clone());
+                }
+                let named = ContactAction { full_name: Some(format!("Person {n}")), ..Default::default() };
+                let value =
+                    SyncActionValue { timestamp: an_hour_ago, contact_action: Some(named), ..Default::default() };
+                mutation(["contact".into(), jid], value)
+            })
+            .collect();
         events.push(mutation(["pin_v1".into(), ANA.into()], unpinned));
         events
     }
 }
 
 /// WhatsApp holding the phone's app state, whose people take an hour to answer a message.
-fn phone_with_app_state() -> Arc<World> {
-    let world = DemoEngine::for_account(Vec::new(), Arc::new(Phone)).world();
+fn phone_with_app_state(ahead: Ahead) -> Arc<World> {
+    let world = DemoEngine::for_account(Vec::new(), Arc::new(Phone(ahead))).world();
     world.replying(Replies { delivered: Duration::from_secs(3_600), read: Duration::from_secs(3_600) });
     world
 }
@@ -4206,7 +4220,7 @@ async fn a_pin_that_goes_while_the_engine_start_fetches_app_state_again_ends_pin
     crash(home.path(), "pinned behind a message").await;
     let pinned = ana_pinned(&Connection::open(home.path().join("jaw.db")).unwrap()).unwrap();
     assert!(pinned.0 > 0, "pinned while WhatsApp couldn't be reached");
-    let world = phone_with_app_state();
+    let world = phone_with_app_state(Ahead::Names);
     // The message ahead of the pin waits at WhatsApp until the engine start's full fetch has begun,
     // so the pin goes while the fetch is still handing over the names ahead of Ana's chat.
     world.gate(true);
@@ -4675,4 +4689,33 @@ async fn a_patch_that_runs_out_of_tries_is_kept_in_quarantine_fetched_again_and_
         asked.iter().filter(|k| matches!(k, pb::command::Kind::AppStateResync(r) if r.names == ["regular_low"])).count()
     };
     running.world.until(|asked| low(asked) == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pin_asked_while_a_refusals_fetch_again_is_handed_over_goes_after_it_and_ends_pinned_as_asked() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::on(home.path(), phone_with_app_state(Ahead::Chats), true).await;
+    running.chats(&[ANA, CLIMBING]).await;
+    until_fetched(&running, 1).await;
+    // WhatsApp refuses the group's pin, so its collection, Ana's chat's too, is fetched again.
+    running.world.refuse_patches(1);
+    running.call("chat.pin", json!({ "chat": CLIMBING, "pinned": true })).await.unwrap();
+    let low = |asked: &[pb::command::Kind]| {
+        asked.iter().any(|k| matches!(k, pb::command::Kind::AppStateResync(r) if r.names == ["regular_low"]))
+    };
+    running.world.until(low).await;
+    // Ana's chat is pinned while that fetch still hands over the chats ahead of hers, and her chat
+    // unpinned an hour ago after them.
+    running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
+    let pinned = running.query(|db| Ok(ana_pinned(db)?)).await;
+    assert!(running.world.fetched().len() < 2, "the fetch again was over before the pin was asked");
+    until_stored(&running).await;
+    until_fetched(&running, 2).await;
+    assert_eq!(
+        running.query(|db| Ok(ana_pinned(db)?)).await,
+        pinned,
+        "pinned at jaw's time, unchanged since the pin, the unpin the fetch brought held back"
+    );
+    let latest = value_of(&latest_for(&running, ["pin_v1", ANA]));
+    assert_eq!(latest.pin_action, Some(PinAction { pinned: Some(true) }), "and WhatsApp's latest pins it");
 }
