@@ -148,12 +148,21 @@ pub fn unit(jawd: &Path, log: &Path, jaw_home: Option<&Path>) -> String {
 
 /// jawd, from beside the jaw that's running.
 fn jawd() -> Result<PathBuf> {
-    let jaw = std::env::current_exe()?.canonicalize()?;
-    let jawd = jaw.with_file_name("jawd");
-    if !jawd.is_file() {
-        bail!("jawd isn't beside jaw in {}; make build puts them together", jaw.parent().unwrap_or(&jaw).display());
-    }
-    Ok(jawd)
+    jawd_beside(&std::env::current_exe()?)
+}
+
+/// The jawd beside `jaw` as it was started first, such as the link in Homebrew's bin/, which an
+/// upgrade points at the new jawd as it deletes the old one's folder, then beside where jaw really
+/// is.
+fn jawd_beside(jaw: &Path) -> Result<PathBuf> {
+    let real = jaw.canonicalize()?;
+    let started = jaw.parent().and_then(|folder| folder.canonicalize().ok()).map(|folder| folder.join("jawd"));
+    let folder = real.parent().unwrap_or(&real).display();
+    started
+        .into_iter()
+        .chain([real.with_file_name("jawd")])
+        .find(|jawd| jawd.is_file())
+        .with_context(|| format!("jawd isn't beside jaw in {folder}; make build puts them together"))
 }
 
 fn domain() -> String {
@@ -368,6 +377,26 @@ mod tests {
         assert!(text.contains("JAW_HOME"), "the agent's jawd keeps the JAW_HOME it was installed with: {text}");
         let mode = std::fs::metadata(&jaw).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn from_a_jaw_linked_into_a_shared_bin_the_agent_runs_the_jawd_linked_beside_it_which_upgrades_keep() {
+        let dir = Scratch::new();
+        let keg = dir.path().join("Cellar/jaw/0.1.0/bin");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&keg).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        for program in ["jaw", "jawd"] {
+            std::fs::write(keg.join(program), "").unwrap();
+            std::os::unix::fs::symlink(format!("../Cellar/jaw/0.1.0/bin/{program}"), bin.join(program)).unwrap();
+        }
+        let jaw = bin.join("jaw");
+        let (linked, real) = (bin.canonicalize().unwrap().join("jawd"), keg.canonicalize().unwrap().join("jawd"));
+        assert_eq!(jawd_beside(&jaw).unwrap(), linked, "the link, not the keg");
+        std::fs::remove_file(bin.join("jawd")).unwrap();
+        assert_eq!(jawd_beside(&jaw).unwrap(), real, "jaw linked alone: the jawd beside where it really is");
+        std::fs::remove_file(keg.join("jawd")).unwrap();
+        assert!(jawd_beside(&jaw).is_err(), "no jawd anywhere");
     }
 
     #[test]
