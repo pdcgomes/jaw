@@ -1452,8 +1452,14 @@ impl Sender {
                 self.world.ask(pb::command::Kind::AppStatePatch(patch.clone()));
                 self.patched(patch).await
             }
-            pb::command::Kind::Contacts(_) => Ok(pb::reply::Kind::ContactList(self.account()?.contacts())),
-            pb::command::Kind::Groups(_) => Ok(pb::reply::Kind::GroupList(self.account()?.groups())),
+            kind @ pb::command::Kind::Contacts(_) => {
+                self.world.ask(kind);
+                Ok(pb::reply::Kind::ContactList(self.account()?.contacts()))
+            }
+            kind @ pb::command::Kind::Groups(_) => {
+                self.world.ask(kind);
+                Ok(pb::reply::Kind::GroupList(self.account()?.groups()))
+            }
             pb::command::Kind::LidLookup(asked) => {
                 Ok(pb::reply::Kind::LidPairs(self.account()?.lid_pairs(&asked.lids)))
             }
