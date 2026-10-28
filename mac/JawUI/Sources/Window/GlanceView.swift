@@ -55,9 +55,20 @@ public struct GlanceView: View {
         .panel(roles)
     }
 
+    /// The latest lines each chat's card shows.
+    public static let lines: UInt32 = 3
+    /// The least its panel takes, however few chats need you.
+    public static let least = CGSize(width: 380, height: 260)
+
     /// Room for each chat's card and its three latest lines, and the hint.
     public static func height(_ chats: Int) -> CGFloat {
         CGFloat(max(chats, 1)) * 86 + 56
+    }
+
+    /// Its size for `chats` chats: 520 points wide, with room for five chats' cards at most; its panel
+    /// holds it to `least`.
+    public static func size(_ chats: Int) -> CGSize {
+        CGSize(width: 520, height: height(min(chats, 5)))
     }
 
     func card(_ chat: ChatRow, selected: Bool) -> some View {

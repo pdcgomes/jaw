@@ -71,7 +71,7 @@ public final class FloatingPanel: NSPanel {
         var origin: NSPoint
         switch place {
         case .centre: origin = NSPoint(x: f.midX - size.width / 2, y: f.midY - size.height / 2)
-        case .top: origin = NSPoint(x: f.midX - size.width / 2, y: f.maxY - 60 - size.height)
+        case .top: origin = NSPoint(x: f.midX - size.width / 2, y: f.maxY - PalettePanel.top - size.height)
         case let .above(r): origin = NSPoint(x: min(max(r.maxX - size.width, f.minX + Space.s), f.maxX - size.width - Space.s), y: r.maxY + Space.s)
         }
         setFrame(NSRect(x: origin.x.rounded(), y: origin.y.rounded(), width: size.width, height: size.height), display: true)

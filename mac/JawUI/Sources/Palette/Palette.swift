@@ -594,6 +594,9 @@ public struct PaletteView: View {
 /// The palette's panel, at the top of the window, its field taking keys in the frame after ⌘K.
 @MainActor
 public final class PalettePanel: NSPanel {
+    /// How far the palette's top is below the window's.
+    public static let top: CGFloat = 60
+
     public let model = PaletteModel()
     public var goTo: ((MessageRow) -> Void)?
 
@@ -644,7 +647,7 @@ public final class PalettePanel: NSPanel {
         hosting.frame = NSRect(x: 0, y: 0, width: 620, height: 490)
         contentView = hosting
         let frame = window.frame
-        setFrame(NSRect(x: frame.midX - 310, y: frame.maxY - 60 - 490, width: 620, height: 490), display: true)
+        setFrame(NSRect(x: frame.midX - 310, y: frame.maxY - Self.top - 490, width: 620, height: 490), display: true)
         window.addChildWindow(self, ordered: .above)
         makeKeyAndOrderFront(nil)
         model.reset(mode, kind: kind, scope: scope)

@@ -10,13 +10,12 @@ import SwiftUI
 @MainActor
 final class Glance: NSObject {
     weak var model: AppModel?
-    let panel = FloatingPanel(resizable: true, least: NSSize(width: 380, height: 260), keeps: "glance.size")
+    let panel = FloatingPanel(resizable: true, least: GlanceView.least, keeps: "glance.size")
     var windows: [WindowID: String] = [:]
     let state = GlanceState()
 
     /// The most chats it shows, each a messages window of jawd's 32 a connection.
     static let chats = 12
-    static let lines: UInt32 = 3
 
     var isOpen: Bool {
         panel.isVisible
@@ -33,9 +32,9 @@ final class Glance: NSObject {
         state.rows = [:]
         state.index = 0
         for chat in state.chats {
-            windows[model.jawd.watchMessages(chat.id, .newest(Self.lines))] = chat.id
+            windows[model.jawd.watchMessages(chat.id, .newest(GlanceView.lines))] = chat.id
         }
-        let size = NSSize(width: 520, height: GlanceView.height(min(state.chats.count, 5)))
+        let size = GlanceView.size(state.chats.count)
         let view = GlanceView(state: state, roles: roles, go: { [weak self] chat, pane in self?.go(chat, newPane: pane) })
         panel.keys = { [weak self] event in self?.key(event) ?? false }
         panel.closed = { [weak self] in self?.closed() }
@@ -59,7 +58,7 @@ final class Glance: NSObject {
 
     func apply(_ window: WindowID, _ update: Update<MessageRow>) {
         guard let chat = windows[window] else { return }
-        var rows = state.rows[chat] ?? Messages(chat: chat, place: .newest(Self.lines))
+        var rows = state.rows[chat] ?? Messages(chat: chat, place: .newest(GlanceView.lines))
         rows.apply(update)
         state.rows[chat] = rows
     }
