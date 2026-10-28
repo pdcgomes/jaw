@@ -218,6 +218,7 @@ enum Bench {
 }
 
 fn main() -> Result<()> {
+    unblock_signals();
     let cli = Cli::parse();
     let home = jaw_proto::local::home();
     match cli.command {
@@ -551,6 +552,21 @@ async fn trouble(
         };
         let params = serde_json::to_value(notice).expect("a notice serializes");
         let _ = pushes.send(jaw_proto::Push { method: "notice".into(), params });
+    }
+}
+
+/// Lets through Ctrl-C and SIGTERM, which a jawd started with them blocked would never hear: jaw's
+/// terminal blocks SIGTERM for a thread of its own to wait on, and the jawd it starts inherits the
+/// mask, so `kill` couldn't stop it. Done before any thread starts, so every thread inherits it.
+fn unblock_signals() {
+    // SAFETY: the set is initialised by sigemptyset before it's used, and pthread_sigmask changes
+    // only this thread's mask.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
     }
 }
 

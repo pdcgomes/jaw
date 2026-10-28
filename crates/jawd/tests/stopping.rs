@@ -1,7 +1,9 @@
 //! jawd stops on SIGTERM within its bound however its engine is doing: missing, so the supervisor
-//! keeps trying to start it again, or never answering, so a start is waiting for its hello.
+//! keeps trying to start it again, or never answering, so a start is waiting for its hello; and
+//! however it was started, even with SIGTERM blocked, as jaw's terminal starts it.
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -11,16 +13,22 @@ const BOUND: Duration = Duration::from_secs(3);
 
 /// jawd on `home` with `engine` as its jaw-engine, once it listens.
 fn jawd(home: &Path, engine: &Path) -> Child {
+    jawd_started(home, engine, |_| {})
+}
+
+/// jawd as `jawd` starts it, with `starting` first doing to its command what a parent would.
+fn jawd_started(home: &Path, engine: &Path, starting: impl FnOnce(&mut Command)) -> Child {
     let log = std::fs::File::create(home.join("jawd.log")).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_jawd"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_jawd"));
+    command
         .env("JAW_HOME", home)
         .env("JAW_ENGINE", engine)
         .env("JAW_NOTIFY", "off")
         .stdin(Stdio::null())
         .stdout(log.try_clone().unwrap())
-        .stderr(log)
-        .spawn()
-        .expect("jawd starts");
+        .stderr(log);
+    starting(&mut command);
+    let child = command.spawn().expect("jawd starts");
     let socket = home.join("jaw.sock");
     let ready = Instant::now() + Duration::from_secs(30);
     while !socket.exists() {
@@ -87,4 +95,34 @@ fn jawd_whose_engine_never_answers_stops_on_sigterm_and_takes_its_engine_with_it
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!running(), "the engine outlived jawd");
+}
+
+#[test]
+fn jawd_started_with_sigterm_blocked_as_jaw_starts_it_still_stops_on_sigterm_within_its_bound() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = jawd_started(home.path(), &home.path().join("no-such-engine"), |command| {
+        // SAFETY: between fork and exec the child only sets its signal mask, which is
+        // async-signal-safe.
+        unsafe {
+            command.pre_exec(|| {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGTERM);
+                libc::sigaddset(&mut set, libc::SIGHUP);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+    });
+    // Once hello is answered jawd is serving, where a `kill` after jaw says to stop it comes.
+    let socket = home.path().join("jaw.sock");
+    let ready = Instant::now() + Duration::from_secs(30);
+    while jaw_client::Connection::open(&socket, "stopping test", "0").is_err() {
+        assert!(Instant::now() < ready, "jawd never answered hello:\n{}", log(home.path()));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (status, took) = terminate(&mut child);
+    let log = log(home.path());
+    assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
+    assert!(log.contains("jawd: SIGTERM, so it stops"), "{log}");
 }
