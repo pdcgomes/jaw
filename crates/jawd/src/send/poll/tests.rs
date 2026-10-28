@@ -377,3 +377,88 @@ async fn a_vote_in_a_poll_deleted_for_everyone_before_it_goes_is_withdrawn() {
     assert_eq!(world.given(), 0, "WhatsApp was given nothing");
     assert_eq!(store.count("poll_voters").unwrap(), 0);
 }
+
+/// Your poll about dinner in the climbing group, once WhatsApp has it.
+async fn your_poll(store: &Store, sending: &Sending) -> String {
+    let poll = json!({ "chat": CLIMBING, "question": "Jantar?", "options": DINNER });
+    let sent = sending.call("send.poll", poll).await.unwrap();
+    eventually(store, "the poll sent", outbox_empty).await;
+    sent["message"].as_str().unwrap().to_string()
+}
+
+fn outbox_empty(db: &Connection) -> anyhow::Result<bool> {
+    Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0)
+}
+
+/// The kinds of the outbox's rows, oldest first.
+async fn outbox_kinds(store: &Store) -> Vec<String> {
+    query(store, |db| {
+        Ok(db
+            .prepare("SELECT kind FROM outbox ORDER BY n")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_in_your_poll_is_refused_while_your_deletion_of_it_for_everyone_is_on_its_way() {
+    let home = tempfile::tempdir().unwrap();
+    let (store, sending, world) = sending(home.path()).await;
+    let id = your_poll(&store, &sending).await;
+    // Your deletion of it for everyone fails on the way, so it stays on its way, and windows show
+    // the poll deleted.
+    world.fail_chats(&[CLIMBING.to_string()]);
+    sending.call("delete", json!({ "message": id, "chat": CLIMBING, "for": "everyone" })).await.unwrap();
+    // Whatever the vote names, as for a poll deleted.
+    for options in [json!(["Ramen"]), json!(["Sushi"])] {
+        let vote = json!({ "message": id, "chat": CLIMBING, "options": options });
+        let refused = sending.call("poll.vote", vote).await.unwrap_err();
+        assert_eq!(refused.code, code::NOT_ALLOWED, "{options}: {}", refused.message);
+    }
+    assert_eq!(outbox_kinds(&store).await, ["revoke"], "nothing written");
+    // Once you've deleted it for you too and WhatsApp can be reached, the deletion goes, and no vote
+    // after it.
+    sending.call("delete", json!({ "message": id, "chat": CLIMBING, "for": "me" })).await.unwrap();
+    world.stop_failing_chats();
+    eventually(&store, "the outbox emptied", outbox_empty).await;
+    assert!(world.votes().is_empty(), "{:?}", world.votes());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_whose_poll_is_deleted_for_everyone_once_it_has_found_it_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let (store, sending, world) = sending(home.path()).await;
+    let yours = your_poll(&store, &sending).await;
+    ruis_poll(&store, "p1", 1).await;
+    world.fail_chats(&[CLIMBING.to_string()]);
+    // Each vote finds its poll as it was, and the poll is then deleted for everyone before its step:
+    // yours by you, from another interface at the same moment, and Rui's by him.
+    for (poll, mine) in [(yours.as_str(), true), ("p1", false)] {
+        let (stopped, go) = sending.pause_next_action();
+        let voting = tokio::spawn({
+            let (sending, params) =
+                (sending.clone(), json!({ "message": poll, "chat": CLIMBING, "options": ["Ramen"] }));
+            async move { sending.call("poll.vote", params).await }
+        });
+        stopped.notified().await;
+        if mine {
+            sending.call("delete", json!({ "message": poll, "chat": CLIMBING, "for": "everyone" })).await.unwrap();
+        } else {
+            let his = crate::store::Amend {
+                chat: CLIMBING.into(),
+                target: poll.into(),
+                sender: Some(RUI.into()),
+                mine: false,
+                at: now_ms(),
+                what: Amendment::Revoke,
+                raw: None,
+            };
+            store.apply(Lane::Live, vec![Change::Amend(his)]).await.unwrap();
+        }
+        go.notify_one();
+        let refused = voting.await.unwrap().unwrap_err();
+        assert_eq!(refused.code, code::NOT_ALLOWED, "{poll}: {}", refused.message);
+    }
+    assert_eq!(outbox_kinds(&store).await, ["revoke"], "nothing written behind the deletions");
+}

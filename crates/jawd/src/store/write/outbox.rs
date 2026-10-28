@@ -468,10 +468,11 @@ fn full(db: &Connection, written: &Written) -> Result<bool> {
 }
 
 /// Queues an action, done to its message once WhatsApp has it. Windows show it meanwhile, so its
-/// message, and its chat when it's the chat's newest, change now. A reaction or an edit on a message
-/// shown deleted for everyone isn't taken: `react` and `edit` check on a reader, but a deletion can
-/// commit after that read, and while a chat merges, the copy they read may not be the one found
-/// here, and a deletion can be aimed at either, so the copies merging into this one are read too.
+/// message, and its chat when it's the chat's newest, change now. A reaction, an edit or a vote on a
+/// message shown deleted for everyone isn't taken: `react`, `edit` and `vote` check on a reader, but
+/// a deletion can commit after that read, and while a chat merges, the copy they read may not be the
+/// one found here, and a deletion can be aimed at either, so the copies merging into this one are
+/// read too.
 fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String>, written: &Written) -> Result<bool> {
     if keyed_before(db, key, written)? || full(db, written)? {
         return Ok(false);
@@ -481,7 +482,7 @@ fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String
         written.put(Enqueued::Gone);
         return Ok(false);
     };
-    if matches!(acting.effect, Amendment::React { .. } | Amendment::Edit { .. })
+    if matches!(acting.effect, Amendment::React { .. } | Amendment::Edit { .. } | Amendment::Vote { .. })
         && db.prepare_cached(SHOWN_DELETED)?.query_row([n], |r| r.get::<_, bool>(0))?
     {
         written.put(Enqueued::Deleted);

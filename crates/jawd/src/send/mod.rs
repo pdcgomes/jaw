@@ -197,8 +197,8 @@ impl Sending {
         pause
     }
 
-    /// Stops the next reaction, edit or deletion for everyone between finding its message and its
-    /// step: it notifies the first when it stops, and goes on once the second is notified.
+    /// Stops the next reaction, edit, vote or deletion for everyone between finding its message and
+    /// its step: it notifies the first when it stops, and goes on once the second is notified.
     #[cfg(test)]
     fn pause_next_action(&self) -> (Arc<Notify>, Arc<Notify>) {
         let pause = (Arc::default(), Arc::default());

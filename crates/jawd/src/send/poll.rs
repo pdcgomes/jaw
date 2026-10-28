@@ -182,6 +182,9 @@ pub(super) async fn vote(inner: &Arc<Inner>, vote: PollVote) -> Result<Value, Er
     if target.deleted {
         return refused("a deleted poll can't be voted in");
     }
+    if target.deleting {
+        return refused("it's being deleted for everyone, so it can't be voted in");
+    }
     let n = target.n;
     let (options, max) = query(inner, move |db| options_of(db, n)).await?;
     let mut chosen: Vec<String> = Vec::new();
@@ -227,6 +230,8 @@ pub(super) async fn vote(inner: &Arc<Inner>, vote: PollVote) -> Result<Value, Er
         key: vote.key,
         written: written.clone(),
     };
+    #[cfg(test)]
+    super::paused(&inner.acting).await;
     enqueue(inner, step, written, "keep the vote").await
 }
 
