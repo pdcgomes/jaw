@@ -61,7 +61,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let root = NSViewController()
         let content = NSView()
         root.view = content
-        bar = BottomBar(model: model)
+        bar = BottomBar(commands: { [weak model] in model?.allCommands ?? [] })
         root.addChild(split)
         for v in [split.view, bar!] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -310,11 +310,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     var statusWindow: NSWindow?
 
     func showStatus(_ status: Status) {
-        let text = (try? String(data: JSONEncoder.pretty.encode(status.raw), encoding: .utf8)) ?? ""
-        let view = ScrollView { Text(text).textStyle(.mono).textSelection(.enabled).padding() }
-            .frame(minWidth: 520, minHeight: 420)
-        let w = statusWindow ?? NSWindow(contentViewController: NSHostingController(rootView: AnyView(view)))
-        (w.contentViewController as? NSHostingController<AnyView>)?.rootView = AnyView(view)
+        let view = StatusView(status: status)
+        let w = statusWindow ?? NSWindow(contentViewController: NSHostingController(rootView: view))
+        (w.contentViewController as? NSHostingController<StatusView>)?.rootView = view
         w.title = "jawd's status"
         statusWindow = w
         w.makeKeyAndOrderFront(nil)
@@ -350,16 +348,7 @@ extension MainWindowController {
     /// Asks for a name, in a sheet that takes the keys at once: Return saves, Esc cancels.
     func askName(_ title: String, _ detail: String, value: String = "", button: String, done: @escaping (String) -> Void) {
         guard let window else { return }
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = detail
-        let field = NSTextField(string: value)
-        field.placeholderString = "Work"
-        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
-        alert.accessoryView = field
-        alert.addButton(withTitle: button)
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
+        let (alert, field) = Prompts.name(title, detail, value: value, button: button)
         alert.beginSheetModal(for: window) { response in
             if response == .alertFirstButtonReturn { done(field.stringValue) }
         }
@@ -391,108 +380,8 @@ extension MainWindowController {
 
     func askLayoutDelete() {
         guard let window, let name = model.book.current else { return }
-        let alert = NSAlert()
-        alert.messageText = "Delete \(name)?"
-        alert.informativeText = "Its panes stay on screen, unsaved."
-        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
-        alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { [weak model] response in
+        Prompts.deleteLayout(name).beginSheetModal(for: window) { [weak model] response in
             if response == .alertFirstButtonReturn { model?.deleteLayout(name) }
         }
-    }
-}
-
-extension JSONEncoder {
-    static var pretty: JSONEncoder {
-        let e = JSONEncoder()
-        e.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        return e
-    }
-}
-
-/// The panes' place: the panes, or what's there instead.
-@MainActor
-final class DetailController: NSViewController {
-    let panes = GridView()
-    let box = BoxPlace()
-    /// The panes with the box under them.
-    let panesArea = NSView()
-    var stateHost: NSHostingController<StateView>?
-    var linkingHost: NSHostingController<LinkingView>?
-    var shown: NSView?
-
-    override func loadView() {
-        view = NSView()
-        for v in [panes, box] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            panesArea.addSubview(v)
-        }
-        NSLayoutConstraint.activate([
-            panes.topAnchor.constraint(equalTo: panesArea.topAnchor),
-            panes.leadingAnchor.constraint(equalTo: panesArea.leadingAnchor),
-            panes.trailingAnchor.constraint(equalTo: panesArea.trailingAnchor),
-            panes.bottomAnchor.constraint(equalTo: box.topAnchor),
-            box.leadingAnchor.constraint(equalTo: panesArea.leadingAnchor),
-            box.trailingAnchor.constraint(equalTo: panesArea.trailingAnchor),
-            box.bottomAnchor.constraint(equalTo: panesArea.bottomAnchor),
-        ])
-    }
-
-    var drawn: (PaneGrid, Int?, [Int: ObjectIdentifier], ObjectIdentifier?, Roles, PaneLook)?
-
-    /// Lays the panes out with the focused chat's box under them, unless they're already so.
-    func show(panes grid: PaneGrid, views: [Int: NSView], focused: Int?, box composer: NSView?, roles: Roles, look: PaneLook,
-              force: Bool = false)
-    {
-        let ids = views.mapValues(ObjectIdentifier.init)
-        let boxID = composer.map(ObjectIdentifier.init)
-        if !force, shown === panesArea, let drawn, drawn.0 == grid, drawn.1 == focused, drawn.2 == ids, drawn.3 == boxID, drawn.4 == roles,
-           drawn.5 == look
-        {
-            return
-        }
-        place(panesArea)
-        panes.show(grid, views: views, focused: focused, roles: roles, look: look)
-        box.show(composer, roles: roles)
-        drawn = (grid, focused, ids, boxID, roles, look)
-    }
-
-    func show(state kind: StateView.Kind, roles: Roles) {
-        let view = StateView(kind: kind, roles: roles)
-        if let host = stateHost {
-            host.rootView = view
-        } else {
-            let host = NSHostingController(rootView: view)
-            host.sizingOptions = []
-            stateHost = host
-        }
-        place(stateHost!.view)
-    }
-
-    func showLinking(step: LinkStep?, loggedOut: String?, roles: Roles, start: @escaping (String?) -> Void, cancel: @escaping () -> Void) {
-        let view = LinkingView(step: step, loggedOut: loggedOut, roles: roles, start: start, cancel: cancel)
-        if let host = linkingHost {
-            host.rootView = view
-        } else {
-            let host = NSHostingController(rootView: view)
-            host.sizingOptions = []
-            linkingHost = host
-        }
-        place(linkingHost!.view)
-    }
-
-    func place(_ v: NSView) {
-        guard shown !== v else { return }
-        shown?.removeFromSuperview()
-        v.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(v)
-        NSLayoutConstraint.activate([
-            v.topAnchor.constraint(equalTo: view.topAnchor),
-            v.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            v.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            v.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-        ])
-        shown = v
-        if v !== linkingHost?.view { linkingHost = nil }
     }
 }

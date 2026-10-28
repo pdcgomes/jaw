@@ -1,38 +1,35 @@
 import AppKit
 import JawThemes
-import JawUI
 import SwiftUI
 
 /// The bar along the bottom of the window, where the controls live so the panes have the window's
 /// whole height: the layout and the splits on the left, the status line between, and
 /// Find and New Chat on the right. Each runs the same command as its menu item and key.
 @MainActor
-final class BottomBar: NSView {
-    let status: NSHostingView<StatusLine>
+public final class BottomBar: NSView {
+    public let status: NSHostingView<StatusLine>
     let layout: IconButton
     let split: IconButton
     let find: IconButton
     let newChat: IconButton
     let rule = NSView()
-    static let height: CGFloat = 30
+    public static let height: CGFloat = 30
 
-    init(model: AppModel) {
-        status = NSHostingView(rootView: StatusLine(state: nil, warn: false, chat: nil, roles: model.roles))
-        let run = { [weak model] (id: String) in model?.command(id)?.run() }
+    /// `commands` are the app's, read each time a button runs one or opens its menu, so the bar runs
+    /// what the menus and the keys run.
+    public init(commands: @escaping @MainActor () -> [Command]) {
+        status = NSHostingView(rootView: StatusLine(state: nil, warn: false, chat: nil, roles: Catalog.jaw.dark))
+        let command = { (id: String) in commands().first { $0.id == id } }
         layout = IconButton(symbol: "square.grid.3x2", label: "Layouts on a grid", shortcut: Shortcut("e", [.command, .option]),
                             title: "Unsaved Panes") {}
         split = IconButton(symbol: "rectangle.split.2x1", label: "Split this pane", shortcut: Shortcut("d")) {}
         find = IconButton(symbol: "magnifyingglass", label: "Find: chats, people, messages and every action", shortcut: Shortcut("k"),
-                          title: "Find") { run("palette") }
-        newChat = IconButton(symbol: "square.and.pencil", label: "Start a chat", shortcut: Shortcut("n")) { run("chat.new") }
+                          title: "Find") { command("palette")?.run() }
+        newChat = IconButton(symbol: "square.and.pencil", label: "Start a chat", shortcut: Shortcut("n")) { command("chat.new")?.run() }
         super.init(frame: .zero)
         wantsLayer = true
-        layout.menuToOpen = { [weak model] in
-            model.map { m in Menus.menu(m.allCommands.filter { $0.place == .layouts }) }
-        }
-        split.menuToOpen = { [weak model] in
-            model.map { m in Menus.menu(["split.across", "split.down", "pane.close"].compactMap(m.command)) }
-        }
+        layout.menuToOpen = { Menus.menu(commands().filter { $0.place == .layouts }) }
+        split.menuToOpen = { Menus.menu(["split.across", "split.down", "pane.close"].compactMap(command)) }
         let left = NSStackView(views: [layout, split])
         let right = NSStackView(views: [find, newChat])
         for stack in [left, right] {
@@ -68,7 +65,7 @@ final class BottomBar: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func restyle(_ roles: Roles) {
+    public func restyle(_ roles: Roles) {
         layer?.backgroundColor = roles.surface.cgColor
         rule.layer?.backgroundColor = roles.separator.mixed(with: roles.surface, 0.5).cgColor
         for b in [layout, split, find, newChat] {
@@ -77,7 +74,7 @@ final class BottomBar: NSView {
     }
 
     /// The layout on screen, by name, with • when its shape has changed since it was saved.
-    func show(layout name: String, edited: Bool) {
+    public func show(layout name: String, edited: Bool) {
         layout.title = edited ? "\(name) •" : name
         layout.toolTip = edited
             ? "\(name), changed since it was saved: Save Layout (⌥⌘S) keeps it"

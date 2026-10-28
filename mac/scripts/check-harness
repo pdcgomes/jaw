@@ -1,12 +1,16 @@
 #!/bin/sh
-# Fails when the harness names jawd's client: it draws from fixtures and asks jawd for nothing, so
-# nothing in it may make a Jawd, or JawKit's Client, which opens jawd's socket itself. Its other rules
-# come with the harness's later phases (the Mac harness's design, "The checks").
+# Fails when the harness names jawd's client, or when the app target draws something of its own. The
+# harness draws from fixtures and asks jawd for nothing, so nothing in it may make a Jawd, or JawKit's
+# Client, which opens jawd's socket itself; and everything the app draws lives in JawUI, made from
+# values, so no type in JawApp may be a view or a view controller (a window controller isn't one).
+# Its third rule comes with the harness's third phase (the Mac harness's design, "The checks").
 cd "$(dirname "$0")/.."
-if [ ! -d JawHarness/Sources ]; then
-    echo "check-harness: there's no JawHarness/Sources to check" >&2
-    exit 1
-fi
+for folder in JawHarness/Sources JawApp/Sources; do
+    if [ ! -d "$folder" ]; then
+        echo "check-harness: there's no $folder to check" >&2
+        exit 1
+    fi
+done
 found=$(grep -rnw 'Jawd' JawHarness/Sources)
 if [ -n "$found" ]; then
     echo "$found"
@@ -17,5 +21,16 @@ found=$(grep -rnw 'Client' JawHarness/Sources)
 if [ -n "$found" ]; then
     echo "$found"
     echo "check-harness: the harness draws from fixtures and never names JawKit's Client, which opens jawd's socket itself" >&2
+    exit 1
+fi
+# A class, struct, enum or extension whose inherited types, on its first line, include NSView or any
+# NS…View, NSViewController or any NS…ViewController, a control, a hosting view or controller, a
+# representable, or SwiftUI's View. Comment lines don't count.
+views='NS[A-Za-z]*View|NS[A-Za-z]*ViewController|NSControl|NSButton|NSTextField|NSHosting(View|Controller)|NSView(Controller)?Representable|View'
+found=$(grep -rnE "(^|[^A-Za-z0-9_])(class|struct|enum|extension)[[:space:]]+[A-Za-z_][A-Za-z0-9_.]*(<[^>]*>)?[[:space:]]*:([^{]*[^A-Za-z0-9_.])?((SwiftUI|AppKit)\.)?($views)([^A-Za-z0-9_]|$)" \
+    JawApp/Sources | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//')
+if [ -n "$found" ]; then
+    echo "$found"
+    echo "check-harness: the app target draws nothing of its own: a view or a view controller belongs in JawUI, where the harness can draw it from values" >&2
     exit 1
 fi
