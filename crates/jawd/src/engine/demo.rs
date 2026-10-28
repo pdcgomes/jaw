@@ -7,12 +7,13 @@
 //! recipients' phones say they have but never read; the server refuses an edit once WhatsApp's
 //! window for it has passed; and app state sent for your other devices is taken, kept with the
 //! account's own as the latest for its index in its collection, and sent back, as whatsmeow fetches
-//! a collection again after each patch, unless a test has it refused or its echo lost; a full fetch
-//! sends what it keeps in the collections named, or in every collection. Given an `Account`, it
-//! answers for its contacts and groups, and writes each history blob its phone offers to the spool
-//! as jaw-engine does; events can also be delivered from outside its script, several waiting for
-//! their acks at once. Its people type and record as WhatsApp's chat presence says it, sent over
-//! the link as the `Typing` event jaw-engine sends, in order with the rest.
+//! a collection again after each patch, unless a test has it refused or its echo lost, or holds it
+//! at a gate; a full fetch sends what it keeps in the collections named, or in every collection,
+//! unless a test has fetches fail. Given an `Account`, it answers for its contacts and groups, and
+//! writes each history blob its phone offers to the spool as jaw-engine does; events can also be
+//! delivered from outside its script, several waiting for their acks at once. Its people type and
+//! record as WhatsApp's chat presence says it, sent over the link as the `Typing` event jaw-engine
+//! sends, in order with the rest.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -144,6 +145,11 @@ pub struct World {
     /// How many app-state patches to take and keep next but fail as one to try again, as the engine
     /// fails a patch whose echo doesn't come back in time.
     losing_echoes: Mutex<u32>,
+    /// Whether app-state patches wait to be answered until their gate opens.
+    patches_gated: AtomicBool,
+    /// Whether full fetches of app state fail as ones to try again, as when WhatsApp can't be
+    /// reached.
+    failing_fetches: AtomicBool,
     /// The app state the server keeps for every device: the account's, as its phone left it, and
     /// each patch it has taken since.
     app_state: Mutex<Held>,
@@ -486,6 +492,23 @@ impl World {
     #[cfg(test)]
     pub fn lose_echoes(&self, n: u32) {
         *self.losing_echoes.lock().expect("the demo world") = n;
+    }
+
+    /// Holds app-state patches unanswered while `gated`, as a server that hasn't answered yet,
+    /// answering them all once it opens.
+    #[cfg(test)]
+    pub fn gate_patches(&self, gated: bool) {
+        self.patches_gated.store(gated, Ordering::SeqCst);
+        if !gated {
+            self.opened.notify_waiters();
+        }
+    }
+
+    /// Fails every full fetch of app state as one to try again, as when WhatsApp can't be reached,
+    /// until it's told otherwise.
+    #[cfg(test)]
+    pub fn fail_fetches(&self, failing: bool) {
+        self.failing_fetches.store(failing, Ordering::SeqCst);
     }
 
     /// Has the server keep message `id` as sent at `at`, as one sent long ago.
@@ -1439,6 +1462,9 @@ impl Sender {
             // over as it fetches each collection again in full.
             pb::command::Kind::AppStateResync(resync) => {
                 self.world.ask(pb::command::Kind::AppStateResync(resync.clone()));
+                if self.world.failing_fetches.load(Ordering::SeqCst) {
+                    return Err(EngineError::Failed { message: "websocket not connected".into(), retry: true });
+                }
                 let (began, mut acks) = (Instant::now(), Vec::new());
                 for mutation in self.world.kept_in(&resync.names) {
                     let sent = Instant::now();
@@ -1766,9 +1792,16 @@ impl Sender {
     /// its index in its collection; whatsmeow then fetches the collection again, so the patch comes
     /// back as an AppState event, acked before the patch is answered. A held patch is kept, and its
     /// answer lost; a patch whose echo is lost is kept, and failed as the engine fails one whose
-    /// echo doesn't come back in time.
+    /// echo doesn't come back in time. A gated patch waits for its gate before any of this.
     async fn patched(&self, patch: pb::AppStatePatch) -> Result<pb::reply::Kind, EngineError> {
         let world = &self.world;
+        loop {
+            let opened = world.opened.notified();
+            if !world.patches_gated.load(Ordering::SeqCst) {
+                break;
+            }
+            opened.await;
+        }
         {
             let mut refusing = world.refusing_patches.lock().expect("the demo world");
             if *refusing > 0 {
@@ -2432,6 +2465,33 @@ mod tests {
         let (taken, echo) = answered(&instance, &mut rx, patch("regular_low", ["pin_v1", ANA], &[8, 0])).await;
         assert!(matches!(taken, Ok(pb::reply::Kind::Done(_))), "the next is echoed: {taken:?}");
         assert_eq!(echo, [state(["pin_v1", ANA], &[8, 0])]);
+    }
+
+    #[tokio::test]
+    async fn a_gated_patch_waits_for_its_gate_and_fetches_told_to_fail_fail_as_ones_to_try_again() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let engine = DemoEngine::with(Vec::new());
+        let world = engine.world();
+        let instance = engine.start(tx).await.unwrap();
+        world.gate_patches(true);
+        let mut gated = std::pin::pin!(instance.commands.call(patch("regular_low", ["pin_v1", ANA], &[8, 1])));
+        let unanswered = tokio::time::timeout(Duration::from_millis(200), &mut gated).await;
+        assert!(unanswered.is_err(), "a gated patch was answered: {unanswered:?}");
+        assert!(rx.try_recv().is_err(), "nor was it sent back");
+        world.gate_patches(false);
+        let incoming = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("no echo came").unwrap();
+        incoming.ack.expect("an echo waits for its ack, as jaw-engine's does").send();
+        let reply =
+            tokio::time::timeout(Duration::from_secs(10), gated).await.expect("unanswered once the gate opened");
+        assert!(matches!(reply, Ok(pb::reply::Kind::Done(_))), "{reply:?}");
+        world.fail_fetches(true);
+        let (failed, nothing) = answered(&instance, &mut rx, resync(&["regular_low"])).await;
+        assert!(matches!(failed, Err(EngineError::Failed { retry: true, .. })), "{failed:?}");
+        assert!(nothing.is_empty(), "a failed fetch hands nothing over: {nothing:?}");
+        world.fail_fetches(false);
+        let (fetched, came) = answered(&instance, &mut rx, resync(&["regular_low"])).await;
+        assert!(matches!(fetched, Ok(pb::reply::Kind::Done(_))), "{fetched:?}");
+        assert_eq!(came, [state(["pin_v1", ANA], &[8, 1])]);
     }
 
     #[tokio::test]
