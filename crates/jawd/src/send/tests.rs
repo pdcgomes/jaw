@@ -4361,8 +4361,8 @@ async fn a_mark_read_whose_chat_merges_into_another_before_it_goes_sends_the_kep
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mark_read_that_goes_while_its_chat_merges_waits_for_the_merge_then_sends_the_kept_chats_receipts_first() {
     let home = tempfile::tempdir().unwrap();
-    // A minute between a chat's receipts, so only the patch's own wait sends them in time; the
-    // outbox tries a refused patch again within 20 ms.
+    // A minute between a chat's receipts, so only the patch's own wait sends them in time; a patch
+    // that fails its try is tried again within 20 ms.
     let timing = Timing { read_every: Duration::from_secs(60), ..quick() };
     let running = Running::timed(home.path(), world(), true, true, timing).await;
     let lid = "100000000001@lid";
@@ -4384,7 +4384,7 @@ async fn a_mark_read_that_goes_while_its_chat_merges_waits_for_the_merge_then_se
     let both = Person { jids: vec![ANA.into(), lid.into()], ..Person::default() };
     running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
     running.connection(jaw_proto::ConnectionState::Online);
-    eventually(&running, "the patch to be refused while its chat merges, and tried again, or to go", |db| {
+    eventually(&running, "the patch to fail its try while its chat merges, and be tried again, or to go", |db| {
         let row: Option<(i64, Option<String>)> = db
             .query_row("SELECT attempts, error FROM outbox WHERE kind = 'app_state'", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -4468,6 +4468,7 @@ async fn starring_a_message_stars_it_and_names_it_as_whatsapp_does() {
     let g1 = row(&running, CLIMBING, "g1").await.unwrap();
     assert!(g1.starred && g1.v > before, "starred, with a new version");
     let d1 = row(&running, ANA, "d1").await.unwrap();
+    let own = row(&running, ANA, &mine).await.unwrap();
     running.connection(jaw_proto::ConnectionState::Online);
     until_stored(&running).await;
     let sent = patches_sent(&running);
@@ -4483,8 +4484,12 @@ async fn starring_a_message_stars_it_and_names_it_as_whatsapp_does() {
     for patch in &sent {
         until_echoed(&running, patch).await;
     }
-    let echoed = (row(&running, CLIMBING, "g1").await.unwrap().v, row(&running, ANA, "d1").await.unwrap().v);
-    assert_eq!(echoed, (g1.v, d1.v), "the echoes changed nothing");
+    let echoed = (
+        row(&running, CLIMBING, "g1").await.unwrap().v,
+        row(&running, ANA, "d1").await.unwrap().v,
+        row(&running, ANA, &mine).await.unwrap().v,
+    );
+    assert_eq!(echoed, (g1.v, d1.v, own.v), "the echoes changed nothing");
     running.call("star", json!({ "message": "g1", "starred": true })).await.unwrap();
     running.call("star", json!({ "message": "g1", "starred": false })).await.unwrap();
     assert!(!row(&running, CLIMBING, "g1").await.unwrap().starred);
