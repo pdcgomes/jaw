@@ -377,6 +377,10 @@ pub struct Storage {
     pub shared_writes: u64,
     #[serde(default)]
     pub shared_failed: u64,
+    /// Whether jaw.db's checkpoints are flushed in full rather than fenced by a barrier, as off the
+    /// Mac's own drive, or on a system without barriers.
+    #[serde(default)]
+    pub full_flush: bool,
     /// Why jaw.db can't be written, while it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trouble: Option<String>,

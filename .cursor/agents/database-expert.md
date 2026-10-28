@@ -18,7 +18,7 @@ A worktree path and a range (usually `origin/main..HEAD`), and what the change i
 
 ## What you check
 
-1. **Durability:** every acknowledgement (to WhatsApp, an interface, the engine) follows a synced commit; `checkpoint_fullfsync`; files synced and renamed into place before rows point to them, deleted only after a synced commit stops pointing to them; nothing in flight lost on a crash, a power cut, `SQLITE_FULL` or `SQLITE_BUSY`.
+1. **Durability:** every acknowledgement (to WhatsApp, an interface, the engine) follows a synced commit, flushed in full; `checkpoint_fullfsync`, and `jaw.db` only through jaw's VFS (`store/vfs.rs`), which fences a checkpoint's syncs and a new WAL header's, never a commit's; files synced and renamed into place before rows point to them, deleted only after a synced commit stops pointing to them; nothing in flight lost on a crash, a power cut, `SQLITE_FULL` or `SQLITE_BUSY`.
 2. **Consistency:** idempotent upserts with merge rules for replays, duplicates and out-of-order arrivals (live and history, edits and reactions before their message, LID and phone JIDs); a change and its event in one transaction; derived counters derived; failures quarantined, never dropped, never blocking what follows; row keys never reused.
 3. **Schema:** `STRICT`, `CHECK`s, `json_valid`, foreign keys, NOT NULL where meant; each table's class (derived from raw, fetched from WhatsApp, jaw's own).
 4. **Migrations:** merged ones untouched, the number taken at merge and unique, kind declared, schema steps in one transaction, data steps within 10 s per million messages (measure it), backfills resumable and idempotent, rebuilds recreating every index and trigger, jaw's own data never dropped, the fingerprint and upgrade-from-fixtures tests updated.

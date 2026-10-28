@@ -26,9 +26,8 @@ pub mod read;
 #[cfg(test)]
 mod rules;
 mod schema;
-#[cfg(test)]
-mod syncs;
 pub mod thumbnails;
+mod vfs;
 mod write;
 
 use std::cell::Cell;
@@ -141,13 +140,14 @@ struct Made {
     taken: usize,
 }
 
-/// Whether the transaction about to commit on `db` runs at FULL with F_FULLFSYNC, as the
-/// connection itself says, so a commit is counted synced, and an ack sent, only for what it ran
-/// under.
+/// Whether the transaction about to commit on `db` is flushed past the drive's cache before it
+/// returns, as the connection itself says: at FULL, through jaw's VFS, with fullfsync off, so
+/// SQLite asks its sync at SQLITE_SYNC_NORMAL, which the VFS makes a full flush. A commit is counted
+/// synced, and an ack sent, only for what it ran under.
 fn commits_synced(db: &Connection) -> Result<bool> {
     let synchronous: i64 = db.prepare_cached("PRAGMA synchronous")?.query_row([], |r| r.get(0))?;
     let fullfsync: i64 = db.prepare_cached("PRAGMA fullfsync")?.query_row([], |r| r.get(0))?;
-    Ok(synchronous >= 2 && fullfsync == 1)
+    Ok(synchronous >= 2 && fullfsync == 0 && vfs::opened_through(db))
 }
 
 /// What the writer has done lately, for `status`.
@@ -278,6 +278,8 @@ pub struct Store {
     wal: Arc<Wal>,
     trouble: watch::Receiver<Option<String>>,
     thumbnails: Arc<Thumbnails>,
+    /// Whether barriers fence jaw.db's checkpoints, rather than full flushes.
+    fenced: bool,
 }
 
 const BATCH_ROWS: usize = 1_000;
@@ -319,15 +321,16 @@ const INDEX_RETRY_MOST: Duration = Duration::from_secs(60);
 /// The WAL's size in frames, of a 4 KiB page each, past which background transactions wait for
 /// the checkpointer; past WAL_HARD they wait until the WAL has started again from its beginning,
 /// and the writer starts it again itself after an inbox group or a live write. Each start costs
-/// three flushes of the drive, two in a pause that inbox rows and live writes wait for and one in
-/// the transaction after, which syncs the WAL's new header, so the WAL starts again as seldom as
-/// WAL_LIMIT allows, and the file stays under it while no reader holds its frames for long.
+/// three syncs, two in a pause that inbox rows and live writes wait for and one in the transaction
+/// after, which syncs the WAL's new header, each sent to the drive and fenced on the Mac's own and
+/// flushed in full elsewhere (`vfs`), so the WAL starts again as seldom as WAL_LIMIT allows, and the
+/// file stays under it while no reader holds its frames for long.
 const WAL_SOFT: u64 = 12_288;
 const WAL_HARD: u64 = 15_360;
 /// Frames few enough for the writer to copy itself between two transactions.
 const WAL_NEAR: u64 = 64;
 /// How long the checkpointer has to copy the last frames by itself, which it can between two live
-/// writes, before the writer copies them, flushing the drive twice while live writes wait.
+/// writes, before the writer copies them, syncing twice while live writes wait.
 const FINISH_AFTER: Duration = Duration::from_millis(50);
 /// How often, 10 ms apart, the writer tries to empty the WAL while another checkpoint runs.
 const TRUNCATE_TRIES: u32 = 500;
@@ -339,14 +342,14 @@ const RESTART_AGAIN: Duration = Duration::from_millis(50);
 /// Frames past WAL_HARD from which the writer, refused the checkpoint lock, waits for the
 /// checkpointer's pass to end rather than commit more, for RESTART_MOST at most: what's left before
 /// the file passes WAL_LIMIT, 928 frames past WAL_HARD, is then room for one more transaction. A
-/// pass flushes the WAL as it begins, which a busy drive can take hundreds of ms over.
+/// pass syncs the WAL as it begins, which a busy drive can take hundreds of ms over.
 const WAL_EDGE: u64 = 384;
 const RESTART_MOST: Duration = Duration::from_secs(1);
 /// What the WAL file is cut back to each time it starts again.
 const WAL_LIMIT: i64 = 64 * 1024 * 1024;
 /// Fewer frames than this wait for more before the checkpointer copies them, unless background
-/// work is waiting: each pass flushes the drive twice whatever it copies, and every flush an inbox
-/// commit shares the drive with makes its ack later.
+/// work is waiting: each pass syncs twice whatever it copies, and every sync an inbox commit shares
+/// the drive with makes its ack later.
 const WAL_EASY: u64 = 1_024;
 /// How long jaw.db goes without a commit before the checkpointer empties the WAL.
 const IDLE: Duration = Duration::from_secs(10);
@@ -394,28 +397,24 @@ fn connect(path: &Path, role: Role) -> Result<Connection> {
         Role::Reader => OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
         Role::Writer | Role::Checkpointer => OpenFlags::default(),
     };
-    #[cfg(test)]
-    let opened = match VFS.with(Cell::get) {
-        Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
-        None => Connection::open_with_flags(path, flags),
-    };
-    #[cfg(not(test))]
-    let opened = Connection::open_with_flags(path, flags);
-    let db = opened.with_context(|| format!("can't open {}", path.display()))?;
+    vfs::register();
+    let db = Connection::open_with_flags_and_vfs(path, flags, vfs::NAME)
+        .with_context(|| format!("can't open {}", path.display()))?;
     pragma(&db, "busy_timeout", BUSY_MS)?;
-    // Whichever connection closes last checkpoints, and on macOS a checkpoint whose syncs stop at
-    // the drive's cache can leave jaw.db malformed after a power cut.
+    // With these two SQLite asks a commit's sync at SQLITE_SYNC_NORMAL, which jaw's VFS makes a
+    // full flush, and a checkpoint's and a new WAL header's at SQLITE_SYNC_FULL, which it sends to
+    // the drive and fences, since on macOS a checkpoint whose syncs stop at the drive's cache
+    // unordered can leave jaw.db malformed after a power cut. Set for good from the start, before a
+    // new jaw.db is made a WAL, which syncs it, and whichever connection closes last checkpoints:
+    // setting a flag PRAGMA expires every statement prepared on the connection, so the writer
+    // switches commits between synced and not with synchronous alone.
+    pragma(&db, "fullfsync", 0)?;
     pragma(&db, "checkpoint_fullfsync", 1)?;
     pragma(&db, "temp_store", 2)?;
     db.set_prepared_statement_cache_capacity(64);
     match role {
         Role::Reader => check(&db, "journal_mode", "wal")?,
         Role::Writer => {
-            // On for good, from before a new jaw.db is made a WAL, which syncs it: setting a flag
-            // PRAGMA expires every statement prepared on the connection, so the writer switches
-            // commits between synced and not with synchronous alone. In WAL mode a NORMAL commit
-            // doesn't sync, so fullfsync decides only how a FULL one does.
-            pragma(&db, "fullfsync", 1)?;
             pragma(&db, "journal_mode", "wal")?;
             pragma(&db, "journal_size_limit", WAL_LIMIT)?;
             pragma(&db, "synchronous", 1)?;
@@ -473,8 +472,6 @@ thread_local! {
 thread_local! {
     /// Whether this writer is in an inbox group's transaction that may take live writes.
     static SHARING: Cell<bool> = const { Cell::new(false) };
-    /// The VFS the connections a test opens on this thread go through, if not SQLite's own.
-    static VFS: Cell<Option<&'static str>> = const { Cell::new(None) };
 }
 /// The key a test's `Remember` fails with, as a full disk, whenever it's in such a transaction.
 #[cfg(test)]
@@ -501,10 +498,11 @@ fn wal_checkpoint(db: &Connection, mode: &str) -> Result<(bool, u64, u64)> {
     })?)
 }
 
-/// Flushes jaw.db to the disk, with F_FULLFSYNC on macOS, through `db`'s own file, as SQLite does
-/// after a checkpoint that reaches the WAL's end. A file of jaw.db's opened beside SQLite's would,
-/// as it closed, let go of every lock this process holds on jaw.db, and another process could then
-/// take the database from under it.
+/// Syncs jaw.db through `db`'s own file as a checkpoint's sync, as SQLite does after a checkpoint
+/// that reaches the WAL's end: what's been copied into it is sent to the drive and fenced on the
+/// Mac's own, and flushed in full elsewhere (`vfs`). A file of jaw.db's opened beside SQLite's
+/// would, as it closed, let go of every lock this process holds on jaw.db, and another process
+/// could then take the database from under it.
 fn flush(db: &Connection) -> Result<()> {
     let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
     // SAFETY: SQLITE_FCNTL_FILE_POINTER writes a pointer to the main database's file, which `db`
@@ -562,6 +560,7 @@ impl Store {
     fn open_with(home: &Path, limits: Limits) -> Result<Store> {
         let path = home.join("jaw.db");
         let mut db = connect(&path, Role::Writer)?;
+        let fenced = vfs::fenced(&db);
         pragma(&db, "busy_timeout", limits.busy_ms)?;
         schema::migrate(&mut db)?;
         let stamps = Stamps::load(&db)?;
@@ -627,6 +626,7 @@ impl Store {
             wal,
             trouble: troubled,
             thumbnails,
+            fenced,
         })
     }
 
@@ -806,6 +806,7 @@ impl Store {
             background_waited_ms: stats.held_for.as_millis() as u64,
             shared_writes: stats.shared,
             shared_failed: stats.shared_failed,
+            full_flush: !self.fenced,
             trouble: self.trouble.borrow().clone(),
         }
     }
@@ -1106,8 +1107,8 @@ impl Writer {
 
     /// Makes the writer's commits reach the disk before they return, or go back to letting a later
     /// synced commit or the checkpointer's syncs do it. On macOS only F_FULLFSYNC gets past the
-    /// drive's cache, which fullfsync, on since the writer connected, has a FULL commit use. Each
-    /// is read back before a commit, so one is never said to be synced when it isn't.
+    /// drive's cache, which jaw's VFS makes of a FULL commit's sync. Each is read back before a
+    /// commit, so one is never said to be synced when it isn't.
     fn synced(&mut self, synced: bool) -> Result<()> {
         if self.synced != Some(synced) {
             self.synced = None;
@@ -1550,8 +1551,8 @@ impl Writer {
     /// its passes never reach the last frame before the next commit, so the WAL would only grow.
     /// The writer copies what the checkpointer's last pass left and waits up to RESTART_READERS
     /// for readers still on the WAL's frames, so its next transaction writes the WAL from its
-    /// beginning: what arrives meanwhile waits about two flushes of the drive, and that transaction
-    /// makes a third as it syncs the WAL's new header, once each WAL_HARD frames. While the
+    /// beginning: what arrives meanwhile waits for two syncs, and that transaction makes a third as
+    /// it syncs the WAL's new header, once each WAL_HARD frames. While the
     /// checkpointer's pass runs it tries again after its next commit, unless the WAL is WAL_EDGE
     /// frames past WAL_HARD, when it waits for the pass, and behind a reader that holds the frames
     /// longer, it tries again RESTART_AGAIN later. While background work waits for the WAL to start
@@ -1737,10 +1738,10 @@ impl Writer {
 /// Copies the WAL into jaw.db once WAL_EASY frames wait, or any while background work waits for
 /// the WAL to start again, and until none do, without waiting for readers or holding up the
 /// writer, which keeps appending meanwhile; and says how far it has got. Once the writer copies
-/// the last few frames itself, it leaves them. SQLite flushes jaw.db only after a pass that
-/// reaches the WAL's end, which none does while the writer keeps appending, so after one that
-/// doesn't it flushes jaw.db itself: otherwise every page copied since the WAL last started again
-/// would wait to be flushed as it next does, and what arrives with it. Once jaw.db has gone IDLE
+/// the last few frames itself, it leaves them. SQLite syncs jaw.db only after a pass that reaches
+/// the WAL's end, which none does while the writer keeps appending, so after one that doesn't it
+/// syncs jaw.db itself: otherwise every page copied since the WAL last started again would wait to
+/// be sent to the drive as it next does, and what arrives with it. Once jaw.db has gone IDLE
 /// without a commit, it empties the WAL, and then sleeps until the next commit, so an idle jawd
 /// never wakes for it. It ends when the writer has.
 fn checkpoint(db: Connection, wal: Arc<Wal>, kicks: Receiver<()>, idle: Duration) {
@@ -2649,13 +2650,13 @@ mod tests {
         let (reader, checkpointer) =
             (connect(&path, Role::Reader).unwrap(), connect(&path, Role::Checkpointer).unwrap());
         for db in [&writer, &reader, &checkpointer] {
+            check(db, "fullfsync", "0").unwrap();
             check(db, "checkpoint_fullfsync", "1").unwrap();
             check(db, "busy_timeout", "5000").unwrap();
             check(db, "journal_mode", "wal").unwrap();
+            assert!(vfs::opened_through(db), "a connection that isn't through jaw's VFS");
         }
-        for (name, value) in
-            [("synchronous", "1"), ("fullfsync", "1"), ("wal_autocheckpoint", "0"), ("journal_size_limit", "67108864")]
-        {
+        for (name, value) in [("synchronous", "1"), ("wal_autocheckpoint", "0"), ("journal_size_limit", "67108864")] {
             check(&writer, name, value).unwrap();
         }
         check(&checkpointer, "synchronous", "2").unwrap();
@@ -2693,7 +2694,7 @@ mod tests {
         db.execute_batch("CREATE TABLE t (x INTEGER)").unwrap();
         for synced in [true, false, true, false] {
             sync_commits(&db, synced).unwrap();
-            assert_eq!(commits_synced(&db).unwrap(), synced, "FULL with F_FULLFSYNC, or NORMAL");
+            assert_eq!(commits_synced(&db).unwrap(), synced, "FULL through jaw's VFS, or NORMAL");
             let mut insert = db.prepare_cached("INSERT INTO t (x) VALUES (?1)").unwrap();
             insert.execute([1]).unwrap();
             assert_eq!(
@@ -2704,22 +2705,58 @@ mod tests {
         }
     }
 
-    /// Every sync asked of the files in `home` since `mark` of the syncs noted, by `thread`.
-    fn syncs_since(home: &Path, mark: usize, thread: &str) -> Vec<syncs::Synced> {
-        let folder = home.file_name().unwrap().to_string_lossy().to_string();
-        syncs::synced()[mark..].iter().filter(|s| s.path.contains(&folder) && s.thread == thread).cloned().collect()
+    /// A sync jaw's VFS made of a file in a test's folder: the file's name, the thread that asked,
+    /// the flags SQLite asked it with and what it was made of.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Synced {
+        file: String,
+        thread: String,
+        asked: c_int,
+        made: Option<vfs::Made>,
+    }
+
+    impl Synced {
+        fn of(&self, file: &str, asked: c_int, made: vfs::Made) -> bool {
+            self.file == file && self.asked & 0x0f == asked && self.made == Some(made)
+        }
+    }
+
+    /// Every sync of the files in `home` since `mark` of what was asked of them, by `thread`, or by
+    /// any thread with none.
+    fn syncs_since(home: &Path, mark: usize, thread: Option<&str>) -> Vec<Synced> {
+        vfs::noted::events(home)[mark..]
+            .iter()
+            .filter_map(|event| match event {
+                vfs::noted::Event::Sync { path, thread: by, asked, made } if thread.is_none_or(|t| t == by) => {
+                    Some(Synced {
+                        file: Path::new(path).file_name().unwrap().to_string_lossy().into_owned(),
+                        thread: by.clone(),
+                        asked: *asked,
+                        made: *made,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What a checkpoint's syncs, and a new WAL header's, are made of in `home`: fenced where the
+    /// drive takes barriers and they order jaw.db, and flushed in full elsewhere.
+    fn checkpoints_made(store: &Store, home: &Path) -> vfs::Made {
+        if !store.storage().full_flush && vfs::noted::takes_barriers(home) {
+            vfs::Made::Fenced
+        } else {
+            vfs::Made::Full
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn every_commit_before_an_ack_is_flushed_past_the_drives_cache_and_so_is_every_checkpoint() {
-        syncs::register();
+    async fn every_commit_before_an_ack_is_flushed_in_full_and_every_checkpoint_and_new_wal_header_fenced() {
         let home = tempfile::tempdir().unwrap();
-        VFS.with(|vfs| vfs.set(Some(syncs::NAME)));
-        let store = Store::open(home.path());
-        VFS.with(|vfs| vfs.set(None));
-        let store = store.unwrap();
-        let wal = |s: &syncs::Synced| s.path.ends_with("jaw.db-wal");
-        let file = |s: &syncs::Synced| s.path.ends_with("jaw.db");
+        vfs::noted::watch(home.path());
+        let store = Store::open(home.path()).unwrap();
+        let fenced = checkpoints_made(&store, home.path());
+        let (normal, full) = (ffi::SQLITE_SYNC_NORMAL, ffi::SQLITE_SYNC_FULL);
         let inboxed = store.inboxed();
         let chat = "351910000001@s.whatsapp.net";
         let mut n = 0;
@@ -2727,8 +2764,9 @@ mod tests {
             n += 1;
             let store = store.clone();
             let inboxed = inboxed.clone();
+            let home = home.path().to_path_buf();
             async move {
-                let mark = syncs::synced().len();
+                let mark = vfs::noted::events(&home).len();
                 match what {
                     "inbox" => {
                         let notified = inboxed.notified();
@@ -2754,41 +2792,159 @@ mod tests {
                 mark
             }
         };
-        // Each commit that precedes an answer or an ack syncs the WAL past the drive's cache before
-        // it returns, after normal commits as before them, and the rest don't sync at all.
+        // Each commit that precedes an answer or an ack has SQLite ask its WAL's sync at NORMAL,
+        // which is flushed past the drive's cache before it returns, after normal commits as before
+        // them, and the rest don't sync at all.
         for what in ["inbox", "live", "durable", "background", "live", "inbox", "durable", "durable", "live"] {
             let mark = write(what).await;
-            let synced = syncs_since(home.path(), mark, "jawd-writer");
+            let synced = syncs_since(home.path(), mark, Some("jawd-writer"));
             if matches!(what, "inbox" | "durable") {
-                assert!(synced.iter().any(|s| wal(s) && s.full()), "{what}: the WAL wasn't flushed: {synced:?}");
+                let flushed = synced.iter().any(|s| s.of("jaw.db-wal", normal, vfs::Made::Full));
+                assert!(flushed, "{what}: the WAL wasn't flushed: {synced:?}");
             } else {
                 assert!(synced.is_empty(), "{what}: a normal commit synced {synced:?}");
             }
         }
-        // The writer's own checkpoint flushes the WAL before copying it and jaw.db after.
-        let mark = syncs::synced().len();
+        // The writer's own checkpoint has SQLite ask at FULL for the WAL before it copies and for
+        // jaw.db after, each sent to the drive and fenced.
+        let mark = vfs::noted::events(home.path()).len();
         store.truncate().await.unwrap();
-        let synced = syncs_since(home.path(), mark, "jawd-writer");
-        assert!(synced.iter().any(wal) && synced.iter().any(file), "the writer's checkpoint: {synced:?}");
+        let synced = syncs_since(home.path(), mark, Some("jawd-writer"));
+        let both = synced.iter().any(|s| s.of("jaw.db-wal", full, fenced))
+            && synced.iter().any(|s| s.of("jaw.db", full, fenced));
+        assert!(both, "the writer's checkpoint: {synced:?}");
+        // With the WAL emptied, the next commit, the live write or a step of indexing before it,
+        // writes its new header, asked at FULL and fenced before its frames go in, and a normal
+        // commit syncs nothing else.
+        let emptied = vfs::noted::events(home.path())[mark..]
+            .iter()
+            .position(|e| matches!(e, vfs::noted::Event::Truncate { path, size: 0 } if path.ends_with("jaw.db-wal")))
+            .expect("the writer's checkpoint emptied the WAL")
+            + mark;
+        write("live").await;
+        let synced = syncs_since(home.path(), emptied, Some("jawd-writer"));
+        let header: Vec<_> = synced.iter().map(|s| (s.file.as_str(), s.asked & 0x0f, s.made)).collect();
+        assert_eq!(header, [("jaw.db-wal", full, Some(fenced))], "the WAL's new header: {synced:?}");
         // So does the checkpointer's, once enough frames wait for it.
-        let mark = syncs::synced().len();
+        let mark = vfs::noted::events(home.path()).len();
         let words = "palavras ".repeat(400);
         let history = (0..2_000).map(|k| text(chat, &format!("p{k}"), 10_000 + k, &words));
         store.apply(Lane::Background, messages(history)).await.unwrap();
         let began = Instant::now();
-        while !syncs_since(home.path(), mark, "jawd-checkpoint").iter().any(file) {
+        while !syncs_since(home.path(), mark, Some("jawd-checkpoint")).iter().any(|s| s.file == "jaw.db") {
             assert!(began.elapsed() < Duration::from_secs(60), "the checkpointer never copied the WAL");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let checkpointed = syncs_since(home.path(), mark, "jawd-checkpoint");
-        assert!(checkpointed.iter().any(wal), "the checkpointer copies only what it has flushed: {checkpointed:?}");
-        // Neither jaw.db nor its WAL is ever synced only as far as the drive's cache, by any connection.
-        let folder = home.path().file_name().unwrap().to_string_lossy().to_string();
-        let plain: Vec<_> = syncs::synced()
+        let checkpointed = syncs_since(home.path(), mark, Some("jawd-checkpoint"));
+        let fences = checkpointed.iter().all(|s| s.asked & 0x0f == full && s.made == Some(fenced));
+        assert!(fences, "the checkpointer's syncs: {checkpointed:?}");
+        let wal = checkpointed.iter().any(|s| s.file == "jaw.db-wal");
+        assert!(wal, "the checkpointer copies only what it has synced: {checkpointed:?}");
+        // Neither jaw.db nor its WAL is ever synced only as far as the drive's cache, unfenced, by
+        // any connection, and every sync SQLite asks at NORMAL, a commit's, is a full flush.
+        let unordered: Vec<_> = syncs_since(home.path(), 0, None)
             .into_iter()
-            .filter(|s| s.path.contains(&folder) && (wal(s) || file(s)) && !s.full())
+            .filter(|s| matches!(s.file.as_str(), "jaw.db" | "jaw.db-wal"))
+            .filter(|s| s.made.is_none() || (s.asked & 0x0f == normal && s.made != Some(vfs::Made::Full)))
             .collect();
-        assert!(plain.is_empty(), "synced without F_FULLFSYNC: {plain:?}");
+        assert!(unordered.is_empty(), "synced neither in full nor fenced: {unordered:?}");
+    }
+
+    /// Checks the order a power cut needs in what was asked of a folder's files: before the WAL
+    /// starts again, at its new header (32 bytes at its start), or is cut to nothing, every page
+    /// written to jaw.db since jaw.db was last synced has been synced, fenced or in full, as only
+    /// that sends them to the drive; the new header is synced before a frame is written after it;
+    /// and no sync failed. Says how often the WAL started again and was emptied.
+    fn assert_ordered(events: &[vfs::noted::Event]) -> (usize, usize) {
+        use vfs::noted::Event;
+        let name = |path: &str| Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
+        let (mut pages, mut header, mut started, mut emptied) = (0, false, 0, 0);
+        for (k, event) in events.iter().enumerate() {
+            match event {
+                Event::Write { path, at, len } => match name(path).as_str() {
+                    "jaw.db" => pages += 1,
+                    "jaw.db-wal" if *at == 0 && *len == 32 => {
+                        assert_eq!(pages, 0, "event {k}: the WAL started again over pages of jaw.db not synced");
+                        header = true;
+                        started += 1;
+                    }
+                    "jaw.db-wal" => {
+                        assert!(!header, "event {k}: a frame went in before the WAL's new header was synced")
+                    }
+                    _ => {}
+                },
+                Event::Sync { path, made, .. } => {
+                    assert!(made.is_some(), "event {k}: a sync failed: {event:?}");
+                    match name(path).as_str() {
+                        "jaw.db" => pages = 0,
+                        "jaw.db-wal" => header = false,
+                        _ => {}
+                    }
+                }
+                Event::Truncate { path, size } if *size == 0 && name(path) == "jaw.db-wal" => {
+                    assert_eq!(pages, 0, "event {k}: the WAL was emptied over pages of jaw.db not synced");
+                    emptied += 1;
+                }
+                Event::Truncate { .. } => {}
+            }
+        }
+        (started, emptied)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_wal_starts_again_or_is_emptied_only_once_every_page_copied_into_jaw_db_is_synced() {
+        let home = tempfile::tempdir().unwrap();
+        vfs::noted::watch(home.path());
+        let quiet = Duration::from_secs(60);
+        let idle = Duration::from_millis(300);
+        let limits = Limits { wal_soft: SOFT, wal_hard: HARD, live_pause: quiet, stream_step: quiet, idle, ..LIMITS };
+        let store = Store::open_with(home.path(), limits).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let rows = pouring(&store, stop.clone());
+        let history: Vec<Message> =
+            (0..5_000).map(|n| text("351910000001@s.whatsapp.net", &format!("h{n}"), n, "history")).collect();
+        let batch = {
+            let store = store.clone();
+            tokio::spawn(async move { store.apply(Lane::Background, messages(history)).await.unwrap() })
+        };
+        // Inbox rows, live writes, durable ones and history together, until the writer has started
+        // the WAL again three times, however busy the machine, or for 30 s.
+        let (began, mut n) = (Instant::now(), 0);
+        while restarted(&store) < 3 && began.elapsed() < Duration::from_secs(30) {
+            store.apply(Lane::Live, conversion(n * 10, 10)).await.unwrap();
+            let done = text("351910000002@s.whatsapp.net", &format!("d{n}"), n, "done");
+            store.apply_durable(messages([done])).await.unwrap();
+            n += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (sent, acked, _) = rows.join().unwrap();
+        assert_eq!(acked, sent, "every inbox row was acked");
+        assert_eq!(batch.await.unwrap().changed, 5_000);
+        // Then, idle, the checkpointer empties the WAL.
+        let began = Instant::now();
+        while std::fs::metadata(home.path().join("jaw.db-wal")).map_or(1, |m| m.len()) > 0 {
+            assert!(began.elapsed() < Duration::from_secs(20), "the idle WAL was never emptied");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (started, emptied) = assert_ordered(&vfs::noted::events(home.path()));
+        assert!(started >= 3 && emptied >= 1, "the WAL started again {started} times and was emptied {emptied}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn off_the_macs_own_drive_every_sync_of_jaw_db_is_a_full_flush() {
+        let home = tempfile::tempdir().unwrap();
+        vfs::noted::flush_in_full(home.path());
+        vfs::noted::watch(home.path());
+        let store = Store::open(home.path()).unwrap();
+        assert!(store.storage().full_flush, "status says barriers fence jaw.db's checkpoints");
+        let chat = "351910000001@s.whatsapp.net";
+        store.apply_durable(messages([text(chat, "d1", 1, "done")])).await.unwrap();
+        store.truncate().await.unwrap();
+        store.apply(Lane::Live, messages([text(chat, "l1", 2, "converted")])).await.unwrap();
+        let synced = syncs_since(home.path(), 0, None);
+        assert!(synced.iter().any(|s| s.asked & 0x0f == ffi::SQLITE_SYNC_FULL), "no checkpoint synced: {synced:?}");
+        let fenced: Vec<_> = synced.iter().filter(|s| s.made != Some(vfs::Made::Full)).collect();
+        assert!(fenced.is_empty(), "synced other than in full: {fenced:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2949,7 +3105,7 @@ mod tests {
     }
 
     /// The WAL was started again, each time only once it held HARD frames, since each start costs
-    /// live writes three flushes and no background work waited for it, and never held much more
+    /// live writes three syncs and no background work waited for it, and never held much more
     /// than HARD frames: one transaction can begin just under it.
     fn assert_bounded(store: &Store) {
         let (storage, restarted) = (store.storage(), restarted(store));
@@ -3223,8 +3379,10 @@ mod tests {
     }
 
     /// A store whose WAL has room for the checkpointer's passes, each once WAL_EASY frames wait,
-    /// while the writer appends.
+    /// while the writer appends, and whose passes sync as slowly as on a busy drive, since a pass
+    /// fenced rather than flushed is over too soon for the writer to land a commit in it reliably.
     fn roomy_store(home: &Path) -> Store {
+        vfs::noted::slow(home, Duration::from_millis(25));
         let quiet = Duration::from_secs(60);
         let limits =
             Limits { wal_soft: 8 * WAL_EASY, wal_hard: 12 * WAL_EASY, live_pause: quiet, stream_step: quiet, ..LIMITS };
@@ -3380,7 +3538,7 @@ mod tests {
     }
 
     #[test]
-    fn the_checkpointers_flush_is_a_full_sync_of_jaw_db_itself() {
+    fn the_checkpointers_flush_is_a_checkpoints_sync_of_jaw_db_itself() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("jaw.db");
         let _writer = connect(&path, Role::Writer).unwrap();
@@ -3408,7 +3566,11 @@ mod tests {
         unsafe { (*file).pMethods = own };
         flushed.unwrap();
         let syncs = std::mem::take(&mut *SYNCS.lock().unwrap());
-        assert_eq!(syncs, [(file as usize, ffi::SQLITE_SYNC_FULL)], "the flush didn't sync jaw.db's own file, FULL");
+        assert_eq!(
+            syncs,
+            [(file as usize, ffi::SQLITE_SYNC_FULL)],
+            "the flush didn't ask jaw.db's own file for a checkpoint's sync, at FULL"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

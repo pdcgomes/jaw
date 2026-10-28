@@ -19,7 +19,7 @@ Any change that touches, or changes the behaviour of:
 ## Rules
 
 Read "jawd › Storage › Data integrity" and "Migrations" in `docs/plans/2026-10-16-jaw-design.md` before changing the data layer, and follow every rule there. The ones broken most easily:
-- Nothing is acknowledged before a synced commit (`FULL`, `fullfsync` on macOS). `checkpoint_fullfsync` on every connection.
+- Nothing is acknowledged before a synced commit (`FULL`, flushed in full: `F_FULLFSYNC` on macOS). `checkpoint_fullfsync` on every connection; `jaw.db`'s go through jaw's VFS (`store/vfs.rs`) with `fullfsync` off, so it flushes a commit's sync in full and fences only a checkpoint's and a new WAL header's, with a barrier on the Mac's own drive.
 - Every write is an idempotent upsert with merge rules; replays, duplicates and out-of-order arrivals change nothing twice. Failures are quarantined, never dropped.
 - Counters are derived (triggers or recomputed in the same transaction), never adjusted by hand.
 - A merged migration is never edited; take the next number when you merge; declare its kind (schema step, data step, backfill) and its tables' class; never drop jaw's own data.

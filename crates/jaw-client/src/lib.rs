@@ -278,6 +278,7 @@ pub fn describe(status: &Status) -> String {
                 storage.shared_writes, storage.shared_failed
             ));
         }
+        wal.push_str(if storage.full_flush { "; checkpoints flushed in full" } else { "; checkpoints fenced" });
         lines.push(wal);
         for backup in &storage.backups {
             let days = (backup.kept_until_ms - now_ms()).max(0) / 86_400_000;
