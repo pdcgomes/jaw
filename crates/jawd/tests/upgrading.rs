@@ -188,10 +188,17 @@ fn the_owners_first_run_upgrades_a_version_1_jaw_db_converts_its_history_and_kee
         assert_eq!(count(&db, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
     }
     assert!(home.path().join("jaw.db.before-v1").exists(), "backed up at version 1 before the data steps");
-    assert_eq!(
-        layouts(&mut jaw),
-        jaw_proto::Layouts { kept: 0, most: 16, largest_bytes: 0, bytes_most: 16_384, refused: 0 }
-    );
+    let none = jaw_proto::Layouts {
+        kept: 0,
+        most: 16,
+        largest_bytes: 0,
+        bytes_most: 16_384,
+        books: 0,
+        largest_book_bytes: 0,
+        book_bytes_most: 65_536,
+        refused: 0,
+    };
+    assert_eq!(layouts(&mut jaw), none);
 
     // The terminal's panes: Mãe, whose chat the spike's history made, then the group, with the keys
     // on a chat this account doesn't have.
@@ -206,6 +213,23 @@ fn the_owners_first_run_upgrades_a_version_1_jaw_db_converts_its_history_and_kee
     let mut mac = first.connect("jaw-mac");
     let opened = mac.call("layout.get", json!({ "interface": "jaw" })).unwrap();
     assert_eq!(opened["layout"], two, "the Mac app opens the terminal's");
+    let slot = |id: u32, c0: u32, r0: u32, chat: &str| json!({ "id": id, "c0": c0, "c1": c0 + 1, "r0": r0, "r1": r0 + 1, "chat": chat });
+    let side_by_side =
+        json!({ "cols": [0.0, 0.5, 1.0], "rows": [0.0, 1.0], "slots": [slot(1, 0, 0, MAE), slot(2, 1, 0, CLIMBING)] });
+    let as_grid = mac.call("layout.get", json!({ "interface": "jaw", "format": 2 })).unwrap();
+    let grid = json!({ "format": 2, "unnamed": side_by_side, "unnamedFocus": 2, "layouts": [] });
+    assert_eq!(as_grid["layout"], grid, "and reads it as a grid");
+    // The Mac app's own book, as it writes it: Mãe beside the group, and Family on screen, Mãe over
+    // a chat this account doesn't have.
+    let family = |gone: Value| json!({ "cols": [0, 1], "rows": [0, 0.4, 1], "slots": [slot(1, 0, 0, MAE), gone] });
+    let book = json!({ "format": 2, "current": "Family", "unnamed": side_by_side, "unnamedFocus": 1,
+        "layouts": [{ "name": "Family", "grid": family(slot(2, 0, 1, GONE)), "focus": 2 }] });
+    let saved = mac.call("layout.set", json!({ "v": v, "layout": book })).unwrap();
+    let empty = json!({ "id": 2, "c0": 0, "c1": 1, "r0": 1, "r1": 2 });
+    let mut read = book.clone();
+    read["layouts"][0]["grid"] =
+        json!({ "cols": [0.0, 1.0], "rows": [0.0, 0.4, 1.0], "slots": [slot(1, 0, 0, MAE), empty] });
+    assert_eq!(saved, json!({ "interface": "jaw-mac", "v": v, "layout": read, "kept": true, "dropped": [GONE] }));
     drop((jaw, mac));
     assert!(first.stop(), "a clean stop: {}", log(home.path()));
 
@@ -215,10 +239,24 @@ fn the_owners_first_run_upgrades_a_version_1_jaw_db_converts_its_history_and_kee
     assert_eq!(restored, json!({ "interface": "jaw", "v": v, "layout": two, "dropped": [GONE] }), "as it was left");
     let bytes =
         serde_json::to_string(&serde_json::from_value::<jaw_proto::layout::Layout>(three).unwrap()).unwrap().len();
+    let mut mac = second.connect("jaw-mac");
+    let restored = mac.call("layout.get", Value::Null).unwrap();
     assert_eq!(
-        layouts(&mut jaw),
-        jaw_proto::Layouts { kept: 1, most: 16, largest_bytes: bytes as u64, bytes_most: 16_384, refused: 0 }
+        restored,
+        json!({ "interface": "jaw-mac", "v": v, "layout": read, "dropped": [GONE] }),
+        "as it was left"
     );
+    let book_bytes =
+        serde_json::to_string(&serde_json::from_value::<jaw_proto::layout::Book>(book).unwrap()).unwrap().len();
+    let kept = jaw_proto::Layouts {
+        kept: 2,
+        largest_bytes: bytes as u64,
+        books: 1,
+        largest_book_bytes: book_bytes as u64,
+        ..none
+    };
+    assert_eq!(layouts(&mut jaw), kept);
+    drop(mac);
     let backups = std::fs::read_dir(home.path())
         .unwrap()
         .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("jaw.db.before"))

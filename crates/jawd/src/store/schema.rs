@@ -711,7 +711,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE INDEX messages_by_time ON messages (chat, at, n, mine, kind, mentions_me);
     ",
     // 12: what interfaces keep of how they were laid out, a schema step: one new table, which costs
-    // the same however big jaw.db is, and which nothing refers to. Migration 17 rebuilds it.
+    // the same however big jaw.db is, and which nothing refers to.
     "
     -- Class: jaw's own. What each interface keeps of how it was laid out, by the name it gives in
     -- hello (jaw for the terminal) and what it is: under 'layout', its split panes, in the format
@@ -936,10 +936,11 @@ pub(super) const MIGRATIONS: &[&str] = &[
         WHERE name = 'messages' AND seq > 0;
     ",
     // 17, a schema step: what an interface keeps of how it was laid out takes 64 KiB of JSON rather
-    // than 16, so a book of layouts on a grid fits, the Mac app's: ten named layouts, each with its
-    // saved and its edited shape, and the unnamed one, of 12 slots each. A CHECK can't be changed in
-    // place, so the table is rebuilt and every row copied as it is. A rebuild of a small table:
-    // nothing refers to it, it has no trigger or index of its own, and it holds 16 rows at most.
+    // than 16, so a book of layouts on a grid fits, the Mac app's, which at its limits (the unnamed
+    // layout and nine named, each named one with its saved and its edited shape, 12 slots in each)
+    // takes about 40 KiB. A CHECK can't be changed in place, so the table is rebuilt and every row
+    // copied as it is, as migration 7 rebuilt the outbox. A rebuild of a small table: nothing refers
+    // to it, it has no trigger or index of its own, and it holds 16 rows at most.
     "
     -- Class: jaw's own, as migration 12 made it. What each interface keeps of how it was laid out,
     -- by the name it gives in hello (jaw for the terminal) and what it is: under 'layout', a tree

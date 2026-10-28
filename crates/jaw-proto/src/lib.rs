@@ -291,11 +291,12 @@ pub struct Layouts {
     /// Interfaces with a layout kept, and the most that can have one.
     pub kept: u64,
     pub most: u64,
-    /// The biggest tree of panes kept, in bytes, and the most one can take.
+    /// The biggest layout kept that isn't a book, in bytes: a tree of panes, or one in a format
+    /// this jawd doesn't know; and the most a tree can take.
     pub largest_bytes: u64,
     pub bytes_most: u64,
     /// The interfaces among `kept` whose layout is a book of layouts on a grid, the biggest book's
-    /// bytes, and the most one can take.
+    /// bytes, and the most a book can take.
     #[serde(default)]
     pub books: u64,
     #[serde(default)]

@@ -223,7 +223,8 @@ mod tests {
             .unwrap();
         }
         let too_big = format!("\"{}\"", "x".repeat(16_383));
-        let refused = "INSERT INTO interface_state (interface, key, value, v, updated_at) VALUES ('big', 'layout', ?1, 1, 0)";
+        let refused =
+            "INSERT INTO interface_state (interface, key, value, v, updated_at) VALUES ('big', 'layout', ?1, 1, 0)";
         assert!(db.execute(refused, [&too_big]).is_err(), "16,385 bytes, before the rebuild");
         schema::migrate(&mut db).unwrap();
         let after: Vec<(String, String, i64, i64)> = db

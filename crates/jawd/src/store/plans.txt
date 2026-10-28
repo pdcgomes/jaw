@@ -194,7 +194,7 @@ SELECT count(*) FROM inbox
     SCAN inbox
 
 -- src/store/mod.rs
-SELECT count(*), coalesce(max(octet_length(value)), 0) FROM interface_state
+SELECT count(*), coalesce(max(octet_length(value)) FILTER (WHERE value ->> '$.format' IS NOT 2), 0), count(*) FILTER (WHERE value ->> '$.format' = 2), coalesce(max(octet_length(value)) FILTER (WHERE value ->> '$.format' = 2), 0) FROM interface_state
     SCAN interface_state
 
 -- src/store/mod.rs

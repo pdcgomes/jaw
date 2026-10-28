@@ -68,7 +68,7 @@ const ALLOWED: &[(&str, &str)] = &[
         "interface_state holds a row for each of 16 interfaces at most, counted when one keeps its first",
     ),
     (
-        "SELECT count(*), coalesce(max(octet_length(value)), 0) FROM interface_state",
+        "SELECT count(*), coalesce(max(octet_length(value)) FILTER (WHERE value ->> '$.format' IS NOT 2), 0)",
         "jawd status, on a table of 16 rows at most",
     ),
     (

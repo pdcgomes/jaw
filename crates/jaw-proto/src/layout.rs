@@ -5,24 +5,25 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The format a tree of split panes is written in; jawd refuses one it doesn't know.
+/// The format a tree of split panes is written in.
 pub const FORMAT: u32 = 1;
 /// The format a book of layouts on a grid is written in.
 pub const BOOK_FORMAT: u32 = 2;
-/// The formats jawd takes and answers in.
+/// The formats jawd keeps layouts in and answers in; it refuses another.
 pub const FORMATS: [u32; 2] = [FORMAT, BOOK_FORMAT];
 /// The most panes a tree can have.
 pub const PANES_MOST: usize = 16;
 /// The most bytes a tree can take, written as jawd keeps it: compact JSON.
 pub const BYTES_MOST: usize = 16 * 1024;
-/// The most layouts a book names, besides its unnamed one.
+/// The most layouts a book holds, its unnamed one among them: the ten ⌃⌘0 to ⌃⌘9 reach, so nine
+/// named ones at most.
 pub const LAYOUTS_MOST: usize = 10;
-/// The most slots a layout on a grid can have: a book's unnamed one, a named one's saved shape or
-/// its edited one.
+/// The most slots a layout on a grid can have, in each of its shapes.
 pub const SLOTS_MOST: usize = 12;
 /// The longest name a book's layout can have, in bytes.
 pub const LAYOUT_NAME_MOST: usize = 64;
-/// The most bytes a book can take, written as jawd keeps it: compact JSON.
+/// The most bytes a book can take, written as jawd keeps it: compact JSON. A book at every other
+/// limit, each shape edited and each slot's chat a JID of 64 bytes, takes about 40 KiB.
 pub const BOOK_BYTES_MOST: usize = 64 * 1024;
 /// The most interfaces jawd keeps a layout for.
 pub const KEPT_MOST: u64 = 16;
@@ -84,10 +85,11 @@ impl Layout {
     }
 }
 
-/// A book of layouts on a grid, as the Mac app's `LayoutBook` keeps them, key for key: its named
-/// layouts, each with its saved shape, the shape it was edited to if it was, and its slot with the
-/// focus; the unnamed layout, what's on screen before any is saved; and which is on screen. Every
-/// key is the book's own, so one jawd doesn't know is refused rather than dropped.
+/// A book of layouts on a grid, as the Mac app's `LayoutBook` keeps them, key for key, with
+/// `format` where the app keeps its own version: its named layouts, each with its saved shape, the
+/// shape it was edited to if it was, and its slot with the focus; the unnamed layout, what's on
+/// screen before any is saved, and its slot with the focus; and which is on screen. jawd refuses a
+/// key it doesn't know rather than keep the book without it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Book {
@@ -116,13 +118,13 @@ pub struct Named {
     /// The shape it was edited to, kept apart from the saved one until it's saved or reverted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited: Option<Grid>,
-    /// Its slot with the focus, by its id.
+    /// Its slot with the focus, by its id, in the shape on screen: the edited one if there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<u32>,
 }
 
 /// A layout on a grid, as the Mac app's `PaneGrid` keeps it: the grid's lines as fractions of its
-/// width (`cols`) and height (`rows`), each from 0 to 1 in order, and slots spanning them by index.
+/// width (`cols`) and its height (`rows`), from 0 to 1 in order, and slots spanning them by index.
 /// The slots cover the grid with no holes and no overlaps, every line inside it is some slot's
 /// edge, and a chat shows in one slot at most.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -148,25 +150,25 @@ pub struct Slot {
     pub chat: Option<String>,
 }
 
-impl Grid {
-    /// The slots top to bottom, then left to right: the Mac app's reading order.
-    pub fn reading(&self) -> Vec<&Slot> {
-        let mut slots: Vec<&Slot> = self.slots.iter().collect();
-        slots.sort_by_key(|s| (s.r0, s.c0));
-        slots
-    }
-}
-
 impl Book {
     /// Every layout on a grid the book holds: the unnamed one, then each named one's saved shape
     /// and its edited one.
     pub fn grids(&self) -> impl Iterator<Item = &Grid> {
         self.unnamed.iter().chain(self.layouts.iter().flat_map(|n| std::iter::once(&n.grid).chain(&n.edited)))
     }
+
+    /// What's on screen, as the app has it: the layout `current` names, in its edited shape if it
+    /// has one, or the unnamed layout; with its slot with the focus.
+    pub fn on_screen(&self) -> Option<(&Grid, Option<u32>)> {
+        match self.current.as_ref().and_then(|name| self.layouts.iter().find(|n| &n.name == name)) {
+            Some(named) => Some((named.edited.as_ref().unwrap_or(&named.grid), named.focus)),
+            None => self.unnamed.as_ref().map(|grid| (grid, self.unnamed_focus)),
+        }
+    }
 }
 
 /// `layout.get`'s params: whose layout, the connection's own interface's by default, and the format
-/// to answer in, 1 by default.
+/// to answer in, the one it was kept in by default.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutGet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,8 +179,8 @@ pub struct LayoutGet {
 
 /// `layout.set`'s params: the connection's interface's layout, a `Layout` or a `Book`, and its
 /// version, which the interface gives: more than any it has kept or been told of, such as the time
-/// in milliseconds. jawd keeps it only if no layout with a newer version is kept, so asking again
-/// changes nothing.
+/// in milliseconds. jawd keeps it only if no layout with a newer version is kept, whatever its
+/// format, so asking again changes nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutSet<L = Layout> {
     pub v: u64,
@@ -186,22 +188,21 @@ pub struct LayoutSet<L = Layout> {
 }
 
 /// The layout jawd keeps for an interface, as `layout.get` and `layout.set` answer and the
-/// `layout` push says, in a format the connection reads, `Layout` or `Book`, with each chat as jawd
-/// knows it now.
+/// `layout` push says, a `Layout` or a `Book`, with each chat as jawd knows it now.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Saved<L = Layout> {
     pub interface: String,
     /// The version kept; 0 when none is.
     pub v: u64,
-    /// None when none is kept, when no pane's chat is left, or when it was written in a format
-    /// this jawd doesn't know or the connection doesn't read.
+    /// None when none is kept, when no pane's chat is left, when it was written in a format this
+    /// jawd doesn't know, or when a book's layout on screen, asked for as a tree, isn't one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<L>,
     /// `layout.set`'s answer only: whether its layout is the one kept, or a newer one is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept: Option<bool>,
     /// The panes left out, or the slots emptied, by the chat each named: a chat that's gone, or
-    /// one another pane or slot shows.
+    /// one another pane, or slot of the same layout, shows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped: Vec<String>,
 }

@@ -1,7 +1,7 @@
 //! Each interface's layout, kept in jaw.db as jaw's own under the name the interface gives in
 //! hello, so it opens where it was left and another interface can open it: `layout.get` and
 //! `layout.set`, and the `layout` push to the interface's other connections. A layout is a tree of
-//! split panes (format 1), or a book of layouts on a grid (format 2, `book`).
+//! split panes (format 1) or a book of layouts on a grid (format 2, `book`).
 //!
 //! A layout is checked, then kept with a synced commit before `layout.set` answers. The version
 //! the interface gives decides between two layouts, whatever their formats: only a newer one
@@ -14,11 +14,10 @@
 //! a pane whose chat is gone, or that shows the chat of a pane before it, is left out, and such a
 //! slot is emptied.
 //!
-//! Each answer and push is in a format its connection reads: `layout.get`'s in the format it asks
-//! for, 1 by default; `layout.set`'s in the format of the layout it keeps; and a push in the format
-//! of the connection's last request for its own interface's layout (`format_read`), 1 before one.
-//! In format 2 a tree reads as a book whose unnamed layout is the tree on a grid; in format 1 a
-//! book reads as none, as a format the reader doesn't know.
+//! A layout is answered and pushed in the format it was kept in, but for `layout.get` asking for
+//! the other, and `layout.set`, answered in the format of the layout it asked to keep: a tree reads
+//! as a book whose unnamed layout is the tree on a grid, and a book as its layout on screen when
+//! that's a tree (`book` says how).
 
 mod book;
 
@@ -45,68 +44,40 @@ use crate::work::Priority;
 /// What an interface's layout is kept under in `interface_state`.
 const KEY: &str = "layout";
 
-/// A layout just kept, as the interface's connections are pushed it in each format, and the
-/// connection that set it, which isn't.
-#[derive(Clone, Debug)]
-pub struct Pushed {
-    pub tree: Saved,
-    pub book: Saved<Book>,
-    pub from: u64,
-}
-
-impl Pushed {
-    fn v(&self) -> u64 {
-        self.tree.v
-    }
-
-    /// The push's params for a connection reading layouts in `format`.
-    pub fn told(&self, format: u32) -> Value {
-        let told = if format == BOOK_FORMAT { serde_json::to_value(&self.book) } else { serde_json::to_value(&self.tree) };
-        told.expect("jaw-proto's types serialize")
-    }
-}
-
-/// `layout.get`'s or `layout.set`'s answer, in the format asked for.
+/// A layout in one of the formats jawd keeps, as it's kept and as it's answered.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
-pub enum Answer {
-    Tree(Saved),
-    Book(Saved<Book>),
-}
-
-/// What's kept for an interface, as a connection reading each format is answered.
-#[derive(Clone, Debug)]
-struct Read {
-    tree: Saved,
-    book: Saved<Book>,
-}
-
-impl Read {
-    fn answer(self, format: u32, kept: Option<bool>) -> Answer {
-        if format == BOOK_FORMAT {
-            Answer::Book(Saved { kept, ..self.book })
-        } else {
-            Answer::Tree(Saved { kept, ..self.tree })
-        }
-    }
-}
-
-/// A layout as it was kept, in a format this jawd reads.
-enum Formatted {
+pub enum Formatted {
     Tree(Layout),
     Book(Book),
 }
 
 impl Formatted {
-    /// What `value` holds; none for a format this jawd doesn't know, or a value it can't read.
+    /// What `value`, as jaw.db keeps it, holds; none for a format this jawd doesn't know, or one it
+    /// can't read.
     fn read(value: &str) -> Option<Formatted> {
         let value: Value = serde_json::from_str(value).ok()?;
-        match u32::try_from(value.get("format")?.as_u64()?).ok()? {
-            FORMAT => serde_json::from_value(value).ok().map(Formatted::Tree),
-            BOOK_FORMAT => serde_json::from_value(value).ok().map(Formatted::Book),
+        match value.get("format")?.as_u64()? {
+            format if format == u64::from(FORMAT) => serde_json::from_value(value).ok().map(Formatted::Tree),
+            format if format == u64::from(BOOK_FORMAT) => serde_json::from_value(value).ok().map(Formatted::Book),
             _ => None,
         }
     }
+
+    fn format(&self) -> u32 {
+        match self {
+            Formatted::Tree(_) => FORMAT,
+            Formatted::Book(_) => BOOK_FORMAT,
+        }
+    }
+}
+
+/// A layout just kept, as the interface's connections are pushed it, in the format it was kept in,
+/// and the connection that set it, which isn't.
+#[derive(Clone, Debug)]
+pub struct Pushed {
+    pub saved: Saved<Formatted>,
+    pub from: u64,
 }
 
 #[derive(Clone)]
@@ -138,21 +109,20 @@ impl Layouts {
     }
 
     /// `layout.get`: the layout kept for the interface asked for, or the connection's own, `own`,
-    /// in the format asked for, 1 by default.
-    pub async fn get(&self, own: &str, params: Value) -> Result<Answer, Error> {
+    /// in the format asked for, or the one it was kept in.
+    pub async fn get(&self, own: &str, params: Value) -> Result<Saved<Formatted>, Error> {
         let asked: LayoutGet = params_of("layout.get", params)?;
-        let format = asked.format.unwrap_or(FORMAT);
-        if !FORMATS.contains(&format) {
-            return Err(unknown_format("format", format));
+        if let Some(format) = asked.format.filter(|format| !FORMATS.contains(format)) {
+            return Err(unknown_format("format", Some(u64::from(format))));
         }
         let interface = asked.interface.unwrap_or_else(|| own.to_string());
         named(&interface)?;
-        Ok(self.read(interface).await?.0.answer(format, None))
+        Ok(self.read(interface, asked.format).await?.0)
     }
 
     /// `layout.set`, from the connection `from`, greeted as `interface`: answered once what it
     /// came to is on disk, with the layout kept then, in the format of the one asked to keep.
-    pub async fn set(&self, interface: &str, from: u64, params: Value) -> Result<Answer, Error> {
+    pub async fn set(&self, interface: &str, from: u64, params: Value) -> Result<Saved<Formatted>, Error> {
         let LayoutSet { v, layout } = params_of::<LayoutSet<Value>>("layout.set", params)?;
         named(interface)?;
         let v = i64::try_from(v).ok().filter(|&v| v > 0).ok_or_else(|| {
@@ -198,8 +168,9 @@ impl Layouts {
     }
 
     /// The answer to a set of `value` at `v`, once committed: the layout kept now, in `format`,
-    /// published to the interface's connections if this set wrote it and it's still what's kept. A
-    /// newer one committed since is published by the set that wrote it, as its own.
+    /// published to the interface's connections if this set wrote it and it's still what's kept,
+    /// so in the format it was kept in. A newer one committed since is published by the set that
+    /// wrote it, as its own.
     async fn answer(
         &self,
         interface: &str,
@@ -208,13 +179,14 @@ impl Layouts {
         v: i64,
         written: bool,
         format: u32,
-    ) -> Result<Answer, Error> {
-        let (read, stored) = self.read(interface.to_string()).await?;
+    ) -> Result<Saved<Formatted>, Error> {
+        let (mut saved, stored) = self.read(interface.to_string(), Some(format)).await?;
         let own = stored.is_some_and(|(kept, at)| kept == value && at == v);
         if written && own {
-            self.publish(interface, Pushed { tree: read.tree.clone(), book: read.book.clone(), from });
+            self.publish(interface, Pushed { saved: saved.clone(), from });
         }
-        Ok(read.answer(format, Some(own)))
+        saved.kept = Some(own);
+        Ok(saved)
     }
 
     /// The layouts kept and the limits on them, for `status`.
@@ -235,33 +207,20 @@ impl Layouts {
     /// The layout's format and the layout as jawd keeps it, compact JSON, once it's known to be one
     /// jawd can keep.
     fn checked(&self, layout: Value) -> Result<(u32, String), Error> {
-        let format = layout.get("format").and_then(Value::as_u64).unwrap_or(0);
         let unreadable = |e: serde_json::Error| {
             let mut error = Error::new(code::INVALID_PARAMS, format!("layout.set's params: {e}"));
             error.data = Some(json!({ "param": "layout" }));
             error
         };
-        match u32::try_from(format).unwrap_or(0) {
-            FORMAT => Ok((FORMAT, self.checked_tree(&serde_json::from_value(layout).map_err(unreadable)?)?)),
-            BOOK_FORMAT => Ok((BOOK_FORMAT, self.checked_book(&serde_json::from_value(layout).map_err(unreadable)?)?)),
-            _ => Err(unknown_format("layout.format", format)),
+        match layout.get("format").and_then(Value::as_u64) {
+            Some(format) if format == u64::from(FORMAT) => {
+                Ok((FORMAT, self.checked_tree(&serde_json::from_value(layout).map_err(unreadable)?)?))
+            }
+            Some(format) if format == u64::from(BOOK_FORMAT) => {
+                Ok((BOOK_FORMAT, self.checked_book(&serde_json::from_value(layout).map_err(unreadable)?)?))
+            }
+            format => Err(unknown_format("layout.format", format)),
         }
-    }
-
-    /// A book as jawd keeps it, compact JSON, once it's known to be one jawd can keep (`book::checked`).
-    fn checked_book(&self, book: &Book) -> Result<String, Error> {
-        book::checked(book).map_err(|refusal| match refusal {
-            Refusal::Past(why) => self.past(why),
-            Refusal::Invalid { param, why } => invalid(&param, &why),
-        })?;
-        let value = serde_json::to_string(book).expect("jaw-proto's types serialize");
-        if value.len() > BOOK_BYTES_MOST {
-            return Err(self.past(format!(
-                "a book of layouts can take {BOOK_BYTES_MOST} bytes at most, and this one takes {}",
-                value.len()
-            )));
-        }
-        Ok(value)
     }
 
     /// A tree as jawd keeps it, compact JSON, once it's known to be one jawd can keep.
@@ -297,45 +256,50 @@ impl Layouts {
         Ok(value)
     }
 
+    /// A book as jawd keeps it, compact JSON, once it's known to be one jawd can keep
+    /// (`book::checked`).
+    fn checked_book(&self, book: &Book) -> Result<String, Error> {
+        book::checked(book).map_err(|refusal| match refusal {
+            Refusal::Past(why) => self.past(why),
+            Refusal::Invalid { param, why } => invalid(param, &why),
+        })?;
+        let value = serde_json::to_string(book).expect("jaw-proto's types serialize");
+        if value.len() > BOOK_BYTES_MOST {
+            return Err(self.past(format!(
+                "a book of layouts can take {BOOK_BYTES_MOST} bytes at most, and this one takes {}",
+                value.len()
+            )));
+        }
+        Ok(value)
+    }
+
     /// A layout refused for being past a limit, counted for `status`.
     fn past(&self, why: String) -> Error {
         self.inner.refused.fetch_add(1, Ordering::Relaxed);
         Error::new(code::LIMIT, why)
     }
 
-    /// What's kept for `interface`, as it's answered in each format, and the row it came from.
-    async fn read(&self, interface: String) -> Result<(Read, Option<(String, i64)>), Error> {
+    /// What's kept for `interface`, as it's answered in `format`, or the format it was kept in, and
+    /// the row it came from.
+    async fn read(
+        &self,
+        interface: String,
+        format: Option<u32>,
+    ) -> Result<(Saved<Formatted>, Option<(String, i64)>), Error> {
         self.inner
             .store
             .reads()
             .query(Priority::Interactive, move |db| {
                 let stored = read::interface_state(db, &interface, KEY)?;
-                let v = stored.as_ref().map_or(0, |(_, v)| *v as u64);
-                let none = |interface| Saved { interface, v, layout: None, kept: None, dropped: Vec::new() };
-                let mut read = Read { tree: none(interface.clone()), book: none(interface) };
-                // A chat a book names in several of its layouts is looked for once.
-                let mut known: HashMap<String, Option<String>> = HashMap::new();
-                let named = |jid: &str| -> anyhow::Result<Option<String>> {
-                    if let Some(chat) = known.get(jid) {
-                        return Ok(chat.clone());
+                let mut saved = Saved { interface, v: 0, layout: None, kept: None, dropped: Vec::new() };
+                if let Some((value, v)) = &stored {
+                    saved.v = *v as u64;
+                    if let Some(kept) = Formatted::read(value) {
+                        let format = format.unwrap_or(kept.format());
+                        (saved.layout, saved.dropped) = answered(kept, format, |jid| read::chat_named(db, jid))?;
                     }
-                    let chat = read::chat_named(db, jid)?;
-                    known.insert(jid.to_string(), chat.clone());
-                    Ok(chat)
-                };
-                match stored.as_ref().and_then(|(value, _)| Formatted::read(value)) {
-                    Some(Formatted::Tree(layout)) => {
-                        (read.tree.layout, read.tree.dropped) = resolved(layout, named)?;
-                        (read.book.layout, read.book.dropped) =
-                            book::of_tree(read.tree.layout.clone(), read.tree.dropped.clone())?;
-                    }
-                    Some(Formatted::Book(kept)) => {
-                        let (kept, dropped) = book::resolved(kept, named)?;
-                        (read.book.layout, read.book.dropped) = (Some(kept), dropped);
-                    }
-                    None => {}
                 }
-                Ok((read, stored))
+                Ok((saved, stored))
             })
             .await
             .map_err(|e| Error::new(code::INTERNAL, format!("jawd couldn't read the layout: {e:#}")))
@@ -347,7 +311,7 @@ impl Layouts {
         let channels = self.inner.channels.lock().expect("the layouts' channels");
         if let Some(channel) = channels.get(interface) {
             channel.send_if_modified(|told| {
-                let newer = told.as_ref().is_none_or(|told| told.v() < pushed.v());
+                let newer = told.as_ref().is_none_or(|told| told.saved.v < pushed.saved.v);
                 if newer {
                     *told = Some(pushed);
                 }
@@ -355,6 +319,54 @@ impl Layouts {
             });
         }
     }
+}
+
+/// `kept` as a connection reading `format` is answered with it, each chat as `named` knows it now,
+/// and the chats of the panes left out or slots emptied. A tree is read as a tree (`resolved`)
+/// before it's laid out as a book, and a book's layout on screen is cut into a tree before it's
+/// read as one, so a reader of either format leaves out what a reader of trees would.
+pub fn answered(
+    kept: Formatted,
+    format: u32,
+    mut named: impl FnMut(&str) -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<(Option<Formatted>, Vec<String>)> {
+    // A chat a book names in several of its layouts is looked for once.
+    let mut known: HashMap<String, Option<String>> = HashMap::new();
+    let mut named = move |jid: &str| -> anyhow::Result<Option<String>> {
+        if let Some(chat) = known.get(jid) {
+            return Ok(chat.clone());
+        }
+        let chat = named(jid)?;
+        known.insert(jid.to_string(), chat.clone());
+        Ok(chat)
+    };
+    Ok(match (kept, format) {
+        (Formatted::Tree(tree), BOOK_FORMAT) => {
+            let (tree, mut dropped) = resolved(tree, &mut named)?;
+            let book = tree.map(|tree| {
+                let (book, too_small) = book::of_tree(tree);
+                dropped.extend(too_small);
+                Formatted::Book(book)
+            });
+            (book, dropped)
+        }
+        (Formatted::Tree(tree), _) => {
+            let (tree, dropped) = resolved(tree, &mut named)?;
+            (tree.map(Formatted::Tree), dropped)
+        }
+        (Formatted::Book(book), BOOK_FORMAT) => {
+            let (book, dropped) = book::resolved(book, &mut named)?;
+            (Some(Formatted::Book(book)), dropped)
+        }
+        (Formatted::Book(book), _) => match book::tree_of(&book) {
+            Some(tree) => {
+                let (tree, mut dropped) = resolved(tree, |jid| if jid.is_empty() { Ok(None) } else { named(jid) })?;
+                dropped.retain(|jid| !jid.is_empty());
+                (tree.map(Formatted::Tree), dropped)
+            }
+            None => (None, Vec::new()),
+        },
+    })
 }
 
 /// `layout` with each pane's chat as `named` knows it now, without the panes whose chat it doesn't
@@ -449,35 +461,17 @@ fn invalid(param: &str, why: &str) -> Error {
     error
 }
 
-/// A format jawd doesn't take, named by `param`, with the formats it does.
-fn unknown_format(param: &str, format: impl std::fmt::Display) -> Error {
+/// A format jawd doesn't keep layouts in, named by `param`, with the formats it does.
+fn unknown_format(param: &str, format: Option<u64>) -> Error {
+    let not = format.map_or("and this layout gives none".to_string(), |format| format!("not in format {format}"));
     let mut error = Error::new(
         code::INVALID_PARAMS,
-        format!("jawd keeps layouts in format {FORMAT}, a tree, or {BOOK_FORMAT}, a book, and not in format {format}"),
+        format!(
+            "jawd keeps layouts in format {FORMAT}, a tree of panes, or {BOOK_FORMAT}, a book of layouts on a grid, {not}"
+        ),
     );
     error.data = Some(json!({ "param": param, "allowed": FORMATS }));
     error
-}
-
-/// The format a connection greeted as `own` reads layouts in from now on, as its request `method`
-/// with `params` says: `layout.get` of its own interface's layout in its `format`, 1 without one,
-/// or `layout.set` of a layout in its format. None for any other request, one for another
-/// interface's layout, or a format jawd doesn't take, after which it reads as before.
-pub fn format_read(method: &str, params: &Value, own: &str) -> Option<u32> {
-    let format = match method {
-        "layout.get" => {
-            if params.get("interface").and_then(Value::as_str).is_some_and(|interface| interface != own) {
-                return None;
-            }
-            match params.get("format") {
-                None | Some(Value::Null) => u64::from(FORMAT),
-                Some(format) => format.as_u64()?,
-            }
-        }
-        "layout.set" => params.get("layout")?.get("format")?.as_u64()?,
-        _ => return None,
-    };
-    u32::try_from(format).ok().filter(|format| FORMATS.contains(format))
 }
 
 fn params_of<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, Error> {
@@ -494,68 +488,124 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
-    use jaw_proto::layout::How;
+    use jaw_proto::layout::{Grid, How, Named, Slot};
     use rusqlite::{Connection, OptionalExtension};
 
+    use super::Formatted::Tree;
     use super::*;
     use crate::store::{Chat, Lane, Person};
 
-    const ANA: &str = "351912345678@s.whatsapp.net";
-    const ANA_LID: &str = "100000000001@lid";
-    const RUI: &str = "351913333333@s.whatsapp.net";
-    const RUI_LID: &str = "100000000003@lid";
-    const CLIMBING: &str = "120363012345678901@g.us";
-    const GONE: &str = "351919999999@s.whatsapp.net";
+    pub(super) const ANA: &str = "351912345678@s.whatsapp.net";
+    pub(super) const ANA_LID: &str = "100000000001@lid";
+    pub(super) const RUI: &str = "351913333333@s.whatsapp.net";
+    pub(super) const RUI_LID: &str = "100000000003@lid";
+    pub(super) const CLIMBING: &str = "120363012345678901@g.us";
+    pub(super) const GONE: &str = "351919999999@s.whatsapp.net";
 
-    fn layout(focused: u32, tree: Node) -> Layout {
+    pub(super) fn layout(focused: u32, tree: Node) -> Layout {
         Layout { format: FORMAT, focused, tree }
     }
 
-    fn chat(jid: &str) -> Node {
+    pub(super) fn chat(jid: &str) -> Node {
         Node::Chat(jid.into())
     }
 
-    fn split(how: How, first: u16, a: Node, b: Node) -> Node {
+    pub(super) fn split(how: How, first: u16, a: Node, b: Node) -> Node {
         Node::Split(Box::new(Split { how, first, a, b }))
     }
 
-    fn asked(v: u64, layout: &Layout) -> Value {
+    pub(super) fn asked(v: u64, layout: &impl Serialize) -> Value {
         json!({ "v": v, "layout": layout })
     }
 
-    fn both() -> Layout {
+    pub(super) fn both() -> Layout {
         layout(1, split(How::Across, 500, chat(ANA), chat(CLIMBING)))
     }
 
-    async fn opened(home: &Path, chats: &[&str]) -> (Store, Layouts) {
+    pub(super) fn slot(id: u32, [c0, c1, r0, r1]: [u32; 4], chat: Option<&str>) -> Slot {
+        Slot { id, c0, c1, r0, r1, chat: chat.map(str::to_string) }
+    }
+
+    pub(super) fn grid(cols: &[f64], rows: &[f64], slots: Vec<Slot>) -> Grid {
+        Grid { cols: cols.to_vec(), rows: rows.to_vec(), slots }
+    }
+
+    /// The Mac app's book: the unnamed layout, Ana beside the group; and Work, on screen, the group
+    /// over Ana and an empty slot, edited to the group beside the two, with the keys on the empty
+    /// slot. Its lines are fractions a decimal can't write exactly.
+    pub(super) fn book() -> Book {
+        let third = 1.0 / 3.0;
+        Book {
+            format: BOOK_FORMAT,
+            current: Some("Work".into()),
+            unnamed: Some(grid(
+                &[0.0, 0.5, 1.0],
+                &[0.0, 1.0],
+                vec![slot(1, [0, 1, 0, 1], Some(ANA)), slot(2, [1, 2, 0, 1], Some(CLIMBING))],
+            )),
+            unnamed_focus: Some(2),
+            layouts: vec![Named {
+                name: "Work".into(),
+                grid: grid(
+                    &[0.0, third, 1.0],
+                    &[0.0, 0.4, 1.0],
+                    vec![
+                        slot(1, [0, 2, 0, 1], Some(CLIMBING)),
+                        slot(2, [0, 1, 1, 2], Some(ANA)),
+                        slot(3, [1, 2, 1, 2], None),
+                    ],
+                ),
+                edited: Some(grid(
+                    &[0.0, 0.1 + 0.2, 1.0],
+                    &[0.0, 2.0 / 3.0, 1.0],
+                    vec![
+                        slot(1, [0, 1, 0, 2], Some(CLIMBING)),
+                        slot(2, [1, 2, 0, 1], Some(ANA)),
+                        slot(3, [1, 2, 1, 2], None),
+                    ],
+                )),
+                focus: Some(3),
+            }],
+        }
+    }
+
+    pub(super) async fn opened(home: &Path, chats: &[&str]) -> (Store, Layouts) {
         let store = Store::open(home).unwrap();
         let made = chats.iter().map(|id| Change::Chat(Chat { id: id.to_string(), ..Chat::default() })).collect();
         store.apply(Lane::Live, made).await.unwrap();
         (store.clone(), Layouts::new(store))
     }
 
-    fn updated_at(home: &Path, interface: &str) -> Option<i64> {
+    pub(super) fn updated_at(home: &Path, interface: &str) -> Option<i64> {
         let db = Connection::open(home.join("jaw.db")).unwrap();
         db.query_row("SELECT updated_at FROM interface_state WHERE interface = ?1", [interface], |r| r.get(0))
             .optional()
             .unwrap()
     }
 
-    fn count(home: &Path, table: &str) -> i64 {
+    pub(super) fn count(home: &Path, table: &str) -> i64 {
         let db = Connection::open(home.join("jaw.db")).unwrap();
         db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
     }
 
-    fn exists(home: &Path, id: &str) -> bool {
+    pub(super) fn exists(home: &Path, id: &str) -> bool {
         let db = Connection::open(home.join("jaw.db")).unwrap();
         db.query_row("SELECT count(*) FROM chats WHERE id = ?1", [id], |r| r.get::<_, i64>(0)).unwrap() == 1
     }
 
-    fn panes_of(saved: &Saved) -> Vec<String> {
-        saved.layout.as_ref().map(|l| l.chats().into_iter().map(str::to_string).collect()).unwrap_or_default()
+    pub(super) fn panes_of(saved: &Saved<Formatted>) -> Vec<String> {
+        the_tree(saved).map(|l| l.chats().into_iter().map(str::to_string).collect()).unwrap_or_default()
     }
 
-    async fn merges_run(store: &Store, home: &Path) {
+    /// The tree an answer carries, if it carries one.
+    pub(super) fn the_tree(saved: &Saved<Formatted>) -> Option<&Layout> {
+        match &saved.layout {
+            Some(Tree(tree)) => Some(tree),
+            _ => None,
+        }
+    }
+
+    pub(super) async fn merges_run(store: &Store, home: &Path) {
         for _ in 0..50 {
             if count(home, "chat_merges") == 0 {
                 return;
@@ -582,7 +632,7 @@ mod tests {
         holder.execute_batch("COMMIT").unwrap();
         let saved = tokio::time::timeout(Duration::from_secs(10), answer).await.expect("answered once it could");
         let saved = saved.unwrap().unwrap();
-        assert_eq!((saved.v, saved.kept, saved.layout), (5, Some(true), Some(both())));
+        assert_eq!((saved.v, saved.kept, saved.layout), (5, Some(true), Some(Tree(both()))));
         assert_eq!(store.storage().synced_commits - synced, 1, "kept with a synced commit");
     }
 
@@ -598,25 +648,29 @@ mod tests {
         assert!(other.has_changed().unwrap(), "the terminal's other connection is told");
         let pushed = other.borrow_and_update().clone().unwrap();
         assert_eq!((pushed.from, pushed.saved.v, pushed.saved.kept), (1, 10, None));
-        assert_eq!(pushed.saved.layout, Some(both()));
+        assert_eq!(pushed.saved.layout, Some(Tree(both())));
         assert!(!mac.has_changed().unwrap(), "another interface isn't");
         let at = updated_at(home.path(), "jaw");
 
         let again = layouts.set("jaw", 1, asked(10, &both())).await.unwrap();
-        assert_eq!((again.v, again.kept, again.layout), (10, Some(true), Some(both())), "asked again: kept");
+        assert_eq!((again.v, again.kept, again.layout), (10, Some(true), Some(Tree(both()))), "asked again: kept");
         let late = layouts.set("jaw", 2, asked(9, &one)).await.unwrap();
-        assert_eq!((late.v, late.kept, late.layout), (10, Some(false), Some(both())), "an older one, late");
+        assert_eq!((late.v, late.kept, late.layout), (10, Some(false), Some(Tree(both()))), "an older one, late");
         let rival = layouts.set("jaw", 2, asked(10, &one)).await.unwrap();
-        assert_eq!((rival.kept, rival.layout), (Some(false), Some(both())), "the first of a version stays");
+        assert_eq!((rival.kept, rival.layout), (Some(false), Some(Tree(both()))), "the first of a version stays");
         assert_eq!(updated_at(home.path(), "jaw"), at, "none of them changed the row");
         assert!(!other.has_changed().unwrap(), "so none was pushed");
 
         let newer = layouts.set("jaw", 2, asked(11, &one)).await.unwrap();
-        assert_eq!((newer.v, newer.kept, newer.layout), (11, Some(true), Some(one.clone())));
+        assert_eq!((newer.v, newer.kept, newer.layout), (11, Some(true), Some(Tree(one.clone()))));
         let pushed = other.borrow_and_update().clone().unwrap();
         assert_eq!((pushed.from, pushed.saved.v), (2, 11));
         let read = layouts.get("jaw-mac", json!({ "interface": "jaw" })).await.unwrap();
-        assert_eq!((read.interface.as_str(), read.v, read.layout), ("jaw", 11, Some(one)), "the Mac app opens it");
+        assert_eq!(
+            (read.interface.as_str(), read.v, read.layout),
+            ("jaw", 11, Some(Tree(one))),
+            "the Mac app opens it"
+        );
         let own = layouts.get("jaw-mac", Value::Null).await.unwrap();
         assert_eq!((own.interface.as_str(), own.v, own.layout), ("jaw-mac", 0, None), "and has none of its own");
     }
@@ -627,9 +681,9 @@ mod tests {
         let (_store, layouts) = opened(home.path(), &[ANA, CLIMBING]).await;
         let refused = |e: Error| (e.code, e.data.and_then(|d| d["param"].as_str().map(str::to_string)));
         let mut later = layout(0, chat(ANA));
-        later.format = 2;
+        later.format = 3;
         let e = layouts.set("jaw", 1, asked(1, &later)).await.unwrap_err();
-        assert_eq!(e.data, Some(json!({ "param": "layout.format", "allowed": [1] })), "{}", e.message);
+        assert_eq!(e.data, Some(json!({ "param": "layout.format", "allowed": [1, 2] })), "{}", e.message);
         assert_eq!(e.code, code::INVALID_PARAMS);
         let seventeen = (1..17).fold(chat("1@g.us"), |tree, n| split(How::Down, 500, tree, chat(&format!("{n}@g.us"))));
         let e = layouts.set("jaw", 1, asked(1, &layout(0, seventeen))).await.unwrap_err();
@@ -705,7 +759,7 @@ mod tests {
         let (_store, layouts) = opened(home.path(), &[]).await;
         let mut jaw = layouts.subscribe("jaw").unwrap();
         let told = |v: u64, from: u64| Pushed {
-            saved: Saved { interface: "jaw".into(), v, layout: Some(both()), kept: None, dropped: Vec::new() },
+            saved: Saved { interface: "jaw".into(), v, layout: Some(Tree(both())), kept: None, dropped: Vec::new() },
             from,
         };
         layouts.publish("jaw", told(11, 2));
@@ -728,10 +782,10 @@ mod tests {
         let first = layouts.keep("jaw", &ten, 10).await.unwrap();
         let second = layouts.keep("jaw", &eleven, 11).await.unwrap();
         assert_eq!((first, second), (true, true));
-        let answered = layouts.answer("jaw", 1, &ten, 10, first).await.unwrap();
+        let answered = layouts.answer("jaw", 1, &ten, 10, first, FORMAT).await.unwrap();
         assert_eq!((answered.v, answered.kept), (11, Some(false)), "answered with the newer one");
         assert!(!told.has_changed().unwrap(), "which it doesn't publish as connection 1's");
-        layouts.answer("jaw", 2, &eleven, 11, second).await.unwrap();
+        layouts.answer("jaw", 2, &eleven, 11, second, FORMAT).await.unwrap();
         let latest = told.borrow_and_update().clone().unwrap();
         assert_eq!((latest.saved.v, latest.from), (11, 2), "connection 2's set does, so connection 1 is told");
     }
@@ -830,7 +884,7 @@ mod tests {
         let three = layout(1, split(How::Across, 400, chat(ANA), split(How::Down, 600, chat(CLIMBING), chat(RUI_LID))));
         assert_eq!(
             (saved.kept, saved.layout.as_ref(), saved.dropped.as_slice()),
-            (Some(true), Some(&three), &[GONE.to_string()][..])
+            (Some(true), Some(&Tree(three)), &[GONE.to_string()][..])
         );
         // Rui's number and LID turn out to be one person, so their chats merge into one.
         let both_rui = layout(1, split(How::Across, 500, chat(RUI), chat(RUI_LID)));
@@ -852,7 +906,11 @@ mod tests {
                 })
         };
         let read = layouts.get("jaw", Value::Null).await.unwrap();
-        assert_eq!(read.layout, Some(layout(0, chat(&kept))), "one pane, the chat they merged into, with the keys");
+        assert_eq!(
+            read.layout,
+            Some(Tree(layout(0, chat(&kept)))),
+            "one pane, the chat they merged into, with the keys"
+        );
         assert_eq!(read.dropped, [RUI_LID.to_string()], "the second, as it named it, showed what the first does");
         assert_eq!(read.v, 2, "read as jawd knows it, and kept as it was written");
     }
@@ -883,7 +941,7 @@ mod tests {
         let during = layouts.get("jaw", Value::Null).await.unwrap();
         assert_eq!(panes_of(&during), [RUI, CLIMBING], "during the merge: {during:?}");
         assert_eq!(during.dropped, [RUI.to_string()], "the second pane on Rui, as it named him");
-        assert_eq!(during.layout.as_ref().unwrap().focused, 1, "the keys to the pane before it");
+        assert_eq!(the_tree(&during).unwrap().focused, 1, "the keys to the pane before it");
         // A pane naming Rui by a device JID while his LID chat, the older, is being merged away.
         let device = layout(0, split(How::Across, 500, chat("351913333333:7@s.whatsapp.net"), chat(CLIMBING)));
         let by_device = layouts.set("jaw-mac", 1, asked(1, &device)).await.unwrap();
@@ -941,7 +999,7 @@ mod tests {
         let db = Connection::open(home.path().join("jaw.db")).unwrap();
         db.execute(
             "INSERT INTO interface_state (interface, key, value, v, updated_at) VALUES ('jaw', 'layout', ?1, 5, 1)",
-            [r#"{"format":2,"panes":[]}"#],
+            [r#"{"format":3,"panes":[]}"#],
         )
         .unwrap();
         let read = layouts.get("jaw", Value::Null).await.unwrap();
@@ -949,7 +1007,7 @@ mod tests {
         let stale = layouts.set("jaw", 1, asked(4, &both())).await.unwrap();
         assert_eq!((stale.kept, stale.layout), (Some(false), None), "kept as it was");
         let newer = layouts.set("jaw", 1, asked(6, &both())).await.unwrap();
-        assert_eq!((newer.kept, newer.layout), (Some(true), Some(both())));
+        assert_eq!((newer.kept, newer.layout), (Some(true), Some(Tree(both()))));
     }
 
     const SCENE_HOME: &str = "JAW_LAYOUT_TEST_HOME";
@@ -958,7 +1016,7 @@ mod tests {
     /// Runs `scene` on `home` in a process of its own, this test binary again, and kills it the
     /// moment it says it has got to where the scene stops, as a crash stops jawd. Returns what it
     /// said there.
-    async fn crash(home: &Path, scene: &str) -> String {
+    pub(super) async fn crash(home: &Path, scene: &str) -> String {
         use std::io::{BufRead, BufReader};
         let (home, scene) = (home.to_path_buf(), scene.to_string());
         tokio::task::spawn_blocking(move || {
@@ -988,9 +1046,9 @@ mod tests {
     }
 
     /// The scenes `crash` runs, each in a process of its own; run on its own, it does nothing.
-    /// Each asks for a layout while jaw.db's write lock is held from outside: `answered` lets it go
-    /// and stops once the answer is made, before it reaches anyone; `asked` stops while the layout
-    /// waits for the lock.
+    /// Each asks for a layout, `both()` or with ` book` after its name `book()`, while jaw.db's
+    /// write lock is held from outside: `answered` lets it go and stops once the answer is made,
+    /// before it reaches anyone; `asked` stops while the layout waits for the lock.
     #[test]
     #[ignore = "run by the crash tests, in a process of their own"]
     fn a_scene_of_jawd_to_be_killed() {
@@ -1000,13 +1058,17 @@ mod tests {
             println!("AT {what}");
             std::io::stdout().flush().unwrap();
         };
+        let (scene, layout) = match scene.strip_suffix(" book") {
+            Some(scene) => (scene.to_string(), json!(book())),
+            None => (scene, json!(both())),
+        };
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         runtime.block_on(async move {
             let home = Path::new(&home);
             let (_store, layouts) = opened(home, &[ANA, CLIMBING]).await;
             let holder = Connection::open(home.join("jaw.db")).unwrap();
             holder.execute_batch("BEGIN IMMEDIATE").unwrap();
-            let answer = tokio::spawn(async move { layouts.set("jaw", 1, asked(5, &both())).await });
+            let answer = tokio::spawn(async move { layouts.set("jaw", 1, json!({ "v": 5, "layout": layout })).await });
             tokio::time::sleep(Duration::from_millis(300)).await;
             match scene.as_str() {
                 "answered" => {
@@ -1029,7 +1091,7 @@ mod tests {
         assert_eq!(crash(home.path(), "answered").await, "5 Some(true)");
         let (_store, layouts) = opened(home.path(), &[]).await;
         let read = layouts.get("jaw", Value::Null).await.unwrap();
-        assert_eq!((read.v, read.layout), (5, Some(both())), "there once jawd starts again");
+        assert_eq!((read.v, read.layout), (5, Some(Tree(both()))), "there once jawd starts again");
         let at = updated_at(home.path(), "jaw");
         let again = layouts.set("jaw", 1, asked(5, &both())).await.unwrap();
         assert_eq!(again.kept, Some(true), "the interface asks again, its answer lost");
@@ -1043,6 +1105,32 @@ mod tests {
         let (_store, layouts) = opened(home.path(), &[]).await;
         assert_eq!(layouts.get("jaw", Value::Null).await.unwrap().v, 0, "not kept, as it wasn't answered");
         let again = layouts.set("jaw", 1, asked(5, &both())).await.unwrap();
-        assert_eq!((again.v, again.kept, again.layout), (5, Some(true), Some(both())));
+        assert_eq!((again.v, again.kept, again.layout), (5, Some(true), Some(Tree(both()))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_book_answered_was_on_disk_first_and_after_a_crash_it_opens_as_it_was_and_asking_again_changes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(crash(home.path(), "answered book").await, "5 Some(true)");
+        let (_store, layouts) = opened(home.path(), &[]).await;
+        let read = layouts.get("jaw", Value::Null).await.unwrap();
+        assert_eq!((read.v, read.layout), (5, Some(Formatted::Book(book()))), "there once jawd starts again");
+        let status = layouts.status();
+        let bytes = serde_json::to_string(&book()).unwrap().len() as u64;
+        assert_eq!((status.kept, status.books, status.largest_book_bytes, status.largest_bytes), (1, 1, bytes, 0));
+        let at = updated_at(home.path(), "jaw");
+        let again = layouts.set("jaw", 1, json!({ "v": 5, "layout": book() })).await.unwrap();
+        assert_eq!(again.kept, Some(true), "the interface asks again, its answer lost");
+        assert_eq!(updated_at(home.path(), "jaw"), at, "and nothing changes");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_book_jawd_stopped_before_keeping_was_never_answered_and_asking_again_keeps_it() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(crash(home.path(), "asked book").await, "asked");
+        let (_store, layouts) = opened(home.path(), &[]).await;
+        assert_eq!(layouts.get("jaw", Value::Null).await.unwrap().v, 0, "not kept, as it wasn't answered");
+        let again = layouts.set("jaw", 1, json!({ "v": 5, "layout": book() })).await.unwrap();
+        assert_eq!((again.v, again.kept, again.layout), (5, Some(true), Some(Formatted::Book(book()))));
     }
 }
