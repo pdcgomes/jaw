@@ -13,11 +13,11 @@ public final class WindowContent: NSViewController {
     public let chatList: ChatListController
     public let detail: DetailController
     public let bar: BottomBar
-    let split = NSSplitViewController()
+    private let split = NSSplitViewController()
     let sidebarItem: NSSplitViewItem
     let listItem: NSSplitViewItem
     /// The sidebar's and the chat list's folding before focus mode, to put back; nil out of it.
-    private(set) var beforeFocus: (Bool, Bool)?
+    private var beforeFocus: (Bool, Bool)?
 
     /// Below this width the sidebar folds away.
     public static let sidebarFold: CGFloat = 960
@@ -141,14 +141,14 @@ public final class WindowContent: NSViewController {
     }
 
     public func toggleSidebar() {
-        collapse(sidebarItem, !sidebarItem.isCollapsed)
+        collapse(sidebarItem, !sidebarItem.isCollapsed, animated: true)
     }
 
     public func toggleChatList() {
-        collapse(listItem, !listItem.isCollapsed)
+        collapse(listItem, !listItem.isCollapsed, animated: true)
     }
 
-    func collapse(_ item: NSSplitViewItem, _ collapsed: Bool, animated: Bool = true) {
+    private func collapse(_ item: NSSplitViewItem, _ collapsed: Bool, animated: Bool) {
         (animated && !Motion.reduced() ? item.animator() : item).isCollapsed = collapsed
     }
 
