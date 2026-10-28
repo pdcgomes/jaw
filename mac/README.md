@@ -25,7 +25,7 @@ The app's options: `--demo`, `--home <folder>`, `--bench launch|open|memory|idle
 
 ## Component harness
 
-Jaw Harness (`JawHarness`) draws the app's components and screens from made-up rows and the protocol's fixtures, in each theme, look and density, and asks jawd for nothing, as [the harness's design](../docs/plans/2026-10-27-jaw-mac-harness-design.md) has it. Its scenes are listed by section on the left, with the conditions they're drawn in under them; each says what to look at, and each band of specimens what would be wrong with it.
+Jaw Harness (`JawHarness`) draws the app's components and screens from made-up rows and the protocol's fixtures, in each theme, look and density, and asks jawd for nothing, as [the harness's design](../docs/plans/2026-10-27-jaw-mac-harness-design.md) has it. Its scenes are listed by section on the left, with the conditions they're drawn in under them; each says what to look at, and each band of specimens what would be wrong with it. The Screens section draws the whole window from a `Screen`, which gives jawd's situation, the chats, the chats open, the layout's name, focus mode and the size, as the app draws it from jawd's windows, through the same `WindowContent`.
 
 ```sh
 mac/scripts/build-mac harness [scene] [options]    # built on the build Mac and opened here

@@ -14,6 +14,11 @@ enum BuiltInScenes {
         catalog.register(.screensConnection)
         catalog.register(.screensLinking)
         catalog.register(.screensEmpty)
+        catalog.register(.screensChat)
+        catalog.register(.screensPanes)
+        catalog.register(.screensFocus)
+        catalog.register(.screensFolded)
+        catalog.register(.screensOverlays)
         return catalog
     }
 }

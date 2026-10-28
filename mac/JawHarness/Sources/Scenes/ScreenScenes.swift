@@ -39,18 +39,68 @@ extension HarnessScene {
             width: 1180,
         ) { NothingOpenScene(conditions: $0) }
     }
+
+    static var screensChat: HarnessScene {
+        HarnessScene(
+            id: "screens-chat", title: "One chat", symbol: "text.bubble",
+            synopsis: "The whole window with Lisbon Climbing open, in either look: its header, its messages, the box naming it, and the status line",
+            section: .screens, covers: [WindowContent.self, DetailController.self, GridView.self, BoxPlace.self, ConversationController.self,
+                                        ComposerController.self, ChatListController.self, SidebarController.self, BottomBar.self, StatusLine.self],
+            axes: .look, width: 1180,
+        ) { OneChatScene(conditions: $0) }
+    }
+
+    static var screensPanes: HarnessScene {
+        HarnessScene(
+            id: "screens-panes", title: "Three panes", symbol: "rectangle.split.3x1",
+            synopsis: "Lisbon Climbing, Ana Ribeiro and Mãe side by side in the layout called Work, the first with the keys",
+            section: .screens, covers: [WindowContent.self, DetailController.self, GridView.self, BoxPlace.self, ConversationController.self,
+                                        EmptyChatView.self, BottomBar.self, StatusLine.self],
+            width: 1180,
+        ) { ThreePanesScene(conditions: $0) }
+    }
+
+    static var screensFocus: HarnessScene {
+        HarnessScene(
+            id: "screens-focus", title: "Focus mode", symbol: "rectangle.center.inset.filled",
+            synopsis: "Lisbon Climbing open in focus mode, the sidebar and the chat list folded away",
+            section: .screens, covers: [WindowContent.self, DetailController.self, GridView.self, BoxPlace.self, ConversationController.self,
+                                        BottomBar.self, StatusLine.self],
+            width: 1180,
+        ) { FocusScene(conditions: $0) }
+    }
+
+    static var screensFolded: HarnessScene {
+        HarnessScene(
+            id: "screens-folded", title: "Folded", symbol: "rectangle.compress.vertical",
+            synopsis: "Lisbon Climbing open as the window narrows: the sidebar folded at 940 points, the chat list too at 720, and at 520, the least the window takes",
+            section: .screens, covers: [WindowContent.self, DetailController.self, GridView.self, BoxPlace.self, ConversationController.self,
+                                        ChatListController.self, BottomBar.self, StatusLine.self],
+            width: 940,
+        ) { FoldedScene(conditions: $0) }
+    }
+
+    static var screensOverlays: HarnessScene {
+        HarnessScene(
+            id: "screens-overlays", title: "With overlays", symbol: "macwindow.on.rectangle",
+            synopsis: "Lisbon Climbing open with the palette over it, with the glance over it, and with Settings over it",
+            section: .screens, covers: [WindowContent.self, ConversationController.self, PaletteView.self, GlanceView.self, SettingsView.self],
+            width: 1180,
+        ) { OverlaysScene(conditions: $0) }
+    }
 }
 
-/// One screen in a band of its own, with what it should show.
+/// One screen in a band of its own, with what it should show, and what's open over it, if anything.
 private struct ScreenBand: View {
     let title: String
     let note: String
     let screen: Screen
     let conditions: Conditions
+    var overlay: ScreenSpecimen.Overlay?
 
     var body: some View {
         SpecimenGroup(title: title, note: note, roles: conditions.roles) {
-            ScreenSpecimen(screen: screen, conditions: conditions)
+            ScreenSpecimen(screen: screen, conditions: conditions, overlay: overlay)
         }
     }
 }
@@ -171,6 +221,99 @@ private struct NothingOpenScene: View {
                 title: "No chat open",
                 note: "The four chats, none open: the Mimic over \"No chat open\" in the panes' place, with ⌘K and ⌘N; nothing on the status line's left, as jawd is online, and @ Lisbon Climbing and ⌘J glance on its right.",
                 screen: Screen(), conditions: conditions,
+            )
+        }
+    }
+}
+
+/// Lisbon Climbing open, linked and online, in the look the scene is drawn in.
+private struct OneChatScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        ScreenBand(
+            title: "Lisbon Climbing open",
+            note: "Lisbon Climbing, selected in the chat list, fills the panes' place, 739 points wide beside the sidebar and the list: its header with the LC avatar, its name and \"someone's typing…\" in the online colour, the \"3 new\" line, then Rui's contact card, Ana's link and its preview, your voice message and Inês's album of five; in bubbles, yours on the right and the top of Rui's typing bubble at the pane's foot; in lines, the poll's last option above the \"3 new\" line, each name over its messages with its time on the right, your voice message a third of the way across, and the typing dots alone. The box under the pane names the chat beside \"Message\". The status line says \"someone's typing…\", quieter, and nothing on its right: nothing needs you elsewhere, as Ana's chat has nothing unread and Mãe's is muted. A picture can't hold the sidebar's selection material or the header's blur: the selected folder is a black pill (in light it hides All), what's under the header shows through it (in lines, a time over its right end), and the window's buttons are grey, as in a window that isn't key; judge those in the app.",
+            screen: Screen(open: [Samples.group]), conditions: conditions,
+        )
+    }
+}
+
+/// Lisbon Climbing, Ana Ribeiro and Mãe open side by side in the layout called Work, Lisbon Climbing
+/// with the keys; Ana's and Mãe's chats have no messages among `Samples`.
+private struct ThreePanesScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        ScreenBand(
+            title: "Three panes, the first with the keys",
+            note: "Three panes across the panes' place, 245, 246 and 246 points wide, between hairlines: Lisbon Climbing's, with the keys, outlined inside its edge in the accent, and Ana Ribeiro's and Mãe's dimmed, faintly, as the app's default of 18% does. Lisbon Climbing's has the poll's end above the \"3 new\" line, then its messages as in one chat, its cards' second lines cut short to fit; Ana's and Mãe's are empty chats, as the samples have no messages for them, each the Mimic awake over \"No messages with … yet. What you type goes to them.\" That line doesn't fit: it's one line about 316 points wide, centred on a pane 246 wide, so Ana's runs into Lisbon Climbing's pane and Mãe's, and Mãe's is cut at the window's edge. The app draws it so too, as an empty chat's words aren't held to its pane's width: a fault to fix in JawUI. Ana's header has her name alone and Mãe's says \"muted\". The box under the panes is the focused chat's, Lisbon Climbing's; the bar's layout is Work; the status line says \"someone's typing…\" for Lisbon Climbing and nothing on its right, as Ana's and Mãe's chats are open. A picture can't hold the sidebar's selection material or the header's blur, and the window's buttons are grey; judge those in the app.",
+            screen: Screen(open: [Samples.group, Samples.direct] + Samples.chats.filter { $0.name == "Mãe" }, layout: "Work"),
+            conditions: conditions,
+        )
+    }
+}
+
+/// Lisbon Climbing open in focus mode.
+private struct FocusScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        ScreenBand(
+            title: "Focus mode",
+            note: "The sidebar and the chat list folded away, so Lisbon Climbing's pane is the window's whole width, with its box under it and the bar along the foot. Its header starts at the window's top left, under the title bar: the window's three buttons, grey, at x 9 to 69 and y 9 to 23 points, over the header's left end, then the avatar at x 81 to 109 and y 8 to 36, as the header clears the three buttons, and the name and \"someone's typing…\" from x 120. But the sidebar's button is in the title bar too, and the app draws it over the pane's picture: its glyph, at x 87.5 to 102.5 and y 10 to 22, covers the avatar's upper half, down to its middle and across the top of the initials, LC, which are at y 18 to 26. The header clears only the window's three buttons: a fault to fix in JawUI. The messages are as in one chat, the window's width apart. A picture can't hold the header's blur, so what's under it shows through, behind the buttons and the avatar too, and the window's buttons are grey, as in a window that isn't key; judge those in the app. Focus mode is drawn here alone: the app's own snapshots can't show it, as the build Mac's locked screen never runs the fold's animation.",
+            screen: Screen(open: [Samples.group], focusMode: true), conditions: conditions,
+        )
+    }
+}
+
+/// Lisbon Climbing open in a window too narrow for the sidebar, then for the chat list too, then at
+/// the least the window takes.
+private struct FoldedScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScreenBand(
+                title: "At 940 by 700 points",
+                note: "Below 960 points the sidebar folds away and the chat list stays, at its least, 260 points, with the four chats; the window's three buttons and the sidebar's button sit over its 32-point strip under the title bar, clear of its first row, Ana's, which starts at y 42. Lisbon Climbing's pane, 679 points wide, keeps its header's usual 14 points in from its edge, and shows the \"3 new\" line, Rui's card, Ana's link, your voice message and Inês's album down to the box. The harness draws the title bar's buttons where the window has them with the sidebar shown; if macOS moves them when the sidebar folds, judge that in the app. The app's own snapshots can't show a fold, as the build Mac's locked screen never runs its animation.",
+                screen: Screen(open: [Samples.group], width: 940, height: 700), conditions: conditions,
+            )
+            ScreenBand(
+                title: "At 720 by 600 points",
+                note: "Below 740 points, with a chat open, the chat list folds too, and Lisbon Climbing's pane is the window's whole width, its header at the window's top left as in focus mode: the window's three buttons over its left end, the avatar at x 81 to 109, and the sidebar's glyph, at x 87.5 to 102.5 and y 10 to 22, over the avatar's upper half and the top of its initials, a fault to fix in JawUI, as focus mode's band says. Rui's card, Ana's link, your voice message and the top of Inês's album come down to the box.",
+                screen: Screen(open: [Samples.group], width: 720, height: 600), conditions: conditions,
+            )
+            ScreenBand(
+                title: "At 520 by 420 points, the least the window takes",
+                note: "Both folded, as at 720, with the same header and the sidebar's glyph over its avatar. The chat opens at its first unread, so the pane shows Rui's card and Ana's link under the \"3 new\" line, then your voice message under \"1 new ↓\": Inês's album is below what the pane shows, and the pill counts it. The box and the bar fit the width, with Unsaved Panes, the split button, \"someone's typing…\", Find and New Chat.",
+                screen: Screen(open: [Samples.group], width: 520, height: 420), conditions: conditions,
+            )
+        }
+    }
+}
+
+/// Lisbon Climbing open with the palette, the glance and Settings each open over it, where the window
+/// puts them.
+private struct OverlaysScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScreenBand(
+                title: "The palette",
+                note: "The palette over the window and its title bar, as its panel is a window above them: centred, at x 280 to 900, its top 60 points below the window's, and as tall as it is, 325 points, as its panel takes its view's size. \"ar\" is typed and selected, the strip counts all, chats 1, people 2, folders 1 and messages 214, each of the four results is under its kind's heading with the letters that matched marked, Ana Ribeiro's selected, and the hints run along its foot. The window under it is as in one chat. A picture can't hold its panel's shadow; judge that in the app.",
+                screen: Screen(open: [Samples.group]), conditions: conditions, overlay: .palette,
+            )
+            ScreenBand(
+                title: "The glance",
+                note: "The glance centred in the window, at x 330 to 850 and y 260 to 520: 520 by 260 points, the least its panel takes. It leaves out the chats a pane shows, as the app's does, and with Lisbon Climbing open nothing else needs you, as Ana's chat has nothing unread and Mãe's is muted, so it says \"Nothing needs you.\", with \"↩ goes to it · ⌘↩ in a new pane · nothing is marked read\" and \"0 chats · drag an edge to resize\" along its foot. A picture can't hold its panel's shadow; judge that in the app.",
+                screen: Screen(open: [Samples.group]), conditions: conditions, overlay: .glance,
+            )
+            ScreenBand(
+                title: "Settings",
+                note: "Settings in a sheet at its own size, 480 by 448 points, centred in the window, at x 350 to 830 and y 166 to 614, as macOS puts a sheet: the app's, on the build Mac, comes down to the middle of its window, not from its top. It's drawn on the window's colour with a shadow from the theme's separator, as a picture can't hold a sheet's material or its own shadow. Appearance is chosen in the segmented control, the system's appearance and Jaw (Tokyo Night) in the form under it, with \"Redlamp's themes come in a later version.\", and Done at the foot; the chosen segment and Done are grey, as in a window that isn't key. In the app the sheet is 432 points tall, 16 short of its view, which is worth a look there.",
+                screen: Screen(open: [Samples.group]), conditions: conditions, overlay: .settings,
             )
         }
     }
