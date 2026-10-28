@@ -165,7 +165,10 @@ pub fn describe(status: &Status) -> String {
         ConnectionState::PhoneOffline => "online, but the phone is offline".to_string(),
         ConnectionState::Offline => "offline".to_string(),
         ConnectionState::LoggedOut => logged_out(status.connection.reason.as_deref()),
-        ConnectionState::UpdateNeeded => "WhatsApp wants a newer version of jaw".to_string(),
+        ConnectionState::UpdateNeeded => match status.connection.reason.as_deref() {
+            Some(why) => format!("update needed: {why}"),
+            None => "WhatsApp wants a newer version of jaw".to_string(),
+        },
         ConnectionState::Banned => "temporarily banned".to_string(),
         ConnectionState::EngineRestarting => "reconnecting while the engine restarts".to_string(),
     };
@@ -426,6 +429,19 @@ mod tests {
         assert_eq!(super::logged_out(Some("logged out from another device")), "logged out from another device");
         let gone = super::logged_out(Some("this device isn't linked any more"));
         assert_eq!(gone, "logged out: this device isn't linked any more");
+    }
+
+    #[test]
+    fn an_update_needed_is_said_with_the_engines_reason_and_as_whatsapps_without_one() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/fixtures/status.result.json")).unwrap();
+        let mut status: super::Status = serde_json::from_value(fixture["result"].clone()).unwrap();
+        status.connection = jaw_proto::Connection::new(super::ConnectionState::UpdateNeeded);
+        let said = super::describe(&status);
+        assert!(said.lines().any(|l| l == "whatsapp  WhatsApp wants a newer version of jaw"), "{said}");
+        status.connection.reason = Some("session.db is from a newer jaw-engine".into());
+        let said = super::describe(&status);
+        assert!(said.lines().any(|l| l == "whatsapp  update needed: session.db is from a newer jaw-engine"), "{said}");
     }
 
     #[test]
