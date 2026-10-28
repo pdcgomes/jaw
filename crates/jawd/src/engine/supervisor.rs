@@ -1,6 +1,8 @@
 //! Keeps an engine running: starts it, starts it again after a pause that doubles each time it
-//! stops (back to the first once it has run a minute), and says how it is for `status`. Told to
-//! stop, it does at once, whatever it's waiting for, and starts the engine no more.
+//! stops (back to the first once it has run a minute), and says how it is for `status`. Once sync
+//! follows the engines' events, each engine after a stop waits for sync to have taken the stop in
+//! too, so nothing it sends comes before. Told to stop, it does at once, whatever it's waiting for,
+//! and starts the engine no more.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -60,6 +62,8 @@ pub struct Supervisor {
     status: watch::Receiver<EngineStatus>,
     current: watch::Receiver<Option<Commands>>,
     stop: Arc<watch::Sender<bool>>,
+    /// How many stops whoever follows the engines' events has taken in, once one does.
+    taken: Arc<watch::Sender<Option<u32>>>,
 }
 
 impl Supervisor {
@@ -76,8 +80,22 @@ impl Supervisor {
         let (status_tx, status) = watch::channel(initial);
         let (current_tx, current) = watch::channel(None);
         let (stop, stopping) = watch::channel(false);
-        tokio::spawn(run(engine, events, backoff, status_tx, current_tx, stopping));
-        Supervisor { status, current, stop: Arc::new(stop) }
+        let (taken, taking) = watch::channel(None);
+        tokio::spawn(run(engine, events, backoff, status_tx, current_tx, stopping, taking));
+        Supervisor { status, current, stop: Arc::new(stop), taken: Arc::new(taken) }
+    }
+
+    /// Has each engine after a stop wait until `taken_in` says the stop is taken in, from now on,
+    /// so nothing it sends comes before; says how many engines have stopped so far.
+    pub fn follow(&self) -> u32 {
+        let restarts = self.status.borrow().restarts;
+        self.taken_in(restarts);
+        restarts
+    }
+
+    /// Says the first `restarts` stops are taken in, so the engine after them may start.
+    pub fn taken_in(&self, restarts: u32) {
+        self.taken.send_modify(|taken| *taken = Some(taken.map_or(restarts, |taken| taken.max(restarts))));
     }
 
     /// Ends the engine and starts it no more, and waits until it has: a start under way is given
@@ -93,8 +111,8 @@ impl Supervisor {
         self.status.borrow().clone()
     }
 
-    /// The engine's status as it changes. It's `Restarting` only once an engine has stopped and
-    /// before the next is started, so nothing the next sends can come before it.
+    /// The engine's status as it changes. `restarts` counts the stops once each engine's events are
+    /// all handed over, so a stop is seen however late it's looked at.
     pub fn watch(&self) -> watch::Receiver<EngineStatus> {
         self.status.clone()
     }
@@ -121,8 +139,9 @@ async fn run(
     status: watch::Sender<EngineStatus>,
     current: watch::Sender<Option<Commands>>,
     mut stopping: watch::Receiver<bool>,
+    mut taken: watch::Receiver<Option<u32>>,
 ) {
-    supervise(engine, events, backoff, &status, &current, &mut stopping).await;
+    supervise(engine, events, backoff, &status, &current, &mut stopping, &mut taken).await;
     current.send_replace(None);
     status.send_modify(|s| s.state = State::Stopped);
 }
@@ -142,6 +161,7 @@ async fn supervise(
     status: &watch::Sender<EngineStatus>,
     current: &watch::Sender<Option<Commands>>,
     stopping: &mut watch::Receiver<bool>,
+    taken: &mut watch::Receiver<Option<u32>>,
 ) {
     let mut pause = backoff.first;
     loop {
@@ -188,9 +208,15 @@ async fn supervise(
             s.restarts += 1;
             s.last_exit = Some(why);
         });
+        let restarts = status.borrow().restarts;
+        let ready = async {
+            tokio::time::sleep(pause).await;
+            let _ = taken.wait_for(|taken| taken.is_none_or(|taken| taken >= restarts)).await;
+        };
         tokio::select! {
-            _ = tokio::time::sleep(pause) => {}
+            () = ready => {}
             _ = told(stopping) => return,
+            () = events.closed() => return,
         }
         pause = (pause * 2).min(backoff.most);
     }
@@ -300,6 +326,25 @@ mod tests {
         assert!(matches!(refused, EngineError::Unavailable(_)), "{refused:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!((engine.tries.load(Ordering::Relaxed), supervisor.status().restarts), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn once_followed_the_engine_after_a_stop_starts_only_when_the_stop_is_taken_in() {
+        let engine = Arc::new(Flaky { failures: 1, tries: AtomicU32::new(0), demo: DemoEngine::with(Vec::new()) });
+        let (tx, _rx) = mpsc::channel(8);
+        let pausing = Backoff { first: Duration::from_millis(500), ..quick() };
+        let supervisor = Supervisor::spawn(engine.clone(), tx, pausing);
+        assert_eq!(supervisor.follow(), 0, "no engine has stopped yet");
+        let mut status = supervisor.status.clone();
+        status.wait_for(|s| s.restarts == 1).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let waiting = (engine.tries.load(Ordering::Relaxed), supervisor.status().state);
+        assert_eq!(waiting, (1, State::Restarting), "past its pause, the next waits for the stop to be taken in");
+        supervisor.taken_in(1);
+        let running =
+            tokio::time::timeout(Duration::from_secs(2), status.wait_for(|s| s.state == State::Running)).await;
+        assert!(running.is_ok_and(|running| running.is_ok()), "and starts once it is");
+        assert_eq!(engine.tries.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]

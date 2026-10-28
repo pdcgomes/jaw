@@ -2034,6 +2034,47 @@ async fn what_whatsapp_said_of_the_account_stands_while_the_engine_starts_again(
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_while_sync_waits_on_jaw_db_for_longer_than_the_pause_is_still_said_in_order_and_ends_its_catch_up() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let engine = Scripted::default();
+    let pause = Duration::from_millis(300);
+    let (supervisor, incoming) = supervised_pausing(&engine, pause);
+    let (live, mut told, running) = syncing(&store, home.path(), supervisor.clone(), incoming);
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    engine.send(offline_preview(10)).await;
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::CatchingUp));
+    // Holding jaw.db's writer holds sync on the account the next Connected names, while the engine
+    // stops and for longer than the pause before the next would start.
+    let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    engine.send(connection_event(State::Connected).event).await;
+    assert_eq!(
+        next_connection_within(&mut told, WAIT).await,
+        Some(ConnectionState::CatchingUp),
+        "taken, still catching up"
+    );
+    engine.stop.notify_one();
+    until("the engine to stop", || supervisor.status().restarts == 1).await;
+    tokio::time::sleep(pause * 4).await;
+    assert_eq!(
+        supervisor.status().state,
+        crate::engine::supervisor::State::Restarting,
+        "the next engine waits for sync to say the stop"
+    );
+    holder.execute_batch("COMMIT").unwrap();
+    let said = next_connections(&mut told, 2).await;
+    assert_eq!(
+        said,
+        [ConnectionState::EngineRestarting, ConnectionState::Online],
+        "reconnecting, then the next engine's word"
+    );
+    assert!(!live.lock().unwrap().catching_up(), "the catch-up the stop cut short ended");
+    running.abort();
+}
+
 /// The phone's message saying older history is ready, as it sends one to its own account.
 fn phone_answers() -> crate::engine::Incoming {
     let notification = e2e::HistorySyncNotification { direct_path: Some("on-demand".into()), ..Default::default() };

@@ -26,7 +26,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 pub use self::avatars::Avatars;
 pub use self::merge::Merges;
 use crate::convert;
-use crate::engine::supervisor::{self, EngineStatus, Supervisor};
+use crate::engine::supervisor::{EngineStatus, Supervisor};
 use crate::engine::{EngineError, Incoming, pb};
 use crate::store::{Change, Lane, Store};
 use crate::work::Priority;
@@ -273,13 +273,17 @@ pub async fn run(
     let mut refreshed: Option<u32> = None;
     let mut linked_now = false;
     let mut status = engine.as_ref().map(Supervisor::watch);
+    // The stops sync has said, as the supervisor counts them; it starts the next engine only once
+    // sync has said the last, so nothing the next engine sends can come before it.
+    let mut said = engine.as_ref().map_or(0, Supervisor::follow);
     let (mut phone, patience) = {
         let live = live.lock().expect("live state");
         (live.phone.subscribe(), live.phone_patience)
     };
     loop {
-        // An engine's events are all in `incoming` before the supervisor says it stopped, and the
-        // next engine's can't come before that, so taking events first keeps the order they came in.
+        // An engine's events are all in `incoming` before the supervisor counts its stop, and the
+        // next engine's can't come before sync has said it, so taking events first keeps the order
+        // they came in.
         // What jawd says of the phone is said here too, so it's in order with the engine's word.
         let Incoming { event, ack } = tokio::select! {
             biased;
@@ -287,8 +291,12 @@ pub async fn run(
                 Some(incoming) => incoming,
                 None => break,
             },
-            () = stopped(&mut status) => {
+            stops = stopped(&mut status, said) => {
                 restarting(&live, &pushes);
+                said = stops;
+                if let Some(engine) = &engine {
+                    engine.taken_in(stops);
+                }
                 continue;
             }
             () = phone_due(&mut phone, &live, patience) => {
@@ -406,15 +414,14 @@ pub async fn run(
     }
 }
 
-/// Waits until an engine has stopped and the next isn't started yet; with no engine, or once its
-/// supervisor has gone, that's never.
-async fn stopped(status: &mut Option<watch::Receiver<EngineStatus>>) {
-    if let Some(status) = status {
-        while status.changed().await.is_ok() {
-            if status.borrow_and_update().state == supervisor::State::Restarting {
-                return;
-            }
-        }
+/// Waits until more engines have stopped than the `said` sync has said, and says how many have.
+/// The supervisor counts them, so none goes unseen however long sync was held up; with no engine,
+/// or once its supervisor has gone, that's never.
+async fn stopped(status: &mut Option<watch::Receiver<EngineStatus>>, said: u32) -> u32 {
+    if let Some(status) = status
+        && let Ok(stops) = status.wait_for(|status| status.restarts > said).await.map(|status| status.restarts)
+    {
+        return stops;
     }
     std::future::pending().await
 }
