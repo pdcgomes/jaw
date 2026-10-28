@@ -15,12 +15,7 @@ extension HarnessScene {
 /// The palette with "ar" typed and jawd's answer from `protocol/fixtures/find.result.json`.
 private struct PaletteScene: View {
     let roles: Roles
-    @State private var model: PaletteModel = {
-        let model = PaletteModel()
-        model.query = "ar"
-        model.answered(id: 1, Fixtures.found)
-        return model
-    }()
+    @State private var model = Fixtures.palette()
 
     var body: some View {
         SpecimenGroup(

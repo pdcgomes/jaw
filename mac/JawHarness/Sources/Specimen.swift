@@ -97,30 +97,25 @@ struct ScreenSpecimen: View {
     }
 }
 
-/// The palette with "ar" typed and jawd's answer from `protocol/fixtures/find.result.json`, as the
-/// palette scene makes it, where `PalettePanel.show(over:)` puts it: centred, its top 60 points below
-/// the window's, 620 points wide and as tall as the palette is, as its panel takes its view's size.
+/// The palette as the palette scene makes it, where `PalettePanel.show(over:)` puts it: centred, its
+/// top `PalettePanel.top` below the window's, 620 points wide and as tall as the palette is, as its
+/// panel takes its view's size.
 private struct PaletteOver: View {
     let roles: Roles
-    @State private var model: PaletteModel = {
-        let model = PaletteModel()
-        model.query = "ar"
-        model.answered(id: 1, Fixtures.found)
-        return model
-    }()
+    @State private var model = Fixtures.palette()
 
     var body: some View {
         PaletteView(model: model, roles: roles) {}
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, 60)
+            .padding(.top, PalettePanel.top)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
 /// The glance as `Glance.show(over:roles:)` opens it: the chats that need you that no pane shows,
-/// each with its newest three messages as a watch of `.newest(3)` gives them, which only Lisbon
-/// Climbing has among `Samples`' chats; 520 points wide, as tall as five chats' cards at most and no
-/// less than the 260 points its panel takes, and centred in the window.
+/// each with its newest messages as a watch of `GlanceView.lines` gives them, which only Lisbon
+/// Climbing has among `Samples`' chats; at `GlanceView.size(_:)` and no less than `GlanceView.least`,
+/// as its panel takes it, and centred in the window.
 private struct GlanceOver: View {
     let roles: Roles
     @State private var state: GlanceState
@@ -131,36 +126,44 @@ private struct GlanceOver: View {
         state.chats = Situation.needs(screen.chats, shown: Set(screen.open.map(\.id)))
         for chat in state.chats where chat.id == Samples.group.id {
             let messages = Samples.messages
-            var rows = Messages<MessageRow>(chat: chat.id, place: .newest(3))
-            rows.apply(Update(seq: 1, upsert: Array(messages.sorted { $0.sort < $1.sort }.suffix(3)), total: UInt64(messages.count),
-                              older: true, newer: 0, moved: Moved(place: .newest(3), newer: 0)))
+            let place = Place.newest(GlanceView.lines)
+            var rows = Messages<MessageRow>(chat: chat.id, place: place)
+            rows.apply(Update(seq: 1, upsert: Array(messages.sorted { $0.sort < $1.sort }.suffix(Int(GlanceView.lines))),
+                              total: UInt64(messages.count), older: true, newer: 0, moved: Moved(place: place, newer: 0)))
             state.rows[chat.id] = rows
         }
         _state = State(initialValue: state)
     }
 
     var body: some View {
+        let size = GlanceView.size(state.chats.count)
         GlanceView(state: state, roles: roles) { _, _ in }
-            .frame(width: 520, height: max(GlanceView.height(min(state.chats.count, 5)), 260))
+            .frame(width: max(size.width, GlanceView.least.width), height: max(size.height, GlanceView.least.height))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
 /// Settings as `MainWindowController.showSettings()` shows them, in a sheet at its own size, centred
 /// in the window as macOS puts a sheet, on the window's colour, which a sheet sits on, with a shadow
-/// from the theme's separator. Its preferences are the harness's own, emptied each time they're
-/// made, so they're the app's defaults but for the look, the density, the text size and the font the
-/// scene is drawn in, whatever was chosen in Settings the last time it was shown.
+/// from the theme's separator. Its preferences are the harness's own, emptied once a launch, so each
+/// launch starts from the app's defaults, whatever was chosen in Settings in the last, and the look,
+/// the density, the text size and the font are the scene's.
 private struct SettingsOver: View {
+    /// The harness's own defaults for Settings, emptied as they're made, the first time Settings is
+    /// drawn in a launch.
+    private static let defaults: UserDefaults = {
+        let suite = "\(Bundle.main.bundleIdentifier ?? "JawHarness").settings"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }()
+
     let roles: Roles
     @State private var preferences: Preferences
 
     init(conditions: Conditions) {
         roles = conditions.roles
-        let suite = "\(Bundle.main.bundleIdentifier ?? "JawHarness").settings"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
-        let preferences = Preferences(defaults: defaults)
+        let preferences = Preferences(defaults: Self.defaults)
         preferences.look = conditions.look
         preferences.density = conditions.density
         preferences.textSize = conditions.textSize

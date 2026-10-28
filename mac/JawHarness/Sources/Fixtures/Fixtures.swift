@@ -1,5 +1,6 @@
 import Foundation
 import JawKit
+import JawUI
 
 /// The made-up account the scenes draw: `Samples`' chats and messages, in `JawUI`, and the protocol's
 /// own fixtures, read from the harness's bundle and decoded as jawd sends them, so a scene shows
@@ -14,6 +15,15 @@ enum Fixtures {
      {"person":"person:7","name":"Rui Costa","admin":true},
      {"person":"person:9","name":"Inês Gomes","admin":false}]
     """, from: "Fixtures.members")
+
+    /// The palette with "ar" typed and `found` as jawd's answer, as the palette scene and the palette
+    /// over a screen draw it.
+    @MainActor static func palette() -> PaletteModel {
+        let model = PaletteModel()
+        model.query = "ar"
+        model.answered(id: 1, found)
+        return model
+    }
 
     /// The `result` of an answer in `protocol/fixtures/<name>.json`; a fixture that can't be read stops
     /// the harness, saying which file and why.
