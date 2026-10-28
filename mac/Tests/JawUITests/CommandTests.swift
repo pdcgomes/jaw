@@ -83,6 +83,44 @@ final class Ran {
     #expect(problems == ["⌘D is both a and b", "c has ⌥⌘X but no menu"])
 }
 
+/// Return pressed with `flags`, as AppKit hands a key to the menus.
+func returnKey(_ flags: NSEvent.ModifierFlags) throws -> NSEvent {
+    try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil,
+                                  characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+}
+
+@MainActor
+@Test func `⌘↩ isn't ⇧⌘↩: a key on Return answers only with its own modifiers`() throws {
+    let ran = Ran()
+    let focus = Command("focus.mode", "Focus on This Chat", key: Shortcut("↩", [.command, .shift]), place: .panes) { ran.n += 1 }
+    let bar = Menus.bar([focus])
+    #expect(try !bar.performKeyEquivalent(with: returnKey(.command)), "AppKit alone runs focus mode for ⌘↩")
+    #expect(try !bar.performKeyEquivalent(with: returnKey([.command, .option])))
+    #expect(ran.n == 0)
+    #expect(try bar.performKeyEquivalent(with: returnKey([.command, .shift])))
+    #expect(ran.n == 1)
+}
+
+@MainActor
+@Test func `⌘↩ and ⇧⌘↩ each run their own command, whichever comes first, and a greyed one runs neither`() throws {
+    for shiftedFirst in [false, true] {
+        let plain = Ran(), shifted = Ran()
+        var commands = [
+            Command("plain", "Plain", key: Shortcut("↩"), place: .panes) { plain.n += 1 },
+            Command("shifted", "Shifted", key: Shortcut("↩", [.command, .shift]), place: .panes, enabled: { shifted.flag }) { shifted.n += 1 },
+        ]
+        if shiftedFirst { commands.reverse() }
+        let bar = Menus.bar(commands)
+        #expect(try bar.performKeyEquivalent(with: returnKey(.command)))
+        #expect(plain.n == 1 && shifted.n == 0, "AppKit alone runs the first for both; shifted first: \(shiftedFirst)")
+        #expect(try bar.performKeyEquivalent(with: returnKey([.command, .shift])))
+        #expect(plain.n == 1 && shifted.n == 1, "shifted first: \(shiftedFirst)")
+        shifted.flag = false
+        #expect(try !bar.performKeyEquivalent(with: returnKey([.command, .shift])))
+        #expect(plain.n == 1 && shifted.n == 1, "shifted first: \(shiftedFirst)")
+    }
+}
+
 @MainActor
 @Test func `a message's keys are shown but not bound, so the box keeps its letters`() {
     let reply = Command("message.reply", "Reply", phrase: "Reply to this message", hint: "r", place: .message) {}

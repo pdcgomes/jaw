@@ -164,7 +164,7 @@ public enum Menus {
     /// The menu bar: each place's commands in their groups, submenus gathered where they first
     /// appear.
     public static func bar(_ commands: [Command]) -> NSMenu {
-        let main = NSMenu()
+        let main = MenuBar()
         for place in MenuPlace.allCases {
             let mine = commands.filter { $0.place == place }
             guard !mine.isEmpty else { continue }
@@ -276,6 +276,41 @@ public enum Menus {
                 .map { c in (([c.keyText!] + c.also.map(\.display)).joined(separator: " or "), c.phrase) }
             return rows.isEmpty ? nil : (place.rawValue, rows)
         }
+    }
+}
+
+/// The menu bar. AppKit matches Return in a key whatever Shift says and runs the first item on it,
+/// so ⌘↩ ran focus mode's ⇧⌘↩; the bar runs a command on Return only for its own modifiers.
+@MainActor
+final class MenuBar: NSMenu {
+    nonisolated static let modifiers: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+
+    /// AppKit asks the menu bar for a key on the main thread, though NSMenu doesn't say so.
+    override nonisolated func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown, event.charactersIgnoringModifiers == "\r" else { return super.performKeyEquivalent(with: event) }
+        nonisolated(unsafe) let bar = self, key = event
+        return MainActor.assumeIsolated { bar.runOnReturn(key) }
+    }
+
+    /// Runs the command on Return with exactly the key's modifiers, when there's one and it's enabled.
+    func runOnReturn(_ event: NSEvent) -> Bool {
+        guard let item = Self.item(in: self, key: "\r", modifiers: event.modifierFlags.intersection(Self.modifiers)),
+              let action = item.action else { return false }
+        if let target = item.target as? NSMenuItemValidation, !target.validateMenuItem(item) { return false }
+        return NSApplication.shared.sendAction(action, to: item.target, from: item)
+    }
+
+    /// The item in `menu` or under it on `key` with exactly `modifiers`.
+    static func item(in menu: NSMenu, key: String, modifiers: NSEvent.ModifierFlags) -> NSMenuItem? {
+        for item in menu.items {
+            if let inner = item.submenu, let found = Self.item(in: inner, key: key, modifiers: modifiers) { return found }
+            if item.keyEquivalent == key, item.keyEquivalentModifierMask.intersection(Self.modifiers) == modifiers,
+               !item.isHidden || item.allowsKeyEquivalentWhenHidden
+            {
+                return item
+            }
+        }
+        return nil
     }
 }
 
