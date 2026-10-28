@@ -3730,6 +3730,10 @@ Beyond your standard checks, look at:
     - A mark read on a chat jaw holds none of the messages of, in the instant a merge into it has started but its first step hasn't shown its newest message, reads nothing at the write, and its echo settles "told" past the gone chat's moved messages, whose receipts never go.
     - Receipts a merge moves to the kept chat wait for the next `want` of it or the next start's `reads::resume`, as before this branch; and a WhatsApp read of one chat converted after a merge into another has started settles "told" at that position in the kept chat, as before this branch.
     - A message reaching jaw between a no-message mark read and its echo, stamped at or before the patch's second, gets no read receipt from jaw; whether the phone sends one is WhatsApp's behaviour.
+    - Each patch given up on starts its own fetch again, so a burst of them in one collection queues that many full fetches, each holding the app-state turn; bounded by the outbox and `FETCH_TRIES`, with nothing lost.
+    - A patch that doesn't decode is quarantined and fetches every collection but puts nothing back, so if WhatsApp holds nothing for its setting the chat keeps jaw's unsent change; only corruption makes jaw's own bytes undecodable.
+    - The engine start's own fetch again (`resync_again`) spends its tries whether or not WhatsApp can be reached, as before this branch, so if WhatsApp stays out of reach through its ten tries (about nine minutes) the start's full fetch, which heals what the order guarantee can't, waits for the next engine.
+    - A refused archive of a pinned chat still sends its unpin, a change of its own, so the chat ends unarchived and unpinned on every device; the protocol says so.
 ```
 
 - [ ] **Step 2: Fix what it marks, and audit again**
