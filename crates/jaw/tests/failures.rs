@@ -283,6 +283,31 @@ fn with_jawd_itself_out_of_reach_the_mimic_sleeps() {
 }
 
 #[test]
+fn with_the_phone_offline_older_history_waits_and_says_so_while_messages_still_go() {
+    let jawd = Jawd::demo(&["--fail", "phone-offline", "--phone-patience", "1"]);
+    let stored = |s: &Status| s.stored.map_or(0, |stored| stored.messages);
+    let before = stored(&status_of(jawd.home()).expect("jawd answers"));
+    jawd.toggle();
+    until("the phone to go offline", || jawd.log().contains("failure (phone-offline) is on"));
+    let frame = jawd.snapshot("<up><up><up><up><up><up>");
+    assert!(frame.contains("asking your phone for older messages"), "moving past the oldest message:\n{frame}");
+    jawd.until("jawd to say the phone is offline", |s| s.connection.state == ConnectionState::PhoneOffline);
+    let frame = jawd.snapshot("still goes\n");
+    assert!(header(&frame).contains("jaw  online · phone offline: photos and older history wait for it"), "{frame}");
+    jawd.until("the message to go", |s| s.stored.is_some_and(|stored| stored.outbox == 0));
+    assert!(jawd.status().contains("whatsapp  online, but the phone is offline"), "{}", jawd.status());
+    jawd.toggle();
+    jawd.until("the phone's older messages", |s| {
+        s.connection.state == ConnectionState::Online && stored(s) >= before + 4
+    });
+    let frame = jawd.snapshot("");
+    assert!(header(&frame).contains("jaw  online"), "{frame}");
+    assert!(frame.contains("an older message from the phone, 3 of 3"), "{frame}");
+    let sent = lines_with(&frame, "still goes");
+    assert!(!sent.is_empty() && sent.iter().all(|line| line.contains('✓')), "{frame}");
+}
+
+#[test]
 fn logged_out_from_the_phone_jaw_says_why_keeps_the_messages_and_links_again_from_a_qr_code() {
     let jawd = Jawd::demo(&["--fail", "logout"]);
     let stored = status_of(jawd.home()).and_then(|s| s.stored).expect("jawd says what it stores");
