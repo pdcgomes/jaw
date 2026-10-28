@@ -40,6 +40,7 @@ struct Running {
     pushes: broadcast::Sender<Push>,
     supervisor: Option<Supervisor>,
     attention: Arc<crate::attention::Attention>,
+    live: crate::sync::Shared,
 }
 
 impl Running {
@@ -54,18 +55,30 @@ impl Running {
     }
 
     async fn timed(home: &Path, world: Arc<World>, engine: bool, connect: bool, timing: Timing) -> Running {
+        let script = if connect { vec![demo::connected()] } else { Vec::new() };
+        let demo: Option<Arc<dyn crate::engine::Engine>> =
+            engine.then(|| Arc::new(DemoEngine::sharing(script, world.clone())) as Arc<dyn crate::engine::Engine>);
+        Running::running(home, world, demo, connect, timing).await
+    }
+
+    /// With `engine` running on `world`, connected once its script says so if `connect`.
+    async fn running(
+        home: &Path,
+        world: Arc<World>,
+        engine: Option<Arc<dyn crate::engine::Engine>>,
+        connect: bool,
+        timing: Timing,
+    ) -> Running {
         let store = Store::open(home).unwrap();
-        if engine && !connect {
+        if engine.is_some() && !connect {
             store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
         }
-        let live: crate::sync::Shared = Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, engine)));
+        let live: crate::sync::Shared =
+            Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, engine.is_some())));
         let (pushes, _) = broadcast::channel(256);
         let (events, incoming) = mpsc::channel(1024);
-        let supervisor = engine.then(|| {
-            let script = if connect { vec![demo::connected()] } else { Vec::new() };
-            let engine = DemoEngine::sharing(script, world.clone());
-            Supervisor::spawn(Arc::new(engine), events, Backoff::default())
-        });
+        let connect = connect && engine.is_some();
+        let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
         let mut connected = pushes.subscribe();
         let sync =
             crate::sync::run(incoming, store.clone(), live.clone(), pushes.clone(), supervisor.clone(), home.into());
@@ -74,7 +87,7 @@ impl Running {
         let sending = Sending::start(
             store.clone(),
             supervisor.clone(),
-            live,
+            live.clone(),
             &pushes,
             attention.focus(),
             timing,
@@ -82,7 +95,7 @@ impl Running {
         )
         .await
         .unwrap();
-        if engine && connect {
+        if connect {
             let online = async {
                 while let Ok(push) = connected.recv().await {
                     if push.method == "connection" && push.params["state"] == "online" {
@@ -92,7 +105,7 @@ impl Running {
             };
             tokio::time::timeout(Duration::from_secs(10), online).await.expect("the demo engine never connected");
         }
-        Running { store, sending, world, pushes, supervisor, attention }
+        Running { store, sending, world, pushes, supervisor, attention, live }
     }
 
     async fn new(home: &Path) -> Running {
@@ -796,6 +809,90 @@ async fn a_message_waits_pending_for_as_long_as_whatsapp_cant_be_reached_and_goe
     assert_eq!(running.world.sends().len(), 3);
     running.connection(Online);
     running.until_status(ANA, &later, "sent").await;
+}
+
+/// The `connection` pushes' states until one says `state`, which must come within 30 seconds.
+async fn until_said(told: &mut broadcast::Receiver<Push>, state: &str) -> Vec<String> {
+    let mut said = Vec::new();
+    let waited = tokio::time::timeout(Duration::from_secs(30), async {
+        while let Ok(push) = told.recv().await {
+            if push.method == "connection" {
+                let now = push.params["state"].as_str().unwrap_or_default().to_string();
+                said.push(now.clone());
+                if now == state {
+                    return;
+                }
+            }
+        }
+    });
+    waited.await.unwrap_or_else(|_| panic!("jawd never said {state}"));
+    said
+}
+
+/// Notifications, as a test sees them.
+struct Notified(mpsc::UnboundedSender<crate::notify::Notice>);
+
+impl crate::notify::Notifier for Notified {
+    fn name(&self) -> &str {
+        "to a test"
+    }
+
+    fn notify(&self, notice: &crate::notify::Notice) -> anyhow::Result<()> {
+        let _ = self.0.send(notice.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn linked_again_after_a_logout_that_cut_a_catch_up_short_jawd_is_online_and_sends_and_notifications_go() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    running.chats(&[ANA]).await;
+    let (to, mut notified) = mpsc::unbounded_channel();
+    crate::notify::start(
+        running.store.clone(),
+        running.attention.clone(),
+        crate::feed::catching_up(running.live.clone()),
+        running.pushes.subscribe(),
+        Arc::new(Notified(to)),
+        crate::notify::Timing {
+            quiet: Duration::from_millis(20),
+            most: Duration::from_millis(100),
+            hold: Duration::from_millis(300),
+        },
+    );
+    let mut told = running.pushes.subscribe();
+    let connection = |state: pb::connection::State, reason: &str| {
+        let mut event = demo::connected();
+        if let Some(pb::event::Kind::Connection(connection)) = &mut event.kind {
+            connection.state = state as i32;
+            connection.reason = reason.into();
+        }
+        event
+    };
+    let preview = pb::OfflinePreview { total: 10, messages: 10, ..Default::default() };
+    let linked = pb::Linked { jid: ME.into(), push_name: "Pedro".into(), ..Default::default() };
+    for event in [
+        demo::connected(),
+        pb::Event { seq: 0, kind: Some(pb::event::Kind::OfflinePreview(preview)) },
+        connection(pb::connection::State::LoggedOut, "logged out from another device"),
+        pb::Event { seq: 0, kind: Some(pb::event::Kind::Link(pb::Link { step: Some(pb::link::Step::Done(linked)) })) },
+        demo::connected(),
+    ] {
+        running.world.deliver(event).await;
+    }
+    let said = until_said(&mut told, "logged_out").await;
+    assert_eq!(said, ["online", "catching_up", "logged_out"]);
+    assert_eq!(until_said(&mut told, "online").await, ["online"], "linked again, it's online");
+    assert_eq!(running.live.lock().unwrap().account.state, jaw_proto::AccountState::Linked);
+    assert!(!crate::feed::catching_up(running.live.clone())(), "and no catch-up holds the chat list");
+    let id = running.send(ANA, "linked again").await;
+    running.until_status(ANA, &id, "read").await;
+    // WhatsApp times a message to the second, so Ana's is a second on, after yours.
+    running.world.deliver(demo::text(ANA, ANA, "3EB0WELCOME", now_ms() + 1_000, "welcome back")).await;
+    let notice = tokio::time::timeout(Duration::from_secs(10), notified.recv()).await.expect("no notification came");
+    assert!(notice.unwrap().body.contains("welcome back"), "a message that arrives is notified");
 }
 
 #[tokio::test(flavor = "multi_thread")]

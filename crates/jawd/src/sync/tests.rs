@@ -1849,11 +1849,104 @@ fn syncing(
     supervisor: Supervisor,
     incoming: mpsc::Receiver<crate::engine::Incoming>,
 ) -> (Shared, broadcast::Receiver<Push>, tokio::task::JoinHandle<()>) {
-    let live: Shared = Arc::new(Mutex::new(starting(store, true)));
+    syncing_from(store, home, Some(supervisor), incoming, starting(store, true))
+}
+
+/// What a running sync on `store` says, starting from `live`.
+fn syncing_from(
+    store: &Store,
+    home: &Path,
+    supervisor: Option<Supervisor>,
+    incoming: mpsc::Receiver<crate::engine::Incoming>,
+    live: Live,
+) -> (Shared, broadcast::Receiver<Push>, tokio::task::JoinHandle<()>) {
+    let live: Shared = Arc::new(Mutex::new(live));
     let (pushes, told) = broadcast::channel(64);
-    let running =
-        tokio::spawn(run(incoming, store.clone(), live.clone(), pushes, Some(supervisor), home.to_path_buf()));
+    let running = tokio::spawn(run(incoming, store.clone(), live.clone(), pushes, supervisor, home.to_path_buf()));
     (live, told, running)
+}
+
+/// The phone's word that WhatsApp has more of a catch-up's messages waiting.
+fn offline_preview(messages: u32) -> pb::Event {
+    let preview = pb::OfflinePreview { total: messages, messages, ..Default::default() };
+    pb::Event { seq: 0, kind: Some(pb::event::Kind::OfflinePreview(preview)) }
+}
+
+/// The next `n` `connection` pushes' states, as far as they come, each within WAIT.
+async fn next_connections(told: &mut broadcast::Receiver<Push>, n: usize) -> Vec<ConnectionState> {
+    let mut said = Vec::new();
+    while said.len() < n
+        && let Some(state) = next_connection_within(told, WAIT).await
+    {
+        said.push(state);
+    }
+    said
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_logout_that_cuts_a_catch_up_short_ends_it_so_the_account_linked_again_is_online() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tx, incoming) = mpsc::channel(16);
+    let (live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    tx.send(crate::engine::Incoming { event: offline_preview(10), ack: None }).await.unwrap();
+    tx.send(connection_event(State::LoggedOut)).await.unwrap();
+    // The phone links jaw again: a fresh device, connected.
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    let said = next_connections(&mut told, 4).await;
+    let expected =
+        [ConnectionState::Online, ConnectionState::CatchingUp, ConnectionState::LoggedOut, ConnectionState::Online];
+    assert_eq!(said, expected, "linked again and online");
+    {
+        let live = live.lock().unwrap();
+        assert_eq!(live.account.state, AccountState::Linked);
+        assert!(!live.catching_up(), "the catch-up the logout cut short ended");
+        assert!(live.catch_up.as_ref().unwrap().seconds.is_some(), "so the chat list and notifications go on");
+    }
+    assert!(!crate::feed::catching_up(live.clone())(), "as the feed and the notifications read it");
+    drop(tx);
+    running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_drops_during_a_catch_up_ends_it_and_the_next_connection_is_online() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tx, incoming) = mpsc::channel(16);
+    let (live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    tx.send(crate::engine::Incoming { event: offline_preview(10), ack: None }).await.unwrap();
+    tx.send(connection_event(State::Disconnected)).await.unwrap();
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    let said = next_connections(&mut told, 4).await;
+    let expected =
+        [ConnectionState::Online, ConnectionState::CatchingUp, ConnectionState::Offline, ConnectionState::Online];
+    assert_eq!(said, expected, "the next connection isn't taken for part of the catch-up");
+    assert!(!live.lock().unwrap().catching_up());
+    drop(tx);
+    running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_logout_jawd_asks_for_ends_a_catch_up_it_cuts_short() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tx, incoming) = mpsc::channel(16);
+    let (live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    tx.send(crate::engine::Incoming { event: offline_preview(10), ack: None }).await.unwrap();
+    assert_eq!(next_connections(&mut told, 2).await, [ConnectionState::Online, ConnectionState::CatchingUp]);
+    let pushed = logged_out(&store, &live, "you logged out").await.unwrap();
+    assert_eq!(pushed.params["state"], "logged_out");
+    assert!(!live.lock().unwrap().catching_up(), "the catch-up the logout cut short ended");
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online), "linked again");
+    drop(tx);
+    running.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

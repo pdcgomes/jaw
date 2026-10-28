@@ -101,6 +101,18 @@ impl Live {
     pub fn catching_up(&self) -> bool {
         self.catching_up.is_some()
     }
+
+    /// Ends a catch-up its connection cut short, as its end would but for the summary: the chat
+    /// list and notifications go on with what it brought, and what it didn't bring comes in the
+    /// next connection's.
+    fn cut_short(&mut self) {
+        if let Some(started) = self.catching_up.take() {
+            self.caught_chats.clear();
+            if let Some(catch_up) = self.catch_up.as_mut() {
+                catch_up.seconds = Some(started.elapsed().as_secs_f64());
+            }
+        }
+    }
 }
 
 pub type Shared = Arc<Mutex<Live>>;
@@ -168,15 +180,16 @@ pub fn starting(store: &Store, engine: bool) -> Live {
 }
 
 /// Ends the account after a logout jawd asked for, as WhatsApp logging it out would, since whatsmeow
-/// says nothing after one: jaw.db forgets the account, synced. The `connection` push it returns
-/// tells interfaces it's logged out, so they offer to link again; the caller sends it once the
-/// logout's answer has gone ahead of it.
+/// says nothing after one: jaw.db forgets the account, synced, and a catch-up the logout cut short
+/// ends. The `connection` push it returns tells interfaces it's logged out, so they offer to link
+/// again; the caller sends it once the logout's answer has gone ahead of it.
 pub async fn logged_out(store: &Store, live: &Shared, reason: &str) -> anyhow::Result<Push> {
     store.apply_durable(vec![Change::Remember { key: ACCOUNT.into(), value: String::new() }]).await?;
     let connection = {
         let mut live = live.lock().expect("live state");
         live.account = Account { state: AccountState::Unlinked, me: None };
         live.forget_question();
+        live.cut_short();
         live.connection = Connection::new(ConnectionState::LoggedOut);
         live.connection.reason = Some(reason.into());
         live.connection.clone()
@@ -414,12 +427,7 @@ async fn stopped(status: &mut Option<watch::Receiver<EngineStatus>>) {
 fn restarting(live: &Shared, pushes: &broadcast::Sender<Push>) {
     let connection = {
         let mut live = live.lock().expect("live state");
-        if let Some(started) = live.catching_up.take() {
-            live.caught_chats.clear();
-            if let Some(catch_up) = live.catch_up.as_mut() {
-                catch_up.seconds = Some(started.elapsed().as_secs_f64());
-            }
-        }
+        live.cut_short();
         use ConnectionState::{Banned, LoggedOut, UpdateNeeded};
         if matches!(live.connection.state, LoggedOut | UpdateNeeded | Banned) {
             return;
@@ -604,6 +612,12 @@ fn apply(live: &mut Live, connection: &pb::Connection) {
             me: Some(Me { id: connection.jid.clone(), name, phone: format!("+{phone}") }),
         };
     }
+    // A catch-up lasts as long as its connection: one cut short ends, so a connection after it (the
+    // account linked again, or the same one back) isn't taken for part of it.
+    if !matches!(connection.state(), State::Connected | State::KeepaliveTimeout) {
+        live.cut_short();
+    }
+    // Connected can come after WhatsApp said what's waiting, and the catch-up goes on.
     if live.catching_up() && state == ConnectionState::Online {
         return;
     }
