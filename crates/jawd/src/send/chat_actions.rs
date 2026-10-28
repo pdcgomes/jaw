@@ -243,7 +243,7 @@ pub(super) async fn mark_unread(inner: &Arc<Inner>, mark: ChatMarkUnread) -> Res
 pub(super) async fn star(inner: &Arc<Inner>, star: Star) -> Result<Value, Error> {
     linked(inner)?;
     let target = actions::find(inner, star.chat, star.message).await?;
-    if star.starred && matches!(target.kind.as_str(), "system" | "call") {
+    if star.starred && !actions::someones(&target.kind) {
         return Err(Error::new(code::NOT_ALLOWED, "a line about the chat can't be starred"));
     }
     if star.starred && target.deleted {

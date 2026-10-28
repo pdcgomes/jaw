@@ -1,10 +1,12 @@
 //! Read receipts. `read` moves the chat's one read position in a synced commit, as sync moves it
 //! for WhatsApp, which counts its unread messages again, and owes WhatsApp a receipt for the
-//! messages from others between how far it was told and there; so does a message you send here. A chat's receipts go at once, then at most once every
-//! `Timing::read_every`, however fast it's read, each naming the messages owed since the last, a
-//! thousand to a receipt, oldest first, with how far WhatsApp was told never past what it heard;
-//! what the engine couldn't send waits for the connection to come back. whatsmeow sends them as
-//! read-self when read receipts are off on the phone, so only your own devices hear.
+//! messages from others between how far it was told and there; so does a message you send here,
+//! and marking the chat read. A chat's receipts go at once, then at most once every
+//! `Timing::read_every`, however fast it's read, except that a patch saying the chat is read sends
+//! what it owes at once, before the patch goes (`tell_now`). Each lot names the messages owed since
+//! the last, a thousand to a receipt, oldest first, with how far WhatsApp was told never past what
+//! it heard; what the engine couldn't send waits for the connection to come back. whatsmeow sends
+//! them as read-self when read receipts are off on the phone, so only your own devices hear.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

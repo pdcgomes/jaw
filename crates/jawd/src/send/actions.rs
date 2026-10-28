@@ -157,7 +157,7 @@ pub(super) async fn find(inner: &Inner, chat: Option<String>, id: String) -> Res
 }
 
 /// Whether a message of `kind` is someone's, rather than a line about the chat.
-fn someones(kind: &str) -> bool {
+pub(super) fn someones(kind: &str) -> bool {
     !matches!(kind, "system" | "call")
 }
 
