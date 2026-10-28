@@ -108,11 +108,14 @@ impl Default for Replies {
     }
 }
 
-/// The made-up WhatsApp the demo engine talks to: what it was asked, which messages it has, and how
-/// it behaves, kept across the engines that share it.
+/// The made-up WhatsApp the demo engine talks to: which messages it has, how it behaves and, for
+/// tests, what it was asked, kept across the engines that share it.
 #[derive(Default)]
 pub struct World {
     replies: Mutex<Replies>,
+    /// What the engine was asked, in order. Only tests read it, and a demo jawd would keep every
+    /// command it was asked for as long as it ran, so only test builds keep it.
+    #[cfg(test)]
     asked: Mutex<Vec<pb::command::Kind>>,
     /// Each message the server has, by ID, with its time.
     has: Mutex<HashMap<String, i64>>,
@@ -132,6 +135,7 @@ pub struct World {
     /// Whether sends wait to be answered until it opens.
     gated: AtomicBool,
     opened: Notify,
+    #[cfg(test)]
     asked_now: Notify,
     /// The account the engine answers for, besides its script.
     account: Option<Arc<dyn Account>>,
@@ -538,7 +542,9 @@ impl World {
         self.most_in_flight.load(Ordering::SeqCst)
     }
 
-    /// Everything the engine was asked, pings and benches apart, in order.
+    /// The commands the engine was asked, in order: sends, lookups of who's on WhatsApp, read
+    /// receipts, typing, presence, app-state patches and full fetches, contacts and groups. It leaves
+    /// out pings, benches, LID lookups, avatars, history, and what the demo engine doesn't do.
     #[cfg(test)]
     pub fn asked(&self) -> Vec<pb::command::Kind> {
         self.asked.lock().expect("the demo world").clone()
@@ -591,10 +597,14 @@ impl World {
         }
     }
 
+    #[cfg(test)]
     fn ask(&self, kind: pb::command::Kind) {
         self.asked.lock().expect("the demo world").push(kind);
         self.asked_now.notify_waiters();
     }
+
+    #[cfg(not(test))]
+    fn ask(&self, _: pb::command::Kind) {}
 
     /// Keeps `state` as the latest for its index in `collection`.
     fn keep(&self, collection: &str, state: pb::AppState) {
