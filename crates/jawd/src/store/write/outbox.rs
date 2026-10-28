@@ -256,9 +256,14 @@ const RETRYABLE: &str =
     "SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke')
     FROM messages m WHERE m.n = ?1";
 /// Whether message ?1 shows deleted for everyone, as windows show it: it is, or your deletion of it
-/// for everyone is on its way.
+/// for everyone is on its way; or, while a chat merges into its own, the copy of it there is, which
+/// the merge folds into it.
 const SHOWN_DELETED: &str = "SELECT m.deleted
         OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed')
+        OR EXISTS (SELECT 1 FROM chat_merges cm JOIN messages g ON g.chat = cm.gone AND g.id = m.id
+            WHERE cm.keep = m.chat AND (g.deleted
+                OR EXISTS (SELECT 1 FROM outbox b WHERE b.target = g.n AND b.kind = 'revoke'
+                    AND b.state <> 'failed')))
     FROM messages m WHERE m.n = ?1";
 /// The actions kept for a late receipt that are past ACTION_KEPT_MS, and how many are kept.
 const PRUNE_KEPT: &str =
@@ -466,7 +471,7 @@ fn full(db: &Connection, written: &Written) -> Result<bool> {
 /// message, and its chat when it's the chat's newest, change now. A reaction or an edit on a message
 /// shown deleted for everyone isn't taken: `react` and `edit` check on a reader, but a deletion can
 /// commit after that read, and while a chat merges, the copy they read may not be the one found
-/// here, which a deletion is aimed at.
+/// here, and a deletion can be aimed at either, so the copies merging into this one are read too.
 fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String>, written: &Written) -> Result<bool> {
     if keyed_before(db, key, written)? || full(db, written)? {
         return Ok(false);
@@ -1394,7 +1399,7 @@ mod tests {
             (
                 "shown deleted",
                 SHOWN_DELETED,
-                "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)",
+                "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH cm USING COVERING INDEX chat_merges_by_keep (keep=?)\nSEARCH g USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH b USING INDEX outbox_by_target (target=?)",
             ),
             ("prune kept actions", PRUNE_KEPT, "SCAN outbox"),
             ("kept actions", KEPT, "SCAN outbox"),

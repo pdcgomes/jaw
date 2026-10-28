@@ -913,10 +913,15 @@ SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n
       SEARCH a USING INDEX outbox_by_target (target=?)
 
 -- src/store/write/outbox.rs
-SELECT m.deleted OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed') FROM messages m WHERE m.n = ?1
+SELECT m.deleted OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke' AND a.state <> 'failed') OR EXISTS (SELECT 1 FROM chat_merges cm JOIN messages g ON g.chat = cm.gone AND g.id = m.id WHERE cm.keep = m.chat AND (g.deleted OR EXISTS (SELECT 1 FROM outbox b WHERE b.target = g.n AND b.kind = 'revoke' AND b.state <> 'failed'))) FROM messages m WHERE m.n = ?1
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 1
       SEARCH a USING INDEX outbox_by_target (target=?)
+    CORRELATED SCALAR SUBQUERY 3
+      SEARCH cm USING COVERING INDEX chat_merges_by_keep (keep=?)
+      SEARCH g USING INDEX messages_by_id (chat=? AND id=?)
+      CORRELATED SCALAR SUBQUERY 2
+        SEARCH b USING INDEX outbox_by_target (target=?)
 
 -- src/store/write/outbox.rs
 DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote') AND created_at < ?1
