@@ -555,6 +555,46 @@ async fn a_vote_set_aside_in_a_chat_merged_away_comes_back_to_the_poll_the_kept_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_vote_set_aside_under_the_middle_chat_of_a_chain_comes_back_to_the_poll_the_chat_that_stays_has_as_it_goes() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    // Ana's chats: her number's, with her poll, then her old number's, then her LID's.
+    let old = "351910000004@s.whatsapp.net";
+    apply(
+        &store,
+        vec![Change::Message(poll_in(ANA, "p1", DINNER, 1)), hello(old, "t1", AT + 1), hello(ANA_LID, "t2", AT + 2)],
+    )
+    .await;
+    apply(&store, vec![joined(&[old, ANA_LID])]).await;
+    apply(&store, vec![joined(&[ANA_LID, ANA])]).await;
+    // A chain of merges as an earlier jawd left them, which stands until its middle chat's merge
+    // ends: her LID's chat merging into her old number's, itself merging into her number's.
+    let side = Connection::open(home.path().join("jaw.db")).unwrap();
+    side.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    side.execute(
+        "UPDATE chat_merges SET keep = (SELECT n FROM chats WHERE id = ?1) WHERE gone = (SELECT n FROM chats WHERE id = ?2)",
+        [old, ANA_LID],
+    )
+    .unwrap();
+    // Her vote addressed to her LID waits under the middle chat, which hasn't the poll, and is set aside.
+    apply(&store, vec![vote_in(ANA_LID, "p1", ANA_LID, AT + 10, "a1", &["Pizza"])]).await;
+    set_aside(&store, home.path()).await;
+    let kept: String = query(&store, |db| {
+        Ok(db.query_row("SELECT ref FROM quarantine WHERE source = 'vote'", [], |r| r.get::<_, String>(0))?)
+    })
+    .await;
+    assert_eq!(kept, format!("{old} p1 {ANA_LID} a1"));
+    merged(&store).await;
+    let (options, voters, _) = shown_in(&store, ANA.into(), "p1").await;
+    let left = count(&store, "quarantine WHERE source = 'vote'").await;
+    assert_eq!(
+        (options, voters, left),
+        (tally([0, 0, 1], None), 1, 0),
+        "it came back as the middle chat went, and counts"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_vote_waiting_under_a_jid_jaw_has_no_chat_by_counts_once_that_jid_leads_to_the_chat_with_its_poll() {
     let home = tempfile::tempdir().unwrap();
     let store = opened(home.path()).await;

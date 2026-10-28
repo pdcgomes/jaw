@@ -952,6 +952,24 @@ async fn what_waited_under_a_chat_that_starts_merging_is_done_to_the_messages_th
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_waiting_for_a_message_a_chat_that_starts_merging_deleted_for_you_waits_no_more() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    store.apply(Lane::Live, vec![message(NEW, "n0", AT), message(LID, "l0", AT + 10)]).await.unwrap();
+    // Sent to the LID for n0, which only the number's chat has, before they're known to be one
+    // person's: a reaction, which waits, then a deletion for you, which leaves a tombstone.
+    let changes = vec![react(LID, "n0", AT + 20, "👍"), amend(LID, "n0", AT + 21, Amendment::DeleteForMe)];
+    store.apply(Lane::Live, changes).await.unwrap();
+    assert_eq!(store.count("pending").unwrap(), 1);
+    // As the merge starts, the reaction is done to n0 before n0 is deleted for you.
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    assert_eq!(column::<String>(&store, "SELECT id FROM messages ORDER BY id").await, ["l0"], "n0 deleted for you");
+    assert_eq!(store.count("pending").unwrap(), 0, "nothing waits for a message that will never come");
+    merged(&store, LID).await;
+    assert_eq!(store.count("pending").unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn what_was_undone_in_the_chat_that_stays_during_a_merge_this_jawd_started_stays_undone_when_it_ends() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
