@@ -69,9 +69,10 @@ pub enum Setting {
     /// Muted until `until`, in milliseconds (`FOREVER` for ever), or unmuted at 0.
     Mute { until: i64, patch: Patch },
     /// Marked unread; or the mark taken off and the chat read here up to `newest`, its newest
-    /// message, which owes WhatsApp its read receipts, or, with none of its messages here, read
-    /// as WhatsApp's echo of the patch reads it, at `at`, the time the patch carries.
-    MarkUnread { unread: bool, newest: Option<String>, at: i64, patch: Patch },
+    /// message, which owes WhatsApp its read receipts. With none of its messages here, nothing is
+    /// read until WhatsApp's echo of the patch reads it, as any device's read does, so a refused
+    /// patch leaves the phone's count as it was.
+    MarkUnread { unread: bool, newest: Option<String>, patch: Patch },
 }
 
 /// An app-state patch to queue: its outbox row's own ID, the AppStatePatch, encoded, and the index
@@ -230,14 +231,16 @@ fn set(db: &Connection, stamps: &mut Stamps, jid: &str, setting: &Setting) -> Re
             row.marked_unread = Some(true);
             patches.push(patch);
         }
-        Setting::MarkUnread { unread: false, newest, at, patch } => {
+        Setting::MarkUnread { unread: false, newest, patch } => {
             if !chat.marked && chat.unread == 0 {
                 return Ok((Acted::Already, false));
             }
             row.marked_unread = Some(false);
-            read = Some(match newest {
-                Some(id) => Read { chat: jid.to_string(), ids: vec![id.clone()], here: true, ..Read::default() },
-                None => Read { chat: jid.to_string(), at: *at, ..Read::default() },
+            read = newest.as_ref().map(|id| Read {
+                chat: jid.to_string(),
+                ids: vec![id.clone()],
+                here: true,
+                ..Read::default()
             });
             patches.push(patch);
         }
@@ -649,7 +652,7 @@ mod tests {
         written(&db, &[from_ana("m1", AT), from_ana("m2", AT + 10)]);
         assert_eq!(chat(&db, ANA).4, 2, "two unread");
         let mark = |unread: bool, id: &str| {
-            Does::Set(Setting::MarkUnread { unread, newest: Some("m2".into()), at: AT + 20, patch: patch(id) })
+            Does::Set(Setting::MarkUnread { unread, newest: Some("m2".into()), patch: patch(id) })
         };
         assert!(matches!(acted(&db, ANA, mark(true, "u1")), Acted::Queued { .. }));
         assert!(chat(&db, ANA).3);
@@ -664,38 +667,67 @@ mod tests {
         assert_eq!(queued(&db).len(), 2);
     }
 
+    /// Ana's chat as the phone left it: three unread, none of them here, and marked unread if
+    /// `marked`.
+    fn counted_on_the_phone(db: &Connection, marked: bool) {
+        written(db, &[Change::Read(Read { chat: ANA.into(), at: AT, phone: Some((3, 0)), ..Read::default() })]);
+        if marked {
+            written(db, &[Change::Chat(Chat { id: ANA.into(), marked_unread: Some(true), ..Chat::default() })]);
+        }
+        let (.., is_marked, unread, _) = chat(db, ANA);
+        assert_eq!((is_marked, unread), (marked, 3), "the phone's count, with none of its messages here");
+    }
+
     #[test]
-    fn marking_read_a_chat_with_only_the_phones_count_reads_it_at_the_patchs_time_as_whatsapps_echo_will() {
+    fn marking_read_a_chat_jaw_holds_none_of_the_messages_of_takes_the_mark_off_and_leaves_the_read_to_its_echo() {
         let db = db();
-        written(&db, &[Change::Read(Read { chat: ANA.into(), at: AT, phone: Some((3, 0)), ..Read::default() })]);
-        let (.., marked, unread, v) = chat(&db, ANA);
-        assert_eq!((marked, unread), (false, 3), "the phone's count, with none of its messages here");
+        counted_on_the_phone(&db, true);
+        let v = chat(&db, ANA).5;
         let at = AT + 1_500;
-        let read = |id: &str| Does::Set(Setting::MarkUnread { unread: false, newest: None, at, patch: patch(id) });
-        assert!(matches!(acted(&db, ANA, read("r1")), Acted::Queued { .. }));
-        let (.., unread, read_v) = chat(&db, ANA);
-        assert_eq!(unread, 0, "the phone's count cleared at once");
+        assert!(matches!(acted(&db, ANA, mark_read_at(ANA, at, "r1")), Acted::Queued { .. }));
+        let (.., marked, unread, read_v) = chat(&db, ANA);
+        assert_eq!((marked, unread), (false, 3), "the mark taken off, and the phone's count left");
         assert!(read_v > v, "with a new version");
-        let event: String = db.query_row("SELECT type FROM events WHERE seq = ?1", [read_v], |r| r.get(0)).unwrap();
-        assert_eq!(event, "chat", "and its event");
+        arrives(&db, &["markChatAsRead", ANA], &read_value(at), 1);
+        let (.., marked, unread, echoed_v) = chat(&db, ANA);
+        assert_eq!((marked, unread), (false, 0), "WhatsApp's echo of the patch reads it, clearing the count");
+        assert!(echoed_v > read_v, "with a version of its own");
         let read_at: i64 = db.query_row("SELECT read_at FROM chats WHERE id = ?1", [ANA], |r| r.get(0)).unwrap();
-        assert_eq!(read_at, at, "read at the patch's time");
-        let echo = action::SyncActionValue {
-            timestamp: Some(at),
-            mark_chat_as_read_action: Some(action::MarkChatAsReadAction {
-                read: Some(true),
-                message_range: Some(action::SyncActionMessageRange {
-                    last_message_timestamp: Some(at / 1000),
-                    ..Default::default()
-                }),
-            }),
-            ..Default::default()
-        };
-        let index = ["markChatAsRead".to_string(), ANA.to_string()];
-        written(&db, &crate::convert::app_state::mutation(&index, &echo.encode_to_vec()).changes);
-        assert_eq!(chat(&db, ANA).5, read_v, "WhatsApp's echo of the patch changes nothing");
-        assert_eq!(acted(&db, ANA, read("r2")), Acted::Already, "asked again, it's so already");
+        assert_eq!(read_at, at - at % 1_000, "read at the patch's time, to the second its range gives");
+        assert_eq!(acted(&db, ANA, mark_read_at(ANA, at + 1, "r2")), Acted::Already, "read now, it's so already");
         assert_eq!(queued(&db).len(), 1, "and no second patch");
+    }
+
+    #[test]
+    fn marking_read_again_before_the_echo_queues_a_second_patch_and_only_its_echo_reads_the_chat() {
+        let db = db();
+        counted_on_the_phone(&db, false);
+        let index = ["markChatAsRead", ANA];
+        let (t1, t2) = (AT + 1_000, AT + 2_000);
+        assert!(matches!(acted(&db, ANA, mark_read_at(ANA, t1, "r1")), Acted::Queued { .. }));
+        let again = acted(&db, ANA, mark_read_at(ANA, t2, "r2"));
+        assert!(matches!(again, Acted::Queued { .. }), "its count still there, it isn't so already: {again:?}");
+        assert_eq!(queued(&db).len(), 2);
+        let before = chat(&db, ANA);
+        arrives(&db, &index, &read_value(t1), 1);
+        assert_eq!(chat(&db, ANA), before, "the first patch's echo, taken before the second, is held back");
+        arrives(&db, &index, &read_value(t2), 2);
+        assert_eq!((chat(&db, ANA).4, awaited(&db, &index)), (0, None), "the second's reads it, and ends the wait");
+    }
+
+    #[test]
+    fn a_refused_mark_read_of_a_chat_jaw_holds_none_of_the_messages_of_leaves_the_phones_count() {
+        let db = db();
+        counted_on_the_phone(&db, true);
+        let Acted::Queued { outbox, .. } = acted(&db, ANA, mark_read_at(ANA, AT + 1_000, "r1")) else {
+            panic!("not queued")
+        };
+        let undo = Some(Undo::MarkUnread { chat: ANA.into() });
+        let refused = Step::Refused { outbox: outbox[0], error: "server returned error 400".into(), undo };
+        written(&db, &[Change::Outbox(refused)]);
+        let (.., marked, unread, _) = chat(&db, ANA);
+        assert_eq!((marked, unread), (false, 3), "the mark as nothing had set it, and the phone's count as it was");
+        assert_eq!(awaited(&db, &["markChatAsRead", ANA]), None, "the wait over");
     }
 
     #[test]
@@ -709,7 +741,7 @@ mod tests {
         chats(&db, &[untouched]);
         let read = |newest: Option<&str>, id: &str| {
             let newest = newest.map(str::to_string);
-            Does::Set(Setting::MarkUnread { unread: false, newest, at: AT + 100, patch: patch(id) })
+            Does::Set(Setting::MarkUnread { unread: false, newest, patch: patch(id) })
         };
         assert!(matches!(acted(&db, ANA, read(Some("m1"), "a1")), Acted::Queued { .. }), "unread, though not marked");
         assert_eq!(chat(&db, ANA).4, 0, "and read");
@@ -876,6 +908,26 @@ mod tests {
     fn pin_at(chat: &str, pinned: bool, at: i64, id: &str) -> Does {
         let patch = patch_of(&["pin_v1", chat], &pin_value(pinned, at), id);
         Does::Set(Setting::Pin { at: pinned.then_some(at), patch })
+    }
+
+    /// A chat read at `at`, naming no message, as jaw's patch for a chat it holds none of the
+    /// messages of carries it.
+    fn read_value(at: i64) -> action::SyncActionValue {
+        let range = action::SyncActionMessageRange { last_message_timestamp: Some(at / 1000), ..Default::default() };
+        action::SyncActionValue {
+            timestamp: Some(at),
+            mark_chat_as_read_action: Some(action::MarkChatAsReadAction {
+                read: Some(true),
+                message_range: Some(range),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Chat `chat`, none of whose messages jaw holds, marked read from jaw at `at`.
+    fn mark_read_at(chat: &str, at: i64, id: &str) -> Does {
+        let patch = patch_of(&["markChatAsRead", chat], &read_value(at), id);
+        Does::Set(Setting::MarkUnread { unread: false, newest: None, patch })
     }
 
     /// What WhatsApp sends for `index`, converted from inbox row `seq` as the drain converts it.
