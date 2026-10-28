@@ -84,6 +84,13 @@ public final class FloatingPanel: NSPanel {
         super.sendEvent(event)
     }
 
+    /// A key with ⌘ goes to the key window and then to the menu bar before the window's
+    /// `sendEvent`, so `keys` is asked here first: the glance's ⌘↩.
+    override public func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown, keys?(event) == true { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override public func resignKey() {
         super.resignKey()
         close()

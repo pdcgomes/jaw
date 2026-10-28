@@ -1,10 +1,11 @@
-import Foundation
+import AppKit
 @testable import JawKit
 @testable import JawUI
 import Testing
 
 /// The palette's rules: actions ranked as jawd ranks
-/// names, Tab narrowing and stepping back, reactions by name, forwarding to five chats at most.
+/// names, Tab narrowing and stepping back, reactions by name, forwarding to five chats at most, and
+/// ⌘↩ for a new pane, which the palette and the glance take before the menu bar.
 
 @Test func `actions are matched as jawd matches names`() {
     #expect(PaletteModel.score("sta", "Start a chat") == 100, "the start")
@@ -56,6 +57,48 @@ import Testing
     #expect(model.digit(2) && reacted == "❤️")
     model.query = "thumbs"
     #expect(model.items.contains { $0.title.map(\.s).joined().hasPrefix("👍") })
+}
+
+@MainActor
+@Test func `⌘↩ puts a chat in a pane of its own, before the menu bar sees it, and does what ↩ does with anything else`() throws {
+    let panel = PalettePanel()
+    let model = panel.model
+    var chosen: [String] = []
+    model.chose = { pick in
+        switch pick {
+        case let .newPane(row): chosen.append("new pane \(row.id)")
+        case let .chat(row): chosen.append("chat \(row.id)")
+        case let .action(a): chosen.append("action \(a.name)")
+        default: chosen.append("something else")
+        }
+    }
+    model.actions = { [PaletteAction("Start a chat") {}] }
+    model.reset()
+    let json = #"{"results":[{"kind":"chat","score":1,"text":[],"row":{"id":"c1","v":1,"sort":"1","kind":"direct","name":"Ana"}}],"counts":{"chat":1}}"#
+    model.answered(id: 1, try JSONDecoder().decode(Found.self, from: Data(json.utf8)))
+    #expect(try panel.performKeyEquivalent(with: returnKey(.command)))
+    model.pick()
+    #expect(chosen == ["new pane c1", "chat c1"])
+    model.index = try #require(model.items.firstIndex { $0.group == .actions })
+    model.pick(newPane: true)
+    #expect(chosen.last == "action Start a chat", "an action is run as ↩ runs it")
+    #expect(try !panel.performKeyEquivalent(with: returnKey([.command, .shift])), "⇧⌘↩ is the menu bar's")
+    #expect(chosen.count == 3)
+}
+
+@MainActor
+@Test func `a floating panel's keys come before the menu bar's, as the glance's ⌘↩`() throws {
+    let panel = FloatingPanel()
+    var seen: [UInt16] = []
+    panel.keys = { event in
+        seen.append(event.keyCode)
+        return event.keyCode == 36
+    }
+    #expect(try panel.performKeyEquivalent(with: returnKey(.command)))
+    let palette = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: 0,
+                                                context: nil, characters: "k", charactersIgnoringModifiers: "k", isARepeat: false, keyCode: 40))
+    #expect(!panel.performKeyEquivalent(with: palette), "a key it doesn't take goes on to the menu bar")
+    #expect(seen == [36, 40])
 }
 
 @MainActor

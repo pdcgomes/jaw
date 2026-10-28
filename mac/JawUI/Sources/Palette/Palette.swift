@@ -74,6 +74,8 @@ public final class PaletteModel {
 
     public enum Pick: Sendable {
         case chat(ChatRow)
+        /// A chat in a pane of its own: ⌘↩ on a chat.
+        case newPane(ChatRow)
         case person(Person)
         case message(MessageRow)
         case folder(FolderRef)
@@ -281,7 +283,9 @@ public final class PaletteModel {
         return false
     }
 
-    public func pick() {
+    /// ↩, or ⌘↩ with `newPane`, which opens a chat in a pane of its own and does what ↩ does with
+    /// anything else.
+    public func pick(newPane: Bool = false) {
         let all = items
         if case let .forward(messages, from, _) = mode {
             let to = picked.isEmpty ? (index < all.count ? [all[index]].compactMap { if case let .chat(c) = $0.pick { c.id } else { nil } } : []) : picked.map(\.id)
@@ -290,7 +294,11 @@ public final class PaletteModel {
             return
         }
         guard index < all.count else { return }
-        chose?(all[index].pick)
+        if newPane, case let .chat(row) = all[index].pick {
+            chose?(.newPane(row))
+        } else {
+            chose?(all[index].pick)
+        }
     }
 
     public func pick(_ item: Item) {
@@ -527,7 +535,7 @@ public struct PaletteView: View {
 
     var hints: some View {
         let text = switch model.mode {
-        case .find: "⏎ opens · ⌘G goes to a message · Tab narrows · Esc closes"
+        case .find: "⏎ opens · ⌘⏎ in a new pane · ⌘G goes to a message · Tab narrows · Esc closes"
         case .react: "1 to 6 · ⏎ reacts · Esc closes"
         case .forward: "Tab picks · ⏎ forwards to \(model.picked.isEmpty ? "the chat" : "\(model.picked.count) chat\(model.picked.count == 1 ? "" : "s")") · Esc closes"
         }
@@ -614,6 +622,16 @@ public final class PalettePanel: NSPanel {
             }
         }
         super.sendEvent(event)
+    }
+
+    /// ⌘↩ puts the chat in a pane of its own. A key with ⌘ goes to the key window and then to the
+    /// menu bar before the window's `sendEvent`, so it's taken here.
+    override public func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown, [36, 76].contains(event.keyCode), event.modifierFlags.intersection(MenuBar.modifiers) == .command {
+            model.pick(newPane: true)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     /// Shows the palette over `window`, in a mode, with jawd's answers to what's typed.

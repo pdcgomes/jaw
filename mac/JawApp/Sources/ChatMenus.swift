@@ -53,7 +53,7 @@ extension AppModel {
     }
 
     /// A chat in a pane of its own: beside the focused pane, or in it when it's empty; a chat a pane
-    /// already shows is gone to there, as ⌘↩ does in the glance.
+    /// already shows is gone to there, as ⌘↩ does in the glance and the palette.
     func openInNewPane(_ chat: ChatRow) {
         guard let grid, panes[chat.id] == nil, let at = focusedSlot, grid.slot(at)?.chat != nil else {
             return open(chat, opened: true)

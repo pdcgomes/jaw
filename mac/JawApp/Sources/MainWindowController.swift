@@ -250,6 +250,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         palette.close()
         switch pick {
         case let .chat(row): model.open(row, opened: true)
+        case let .newPane(row): model.openInNewPane(row)
         case let .person(p): model.jawd.startChat(person: p.id)
         case let .number(n): model.jawd.startChat(phone: n)
         case let .message(m): goTo(m)
