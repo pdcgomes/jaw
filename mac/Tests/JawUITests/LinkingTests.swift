@@ -2,12 +2,16 @@ import AppKit
 @testable import JawUI
 import Testing
 
-/// The linking screen's QR code: in a picture of it at one and at two pixels a point, as phase three's
-/// check and a sweep draw it, every module a hard-edged square where the code has it; and what
-/// VoiceOver hears of it.
+/// The linking screen's QR code: kept for its text, and made again for new text; in a picture of it at
+/// one and at two pixels a point, as phase three's check and a sweep draw it, every module a
+/// hard-edged square where the code has it; and what VoiceOver hears of it.
 
-@MainActor @Test func `the QR code is drawn crisp at one and two pixels a point, its dark modules where the code's are, and heard as the code to scan`() throws {
-    let image = try #require(LinkingView.qr("2@jaw-harness,QWERTYUIOPASDFGHJKL,ZXCVBNM="))
+@MainActor @Test func `the QR code is kept until jawd's text changes, drawn crisp at one and two pixels a point, its dark modules where the code's are, and heard as the code to scan`() throws {
+    let text = "2@jaw-harness,QWERTYUIOPASDFGHJKL,ZXCVBNM="
+    let image = try #require(LinkingView.qr(text))
+    #expect(LinkingView.qr(text) === image, "the same text gives the code kept")
+    let another = try #require(LinkingView.qr("2@another"))
+    #expect(another !== image, "new text gives a new code")
     let code = NSBitmapImageRep(cgImage: image)
     let modules = code.pixelsWide
     func dark(_ x: Int, _ y: Int) -> Bool {

@@ -17,10 +17,12 @@ func paneLaidOut(windowButtons: (() -> NSRect?)? = nil) -> ConversationControlle
     return c
 }
 
-@MainActor @Test func `a header under the window's buttons starts after them, and with none given and no window keeps its inset`() {
+@MainActor @Test func `a header under the window's buttons starts after them, and one they miss, or with none given and no window, keeps its inset`() {
     let zoom = NSRect(x: 55, y: 480 - 9 - 14, width: 14, height: 14)
     let under = paneLaidOut(windowButtons: { zoom })
     #expect(under.header.avatar.frame.minX == zoom.maxX + Space.xs + Space.m, "the zoom button's right edge, the buttons' margin and the header's own")
+    let lower = paneLaidOut(windowButtons: { zoom.offsetBy(dx: 0, dy: 200) })
+    #expect(lower.header.avatar.frame.minX == HeaderView.inset, "a pane 200 points down the window, the buttons above it")
     let alone = paneLaidOut()
     #expect(alone.header.avatar.frame.minX == HeaderView.inset)
 }

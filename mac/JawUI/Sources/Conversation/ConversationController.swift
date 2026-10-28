@@ -935,7 +935,9 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     }
 
     public var notice: ((String) -> Void)?
-    /// Called once each time rows are drawn after an update, for the bench.
+    /// Called once, then cleared, when the next update with rows has been laid out and its rows are in
+    /// the table: set by whatever waits for them, as the bench does to time an open and the harness
+    /// before a picture.
     public var drawn: (() -> Void)?
 
     func say(_ text: String) {

@@ -15,9 +15,6 @@ enum Pictures {
     /// once it finds the window isn't key, such as the sidebar's folders in grey. A conversation given
     /// rows is waited for after it, until it has drawn them.
     static let settle = Duration.milliseconds(400)
-    /// How long the typing bubble takes to rise once a conversation's rows are drawn, 0.16 s, with a
-    /// little to spare.
-    static let rise = Duration.milliseconds(250)
     /// How long a picture's conversations have to draw their rows, from when it's made.
     nonisolated static let limit = Duration.seconds(10)
 
@@ -39,11 +36,11 @@ enum Pictures {
     }
 
     /// A conversation given rows, held weakly, so one SwiftUI made and let go isn't waited for, and
-    /// when it drew them.
+    /// whether it has drawn them.
     @MainActor
     private final class Arrival {
         weak var conversation: ConversationController?
-        var drawn: ContinuousClock.Instant?
+        var drawn = false
 
         init(_ conversation: ConversationController) {
             self.conversation = conversation
@@ -64,7 +61,7 @@ enum Pictures {
             arrivals.append(arrival)
         }
         DispatchQueue.main.async {
-            if let arrival { conversation.drawn = { arrival.drawn = .now } }
+            if let arrival { conversation.drawn = { arrival.drawn = true } }
             conversation.apply(update)
         }
     }
@@ -81,12 +78,12 @@ enum Pictures {
 
     /// Draws `scene` in `conditions`, in a window of its own off the screen, once it has had `settle`
     /// to do what it does after it's made and each conversation in it that was given rows has drawn
-    /// them and its typing bubble has risen; one that hasn't drawn them within `limit` fails the
-    /// picture. Once it's drawn, it closes the window and lets the window's content go, as AppKit can
-    /// keep a window it has shown after it's closed. It holds the app-wide `Motion.reduced`, and the
-    /// list of conversations given rows, for as long as it draws, so draws mustn't overlap. The
-    /// window doesn't animate as it comes and goes: off every screen that animation never ends, and
-    /// each would hold one of GCD's threads, which lay a conversation's rows out, for good.
+    /// them; one that hasn't drawn them within `limit` fails the picture. Once it's drawn, it closes
+    /// the window and lets the window's content go, as AppKit can keep a window it has shown after
+    /// it's closed. It holds the app-wide `Motion.reduced`, and the list of conversations given rows,
+    /// for as long as it draws, so draws mustn't overlap. The window doesn't animate as it comes and
+    /// goes: off every screen that animation never ends, and each would hold one of GCD's threads,
+    /// which lay a conversation's rows out, for good.
     static func draw(_ scene: HarnessScene, _ conditions: Conditions) async throws -> Drawn {
         let reduced = Motion.reduced
         Motion.reduced = { conditions.reduceMotion }
@@ -133,26 +130,20 @@ enum Pictures {
         return Drawn(png: png, points: bounds.size, pixels: [rep.pixelsWide, rep.pixelsHigh], hash: hash, notes: taker.notes)
     }
 
-    /// Waits until each conversation given rows that's still alive and in `window` has drawn them, then
-    /// until `rise` after the last of them drew, for its typing bubble; if one hasn't drawn them by
-    /// `deadline`, `scene` fails. It lays the window out before each look, as the picture is laid out
-    /// before it's drawn, so a conversation SwiftUI hasn't put in the window yet is waited for too.
+    /// Waits until each conversation given rows that's still alive and in `window` has drawn them; if
+    /// one hasn't drawn them by `deadline`, `scene` fails. It lays the window out before each look, as
+    /// the picture is laid out before it's drawn, so a conversation SwiftUI hasn't put in the window
+    /// yet is waited for too.
     private static func rowsDrawn(_ scene: HarnessScene, in window: NSWindow, by deadline: ContinuousClock.Instant) async throws {
-        func inWindow() -> [Arrival] {
-            arrivals.filter { $0.conversation?.viewIfLoaded?.window === window }
-        }
         func undrawn() -> Int {
             window.layoutIfNeeded()
-            return inWindow().filter { $0.drawn == nil }.count
+            return arrivals.filter { !$0.drawn && $0.conversation?.viewIfLoaded?.window === window }.count
         }
         var waiting = undrawn()
         while waiting > 0 {
             guard ContinuousClock.now < deadline else { throw PictureError.undrawn(scene.id, waiting) }
             try await Task.sleep(for: .milliseconds(10))
             waiting = undrawn()
-        }
-        if let last = inWindow().compactMap(\.drawn).max() {
-            try await Task.sleep(until: last + rise, clock: .continuous)
         }
     }
 
