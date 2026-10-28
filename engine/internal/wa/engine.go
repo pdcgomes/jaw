@@ -199,27 +199,31 @@ func (e *Engine) keep(event *enginepb.Event) {
 	}
 }
 
-// handleFrom is whatsmeow's event handler for client. Once the account is logged out, whatsmeow
-// can still have the client say how its connection went (Connected after LoggedOut), which would
-// tell jawd the removed device is linked again, so only what jawd must store goes on from it.
+// handleFrom is whatsmeow's event handler for client. What jawd must store goes on from any
+// client, since whatsmeow tells WhatsApp it arrived once this returns. The rest goes on only from
+// the client running now: once the account is logged out, whatsmeow can still have its client say
+// how its connection went (Connected after LoggedOut), which would tell jawd the removed device is
+// linked again.
 func (e *Engine) handleFrom(client *whatsmeow.Client, evt any) {
 	if out, ok := evt.(*events.LoggedOut); ok {
 		e.loggedOut(client, out.Reason)
 		return
 	}
-	if (client != e.cli() || client == e.retired.Load()) && !mustKeep(evt) {
-		return
+	if client == e.cli() && client != e.retired.Load() {
+		e.handle(evt)
+	} else if event, _ := e.kept(evt); event != nil {
+		e.keep(event)
 	}
-	e.handle(evt)
 }
 
-// mustKeep says whether jawd must store evt, which whatsmeow won't send again once it's handled.
-func mustKeep(evt any) bool {
-	switch evt.(type) {
-	case *events.Message, *events.AppState, *events.PushName, *events.JoinedGroup, *events.GroupInfo, *events.Picture, *events.Receipt:
-		return true
+// handle hands one of the running client's events to jawd. It runs on whatsmeow's one queue, so it
+// hands each event on and returns; what jawd must store waits for jawd's ack.
+func (e *Engine) handle(evt any) {
+	if event, kept := e.kept(evt); event != nil {
+		e.keep(event)
+	} else if !kept {
+		e.say(evt)
 	}
-	return false
 }
 
 // loggedOut tells jawd WhatsApp logged the account out, why in whatsmeow's words without the code
@@ -258,33 +262,44 @@ func (e *Engine) renew(old *whatsmeow.Client) {
 	e.client.Store(fresh)
 }
 
-// handle hands one of whatsmeow's events to jawd. It runs on whatsmeow's one queue, so it hands
-// each event on and returns; what whatsmeow won't send again waits for jawd's ack.
-func (e *Engine) handle(evt any) {
+// kept is what jawd must store of evt, which whatsmeow won't send again once it's handled, and
+// whether evt is of a kind jawd must store; one of those that can't be encoded is said in the log
+// and comes back nil. It's the one list of those kinds, so none can go unstored from a client
+// replaced after a logout.
+func (e *Engine) kept(evt any) (*enginepb.Event, bool) {
 	switch v := evt.(type) {
 	case *events.Message:
-		e.keep(&enginepb.Event{Kind: &enginepb.Event_Message{Message: e.message(v)}})
+		return &enginepb.Event{Kind: &enginepb.Event_Message{Message: e.message(v)}}, true
 	case *events.AppState:
-		if state, err := appState(v); err == nil {
-			e.keep(&enginepb.Event{Kind: &enginepb.Event_AppState{AppState: state}})
-		} else {
+		state, err := appState(v)
+		if err != nil {
 			e.log.Errorf("can't encode the app state %v: %v", v.Index, err)
+			return nil, true
 		}
+		return &enginepb.Event{Kind: &enginepb.Event_AppState{AppState: state}}, true
+	case *events.PushName:
+		return &enginepb.Event{Kind: &enginepb.Event_PushName{PushName: pushName(v)}}, true
+	case *events.JoinedGroup:
+		return &enginepb.Event{Kind: &enginepb.Event_Group{Group: groupInfo(&v.GroupInfo)}}, true
+	case *events.GroupInfo:
+		return &enginepb.Event{Kind: &enginepb.Event_GroupChange{GroupChange: groupChange(v)}}, true
+	case *events.Picture:
+		return &enginepb.Event{Kind: &enginepb.Event_Picture{Picture: picture(v)}}, true
+	case *events.Receipt:
+		return &enginepb.Event{Kind: &enginepb.Event_Receipt{Receipt: receipt(v)}}, true
+	}
+	return nil, false
+}
+
+// say tells jawd what the client running now says of its connection, its linking, catching up
+// and app state's versions, none of which needs an ack.
+func (e *Engine) say(evt any) {
+	switch v := evt.(type) {
 	case *events.AppStateSyncComplete:
 		e.send(&enginepb.Event{Kind: &enginepb.Event_AppStateSynced{AppStateSynced: &enginepb.AppStateSynced{
 			Name:    string(v.Name),
 			Version: v.Version,
 		}}})
-	case *events.PushName:
-		e.keep(&enginepb.Event{Kind: &enginepb.Event_PushName{PushName: pushName(v)}})
-	case *events.JoinedGroup:
-		e.keep(&enginepb.Event{Kind: &enginepb.Event_Group{Group: groupInfo(&v.GroupInfo)}})
-	case *events.GroupInfo:
-		e.keep(&enginepb.Event{Kind: &enginepb.Event_GroupChange{GroupChange: groupChange(v)}})
-	case *events.Picture:
-		e.keep(&enginepb.Event{Kind: &enginepb.Event_Picture{Picture: picture(v)}})
-	case *events.Receipt:
-		e.keep(&enginepb.Event{Kind: &enginepb.Event_Receipt{Receipt: receipt(v)}})
 	case *events.Connected:
 		e.connection(enginepb.Connection_CONNECTED, "")
 	case *events.Disconnected:

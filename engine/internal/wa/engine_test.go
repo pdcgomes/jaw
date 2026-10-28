@@ -2,13 +2,17 @@ package wa
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -172,8 +176,15 @@ func linkedEngine(t *testing.T) (*Engine, *link.Link, func()) {
 	if err := e.open(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	device := e.cli().Store
-	device.ID = &types.JID{User: "351910000001", Device: 12, Server: types.DefaultUserServer}
+	paired(t, e.cli().Store, 12)
+	return e, jawd, closeLink
+}
+
+// paired stores device as linked to the account as its device number n, as pairing would, with
+// nothing sent to WhatsApp.
+func paired(t *testing.T, device *store.Device, n uint16) {
+	t.Helper()
+	device.ID = &types.JID{User: "351910000001", Device: n, Server: types.DefaultUserServer}
 	// The account's signatures, made up but of the lengths session.db checks.
 	device.Account = &waAdv.ADVSignedDeviceIdentity{
 		Details:             []byte{1},
@@ -184,7 +195,41 @@ func linkedEngine(t *testing.T) (*Engine, *link.Link, func()) {
 	if err := device.Save(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return e, jawd, closeLink
+}
+
+// renewed waits for the engine to have replaced old with a client on a fresh device, and returns it.
+func renewed(t *testing.T, e *Engine, old *whatsmeow.Client) *whatsmeow.Client {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for e.cli() == old && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if e.cli() == old {
+		t.Fatal("no fresh client")
+	}
+	return e.cli()
+}
+
+// loggedOutByThePhone has the phone log client's device out, as whatsmeow does it, checks jawd
+// heard so, and returns the client the engine gives itself for linking again.
+func loggedOutByThePhone(t *testing.T, e *Engine, jawd *link.Link, client *whatsmeow.Client) *whatsmeow.Client {
+	t.Helper()
+	// whatsmeow deletes the device as it dispatches LoggedOut.
+	if err := client.Store.Delete(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	go e.handleFrom(client, &events.LoggedOut{Reason: events.ConnectFailureLoggedOut})
+	if said := recv(t, jawd).GetEvent().GetConnection(); said.GetState() != enginepb.Connection_LOGGED_OUT {
+		t.Fatalf("a logout said %v", said)
+	}
+	return renewed(t, e, client)
+}
+
+func acked(t *testing.T, jawd *link.Link, seq uint64) {
+	t.Helper()
+	if err := jawd.Send(&enginepb.Frame{Body: &enginepb.Frame_Ack{Ack: &enginepb.Ack{Seq: seq}}}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // returnsAlone says whether fn returns without sending jawd anything, which it couldn't do without
@@ -226,11 +271,7 @@ func TestALogoutGivesAFreshDeviceToLinkAgainWithAndDropsWhatTheOldClientSaysOfIt
 	if said.GetState() != enginepb.Connection_LOGGED_OUT || said.GetReason() != "logged out from another device" {
 		t.Fatalf("a logout said %v", frame)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for e.cli() == old && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	fresh := e.cli()
+	fresh := renewed(t, e, old)
 	if fresh == old || fresh.Store.ID != nil || fresh.Store.Deleted {
 		t.Fatalf("after the logout the client is %p (was %p), its device %v, deleted %v", fresh, old, fresh.Store.ID, fresh.Store.Deleted)
 	}
@@ -252,9 +293,7 @@ func TestALogoutGivesAFreshDeviceToLinkAgainWithAndDropsWhatTheOldClientSaysOfIt
 	if frame.GetEvent().GetMessage().GetInfo().GetId() != "3EB0LATE" || frame.GetEvent().Seq == 0 {
 		t.Fatalf("a message the old client handed over after the logout: %v", frame)
 	}
-	if err := jawd.Send(&enginepb.Frame{Body: &enginepb.Frame_Ack{Ack: &enginepb.Ack{Seq: frame.GetEvent().Seq}}}); err != nil {
-		t.Fatal(err)
-	}
+	acked(t, jawd, frame.GetEvent().Seq)
 	go e.handleFrom(fresh, &events.Connected{})
 	if frame = recv(t, jawd); frame.GetEvent().GetConnection().GetState() != enginepb.Connection_CONNECTED {
 		t.Fatalf("the fresh client's Connected: %v", frame)
@@ -270,14 +309,85 @@ func TestALogoutLeavesNoDeviceInTheSessionWhetherOrNotWhatsmeowHasDeletedItYet(t
 	if reason := frame.GetEvent().GetConnection().GetReason(); reason != "primary device was logged out" {
 		t.Fatalf("a logout's reason: %q", reason)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for e.cli() == old && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if e.cli() == old {
-		t.Fatal("no fresh client")
-	}
+	renewed(t, e, old)
 	if n := devicesIn(t, e); n != 0 {
 		t.Fatalf("%d devices left in session.db, which the next start would read as the account", n)
+	}
+}
+
+// stored is one event of each kind jawd must store, as whatsmeow hands them over, with the kind of
+// event jawd gets for it.
+func stored() []struct {
+	evt  any
+	kind string
+} {
+	ana := types.NewJID("351912345678", types.DefaultUserServer)
+	group := types.NewJID("120363000000000001", types.GroupServer)
+	return []struct {
+		evt  any
+		kind string
+	}{
+		{&events.Message{
+			Info:    types.MessageInfo{MessageSource: types.MessageSource{Chat: ana, Sender: ana}, ID: "3EB0LATE"},
+			Message: &waE2E.Message{Conversation: proto.String("still kept")},
+		}, "message"},
+		{&events.Receipt{
+			MessageSource: types.MessageSource{Chat: ana, Sender: ana},
+			MessageIDs:    []types.MessageID{"3EB0MINE"},
+			Timestamp:     time.UnixMilli(1_792_000_000_000),
+			Type:          types.ReceiptTypeRead,
+		}, "receipt"},
+		{&events.AppState{
+			Index:           []string{"pin_v1", ana.String()},
+			SyncActionValue: &waSyncAction.SyncActionValue{PinAction: &waSyncAction.PinAction{Pinned: proto.Bool(true)}},
+		}, "app state"},
+		{&events.PushName{JID: ana, NewPushName: "Ana"}, "push name"},
+		{&events.JoinedGroup{GroupInfo: types.GroupInfo{JID: group, GroupName: types.GroupName{Name: "Lisbon Climbing"}}}, "group"},
+		{&events.GroupInfo{JID: group, Name: &types.GroupName{Name: "Lisbon Climbing"}}, "group change"},
+		{&events.Picture{JID: ana, PictureID: "123"}, "picture"},
+	}
+}
+
+func kindOf(event *enginepb.Event) string {
+	switch event.GetKind().(type) {
+	case *enginepb.Event_Message:
+		return "message"
+	case *enginepb.Event_Receipt:
+		return "receipt"
+	case *enginepb.Event_AppState:
+		return "app state"
+	case *enginepb.Event_PushName:
+		return "push name"
+	case *enginepb.Event_Group:
+		return "group"
+	case *enginepb.Event_GroupChange:
+		return "group change"
+	case *enginepb.Event_Picture:
+		return "picture"
+	}
+	return fmt.Sprintf("%T", event.GetKind())
+}
+
+func TestEveryKindJawdMustStoreGoesOnFromAClientReplacedAfterALogoutAndWhatItSaysOfItsConnectionDoesnt(t *testing.T) {
+	e, jawd, closeLink := linkedEngine(t)
+	defer closeLink()
+	old := e.cli()
+	loggedOutByThePhone(t, e, jawd, old)
+	for _, sample := range stored() {
+		go e.handleFrom(old, sample.evt)
+		frame := recv(t, jawd)
+		if event := frame.GetEvent(); kindOf(event) != sample.kind || event.Seq == 0 {
+			t.Fatalf("a %s from the replaced client reached jawd as %v", sample.kind, frame)
+		}
+		acked(t, jawd, frame.GetEvent().Seq)
+	}
+	for _, evt := range []any{
+		&events.Connected{}, &events.Disconnected{}, &events.KeepAliveTimeout{}, &events.StreamReplaced{},
+		&events.ClientOutdated{}, &events.ConnectFailure{}, &events.TemporaryBan{}, &events.PairSuccess{},
+		&events.OfflineSyncPreview{}, &events.OfflineSyncCompleted{}, &events.AppStateSyncComplete{},
+	} {
+		if !returnsAlone(func() { e.handleFrom(old, evt) }) {
+			t.Fatalf("the replaced client's %T went to jawd", evt)
+		}
 	}
 }
