@@ -2667,6 +2667,92 @@ async fn a_reaction_or_an_edit_whose_message_is_deleted_for_everyone_once_it_has
     assert_eq!(outbox_rows(&running).await.0, [queued.clone(), queued], "nothing written behind your deletions");
 }
 
+/// A reaction stopped between finding your message and its step while your deletion of it for
+/// everyone commits and reaches `state`: what the step answers, and the outbox after.
+async fn reaction_stopped_while_your_deletion_is(state: &str) -> (Result<Value, Error>, Vec<(String, String)>) {
+    let home = tempfile::tempdir().unwrap();
+    let timing = Timing { unconfirmed_for: Duration::from_secs(1), ..quick() };
+    let running = Running::timed(home.path(), world(), true, true, timing).await;
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &id, "sent").await;
+    let (stopped, go) = running.sending.pause_next_action();
+    let sending = running.sending.clone();
+    let params = json!({ "message": id, "chat": ANA, "emoji": "👍" });
+    let asking = tokio::spawn(async move { sending.call("react", params).await });
+    stopped.notified().await;
+    let revoke_is = |state: &'static str| {
+        move |db: &Connection| {
+            let now: Option<String> =
+                db.query_row("SELECT state FROM outbox WHERE kind = 'revoke'", [], |r| r.get(0)).optional()?;
+            Ok(now.as_deref() == Some(state))
+        }
+    };
+    let delete = || running.call("delete", json!({ "message": id, "chat": ANA, "for": "everyone" }));
+    match state {
+        "queued" => {
+            until_offline(&running).await;
+            delete().await.unwrap();
+        }
+        "handed to the engine" => {
+            running.world.hold(true);
+            delete().await.unwrap();
+            running
+                .world
+                .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count() >= 2)
+                .await;
+        }
+        "waiting for a receipt" | "kept for a late receipt" => {
+            // The first try fails on the way, and the next is refused when it may have gone.
+            running.world.fail_chats(&[ANA.to_string()]);
+            delete().await.unwrap();
+            running
+                .world
+                .until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count() >= 2)
+                .await;
+            running.world.refuse_next(1);
+            running.world.stop_failing_chats();
+            eventually(&running, "the deletion waiting for a receipt", revoke_is("unconfirmed")).await;
+            if state == "kept for a late receipt" {
+                eventually(&running, "the deletion kept for a late receipt", revoke_is("failed")).await;
+            }
+        }
+        "done" => {
+            delete().await.unwrap();
+            until_stored(&running).await;
+        }
+        "refused" => {
+            running.world.refuse_next(1);
+            delete().await.unwrap();
+            until_stored(&running).await;
+        }
+        other => panic!("no state {other}"),
+    }
+    go.notify_one();
+    let answered = asking.await.unwrap();
+    (answered, outbox_rows(&running).await.0)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_step_refuses_a_reaction_in_each_state_of_your_deletion_for_everyone_that_windows_show_as_deleted() {
+    let states = [
+        ("queued", true),
+        ("handed to the engine", true),
+        ("waiting for a receipt", true),
+        ("kept for a late receipt", false),
+        ("done", true),
+        ("refused", false),
+    ];
+    for (state, refused) in states {
+        let (answered, rows) = reaction_stopped_while_your_deletion_is(state).await;
+        let written = rows.iter().any(|(kind, _)| kind == "reaction");
+        match answered {
+            Err(e) => assert!(refused && e.code == code::NOT_ALLOWED && !written, "{state}: {} {rows:?}", e.message),
+            Ok(_) => assert!(!refused && written, "{state}: taken, {rows:?}"),
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reaction_or_an_edit_in_a_chat_merging_away_is_refused_while_the_copy_kept_is_being_deleted() {
     let home = tempfile::tempdir().unwrap();
@@ -2698,6 +2784,40 @@ async fn a_reaction_or_an_edit_in_a_chat_merging_away_is_refused_while_the_copy_
         let edited = running.call("edit", named(json!({ "message": "m1", "text": "chego às 21h" }))).await.unwrap_err();
         assert_eq!((reacted.code, edited.code), (code::NOT_ALLOWED, code::NOT_ALLOWED), "named in {chat:?}");
     }
+    assert_eq!(outbox_rows(&running).await.0, [("revoke".to_string(), "queued".to_string())], "nothing written");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_or_an_edit_in_a_chat_merging_away_is_refused_while_its_copy_there_is_being_deleted() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    let lid = "100000000001@lid";
+    // Your message is in both of Ana's chats, her LID's the older, so an action that names no
+    // chat finds its copy there first; you delete it for everyone in her LID's chat.
+    running.chats(&[lid, ANA]).await;
+    for chat in [lid, ANA] {
+        let message = Message { chat: chat.into(), ..mine_message("m1", now_ms() - 60_000) };
+        running.store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+    }
+    running.call("delete", json!({ "message": "m1", "chat": lid, "for": "everyone" })).await.unwrap();
+    // Her LID's chat then starts merging into her number's: your deletion is aimed at the copy
+    // merging away, and the copy kept shows as it was.
+    let both = Person { jids: vec![ANA.into(), lid.into()], ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
+    for chat in [Some(lid), None] {
+        let named = |mut params: Value| {
+            if let Some(chat) = chat {
+                params["chat"] = json!(chat);
+            }
+            params
+        };
+        let reacted = running.call("react", named(json!({ "message": "m1", "emoji": "👍" }))).await.unwrap_err();
+        let edited = running.call("edit", named(json!({ "message": "m1", "text": "chego às 21h" }))).await.unwrap_err();
+        assert_eq!((reacted.code, edited.code), (code::NOT_ALLOWED, code::NOT_ALLOWED), "named in {chat:?}");
+    }
+    let copies: i64 =
+        running.query(|db| Ok(db.query_row("SELECT count(*) FROM messages WHERE id = 'm1'", [], |r| r.get(0))?)).await;
+    assert_eq!(copies, 2, "the merge is still to move the copy in her LID's chat");
     assert_eq!(outbox_rows(&running).await.0, [("revoke".to_string(), "queued".to_string())], "nothing written");
 }
 
