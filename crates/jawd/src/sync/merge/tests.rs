@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use rusqlite::Connection;
 use rusqlite::types::Value;
+use rusqlite::{Connection, OpenFlags};
 
 use super::*;
 use crate::store::outbox::{self, Owing};
@@ -683,7 +683,9 @@ async fn a_chain_of_merges_made_after_jaw_db_opened_still_ends_in_one_chat_with_
 /// - `two-chats`: the new number's chat, then the LID's with l0 to l209, pinned, muted, with a
 ///   draft and a 24-hour timer, which the new number's takes as the LID's starts merging into it;
 ///   a step taken, then the new number's chat unpinned, unmuted, archived, its draft sent and its
-///   timer turned off.
+///   timer turned off;
+/// - `read-chain`: `x1-chain`'s chain with a step of each merge taken, then the new number's chat
+///   read on the phone, which left the LID's chat at 10 unread.
 fn from_before(name: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let packed = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/merge-chains/{name}.db.zst"));
@@ -749,6 +751,22 @@ async fn a_chain_of_merges_an_earlier_jawd_left_is_flattened_so_reading_the_chat
     assert_eq!(unread(&store).await, person(0, 0, 0), "read on the phone, the LID's chat with the rest");
     let both = [(OLD.to_string(), NEW.to_string()), (LID.to_string(), NEW.to_string())];
     assert_eq!(merging(&store).await, both, "each merge goes into the chat that stays");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chain_an_earlier_jawd_left_after_reading_the_chat_that_stays_is_counted_read_as_jaw_db_opens() {
+    let home = from_before("read-chain");
+    let person = |new, old, lid| vec![(NEW.to_string(), new), (OLD.to_string(), old), (LID.to_string(), lid)];
+    let left: Vec<(String, i64)> = {
+        let db = Connection::open_with_flags(home.path().join("jaw.db"), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut each = db.prepare("SELECT id, unread FROM chats ORDER BY n").unwrap();
+        each.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(left, person(0, 0, 10), "as 4126db2 left them, the LID's chat merging into the old number's");
+    let store = Store::open(home.path()).unwrap();
+    // Before any change: the LID's chat merges into the new number's now, and counts from where
+    // that was read, in the commit that pointed it there.
+    assert_eq!(unread(&store).await, person(0, 0, 0));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -821,7 +839,8 @@ async fn settings_and_told(store: &Store) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_chain_an_earlier_jawd_left_ends_the_same_whichever_commit_jawd_is_killed_after() {
-    let fixtures = [("x1-chain", OLD), ("ended-chain", OLD), ("standing-chain", LID), ("two-chats", LID)];
+    let fixtures =
+        [("x1-chain", OLD), ("ended-chain", OLD), ("standing-chain", LID), ("two-chats", LID), ("read-chain", OLD)];
     for (name, first) in fixtures {
         let home = from_before(name);
         let store = Store::open(home.path()).unwrap();

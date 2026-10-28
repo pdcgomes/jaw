@@ -210,5 +210,22 @@ mod made_at_4126db2 {
             store.apply(Lane::Live, vec![Change::Chat(undone)]).await.unwrap();
             keep(home.path(), "two-chats.db");
         }
+        // X1's scene with the new number's chat read on the phone while the chain stands: the old
+        // number's chat, merging into it, counts from there, and the LID's, merging into the old
+        // number's, keeps its 10 unread.
+        {
+            let home = tempfile::tempdir().unwrap();
+            let store = Store::open(home.path()).unwrap();
+            let mut changes = vec![from_them(NEW, "n0", AT), mine(NEW, "n1", AT + 1)];
+            changes.extend((0..5).map(|i| from_them(OLD, &format!("o{i}"), AT + 10 + i)));
+            changes.extend((0..210).map(|i| from_them(LID, &format!("l{i}"), AT + 1_000 + i)));
+            store.apply(Lane::Live, changes).await.unwrap();
+            store.apply(Lane::Live, vec![join(OLD, LID)]).await.unwrap();
+            step(&store, LID).await;
+            store.apply(Lane::Live, vec![join(LID, NEW)]).await.unwrap();
+            step(&store, OLD).await;
+            store.apply(Lane::Live, vec![on_the_phone(NEW)]).await.unwrap();
+            keep(home.path(), "read-chain.db");
+        }
     }
 }
