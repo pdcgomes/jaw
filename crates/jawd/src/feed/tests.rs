@@ -4469,4 +4469,98 @@ mod folders {
         watcher.call("unwatch", json!({"watch": roster})).await.unwrap();
         assert_eq!(bed.feed.showing(), (vec![ines], Vec::new()), "a window unwatched shows nobody");
     }
+
+    /// A message row's v is the newest of its message's and those of the people it names, so only
+    /// what changes how a row names someone may move their people.v: anything else that did would
+    /// send every row naming them again to every window holding it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_message_row_is_sent_again_for_presence_an_about_text_filing_or_a_chat_only_for_a_new_name() {
+        let bed = Bed::new(brisk());
+        let mut watcher = bed.watcher(64);
+        // Ana sends in her chat and in Climbing, where Rui mentions her and quotes her.
+        bed.apply(vec![
+            Change::Person(named(ANA, "Ana")),
+            Change::Person(named(RUI, "Rui")),
+            Change::Message(text(ANA, "a1", AT, Some(ANA), "olá")),
+            Change::Message(text(CLIMBING, "c1", AT + 1, Some(ANA), "sábado?")),
+            Change::Message(mentioning(CLIMBING, "c2", AT + 2, RUI, ANA)),
+            Change::Message(quoting(CLIMBING, "c3", AT + 3, RUI, "c1", ANA)),
+        ])
+        .await;
+        let (ana, rui) = (person_n(&bed, ANA).await, person_n(&bed, RUI).await);
+        let family = create(&bed, "Family", None).await;
+        let messages = |chat: &str| Want::Messages { chat: chat.into(), anchor: None, before: 10, after: 0 };
+        let watched = watch_all(&mut watcher, &[messages(ANA), messages(CLIMBING)]).await;
+        let mut last = bed.apply(Vec::new()).await;
+        watcher.settle(last).await;
+        let versions = |watcher: &Watcher| -> HashMap<String, Value> {
+            watched
+                .iter()
+                .flat_map(|(watch, _)| {
+                    watcher.windows[watch].rows.iter().map(|(id, row)| (id.clone(), row["v"].clone()))
+                })
+                .collect()
+        };
+        let held = versions(&watcher);
+        assert_eq!(held.len(), 4, "{held:?}");
+
+        let said = |state| Change::Folders(Step::Presence { jid: ANA.into(), state });
+        let following = |people| Change::Folders(Step::Following { people });
+        let about = vec![(ANA.to_string(), "Lisboa".to_string())];
+        let avatar = Some("media/avatars/ana.jpg".to_string());
+        let changes = vec![
+            ("her online", said(Presence::Online)),
+            ("her followed", following(vec![ana])),
+            ("her no longer followed", following(Vec::new())),
+            ("her gone away", said(Presence::Away(Some(AT + 5)))),
+            ("her followed again", following(vec![ana])),
+            ("nobody's presence known", Change::Folders(Step::Unknown)),
+            ("her about text", Change::Folders(Step::About { asked: vec![ANA.into()], about, at: AT + 6 })),
+            (
+                "her filed",
+                Change::Folders(Step::File { folder: family, item: Item::Person(ana), done: Done::default() }),
+            ),
+            ("his one-to-one chat", Change::Chat(Chat { id: RUI.into(), ..Chat::default() })),
+            (
+                "her chat's avatar",
+                Change::Chat(Chat { id: ANA.into(), avatar, avatar_id: Some("1".into()), ..Chat::default() }),
+            ),
+        ];
+        for (what, change) in changes {
+            let pushed = watcher.batches.clone();
+            let seq = bed.apply(vec![change]).await;
+            assert!(seq > last, "{what} wrote nothing");
+            last = seq;
+            watcher.settle(seq).await;
+            for (watch, _) in &watched {
+                assert_eq!(watcher.batches.get(watch), pushed.get(watch), "{what} sent {watch} message rows again");
+            }
+            assert_eq!(versions(&watcher), held, "{what}");
+            check(&bed, &watcher, &watched, what).await;
+        }
+        for (who, n) in [("Ana", ana), ("Rui", rui)] {
+            let (v, roster_v) = bed
+                .store
+                .reads()
+                .query(crate::work::Priority::Interactive, move |db| {
+                    Ok(db.query_row("SELECT v, roster_v FROM people WHERE n = ?1", [n], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                    })?)
+                })
+                .await
+                .unwrap();
+            assert!(roster_v > v, "{who}'s roster row took the changes ({roster_v}) and their v didn't ({v})");
+        }
+
+        // Her new name is in every one of those rows, each sent again with the rename's seq.
+        let renamed = bed.apply(vec![Change::Person(named(ANA, "Ana Ribeiro"))]).await;
+        watcher.settle(renamed).await;
+        assert!(versions(&watcher).values().all(|v| *v == renamed), "{:?}", versions(&watcher));
+        let climbing = &watcher.windows[&watched[1].0];
+        assert_eq!(
+            (&climbing.rows["c2"]["spans"][1]["s"], &climbing.rows["c3"]["reply"]["from"]),
+            (&json!("@Ana Ribeiro"), &json!("Ana Ribeiro"))
+        );
+        check(&bed, &watcher, &watched, "her renamed").await;
+    }
 }
