@@ -396,7 +396,7 @@ fn a_scene_of_jawd_to_be_killed() {
                 running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
                 at(&id);
             }
-            "pinned behind a message" => {
+            "pinned behind a message" | "pinned offline" => {
                 let running = Running::on(home, phone_with_app_state(Ahead::Names), true).await;
                 until_fetched(&running, 1).await;
                 // Ana has no picture, as the avatars looked for once the engine connects find, so
@@ -409,10 +409,12 @@ fn a_scene_of_jawd_to_be_killed() {
                 };
                 running.store.apply(Lane::Live, vec![Change::Chat(pictureless)]).await.unwrap();
                 until_offline(&running).await;
-                running.send(ANA, "on my way").await;
-                // Ana's newer message keeps the one sent from being the chat's newest, whose status
-                // its line shows, so its going later leaves the chat's row as it is.
-                running.arrives(ANA, ANA, "m2", now_ms() + 1_000).await;
+                if scene == "pinned behind a message" {
+                    running.send(ANA, "on my way").await;
+                    // Ana's newer message keeps the one sent from being the chat's newest, whose
+                    // status its line shows, so its going later leaves the chat's row as it is.
+                    running.arrives(ANA, ANA, "m2", now_ms() + 1_000).await;
+                }
                 running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
                 at("pinned");
             }
@@ -4222,7 +4224,9 @@ async fn a_pin_that_goes_while_the_engine_start_fetches_app_state_again_ends_pin
     assert!(pinned.0 > 0, "pinned while WhatsApp couldn't be reached");
     let world = phone_with_app_state(Ahead::Names);
     // The message ahead of the pin waits at WhatsApp until the engine start's full fetch has begun,
-    // so the pin goes while the fetch is still handing over the names ahead of Ana's chat.
+    // so the pin is ready to go while the fetch is still handing over the names ahead of Ana's chat.
+    // It waits for its turn until the fetch has answered: the unpin of an hour ago the fetch brings is
+    // held back, since jaw's pin is still to go, and the pin's echo comes after all the fetch brought.
     world.gate(true);
     let running = Running::on(home.path(), world, true).await;
     running.world.until(|asked| asked.iter().any(|kind| matches!(kind, pb::command::Kind::AppStateResync(_)))).await;
@@ -4234,6 +4238,69 @@ async fn a_pin_that_goes_while_the_engine_start_fetches_app_state_again_ends_pin
         pinned,
         "pinned at jaw's time, unchanged since the pin, the unpin the fetch brought held back"
     );
+    let latest = value_of(&latest_for(&running, ["pin_v1", ANA]));
+    assert_eq!(latest.pin_action, Some(PinAction { pinned: Some(true) }), "and WhatsApp's latest pins it");
+}
+
+/// Whether `patch`'s echo has been kept: still in the inbox, or converted, its value then the latest
+/// for its index.
+fn echo_kept(db: &Connection, patch: &pb::AppStatePatch) -> anyhow::Result<bool> {
+    let key = serde_json::to_string(&patch.index)?;
+    let latest: Option<Vec<u8>> =
+        db.query_row("SELECT value FROM app_state WHERE key = ?1", [&key], |r| r.get(0)).optional()?;
+    if latest.as_ref() == Some(&patch.value) {
+        return Ok(true);
+    }
+    let mut inboxed = db.prepare("SELECT payload FROM inbox WHERE kind = 'app_state'")?;
+    for payload in inboxed.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
+        let state = pb::AppState::decode(payload?.as_slice())?;
+        if (&state.index, &state.value) == (&patch.index, &patch.value) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pin_that_goes_before_the_engine_start_fetches_app_state_again_holds_the_fetch_until_its_echo_is_kept() {
+    let home = tempfile::tempdir().unwrap();
+    crash(home.path(), "pinned offline").await;
+    let pinned = ana_pinned(&Connection::open(home.path().join("jaw.db")).unwrap()).unwrap();
+    assert!(pinned.0 > 0, "pinned while WhatsApp couldn't be reached");
+    let world = phone_with_app_state(Ahead::Names);
+    world.gate_patches(true);
+    let running = Running::timed(home.path(), world, true, false, quick()).await;
+    // WhatsApp can be reached before the engine says it has connected, so the pin goes, and waits at
+    // WhatsApp holding its turn, before the engine start's refresh asks for anything.
+    running.connection(jaw_proto::ConnectionState::Online);
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::AppStatePatch(_)))).await;
+    running.world.deliver(demo::connected()).await.expect("no engine ran to say it connected");
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Groups(_)))).await;
+    // Its contacts and groups asked, the refresh waits for the turn to fetch app state again.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let fetch = |asked: &[pb::command::Kind]| asked.iter().any(|k| matches!(k, pb::command::Kind::AppStateResync(_)));
+    assert!(!fetch(&running.world.asked()), "the start's full fetch was asked while the pin still waited at WhatsApp");
+    running.world.gate_patches(false);
+    running.world.until(fetch).await;
+    let pin = patches_sent(&running).remove(0);
+    let kept = running.query(move |db| echo_kept(db, &pin)).await;
+    assert!(kept, "the start's full fetch was asked before the pin's echo was kept");
+    until_stored(&running).await;
+    until_fetched(&running, 1).await;
+    let order: Vec<&str> = running
+        .world
+        .asked()
+        .iter()
+        .filter_map(|kind| match kind {
+            pb::command::Kind::AppStatePatch(_) => Some("pin"),
+            pb::command::Kind::Contacts(_) => Some("contacts"),
+            pb::command::Kind::Groups(_) => Some("groups"),
+            pb::command::Kind::AppStateResync(_) => Some("full fetch"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, ["pin", "contacts", "groups", "full fetch"], "the refresh asked the rest while the pin waited");
+    assert_eq!(running.query(|db| Ok(ana_pinned(db)?)).await, pinned, "pinned at jaw's time, unchanged since the pin");
     let latest = value_of(&latest_for(&running, ["pin_v1", ANA]));
     assert_eq!(latest.pin_action, Some(PinAction { pinned: Some(true) }), "and WhatsApp's latest pins it");
 }
