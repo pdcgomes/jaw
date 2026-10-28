@@ -65,3 +65,14 @@ struct ControllerSpecimen: NSViewControllerRepresentable {
 
     func updateNSViewController(_: NSViewController, context _: Context) {}
 }
+
+/// A whole window's content at the screen's size, as the window holds it, made from a `Screen`.
+struct ScreenSpecimen: View {
+    let screen: Screen
+    let conditions: Conditions
+
+    var body: some View {
+        ControllerSpecimen { screen.content(conditions) }
+            .frame(width: screen.width, height: screen.height)
+    }
+}

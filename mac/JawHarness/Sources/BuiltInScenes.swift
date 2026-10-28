@@ -10,6 +10,10 @@ enum BuiltInScenes {
         catalog.register(.conversation)
         catalog.register(.palette)
         catalog.register(.states)
+        catalog.register(.screensJawd)
+        catalog.register(.screensConnection)
+        catalog.register(.screensLinking)
+        catalog.register(.screensEmpty)
         return catalog
     }
 }

@@ -45,7 +45,10 @@ func emptyChatList(_ band: Note, width: CGFloat) -> HarnessScene {
 @MainActor
 @Suite(.serialized) struct SceneDrawingTests {
     @Test func `every scene draws as wide as it says, says what to look for, and is named for a script`() async throws {
-        #expect(HarnessCatalog.shared.scenes.map(\.id) == ["roles", "mimic", "chat-list", "conversation", "palette", "states"])
+        #expect(HarnessCatalog.shared.scenes.map(\.id) == [
+            "roles", "mimic", "chat-list", "conversation", "palette", "states",
+            "screens-jawd", "screens-connection", "screens-linking", "screens-empty",
+        ])
         for scene in HarnessCatalog.shared.scenes {
             let drawn = try await Pictures.draw(scene, scene.variants[0].applied(to: Conditions()))
             #expect(drawn.points.width == scene.width + 2 * Space.xxl, "\(scene.id)")
