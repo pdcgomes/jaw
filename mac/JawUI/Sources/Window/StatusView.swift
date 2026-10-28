@@ -14,7 +14,7 @@ public struct StatusView: View {
             .frame(minWidth: 520, minHeight: 420)
     }
 
-    /// The answer as jawd sent it, pretty-printed with its keys in order.
+    /// The answer as jawd sent it, pretty-printed, its keys sorted.
     static func text(_ status: Status) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

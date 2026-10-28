@@ -37,7 +37,7 @@ After a sweep, the review canvas, `.atelier/mac-harness.canvas.tsx`, shows each 
 
 Its options: `--scene <id>`, `--theme <id>`, `--appearance dark|light`, `--look bubbles|lines`, `--density comfortable|compact`, `--text-size <11…17>`, `--font system|mono`, `--reduce-motion`, `--window <width>x<height>`, `--stage-only`, `--snapshot <png>` and `--sweep <folder>`.
 
-To add a component, write a scene in `JawHarness/Sources/Scenes/` and register it in `BuiltInScenes.swift`. `scripts/check-harness`, which every build runs, fails if the harness names `Jawd`, or JawKit's `Client`, which opens jawd's socket itself.
+To add a component, write a scene in `JawHarness/Sources/Scenes/` and register it in `BuiltInScenes.swift`. `scripts/check-harness`, which every build runs, fails if the harness names `Jawd`, or JawKit's `Client`, which opens jawd's socket itself, or if the app target defines a view or a view controller of its own, which belongs in `JawUI`, where the harness can draw it from values.
 
 ## How the interface is put together
 
