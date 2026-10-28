@@ -259,11 +259,25 @@ const ASK_AGAIN: &str = "UPDATE media SET state = 'remote', wanted = iif(wanted 
     WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone' AND retried_at = ?3";
 const ASK_REFUSED: &str = "UPDATE media SET state = 'expired', error = ?4
     WHERE message = ?1 AND variant = ?2 AND state = 'waiting_for_phone' AND retried_at = ?3";
+/// The phone uploaded the file again: it's downloaded from there, and no ask waits for an answer,
+/// so a late "no file" to an earlier one leaves the copy to be downloaded (NO_FILE).
 const UPLOADED: &str = "UPDATE media SET direct_path = ?2, state = 'remote', error = NULL,
-        wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 1
+        wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 1, retried_at = NULL
     WHERE message = ?1 AND variant = 'sd'
         AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.sha256 = media.sha256 AND f.path IS NOT NULL)";
-const NOT_UPLOADED: &str = "UPDATE media SET state = ?2, error = ?3
+/// The phone no longer has the file: the copy is gone and nothing wants it, so no job takes it again
+/// to ask the phone again. That's a copy waiting for the answer, one a later job downloads
+/// meanwhile, and one wanted again since it was asked for: by a start, which wants again what a
+/// stopped jawd left waiting, whose answer that jawd may have acked and not converted; or as the
+/// phone couldn't be asked again then.
+const NO_FILE: &str = "UPDATE media SET state = 'gone', error = ?2, wanted = NULL, asked = 0, arrived = 0,
+        progress = NULL
+    WHERE message = ?1 AND variant = 'sd' AND (state IN ('waiting_for_phone', 'downloading')
+        OR state = 'remote' AND wanted IS NOT NULL AND retried_at IS NOT NULL)";
+/// The phone couldn't upload the file again, or its answer couldn't be read: a copy waiting for the
+/// answer, or one a later job downloads meanwhile, is expired, saying why; one still wanted is
+/// tried again, which asks the phone again.
+const COULDNT: &str = "UPDATE media SET state = 'expired', error = ?2
     WHERE message = ?1 AND variant = 'sd' AND state IN ('waiting_for_phone', 'downloading')";
 const WANT: &str = "UPDATE media SET wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = max(asked, ?4),
         error = iif(?4, NULL, error), cancelled = iif(?4, 0, cancelled)
@@ -453,9 +467,9 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
                 Answer::Uploaded(path) => one(db, stamps, n, db.prepare_cached(UPLOADED)?, params![n, path, at]),
                 Answer::NotFound => {
                     let why = "your phone no longer has this file, so it can't send it again";
-                    one(db, stamps, n, db.prepare_cached(NOT_UPLOADED)?, params![n, "gone", why])
+                    one(db, stamps, n, db.prepare_cached(NO_FILE)?, params![n, why])
                 }
-                Answer::Failed(why) => one(db, stamps, n, db.prepare_cached(NOT_UPLOADED)?, params![n, "expired", why]),
+                Answer::Failed(why) => one(db, stamps, n, db.prepare_cached(COULDNT)?, params![n, why]),
             }
         }
         Step::Want { message, variant, at, asked } => {

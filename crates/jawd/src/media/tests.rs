@@ -15,6 +15,7 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 
 use super::*;
 use crate::engine::demo::{self, DemoEngine, Phone, Picture, World};
+use crate::engine::pb::media_retried::Result as PhoneSaid;
 use crate::engine::supervisor::{Backoff, Supervisor};
 use crate::store::{Change, Lane, Message, read};
 
@@ -2388,4 +2389,371 @@ fn preparing_the_cache_beside_a_link_thumbnail_never_fails() {
         other.join().unwrap();
     }
     assert!(failed.is_empty(), "{} of 300 starts failed: {:?}", failed.len(), failed.first());
+}
+
+/// The audit's K4: the owner opens a photo the phone was asked for and hasn't answered yet; the
+/// first ask's "no file" then comes while the second job downloads. The copy ends as the phone said,
+/// without the phone being asked again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_to_an_earlier_ask_while_a_later_job_downloads_is_kept() {
+    let rig = rig(Config { phone_wait: Duration::from_secs(600), downloads: 1, ..quick() }).await;
+    let lake = Picture::lake(640, 480);
+    rig.world.expire(&lake.direct_path);
+    rig.world.phone(Phone::Silent);
+    rig.photo(&lake, ANA, ANA, "3EB0LATE").await;
+    rig.until(ANA, "3EB0LATE", "waiting for the phone", |row| row["media"]["state"] == "waiting_for_phone").await;
+    // The one download worker is held by another photo's download, so the second job's download
+    // waits in the lane, its copy downloading, as the first ask's answer comes.
+    rig.world.gate_downloads(true);
+    let blocker = Picture::lake(512, 384);
+    rig.photo(&blocker, RUI, RUI, "3EB0BLOCKER").await;
+    rig.until(RUI, "3EB0BLOCKER", "half downloaded", half).await;
+    rig.call("media.fetch", json!({ "message": "3EB0LATE" })).await.unwrap();
+    rig.until(ANA, "3EB0LATE", "downloading again", |row| row["media"]["state"] == "downloading").await;
+    rig.world.deliver(answer("3EB0LATE", PhoneSaid::NotFound, "")).await.unwrap();
+    rig.converted("3EB0AFTER3").await;
+    let between = rig.row(ANA, "3EB0LATE").await;
+    rig.world.gate_downloads(false);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let after = rig.row(ANA, "3EB0LATE").await;
+    let asks = rig.world.asked().iter().filter(|k| matches!(k, pb::command::Kind::MediaRetry(_))).count();
+    assert_eq!(after["media"]["state"], "gone", "between {}; after {}", between["media"], after["media"]);
+    assert_eq!(asks, 1, "the phone asked once");
+}
+
+/// The audit's K1: the phone's answer that it has no file, acked into the inbox before a stop and not
+/// yet converted, meets the next start, which wants the copy again; the phone is off by then.
+/// `ahead` inbox rows wait before the answer; `media_first` starts media before sync, as the rig
+/// does, rather than after, as main.rs does. Says how the copy ended and how often the phone was
+/// asked after the start.
+fn answer_left_in_the_inbox(ahead: usize, media_first: bool) -> (String, Option<String>, usize) {
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let lake = Picture::lake(640, 480);
+    as_a_jawd(async {
+        let store = Store::open(home.path()).unwrap();
+        crate::sync::running(&store).await.unwrap();
+        let event = World::default().photo(&lake, ANA, ANA, "3EB0LEFT", now_ms(), "");
+        let Some(pb::event::Kind::Message(message)) = event.kind else { unreachable!() };
+        let web = crate::convert::web_message(&message).unwrap();
+        let me = crate::convert::Me::new([demo::ME.to_string()]);
+        store.apply(Lane::Live, crate::convert::message(&web, &me, true)).await.unwrap();
+        let (n, wanted): (i64, i64) = store
+            .reads()
+            .query(Priority::Interactive, |db| {
+                Ok(db.query_row("SELECT message, wanted FROM media", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+            })
+            .await
+            .unwrap();
+        let downloading = Step::Downloading { message: n, variant: "sd" };
+        let asked = Step::AskedPhone { message: n, variant: "sd", wanted, at: now_ms() };
+        store.apply(Lane::Live, vec![Change::Media(downloading), Change::Media(asked)]).await.unwrap();
+        for k in 0..ahead {
+            let text = demo::text(ANA, ANA, &format!("3EB0AHEAD{k:05}"), now_ms(), "ahead of the answer");
+            let Some(pb::event::Kind::Message(m)) = text.kind else { unreachable!() };
+            store.inbox("message", now_ms(), m.encode_to_vec(), None);
+        }
+        let answer = pb::MediaRetried {
+            id: "3EB0LEFT".into(),
+            chat: ANA.into(),
+            result: PhoneSaid::NotFound as i32,
+            timestamp_ms: now_ms(),
+            ..Default::default()
+        };
+        store.inbox("media_retry", now_ms(), answer.encode_to_vec(), None);
+        for _ in 0..4_000 {
+            if store.count("inbox").unwrap() as usize == ahead + 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(store.count("inbox").unwrap() as usize, ahead + 1, "the answer waits in the inbox");
+    });
+    as_a_jawd(async {
+        let store = Store::open(home.path()).unwrap();
+        crate::sync::running(&store).await.unwrap();
+        let engine = DemoEngine::with(vec![demo::connected()]);
+        let world = engine.world();
+        world.phone(Phone::Silent);
+        let _ = world.photo(&lake, ANA, ANA, "3EB0LEFT", now_ms(), "");
+        world.expire(&lake.direct_path);
+        let (events, incoming) = mpsc::channel(1024);
+        let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
+        let live: crate::sync::Shared = Arc::default();
+        let (pushes, _) = broadcast::channel(256);
+        let pipeline = jaw_media::Media::new(jaw_media::Config {
+            previews: jaw_media::Durability::Derived,
+            ..jaw_media::Config::default()
+        });
+        let sync = crate::sync::run(
+            incoming,
+            store.clone(),
+            live.clone(),
+            pushes.clone(),
+            Some(supervisor.clone()),
+            home.path().to_path_buf(),
+            Default::default(),
+        );
+        let config = Config { phone_wait: Duration::from_secs(60), ..quick() };
+        let _media = if media_first {
+            let media = Media::start_with(
+                store.clone(),
+                Some(supervisor.clone()),
+                home.path(),
+                &live,
+                &pushes,
+                config,
+                pipeline,
+            )
+            .await
+            .unwrap();
+            tokio::spawn(sync);
+            media
+        } else {
+            tokio::spawn(sync);
+            Media::start_with(store.clone(), Some(supervisor.clone()), home.path(), &live, &pushes, config, pipeline)
+                .await
+                .unwrap()
+        };
+        let read = || {
+            let reads = store.reads().clone();
+            async move {
+                reads
+                    .query(Priority::Interactive, |db| {
+                        Ok(db.query_row("SELECT state, error FROM media", [], |r| {
+                            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                        })?)
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+        let mut last = read().await;
+        for _ in 0..1_500 {
+            last = read().await;
+            if !matches!(last.0.as_str(), "remote" | "downloading") && store.count("inbox").unwrap() == 0 {
+                tokio::time::sleep(Duration::from_millis(1_500)).await;
+                last = read().await;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let asks = world.asked().iter().filter(|k| matches!(k, pb::command::Kind::MediaRetry(_))).count();
+        (last.0, last.1, asks)
+    })
+}
+
+#[test]
+fn an_answer_left_in_the_inbox_at_a_stop_is_kept_when_media_starts_first() {
+    let (state, error, asks) = answer_left_in_the_inbox(0, true);
+    assert_eq!(state, "gone", "{error:?}, asked again {asks} times");
+}
+
+#[test]
+fn an_answer_left_in_the_inbox_at_a_stop_is_kept_when_sync_starts_first() {
+    let (state, error, asks) = answer_left_in_the_inbox(0, false);
+    assert_eq!(state, "gone", "{error:?}, asked again {asks} times");
+}
+
+#[test]
+fn an_answer_left_behind_a_backlog_at_a_stop_is_kept_when_sync_starts_first() {
+    let (state, error, asks) = answer_left_in_the_inbox(2_000, false);
+    assert_eq!(state, "gone", "{error:?}, asked again {asks} times");
+}
+
+/// An answer from the phone, as the engine hands it over.
+fn answer(id: &str, result: PhoneSaid, direct_path: &str) -> pb::Event {
+    pb::Event {
+        seq: 0,
+        kind: Some(pb::event::Kind::MediaRetried(pb::MediaRetried {
+            id: id.into(),
+            chat: ANA.into(),
+            result: result as i32,
+            direct_path: direct_path.into(),
+            timestamp_ms: now_ms(),
+            ..Default::default()
+        })),
+    }
+}
+
+impl Rig {
+    /// Waits until everything delivered before now is converted: a text after it is in.
+    async fn converted(&self, after: &str) {
+        self.world.deliver(demo::text(ANA, ANA, after, now_ms(), "after")).await.unwrap();
+        self.until(ANA, after, "converted", |row| !row.is_null()).await;
+    }
+}
+
+/// The audit's K3: answers delivered twice, and an old one after a newer: each copy stays as the
+/// phone first said, nothing downloads twice, and nothing's version moves.
+#[tokio::test(flavor = "multi_thread")]
+async fn answers_twice_or_late_change_nothing() {
+    let rig = rig(Config { phone_wait: Duration::from_secs(600), ..quick() }).await;
+    let lost = Picture::lake(640, 480);
+    rig.world.expire(&lost.direct_path);
+    rig.world.phone(Phone::Lost);
+    rig.photo(&lost, ANA, ANA, "3EB0LOSTTWICE").await;
+    rig.until(ANA, "3EB0LOSTTWICE", "gone", |row| {
+        row["media"]["state"] == "gone" && row["media"]["thumbnail"].is_string()
+    })
+    .await;
+    rig.until_nothing_wanted("settled").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let row = rig.row(ANA, "3EB0LOSTTWICE").await;
+    rig.world.deliver(answer("3EB0LOSTTWICE", PhoneSaid::NotFound, "")).await.unwrap();
+    rig.world.deliver(answer("3EB0LOSTTWICE", PhoneSaid::GeneralError, "")).await.unwrap();
+    rig.converted("3EB0AFTER1").await;
+    let again = rig.row(ANA, "3EB0LOSTTWICE").await;
+    assert_eq!((&again["media"], &again["v"]), (&row["media"], &row["v"]), "a second answer changes nothing");
+
+    rig.world.phone(Phone::Uploads);
+    let up = Picture::lake(320, 240);
+    rig.world.expire(&up.direct_path);
+    rig.photo(&up, ANA, ANA, "3EB0UPTWICE").await;
+    rig.until(ANA, "3EB0UPTWICE", "downloaded", previewed).await;
+    rig.until_nothing_wanted("settled").await;
+    let row = rig.row(ANA, "3EB0UPTWICE").await;
+    let downloads = rig.world.downloads();
+    rig.world.deliver(answer("3EB0UPTWICE", PhoneSaid::Success, "/v/t62/again-and-again")).await.unwrap();
+    rig.world.deliver(answer("3EB0UPTWICE", PhoneSaid::NotFound, "")).await.unwrap();
+    rig.converted("3EB0AFTER2").await;
+    rig.until_nothing_wanted("nothing wanted again").await;
+    let again = rig.row(ANA, "3EB0UPTWICE").await;
+    assert_eq!(rig.world.downloads(), downloads, "no second download");
+    assert_eq!((&again["media"], &again["v"]), (&row["media"], &row["v"]), "a late answer changes nothing");
+}
+
+/// The audit's K5: arrivals, history windows show and an interface's asks, all at once, some
+/// sharing a file: every file downloads once, and every copy is done.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_file_downloads_once_whatever_wants_it() {
+    let rig = rig(quick()).await;
+    rig.world.gate_downloads(true);
+    let history: Vec<Picture> = (0..12).map(|n| Picture::lake(300 + n, 200)).collect();
+    for (k, picture) in history.iter().enumerate() {
+        rig.photo_from_history(picture, &format!("3EB0HIST{k}A")).await;
+        rig.photo_from_history(picture, &format!("3EB0HIST{k}B")).await;
+    }
+    for k in 0..12 {
+        rig.row(ANA, &format!("3EB0HIST{k}A")).await;
+        rig.row(ANA, &format!("3EB0HIST{k}B")).await;
+    }
+    let arriving: Vec<Picture> = (0..10).map(|n| Picture::lake(500 + n, 400)).collect();
+    for (k, picture) in arriving.iter().enumerate() {
+        rig.photo(picture, RUI, RUI, &format!("3EB0LIVE{k}")).await;
+    }
+    for (k, picture) in history.iter().take(10).enumerate() {
+        rig.photo(picture, RUI, RUI, &format!("3EB0SAME{k}")).await;
+    }
+    for k in [0, 3, 7] {
+        rig.call("media.fetch", json!({ "message": format!("3EB0HIST{k}A") })).await.unwrap();
+    }
+    for k in [1, 4] {
+        rig.call("media.fetch", json!({ "message": format!("3EB0LIVE{k}") })).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    rig.world.gate_downloads(false);
+    rig.until_nothing_wanted("everything done").await;
+    let mut not_local = Vec::new();
+    for k in 0..12 {
+        for side in ["A", "B"] {
+            let id = format!("3EB0HIST{k}{side}");
+            if !local(&rig.row(ANA, &id).await) {
+                not_local.push(id);
+            }
+        }
+    }
+    for k in 0..10 {
+        for id in [format!("3EB0LIVE{k}"), format!("3EB0SAME{k}")] {
+            if !local(&rig.row(RUI, &id).await) {
+                not_local.push(id);
+            }
+        }
+    }
+    assert!(not_local.is_empty(), "{not_local:?}");
+    assert_eq!(rig.world.downloads(), 22, "each of the 22 files once");
+}
+
+/// A photo at the store, as it arrived live, with the copy its message brings; its n and its want.
+async fn stored_photo(store: &Store, id: &str, sha256: u8) -> (i64, i64) {
+    let message = Message {
+        chat: ANA.into(),
+        id: id.into(),
+        at: 1,
+        sender: Some(ANA.into()),
+        kind: "image",
+        summary: "Photo".into(),
+        live: true,
+        media: Some(Box::new(crate::store::media::MediaCopy { sha256: Some(vec![sha256; 32]), ..Default::default() })),
+        ..Message::default()
+    };
+    store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+    store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            Ok(db.query_row("SELECT message, wanted FROM media", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        })
+        .await
+        .unwrap()
+}
+
+/// The audit's K1b, K1 at the store: a start wants again a copy waiting for the phone, whose "no
+/// file" answer waits in the inbox, converted after: the copy ends as the phone said, wanted by
+/// nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_converted_after_a_start_wanted_its_copy_again_still_settles_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (n, wanted) = stored_photo(&store, "3EB0RESTART", 5).await;
+    let steps = [
+        Step::Downloading { message: n, variant: "sd" },
+        Step::AskedPhone { message: n, variant: "sd", wanted, at: now_ms() },
+        Step::Restarted { at: now_ms() },
+        Step::Answered {
+            chat: ANA.into(),
+            id: "3EB0RESTART".into(),
+            answer: crate::store::media::Answer::NotFound,
+            at: now_ms(),
+        },
+    ];
+    for step in steps {
+        store.apply(Lane::Live, vec![Change::Media(step)]).await.unwrap();
+    }
+    let (state, wanted): (String, Option<i64>) = store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            Ok(db.query_row("SELECT state, wanted FROM media", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!((state.as_str(), wanted), ("gone", None), "the phone's answer, converted after the start");
+}
+
+/// The phone uploads a file again, and a "no file" to an earlier ask is converted after that answer,
+/// before the upload is downloaded: an upload answers every ask before it, so the copy is still
+/// downloaded from where the phone uploaded it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_no_file_after_the_phone_uploaded_the_file_leaves_it_to_be_downloaded() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (n, wanted) = stored_photo(&store, "3EB0UPLOADED", 6).await;
+    let answered = |answer| Step::Answered { chat: ANA.into(), id: "3EB0UPLOADED".into(), answer, at: now_ms() };
+    let steps = [
+        Step::Downloading { message: n, variant: "sd" },
+        Step::AskedPhone { message: n, variant: "sd", wanted, at: now_ms() },
+        answered(crate::store::media::Answer::Uploaded("/v/t62/uploaded-again".into())),
+        answered(crate::store::media::Answer::NotFound),
+    ];
+    for step in steps {
+        store.apply(Lane::Live, vec![Change::Media(step)]).await.unwrap();
+    }
+    let (state, wanted, path): (String, Option<i64>, Option<String>) = store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            Ok(db.query_row("SELECT state, wanted, direct_path FROM media", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!((state.as_str(), wanted.is_some(), path.as_deref()), ("remote", true, Some("/v/t62/uploaded-again")));
 }

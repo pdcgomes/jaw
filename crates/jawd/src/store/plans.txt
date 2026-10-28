@@ -2441,13 +2441,17 @@ UPDATE media SET state = 'expired', error = ?4 WHERE message = ?1 AND variant = 
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
-UPDATE media SET direct_path = ?2, state = 'remote', error = NULL, wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 1 WHERE message = ?1 AND variant = 'sd' AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.sha256 = media.sha256 AND f.path IS NOT NULL)
+UPDATE media SET direct_path = ?2, state = 'remote', error = NULL, wanted = iif(wanted IS NULL, ?3, max(?3, wanted + 1)), asked = 1, retried_at = NULL WHERE message = ?1 AND variant = 'sd' AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.sha256 = media.sha256 AND f.path IS NOT NULL)
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
     CORRELATED SCALAR SUBQUERY 1
       SEARCH f USING PRIMARY KEY (sha256=?)
 
 -- src/store/write/media.rs
-UPDATE media SET state = ?2, error = ?3 WHERE message = ?1 AND variant = 'sd' AND state IN ('waiting_for_phone', 'downloading')
+UPDATE media SET state = 'gone', error = ?2, wanted = NULL, asked = 0, arrived = 0, progress = NULL WHERE message = ?1 AND variant = 'sd' AND (state IN ('waiting_for_phone', 'downloading') OR state = 'remote' AND wanted IS NOT NULL AND retried_at IS NOT NULL)
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/media.rs
+UPDATE media SET state = 'expired', error = ?2 WHERE message = ?1 AND variant = 'sd' AND state IN ('waiting_for_phone', 'downloading')
     SEARCH media USING PRIMARY KEY (message=? AND variant=?)
 
 -- src/store/write/media.rs
