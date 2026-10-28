@@ -11,27 +11,36 @@ import SwiftUI
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let model: AppModel
-    let split = NSSplitViewController()
-    let sidebar = SidebarController()
-    let chatList: ChatListController
-    let detail = DetailController()
+    let content: WindowContent
+    var sidebar: SidebarController {
+        content.sidebar
+    }
+
+    var chatList: ChatListController {
+        content.chatList
+    }
+
+    var detail: DetailController {
+        content.detail
+    }
+
+    var bar: BottomBar {
+        content.bar
+    }
+
     let palette = PalettePanel()
-    var bar: BottomBar!
     var editorSheet: NSWindow?
     var sidebarToggle: IconButton?
     var status: NSHostingView<StatusLine> {
         bar.status
     }
-    var sidebarItem: NSSplitViewItem!
-    var listItem: NSSplitViewItem!
     var displayLink: CADisplayLink?
     var settings: NSWindow?
-    /// The sidebar's and the chat list's folding before focus mode, to put back.
-    var beforeFocus: (Bool, Bool)?
 
     init(model: AppModel) {
         self.model = model
-        chatList = ChatListController(folder: model.folder, roles: model.roles)
+        content = WindowContent(sidebar: SidebarController(), chatList: ChatListController(folder: model.folder, roles: model.roles),
+                                detail: DetailController(), bar: BottomBar(commands: { [weak model] in model?.allCommands ?? [] }))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
@@ -44,39 +53,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
 
-        sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        sidebarItem.minimumThickness = 180
-        sidebarItem.maximumThickness = 280
-        sidebarItem.canCollapseFromWindowResize = true
-        listItem = NSSplitViewItem(contentListWithViewController: chatList)
-        listItem.minimumThickness = 260
-        listItem.maximumThickness = 420
-        let detailItem = NSSplitViewItem(viewController: detail)
-        detailItem.minimumThickness = 360
-        split.addSplitViewItem(sidebarItem)
-        split.addSplitViewItem(listItem)
-        split.addSplitViewItem(detailItem)
-        split.splitView.autosaveName = "jaw.split"
-
-        let root = NSViewController()
-        let content = NSView()
-        root.view = content
-        bar = BottomBar(commands: { [weak model] in model?.allCommands ?? [] })
-        root.addChild(split)
-        for v in [split.view, bar!] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            content.addSubview(v)
-        }
-        NSLayoutConstraint.activate([
-            split.view.topAnchor.constraint(equalTo: content.topAnchor),
-            split.view.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            split.view.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            split.view.bottomAnchor.constraint(equalTo: bar.topAnchor),
-            bar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            bar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-        ])
-        window.contentViewController = root
+        window.contentViewController = content
         if window.frame.origin == .zero { window.center() }
 
         // The sidebar's button beside the window's, in the title bar as an accessory: a toolbar
@@ -118,7 +95,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             return Menus.menu(ChatMenu.splits) { id in model.command(id) }
         }
 
-        let link = content.displayLink(target: self, selector: #selector(frame(_:)))
+        let link = content.view.displayLink(target: self, selector: #selector(frame(_:)))
         link.isPaused = true
         link.add(to: .main, forMode: .common)
         displayLink = link
@@ -146,30 +123,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - What it shows
 
     func refresh() {
-        let state = model.stateLine
-        status.rootView = StatusLine(state: state?.0, warn: state?.1 ?? false, chat: model.chatLine, needs: model.needs, roles: model.roles,
-                                     open: { [weak model] c in model?.open(c, opened: true) },
-                                     glance: { [weak self] in self?.showGlance() })
-        if case let .linking(step, loggedOut) = model.stateView {
-            detail.showLinking(step: step, loggedOut: loggedOut, roles: model.roles,
-                               start: { [weak model] phone in model?.jawd.linkStart(phone: phone) },
-                               cancel: { [weak model] in model?.jawd.linkCancel() })
-        } else if let kind = model.stateView {
-            detail.show(state: kind, roles: model.roles)
-        } else {
-            showPanes()
-        }
+        content.show(model.situation, chats: chatList.all, focused: model.conversation?.chat, panes: panesShown, roles: model.roles,
+                     now: Date(), actions: WindowContent.Actions(
+                         open: { [weak model] c in model?.open(c, opened: true) },
+                         glance: { [weak self] in self?.showGlance() },
+                         linkStart: { [weak model] phone in model?.jawd.linkStart(phone: phone) },
+                         linkCancel: { [weak model] in model?.jawd.linkCancel() },
+                     ))
     }
 
-    /// Lays the panes out as the model's layout has them, the focused one outlined.
-    func showPanes() {
-        guard let grid = model.grid, model.stateView == nil else { return }
+    /// The panes as the model's layout has them, the focused one outlined, or nil with no layout.
+    var panesShown: WindowContent.Panes? {
+        guard let grid = model.grid else { return nil }
         var views: [Int: NSView] = [:]
         for slot in grid.slots {
             if let chat = slot.chat, let c = model.panes[chat] { views[slot.id] = c.view }
         }
-        detail.show(panes: grid, views: views, focused: model.focusedSlot, box: model.conversation?.composer.view, roles: model.roles,
-                    look: model.preferences.paneLook(model.roles))
+        return WindowContent.Panes(grid: grid, views: views, focused: model.focusedSlot, box: model.conversation?.composer.view,
+                                   look: model.preferences.paneLook(model.roles))
+    }
+
+    /// Lays the panes out as the model's layout has them, the focused one outlined.
+    func showPanes() {
+        guard let panes = panesShown, model.stateView == nil else { return }
+        detail.show(panes: panes.grid, views: panes.views, focused: panes.focused, box: panes.box, roles: model.roles, look: panes.look)
     }
 
     func restyle() {
@@ -182,29 +159,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func toggleChatList() {
-        listItem.animator().isCollapsed.toggle()
+        content.toggleChatList()
     }
 
     func toggleSidebar() {
-        sidebarItem.animator().isCollapsed.toggle()
+        content.toggleSidebar()
     }
 
     /// Focus mode: the sidebar and the chat list fold away for the focused pane, and come back.
     func focusMode(_ on: Bool) {
-        if on {
-            beforeFocus = (sidebarItem.isCollapsed, listItem.isCollapsed)
-            sidebarItem.animator().isCollapsed = true
-            listItem.animator().isCollapsed = true
-        } else {
-            sidebarItem.animator().isCollapsed = beforeFocus?.0 ?? false
-            listItem.animator().isCollapsed = beforeFocus?.1 ?? false
-        }
+        content.focusMode(on)
     }
 
     func windowDidResize(_: Notification) {
-        guard let width = window?.frame.width, !model.focusMode else { return }
-        sidebarItem.animator().isCollapsed = width < 960
-        listItem.animator().isCollapsed = width < 740 && model.conversation != nil
+        content.fold(chatOpen: model.conversation != nil)
     }
 
     func windowDidBecomeKey(_: Notification) {
@@ -342,7 +310,7 @@ extension MainWindowController {
         if let item = NSApp.mainMenu?.item(withTitle: MenuPlace.layouts.rawValue) {
             item.submenu = Menus.menu(commands, title: MenuPlace.layouts.rawValue)
         }
-        bar?.show(layout: model.book.current ?? "Unsaved Panes", edited: model.book.isEdited)
+        bar.show(layout: model.book.current ?? "Unsaved Panes", edited: model.book.isEdited)
     }
 
     /// Asks for a name, in a sheet that takes the keys at once: Return saves, Esc cancels.
