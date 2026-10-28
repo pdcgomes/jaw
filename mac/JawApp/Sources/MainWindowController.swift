@@ -39,36 +39,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         content = WindowContent(sidebar: SidebarController(), chatList: ChatListController(folder: model.folder, roles: model.roles),
                                 detail: DetailController(), bar: BottomBar(commands: { [weak model] in model?.allCommands ?? [] }),
                                 autosaveName: "jaw.split")
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780), styleMask: TitleBar.style,
                               backing: .buffered, defer: false)
         window.title = "Jaw"
         window.minSize = NSSize(width: 520, height: 420)
         window.setFrameAutosaveName("jaw")
-        window.titlebarAppearsTransparent = true
-        // No toolbar: its controls are in the bottom bar, so every pane has the window's height.
-        window.titleVisibility = .hidden
         super.init(window: window)
         window.delegate = self
 
         window.contentViewController = content
         if window.frame.origin == .zero { window.center() }
 
-        // The sidebar's button beside the window's, in the title bar as an accessory: a toolbar
-        // would make the title bar taller and take the clicks of the panes' headers under it.
-        let toggle = IconButton(symbol: "sidebar.left", label: "Show or fold the sidebar", shortcut: Shortcut("b"), tone: .secondary)
-        { [weak self] in self?.toggleSidebar() }
-        sidebarToggle = toggle
-        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 34, height: 28))
-        holder.addSubview(toggle)
-        NSLayoutConstraint.activate([
-            toggle.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: Space.xs),
-            toggle.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
-        ])
-        let accessory = NSTitlebarAccessoryViewController()
-        accessory.view = holder
-        accessory.layoutAttribute = .leading
-        window.addTitlebarAccessoryViewController(accessory)
+        sidebarToggle = TitleBar.dress(window) { [weak self] in self?.toggleSidebar() }
 
 
         sidebar.picked = { [weak model] folder in model?.pick(folder: folder.id) }
