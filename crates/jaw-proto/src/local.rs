@@ -30,8 +30,8 @@ pub fn socket(home: &Path) -> PathBuf {
 
 /// The first of `paths`, each relative to the folder of the program running, that's a file: from
 /// where the program really is, once links such as Homebrew's bin/ are followed, then from where
-/// it was started. It's how jaw finds jawd and jawd its engine, as `make install` and cargo lay
-/// them out.
+/// it was started. It's how jaw finds jawd and jawd its engine, as `make install`, cargo and Jaw.app's
+/// Contents/Helpers/ lay them out.
 pub fn beside(paths: &[&str]) -> Option<PathBuf> {
     beside_program(&std::env::current_exe().ok()?, paths)
 }
@@ -83,6 +83,17 @@ mod tests {
         assert_eq!(real(beside_program(&jawd, &ENGINE)), real(Some(dir.path().join("target/engine/jaw-engine"))));
         file(&dir.path().join("target/debug/jaw-engine"));
         assert_eq!(real(beside_program(&jawd, &ENGINE)), real(Some(dir.path().join("target/debug/jaw-engine"))));
+    }
+
+    #[test]
+    fn in_the_mac_apps_helpers_jaw_finds_jawd_and_jawd_the_engine_beside_them_as_make_mac_bundles_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let helpers = dir.path().join("Jaw.app/Contents/Helpers");
+        for program in ["jaw", "jawd", "jaw-engine"] {
+            file(&helpers.join(program));
+        }
+        assert_eq!(real(beside_program(&helpers.join("jawd"), &ENGINE)), real(Some(helpers.join("jaw-engine"))));
+        assert_eq!(real(beside_program(&helpers.join("jaw"), &["jawd"])), real(Some(helpers.join("jawd"))));
     }
 
     #[test]

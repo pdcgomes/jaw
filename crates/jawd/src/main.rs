@@ -345,10 +345,10 @@ fn engine(kind: EngineKind, home: &Path) -> Chosen {
     }
 }
 
-/// Where jaw-engine is: `JAW_ENGINE` if set; beside jawd, in libexec/jaw/ beside jawd's folder as
-/// `make install` and Homebrew put it, or in target/engine/ when jawd runs from a checkout's
-/// target/, each looked for from where jawd really is; then as `GoEngine::find` looks, which
-/// ends on PATH.
+/// Where jaw-engine is: `JAW_ENGINE` if set; beside jawd, as in Jaw.app's Contents/Helpers/, in
+/// libexec/jaw/ beside jawd's folder as `make install` and Homebrew put it, or in target/engine/
+/// when jawd runs from a checkout's target/, each looked for from where jawd really is; then as
+/// `GoEngine::find` looks, which ends on PATH.
 fn engine_program() -> Option<std::path::PathBuf> {
     if std::env::var_os("JAW_ENGINE").is_some() {
         return GoEngine::find();
