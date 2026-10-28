@@ -126,7 +126,7 @@ Both interfaces already send `chat.pin`, `chat.archive`, `chat.mute` and `chat.m
 
 ### 3.3 Links and polls
 
-The Mac's cards for link previews and polls already draw what jawd will send. Once `m2-content` lands, they're checked against real rows; voting by clicking an option (`poll.vote`) comes in this step, beside the terminal's number keys; and links come into the palette's answers and the library (2.4). When the terminal sends `poll.vote`, the check queues it here.
+Since `m2-content` landed on 28 October (6c1c81f), jawd sends link previews both ways, keeps every link for the palette's answers and the library, counts polls' tallies, and serves `send.poll` and `poll.vote`. The Mac's cards for link previews and polls already draw what it sends, so this step checks them against real rows, adds voting by clicking an option, beside the terminal's number keys, and brings links into the palette's answers; the library's come with 2.4, and the poll form with the box's B3. When the terminal sends `poll.vote`, the check queues it here.
 
 ### 3.4 Failure states
 
@@ -147,6 +147,13 @@ Since `settings` landed on 27 October (ebbd905), the terminal's settings are jaw
 ### 3.7 Assistants and the catch-up
 
 After the first release: Settings › Assistants with [M9](2026-10-27-jaw-mcp-design.md)'s second stage, beside the terminal's `jaw mcp grant` and its palette's Assistants; and the catch-up's panel with M11.
+
+### 3.8 Invitations, and what jaw couldn't show
+
+Since `unknown-kinds` landed on 28 October (7f8fc11), jawd shows most of what it called "jaw can't show this yet": history's community and group events come as system lines in jawd's words, which the Mac draws already, and invitations to join a group or follow a channel come as a kind of their own, `invite`, with the group's or channel's name and when it runs out. The terminal draws an invitation by the summary jawd gives it ("Invitation to join Lisbon"); the Mac reads the kind as one it can't show.
+
+- **The Mac's:** JawKit's rows take `invite`, and the conversation draws it as a card in both looks: what it invites to, the group's or channel's name, and when it expires.
+- **The check:** nothing, since it's a kind and not a request; the parity canvas carries it.
 
 ## Phase 4 · The Mac's own, after the gaps
 

@@ -25,8 +25,8 @@ These need nothing more than their branches, and are listed so nothing drops.
   - a document's type, name, size and pages, with Enter opening it once media in lands;
   - a place's name, address and coordinates, with Enter opening it on a map in the browser, and a live location saying until when;
   - a contact's name and numbers, with Enter starting a chat with the number (`chat.start`);
-  - a link preview's title, two lines of its description and its host, its thumbnail drawn as a picture where the terminal draws them, once `m2-content` lands.
-- **Polls,** as the design has them: each option's bar and count, the voters, your choice ticked, and number keys to vote (`poll.vote`, with `m2-content`). On a selected poll the numbers vote rather than react, and + still reacts.
+  - a link preview's title, two lines of its description and its host, its thumbnail drawn as a picture where the terminal draws them, which jawd sends since `m2-content` landed (6c1c81f).
+- **Polls,** as the design has them: each option's bar and count, the voters, your choice ticked, and number keys to vote (`poll.vote`, which jawd serves since `m2-content` landed). On a selected poll the numbers vote rather than react, and + still reacts.
 - **View-once:** "Photo, view once · open it on your phone", as the Mac says it, and never forwarded.
 - **Emoji after a colon,** as the design's keys have it: `:` and a few letters offer emoji by name, from the `emojis` crate jaw already has, as `@` offers names, recents first.
 
