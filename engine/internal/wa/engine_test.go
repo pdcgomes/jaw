@@ -391,3 +391,19 @@ func TestEveryKindJawdMustStoreGoesOnFromAClientReplacedAfterALogoutAndWhatItSay
 		}
 	}
 }
+
+func TestALateLogoutFromAClientReplacedTwiceLeavesTheDeviceLinkedSince(t *testing.T) {
+	e, jawd, closeLink := linkedEngine(t)
+	defer closeLink()
+	first := e.cli()
+	second := loggedOutByThePhone(t, e, jawd, first)
+	paired(t, second.Store, 13)
+	third := loggedOutByThePhone(t, e, jawd, second)
+	paired(t, third.Store, 14)
+	if !returnsAlone(func() { e.handleFrom(first, &events.LoggedOut{Reason: events.ConnectFailureLoggedOut}) }) {
+		t.Fatal("a late logout from the first client went to jawd")
+	}
+	if n := devicesIn(t, e); n != 1 || e.cli() != third {
+		t.Fatalf("after the late logout: %d devices in session.db, the client running now replaced: %v", n, e.cli() != third)
+	}
+}

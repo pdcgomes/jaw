@@ -229,14 +229,21 @@ func (e *Engine) handle(evt any) {
 // loggedOut tells jawd WhatsApp logged the account out, why in whatsmeow's words without the code
 // ("logged out from another device", not "401: logged out from another device"), and gives the
 // engine a fresh device to link again with. It reads nothing of the device, which whatsmeow is
-// deleting meanwhile, and says it once for each client.
+// deleting meanwhile, and says it once, for the client running now only.
 func (e *Engine) loggedOut(client *whatsmeow.Client, reason events.ConnectFailureReason) {
-	if e.retired.Swap(client) == client {
+	if !e.retire(client) {
 		return
 	}
 	why := strings.TrimPrefix(reason.String(), reason.NumberString()+": ")
 	e.send(&enginepb.Event{Kind: &enginepb.Event_Connection{Connection: &enginepb.Connection{State: enginepb.Connection_LOGGED_OUT, Reason: why}}})
 	e.renew(client)
+}
+
+// retire marks client logged out, once, if it's the client running now: renewing deletes every
+// device in session.db, so a late word from a client replaced before mustn't reach it, or it
+// would delete the device linked since.
+func (e *Engine) retire(client *whatsmeow.Client) bool {
+	return client == e.cli() && e.retired.Swap(client) != client
 }
 
 // renew replaces a client whose account is logged out with one on a fresh device, so linking again
@@ -470,8 +477,9 @@ func (e *Engine) do(cmd *enginepb.Command) *enginepb.Reply {
 		}
 		// whatsmeow says nothing after a logout jawd asked for, and deletes the device as it does
 		// after the phone's.
-		e.retired.Store(client)
-		e.renew(client)
+		if e.retire(client) {
+			e.renew(client)
+		}
 		return done()
 	case *enginepb.Command_HistoryDownload:
 		return e.historyDownload(c.HistoryDownload)
