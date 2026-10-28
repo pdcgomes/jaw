@@ -2705,6 +2705,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_commit_is_counted_synced_only_through_jaws_vfs_with_fullfsync_off() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("jaw.db");
+        let db = connect(&path, Role::Writer).unwrap();
+        sync_commits(&db, true).unwrap();
+        assert!(commits_synced(&db).unwrap(), "FULL through jaw's VFS, fullfsync off");
+        // With fullfsync on, SQLite asks a commit's sync at FULL, which the VFS fences.
+        pragma(&db, "fullfsync", 1).unwrap();
+        assert!(!commits_synced(&db).unwrap(), "a commit whose sync the VFS fences");
+        // Through SQLite's own VFS, a FULL commit with fullfsync off is a plain fsync on macOS.
+        let own = Connection::open(&path).unwrap();
+        pragma(&own, "synchronous", 2).unwrap();
+        pragma(&own, "fullfsync", 0).unwrap();
+        assert!(!commits_synced(&own).unwrap(), "a commit through SQLite's own VFS");
+    }
+
     /// A sync jaw's VFS made of a file in a test's folder: the file's name, the thread that asked,
     /// the flags SQLite asked it with and what it was made of.
     #[derive(Clone, Debug, PartialEq, Eq)]
