@@ -164,9 +164,26 @@ final class Agent {
         return registerAgent()
     }
 
-    /// Whether version `a` is newer than `b`, by their dotted numbers.
+    /// Whether version `a` is newer than `b`, as git describe gives them: by the release's dotted
+    /// numbers, then the commits since it, so 0.2.0-3-g4d2c1e9 is newer than 0.2.0 and older than
+    /// 0.2.1. Before the first tag a build says its commit's hash, which has no order, and neither is
+    /// newer, as when every jawd said 0.1.0.
     static func newer(_ a: String, than b: String) -> Bool {
-        let parts = { (s: String) in s.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) } }
-        return parts(a).lexicographicallyPrecedes(parts(b)) == false && parts(a) != parts(b)
+        guard let a = order(a), let b = order(b) else { return false }
+        return b.lexicographicallyPrecedes(a)
+    }
+
+    /// A version's release numbers and the commits since it: [0, 2, 0] for 0.2.0, [0, 2, 0, 3] for
+    /// 0.2.0-3-g4d2c1e9, and nil for a commit's hash or anything else.
+    static func order(_ version: String) -> [Int]? {
+        let parts = version.split(separator: "-", omittingEmptySubsequences: false)
+        let release = parts[0].split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
+        guard release.count == 3, !release.contains(nil) else { return nil }
+        let numbers = release.compactMap(\.self)
+        switch parts.count {
+        case 1: return numbers
+        case 3 where parts[2].hasPrefix("g"): return Int(parts[1]).map { numbers + [$0] }
+        default: return nil
+        }
     }
 }
