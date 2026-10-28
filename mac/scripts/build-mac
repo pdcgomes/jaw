@@ -96,10 +96,11 @@ case "$what" in
         open -n "$here/mac/build/harness/JawHarness.app" --args "$@"
         ;;
     release)
+        # A failed build stops here, so the app copied back is never an earlier build's.
         out="$1"
-        run "xcodebuild build -workspace Jaw.xcworkspace -scheme jaw -configuration Release -destination 'platform=macOS,arch=arm64' -derivedDataPath build/DerivedData-release -quiet CODE_SIGN_IDENTITY=- 2>&1 | grep -E 'error|BUILD' || true"
+        run "scripts/check build jaw -configuration Release CODE_SIGN_IDENTITY=-"
         mkdir -p "$out"
-        rsync -a --delete -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/DerivedData-release/Build/Products/Release/Jaw.app/" "$out/Jaw.app/"
+        rsync -a --delete -e "ssh -o BatchMode=yes" "$host:$remote/mac/build/DerivedData/Build/Products/Release/Jaw.app/" "$out/Jaw.app/"
         ;;
     references)
         rsync -a -e "ssh -o BatchMode=yes" "$host:$remote/mac/Tests/JawUITests/References/" "$here/mac/Tests/JawUITests/References/"
