@@ -3897,7 +3897,6 @@ fn patches_sent(running: &Running) -> Vec<pb::AppStatePatch> {
 }
 
 /// The collections the engine was asked to fetch again, each fetch's names.
-#[expect(dead_code)]
 fn fetched_again(running: &Running) -> Vec<Vec<String>> {
     asked(running, |k| match k {
         pb::command::Kind::AppStateResync(resync) => Some(resync.names),
@@ -4559,4 +4558,121 @@ async fn marking_and_starring_refuse_what_the_other_chat_actions_refuse() {
     for (method, params) in [("chat.mark_unread", mark(ANA)), ("star", json!({ "message": "m1", "starred": true }))] {
         assert_eq!(unlinked.call(method, params).await.unwrap_err().code, code::NOT_LINKED, "{method}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_patch_whatsapp_refuses_is_kept_in_quarantine_put_back_as_the_phone_has_it_and_said() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA, CLIMBING]).await;
+    let mut pushes = running.pushes.subscribe();
+    running.call("chat.pin", json!({ "chat": CLIMBING, "pinned": true })).await.unwrap();
+    until_stored(&running).await;
+    // WhatsApp won't take the unpin, so the group ends pinned, as WhatsApp keeps it.
+    running.world.refuse_patches(1);
+    running.call("chat.pin", json!({ "chat": CLIMBING, "pinned": false })).await.unwrap();
+    assert!(!chat_row(&running, CLIMBING).await.pinned, "shown at once");
+    running
+        .until("the group pinned again", |db| {
+            Ok(db.query_row("SELECT pinned FROM chats WHERE id = ?1", [CLIMBING], |r| r.get::<_, i64>(0))? > 0)
+        })
+        .await;
+    // Nor the pin of a chat nothing ever pinned, which ends unpinned, as WhatsApp has it.
+    running.world.refuse_patches(1);
+    running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
+    until_stored(&running).await;
+    running
+        .until("Ana's chat unpinned again", |db| {
+            Ok(db.query_row("SELECT pinned FROM chats WHERE id = ?1", [ANA], |r| r.get::<_, i64>(0))? == 0)
+        })
+        .await;
+    type Kept = (String, String, Vec<u8>);
+    let kept: Vec<Kept> = running
+        .query(|db| {
+            Ok(db
+                .prepare("SELECT source, error, raw FROM quarantine ORDER BY n")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+    let indexes: Vec<(String, String, Vec<String>)> = kept
+        .into_iter()
+        .map(|(source, error, raw)| (source, error, pb::AppStatePatch::decode(raw.as_slice()).unwrap().index))
+        .collect();
+    let index = |chat: &str| vec!["pin_v1".to_string(), chat.to_string()];
+    let refused = |chat: &str| ("app_state_patch".to_string(), "server returned error 400".to_string(), index(chat));
+    assert_eq!(indexes, [refused(CLIMBING), refused(ANA)], "each kept with why and its patch, never dropped");
+    let said = notices(&mut pushes, Duration::from_millis(300)).await;
+    assert_eq!(
+        said,
+        [
+            "WhatsApp refused unpinning a chat: server returned error 400",
+            "WhatsApp refused pinning a chat: server returned error 400"
+        ]
+    );
+    let low = |asked: &[pb::command::Kind]| {
+        asked.iter().filter(|k| matches!(k, pb::command::Kind::AppStateResync(r) if r.names == ["regular_low"])).count()
+    };
+    // Each refusal fetches its collection again.
+    running.world.until(|asked| low(asked) == 2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn telling_your_other_devices_of_a_deletion_for_you_that_whatsapp_refuses_is_kept_in_quarantine() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 1_000).await;
+    let mut pushes = running.pushes.subscribe();
+    running.world.refuse_patches(1);
+    running.call("delete", json!({ "message": "m1", "for": "me" })).await.unwrap();
+    until_stored(&running).await;
+    assert!(row(&running, ANA, "m1").await.is_none(), "deleted here all the same");
+    assert_eq!(running.store.count("quarantine").unwrap(), 1, "what WhatsApp refused is kept, not dropped");
+    let said = notices(&mut pushes, Duration::from_millis(300)).await;
+    assert_eq!(said, ["WhatsApp refused telling your other devices you deleted a message: server returned error 400"]);
+    let high = fetched_again(&running).iter().any(|names| names == &["regular_high".to_string()]);
+    assert!(!high, "nothing to put back, so nothing fetched");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_patch_that_runs_out_of_tries_is_kept_in_quarantine_fetched_again_and_said_as_one_whatsapp_may_have() {
+    let home = tempfile::tempdir().unwrap();
+    // A try that fails is tried again within a millisecond, so the pin uses up its tries quickly.
+    let timing = Timing { retry_first: Duration::from_millis(1), retry_most: Duration::from_millis(1), ..quick() };
+    let running = Running::timed(home.path(), world(), true, true, timing).await;
+    running.chats(&[ANA]).await;
+    let mut pushes = running.pushes.subscribe();
+    // WhatsApp takes the pin each time it's tried, but its echo never comes back in time.
+    running.world.lose_echoes(outbox::ATTEMPTS_MOST as u32);
+    running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
+    let at = pinned_at(&running, ANA).await;
+    until_stored(&running).await;
+    assert_eq!(patches_sent(&running).len() as i64, outbox::ATTEMPTS_MOST, "tried as often as a failure that may pass");
+    let kept: Vec<(String, String, Vec<u8>)> = running
+        .query(|db| {
+            Ok(db
+                .prepare("SELECT source, error, raw FROM quarantine ORDER BY n")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+    let lost = "WhatsApp took the pin_v1 change, but its echo didn't come back within 30s";
+    let indexes: Vec<(String, String, Vec<String>)> = kept
+        .into_iter()
+        .map(|(source, error, raw)| (source, error, pb::AppStatePatch::decode(raw.as_slice()).unwrap().index))
+        .collect();
+    let index = vec!["pin_v1".to_string(), ANA.to_string()];
+    assert_eq!(indexes, [("app_state_patch".into(), lost.into(), index)], "kept with why and its patch, never dropped");
+    let said = notices(&mut pushes, Duration::from_millis(300)).await;
+    assert_eq!(said, [format!("jaw couldn't tell your other devices about pinning a chat: {lost}")]);
+    // Put back and fetched again, it ends as WhatsApp has it: pinned, at the time jaw pinned it.
+    running
+        .until("Ana's chat pinned again", move |db| {
+            Ok(db.query_row("SELECT pinned FROM chats WHERE id = ?1", [ANA], |r| r.get::<_, i64>(0))? == at)
+        })
+        .await;
+    let low = |asked: &[pb::command::Kind]| {
+        asked.iter().filter(|k| matches!(k, pb::command::Kind::AppStateResync(r) if r.names == ["regular_low"])).count()
+    };
+    running.world.until(|asked| low(asked) == 1).await;
 }

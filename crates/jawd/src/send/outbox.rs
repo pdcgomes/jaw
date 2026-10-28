@@ -43,7 +43,7 @@ pub(super) const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 const KEY_MOST: usize = 128;
 /// How many attempts while WhatsApp can be reached, about a day's worth at the longest pause,
 /// before a failure that might pass is taken as one that won't.
-const ATTEMPTS_MOST: i64 = 1_500;
+pub(super) const ATTEMPTS_MOST: i64 = 1_500;
 /// How long after a commit the held actions are looked at again, so a burst of commits is looked
 /// at once.
 const HELD_SETTLE: Duration = Duration::from_millis(50);
@@ -478,19 +478,19 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
     let app_state = row.kind == "app_state";
     let resumed = resumed && !waited.load(Ordering::Relaxed);
     let may_have_gone = (resumed || row.attempts > 0) && !app_state;
-    let command = if app_state {
+    let (command, patch) = if app_state {
         match pb::AppStatePatch::decode(row.raw.as_slice()) {
-            Ok(patch) => pb::command::Kind::AppStatePatch(patch),
+            Ok(patch) => (pb::command::Kind::AppStatePatch(patch.clone()), Some(patch)),
             Err(e) => {
                 let error = format!("its app state doesn't decode: {e}");
-                settle(&inner, vec![Change::Outbox(Step::Failed { outbox, error, next_at: None })]).await;
+                super::chat_actions::refused(&inner, outbox, None, error, false).await;
                 return Next::Done;
             }
         }
     } else if row.kind == "vote" {
         // A vote goes through the engine, which encrypts it with the poll's secret.
         match pb::PollVote::decode(row.raw.as_slice()) {
-            Ok(vote) => pb::command::Kind::PollVote(vote),
+            Ok(vote) => (pb::command::Kind::PollVote(vote), None),
             Err(e) => {
                 let error = format!("its vote doesn't decode: {e}");
                 settle(&inner, vec![Change::Outbox(Step::Failed { outbox, error, next_at: None })]).await;
@@ -498,7 +498,8 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
             }
         }
     } else {
-        pb::command::Kind::Send(pb::Send { chat: row.chat.clone(), id: row.id.clone(), raw: row.raw.clone() })
+        let send = pb::Send { chat: row.chat.clone(), id: row.id.clone(), raw: row.raw.clone() };
+        (pb::command::Kind::Send(send), None)
     };
     // A patch saying a chat is read goes after the chat's read receipts, told before it takes its
     // turn, which full fetches of app state wait for.
@@ -541,6 +542,13 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
         eprintln!("jawd: WhatsApp answered {} in {} sent again with: {failure}", row.id, row.chat);
     }
     let gives_up = !retryable(&failure) || row.attempts + 1 >= ATTEMPTS_MOST;
+    if gives_up && app_state {
+        let retried = retryable(&failure);
+        let why = if retried { "ran out of tries" } else { "was refused" };
+        eprintln!("jawd: app state {} in {} {why}: {failure}", row.id, row.chat);
+        super::chat_actions::refused(&inner, outbox, patch.as_ref(), failure.to_string(), retried).await;
+        return Next::Done;
+    }
     let step = match (gives_up, may_have_gone) {
         (false, _) => {
             let next_at = now_ms() + pause(&inner, row.attempts + 1).as_millis() as i64;
@@ -591,7 +599,7 @@ fn sent_changes(row: &Outboxed, sent: &pb::Sent) -> Vec<Change> {
 /// sent again for want of a commit, and one that failed must be counted as tried, or a later
 /// refusal of what may have gone would fail it outright. The actions held for it are looked at
 /// again.
-async fn settle(inner: &Inner, changes: Vec<Change>) -> Applied {
+pub(super) async fn settle(inner: &Inner, changes: Vec<Change>) -> Applied {
     let mut pause = inner.timing.retry_first;
     loop {
         match inner.store.apply(Lane::Live, changes.clone()).await {

@@ -473,7 +473,8 @@ pub struct Stored {
     /// Messages not yet indexed for search.
     #[serde(default)]
     pub unindexed: u64,
-    /// Changes that failed to convert, kept with their errors.
+    /// Changes that failed to convert, and app state WhatsApp refused or that ran out of tries, kept
+    /// with their errors.
     #[serde(default)]
     pub quarantined: u64,
     /// Chats being merged into another, the same person's under another JID.

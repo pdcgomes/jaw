@@ -6,12 +6,16 @@
 //! WhatsApp's echo of it through app state is known by that time and finds the row as it is; what
 //! WhatsApp sends for its index before the echo is held back (store::chat_actions).
 //! A patch saying a chat is read goes after the chat's read receipts (`receipts_first`); for a chat
-//! jaw holds none of the messages of, its echo is what reads the chat (store::chat_actions).
+//! jaw holds none of the messages of, its echo is what reads the chat (store::chat_actions). A patch
+//! WhatsApp refuses for good, or that runs out of tries, is kept in quarantine, what it set is put
+//! back, every interface is told which it was, and its collection is fetched again, so the chat ends
+//! as the phone has it (`refused`).
 
 use std::sync::Arc;
 
 use jaw_proto::send::{ChatArchive, ChatMarkUnread, ChatMute, ChatPin, Star};
-use jaw_proto::{AccountState, Error, code};
+use jaw_proto::sync::{Notice, Tone};
+use jaw_proto::{AccountState, Error, Push, code};
 use prost::Message as _;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -22,11 +26,12 @@ use wa_proto::wa_web_protobuf_sync_action::{
 };
 
 use super::actions::{self, Target};
-use super::outbox::{bad_param, message_id, queue};
+use super::outbox::{bad_param, message_id, queue, settle};
 use super::{Inner, durably, internal, no_chat, now_ms, query};
 use crate::convert::app_state::FOREVER;
 use crate::engine::{EngineError, pb};
-use crate::store::chat_actions::{Act, Acted, Does, Outcome, PINNED_MOST, Patch, Setting};
+use crate::store::chat_actions::{Act, Acted, Does, Outcome, PINNED_MOST, Patch, Setting, Undo};
+use crate::store::outbox::Step;
 use crate::store::{Change, read};
 
 /// A chat an action names: the chat it's being merged into, or itself, with its kind.
@@ -285,6 +290,114 @@ pub(super) async fn receipts_first(inner: &Inner, chat: &str) -> Result<(), Engi
     super::reads::tell_now(inner, n).await.map_err(|e| failed(format!("{e:#}")))
 }
 
+/// How many times a fetch after a refusal is tried while the engine that refused runs; the next
+/// engine to start fetches every collection again in full anyway.
+const FETCH_TRIES: u32 = 10;
+
+/// What putting back a refused patch undoes, by its index; nothing for a deletion for you, whose
+/// message stays deleted here.
+pub(super) fn undo_of(index: &[String]) -> Option<Undo> {
+    let chat = index.get(1)?.clone();
+    match index.first()?.as_str() {
+        "pin_v1" => Some(Undo::Pin { chat }),
+        "archive" => Some(Undo::Archive { chat }),
+        "mute" => Some(Undo::Mute { chat }),
+        "markChatAsRead" => Some(Undo::MarkUnread { chat }),
+        "star" => Some(Undo::Star { chat, id: index.get(2)?.clone() }),
+        _ => None,
+    }
+}
+
+/// What a patch did, as the notice for a patch given up on names it.
+pub(super) fn what_it_did(patch: &pb::AppStatePatch) -> &'static str {
+    let value = SyncActionValue::decode(patch.value.as_slice()).unwrap_or_default();
+    let on = |set: Option<bool>| set.unwrap_or(false);
+    match patch.index.first().map(String::as_str) {
+        Some("pin_v1") if on(value.pin_action.as_ref().and_then(|a| a.pinned)) => "pinning a chat",
+        Some("pin_v1") => "unpinning a chat",
+        Some("archive") if on(value.archive_chat_action.as_ref().and_then(|a| a.archived)) => "archiving a chat",
+        Some("archive") => "unarchiving a chat",
+        Some("mute") if on(value.mute_action.as_ref().and_then(|a| a.muted)) => "muting a chat",
+        Some("mute") => "unmuting a chat",
+        Some("markChatAsRead") if on(value.mark_chat_as_read_action.as_ref().and_then(|a| a.read)) => {
+            "marking a chat read"
+        }
+        Some("markChatAsRead") => "marking a chat unread",
+        Some("star") if on(value.star_action.as_ref().and_then(|a| a.starred)) => "starring a message",
+        Some("star") => "unstarring a message",
+        Some("deleteMessageForMe") => "telling your other devices you deleted a message",
+        _ => "telling your other devices of a change",
+    }
+}
+
+/// Keeps app-state row `outbox`, which WhatsApp refused for good or which ran out of tries, in
+/// quarantine with why, puts back what its patch set, says so to every interface, and fetches the
+/// patch's collection again, so the chat ends as the phone has it. One that ran out of tries on
+/// failures that could be retried (`retryable`) may have reached WhatsApp all the same, which the
+/// notice says.
+pub(super) async fn refused(
+    inner: &Inner,
+    outbox: i64,
+    patch: Option<&pb::AppStatePatch>,
+    error: String,
+    retryable: bool,
+) {
+    let undo = patch.and_then(|patch| undo_of(&patch.index));
+    // Empty names are every collection.
+    let fetch = match patch {
+        Some(patch) if undo.is_some() => Some(vec![patch.name.clone()]),
+        Some(_) => None,
+        None => Some(Vec::new()),
+    };
+    let what = patch.map_or("telling your other devices of a change", what_it_did);
+    let text = if retryable {
+        format!("jaw couldn't tell your other devices about {what}: {error}")
+    } else {
+        format!("WhatsApp refused {what}: {error}")
+    };
+    settle(inner, vec![Change::Outbox(Step::Refused { outbox, error, undo })]).await;
+    say(inner, text);
+    if let Some(names) = fetch {
+        fetch_again(inner, names);
+    }
+}
+
+/// Asks the engine running now to fetch collections `names` again in full, trying again while it
+/// runs. Each try waits for its turn with jaw's own patches and sync's full fetches of app state,
+/// and holds it until every mutation is kept.
+fn fetch_again(inner: &Inner, names: Vec<String>) {
+    let Some(engine) = inner.engine.clone() else { return };
+    let (app_state, timing) = (inner.app_state.clone(), inner.timing);
+    tokio::spawn(async move {
+        let restarts = engine.status().restarts;
+        let mut pause = timing.retry_first;
+        for _ in 0..FETCH_TRIES {
+            let resync = pb::command::Kind::AppStateResync(pb::AppStateResync { names: names.clone() });
+            let turn = app_state.take().await;
+            let answer = engine.call(resync).await;
+            drop(turn);
+            match answer {
+                Ok(_) => return,
+                Err(e) => eprintln!("jawd: can't fetch app state again after giving up on a patch: {e}"),
+            }
+            tokio::time::sleep(pause).await;
+            if engine.status().restarts != restarts {
+                return;
+            }
+            pause = (pause * 2).min(timing.retry_most);
+        }
+        eprintln!(
+            "jawd: stopped fetching app state again after giving up on a patch; the next engine to start fetches it"
+        );
+    });
+}
+
+/// Says `text` to every interface, as a warning.
+fn say(inner: &Inner, text: String) {
+    let params = serde_json::to_value(Notice { text, tone: Tone::Warning }).expect("jawd's own types serialize");
+    let _ = inner.pushes.send(Push { method: "notice".into(), params });
+}
+
 /// Commits a chat action, synced, and queues the patches it wrote after the chat's earlier sends; a
 /// chat read here owes its read receipts, which `owes_receipts` says. `does` makes the action done
 /// at `at`, later than every chat action jawd has done since it started, so no two of jaw's patches
@@ -456,5 +569,48 @@ mod tests {
         assert!(reads_the_chat(&marked(ANA, false, none.clone(), AT)));
         assert!(!reads_the_chat(&marked(ANA, true, none, AT)));
         assert!(!reads_the_chat(&pinned(ANA, true, AT)));
+    }
+
+    #[test]
+    fn a_refused_patch_puts_back_what_it_set_and_is_said_as_what_it_did() {
+        let none = || range(ANA, false, None, AT);
+        let undo = |patch: pb::AppStatePatch| undo_of(&patch.index);
+        assert_eq!(undo(pinned(ANA, true, AT)), Some(Undo::Pin { chat: ANA.into() }));
+        assert_eq!(undo(archived(ANA, true, none(), AT)), Some(Undo::Archive { chat: ANA.into() }));
+        assert_eq!(undo(muted(ANA, FOREVER, AT)), Some(Undo::Mute { chat: ANA.into() }));
+        assert_eq!(undo(marked(ANA, true, none(), AT)), Some(Undo::MarkUnread { chat: ANA.into() }));
+        let star = starred(&target(ANA, "d1", false, Some(ANA)), true, AT);
+        assert_eq!(undo(star), Some(Undo::Star { chat: ANA.into(), id: "d1".into() }));
+        let deletion = pb::AppStatePatch {
+            name: "regular_high".into(),
+            index: ["deleteMessageForMe", ANA, "d1", "0", "0"].iter().map(|part| part.to_string()).collect(),
+            version: 3,
+            value: Vec::new(),
+        };
+        assert_eq!(undo_of(&deletion.index), None, "a message deleted for you stays deleted here");
+        let said: Vec<&str> = [
+            pinned(ANA, true, AT),
+            pinned(ANA, false, AT),
+            archived(ANA, true, none(), AT),
+            muted(ANA, 0, AT),
+            marked(ANA, false, none(), AT),
+            starred(&target(ANA, "d1", false, None), false, AT),
+            deletion,
+        ]
+        .iter()
+        .map(what_it_did)
+        .collect();
+        assert_eq!(
+            said,
+            [
+                "pinning a chat",
+                "unpinning a chat",
+                "archiving a chat",
+                "unmuting a chat",
+                "marking a chat read",
+                "unstarring a message",
+                "telling your other devices you deleted a message"
+            ]
+        );
     }
 }

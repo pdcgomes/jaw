@@ -435,7 +435,6 @@ pub(super) fn refused(inner: &Inner, kind: &str, why: &str) {
         "edit" => "your edit",
         "revoke" => "deleting your message for everyone",
         "vote" => "your vote",
-        "app_state" => "telling your other devices you deleted a message",
         _ => return,
     };
     let notice = Notice { text: format!("WhatsApp refused {what}: {why}"), tone: Tone::Warning };
