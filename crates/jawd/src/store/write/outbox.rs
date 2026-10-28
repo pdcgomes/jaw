@@ -213,10 +213,11 @@ const WAITING: &str = "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM 
     WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote'))";
 /// An outbox row as the sender takes it, with, for an action, the state of its message's own outbox
 /// row while that message is still to reach WhatsApp, and whether its message has been deleted for
-/// everyone.
+/// everyone, which the action keeps once that message is deleted for you too.
 const OUTBOXED: &str = concat!(
     "SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind,
-        (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, 0) FROM outbox o ",
+        (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted)
+    FROM outbox o ",
     sent_where!()
 );
 const ACT: &str = "INSERT INTO outbox (target, jid, id, kind, raw, effect, next_at, created_at)
@@ -235,6 +236,10 @@ const ACTIONS_BY_ID: &str = "SELECT n FROM outbox WHERE id = ?1 AND kind IN ('re
 const CANCELLED: &str = "DELETE FROM outbox WHERE message = ?1 AND state IN ('unconfirmed', 'failed')";
 /// A message of yours deleted for you once it had failed has nothing left to retry.
 const FORGOTTEN: &str = "DELETE FROM outbox WHERE message = ?1 AND state = 'failed'";
+/// The actions on message ?1, which is being deleted for you, keep whether it was deleted for
+/// everyone, which nothing says once its row has gone.
+const KEEP_DELETED: &str = "UPDATE outbox SET target_deleted = 1 WHERE target = ?1
+    AND EXISTS (SELECT 1 FROM messages WHERE n = ?1 AND deleted)";
 /// Whether a message of yours has a failed row, which a deletion for you of it removes.
 const FAILED_ROW: &str = "SELECT 1 FROM outbox WHERE message = ?1 AND state = 'failed'";
 /// Whether an outbox row is still to send.
@@ -894,10 +899,14 @@ pub(super) fn tidied(db: &Connection, n: i64) -> Result<()> {
     Ok(())
 }
 
-/// Message `n` of yours is being deleted for you: a failed row of it has nothing left to retry. One
+/// Message `n` is being deleted for you. A failed row of yours of it has nothing left to retry; one
 /// still queued goes all the same, as on the phone, and one waiting for a receipt ends at its time.
+/// Your actions on it keep whether it was deleted for everyone, so a reaction or an edit still to go
+/// on a message deleted for everyone isn't sent once you've deleted it for you too
+/// (`Outboxed::withdrawn`).
 pub(super) fn deleted_for_you(db: &Connection, n: i64) -> Result<()> {
     db.prepare_cached(FORGOTTEN)?.execute([n])?;
+    db.prepare_cached(KEEP_DELETED)?.execute([n])?;
     Ok(())
 }
 
@@ -1097,7 +1106,8 @@ pub struct Outboxed {
     /// For an action on a message of yours that's still to reach WhatsApp, the state of that
     /// message's own outbox row.
     pub behind: Option<String>,
-    /// For an action, whether its message has been deleted for everyone.
+    /// For an action, whether its message has been deleted for everyone, before it was deleted for
+    /// you if it has been since.
     pub target_deleted: bool,
 }
 
@@ -1105,7 +1115,8 @@ impl Outboxed {
     /// Whether it's a reaction, an edit or a vote on a message deleted for everyone since it was
     /// asked, which isn't sent: the phones show nothing of any of them on a deleted message, and
     /// jaw.db would keep the reaction on the deleted row. Whoever deleted the message, you, your
-    /// other devices, history or whoever sent it, it's withdrawn as a refused one is.
+    /// other devices, history or whoever sent it, and whether or not you've deleted it for you
+    /// since, it's withdrawn as a refused one is.
     pub fn withdrawn(&self) -> bool {
         self.target_deleted && matches!(self.kind.as_str(), "reaction" | "edit" | "vote")
     }
@@ -1347,6 +1358,11 @@ mod tests {
             ("actions by ID", ACTIONS_BY_ID, "SEARCH outbox USING INDEX outbox_by_id (id=?)"),
             ("cancelled", CANCELLED, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
             ("forgotten", FORGOTTEN, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
+            (
+                "keep deleted",
+                KEEP_DELETED,
+                "SEARCH outbox USING COVERING INDEX outbox_by_target (target=?)\nSCALAR SUBQUERY 1\nSEARCH messages USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
             ("a failed row", FAILED_ROW, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
             ("still queued", STILL_QUEUED, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
             (

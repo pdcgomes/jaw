@@ -2127,6 +2127,19 @@ fn deleted_from_your_phone(id: &str) -> Change {
     })
 }
 
+/// Message `id` of yours in Ana's chat deleted for you on your phone, as its app state says.
+fn deleted_for_you_on_your_phone(id: &str) -> Change {
+    Change::Amend(Amend {
+        chat: ANA.into(),
+        target: id.into(),
+        sender: None,
+        mine: true,
+        at: now_ms(),
+        what: Amendment::DeleteForMe,
+        raw: None,
+    })
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_message_deleted_for_you_leaves_nothing_to_send_again() {
     let home = tempfile::tempdir().unwrap();
@@ -2363,6 +2376,51 @@ async fn an_edit_on_its_way_to_a_message_your_phone_then_deletes_for_everyone_is
     assert_eq!(said, ["Your edit wasn't sent: the message was deleted for everyone"]);
     let shown = row(&running, ANA, &id).await.unwrap();
     assert!(shown.deleted && !shown.edited, "{shown:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_on_its_way_to_a_message_deleted_for_everyone_and_then_for_you_isnt_sent() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    running.call("react", json!({ "message": "m1", "emoji": "❤️" })).await.unwrap();
+    let mut pushes = running.pushes.subscribe();
+    // Before WhatsApp can be reached, Ana deletes it for everyone, and then you delete it for you.
+    running
+        .store
+        .apply(Lane::Live, vec![Change::Amend(Amend { what: Amendment::Revoke, ..other_of(ANA, "m1") })])
+        .await
+        .unwrap();
+    running.call("delete", json!({ "message": "m1", "for": "me" })).await.unwrap();
+    assert!(row(&running, ANA, "m1").await.is_none());
+    running.connection(Online);
+    until_stored(&running).await;
+    assert!(kinds_sent(&running).is_empty(), "{:?}", kinds_sent(&running));
+    let said = notices(&mut pushes, Duration::from_millis(500)).await;
+    assert_eq!(said, ["Your reaction wasn't sent: the message was deleted for everyone"]);
+    assert_eq!(stored_reactions(&running).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_on_its_way_to_a_message_your_phone_deletes_for_everyone_and_then_for_you_isnt_sent() {
+    use jaw_proto::ConnectionState::Online;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &id, "sent").await;
+    until_offline(&running).await;
+    running.call("edit", json!({ "message": id, "text": "chego às 21h" })).await.unwrap();
+    let mut pushes = running.pushes.subscribe();
+    running.store.apply(Lane::Live, vec![deleted_from_your_phone(&id)]).await.unwrap();
+    running.store.apply(Lane::Live, vec![deleted_for_you_on_your_phone(&id)]).await.unwrap();
+    assert!(row(&running, ANA, &id).await.is_none());
+    running.connection(Online);
+    until_stored(&running).await;
+    assert_eq!(kinds_sent(&running), ["chego às 20h"], "only the message went, not its edit");
+    let said = notices(&mut pushes, Duration::from_millis(500)).await;
+    assert_eq!(said, ["Your edit wasn't sent: the message was deleted for everyone"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

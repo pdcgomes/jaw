@@ -962,6 +962,18 @@ pub(super) const MIGRATIONS: &[&str] = &[
     DROP TABLE interface_state;
     ALTER TABLE interface_state_rebuilt RENAME TO interface_state;
     ",
+    // 18, a schema step: a column with a constant default on the outbox, which holds at most two
+    // thousand rows (a thousand waiting and a thousand actions kept for a late receipt), its CHECK
+    // reading each once. Rows from before take 0, as nothing is left to say whether a message
+    // already deleted for you had been deleted for everyone, so their actions go as they would have.
+    "
+    -- Class: jaw's own column on the outbox.
+    -- `target_deleted`: 1 for an action whose message had been deleted for everyone when it was
+    -- deleted for you, kept as `target` goes NULL, since a reaction or an edit on a message deleted
+    -- for everyone isn't sent, while one on a message only deleted for you goes. While `target`
+    -- names the message, the message's own row says.
+    ALTER TABLE outbox ADD COLUMN target_deleted INTEGER NOT NULL DEFAULT 0 CHECK (target_deleted IN (0, 1));
+    ",
 ];
 
 /// jaw.db's `application_id`, "jaw" and a 1, so another file is never taken for it.
