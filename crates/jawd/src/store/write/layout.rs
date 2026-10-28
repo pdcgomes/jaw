@@ -1,7 +1,8 @@
-//! What interfaces keep of how they were laid out (`interface_state`): each interface's layout of
-//! split panes, by its name and a key, with the version the interface gave it. A row is replaced
-//! only by one with a newer version, so asking again, or a write that comes late, changes nothing;
-//! and an interface with no row gets one only while fewer than KEPT_MOST have one.
+//! What interfaces keep of how they were laid out (`interface_state`): each interface's layout, a
+//! tree of split panes or a book of layouts on a grid, by its name and a key, with the version the
+//! interface gave it. A row is replaced only by one with a newer version, whichever format either
+//! is in, so asking again, or a write that comes late, changes nothing; and an interface with no
+//! row gets one only while fewer than KEPT_MOST have one.
 
 use std::sync::{Arc, Mutex};
 
@@ -81,7 +82,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::store::{Change, Store, schema};
+    use crate::store::{Change, LayoutsKept, Store, schema};
 
     async fn kept(store: &Store, interface: &str, value: &str, v: i64, at: i64) -> Keeping {
         let kept = Kept::default();
@@ -129,11 +130,34 @@ mod tests {
             Keeping::Written,
             "one with a row still changes it"
         );
-        assert_eq!(store.layouts_kept().unwrap(), (KEPT_MOST, 7), "16 kept, the biggest {{\"n\":2}}");
+        assert_eq!(
+            store.layouts_kept().unwrap(),
+            LayoutsKept { kept: KEPT_MOST, largest: 7, books: 0, largest_book: 0 },
+            "16 kept, the biggest {{\"n\":2}}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_tells_books_from_trees_by_their_format_and_counts_each_ones_biggest() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let tree = r#"{"format":1,"focused":0,"tree":{"chat":"1@g.us"}}"#;
+        let book = r#"{"format":2,"layouts":[]}"#;
+        let bigger = r#"{"format":2,"current":"Work","layouts":[]}"#;
+        let formatless = format!("[{}0]", "0,".repeat(40));
+        assert!(formatless.len() > tree.len().max(bigger.len()));
+        for (interface, value) in [("jaw", tree), ("jaw-mac", book), ("jaw-mac 2", bigger), ("other", &formatless)] {
+            assert_eq!(kept(&store, interface, value, 1, 1).await, Keeping::Written);
+        }
+        assert_eq!(
+            store.layouts_kept().unwrap(),
+            LayoutsKept { kept: 4, largest: formatless.len() as u64, books: 2, largest_book: bigger.len() as u64 },
+            "a value of no format counts beside the trees"
+        );
     }
 
     #[test]
-    fn the_table_holds_json_of_16_kib_at_most_a_version_from_1_and_names_of_1_to_64_bytes() {
+    fn the_table_holds_json_of_64_kib_at_most_a_version_from_1_and_names_of_1_to_64_bytes() {
         let mut db = Connection::open_in_memory().unwrap();
         schema::migrate(&mut db).unwrap();
         let insert = |interface: &str, value: &str, v: i64| {
@@ -144,8 +168,8 @@ mod tests {
         };
         assert!(insert("jaw", "{}", 1).is_ok());
         assert!(insert("a", "not json", 1).is_err(), "not JSON");
-        assert!(insert("b", &format!("\"{}\"", "ã".repeat(8_192)), 1).is_err(), "16,386 bytes in 8,194 letters");
-        assert!(insert("c", &format!("\"{}\"", "x".repeat(16_382)), 1).is_ok(), "16,384 bytes");
+        assert!(insert("b", &format!("\"{}\"", "ã".repeat(32_768)), 1).is_err(), "65,538 bytes in 32,770 letters");
+        assert!(insert("c", &format!("\"{}\"", "x".repeat(65_534)), 1).is_ok(), "65,536 bytes");
         assert!(insert("d", "{}", 0).is_err(), "a version of 0");
         assert!(insert(&"x".repeat(65), "{}", 1).is_err(), "a name of 65 bytes");
         assert!(insert("", "{}", 1).is_err(), "no name");
@@ -167,11 +191,50 @@ mod tests {
                 params![interface, key, value],
             )
         };
-        assert!(insert("a", "layout", &format!("\"{}\"", "x".repeat(16_382))).is_ok(), "16,384 bytes");
-        assert!(insert("b", "layout", &format!("\"{}\"", "x".repeat(16_383))).is_err(), "16,385 bytes");
+        assert!(insert("a", "layout", &format!("\"{}\"", "x".repeat(65_534))).is_ok(), "65,536 bytes");
+        assert!(insert("b", "layout", &format!("\"{}\"", "x".repeat(65_535))).is_err(), "65,537 bytes");
         assert!(insert("c", "", "{}").is_err(), "no key");
         assert!(insert("d", &"k".repeat(65), "{}").is_err(), "a key of 65 bytes");
         assert!(insert("e", &"k".repeat(64), "{}").is_ok(), "a key of 64 bytes");
+    }
+
+    #[test]
+    fn rebuilt_to_take_a_book_the_table_keeps_every_row_it_had_as_it_was() {
+        let mut db = Connection::open_in_memory().unwrap();
+        // jaw.db as migration 16 left it, with the most it held then: 16 interfaces, one at 16 KiB.
+        let before = schema::MIGRATIONS.len() - 1;
+        for migration in &schema::MIGRATIONS[..before] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", before as i64).unwrap();
+        let rows: Vec<(String, String, i64, i64)> = (0..KEPT_MOST as i64)
+            .map(|n| {
+                let value =
+                    if n == 0 { format!("\"{}\"", "ã".repeat(8_191)) } else { format!(r#"{{"format":1,"n":{n}}}"#) };
+                (format!("app {n}"), value, 1_792_000_000_000 + n, 1_000 + n)
+            })
+            .collect();
+        assert_eq!(rows[0].1.len(), 16_384);
+        for (interface, value, v, at) in &rows {
+            db.execute(
+                "INSERT INTO interface_state (interface, key, value, v, updated_at) VALUES (?1, 'layout', ?2, ?3, ?4)",
+                params![interface, value, v, at],
+            )
+            .unwrap();
+        }
+        let too_big = format!("\"{}\"", "x".repeat(16_383));
+        let refused = "INSERT INTO interface_state (interface, key, value, v, updated_at) VALUES ('big', 'layout', ?1, 1, 0)";
+        assert!(db.execute(refused, [&too_big]).is_err(), "16,385 bytes, before the rebuild");
+        schema::migrate(&mut db).unwrap();
+        let after: Vec<(String, String, i64, i64)> = db
+            .prepare("SELECT interface, value, v, updated_at FROM interface_state WHERE key = 'layout' ORDER BY v")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(after, rows, "every row, as it was");
+        assert!(db.execute(refused, [&too_big]).is_ok(), "and a book bigger than a tree may be now");
     }
 
     #[tokio::test(flavor = "multi_thread")]

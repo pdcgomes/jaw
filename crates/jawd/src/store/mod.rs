@@ -79,6 +79,16 @@ pub struct Applied {
     pub seq: i64,
 }
 
+/// The layouts kept: how many interfaces keep one, the bytes of the biggest that isn't a book, how
+/// many are books, and the bytes of the biggest book.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayoutsKept {
+    pub kept: u64,
+    pub largest: u64,
+    pub books: u64,
+    pub largest_book: u64,
+}
+
 /// Which of the writer's queues a batch of changes joins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
@@ -726,15 +736,21 @@ impl Store {
         Ok(count.max(0) as u64)
     }
 
-    /// How many interfaces keep a layout, and the bytes of the biggest, read on a connection of its
-    /// own so the writer doesn't wait.
-    pub fn layouts_kept(&self) -> Result<(u64, u64)> {
+    /// How many interfaces keep a layout and the bytes of the biggest tree, and how many of them
+    /// keep a book and the bytes of the biggest, read on a connection of its own so the writer
+    /// doesn't wait.
+    pub fn layouts_kept(&self) -> Result<LayoutsKept> {
         let db = connect(&self.path, Role::Reader)?;
-        let (kept, largest): (i64, i64) =
-            db.query_row("SELECT count(*), coalesce(max(octet_length(value)), 0) FROM interface_state", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?;
-        Ok((kept.max(0) as u64, largest.max(0) as u64))
+        let kept: [i64; 4] = db.query_row(
+            "SELECT count(*), coalesce(max(octet_length(value)) FILTER (WHERE value ->> '$.format' IS NOT 2), 0),
+                count(*) FILTER (WHERE value ->> '$.format' = 2),
+                coalesce(max(octet_length(value)) FILTER (WHERE value ->> '$.format' = 2), 0)
+            FROM interface_state",
+            [],
+            |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]),
+        )?;
+        let [kept, largest, books, largest_book] = kept.map(|n| n.max(0) as u64);
+        Ok(LayoutsKept { kept, largest, books, largest_book })
     }
 
     /// How many messages backfill `name` has still to look at, 0 once it's done, read on a

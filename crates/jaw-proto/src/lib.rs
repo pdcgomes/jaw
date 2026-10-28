@@ -291,10 +291,18 @@ pub struct Layouts {
     /// Interfaces with a layout kept, and the most that can have one.
     pub kept: u64,
     pub most: u64,
-    /// The biggest layout kept, in bytes, and the most one can take.
+    /// The biggest tree of panes kept, in bytes, and the most one can take.
     pub largest_bytes: u64,
     pub bytes_most: u64,
-    /// Layouts refused since jawd started for being past one of those limits.
+    /// The interfaces among `kept` whose layout is a book of layouts on a grid, the biggest book's
+    /// bytes, and the most one can take.
+    #[serde(default)]
+    pub books: u64,
+    #[serde(default)]
+    pub largest_book_bytes: u64,
+    #[serde(default)]
+    pub book_bytes_most: u64,
+    /// Layouts refused since jawd started for being past one of their limits.
     pub refused: u64,
 }
 

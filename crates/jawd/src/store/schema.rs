@@ -711,7 +711,7 @@ pub(super) const MIGRATIONS: &[&str] = &[
     CREATE INDEX messages_by_time ON messages (chat, at, n, mine, kind, mentions_me);
     ",
     // 12: what interfaces keep of how they were laid out, a schema step: one new table, which costs
-    // the same however big jaw.db is, and which nothing refers to.
+    // the same however big jaw.db is, and which nothing refers to. Migration 17 rebuilds it.
     "
     -- Class: jaw's own. What each interface keeps of how it was laid out, by the name it gives in
     -- hello (jaw for the terminal) and what it is: under 'layout', its split panes, in the format
@@ -934,6 +934,32 @@ pub(super) const MIGRATIONS: &[&str] = &[
     "
     INSERT INTO backfills (name, after, upto) SELECT 'kinds', 0, seq FROM sqlite_sequence
         WHERE name = 'messages' AND seq > 0;
+    ",
+    // 17, a schema step: what an interface keeps of how it was laid out takes 64 KiB of JSON rather
+    // than 16, so a book of layouts on a grid fits, the Mac app's: ten named layouts, each with its
+    // saved and its edited shape, and the unnamed one, of 12 slots each. A CHECK can't be changed in
+    // place, so the table is rebuilt and every row copied as it is. A rebuild of a small table:
+    // nothing refers to it, it has no trigger or index of its own, and it holds 16 rows at most.
+    "
+    -- Class: jaw's own, as migration 12 made it. What each interface keeps of how it was laid out,
+    -- by the name it gives in hello (jaw for the terminal) and what it is: under 'layout', a tree
+    -- of split panes or a book of layouts on a grid, in the formats jaw-proto's layout module
+    -- gives, whose limits jawd checks before it writes one. A row is replaced only by one with a
+    -- newer version, which the interface gives, so asking again, or late, changes nothing. Never
+    -- dropped; a rebuild, as this one is, copies it as it is. jawd keeps 16 rows at most.
+    CREATE TABLE interface_state_rebuilt (
+        interface TEXT NOT NULL CHECK (octet_length(interface) BETWEEN 1 AND 64),
+        key TEXT NOT NULL CHECK (octet_length(key) BETWEEN 1 AND 64),
+        value TEXT NOT NULL CHECK (json_valid(value) AND octet_length(value) <= 65536),
+        v INTEGER NOT NULL CHECK (v > 0),
+        -- When the row was last replaced, in milliseconds since the epoch.
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (interface, key)
+    ) STRICT, WITHOUT ROWID;
+    INSERT INTO interface_state_rebuilt (interface, key, value, v, updated_at)
+        SELECT interface, key, value, v, updated_at FROM interface_state;
+    DROP TABLE interface_state;
+    ALTER TABLE interface_state_rebuilt RENAME TO interface_state;
     ",
 ];
 
