@@ -103,8 +103,15 @@ final class Agent {
         return "jawd stopped as it started (status \(demo.terminationStatus))\(last)"
     }
 
+    /// Stops the jawd the app started, giving it a few seconds to go, so its folder is still by the
+    /// time the app has quit: a snapshot's folder is removed then.
     func stop() {
-        if let demo, demo.isRunning { demo.terminate() }
+        guard let demo, demo.isRunning else { return }
+        demo.terminate()
+        let until = Date().addingTimeInterval(5)
+        while demo.isRunning, Date() < until {
+            usleep(10000)
+        }
     }
 
     // MARK: - The LaunchAgent

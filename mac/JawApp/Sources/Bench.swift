@@ -49,21 +49,38 @@ enum Bench {
         }
     }
 
-    /// Opens the first chat once the list's rows come, then draws the window into a PNG and quits.
+    /// Opens the first chat once the list's rows have come and settled, then draws the window into a
+    /// PNG and quits.
     static func snapshot(to path: String, model: AppModel) {
         deadline(30)
         model.window?.window?.setContentSize(NSSize(width: 1440, height: 900))
         model.firstRows = {
-            if let first = model.window?.chatList.all.first(where: { $0.kind != .community && $0.last != nil }) {
-                model.open(first, opened: false)
+            settled(model) {
+                if let first = model.window?.chatList.all.first(where: { $0.kind != .community && $0.last != nil }) {
+                    model.open(first, opened: false)
+                }
+                if CommandLine.arguments.contains("--split") { model.split(.across) }
+                let keys = CommandLine.arguments.firstIndex(of: "--keys").flatMap { i in
+                    i + 1 < CommandLine.arguments.count ? CommandLine.arguments[i + 1].split(separator: ",").map(String.init) : nil
+                } ?? []
+                press(keys, model: model) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { draw(to: path, model: model) }
+                }
             }
-            if CommandLine.arguments.contains("--split") { model.split(.across) }
-            let keys = CommandLine.arguments.firstIndex(of: "--keys").flatMap { i in
-                i + 1 < CommandLine.arguments.count ? CommandLine.arguments[i + 1].split(separator: ",").map(String.init) : nil
-            } ?? []
-            press(keys, model: model) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { draw(to: path, model: model) }
-            }
+        }
+    }
+
+    /// Runs `then` once the chat list's rows have stayed as they are for half a second, or after five
+    /// seconds whatever they do: a fresh demo's messages and its group's name come over its first
+    /// moments, so a picture taken at the first rows would catch some of them and not others.
+    static func settled(_ model: AppModel, looked: Int = 0, still: Int = 0, since: [String] = [],
+                        then: @escaping @MainActor () -> Void)
+    {
+        let rows = (model.window?.chatList.all ?? []).map { "\($0.id)@\($0.v)" }
+        let quiet = rows == since ? still + 1 : 0
+        if quiet >= 5 || looked >= 50 { return then() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            settled(model, looked: looked + 1, still: quiet, since: rows, then: then)
         }
     }
 

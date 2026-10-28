@@ -70,9 +70,11 @@ case "$what" in
         run "scripts/check $what $scheme $*"
         ;;
     snapshot)
+        # A demo folder of its own for each run, removed after it: every checkout's runs on the build
+        # Mac would otherwise share one, with drafts and a jaw.db that earlier runs and other jawds left.
         out="$1"; shift
-        run "scripts/check build jaw | grep -q 'BUILD SUCCEEDED' || { scripts/check build jaw | tail -5; exit 1; }; rm -rf \\\$TMPDIR/jaw-mac-demo; build/DerivedData/Build/Products/Debug/Jaw.app/Contents/MacOS/Jaw --demo --snapshot /tmp/jaw-mac-snapshot.png $* > /tmp/jaw-mac-snapshot.log 2>&1; cat /tmp/jaw-mac-snapshot.log | tail -12"
-        scp -q -o BatchMode=yes "$host:/tmp/jaw-mac-snapshot.png" "$out" && echo "==> $out"
+        run "scripts/check build jaw || exit 1; home=\$(mktemp -d \"\${TMPDIR:?}/jaw-snap.XXXXXX\") || exit 1; build/DerivedData/Build/Products/Debug/Jaw.app/Contents/MacOS/Jaw --demo --home \"\$home\" --snapshot build/snapshot.png $* > build/snapshot.log 2>&1; rm -rf \"\$home\"; tail -12 build/snapshot.log"
+        scp -q -o BatchMode=yes "$host:$remote/mac/build/snapshot.png" "$out" && echo "==> $out"
         ;;
     shot)
         scene="$1"; out="$2"; shift 2
