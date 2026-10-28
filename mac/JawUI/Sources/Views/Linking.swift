@@ -112,22 +112,28 @@ public struct LinkingView: View {
         } else if case let .qr(text, _) = step, let image = Self.qr(text) {
             QRCode(image: image).frame(width: 260, height: 260)
                 .padding(14).background(RoundedRectangle(cornerRadius: Radius.panel).fill(.white))
-                .accessibilityLabel("The code to scan with your phone")
         } else {
             ProgressView().frame(width: 288, height: 288)
         }
     }
 
-    /// The QR code for jawd's text, a pixel to a module, drawn without smoothing.
+    /// The QR code for jawd's text, a pixel to a module, made once a code: the body asks for it each
+    /// second.
     static func qr(_ text: String) -> CGImage? {
+        if let last, last.text == text { return last.image }
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(text.utf8)
         filter.correctionLevel = "M"
         guard let output = filter.outputImage else { return nil }
-        return context.createCGImage(output, from: output.extent)
+        let image = context.createCGImage(output, from: output.extent)
+        last = image.map { (text, $0) }
+        return image
     }
 
-    /// One context for every code, made once: the body asks for its code each second.
+    /// The last code made, and the text it was made for.
+    static var last: (text: String, image: CGImage)?
+
+    /// One context for every code, made once.
     static let context = CIContext()
 }
 
@@ -151,7 +157,7 @@ struct QRCode: NSViewRepresentable {
 /// its pixels, since a picture taken with `cacheDisplay` ignores a layer's filter.
 final class QRCodeView: NSView {
     var image: CGImage? {
-        didSet { needsDisplay = true }
+        didSet { if image !== oldValue { needsDisplay = true } }
     }
 
     init() {
@@ -171,6 +177,20 @@ final class QRCodeView: NSView {
         context.imageInterpolation = .none
         context.cgContext.interpolationQuality = .none
         context.cgContext.draw(image, in: bounds)
+    }
+
+    // MARK: VoiceOver
+
+    override func isAccessibilityElement() -> Bool {
+        true
+    }
+
+    override func accessibilityRole() -> NSAccessibility.Role? {
+        .image
+    }
+
+    override func accessibilityLabel() -> String? {
+        "The code to scan with your phone"
     }
 }
 
