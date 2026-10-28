@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::mpsc;
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
@@ -879,8 +880,16 @@ async fn merges_that_go_round_in_a_circle_keep_jawd_from_opening_jaw_db_and_chan
     // The old number's chat and the LID's, each merging into the other, which no jawd makes.
     db.execute("INSERT INTO chat_merges (gone, keep) VALUES (1, 2), (2, 1)", []).unwrap();
     drop(db);
-    let refused = Store::open(copy.path()).err().expect("jaw.db isn't opened");
-    assert!(format!("{refused:#}").contains("go round in a circle"), "{refused:#}");
+    // Opened on a thread of its own, so a walk that went round the circle for ever fails the test
+    // rather than hanging it.
+    let (opened, open) = mpsc::channel();
+    let path = copy.path().to_path_buf();
+    std::thread::spawn(move || {
+        let _ = opened.send(Store::open(&path).err().map(|e| format!("{e:#}")));
+    });
+    let refused = open.recv_timeout(Duration::from_secs(30)).expect("opening jaw.db never ended");
+    let refused = refused.expect("jaw.db isn't opened");
+    assert!(refused.contains("go round in a circle"), "{refused}");
     let db = Connection::open(copy.path().join("jaw.db")).unwrap();
     let merges: i64 = db.query_row("SELECT count(*) FROM chat_merges WHERE gone <> keep", [], |r| r.get(0)).unwrap();
     assert_eq!(merges, 2, "nothing written");
