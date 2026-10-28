@@ -38,10 +38,11 @@ enum Pictures {
     }
 
     /// Draws `scene` in `conditions`, in a window of its own off the screen, once it has had `settle`
-    /// to do what it does after it's made. It holds the app-wide `Motion.reduced` for as long as it
-    /// draws, so draws mustn't overlap. The window doesn't animate as it comes and goes: off every
-    /// screen that animation never ends, and each kept one of the system's threads for good, so after
-    /// some 80 pictures in one run nothing more was laid out off the main thread.
+    /// to do what it does after it's made; once it's drawn, it closes the window and lets the window's
+    /// content go, as AppKit can keep a window it has shown after it's closed. It holds the app-wide
+    /// `Motion.reduced` for as long as it draws, so draws mustn't overlap. The window doesn't animate
+    /// as it comes and goes: off every screen that animation never ends, and each would hold one of
+    /// GCD's threads, which lay a conversation's rows out, for good.
     static func draw(_ scene: HarnessScene, _ conditions: Conditions) async throws -> Drawn {
         let reduced = Motion.reduced
         Motion.reduced = { conditions.reduceMotion }
@@ -60,7 +61,10 @@ enum Pictures {
         window.appearance = NSAppearance(named: conditions.dark ? .darkAqua : .aqua)
         window.contentView = host
         window.orderFront(nil)
-        defer { window.orderOut(nil) }
+        defer {
+            window.close()
+            window.contentView = nil
+        }
         try await Task.sleep(for: settle)
         host.layoutSubtreeIfNeeded()
         let bounds = host.bounds
@@ -72,6 +76,7 @@ enum Pictures {
                                          bytesPerRow: wide * 4, bitsPerPixel: 32)
         else { throw PictureError.cantDraw(scene.id) }
         rep.size = bounds.size
+        hideScrollers(in: host)
         host.cacheDisplay(in: bounds, to: rep)
         guard let png = rep.representation(using: .png, properties: [:]), let pixels = rep.bitmapData else {
             throw PictureError.cantDraw(scene.id)
@@ -79,6 +84,14 @@ enum Pictures {
         let digest = SHA256.hash(data: Data(bytes: pixels, count: rep.bytesPerRow * rep.pixelsHigh))
         let hash = String(digest.map { String(format: "%02x", $0) }.joined().prefix(16))
         return Drawn(png: png, points: bounds.size, pixels: [rep.pixelsWide, rep.pixelsHigh], hash: hash, notes: taker.notes)
+    }
+
+    /// At rest the app shows no scroller: `Scrolling.style` makes each a `ThinScroller`, overlaid, which
+    /// shows only while its view scrolls. A picture is of the window at rest, however lately it scrolled.
+    private static func hideScrollers(in view: NSView) {
+        for v in view.subviews {
+            if v is ThinScroller { v.isHidden = true } else { hideScrollers(in: v) }
+        }
     }
 
     /// `--snapshot`: the scene `--scene` names, or the first, in the conditions the flags set.
