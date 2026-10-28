@@ -282,3 +282,36 @@ func TestAPatchWhoseEchoDoesntComeBackIsAFailureToTryAgainAndItsWaitIsForgotten(
 		t.Fatalf("%d waits are left once the patch was answered", len(e.echoes.waiting))
 	}
 }
+
+// WhatsApp may have taken a patch whose echo jawd hasn't kept, so a wait that ends because jawd has
+// gone, after which no ack comes, or because the engine is stopping, is a failure to try again too.
+func TestAPatchWhoseWaitForItsEchoJawdOrTheEngineEndsIsAFailureToTryAgain(t *testing.T) {
+	const at = 1_792_000_000_123
+	mute := []string{"mute", "351910000002@s.whatsapp.net"}
+	for what, end := range map[string]func(*Engine, context.CancelFunc){
+		"jawd went":          func(e *Engine, _ context.CancelFunc) { e.acks.Close() },
+		"the engine stopped": func(_ *Engine, stop context.CancelFunc) { stop() },
+	} {
+		ctx, stop := context.WithCancel(context.Background())
+		defer stop()
+		e := newEngine(ctx, nil, NewLogger("test", "error"))
+		echo := e.echoes.expect(mute, at)
+		answered := make(chan *enginepb.Reply, 1)
+		go func() { answered <- e.echoed(echo, "mute", time.Minute) }()
+		select {
+		case reply := <-answered:
+			t.Fatalf("the patch was answered %v before %s", reply, what)
+		case <-time.After(20 * time.Millisecond):
+		}
+		end(e, stop)
+		select {
+		case reply := <-answered:
+			said := what + " before the mute change's echo came back"
+			if failure := reply.GetFailure(); failure == nil || !failure.Retry || failure.Message != said {
+				t.Errorf("once %s, the patch gave %v", what, reply)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("%s, and the patch still waited for its echo", what)
+		}
+	}
+}
