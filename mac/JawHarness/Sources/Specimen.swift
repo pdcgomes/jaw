@@ -67,7 +67,7 @@ struct ControllerSpecimen: NSViewControllerRepresentable {
 }
 
 /// A whole window's content at the screen's size, as the window holds it, made from a `Screen`, with
-/// the window's buttons over it where the window puts them.
+/// the title bar's buttons over it where the window puts them.
 struct ScreenSpecimen: View {
     let screen: Screen
     let conditions: Conditions
@@ -75,29 +75,39 @@ struct ScreenSpecimen: View {
     var body: some View {
         ControllerSpecimen { screen.content(conditions) }
             .frame(width: screen.width, height: screen.height)
-            .overlay(alignment: .topLeading) { WindowButtons() }
+            .overlay(alignment: .topLeading) { WindowButtons(roles: conditions.roles) }
     }
 }
 
-/// The window's three buttons where the window puts them: real buttons made for the app's window,
-/// which draw as its own do, grey in a window that isn't key, as a picture's never is. A button made
-/// on its own sends its action to the window with the keys, the harness's, so these send none.
+/// The title bar's buttons where the window puts them. The window's three are real buttons made for
+/// the app's window, which draw as its own do, grey in a window that isn't key, as a picture's never
+/// is; a button made on its own sends its action to the window with the keys, the harness's, so these
+/// send none. Beside them, the sidebar's button as `TitleBar` makes it, in `roles`, toggling nothing.
 private struct WindowButtons: NSViewRepresentable {
+    let roles: Roles
+
     func makeNSView(context _: Context) -> NSView {
         let view = TopLeft()
         for (kind, frame) in Screen.titleBar.buttons {
-            guard let button = NSWindow.standardWindowButton(kind, for: Screen.style) else { continue }
+            guard let button = NSWindow.standardWindowButton(kind, for: TitleBar.style) else { continue }
             button.frame = frame
             button.action = nil
             view.addSubview(button)
         }
+        let sidebar = TitleBar.sidebarButton {}
+        sidebar.roles = roles
+        view.addSubview(sidebar)
+        NSLayoutConstraint.activate([
+            sidebar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Screen.titleBar.sidebar.minX),
+            sidebar.topAnchor.constraint(equalTo: view.topAnchor, constant: Screen.titleBar.sidebar.minY),
+        ])
         return view
     }
 
     func updateNSView(_: NSView, context _: Context) {}
 
     func sizeThatFits(_: ProposedViewSize, nsView _: NSView, context _: Context) -> CGSize? {
-        let frames = Screen.titleBar.buttons.map(\.frame)
+        let frames = Screen.titleBar.buttons.map(\.frame) + [Screen.titleBar.sidebar]
         return CGSize(width: frames.map(\.maxX).max() ?? 0, height: frames.map(\.maxY).max() ?? 0)
     }
 }

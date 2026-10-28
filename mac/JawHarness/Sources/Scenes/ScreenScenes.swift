@@ -64,7 +64,7 @@ private struct ReachingJawdScene: View {
         VStack(alignment: .leading, spacing: 0) {
             ScreenBand(
                 title: "Starting jawd",
-                note: "The Mimic awake in the panes' place, \"Starting jawd\" and what jawd is for; the status line says \"starting jawd…\" in the accent, with @ Lisbon Climbing in the mention colour and ⌘J glance on its right. The rest is the window as it always is: its three buttons at the top left, the sidebar, the four chats in the list, none selected, and the bar with Unsaved Panes, the split button, Find and New Chat. A picture can't hold the sidebar's selection material: the selected folder is a black pill (in light it hides All), and the window's buttons are grey, as in a window that isn't key; judge those in the app.",
+                note: "The Mimic awake in the panes' place, \"Starting jawd\" and what jawd is for; the status line says \"starting jawd…\" in the accent, with @ Lisbon Climbing in the mention colour and ⌘J glance on its right. The rest is the window as it always is: its three buttons at the top left and the sidebar's button beside them, the sidebar, the four chats in the list, none selected, and the bar with Unsaved Panes, the split button, Find and New Chat. A picture can't hold the sidebar's selection material: the selected folder is a black pill (in light it hides All), and the window's buttons are grey, as in a window that isn't key; judge those in the app.",
                 screen: Screen(situation: Situation(reach: .starting(failed: nil))), conditions: conditions,
             )
             ScreenBand(
@@ -140,14 +140,14 @@ private struct LinkingScene: View {
         VStack(alignment: .leading, spacing: 0) {
             ScreenBand(
                 title: "Not linked, with a QR code",
-                note: "Linking fills the panes' place: jawd's QR code on white beside the Mimic, every module a hard-edged square (a soft edge means it was smoothed as it was scaled), \"Link Jaw to WhatsApp\", the steps on the phone, \"It changes in 45 s.\", held still by the harness's clock, and Use a Phone Number Instead, with \"Jaw isn't affiliated with WhatsApp or Meta.\" under them. The status line says \"not linked\" in the mention colour; the chats jawd kept are in the list, with @ Lisbon Climbing and ⌘J glance on the status line's right. A picture can't hold the sidebar's selection material: the selected folder is a black pill (in light it hides All), and Link Again and the window's buttons are grey, as in a window that isn't key; judge those in the app.",
+                note: "Linking fills the panes' place: jawd's QR code on white beside the Mimic, every module a hard-edged square (a soft edge means it was smoothed as it was scaled), \"Link Jaw to WhatsApp\", the steps on the phone, \"It changes in 45 s.\", held still by the harness's clock, and Use a Phone Number Instead, with \"Jaw isn't affiliated with WhatsApp or Meta.\" under them. The status line says \"not linked\" in the mention colour; the chats jawd kept are in the list, with @ Lisbon Climbing and ⌘J glance on the status line's right. A picture can't hold the sidebar's selection material: the selected folder is a black pill (in light it hides All), and the window's buttons are grey, as in a window that isn't key; judge those in the app.",
                 screen: Screen(situation: Situation(reach: .up, linked: false,
                                                     link: .qr(code: "2@jaw-harness,QWERTYUIOPASDFGHJKL,ZXCVBNM=", expires: Samples.now + 45_000))),
                 conditions: conditions,
             )
             ScreenBand(
                 title: "Logged out",
-                note: "The Mimic over \"Logged out\", with jawd's reason, from the phone, that jawd deleted the session and kept your messages, Link Again, and \"Jaw isn't affiliated with WhatsApp or Meta.\" under it; the four chats are in the list, and the status line says \"not linked\" in the mention colour, as not being linked comes before the connection's state, with @ Lisbon Climbing and ⌘J glance on its right.",
+                note: "The Mimic over \"Logged out\", with jawd's reason, from the phone, that jawd deleted the session and kept your messages, Link Again, grey as in a window that isn't key, and \"Jaw isn't affiliated with WhatsApp or Meta.\" under it; the four chats are in the list, and the status line says \"not linked\" in the mention colour, as not being linked comes before the connection's state, with @ Lisbon Climbing and ⌘J glance on its right.",
                 screen: Screen(situation: Situation(reach: .up, linked: false,
                                                     connection: Connection(state: .loggedOut, reason: "logged out from the phone"))),
                 conditions: conditions,

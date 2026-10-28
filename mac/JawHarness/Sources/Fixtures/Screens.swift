@@ -15,37 +15,42 @@ struct Screen {
     var width: CGFloat = 1180
     var height: CGFloat = 780
 
-    /// The app's window's style, as `MainWindowController` makes it: titled, with the content filling
-    /// the window under its title bar.
-    static let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-
-    /// The app's title bar: how tall it is, and where its three buttons are, from the window's top left.
-    struct TitleBar {
+    /// The app's title bar: how tall it is, and where its buttons are from the window's top left, the
+    /// window's three and the sidebar's beside them.
+    struct Bar {
         let height: CGFloat
         let buttons: [(kind: NSWindow.ButtonType, frame: NSRect)]
+        let sidebar: NSRect
+
+        /// `frame`, from the top left of a view `height` points tall, in that view's own coordinates,
+        /// whose y runs up as a window's content view's does; and back, as the flip undoes itself.
+        static func flip(_ frame: NSRect, in height: CGFloat) -> NSRect {
+            NSRect(x: frame.minX, y: height - frame.maxY, width: frame.width, height: frame.height)
+        }
 
         /// Where the window puts `kind`'s button, in the coordinates of `content`, the window's content.
         @MainActor
         func frame(of kind: NSWindow.ButtonType, in content: NSView) -> NSRect? {
-            guard let f = buttons.first(where: { $0.kind == kind })?.frame else { return nil }
-            return content.isFlipped ? f : NSRect(x: f.minX, y: content.bounds.height - f.maxY, width: f.width, height: f.height)
+            buttons.first { $0.kind == kind }.map { Self.flip($0.frame, in: content.bounds.height) }
         }
     }
 
-    /// The title bar as a window made as the app makes its own has it, measured once from one that's
-    /// never shown.
-    @MainActor static let titleBar: TitleBar = {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780), styleMask: style, backing: .buffered, defer: false)
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
+    /// The title bar as a window made with `TitleBar.style` and dressed by `TitleBar.dress` has it,
+    /// measured once from one that's never shown, with its frame view laid out, which places the
+    /// sidebar's button.
+    @MainActor static let titleBar: Bar = {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780), styleMask: TitleBar.style, backing: .buffered,
+                              defer: false)
+        let sidebar = TitleBar.dress(window) {}
         let content = window.contentView!
-        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { kind in
-            window.standardWindowButton(kind).map { button in
-                let f = content.convert(button.frame, from: button.superview)
-                return (kind: kind, frame: NSRect(x: f.minX, y: content.bounds.height - f.maxY, width: f.width, height: f.height))
-            }
+        content.superview?.layoutSubtreeIfNeeded()
+        @MainActor func measured(_ view: NSView) -> NSRect {
+            Bar.flip(content.convert(view.frame, from: view.superview), in: content.bounds.height)
         }
-        return TitleBar(height: window.frame.height - window.contentLayoutRect.height, buttons: buttons)
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { kind in
+            window.standardWindowButton(kind).map { (kind: kind, frame: measured($0)) }
+        }
+        return Bar(height: window.frame.height - window.contentLayoutRect.height, buttons: buttons, sidebar: measured(sidebar))
     }()
 
     /// The open chats side by side on a grid of one row, each in a slot numbered from 1.
