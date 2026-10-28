@@ -327,7 +327,8 @@ pub fn chat(db: &Connection, n: i64) -> Result<Option<ChatRow>> {
 /// it as a mention does: by their name once jaw knows it, "You" for yours, and by their JID until
 /// then. A row's v is the newest of its message's and those of the people it names: its sender,
 /// whoever wrote what it quotes, and whoever it mentions, whose newest comes with their names. So
-/// whatever changes how a row names someone must move that person's people.v.
+/// whatever changes how a row names someone must move that person's people.v, and nothing else
+/// should, since each move sends every row naming them again.
 const MESSAGE_COLUMNS: &str = "
     SELECT m.n, c.id, m.id, max(m.v, coalesce(p.v, 0), coalesce(rp.v, 0)), m.at, m.mine, m.kind, m.status, m.text,
         m.spans, coalesce(m.summary, m.text, ''),
