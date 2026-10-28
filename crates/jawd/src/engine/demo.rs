@@ -7,12 +7,12 @@
 //! recipients' phones say they have but never read; the server refuses an edit once WhatsApp's
 //! window for it has passed; and app state sent for your other devices is taken, kept with the
 //! account's own as the latest for its index in its collection, and sent back, as whatsmeow fetches
-//! a collection again after each patch, unless a test has it refused; a full fetch sends what it
-//! keeps in the collections named, or in every collection. Given an `Account`, it answers for its
-//! contacts and groups, and writes each history blob its phone offers to the spool as jaw-engine
-//! does; events can also be delivered from outside its script, several waiting for their acks at
-//! once. Its people type and record as WhatsApp's chat presence says it, sent over the link as the
-//! `Typing` event jaw-engine sends, in order with the rest.
+//! a collection again after each patch, unless a test has it refused or its echo lost; a full fetch
+//! sends what it keeps in the collections named, or in every collection. Given an `Account`, it
+//! answers for its contacts and groups, and writes each history blob its phone offers to the spool
+//! as jaw-engine does; events can also be delivered from outside its script, several waiting for
+//! their acks at once. Its people type and record as WhatsApp's chat presence says it, sent over
+//! the link as the `Typing` event jaw-engine sends, in order with the rest.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -141,6 +141,9 @@ pub struct World {
     /// Whether app-state patches are taken and kept but never answered, as when the connection
     /// drops once the server has a patch.
     holding_patches: AtomicBool,
+    /// How many app-state patches to take and keep next but fail as one to try again, as the engine
+    /// fails a patch whose echo doesn't come back in time.
+    losing_echoes: Mutex<u32>,
     /// The app state the server keeps for every device: the account's, as its phone left it, and
     /// each patch it has taken since.
     app_state: Mutex<Held>,
@@ -476,6 +479,13 @@ impl World {
     #[cfg(test)]
     pub fn hold_patches(&self, holding: bool) {
         self.holding_patches.store(holding, Ordering::SeqCst);
+    }
+
+    /// Takes and keeps the next `n` app-state patches, but fails each as one to try again, as the
+    /// engine fails a patch WhatsApp took whose echo didn't come back in time.
+    #[cfg(test)]
+    pub fn lose_echoes(&self, n: u32) {
+        *self.losing_echoes.lock().expect("the demo world") = n;
     }
 
     /// Has the server keep message `id` as sent at `at`, as one sent long ago.
@@ -1755,7 +1765,8 @@ impl Sender {
     /// WhatsApp takes an app-state patch, unless told to refuse it, and keeps it as the latest for
     /// its index in its collection; whatsmeow then fetches the collection again, so the patch comes
     /// back as an AppState event, acked before the patch is answered. A held patch is kept, and its
-    /// answer lost.
+    /// answer lost; a patch whose echo is lost is kept, and failed as the engine fails one whose
+    /// echo doesn't come back in time.
     async fn patched(&self, patch: pb::AppStatePatch) -> Result<pb::reply::Kind, EngineError> {
         let world = &self.world;
         {
@@ -1767,6 +1778,15 @@ impl Sender {
         }
         let state = pb::AppState { index: patch.index, value: patch.value };
         world.keep(&patch.name, state.clone());
+        {
+            let mut losing = world.losing_echoes.lock().expect("the demo world");
+            if *losing > 0 {
+                *losing -= 1;
+                let what = state.index.first().map_or("", String::as_str);
+                let message = format!("WhatsApp took the {what} change, but its echo didn't come back within 30s");
+                return Err(EngineError::Failed { message, retry: true });
+            }
+        }
         if world.holding_patches.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
@@ -2394,6 +2414,24 @@ mod tests {
         let (taken, echo) = answered(&instance, &mut rx, patch("regular_low", ["pin_v1", ANA], &[8, 1])).await;
         assert!(matches!(taken, Ok(pb::reply::Kind::Done(_))), "the next is taken: {taken:?}");
         assert_eq!(echo, [state(["pin_v1", ANA], &[8, 1])]);
+    }
+
+    #[tokio::test]
+    async fn a_patch_whose_echo_is_lost_is_kept_and_failed_as_one_to_try_again_and_only_as_many_as_a_test_says() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let engine = DemoEngine::with(Vec::new());
+        let world = engine.world();
+        let instance = engine.start(tx).await.unwrap();
+        world.lose_echoes(1);
+        let (failed, nothing) = answered(&instance, &mut rx, patch("regular_low", ["pin_v1", ANA], &[8, 1])).await;
+        let lost = "WhatsApp took the pin_v1 change, but its echo didn't come back within 30s";
+        assert!(matches!(&failed, Err(EngineError::Failed { message, retry: true }) if message == lost), "{failed:?}");
+        assert!(nothing.is_empty(), "its echo never came: {nothing:?}");
+        let (_, fetched) = answered(&instance, &mut rx, resync(&["regular_low"])).await;
+        assert_eq!(fetched, [state(["pin_v1", ANA], &[8, 1])], "WhatsApp took it all the same");
+        let (taken, echo) = answered(&instance, &mut rx, patch("regular_low", ["pin_v1", ANA], &[8, 0])).await;
+        assert!(matches!(taken, Ok(pb::reply::Kind::Done(_))), "the next is echoed: {taken:?}");
+        assert_eq!(echo, [state(["pin_v1", ANA], &[8, 0])]);
     }
 
     #[tokio::test]
