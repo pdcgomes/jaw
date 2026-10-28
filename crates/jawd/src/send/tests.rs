@@ -418,6 +418,31 @@ fn a_scene_of_jawd_to_be_killed() {
                 running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
                 at("pinned");
             }
+            "pin asked" | "pin answered" => {
+                world.hold_patches(true);
+                let running = Running::on(home, world, true).await;
+                running.chats(&[ANA]).await;
+                let holder = Connection::open(home.join("jaw.db")).unwrap();
+                holder.busy_timeout(Duration::from_secs(5)).unwrap();
+                holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+                let sending = running.sending.clone();
+                let answer =
+                    tokio::spawn(async move { sending.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await });
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                if scene == "pin asked" {
+                    // The pin waits for jaw.db's write lock, unanswered, until the scene is killed.
+                    at(if answer.is_finished() { "answered" } else { "asked" });
+                    std::thread::sleep(Duration::from_secs(3_600));
+                } else {
+                    holder.execute_batch("COMMIT").unwrap();
+                    answer.await.unwrap().unwrap();
+                    let db = Connection::open(home.join("jaw.db")).unwrap();
+                    let pinned: i64 =
+                        db.query_row("SELECT pinned FROM chats WHERE id = ?1", [ANA], |r| r.get(0)).unwrap();
+                    at(&pinned.to_string());
+                }
+                drop(holder);
+            }
             other => panic!("there's no scene {other}"),
         }
     });
@@ -1661,6 +1686,7 @@ async fn ask_socket_open(
     let socket = socket.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let hello =
             ("hello", json!({ "protocol": jaw_proto::PROTOCOL, "client": "test", "version": "0", "focus": true }));
@@ -4820,4 +4846,153 @@ async fn a_fetch_again_after_a_refusal_waits_while_whatsapp_cant_be_reached_and_
         })
         .await;
     assert_eq!(fetches(&running.world.asked()), 1, "fetched again once it could be");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_actions_go_through_the_socket_and_a_window_watched_again_from_its_seq_is_sent_their_rows() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA, CLIMBING]).await;
+    running.arrives(ANA, ANA, "m1", now_ms() - 60_000).await;
+    // Ana's newer message keeps starring m1 from giving her chat's row a version, so only the chat
+    // actions on her chat can.
+    running.arrives(ANA, ANA, "m2", now_ms() - 30_000).await;
+    let socket = serve_watched(&running, home.path());
+    let all = json!({ "folder": "all", "around": "top", "before": 0, "after": 60 });
+    let watched = ask_socket(&socket, vec![("chats.watch", all)]).await;
+    let seq = watched[0]["result"]["seq"].as_i64().unwrap();
+    let until = now_ms() + 8 * 3_600_000;
+    let replies = ask_socket(
+        &socket,
+        vec![
+            ("chat.pin", json!({ "chat": ANA, "pinned": true })),
+            ("chat.mute", json!({ "chat": ANA, "until": until })),
+            ("chat.mark_unread", json!({ "chat": ANA, "unread": true })),
+            ("star", json!({ "message": "m1", "starred": true, "chat": ANA })),
+            ("chat.archive", json!({ "chat": CLIMBING, "archived": true })),
+            ("chat.pin", json!({ "chat": "351999999999@s.whatsapp.net", "pinned": true })),
+            ("chat.mute", json!({ "chat": ANA, "until": 1_000 })),
+            ("star", json!({ "message": "nope", "starred": true })),
+        ],
+    )
+    .await;
+    for reply in &replies[..5] {
+        assert_eq!(reply["result"], json!({}), "{reply}");
+    }
+    assert_eq!(replies[5]["error"]["code"], code::NOT_FOUND);
+    assert_eq!(
+        (&replies[6]["error"]["code"], &replies[6]["error"]["data"]),
+        (&json!(code::INVALID_PARAMS), &json!({ "param": "until" }))
+    );
+    assert_eq!(replies[7]["error"]["code"], code::NOT_FOUND);
+    let again =
+        json!({ "folder": "all", "around": "top", "before": 0, "after": 60, "since": seq, "have": [ANA, CLIMBING] });
+    let rewatched = ask_socket(&socket, vec![("chats.watch", again)]).await;
+    let result = &rewatched[0]["result"];
+    let rows = result["rows"].as_array().unwrap();
+    let ana = rows.iter().find(|row| row["id"] == ANA).unwrap_or_else(|| panic!("{result}"));
+    assert_eq!(
+        (&ana["pinned"], &ana["muted_until"], &ana["marked_unread"]),
+        (&json!(true), &json!(until), &json!(true))
+    );
+    assert!(ana["v"].as_i64().unwrap() > seq, "with a version past where the window was watched");
+    assert_eq!(result["remove"], json!([CLIMBING]), "archived, it left All");
+    let archived = json!({ "folder": "archived", "around": "top", "before": 0, "after": 60 });
+    let archived = ask_socket(&socket, vec![("chats.watch", archived)]).await;
+    assert_eq!(archived[0]["result"]["rows"][0]["id"], CLIMBING);
+    assert!(row(&running, ANA, "m1").await.unwrap().starred);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_from_the_phone_while_a_pin_waits_is_held_back_and_the_pin_goes_after_it() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    until_offline(&running).await;
+    running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
+    let pinned = chat_row(&running, ANA).await;
+    let at = pinned_at(&running, ANA).await;
+    // The phone unpins it meanwhile, with a later clock; WhatsApp takes jaw's pin after it all the same.
+    let unpin = SyncActionValue {
+        timestamp: Some(now_ms() + 1_000),
+        pin_action: Some(PinAction { pinned: Some(false) }),
+        ..Default::default()
+    };
+    let value = unpin.encode_to_vec();
+    let state = pb::AppState { index: vec!["pin_v1".into(), ANA.into()], value: value.clone() };
+    let delivered = running.world.deliver(pb::Event { seq: 0, kind: Some(pb::event::Kind::AppState(state)) });
+    let acked =
+        tokio::time::timeout(Duration::from_secs(30), delivered).await.expect("jawd never kept the phone's unpin");
+    acked.expect("no engine ran to hand the phone's unpin over");
+    let key = serde_json::to_string(&["pin_v1", ANA]).unwrap();
+    eventually(&running, "the phone's unpin, kept raw", move |db| {
+        let kept: Option<Vec<u8>> =
+            db.query_row("SELECT value FROM app_state WHERE key = ?1", [&key], |r| r.get(0)).optional()?;
+        Ok(kept.as_deref() == Some(value.as_slice()))
+    })
+    .await;
+    let held = chat_row(&running, ANA).await;
+    assert!(held.pinned && held.v == pinned.v, "held back: jaw's pin goes after it, so it's how every device ends");
+    assert!(patches_sent(&running).is_empty(), "jaw's pin still waits");
+    running.connection(jaw_proto::ConnectionState::Online);
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    assert_eq!(sent.len(), 1);
+    until_echoed(&running, &sent[0]).await;
+    let ana = chat_row(&running, ANA).await;
+    assert!(ana.pinned && ana.v == pinned.v, "jaw's echo changes nothing");
+    assert_eq!(pinned_at(&running, ANA).await, at, "at the time jaw pinned it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pin_killed_before_its_commit_leaves_nothing_and_asked_again_goes_once() {
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(crash(home.path(), "pin asked").await, "asked", "unanswered while it waited for its commit");
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    let (pinned, rows): (i64, i64) = db
+        .query_row(
+            "SELECT (SELECT pinned FROM chats WHERE id = ?1), (SELECT count(*) FROM outbox WHERE kind = 'app_state')",
+            [ANA],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((pinned, rows), (0, 0), "nothing of it was written, and nobody was told it was");
+    drop(db);
+    let running = Running::on(home.path(), world(), true).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(patches_sent(&running).is_empty(), "so nothing goes");
+    running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
+    until_stored(&running).await;
+    assert_eq!(patches_sent(&running).len(), 1, "asked again, it's pinned once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pin_answered_was_on_disk_first_and_after_a_crash_goes_once_and_asked_again_changes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let pinned: i64 = crash(home.path(), "pin answered").await.parse().unwrap();
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    let (kept, v, rows): (i64, i64, i64) = db
+        .query_row(
+            "SELECT pinned, v, (SELECT count(*) FROM outbox WHERE kind = 'app_state' AND state = 'queued')
+            FROM chats WHERE id = ?1",
+            [ANA],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((kept, rows), (pinned, 1), "the pin and its patch outlived jawd");
+    drop(db);
+    let running = Running::on(home.path(), world(), true).await;
+    until_stored(&running).await;
+    let sent = patches_sent(&running);
+    assert_eq!(sent.len(), 1, "sent once jawd started again");
+    assert_eq!(value_of(&sent[0]).timestamp, Some(pinned), "with the time jawd wrote before it stopped");
+    until_echoed(&running, &sent[0]).await;
+    let ana = chat_row(&running, ANA).await;
+    assert_eq!((ana.v, pinned_at(&running, ANA).await), (v, pinned), "and its echo changed nothing");
+    running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
+    assert_eq!(
+        (patches_sent(&running).len(), running.store.count("outbox").unwrap()),
+        (1, 0),
+        "asked again, its answer lost, nothing more goes"
+    );
 }
