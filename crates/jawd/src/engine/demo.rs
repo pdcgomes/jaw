@@ -113,10 +113,10 @@ impl Default for Replies {
 #[derive(Default)]
 pub struct World {
     replies: Mutex<Replies>,
-    /// What the engine was asked, in order. Only tests read it, and a demo jawd would keep every
-    /// command it was asked for as long as it ran, so only test builds keep it.
+    /// What the engine was asked, and each echo jawd acked, in order. Only tests read it, and a demo
+    /// jawd would keep every command it was asked for as long as it ran, so only test builds keep it.
     #[cfg(test)]
-    asked: Mutex<Vec<pb::command::Kind>>,
+    noted: Mutex<Vec<Noted>>,
     /// Each message the server has, by ID, with its time.
     has: Mutex<HashMap<String, i64>>,
     /// Messages a recipient has been given, by ID; a message sent twice is given once.
@@ -136,7 +136,7 @@ pub struct World {
     gated: AtomicBool,
     opened: Notify,
     #[cfg(test)]
-    asked_now: Notify,
+    noted_now: Notify,
     /// The account the engine answers for, besides its script.
     account: Option<Arc<dyn Account>>,
     /// The full fetches of its app state the engine has played.
@@ -217,6 +217,16 @@ pub enum Phone {
     /// It never answers, as when it's off.
     #[cfg(test)]
     Silent,
+}
+
+/// What the made-up WhatsApp notes for tests, in the order it happens.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub enum Noted {
+    /// A command the engine was asked.
+    Asked(pb::command::Kind),
+    /// The echo of an app-state patch, once jawd has acked it.
+    Echo(pb::AppState),
 }
 
 /// App state as WhatsApp's server keeps it: the latest mutation for each index in each collection,
@@ -547,7 +557,19 @@ impl World {
     /// out pings, benches, LID lookups, avatars, history, and what the demo engine doesn't do.
     #[cfg(test)]
     pub fn asked(&self) -> Vec<pb::command::Kind> {
-        self.asked.lock().expect("the demo world").clone()
+        self.noted()
+            .into_iter()
+            .filter_map(|noted| match noted {
+                Noted::Asked(kind) => Some(kind),
+                Noted::Echo(_) => None,
+            })
+            .collect()
+    }
+
+    /// What `asked` gives, with each app-state patch's echo where jawd acked it, in order.
+    #[cfg(test)]
+    pub fn noted(&self) -> Vec<Noted> {
+        self.noted.lock().expect("the demo world").clone()
     }
 
     /// The messages it was asked to send, in order, each time it was asked.
@@ -585,8 +607,8 @@ impl World {
     pub async fn until(&self, enough: impl Fn(&[pb::command::Kind]) -> bool) {
         let waited = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let notified = self.asked_now.notified();
-                if enough(&self.asked.lock().expect("the demo world")) {
+                let notified = self.noted_now.notified();
+                if enough(&self.asked()) {
                     return;
                 }
                 notified.await;
@@ -599,12 +621,17 @@ impl World {
 
     #[cfg(test)]
     fn ask(&self, kind: pb::command::Kind) {
-        self.asked.lock().expect("the demo world").push(kind);
-        self.asked_now.notify_waiters();
+        self.note(Noted::Asked(kind));
     }
 
     #[cfg(not(test))]
     fn ask(&self, _: pb::command::Kind) {}
+
+    #[cfg(test)]
+    fn note(&self, noted: Noted) {
+        self.noted.lock().expect("the demo world").push(noted);
+        self.noted_now.notify_waiters();
+    }
 
     /// Keeps `state` as the latest for its index in `collection`.
     fn keep(&self, collection: &str, state: pb::AppState) {
@@ -1839,9 +1866,13 @@ impl Sender {
         if world.holding_patches.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
+        #[cfg(test)]
+        let echo = state.clone();
         if !self.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::AppState(state)) }).await {
             return Err(EngineError::Gone);
         }
+        #[cfg(test)]
+        world.note(Noted::Echo(echo));
         Ok(pb::reply::Kind::Done(pb::Done {}))
     }
 
