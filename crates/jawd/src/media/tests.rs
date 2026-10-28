@@ -2367,3 +2367,25 @@ async fn files_no_copy_names_past_a_page_that_jobs_hold_still_go() {
     assert_eq!(rows(&db), 0, "and they go once let go");
     assert!(files.iter().all(|f| !f.exists()));
 }
+
+/// The audit's K7: media's start makes its folders while link previews' thumbnails make
+/// media/links, and media/ with it, at the same moment.
+#[test]
+fn preparing_the_cache_beside_a_link_thumbnail_never_fails() {
+    let mut failed = Vec::new();
+    for _ in 0..300 {
+        let home = tempfile::tempdir().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (waiting, links) = (barrier.clone(), home.path().join("media/links"));
+        let other = std::thread::spawn(move || {
+            waiting.wait();
+            std::fs::DirBuilder::new().recursive(true).create(&links).unwrap();
+        });
+        barrier.wait();
+        if let Err(e) = super::cache::prepare(home.path()) {
+            failed.push(format!("{e:#}"));
+        }
+        other.join().unwrap();
+    }
+    assert!(failed.is_empty(), "{} of 300 starts failed: {:?}", failed.len(), failed.first());
+}

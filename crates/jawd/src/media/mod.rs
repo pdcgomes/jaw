@@ -423,7 +423,7 @@ fn find(db: &Connection, id: &str, chat: Option<&str>, variant: &'static str) ->
         return Ok(Err(Error::new(code::NOT_ALLOWED, "jaw doesn't keep the file of a message you can view once")));
     }
     if copy.is_none() {
-        let what = if variant == "hd" { "an HD copy" } else { "a file" };
+        let what = if variant == "hd" { "HD copy" } else { "file" };
         return Ok(Err(Error::new(code::NOT_FOUND, format!("message {id} has no {what}"))));
     }
     Ok(Ok(Named { message, variant, sha256, local, name, id: id.to_string() }))

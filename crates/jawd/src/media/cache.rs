@@ -112,7 +112,13 @@ pub(super) fn prepare(home: &Path) -> anyhow::Result<usize> {
         if path.is_dir() {
             continue;
         }
-        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        // Link previews' thumbnails make media/ as they make media/links, at any moment and without
+        // syncing it in jaw's folder, so one made meanwhile is synced as if it were made here.
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
+            Err(e) => return Err(e.into()),
+        }
         std::fs::File::open(&path)?.sync_all()?;
         std::fs::File::open(path.parent().unwrap_or(home))?.sync_all()?;
     }
