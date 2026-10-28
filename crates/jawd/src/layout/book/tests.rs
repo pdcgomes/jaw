@@ -767,6 +767,26 @@ async fn a_slot_reads_its_chat_as_jawd_knows_it_now_through_a_merge_run_to_its_e
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_book_jaw_db_holds_that_jawd_wouldnt_keep_reads_as_no_tree() {
+    let home = tempfile::tempdir().unwrap();
+    let (_store, layouts) = opened(home.path(), &[ANA, CLIMBING]).await;
+    // Written by hand: its second slot runs past the grid's last line.
+    let broken = grid(
+        &[0.0, 0.5, 1.0],
+        &[0.0, 1.0],
+        vec![slot(1, [0, 1, 0, 1], Some(ANA)), slot(2, [1, 5, 0, 1], Some(CLIMBING))],
+    );
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.execute(
+        "INSERT INTO interface_state (interface, key, value, v, updated_at) VALUES ('jaw-mac', 'layout', ?1, 3, 1)",
+        [serde_json::to_string(&unnamed(broken)).unwrap()],
+    )
+    .unwrap();
+    let read = layouts.get("jaw", json!({ "interface": "jaw-mac", "format": 1 })).await.unwrap();
+    assert_eq!(kept(&read), (3, None, None));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_book_jawd_couldnt_write_is_answered_with_an_error_and_kept_in_quarantine_whole() {
     let home = tempfile::tempdir().unwrap();
     let (_store, layouts) = opened(home.path(), &[ANA, CLIMBING]).await;
