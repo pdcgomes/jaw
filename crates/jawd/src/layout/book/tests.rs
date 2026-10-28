@@ -461,6 +461,45 @@ fn a_reader_of_one_format_is_answered_with_a_layout_kept_in_the_other_left_out_a
     assert_eq!(answered(Formatted::Book(gone), FORMAT, known()).unwrap(), (None, vec![GONE.to_string()]));
 }
 
+fn fixture(name: &str) -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/fixtures").join(format!("{name}.json"));
+    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_protocols_layout_fixtures_are_what_jawd_answers() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let rui = "351912222222@s.whatsapp.net";
+    // Rui by his number and by his LID, whose chat is his number's; Ana; the group.
+    let changes = vec![
+        Change::Person(Person { jids: vec![rui.into(), "100000000002@lid".into()], ..Person::default() }),
+        Change::Chat(Chat { id: rui.into(), kind: Some("direct"), ..Chat::default() }),
+        Change::Chat(Chat { id: ANA.into(), kind: Some("direct"), ..Chat::default() }),
+        Change::Chat(Chat { id: CLIMBING.into(), ..Chat::default() }),
+    ];
+    store.apply(Lane::Live, changes).await.unwrap();
+    let layouts = Layouts::new(store);
+    let answer = layouts.set("jaw-mac", 1, fixture("layout.set.request.book")["params"].clone()).await.unwrap();
+    assert_eq!(serde_json::to_value(&answer).unwrap(), fixture("layout.set.result.book")["result"]);
+    // The terminal's panes, the third on a chat this account doesn't have, as a tree and a grid.
+    let three = layout(1, split(How::Across, 500, chat(ANA), split(How::Down, 500, chat(CLIMBING), chat(GONE))));
+    layouts.set("jaw", 2, asked(1_792_000_000_123, &three)).await.unwrap();
+    for name in ["layout.get", "layout.get.book"] {
+        let [request, result] = ["request", "result"].map(|kind| {
+            let (method, example) = name.split_once(".book").map_or((name, ""), |(method, _)| (method, ".book"));
+            fixture(&format!("{method}.{kind}{example}"))
+        });
+        let answer = layouts.get("jaw-mac", request["params"].clone()).await.unwrap();
+        assert_eq!(serde_json::to_value(&answer).unwrap(), result["result"], "{name}");
+    }
+    let mut told = layouts.subscribe("jaw-mac").unwrap();
+    let push = fixture("layout.push.book");
+    layouts.set("jaw-mac", 3, json!({ "v": push["params"]["v"], "layout": push["params"]["layout"] })).await.unwrap();
+    let pushed = told.borrow_and_update().clone().unwrap();
+    assert_eq!(serde_json::to_value(&pushed.saved).unwrap(), push["params"]);
+}
+
 fn kept(saved: &Saved<Formatted>) -> (u64, Option<bool>, Option<&Formatted>) {
     (saved.v, saved.kept, saved.layout.as_ref())
 }
@@ -491,6 +530,25 @@ async fn a_book_is_kept_with_a_synced_commit_as_its_compact_json_and_read_back_k
     let bytes = serde_json::to_string(&book()).unwrap().len() as u64;
     assert_eq!((status.kept, status.books, status.largest_book_bytes, status.largest_bytes), (1, 1, bytes, 0));
     assert_eq!(status.book_bytes_most, BOOK_BYTES_MOST as u64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_books_lines_come_back_as_the_numbers_they_were_written_as() {
+    let home = tempfile::tempdir().unwrap();
+    let (_store, layouts) = opened(home.path(), &[]).await;
+    // Elevenths and sevenths, which a parser that isn't exact reads back as their neighbours.
+    let sevenths: Vec<f64> = (0..=7).map(|k| f64::from(k) / 7.0).collect();
+    let down = grid(&[0.0, 1.0], &sevenths, (0..7).map(|k| slot(k + 1, [0, 1, k, k + 1], None)).collect());
+    let book = Book { layouts: vec![named("Lines", down, None, None)], ..unnamed(row_of(11)) };
+    let line = book.unnamed.as_ref().unwrap().cols[1];
+    assert_eq!(serde_json::to_string(&line).unwrap(), "0.09090909090909091");
+    layouts.set("jaw-mac", 1, json!({ "v": 1, "layout": book })).await.unwrap();
+    let text = serde_json::to_string(&layouts.get("jaw-mac", Value::Null).await.unwrap()).unwrap();
+    let read: Saved<Book> = serde_json::from_str(&text).unwrap();
+    let bits = |book: &Book| -> Vec<u64> {
+        book.grids().flat_map(|g| g.cols.iter().chain(&g.rows)).map(|x| x.to_bits()).collect()
+    };
+    assert_eq!(bits(read.layout.as_ref().unwrap()), bits(&book), "each line the very number it was");
 }
 
 #[tokio::test(flavor = "multi_thread")]

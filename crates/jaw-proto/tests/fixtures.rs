@@ -1,11 +1,12 @@
 //! Every file in protocol/fixtures/ reads into its type and writes back the same, so the wire
 //! format only changes on purpose. A file is named `<method>.request.json`, `<method>.result.json`,
-//! `<method>.push.json` or `error.<what>.json`; one this test has no type for fails it.
+//! `<method>.push.json` or `error.<what>.json`, or with the name of another example after its kind,
+//! as `layout.set.request.book.json`; one this test has no type for fails it.
 
 use std::path::{Path, PathBuf};
 
 use jaw_proto::find::{ChatOpened, Find, Found, Kind};
-use jaw_proto::layout::{LayoutGet, LayoutSet, Saved};
+use jaw_proto::layout::{Book, LayoutGet, LayoutSet, Saved};
 use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
     PollVote, React, Read, SendPoll, SendRetry, SendText, Sent, Typing,
@@ -63,7 +64,16 @@ fn every_fixture_reads_and_writes_back_the_same() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap())
             .unwrap_or_else(|e| panic!("{name} isn't JSON: {e}"));
-        let parts: Vec<&str> = name.trim_end_matches(".json").rsplitn(2, '.').collect();
+        let stem = name.trim_end_matches(".json");
+        let (stem, example) = match stem.rsplit_once('.') {
+            Some((rest, example)) if [".request", ".result", ".push"].iter().any(|kind| rest.ends_with(kind)) => {
+                (rest, Some(example))
+            }
+            _ => (stem, None),
+        };
+        let book = example == Some("book");
+        assert!(example.is_none() || book, "{name}: this test has no type for the example {example:?}");
+        let parts: Vec<&str> = stem.rsplitn(2, '.').collect();
         let (kind, method) = match parts.as_slice() {
             [kind, method] => (*kind, *method),
             _ => panic!("{name} isn't named <method>.<kind>.json"),
@@ -105,6 +115,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "message.info" => params::<MessageInfo>(&name, &request.params),
                     "chat.info" => params::<ChatInfo>(&name, &request.params),
                     "layout.get" => params::<LayoutGet>(&name, &request.params),
+                    "layout.set" if book => params::<LayoutSet<Book>>(&name, &request.params),
                     "layout.set" => params::<LayoutSet>(&name, &request.params),
                     _ => panic!("no type for {name}'s params"),
                 }
@@ -135,6 +146,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "forward" => params::<Forwarded>(&name, result),
                     "message.info" => params::<Info>(&name, result),
                     "chat.info" => params::<ChatInfoResult>(&name, result),
+                    "layout.get" | "layout.set" if book => params::<Saved<Book>>(&name, result),
                     "layout.get" | "layout.set" => params::<Saved>(&name, result),
                     "chats.watch" => params::<ChatsWatched>(&name, result),
                     // A move's result is its window's; this fixture moves a messages window.
@@ -153,6 +165,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "messages" => params::<MessagesPush>(&name, &push.params),
                     "resync" => params::<Watch>(&name, &push.params),
                     "notice" => params::<Notice>(&name, &push.params),
+                    "layout" if book => params::<Saved<Book>>(&name, &push.params),
                     "layout" => params::<Saved>(&name, &push.params),
                     "settings" => params::<Settings>(&name, &push.params),
                     _ => panic!("no type for {name}'s params"),

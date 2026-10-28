@@ -37,7 +37,9 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # TLS for link previews, with ring as its one provider and Mozilla's roots compiled in.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+# float_roundtrip: a layout book's lines are fractions jawd keeps and answers, and without it about
+# one fraction in ten (1/11 among them) reads back as another number.
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }

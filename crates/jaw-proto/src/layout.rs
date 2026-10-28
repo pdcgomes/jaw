@@ -196,7 +196,7 @@ pub struct Saved<L = Layout> {
     pub v: u64,
     /// None when none is kept, when no pane's chat is left, when it was written in a format this
     /// jawd doesn't know, or when a book's layout on screen, asked for as a tree, isn't one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<L>,
     /// `layout.set`'s answer only: whether its layout is the one kept, or a newer one is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
