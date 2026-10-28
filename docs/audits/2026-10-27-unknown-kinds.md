@@ -1336,3 +1336,159 @@ To land:
 - run `make check-audit`.
 
 Verdict: approved
+
+## Seventh look
+
+Range: `94e19c1..011fdb3` in `unknown-kinds` (worktree `~/src/jaw-unknown`), 28 October 2026. Auditor: database-expert. These are the branch's eight commits, rebased with `m2-content` onto main's `957b06e`, whose settings took migration 13. They sit on m2-content's `94e19c1`, which that branch's note approves in its fourth audit. Line numbers are at `011fdb3`, and paths are under `crates/jawd/src/` unless they say otherwise.
+
+The commits are the sixth look's, each data-layer one with its trailer already:
+- `b92cd67`, the converter's new kinds and the `kinds` backfill (`4504700` at the first look);
+- `c96ad68`, the terminal's invitations;
+- `5afb2fe`, `662a257`, `7776148`, `615fe57` and `c3a3aeb`, the answers to the first five looks;
+- `011fdb3`, this note as the sixth look left it.
+
+The sixth look approved `79ba263` on m2-content's `dc48139`. With its trailers and this note it became `a1d12a6`, whose tree is `79ba263`'s with the note added. The builder rebased that onto `3d8ac96` as `45cc985`, then onto `94e19c1`, renumbering kinds' migration from 15 to 16.
+
+### In short
+
+Approved. Kinds is 16 in every commit, with the text the sixth look approved, nothing else moved, and nothing in the range meets main's settings code. On the owner's data the backfill converts as the sixth look measured, now with one more row.
+
+- **The renumbering holds in every commit.**
+  - At each of the eight, the lock's numbers run 1 to 16 in order, each line's hash is its migration's text, and kinds is 16 with `bd35ad81…` (`store/migrations.lock:31`), the hash the sixth look approved as 15. Its comment says 16 (`store/schema.rs:928`).
+  - The four test databases from before kinds are at version 15 in every commit, none left at 14 (`store/write/kinds/tests.rs:118-126`, `:211-214`, `:485-493`, `:840-843`). Two come with `b92cd67`, one with `5afb2fe` and one with `615fe57`.
+  - Built at `b92cd67`, the schema, plan, links, polls and kinds tests pass there too.
+  - The design says "migration 16's `kinds`" (`docs/plans/2026-10-16-jaw-design.md:170`), and so does `b92cd67`'s message.
+- **Nothing else moved.**
+  - Against `a1d12a6` on `dc48139`, and against `45cc985` on `3d8ac96`, commits 2, 5 and 8 are identical in the range-diffs. Commits 1, 3, 4, 6 and 7 differ only in the lines below and in context.
+  - File by file, 15 of the 20 files have the same added and removed lines. The other five differ only in the lock's number, the comment's, the kinds tests' four versions and three doc comments, the design's migration number, and the README's `status` row.
+  - That row's addition, `kinds_backfill` and `encrypted_kept`, is the same words as before, beside main's new settings fields (`protocol/README.md:238`).
+- **Nothing in the range meets main's settings code.**
+  - The branch changes no line of `settings.rs`, `sock.rs`, quarantine's shared insert, `Applied` or `provenance`.
+  - A conversion that fails is kept under its own source, `kinds`, by chat and ID (`store/write/kinds.rs:77`), apart from settings' rows.
+  - Its two counters sit beside main's `settings` in `status` (`state.rs:248-249`).
+  - The plan test pins kinds' statements and settings' (`store/plans.txt:189`, `:1112`). With settings' upsert taken out of `plans.txt`, it fails at this head.
+  - The branch's catch-alls over `Change` (`converted_again` and `wait` in `store/write/kinds.rs`) see only what a conversion makes, never a settings change.
+- **A jaw.db made at the old numbers is refused.** One at 15 made by the rebased m2-content upgrades to 16 with its rows. One that an earlier build of this branch migrated, where 15 meant kinds, is refused by the fingerprint check (`store/schema.rs:1092`) and left byte for byte as it was.
+- **On the owner's data,** a copy at version 10 upgraded through 11 to 16, with the socket answering at 2.04 s and all three backfills done by 3.76 s, at a load of 50.
+  - All 420 rows the backfill takes convert. That's one more than the sixth look's 419, as the owner's jaw.db has gained one.
+  - 393 stay, as the sixth look's did: 303 lines, 81 texts, 8 invitations and an image. 27 go to `pending` (26 encrypted edits and an event's answer) with 2 tombstones. None is left and none goes to quarantine.
+  - Only those rows' kind, text, spans, summary, detail and reply change, never a raw protobuf, and the 7 edited stand-ins keep their edit times.
+  - Links stay exact: 4,073 on 4,011 messages, as the views derive them, and `links_fts`' 153,257 postings are a fresh index's.
+  - Row by row against m2-content's upgrade, nothing else of the owner's changes but the counts derived for those rows' chats, and 4 receipts that went with the two rows of yours. That isn't a loss by jaw's rules (Data loss).
+- **The gate, repeated:**
+  - `cargo fmt --all --check` is clean, and jawd's suite passed whole twice.
+  - The three socket tests that failed in the builder's gate passed alone 3 runs of 3, and in both suites.
+  - jaw's binary with `JAWD` set, jaw-client's real-jawd tests and main's settings tests in jaw passed.
+  - I didn't repeat clippy.
+- **One follow-up, H12:** the builder's three socket failures are m2-content's H18. `status` takes 13.5 to 14.4 ms p50 here against main's 5.7 to 7.4, nearly all of it from m2-content.
+
+### What I checked
+
+- **The rebase:** `git range-diff dc48139..a1d12a6 94e19c1..011fdb3` and `3d8ac96..45cc985 94e19c1..011fdb3`, and each file's added and removed lines in both ranges. I also checked that `git diff 79ba263 a1d12a6` is the note alone.
+- **Every commit:** each migration hashed as the lock test does and compared with its line, each comment's number, and every test database from before kinds. Built at `b92cd67`, its migration tests.
+- **Main's settings beside the branch:** quarantine's statements, `status`, the plan test with settings' upsert taken out, and the catch-all matches over `Change`.
+- **jaw.dbs at the old numbers**, opened with the head's jawd.
+- **The owner's jaw.db:** the head's upgrade under `--engine demo`, compared row by row with m2-content's.
+- **The gate**, and the builder's three socket failures.
+
+### Findings
+
+#### Data loss
+
+None.
+
+- The kinds migration is the text the sixth look approved. Every row the backfill takes converts, or waits in `pending` with its raw protobuf, as before.
+- **The two rows of yours take their receipts with them.**
+  - Of the 27 rows that turn out to change another message, two are yours. They held two read receipts each, from three people in their group.
+  - Those receipts go with the rows, by `receipts`' `ON DELETE CASCADE` (`store/schema.rs:179`). The sixth look's "no other row changes" counted messages, not them.
+- **That isn't a loss by jaw's rules: jaw keeps no receipt for an action of yours.**
+  - An action of yours never becomes a row. The converter notes its ID as deleted for you, so the receipts for it don't wait for a message that won't come (`convert/mod.rs:606-609`).
+  - A receipt for an ID with a tombstone only tells the outbox that WhatsApp has the action (`store/write.rs:1952-1956`).
+  - So the backfill leaves those two as they'd be had they arrived today, and nothing shows a receipt for an amendment.
+
+#### Inconsistency
+
+None. Each removed row's chat has its counts derived again, with its event, as at the sixth look.
+
+#### Tests (missing)
+
+None. The renumbering is held by the lock test and by the fingerprint, upgrade and fault tests, which pass at the head and at `b92cd67`. The kinds tests build their jaw.dbs from before kinds at 15, so they still test the backfill from where an earlier jawd left it.
+
+#### Unpredictable performance
+
+None that breaks a budget (H12).
+
+#### Hygiene (follow-ups; none blocks)
+
+- **H12. The builder's three socket failures are m2-content's H18, which this branch adds to a little.**
+  - `status` opens a reader connection for each counter, and each parses the whole schema. m2-content's schema and counters make it 13.3 to 13.8 ms p50 against main's 5.7 to 7.4.
+  - This branch's two counters add up to a millisecond: 14.4 ms on the owner's copy against m2-content's 13.4, and the same 13.5 ms on a fresh jawd.
+  - Main's three settings socket tests that poll `status` take 9.8 to 10.1 s together here, against 4.0 to 4.3 s on main. Each ran past 60 s in both of my suites, where none did in main's. That's what ran out their 10 s waits in the builder's gate.
+  - The fix is m2-content's: the counters on one connection, together with a bound in one of those tests, which deadlocks once `status` is quick (the m2-content note's H18).
+- **Carried:** H5, H6, H8 and H9, and what's outside the range in all six looks.
+
+### Measurements
+
+Method:
+- **One folder, `/tmp/jaw-audits/landing-after-settings`**, for both branches' looks, deleted once both notes were written.
+  - It held one clone of this worktree, switched with `git checkout` between `011fdb3`, `94e19c1`, `957b06e`, `b92cd67` and m2-content's first commits. Each was built with `CARGO_INCREMENTAL=0` in the clone's own `target`, with `TMPDIR` inside the folder; 6.2 GB at most.
+  - Each revision's binaries were copied out and run with the clone at their revision.
+- **The owner's jaw.db** was copied once with `sqlite3 -readonly "file:…/jaw.db?mode=ro" ".backup …"` and kept read-only. Each run took a fresh copy of that copy, with no `session.db`, under `--engine demo --no-notify`, and was stopped by its PID.
+- **Safety:** no `session.db` or other engine file was copied or opened, and no Go engine ran. The owner's jawd (PID 8376) and its engine weren't touched, and no process was stopped by name.
+- **Machine:** an Apple M1 Ultra with 20 cores, shared with other agents; one-minute loads are given with each figure.
+
+Results:
+- **The commits:**
+
+| Commits | Migrations | Kinds | Test databases from before kinds |
+| --- | --- | --- | --- |
+| `b92cd67`, `c96ad68` | 16, the lock matching each | 16, `bd35ad81…`, `// 16` | 2, at 15 |
+| `5afb2fe`, `662a257`, `7776148` | the same | the same | 3, at 15 |
+| `615fe57`, `c3a3aeb`, `011fdb3` | the same | the same | 4, at 15 |
+
+- **jawd's suite at the head**, debug: 513 passed and 10 ignored, twice, in 278 and 283 s, at loads of 13 to 36 and 13 to 31.
+  - `starting`, `stopping` and `upgrading` passed.
+  - The schema, migration, plan and kinds tests passed alone (23 of them), and at `b92cd67` (43).
+- **The builder's three socket tests:** alone, 3 of 3 three times; all 23 socket tests together, 23 of 23; in both suites they passed, each having run past 60 s.
+- **jaw's tests against the head's jawd:** jaw's binary with `JAWD` set, 320 passed; jaw-client's real-jawd tests, 3 of 3; main's settings tests in jaw, 3 of 3.
+- **jaw.dbs at the old numbers**, each built from that revision's own migration texts with a row of mine, opened with the head's jawd:
+
+| jaw.db | What jawd did |
+| --- | --- |
+| main's first 13, at 13 | upgraded to 16, the row kept |
+| `94e19c1`'s first 15, at 15 | upgraded to 16, the row kept |
+| `3d8ac96`'s first 14, at 14 | refused ("jaw.db's schema isn't the one jaw's migrations make at version 14"), exit 1, the file unchanged |
+| `45cc985`'s first 15, at 15 | refused at 15, exit 1, the file unchanged |
+
+- **The owner's jaw.db**, a copy at version 10 (79.5 MB, 86,989 messages in 502 chats), upgraded by the head's debug jawd at a load of 50: the socket at 2.04 s, the three backfills done by 3.76 s, everything indexed by 3.87 s.
+
+| | m2-content's upgrade (`94e19c1`) | The head's |
+| --- | --- | --- |
+| Version | 15 | 16 |
+| Messages | 86,994 | 86,967 |
+| Taken by `NEXT_UNSHOWN` | 420 (143 unknown, 277 lines) | 0 |
+| `pending` | 2,232 | 2,259 (26 `secret` and 1 `rsvp` more) |
+| Tombstones | 160 | 162 |
+| Receipts | 2,102 | 2,098 |
+| Links, on messages | 4,043 on 3,981 | 4,073 on 4,011 |
+| `links_fts` postings, each a fresh index's | 152,971 | 153,257 |
+| Quarantine | 18, all inbox | 18, all inbox |
+| Polls, options, voters, votes | 45, 207, 15, 21 | the same |
+
+  - In both: `integrity_check` was ok, with no foreign key violations, FTS5's `integrity-check` was ok for both indexes, and `backfills` and `settings` were empty. `jawd status` gave `kinds_backfill` 0 and `encrypted_kept` 27, beside main's `settings`.
+  - Of the 420 rows, 393 changed and 27 went. The changed columns were kind (116), text (89), spans (58), summary (393), detail (312) and reply (5).
+  - No other row of the owner's changed in any table, but for the derived counts of those rows' chats and the 4 receipts. The demo's own rows differ by each run's time.
+- **`status`**, 100 calls each, debug: 13.60 and 13.51 ms p50 on a fresh jawd and 14.39 ms on the owner's copy. m2-content's took 13.80, 13.28 and 13.43 ms, and main's 5.73, 5.78 and 7.04 ms.
+- **Main's three settings socket tests together**, at loads of 11 to 18: 9.77 to 10.09 s here, 9.07 and 9.13 s at `94e19c1`, and 3.99 to 4.33 s on main.
+
+### Verdict
+
+Approved. The rebase renumbers kinds' migration to 16 consistently in every commit, with the text the sixth look approved, and moves nothing else. Nothing in the range meets main's settings code. On the owner's data the backfill converts every row it takes and changes nothing else of theirs; the receipts of the two rows of yours go as jaw's own rule for actions of yours has them. H12, H5, H6, H8 and H9, and what's outside the range in all six looks, stand as follow-ups.
+
+To land:
+- `m2-content` lands first, under its own audit, whose fourth audit approves `94e19c1`. Giving its commits their trailers changes their hashes.
+- Rebase this branch onto the landed main (`git rebase --onto origin/main 94e19c1`). `git range-diff 94e19c1..011fdb3 origin/main..HEAD` should show its commits the same but for this note. If main has taken another migration by then, kinds moves again and needs another look at the renumbering.
+- Its six data-layer commits keep their trailer `Data-Audit: docs/audits/2026-10-27-unknown-kinds.md`: `b92cd67`, `5afb2fe`, `662a257`, `7776148`, `615fe57` and `c3a3aeb` at the head now. The terminal's `c96ad68` and the note's commit need none.
+- Commit this note as changed here, and run `make check-audit`.
+
+Verdict: approved
