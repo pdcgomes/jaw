@@ -369,8 +369,10 @@ pub async fn run(
                 kept("receipt", receipt.encode_to_vec(), ack)
             }
             // Fire and forget: what's around now, written as it comes and gone by the next start.
-            Some(pb::event::Kind::Presence(presence)) => following.heard(crate::presence::Heard::Presence(presence)),
-            Some(pb::event::Kind::Typing(typing)) => following.heard(crate::presence::Heard::Typing(typing)),
+            Some(pb::event::Kind::Presence(presence)) => following.heard(presence),
+            // Who's typing is never written to jaw.db: the presence and typing step (presence-typing)
+            // keeps it in jawd's memory and pushes it as `typing`. Until it lands, it goes no further.
+            Some(pb::event::Kind::Typing(_)) => {}
             Some(pb::event::Kind::Connection(connection)) => {
                 let (pushed, me, account) = {
                     let mut live = live.lock().expect("live state");

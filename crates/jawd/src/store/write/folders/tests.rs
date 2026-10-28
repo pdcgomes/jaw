@@ -654,8 +654,6 @@ async fn presence_and_about_texts_said_again_or_late_change_nothing() {
     let say = |state| Change::Folders(Step::Presence { jid: format!("{}:3@s.whatsapp.net", &ANA[..12]), state });
     assert_eq!(apply(&store, vec![say(Presence::Online)]).await.changed, 1, "from any of her devices");
     assert_eq!(apply(&store, vec![say(Presence::Online)]).await.changed, 0);
-    assert_eq!(apply(&store, vec![say(Presence::Typing)]).await.changed, 1);
-    assert_eq!(apply(&store, vec![say(Presence::Online)]).await.changed, 0, "online while typing stays typing");
     assert_eq!(apply(&store, vec![say(Presence::Away(Some(AT + 50)))]).await.changed, 1);
     let roster = query(&store, |db| lists::roster(db, &List::All, None, 10, true, AT)).await;
     assert_eq!((roster[0].presence.clone(), roster[0].last_seen), (None, Some(AT + 50)));
@@ -675,6 +673,23 @@ async fn presence_and_about_texts_said_again_or_late_change_nothing() {
     })
     .await;
     assert_eq!((presence, followed), (None, false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jaw_db_refuses_typing_or_recording_as_anyones_presence_whoever_writes_it() {
+    let (home, store) = open().await;
+    apply(&store, vec![person(ANA, "Ana Ribeiro")]).await;
+    let ana = person_n(&store, ANA).await;
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    for state in ["typing", "recording", "paused"] {
+        let refused = db.execute("UPDATE people SET presence = ?2 WHERE n = ?1", rusqlite::params![ana, state]);
+        assert!(
+            matches!(&refused, Err(e) if e.to_string().contains("CHECK constraint failed")),
+            "{state}: {refused:?}"
+        );
+    }
+    db.execute("UPDATE people SET presence = 'online' WHERE n = ?1", [ana]).unwrap();
 }
 
 /// Person `n`'s own version and their roster row's, and the events written for them after
@@ -720,9 +735,6 @@ async fn presence_and_the_rest_of_what_only_rosters_show_move_a_roster_rows_vers
     let following = |people| Change::Folders(Step::Following { people });
     let presence = [
         ("online", said(Presence::Online)),
-        ("typing", said(Presence::Typing)),
-        ("paused", said(Presence::Paused)),
-        ("recording", said(Presence::Recording)),
         ("gone away", said(Presence::Away(Some(AT + 5)))),
         ("followed", following(vec![ana])),
         ("back online", said(Presence::Online)),

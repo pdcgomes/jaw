@@ -271,7 +271,7 @@ pub struct RosterWatch {
     pub before: u32,
     #[serde(default)]
     pub after: u32,
-    /// False leaves out people who aren't online, typing or recording.
+    /// False leaves out people who aren't online.
     #[serde(default = "yes")]
     pub offline: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -300,8 +300,9 @@ pub struct RosterRow {
     pub folders: Vec<String>,
 }
 
-/// Someone's presence: `online`, `typing`, `recording`, `seen` (with `at`) or `hidden`, and
-/// `known` false when jawd isn't following them now, so it's what was last known.
+/// Someone's presence: `online`, `seen` (with `at`) or `hidden`, and `known` false when jawd isn't
+/// following them now, so it's what was last known. Typing and recording show from the chat's
+/// typing, which jaw.db never holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Presence {
     pub state: String,

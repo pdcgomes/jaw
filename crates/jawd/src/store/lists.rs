@@ -601,7 +601,7 @@ pub struct PersonRow {
     pub phone: Option<String>,
     pub about: Option<String>,
     pub avatar: Option<String>,
-    /// online, typing or recording; None when not around.
+    /// online; None when not around.
     pub presence: Option<String>,
     pub last_seen: Option<i64>,
     /// Whether jawd follows their presence now.

@@ -608,6 +608,121 @@ async fn a_senders_lid_joins_their_number_and_contacts_name_them() {
     assert_eq!(rows[0].from.as_ref().unwrap().name, "Ana Ribeiro");
 }
 
+/// Every row of every table in jaw.db, as text, but the feed's events and person `except`'s row.
+fn every_row(home: &Path, except: i64) -> Vec<String> {
+    let db = Connection::open(home.join("jaw.db")).unwrap();
+    let tables: Vec<String> = db
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name <> 'events' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let mut rows = Vec::new();
+    for table in tables {
+        let only = if table == "people" { format!(" WHERE n <> {except}") } else { String::new() };
+        let mut statement = db.prepare(&format!("SELECT * FROM \"{table}\"{only}")).unwrap();
+        let columns = statement.column_count();
+        let found = statement
+            .query_map([], |r| {
+                (0..columns).map(|i| r.get::<_, rusqlite::types::Value>(i)).collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        rows.extend(found.map(|row| format!("{table}: {:?}", row.unwrap())));
+    }
+    rows.sort();
+    rows
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typing_and_recording_heard_from_whatsapp_write_nothing_to_jaw_db() {
+    const RUI: &str = "351910000003@s.whatsapp.net";
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let named = |jid: &str, name: &str| {
+        Change::Person(crate::store::Person { jids: vec![jid.into()], name: Some(name.into()), ..Default::default() })
+    };
+    let said = |chat: &str, id: &str| {
+        Change::Message(crate::store::Message {
+            chat: chat.into(),
+            id: id.into(),
+            at: AT,
+            sender: Some(ANA.into()),
+            kind: "text",
+            text: Some("olá".into()),
+            summary: "olá".into(),
+            live: true,
+            ..Default::default()
+        })
+    };
+    store
+        .apply(Lane::Live, vec![named(ANA, "Ana"), named(RUI, "Rui"), said(ANA, "a1"), said(GROUP, "g1")])
+        .await
+        .unwrap();
+    let rui: i64 = scalar(home.path(), &format!("SELECT person FROM person_jids WHERE jid = '{RUI}'"));
+    let feed = crate::feed::Feed::start(store.clone(), Arc::new(|| false), crate::feed::Timing::default());
+    let following = crate::presence::Following::default();
+    let (pushes, _) = broadcast::channel(16);
+    let (_focus, focused) = watch::channel(true);
+    let looking = crate::presence::Looking { focused, pushes: pushes.subscribe(), online: Box::new(|| true) };
+    following.start(store.clone(), None, feed, looking, crate::presence::Limits::default());
+    let (events, incoming) = mpsc::channel(64);
+    let running = tokio::spawn(run(
+        incoming,
+        store.clone(),
+        Arc::default(),
+        pushes,
+        None,
+        home.path().to_path_buf(),
+        following.clone(),
+    ));
+    // What jaw.db holds once what the writer does after the messages, indexing their words, is done.
+    let mut before = every_row(home.path(), rui);
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let now = every_row(home.path(), rui);
+        if now == before {
+            break;
+        }
+        before = now;
+    }
+    let last: i64 = scalar(home.path(), "SELECT coalesce(max(seq), 0) FROM events");
+
+    // Ana types, records and stops, in her one-to-one chat and in a group; then Rui comes online,
+    // whose presence goes the way hers would have, so once it's written they've all been taken.
+    let send = |kind| crate::engine::Incoming { event: pb::Event { seq: 0, kind: Some(kind) }, ack: None };
+    for chat in [ANA, GROUP] {
+        for state in
+            [pb::chat_presence::State::Composing, pb::chat_presence::State::Recording, pb::chat_presence::State::Paused]
+        {
+            let typing = pb::Typing { chat: chat.into(), sender: ANA.into(), state: state as i32 };
+            events.send(send(pb::event::Kind::Typing(typing))).await.unwrap();
+        }
+    }
+    let online = pb::PresenceUpdate { jid: RUI.into(), unavailable: false, last_seen_ms: 0 };
+    events.send(send(pb::event::Kind::Presence(online))).await.unwrap();
+    until("Rui's presence written", || {
+        scalar(home.path(), &format!("SELECT count(*) FROM people WHERE n = {rui} AND presence = 'online'")) == 1
+    })
+    .await;
+    running.abort();
+
+    let after = every_row(home.path(), rui);
+    let gone: Vec<&String> = before.iter().filter(|row| !after.contains(row)).collect();
+    let came: Vec<&String> = after.iter().filter(|row| !before.contains(row)).collect();
+    assert!(gone.is_empty() && came.is_empty(), "typing changed rows: {gone:#?} became {came:#?}");
+    let written: Vec<(String, i64)> = Connection::open(home.path().join("jaw.db"))
+        .unwrap()
+        .prepare("SELECT type, key FROM events WHERE seq > ?1 ORDER BY seq")
+        .unwrap()
+        .query_map([last], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(written, [("presence".to_string(), rui)], "only Rui's presence reached the feed");
+    assert_eq!(following.status().heard, 1, "only presence is heard, to be written");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn live_messages_count_as_unread_and_mentions_until_you_write_and_history_never_does() {
     let home = tempfile::tempdir().unwrap();

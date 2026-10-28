@@ -4350,9 +4350,6 @@ mod folders {
         let seen = |known| json!({"state": "seen", "at": AT + 5, "known": known});
         let changes = vec![
             ("online", said(Presence::Online), json!({"state": "online", "known": false})),
-            ("typing", said(Presence::Typing), json!({"state": "typing", "known": false})),
-            ("paused", said(Presence::Paused), json!({"state": "online", "known": false})),
-            ("recording", said(Presence::Recording), json!({"state": "recording", "known": false})),
             ("gone away", said(Presence::Away(Some(AT + 5))), seen(false)),
             ("followed", following(vec![ana]), seen(true)),
             ("back online", said(Presence::Online), json!({"state": "online", "known": true})),

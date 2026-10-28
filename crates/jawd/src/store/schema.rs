@@ -1066,9 +1066,10 @@ const FOLDERS_AND_THE_ROSTER: &str = "
     ALTER TABLE people ADD COLUMN direct_chats INTEGER NOT NULL DEFAULT 0;
     UPDATE people SET direct_chats = (SELECT count(*) FROM chats WHERE person = people.n)
         WHERE n IN (SELECT person FROM chats WHERE person IS NOT NULL);
-    -- Class: fetched from WhatsApp while jawd follows them: online, typing or recording, or NULL
-    -- when they're not around or jawd can't know, as whenever WhatsApp can't be reached.
-    ALTER TABLE people ADD COLUMN presence TEXT CHECK (presence IN ('online', 'typing', 'recording'));
+    -- Class: fetched from WhatsApp while jawd follows them: online, or NULL when they're not around
+    -- or jawd can't know, as whenever WhatsApp can't be reached. Who's typing or recording is never
+    -- kept in jaw.db, only in jawd's memory.
+    ALTER TABLE people ADD COLUMN presence TEXT CHECK (presence = 'online');
     -- Class: jaw's own, as it runs, cleared at every start: whether jawd follows their presence now.
     ALTER TABLE people ADD COLUMN followed INTEGER NOT NULL DEFAULT 0 CHECK (followed IN (0, 1));
     -- Class: derived, as v is: the seq of the last change to what only their roster row shows,

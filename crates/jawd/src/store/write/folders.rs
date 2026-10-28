@@ -58,16 +58,13 @@ pub enum Target {
     Chat(String),
 }
 
-/// What WhatsApp says of someone.
+/// What WhatsApp says of someone's presence. Typing and recording aren't among it: who's typing is
+/// never written to jaw.db.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Presence {
     Online,
     /// Away, and when they were last seen, unless they hide it.
     Away(Option<i64>),
-    Typing,
-    Recording,
-    /// Stopped typing or recording.
-    Paused,
 }
 
 #[derive(Clone, Debug)]
@@ -613,26 +610,15 @@ fn favourite(db: &Connection, stamps: &mut Stamps, slot: u8, target: Option<&Tar
     Ok(true)
 }
 
-/// How long typing shows without being said again, as WhatsApp's phones let it fade.
-pub const TYPING_FADES_MS: i64 = 25_000;
-
 fn presence(db: &Connection, stamps: &mut Stamps, jid: &str, state: Presence) -> Result<bool> {
-    let person: Option<(i64, Option<String>, Option<i64>)> = db
-        .prepare_cached(
-            "SELECT p.n, p.presence, p.last_seen FROM person_jids j JOIN people p ON p.n = j.person WHERE j.jid = ?1",
-        )?
-        .query_row([user_jid(jid)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+    let person: Option<(i64, Option<i64>)> = db
+        .prepare_cached("SELECT p.n, p.last_seen FROM person_jids j JOIN people p ON p.n = j.person WHERE j.jid = ?1")?
+        .query_row([user_jid(jid)], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
-    let Some((n, was, seen)) = person else { return Ok(false) };
-    let typing = matches!(was.as_deref(), Some("typing" | "recording"));
+    let Some((n, seen)) = person else { return Ok(false) };
     let (now, seen) = match state {
-        Presence::Online if typing => (was, seen),
-        Presence::Online => (Some("online".to_string()), seen),
+        Presence::Online => (Some("online"), seen),
         Presence::Away(at) => (None, at.filter(|&at| at > 0)),
-        Presence::Typing => (Some("typing".into()), seen),
-        Presence::Recording => (Some("recording".into()), seen),
-        Presence::Paused if typing => (Some("online".into()), seen),
-        Presence::Paused => (was, seen),
     };
     let seq = stamps.seq(PRESENCE, Some(n));
     let changed = db

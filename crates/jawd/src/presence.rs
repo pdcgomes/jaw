@@ -2,11 +2,11 @@
 //! open one-to-one chats' first, then favourites, then rosters' in their order, and only while an
 //! interface has focus, which is also the only time WhatsApp sends presence: at most 20 new people
 //! a minute and 200 on each connection to WhatsApp, since subscribing to everyone is what presence
-//! trackers do and WhatsApp polices it. What WhatsApp says is written to people's rows, which
-//! rosters sort by; typing fades on its own if its stop never comes. About texts are asked of
+//! trackers do and WhatsApp polices it. Whether they're online, and when they were last seen, is
+//! written to people's rows, which rosters sort by; who's typing never is. About texts are asked of
 //! WhatsApp 50 people at a time, each at most once a day, while it can be reached.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
 use crate::feed::Feed;
-use crate::store::folders::{Presence as Said, Step, TYPING_FADES_MS};
+use crate::store::folders::{Presence as Said, Step};
 use crate::store::{Change, Lane, Store};
 use crate::work::Priority;
 
@@ -60,19 +60,13 @@ const ABOUT_IDLE: Duration = Duration::from_secs(60);
 /// What WhatsApp said, waiting to be written; past it, the oldest is dropped, as presence is.
 const HEARD_MOST: usize = 1_024;
 
-/// What WhatsApp said of someone, to write.
-pub enum Heard {
-    Presence(pb::PresenceUpdate),
-    Typing(pb::Typing),
-}
-
 #[derive(Default)]
 struct Stats {
     /// Followed on this connection, wanted now, and those wanted that aren't for the limits.
     subscribed: usize,
     wanted: usize,
     waiting: usize,
-    /// Presence and typing heard, and dropped for coming faster than they could be written.
+    /// Presence heard, and dropped for coming faster than it could be written.
     heard: u64,
     dropped: u64,
     /// About texts asked for, and those due now.
@@ -81,8 +75,8 @@ struct Stats {
 
 #[derive(Clone)]
 pub struct Following {
-    heard: mpsc::Sender<Heard>,
-    hearing: Arc<Mutex<Option<mpsc::Receiver<Heard>>>>,
+    heard: mpsc::Sender<pb::PresenceUpdate>,
+    hearing: Arc<Mutex<Option<mpsc::Receiver<pb::PresenceUpdate>>>>,
     stats: Arc<Mutex<Stats>>,
 }
 
@@ -114,10 +108,10 @@ impl Following {
 
     /// Takes what WhatsApp said, never waiting: presence that comes faster than it can be written
     /// is dropped, as WhatsApp's own clients drop it.
-    pub fn heard(&self, heard: Heard) {
+    pub fn heard(&self, presence: pb::PresenceUpdate) {
         let mut stats = self.stats.lock().expect("presence stats");
         stats.heard += 1;
-        if self.heard.try_send(heard).is_err() {
+        if self.heard.try_send(presence).is_err() {
             stats.dropped += 1;
         }
     }
@@ -161,74 +155,28 @@ async fn connection_of(
     }
 }
 
-/// Whether a typing event is someone's in their own one-to-one chat, which the roster shows.
-fn in_their_chat(typing: &pb::Typing) -> bool {
-    let user = |jid: &str| jid.split(['@', ':', '.']).next().unwrap_or_default().to_string();
-    !typing.chat.ends_with("@g.us") && user(&typing.chat) == user(&typing.sender)
-}
-
-/// Writes what WhatsApp says as it comes, what's waiting in one transaction, and lets typing fade
-/// once TYPING_FADES_MS pass without it being said again.
-async fn write_heard(store: Store, mut hearing: mpsc::Receiver<Heard>) {
-    let mut fading: HashMap<String, Instant> = HashMap::new();
-    let fade = Duration::from_millis(TYPING_FADES_MS as u64);
-    loop {
-        let next = fading.values().min().copied();
-        let first = tokio::select! {
-            heard = hearing.recv() => match heard {
-                Some(heard) => Some(heard),
-                None => return,
-            },
-            _ = async { tokio::time::sleep_until(next.unwrap_or_else(Instant::now).into()).await }, if next.is_some() => None,
-        };
-        let mut changes = Vec::new();
-        let now = Instant::now();
-        fading.retain(|jid, at| {
-            if *at <= now {
-                changes.push(Change::Folders(Step::Presence { jid: jid.clone(), state: Said::Paused }));
-                false
-            } else {
-                true
-            }
-        });
-        let mut waiting: Vec<Heard> = first.into_iter().collect();
+/// Writes the presence WhatsApp says as it comes, what's waiting in one transaction.
+async fn write_heard(store: Store, mut hearing: mpsc::Receiver<pb::PresenceUpdate>) {
+    while let Some(first) = hearing.recv().await {
+        let mut waiting = vec![first];
         while waiting.len() < HEARD_MOST {
             match hearing.try_recv() {
                 Ok(heard) => waiting.push(heard),
                 Err(_) => break,
             }
         }
-        for heard in waiting {
-            match heard {
-                Heard::Presence(p) => {
-                    let state = if p.unavailable {
-                        Said::Away((p.last_seen_ms > 0).then_some(p.last_seen_ms))
-                    } else {
-                        Said::Online
-                    };
-                    if p.unavailable {
-                        fading.remove(&p.jid);
-                    }
-                    changes.push(Change::Folders(Step::Presence { jid: p.jid, state }));
-                }
-                Heard::Typing(t) if in_their_chat(&t) => {
-                    let state = match t.state() {
-                        pb::chat_presence::State::Composing => Said::Typing,
-                        pb::chat_presence::State::Recording => Said::Recording,
-                        _ => Said::Paused,
-                    };
-                    match state {
-                        Said::Paused => fading.remove(&t.sender),
-                        _ => fading.insert(t.sender.clone(), Instant::now() + fade),
-                    };
-                    changes.push(Change::Folders(Step::Presence { jid: t.sender, state }));
-                }
-                Heard::Typing(_) => {}
-            }
-        }
-        if !changes.is_empty()
-            && let Err(e) = store.apply(Lane::Live, changes).await
-        {
+        let changes = waiting
+            .into_iter()
+            .map(|p| {
+                let state = if p.unavailable {
+                    Said::Away((p.last_seen_ms > 0).then_some(p.last_seen_ms))
+                } else {
+                    Said::Online
+                };
+                Change::Folders(Step::Presence { jid: p.jid, state })
+            })
+            .collect();
+        if let Err(e) = store.apply(Lane::Live, changes).await {
             eprintln!("jawd: can't write who's around: {e:#}");
         }
     }

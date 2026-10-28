@@ -2071,7 +2071,7 @@ DELETE FROM favourites WHERE slot = ?1 OR folder = ?2 OR chat = ?3
 INSERT INTO favourites (slot, folder, chat) VALUES (?1, ?2, ?3)
 
 -- src/store/write/folders.rs
-SELECT p.n, p.presence, p.last_seen FROM person_jids j JOIN people p ON p.n = j.person WHERE j.jid = ?1
+SELECT p.n, p.last_seen FROM person_jids j JOIN people p ON p.n = j.person WHERE j.jid = ?1
     SEARCH j USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?)
 
