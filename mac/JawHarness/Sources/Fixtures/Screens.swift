@@ -93,7 +93,7 @@ struct Screen {
             let rows = chat.id == Samples.group.id ? Samples.update
                 : Update(seq: 1, upsert: [], total: 0, older: false, newer: 0, moved: Moved(place: .newest(100), newer: 0))
             if chat.id == Samples.group.id { c.members = Fixtures.members }
-            DispatchQueue.main.async { c.apply(rows) }
+            Pictures.apply(rows, to: c)
             views[i + 1] = c.view
             if i == 0 {
                 box = c.composer.view

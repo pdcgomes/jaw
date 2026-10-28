@@ -29,7 +29,7 @@ private struct ConversationScene: View {
                                                layouts: Layouts(), place: .newest(100))
                 _ = c.view
                 c.members = Fixtures.members
-                DispatchQueue.main.async { c.apply(Samples.update) }
+                Pictures.apply(Samples.update, to: c)
                 return c
             }
             .frame(width: 640, height: 1900)

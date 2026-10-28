@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import JawKit
 import JawUI
 import SwiftUI
 
@@ -9,21 +10,62 @@ import SwiftUI
 enum Pictures {
     /// Pictures are drawn at 2×, as a Retina screen shows them.
     static let scale: CGFloat = 2
-    /// How long a scene is given before it's drawn, for what it does once it's made: rows applied on
-    /// the next turn and laid out off the main thread.
+    /// How long a scene is given before it's drawn, for what it does once it's made that says nothing
+    /// when it's done: an empty conversation's Mimic, two turns after it's made, and what AppKit draws
+    /// once it finds the window isn't key, such as the sidebar's folders in grey. A conversation given
+    /// rows is waited for after it, until it has drawn them.
     static let settle = Duration.milliseconds(400)
+    /// How long the typing bubble takes to rise once a conversation's rows are drawn, 0.16 s, with a
+    /// little to spare.
+    static let rise = Duration.milliseconds(250)
+    /// How long a picture's conversations have to draw their rows, from when it's made.
+    nonisolated static let limit = Duration.seconds(10)
 
     enum PictureError: Error, CustomStringConvertible {
         case noScene(String)
         case cantDraw(String)
         case notASweep(String)
+        case undrawn(String, Int)
 
         var description: String {
             switch self {
             case let .noScene(id): "there's no scene called \(id)"
             case let .cantDraw(id): "\(id) couldn't be drawn"
             case let .notASweep(path): "\(path) has files a sweep didn't make in it; sweep into an empty folder, or one a sweep made"
+            case let .undrawn(id, waiting):
+                "\(id) wasn't drawn: \(waiting) of its conversations hadn't drawn their rows after \(Pictures.limit.components.seconds) s"
             }
+        }
+    }
+
+    /// A conversation given rows, held weakly, so one SwiftUI made and let go isn't waited for, and
+    /// when it drew them.
+    @MainActor
+    private final class Arrival {
+        weak var conversation: ConversationController?
+        var drawn: ContinuousClock.Instant?
+
+        init(_ conversation: ConversationController) {
+            self.conversation = conversation
+        }
+    }
+
+    /// The conversations given rows since the picture being drawn was made.
+    private static var arrivals: [Arrival] = []
+
+    /// Gives `conversation` `update` on the next turn, as jawd's rows come once a chat is open. If the
+    /// update holds rows, the picture being drawn waits until the conversation has drawn them, which
+    /// the first `drawn` after the update says; it takes `drawn`, which nothing else sets on a
+    /// conversation the harness makes.
+    static func apply(_ update: Update<MessageRow>, to conversation: ConversationController) {
+        let arrival = update.upsert.isEmpty ? nil : Arrival(conversation)
+        if let arrival {
+            arrivals.removeAll { $0.conversation == nil || $0.conversation === conversation }
+            arrivals.append(arrival)
+        }
+        DispatchQueue.main.async {
+            if let arrival { conversation.drawn = { arrival.drawn = .now } }
+            conversation.apply(update)
         }
     }
 
@@ -38,15 +80,19 @@ enum Pictures {
     }
 
     /// Draws `scene` in `conditions`, in a window of its own off the screen, once it has had `settle`
-    /// to do what it does after it's made; once it's drawn, it closes the window and lets the window's
-    /// content go, as AppKit can keep a window it has shown after it's closed. It holds the app-wide
-    /// `Motion.reduced` for as long as it draws, so draws mustn't overlap. The window doesn't animate
-    /// as it comes and goes: off every screen that animation never ends, and each would hold one of
-    /// GCD's threads, which lay a conversation's rows out, for good.
+    /// to do what it does after it's made and each conversation in it that was given rows has drawn
+    /// them and its typing bubble has risen; one that hasn't drawn them within `limit` fails the
+    /// picture. Once it's drawn, it closes the window and lets the window's content go, as AppKit can
+    /// keep a window it has shown after it's closed. It holds the app-wide `Motion.reduced`, and the
+    /// list of conversations given rows, for as long as it draws, so draws mustn't overlap. The
+    /// window doesn't animate as it comes and goes: off every screen that animation never ends, and
+    /// each would hold one of GCD's threads, which lay a conversation's rows out, for good.
     static func draw(_ scene: HarnessScene, _ conditions: Conditions) async throws -> Drawn {
         let reduced = Motion.reduced
         Motion.reduced = { conditions.reduceMotion }
         defer { Motion.reduced = reduced }
+        let deadline = ContinuousClock.now + limit
+        arrivals = []
         let taker = NoteTaker()
         let canvas = SceneCanvas(scene: scene, conditions: conditions)
             .onPreferenceChange(NotesKey.self) { notes in
@@ -66,6 +112,7 @@ enum Pictures {
             window.contentView = nil
         }
         try await Task.sleep(for: settle)
+        try await rowsDrawn(scene, in: window, by: deadline)
         host.layoutSubtreeIfNeeded()
         let bounds = host.bounds
         let wide = Int((bounds.width * scale).rounded())
@@ -84,6 +131,29 @@ enum Pictures {
         let digest = SHA256.hash(data: Data(bytes: pixels, count: rep.bytesPerRow * rep.pixelsHigh))
         let hash = String(digest.map { String(format: "%02x", $0) }.joined().prefix(16))
         return Drawn(png: png, points: bounds.size, pixels: [rep.pixelsWide, rep.pixelsHigh], hash: hash, notes: taker.notes)
+    }
+
+    /// Waits until each conversation given rows that's still alive and in `window` has drawn them, then
+    /// until `rise` after the last of them drew, for its typing bubble; if one hasn't drawn them by
+    /// `deadline`, `scene` fails. It lays the window out before each look, as the picture is laid out
+    /// before it's drawn, so a conversation SwiftUI hasn't put in the window yet is waited for too.
+    private static func rowsDrawn(_ scene: HarnessScene, in window: NSWindow, by deadline: ContinuousClock.Instant) async throws {
+        func inWindow() -> [Arrival] {
+            arrivals.filter { $0.conversation?.viewIfLoaded?.window === window }
+        }
+        func undrawn() -> Int {
+            window.layoutIfNeeded()
+            return inWindow().filter { $0.drawn == nil }.count
+        }
+        var waiting = undrawn()
+        while waiting > 0 {
+            guard ContinuousClock.now < deadline else { throw PictureError.undrawn(scene.id, waiting) }
+            try await Task.sleep(for: .milliseconds(10))
+            waiting = undrawn()
+        }
+        if let last = inWindow().compactMap(\.drawn).max() {
+            try await Task.sleep(until: last + rise, clock: .continuous)
+        }
     }
 
     /// At rest the app shows no scroller: `Scrolling.style` makes each a `ThinScroller`, overlaid, which
