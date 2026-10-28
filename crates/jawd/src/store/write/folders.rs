@@ -13,11 +13,13 @@ use anyhow::Result;
 use jaw_proto::code;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{PERSON, Stamps, chat_jid, touch_chat, touch_person, user_jid};
+use super::{PERSON, Stamps, chat_jid, touch_chat, touch_roster, user_jid};
 
-/// The feed's event type for a folder row, and for a favourite slot, keyed by the slot.
+/// The feed's event type for a folder row, for a favourite slot, keyed by the slot, and for
+/// someone's presence, keyed by the person, which only rosters show.
 pub(in crate::store) const FOLDER: &str = "folder";
 pub(in crate::store) const FAVOURITE: &str = "favourite";
+pub(in crate::store) const PRESENCE: &str = "presence";
 
 /// Where a step says what it came to, for whoever asked. The last attempt at its transaction is
 /// the one that stands.
@@ -305,7 +307,7 @@ fn touch_item(db: &Connection, stamps: &mut Stamps, chat: Option<i64>, person: O
         touch_chat(db, stamps, chat)?;
     }
     if let Some(person) = person {
-        touch_person(db, stamps, person)?;
+        touch_roster(db, stamps, person)?;
         let chats: Vec<i64> = db
             .prepare_cached("SELECT n FROM chats WHERE person = ?1")?
             .query_map([person], |r| r.get(0))?
@@ -632,15 +634,15 @@ fn presence(db: &Connection, stamps: &mut Stamps, jid: &str, state: Presence) ->
         Presence::Paused if typing => (Some("online".into()), seen),
         Presence::Paused => (was, seen),
     };
-    let seq = stamps.seq(PERSON, Some(n));
+    let seq = stamps.seq(PRESENCE, Some(n));
     let changed = db
         .prepare_cached(
-            "UPDATE people SET presence = ?2, last_seen = ?3, v = ?4
+            "UPDATE people SET presence = ?2, last_seen = ?3, roster_v = max(roster_v, ?4)
             WHERE n = ?1 AND (presence IS NOT ?2 OR last_seen IS NOT ?3)",
         )?
         .execute(params![n, now, seen, seq])?;
     if changed > 0 {
-        stamps.record(db, PERSON, n, None, seq)?;
+        stamps.record(db, PRESENCE, n, None, seq)?;
     }
     Ok(changed > 0)
 }
@@ -658,19 +660,22 @@ fn following(db: &Connection, stamps: &mut Stamps, people: &[i64]) -> Result<boo
     let mut changed = false;
     for (n, followed) in present(db)? {
         if followed && !wanted.contains(&n) {
-            let seq = stamps.seq(PERSON, Some(n));
-            db.prepare_cached("UPDATE people SET followed = 0, v = ?2 WHERE n = ?1")?.execute(params![n, seq])?;
-            stamps.record(db, PERSON, n, None, seq)?;
+            let seq = stamps.seq(PRESENCE, Some(n));
+            db.prepare_cached("UPDATE people SET followed = 0, roster_v = max(roster_v, ?2) WHERE n = ?1")?
+                .execute(params![n, seq])?;
+            stamps.record(db, PRESENCE, n, None, seq)?;
             changed = true;
         }
     }
     for &n in &wanted {
-        let seq = stamps.seq(PERSON, Some(n));
+        let seq = stamps.seq(PRESENCE, Some(n));
         let now = db
-            .prepare_cached("UPDATE people SET followed = 1, v = ?2 WHERE n = ?1 AND followed = 0")?
+            .prepare_cached(
+                "UPDATE people SET followed = 1, roster_v = max(roster_v, ?2) WHERE n = ?1 AND followed = 0",
+            )?
             .execute(params![n, seq])?;
         if now > 0 {
-            stamps.record(db, PERSON, n, None, seq)?;
+            stamps.record(db, PRESENCE, n, None, seq)?;
             changed = true;
         }
     }
@@ -680,10 +685,12 @@ fn following(db: &Connection, stamps: &mut Stamps, people: &[i64]) -> Result<boo
 fn unknown(db: &Connection, stamps: &mut Stamps) -> Result<bool> {
     let present = present(db)?;
     for &(n, _) in &present {
-        let seq = stamps.seq(PERSON, Some(n));
-        db.prepare_cached("UPDATE people SET presence = NULL, followed = 0, v = ?2 WHERE n = ?1")?
-            .execute(params![n, seq])?;
-        stamps.record(db, PERSON, n, None, seq)?;
+        let seq = stamps.seq(PRESENCE, Some(n));
+        db.prepare_cached(
+            "UPDATE people SET presence = NULL, followed = 0, roster_v = max(roster_v, ?2) WHERE n = ?1",
+        )?
+        .execute(params![n, seq])?;
+        stamps.record(db, PRESENCE, n, None, seq)?;
     }
     Ok(!present.is_empty())
 }
@@ -712,7 +719,10 @@ fn about_texts(
         let Some(n) = person(jid)? else { continue };
         let seq = stamps.seq(PERSON, Some(n));
         let now = db
-            .prepare_cached("UPDATE people SET about = ?2, v = ?3 WHERE n = ?1 AND about IS NOT ?2 AND about_at = ?4")?
+            .prepare_cached(
+                "UPDATE people SET about = ?2, roster_v = max(roster_v, ?3)
+                WHERE n = ?1 AND about IS NOT ?2 AND about_at = ?4",
+            )?
             .execute(params![n, text, seq, at])?;
         if now > 0 {
             stamps.record(db, PERSON, n, None, seq)?;

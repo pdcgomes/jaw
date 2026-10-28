@@ -593,6 +593,7 @@ pub fn favourites(db: &Connection) -> Result<Vec<Favourite>> {
 #[derive(Clone, Debug)]
 pub struct PersonRow {
     pub n: i64,
+    /// The newer of the person's version and their roster row's, which their presence moves.
     pub v: i64,
     /// Around first, then by when last seen, then by name, compared bytewise, read from the top.
     pub sort: String,
@@ -628,7 +629,8 @@ impl PersonRow {
 /// merged into another, which a merge gives the other's avatar if it had none, so a merge ending
 /// changes neither.
 const PERSON_SELECT: &str = "
-    SELECT p.n, p.v, p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence, p.last_seen, p.followed,
+    SELECT p.n, max(p.v, p.roster_v), p.roster_sort, p.name, p.push_name, p.verified_name, p.about, p.presence,
+        p.last_seen, p.followed,
         coalesce(p.avatar, (SELECT a.avatar FROM chats a WHERE a.person = p.n
             AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = a.n) LIMIT 1)),
         (SELECT d.id FROM chats d WHERE d.person = p.n AND NOT EXISTS (SELECT 1 FROM chat_merges g WHERE g.gone = d.n)

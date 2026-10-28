@@ -827,8 +827,14 @@ impl Window {
 
     fn touched_by(&self, changes: &Changes) -> bool {
         match (&self.spec, self.state.chat) {
-            (Spec::Chats(_) | Spec::Folders | Spec::Roster(_), _) => {
+            (Spec::Chats(_) | Spec::Folders, _) => {
                 !changes.chats.is_empty() || !changes.people.is_empty() || changes.folders
+            }
+            (Spec::Roster(_), _) => {
+                !changes.chats.is_empty()
+                    || !changes.people.is_empty()
+                    || !changes.presence.is_empty()
+                    || changes.folders
             }
             (Spec::Messages(_), Some(chat)) => {
                 changes.messages.contains(&chat)

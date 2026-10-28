@@ -1218,10 +1218,12 @@ fn touch_chat(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
     stamps.record(db, CHAT, n, Some(n), seq)
 }
 
-/// Bumps person `n`'s version, as what their roster row shows changed.
-fn touch_person(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
+/// Bumps the version of what only person `n`'s roster row shows, as that changed, leaving their
+/// `v`, which message rows take. Their presence's events and their row's other events take seqs
+/// apart, in either order in a transaction, so the version keeps the newer.
+fn touch_roster(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
     let seq = stamps.seq(PERSON, Some(n));
-    db.prepare_cached("UPDATE people SET v = ?2 WHERE n = ?1")?.execute(params![n, seq])?;
+    db.prepare_cached("UPDATE people SET roster_v = max(roster_v, ?2) WHERE n = ?1")?.execute(params![n, seq])?;
     stamps.record(db, PERSON, n, None, seq)
 }
 
@@ -1320,7 +1322,7 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
     }
     // Someone's roster row shows their one-to-one chat and its avatar.
     if let Some(person) = now.person.filter(|_| now.person != before.person || now.avatar != before.avatar) {
-        touch_person(db, stamps, person)?;
+        touch_roster(db, stamps, person)?;
     }
     Ok(true)
 }

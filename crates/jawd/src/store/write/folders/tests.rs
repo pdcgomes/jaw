@@ -676,3 +676,85 @@ async fn presence_and_about_texts_said_again_or_late_change_nothing() {
     .await;
     assert_eq!((presence, followed), (None, false));
 }
+
+/// Person `n`'s own version and their roster row's, and the events written for them after
+/// `after`, each its seq and type.
+async fn versions(store: &Store, n: i64, after: i64) -> (i64, i64, Vec<(i64, String)>) {
+    query(store, move |db| {
+        let (v, roster_v) =
+            db.query_row("SELECT v, roster_v FROM people WHERE n = ?1", [n], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let events = db
+            .prepare(
+                "SELECT seq, type FROM events WHERE seq > ?1 AND key = ?2 AND type IN ('person', 'presence')
+                ORDER BY seq",
+            )?
+            .query_map([after, n], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((v, roster_v, events))
+    })
+    .await
+}
+
+async fn last_seq(store: &Store) -> i64 {
+    query(store, |db| Ok(db.query_row("SELECT coalesce(max(seq), 0) FROM events", [], |r| r.get(0))?)).await
+}
+
+/// Asserts that what was written for person `n` after `after` is one event of `kind`, whose seq
+/// their roster row's version took, and left their own version `was`.
+async fn moved_roster_only(store: &Store, what: &str, n: i64, was: i64, after: i64, kind: &str) {
+    let (v, roster_v, events) = versions(store, n, after).await;
+    assert_eq!(v, was, "{what} moved their version, which rows of their messages take");
+    let kinds: Vec<&str> = events.iter().map(|(_, kind)| kind.as_str()).collect();
+    assert_eq!(kinds, [kind], "{what}");
+    assert_eq!(roster_v, events[0].0, "{what} gave their roster row its event's seq");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn presence_and_the_rest_of_what_only_rosters_show_move_a_roster_rows_version_and_never_the_persons() {
+    let (_home, store) = open().await;
+    apply(&store, vec![person(ANA, "Ana Ribeiro"), message(ANA, ANA, "a1", AT), person(RUI, "Rui")]).await;
+    let (ana, rui) = (person_n(&store, ANA).await, person_n(&store, RUI).await);
+    let family = create(&store, "Family", None).await;
+    let ((ana_v, ..), (rui_v, ..)) = (versions(&store, ana, 0).await, versions(&store, rui, 0).await);
+    let said = |state| Change::Folders(Step::Presence { jid: ANA.into(), state });
+    let following = |people| Change::Folders(Step::Following { people });
+    let presence = [
+        ("online", said(Presence::Online)),
+        ("typing", said(Presence::Typing)),
+        ("paused", said(Presence::Paused)),
+        ("recording", said(Presence::Recording)),
+        ("gone away", said(Presence::Away(Some(AT + 5)))),
+        ("followed", following(vec![ana])),
+        ("back online", said(Presence::Online)),
+        ("no longer followed", following(Vec::new())),
+        ("nobody's presence known", Change::Folders(Step::Unknown)),
+    ];
+    for (what, change) in presence {
+        let after = last_seq(&store).await;
+        assert_eq!(apply(&store, vec![change]).await.changed, 1, "{what}");
+        moved_roster_only(&store, what, ana, ana_v, after, PRESENCE).await;
+    }
+
+    // The rest of what only rosters show comes as a person's change, as their names do.
+    let about = vec![(ANA.to_string(), "Lisboa".to_string())];
+    let after = last_seq(&store).await;
+    apply(&store, vec![Change::Folders(Step::About { asked: vec![ANA.into()], about, at: AT + 6 })]).await;
+    moved_roster_only(&store, "an about text", ana, ana_v, after, PERSON).await;
+    let avatar = Some("media/avatars/ana.jpg".to_string());
+    let after = last_seq(&store).await;
+    apply(&store, vec![Change::Chat(Chat { id: ANA.into(), avatar, avatar_id: Some("a1".into()), ..Chat::default() })])
+        .await;
+    moved_roster_only(&store, "her chat's avatar", ana, ana_v, after, PERSON).await;
+    let after = last_seq(&store).await;
+    file(&store, family, Item::Person(ana)).await;
+    moved_roster_only(&store, "her filed", ana, ana_v, after, PERSON).await;
+    let after = last_seq(&store).await;
+    apply(&store, vec![message(RUI, RUI, "r1", AT + 7)]).await;
+    moved_roster_only(&store, "his first chat", rui, rui_v, after, PERSON).await;
+
+    let after = last_seq(&store).await;
+    apply(&store, vec![person(ANA, "Ana R.")]).await;
+    let (v, _, events) = versions(&store, ana, after).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(v, events[0].0, "a new name moves her version, as rows of her messages show it");
+}

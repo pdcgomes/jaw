@@ -4339,6 +4339,58 @@ mod folders {
         assert_eq!(offline.windows[&around].rows.len(), 1, "only who's around");
     }
 
+    /// Ana, with her chat, and each way her presence changes in turn, with what her roster row
+    /// says then.
+    async fn presence_changes(bed: &Bed) -> (String, Vec<(&'static str, Change, Value)>) {
+        let ana = Change::Person(Person { jids: vec![ANA.into()], name: Some("Ana".into()), ..Person::default() });
+        bed.apply(vec![ana, Change::Message(text(ANA, "a1", AT, Some(ANA), "olá"))]).await;
+        let ana = person_n(bed, ANA).await;
+        let said = |state| Change::Folders(Step::Presence { jid: ANA.into(), state });
+        let following = |people| Change::Folders(Step::Following { people });
+        let seen = |known| json!({"state": "seen", "at": AT + 5, "known": known});
+        let changes = vec![
+            ("online", said(Presence::Online), json!({"state": "online", "known": false})),
+            ("typing", said(Presence::Typing), json!({"state": "typing", "known": false})),
+            ("paused", said(Presence::Paused), json!({"state": "online", "known": false})),
+            ("recording", said(Presence::Recording), json!({"state": "recording", "known": false})),
+            ("gone away", said(Presence::Away(Some(AT + 5))), seen(false)),
+            ("followed", following(vec![ana]), seen(true)),
+            ("back online", said(Presence::Online), json!({"state": "online", "known": true})),
+            ("no longer followed", following(Vec::new()), json!({"state": "online", "known": false})),
+            ("nobody's presence known", Change::Folders(Step::Unknown), seen(false)),
+        ];
+        (format!("person:{ana}"), changes)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_roster_is_pushed_each_change_of_someones_presence() {
+        let bed = Bed::new(brisk());
+        let (ana, changes) = presence_changes(&bed).await;
+        let mut watcher = bed.watcher(64);
+        let roster = watcher.watch("roster.watch", json!({"folder": "all", "around": "top", "after": 10})).await;
+        for (what, change, shows) in changes {
+            let pushed = watcher.batches.get(&roster).copied().unwrap_or(0);
+            let seq = bed.apply(vec![change]).await;
+            watcher.settle(seq).await;
+            assert!(watcher.batches.get(&roster).copied().unwrap_or(0) > pushed, "{what} reaches the roster");
+            assert_eq!(watcher.windows[&roster].rows[&ana]["presence"], shows, "{what}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_roster_watched_again_from_since_is_sent_each_change_of_someones_presence() {
+        let bed = Bed::new(brisk());
+        let (ana, changes) = presence_changes(&bed).await;
+        let mut watcher = bed.watcher(64);
+        let mut all =
+            Held::watch(&mut watcher, "roster.watch", json!({"folder": "all", "around": "top", "after": 10})).await;
+        for (what, change, shows) in changes {
+            bed.apply(vec![change]).await;
+            all.come_back(&mut watcher, what).await;
+            assert_eq!(all.row(&ana)["presence"], shows, "{what}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_communitys_groups_come_with_it_sorted_under_it_its_announcement_group_first() {
         let bed = Bed::new(brisk());

@@ -44,6 +44,8 @@ pub struct Changes {
     /// name them by. Whoever comes to have a JID, by a new person or a number and a LID found to
     /// be one, is among the people changed, so a row naming it is told the name it now shows.
     pub jids: HashSet<u64>,
+    /// People whose presence changed, by n, which only rosters show.
+    pub presence: HashSet<i64>,
     /// Whether a folder or a favourite slot changed.
     pub folders: bool,
 }
@@ -223,6 +225,7 @@ async fn follow(store: Store, mut committed: watch::Receiver<i64>, changes: broa
                 messages: HashSet::new(),
                 people: HashSet::new(),
                 jids: jids.iter().map(|jid| hashed(jid)).collect(),
+                presence: HashSet::new(),
                 folders: false,
             };
             for event in &events {
@@ -235,6 +238,9 @@ async fn follow(store: Store, mut committed: watch::Receiver<i64>, changes: broa
                     }
                     ("person", _) => {
                         batch.people.insert(event.key);
+                    }
+                    ("presence", _) => {
+                        batch.presence.insert(event.key);
                     }
                     ("folder" | "favourite", _) => batch.folders = true,
                     _ => {}

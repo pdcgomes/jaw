@@ -981,12 +981,13 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // favourites hold folders or chats; and each folder's unread messages, mentions and count are
     // kept by triggers through the chats and people each holds, so a message arriving counts in
     // every folder it's in without any folder's chats being walked. People gain their presence,
-    // which rosters sort by, and how many chats are theirs. Communities, whose rows now show their
-    // groups', and the chats filed, whose rows say where, take new versions with their events. It's
-    // a data step because it rebuilds folders, which other tables refer to, so its foreign keys are
-    // checked before it commits. It reads each chat and person a few times and no message:
-    // measured as jawd runs it, on its writer's connection, at 0.37 to 0.49 s beside a million
-    // messages, 3,000 chats and 5,000 people with 30 folders holding 600 of them, its
+    // which rosters sort by, how many chats are theirs, and a version of what only their roster
+    // row shows, which their presence moves and their v doesn't. Communities, whose rows now show
+    // their groups', and the chats filed, whose rows say where, take new versions with their
+    // events. It's a data step because it rebuilds folders, which other tables refer to, so its
+    // foreign keys are checked before it commits. It reads each chat and person a few times and no
+    // message: measured as jawd runs it, on its writer's connection, at 0.37 to 0.49 s beside a
+    // million messages, 3,000 chats and 5,000 people with 30 folders holding 600 of them, its
     // foreign_key_check, fingerprint and commit included, on the reference Mac at a load of 78 to
     // 99; the backup before it took 2.1 to 4.0 s (`measure_the_folders_migration`).
     FOLDERS_AND_THE_ROSTER,
@@ -1070,6 +1071,12 @@ const FOLDERS_AND_THE_ROSTER: &str = "
     ALTER TABLE people ADD COLUMN presence TEXT CHECK (presence IN ('online', 'typing', 'recording'));
     -- Class: jaw's own, as it runs, cleared at every start: whether jawd follows their presence now.
     ALTER TABLE people ADD COLUMN followed INTEGER NOT NULL DEFAULT 0 CHECK (followed IN (0, 1));
+    -- Class: derived, as v is: the seq of the last change to what only their roster row shows,
+    -- their presence, last seen and whether jawd follows them, and their about text, avatar, chat
+    -- and folders. v is that of what message rows show of them too, their names and JIDs, so
+    -- someone coming online or going away moves no message row's version. A roster row's version
+    -- is the newer of the two.
+    ALTER TABLE people ADD COLUMN roster_v INTEGER NOT NULL DEFAULT 0;
     -- Where they sort in a roster: around first, by name; then by when they were last seen, the
     -- most recent first; then those who hide it or whom WhatsApp hasn't told jawd about, by name.
     ALTER TABLE people ADD COLUMN roster_sort TEXT GENERATED ALWAYS AS (
