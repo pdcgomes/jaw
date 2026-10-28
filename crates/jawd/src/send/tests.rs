@@ -4359,6 +4359,61 @@ async fn a_mark_read_whose_chat_merges_into_another_before_it_goes_sends_the_kep
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_mark_read_that_goes_while_its_chat_merges_waits_for_the_merge_then_sends_the_kept_chats_receipts_first() {
+    let home = tempfile::tempdir().unwrap();
+    // A minute between a chat's receipts, so only the patch's own wait sends them in time; the
+    // outbox tries a refused patch again within 20 ms.
+    let timing = Timing { read_every: Duration::from_secs(60), ..quick() };
+    let running = Running::timed(home.path(), world(), true, true, timing).await;
+    let lid = "100000000001@lid";
+    running.chats(&[ANA]).await;
+    running.arrives(lid, lid, "l0", now_ms() - 3_000).await;
+    running.call("read", json!({ "chat": lid, "up_to": "l0" })).await.unwrap();
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
+    running.arrives(lid, lid, "l1", now_ms() - 2_000).await;
+    until_offline(&running).await;
+    running.call("chat.mark_unread", json!({ "chat": lid, "unread": false })).await.unwrap();
+    // Ana's LID and number turn out to be one person: her LID's chat starts merging into her
+    // number's, and its messages can't move until the test lets them, whatever wakes the merge.
+    let side = Connection::open(home.path().join("jaw.db")).unwrap();
+    side.busy_timeout(Duration::from_secs(5)).unwrap();
+    side.execute_batch(
+        "CREATE TRIGGER moving_waits BEFORE UPDATE OF chat ON messages BEGIN SELECT RAISE(ABORT, 'not yet'); END;",
+    )
+    .unwrap();
+    let both = Person { jids: vec![ANA.into(), lid.into()], ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
+    running.connection(jaw_proto::ConnectionState::Online);
+    eventually(&running, "the patch to be refused while its chat merges, and tried again, or to go", |db| {
+        let row: Option<(i64, Option<String>)> = db
+            .query_row("SELECT attempts, error FROM outbox WHERE kind = 'app_state'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        Ok(row.is_none_or(|(attempts, error)| attempts >= 2 && error.is_some_and(|e| e.contains("being merged"))))
+    })
+    .await;
+    let early = patches_sent(&running).len();
+    side.execute_batch("DROP TRIGGER moving_waits").unwrap();
+    let merging =
+        || running.query(|db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get::<_, i64>(0))?));
+    while merging().await > 0 {
+        running.store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+    }
+    let receipt = |asked: &[pb::command::Kind]| {
+        asked.iter().position(|k| matches!(k, pb::command::Kind::MarkRead(m) if m.ids.iter().any(|id| id == "l1")))
+    };
+    tokio::time::timeout(Duration::from_secs(5), running.world.until(|asked| receipt(asked).is_some()))
+        .await
+        .expect("l1's read receipt never went");
+    until_stored(&running).await;
+    let asked = running.world.asked();
+    let patch = asked.iter().position(|k| matches!(k, pb::command::Kind::AppStatePatch(_)));
+    assert!(matches!((receipt(&asked), patch), (Some(r), Some(p)) if r < p), "its receipt went before it");
+    assert_eq!(early, 0, "nothing went while the chat merged");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn marking_read_a_chat_jaw_holds_none_of_the_messages_of_keeps_its_count_until_whatsapps_echo_reads_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
