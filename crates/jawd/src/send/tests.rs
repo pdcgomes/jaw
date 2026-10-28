@@ -4401,6 +4401,8 @@ async fn starring_a_message_stars_it_and_names_it_as_whatsapp_does() {
     let mine = running.send(ANA, "o meu").await;
     running.until_status(ANA, &mine, "sent").await;
     let before = row(&running, CLIMBING, "g1").await.unwrap().v;
+    // Starred while WhatsApp can't be reached, so the rows are read before any patch goes.
+    until_offline(&running).await;
     for (message, chat) in [("g1", Some(CLIMBING)), ("d1", None), (mine.as_str(), Some(ANA))] {
         let mut params = json!({ "message": message, "starred": true });
         if let Some(chat) = chat {
@@ -4410,21 +4412,24 @@ async fn starring_a_message_stars_it_and_names_it_as_whatsapp_does() {
     }
     let g1 = row(&running, CLIMBING, "g1").await.unwrap();
     assert!(g1.starred && g1.v > before, "starred, with a new version");
+    let d1 = row(&running, ANA, "d1").await.unwrap();
+    running.connection(jaw_proto::ConnectionState::Online);
     until_stored(&running).await;
     let sent = patches_sent(&running);
-    let indexes: Vec<Vec<String>> = sent.iter().map(|p| p.index.clone()).collect();
     let index = |parts: [&str; 5]| parts.iter().map(|part| part.to_string()).collect::<Vec<_>>();
-    assert_eq!(
-        indexes,
-        [
-            index(["star", CLIMBING, "g1", "0", RUI]),
-            index(["star", ANA, "d1", "0", "0"]),
-            index(["star", ANA, mine.as_str(), "1", "0"]),
-        ]
-    );
+    // Each chat's patches go in the order asked, but the two chats' race for the app-state turn.
+    let sent_in = |chat: &str| -> Vec<Vec<String>> {
+        sent.iter().filter(|p| p.index[1] == chat).map(|p| p.index.clone()).collect()
+    };
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent_in(CLIMBING), [index(["star", CLIMBING, "g1", "0", RUI])]);
+    assert_eq!(sent_in(ANA), [index(["star", ANA, "d1", "0", "0"]), index(["star", ANA, mine.as_str(), "1", "0"])]);
     assert!(sent.iter().all(|p| (p.name.as_str(), p.version) == ("regular_high", 2)));
-    until_echoed(&running, &sent[2]).await;
-    assert_eq!(row(&running, CLIMBING, "g1").await.unwrap().v, g1.v, "the echo changed nothing");
+    for patch in &sent {
+        until_echoed(&running, patch).await;
+    }
+    let echoed = (row(&running, CLIMBING, "g1").await.unwrap().v, row(&running, ANA, "d1").await.unwrap().v);
+    assert_eq!(echoed, (g1.v, d1.v), "the echoes changed nothing");
     running.call("star", json!({ "message": "g1", "starred": true })).await.unwrap();
     running.call("star", json!({ "message": "g1", "starred": false })).await.unwrap();
     assert!(!row(&running, CLIMBING, "g1").await.unwrap().starred);
