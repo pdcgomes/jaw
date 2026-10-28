@@ -2980,6 +2980,44 @@ async fn the_step_reads_the_copy_merging_in_as_windows_show_it_in_each_state_of_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_or_an_edit_in_the_chat_kept_is_taken_while_other_messages_in_the_chat_merging_in_are_deleted() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    let lid = "100000000001@lid";
+    // Your message is in both of Ana's chats, her number's the older. In her LID's chat, another
+    // message of yours is being deleted for everyone, and Ana has deleted one of hers.
+    running.chats(&[ANA, lid]).await;
+    for chat in [ANA, lid] {
+        let message = Message { chat: chat.into(), ..mine_message("m1", now_ms() - 60_000) };
+        running.store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+    }
+    let other = Message { chat: lid.into(), ..mine_message("m2", now_ms() - 60_000) };
+    running.store.apply(Lane::Live, vec![Change::Message(other)]).await.unwrap();
+    running.arrives(lid, lid, "a1", now_ms() - 60_000).await;
+    running.call("delete", json!({ "message": "m2", "chat": lid, "for": "everyone" })).await.unwrap();
+    let hers = Amend { what: Amendment::Revoke, ..other_of(lid, "a1") };
+    running.store.apply(Lane::Live, vec![Change::Amend(hers)]).await.unwrap();
+    // Her LID's chat then starts merging into her number's: the copies of m1 show as they were.
+    let both = Person { jids: vec![ANA.into(), lid.into()], ..Person::default() };
+    running.store.apply(Lane::Live, vec![Change::Person(both)]).await.unwrap();
+    for chat in [Some(ANA), None] {
+        let named = |mut params: Value| {
+            if let Some(chat) = chat {
+                params["chat"] = json!(chat);
+            }
+            params
+        };
+        running.call("react", named(json!({ "message": "m1", "emoji": "👍" }))).await.unwrap();
+        running.call("edit", named(json!({ "message": "m1", "text": "chego às 21h" }))).await.unwrap();
+    }
+    let copies: i64 =
+        running.query(|db| Ok(db.query_row("SELECT count(*) FROM messages WHERE id = 'm1'", [], |r| r.get(0))?)).await;
+    assert_eq!(copies, 2, "the merge is still to move the copy in her LID's chat");
+    let kinds: Vec<String> = outbox_rows(&running).await.0.into_iter().map(|(kind, _)| kind).collect();
+    assert_eq!(kinds, ["revoke", "reaction", "edit", "reaction", "edit"], "taken each way");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_action_on_a_message_still_to_go_from_a_chat_being_merged_goes_after_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
