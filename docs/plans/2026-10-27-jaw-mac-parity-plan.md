@@ -150,9 +150,9 @@ After the first release: Settings › Assistants with [M9](2026-10-27-jaw-mcp-de
 
 ### 3.8 Invitations, and what jaw couldn't show
 
-Since `unknown-kinds` landed on 28 October (7f8fc11), jawd shows most of what it called "jaw can't show this yet": history's community and group events come as system lines in jawd's words, which the Mac draws already, and invitations to join a group or follow a channel come as a kind of their own, `invite`, with the group's or channel's name and when it runs out. The terminal draws an invitation by the summary jawd gives it ("Invitation to join Lisbon"); the Mac reads the kind as one it can't show.
+Since `unknown-kinds` landed on 28 October (7f8fc11), jawd shows most of what it called "jaw can't show this yet": history's community and group events come as system lines in jawd's words, which the Mac draws already, and invitations to join a group, follow a channel or be one of its admins come as a kind of their own, `invite`, with the group's or channel's name and when it runs out, under the sentence WhatsApp writes for it as the caption ("Invitation to follow the channel, 'Jaw news'"). A message row carries no summary, so the terminal draws an invitation as "✉ invitation" over its caption. Since 28 October the Mac draws it in both looks as a line over its caption, saying what it's to, the name and until when ("Group invitation · Lisbon · until 2 November, 14:00"), where it said it couldn't show it.
 
-- **The Mac's:** JawKit's rows take `invite`, and the conversation draws it as a card in both looks: what it invites to, the group's or channel's name, and when it expires.
+- **The Mac's:** JawKit's rows take `invite`, done; what's left is the card in both looks, in place of the line: what it invites to, the group's or channel's name, and when it expires.
 - **The check:** nothing, since it's a kind and not a request; the parity canvas carries it.
 
 ## Phase 4 · The Mac's own, after the gaps

@@ -98,6 +98,34 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
     #expect(error.code == ErrorCode.cancelled)
 }
 
+@Test func `an invitation decodes with what it invites to and when it runs out`() throws {
+    func row(_ kind: String) throws -> MessageRow {
+        try JSONDecoder().decode(MessageRow.self, from: Data("""
+        {"id":"3EB0A1B2C3D4E5F7","v":81231,"sort":"1792145070000~000000000124","chat":"351912345678@s.whatsapp.net",
+         "at":1792145070000,"from":{"id":"person:12","name":"Ana","colour":4},"mine":false,\(kind),"reply":null,
+         "forwarded":0,"reactions":[],"status":null,"edited":false,"deleted":false,"expires_at":null,"view_once":false,
+         "starred":false}
+        """.utf8))
+    }
+    let group = try row("""
+    "kind":"invite","spans":[],"invite":{"group":"120363012345678901@g.us","name":"Lisbon","expires":1792404270000}
+    """)
+    #expect(group.kind == .invite && group.spans.isEmpty)
+    #expect(group.invite?.group == "120363012345678901@g.us" && group.invite?.channel == nil)
+    #expect(group.invite?.name == "Lisbon" && group.invite?.expires == 1_792_404_270_000 && group.invite?.admin != true)
+
+    let admin = try row("""
+    "kind":"invite","spans":[{"t":"text","s":"help me run it?"}],
+    "invite":{"channel":"120363000000000007@newsletter","name":"Jaw news","expires":1792600000000,"admin":true}
+    """)
+    #expect(admin.invite?.channel == "120363000000000007@newsletter" && admin.invite?.group == nil)
+    #expect(admin.invite?.admin == true && admin.invite?.expires == 1_792_600_000_000)
+    #expect(admin.plain == "help me run it?", "its caption is the row's spans")
+
+    let unnamed = try row(#""kind":"invite","spans":[],"invite":{"group":null,"name":null,"expires":null}"#)
+    #expect(unnamed.kind == .invite && unnamed.invite != nil && unnamed.invite?.name == nil)
+}
+
 @Test func `each request JawKit writes equals its fixture`() throws {
     func same(_ name: String, _ written: JSONValue) throws {
         #expect(written == (try JSONValue.parse(fixture(name))), "\(name)")

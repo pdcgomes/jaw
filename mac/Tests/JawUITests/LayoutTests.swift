@@ -183,3 +183,51 @@ func differing(_ a: [UInt8], _ b: [UInt8]) -> Int {
     #expect(kinds[3].poll?.options.count == 2 && kinds[3].poll?.options.first?.mine == true && kinds[4].contact?.name == "Climbing shop")
     #expect(kinds[5].link?.description != nil && kinds[7].album?.items.count == 5)
 }
+
+/// An invitation as jawd sends it, from Ana in the sample group, with `caption` as its spans.
+func invitation(_ invite: String, caption: String? = nil) throws -> MessageRow {
+    let spans = caption.map { #"[{"t":"text","s":"\#($0)"}]"# } ?? "[]"
+    return try JSONDecoder().decode(MessageRow.self, from: Data("""
+    {"id":"I1","v":1,"sort":"1","chat":"g","at":\(Samples.now),"from":{"id":"person:4","name":"Ana","colour":4},
+     "kind":"invite","spans":\(spans),"invite":\(invite)}
+    """.utf8))
+}
+
+@Test func `an invitation says what it's to, its name and until when, over the caption WhatsApp writes for it`() throws {
+    let s = spec(.bubbles, dark: true)
+    let context = MessageContext(group: true, firstOfRun: true, showTime: true, day: nil)
+    func builder(_ m: MessageRow) -> MessageLayout.Builder {
+        MessageLayout.Builder(m: m, width: 600, context: context, style: s.style, fonts: s.fonts, me: s.me)
+    }
+    func words(_ m: MessageRow) -> String {
+        builder(m).words().string
+    }
+    let expires: Int64 = 1_792_404_270_000
+    let until = " · until " + Format.until(expires)
+
+    let group = try invitation(#"{"group":"120363012345678901@g.us","name":"Lisbon","expires":\#(expires)}"#,
+                               caption: "Invitation to join my WhatsApp group")
+    #expect(words(group) == "Group invitation · Lisbon" + until + "\nInvitation to join my WhatsApp group")
+    #expect(!builder(group).hasCard, "a line of words, until it has a card of its own")
+    let unnamed = try invitation(#"{"group":null,"name":null,"expires":null}"#)
+    #expect(words(unnamed) == "Group invitation")
+    let blank = try invitation(#"{"group":"120363012345678901@g.us","name":""}"#)
+    #expect(words(blank) == "Group invitation")
+    let noDate = try invitation(#"{"group":"120363012345678901@g.us","name":"Lisbon","expires":0}"#)
+    #expect(words(noDate) == "Group invitation · Lisbon", "a time of 0 is none")
+
+    let follow = try invitation(#"{"channel":"120363000000000007@newsletter","name":"Jaw news"}"#,
+                                caption: "Invitation to follow the channel, 'Jaw news'")
+    #expect(words(follow) == "Channel invitation · Jaw news\nInvitation to follow the channel, 'Jaw news'")
+    let someChannel = try invitation(#"{"channel":"120363000000000007@newsletter"}"#)
+    #expect(words(someChannel) == "Channel invitation")
+    let admin = try invitation(#"{"channel":"120363000000000007@newsletter","name":"Jaw news","expires":\#(expires),"admin":true}"#)
+    #expect(words(admin) == "Channel admin invitation · Jaw news" + until)
+    let someAdmin = try invitation(#"{"channel":"120363000000000007@newsletter","admin":true}"#)
+    #expect(words(someAdmin) == "Channel admin invitation")
+}
+
+@MainActor @Test func `an invitation isn't forwarded, as jawd refuses to forward one`() throws {
+    let group = try invitation(#"{"group":"120363012345678901@g.us","name":"Lisbon"}"#)
+    #expect(ConversationController.notForwardable(group) == "WhatsApp doesn't forward these")
+}

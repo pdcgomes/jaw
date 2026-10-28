@@ -418,8 +418,19 @@ public enum MessageLayout {
             case .contact: return "Contact card"
             case .poll: return "Poll · " + (m.poll?.question ?? "vote on the phone")
             case .event: return "Event"
+            case .invite: return invitation(m.invite)
             case .unknown: return "Jaw can't show this yet"
             }
+        }
+
+        /// What an invitation is to, the group's or channel's name, and until when. Its caption, under
+        /// it, is the sentence WhatsApp writes for it ("Invitation to follow the channel, 'Jaw news'").
+        static func invitation(_ invite: Invite?) -> String {
+            let what = invite?.admin == true ? "Channel admin invitation"
+                : invite?.channel != nil ? "Channel invitation" : "Group invitation"
+            let name = invite?.name.flatMap { $0.isEmpty ? nil : $0 }
+            let until = invite?.expires.flatMap { $0 > 0 ? "until " + Format.until($0) : nil }
+            return ([what, name, until] as [String?]).compactMap(\.self).joined(separator: " · ")
         }
 
         /// Whether the message is one to three emoji alone, drawn large without a bubble.

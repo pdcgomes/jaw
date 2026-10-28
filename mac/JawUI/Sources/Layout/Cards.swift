@@ -47,7 +47,7 @@ extension MessageLayout.Builder {
         case .image, .video, .gif, .sticker, .videoNote, .voice, .audio, .document, .location, .liveLocation, .contact, .poll, .album:
             !m.deleted
         case .text: !m.deleted && m.link?.title != nil
-        case .system, .call, .event, .unknown: false
+        case .system, .call, .event, .invite, .unknown: false
         }
     }
 
@@ -73,7 +73,7 @@ extension MessageLayout.Builder {
             let side = (min(most, 260) - 4) / 2
             return CGSize(width: min(most, 260), height: CGFloat((n + 1) / 2) * (side + 4) - 4)
         case .text: return CGSize(width: min(most, 300), height: 8 + lineHeight(fonts.name) + lineHeight(fonts.small) * 2 + 8)
-        case .system, .call, .event, .unknown: return nil
+        case .system, .call, .event, .invite, .unknown: return nil
         }
     }
 
@@ -103,7 +103,7 @@ extension MessageLayout.Builder {
         case .poll: poll(r)
         case .album: album(r)
         case .text: linkPreview(r)
-        case .system, .call, .event, .unknown: break
+        case .system, .call, .event, .invite, .unknown: break
         }
     }
 

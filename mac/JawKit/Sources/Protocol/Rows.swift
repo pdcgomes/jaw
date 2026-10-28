@@ -140,8 +140,8 @@ public struct Last: Decodable, Sendable, Hashable {
 }
 
 public enum MessageKind: String, Decodable, Sendable, Hashable {
-    case text, image, video, gif, voice, audio, document, sticker, album, location, contact, poll, event, system,
-         call, unknown
+    case text, image, video, gif, voice, audio, document, sticker, album, location, contact, poll, event, invite,
+         system, call, unknown
     case videoNote = "video_note"
     case liveLocation = "live_location"
 
@@ -207,6 +207,7 @@ public struct MessageRow: WindowRow, Decodable, Hashable {
     public var poll: Poll?
     public var location: Location?
     public var contact: Contact?
+    public var invite: Invite?
 
     /// The text as one string, for copying and for the box when editing.
     public var plain: String {
@@ -241,6 +242,7 @@ public struct MessageRow: WindowRow, Decodable, Hashable {
         poll = try? c.decodeIfPresent(Poll.self, forKey: .poll)
         location = try? c.decodeIfPresent(Location.self, forKey: .location)
         contact = try? c.decodeIfPresent(Contact.self, forKey: .contact)
+        invite = try? c.decodeIfPresent(Invite.self, forKey: .invite)
     }
 
     public init(id: String, v: UInt64, sort: String, chat: String, at: Int64, from: Sender? = nil, mine: Bool = false,
@@ -273,11 +275,12 @@ public struct MessageRow: WindowRow, Decodable, Hashable {
         poll = nil
         location = nil
         contact = nil
+        invite = nil
     }
 
     enum Keys: String, CodingKey {
         case id, v, sort, chat, at, from, mine, kind, spans, reply, forwarded, reactions, status, edited, deleted
-        case starred, system, media, voice, album, link, poll, location, contact
+        case starred, system, media, voice, album, link, poll, location, contact, invite
         case expiresAt = "expires_at"
         case viewOnce = "view_once"
     }
@@ -400,6 +403,19 @@ public struct Location: Decodable, Sendable, Hashable {
 /// A contact card.
 public struct Contact: Decodable, Sendable, Hashable {
     public var name: String?
+}
+
+/// An invitation to join a group, or to follow a channel or be one of its admins, as it says.
+public struct Invite: Decodable, Sendable, Hashable {
+    /// The group's JID, for an invitation to join it.
+    public var group: String?
+    /// The channel's JID, for an invitation to follow it or help run it.
+    public var channel: String?
+    public var name: String?
+    /// When it runs out, in milliseconds since the epoch.
+    public var expires: Int64?
+    /// Whether it's to be one of the channel's admins.
+    public var admin: Bool?
 }
 
 public struct Voice: Decodable, Sendable, Hashable {

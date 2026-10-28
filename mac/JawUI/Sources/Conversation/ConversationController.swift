@@ -731,7 +731,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         if m.viewOnce { return "it's view-once" }
         switch m.kind {
         case .system, .call: return "it's a line about the chat"
-        case .poll, .event, .liveLocation, .album: return "WhatsApp doesn't forward these"
+        case .poll, .event, .invite, .liveLocation, .album: return "WhatsApp doesn't forward these"
         default: return nil
         }
     }
