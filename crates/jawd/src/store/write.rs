@@ -1431,8 +1431,8 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
 /// an earlier jawd started has no such row: through a chain of merges, what was said of another of
 /// the person's chats may have landed on its chat. A chain takes three of a person's chats, so
 /// only a person with three JIDs or more has its settings merged again, and for them, what was
-/// undone on the kept chat while the merge ran (a pin, a mute or an archive, a draft sent, the
-/// disappearing timer) comes back once.
+/// undone on the kept chat while the merge ran (a pin, a mute or an archive, the mark, a draft
+/// sent, the disappearing timer) comes back once.
 fn merge_started(gone: i64) -> String {
     format!("merge.started.{gone}")
 }
