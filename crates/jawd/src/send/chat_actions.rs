@@ -290,8 +290,8 @@ pub(super) async fn receipts_first(inner: &Inner, chat: &str) -> Result<(), Engi
     super::reads::tell_now(inner, n).await.map_err(|e| failed(format!("{e:#}")))
 }
 
-/// How many times a fetch after a refusal is tried while the engine that refused runs; the next
-/// engine to start fetches every collection again in full anyway.
+/// How many times the fetch after a patch is given up on is tried, while WhatsApp can be reached and
+/// the engine that gave it up runs; the next engine to start fetches every collection in full anyway.
 const FETCH_TRIES: u32 = 10;
 
 /// What putting back a refused patch undoes, by its index; nothing for a deletion for you, whose
@@ -387,15 +387,24 @@ pub(super) async fn refused(
 }
 
 /// Asks the engine running now to fetch collections `names` again in full, trying again while it
-/// runs. Each try waits for its turn with jaw's own patches and sync's full fetches of app state,
-/// and holds it until every mutation is kept.
+/// runs. Each try waits until WhatsApp can be reached, as a send does, so tries are spent only
+/// then, and for its turn with jaw's own patches and sync's full fetches of app state, which it
+/// holds until every mutation is kept.
 fn fetch_again(inner: &Inner, names: Vec<String>) {
     let Some(engine) = inner.engine.clone() else { return };
-    let (app_state, timing) = (inner.app_state.clone(), inner.timing);
+    let (app_state, timing, mut connected) = (inner.app_state.clone(), inner.timing, inner.connected.subscribe());
     tokio::spawn(async move {
         let restarts = engine.status().restarts;
         let mut pause = timing.retry_first;
-        for _ in 0..FETCH_TRIES {
+        for tried in 0..FETCH_TRIES {
+            if tried > 0 {
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(timing.retry_most);
+            }
+            let reachable = connected.wait_for(|connected| *connected).await.is_ok();
+            if !reachable || engine.status().restarts != restarts {
+                return;
+            }
             let resync = pb::command::Kind::AppStateResync(pb::AppStateResync { names: names.clone() });
             let turn = app_state.take().await;
             let answer = engine.call(resync).await;
@@ -404,11 +413,6 @@ fn fetch_again(inner: &Inner, names: Vec<String>) {
                 Ok(_) => return,
                 Err(e) => eprintln!("jawd: can't fetch app state again after giving up on a patch: {e}"),
             }
-            tokio::time::sleep(pause).await;
-            if engine.status().restarts != restarts {
-                return;
-            }
-            pause = (pause * 2).min(timing.retry_most);
         }
         eprintln!(
             "jawd: stopped fetching app state again after giving up on a patch; the next engine to start fetches it"

@@ -4719,3 +4719,38 @@ async fn a_pin_asked_while_a_refusals_fetch_again_is_handed_over_goes_after_it_a
     let latest = value_of(&latest_for(&running, ["pin_v1", ANA]));
     assert_eq!(latest.pin_action, Some(PinAction { pinned: Some(true) }), "and WhatsApp's latest pins it");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetch_again_after_a_refusal_waits_while_whatsapp_cant_be_reached_and_the_chat_ends_as_whatsapp_has_it() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[CLIMBING]).await;
+    running.call("chat.pin", json!({ "chat": CLIMBING, "pinned": true })).await.unwrap();
+    until_stored(&running).await;
+    // WhatsApp, which keeps the group pinned, refuses the unpin just as it goes out of reach.
+    running.world.gate_patches(true);
+    running.world.refuse_patches(1);
+    running.call("chat.pin", json!({ "chat": CLIMBING, "pinned": false })).await.unwrap();
+    let patches =
+        |asked: &[pb::command::Kind]| asked.iter().filter(|k| matches!(k, pb::command::Kind::AppStatePatch(_))).count();
+    running.world.until(|asked| patches(asked) == 2).await;
+    until_offline(&running).await;
+    running.world.fail_fetches(true);
+    running.world.gate_patches(false);
+    until_stored(&running).await;
+    // Out of reach for longer than the fetch's tries take, at most FETCH_TRIES of quick()'s 20 ms.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let fetches = |asked: &[pb::command::Kind]| {
+        asked.iter().filter(|k| matches!(k, pb::command::Kind::AppStateResync(r) if r.names == ["regular_low"])).count()
+    };
+    assert_eq!(fetches(&running.world.asked()), 0, "no try is spent while WhatsApp can't be reached");
+    assert!(!chat_row(&running, CLIMBING).await.pinned, "as the put-back left it, meanwhile");
+    running.world.fail_fetches(false);
+    running.connection(jaw_proto::ConnectionState::Online);
+    running
+        .until("the group pinned again, as WhatsApp has it", |db| {
+            Ok(db.query_row("SELECT pinned FROM chats WHERE id = ?1", [CLIMBING], |r| r.get::<_, i64>(0))? > 0)
+        })
+        .await;
+    assert_eq!(fetches(&running.world.asked()), 1, "fetched again once it could be");
+}
