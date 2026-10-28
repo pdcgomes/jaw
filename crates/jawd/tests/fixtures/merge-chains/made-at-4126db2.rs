@@ -79,8 +79,8 @@ mod made_at_4126db2 {
         let kept = Connection::open(&path).unwrap();
         println!("{name}:");
         for sql in [
-            "SELECT 'chat', n, id, pinned, draft, frecency, unread, message_count, read_at, read_n, read_known, told_at,
-                told_n
+            "SELECT 'chat', n, id, pinned, muted_until, archived, ephemeral, draft, frecency, unread, message_count,
+                read_at, read_n, read_known, told_at, told_n
             FROM chats ORDER BY n",
             "SELECT 'merging', g.id, k.id FROM chat_merges m JOIN chats g ON g.n = m.gone JOIN chats k ON k.n = m.keep",
             "SELECT 'pending', chat, target, kind FROM pending ORDER BY n",
@@ -174,6 +174,41 @@ mod made_at_4126db2 {
             store.apply(Lane::Live, vec![join(OLD, LID)]).await.unwrap();
             store.apply(Lane::Live, vec![join(LID, NEW)]).await.unwrap();
             keep(home.path(), "standing-chain.db");
+        }
+        // A person's two chats, which can't make a chain: the LID's, pinned, muted, with a draft
+        // and a 24-hour timer, starts merging into the number's, which takes all four, and a step
+        // is taken; then, while the merge runs, the number's chat is unpinned, unmuted, archived,
+        // its draft sent and its timer turned off.
+        {
+            let home = tempfile::tempdir().unwrap();
+            let store = Store::open(home.path()).unwrap();
+            let mut changes = vec![from_them(NEW, "n0", AT)];
+            changes.extend((0..210).map(|i| from_them(LID, &format!("l{i}"), AT + 1_000 + i)));
+            let set = Chat {
+                id: LID.into(),
+                pinned: Some(AT + 60),
+                muted_until: Some(AT + 9_000_000),
+                ephemeral: Some(86_400),
+                ..Chat::default()
+            };
+            changes.push(Change::Chat(set));
+            store.apply(Lane::Live, changes).await.unwrap();
+            let draft = Change::Chat(Chat { id: LID.into(), draft: Some("typed under the LID".into()), ..Chat::default() });
+            store.apply_durable(vec![draft]).await.unwrap();
+            store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+            // Moves l0 to l199 into the number's chat.
+            step(&store, LID).await;
+            let undone = Chat {
+                id: NEW.into(),
+                pinned: Some(0),
+                muted_until: Some(0),
+                archived: Some(true),
+                ephemeral: Some(0),
+                draft: Some(String::new()),
+                ..Chat::default()
+            };
+            store.apply(Lane::Live, vec![Change::Chat(undone)]).await.unwrap();
+            keep(home.path(), "two-chats.db");
         }
     }
 }

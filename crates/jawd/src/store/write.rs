@@ -1429,7 +1429,10 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
 /// of its settings change, so the merge's last step merges none of them into the kept chat again,
 /// which would undo what was done to that chat meanwhile (a draft sent, a pin taken off). A merge
 /// an earlier jawd started has no such row: through a chain of merges, what was said of another of
-/// the person's chats may have landed on its chat.
+/// the person's chats may have landed on its chat. A chain takes three of a person's chats, so
+/// only a person with three JIDs or more has its settings merged again, and for them, what was
+/// undone on the kept chat while the merge ran (a pin, a mute or an archive, a draft sent, the
+/// disappearing timer) comes back once.
 fn merge_started(gone: i64) -> String {
     format!("merge.started.{gone}")
 }
@@ -1590,7 +1593,7 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     repoint(db, stamps, (gone, &gone_jid), (keep, &keep_jid))?;
     carry(db, stamps, (gone, &gone_jid), (keep, &keep_jid))?;
     let started = db.prepare_cached("DELETE FROM sync_state WHERE key = ?1")?.execute([merge_started(gone)])? > 0;
-    if !started {
+    if !started && could_chain(db, keep)? {
         merge_settings_again(db, stamps, keep, gone)?;
     }
     db.prepare_cached("DELETE FROM chat_merges WHERE gone = ?1")?.execute([gone])?;
@@ -1600,10 +1603,20 @@ fn merge_step(db: &Connection, stamps: &mut Stamps, gone: Option<i64>) -> Result
     Ok(true)
 }
 
+/// Whether chat `keep`'s person has three JIDs or more, as a chain of merges through chats of
+/// theirs needs: with fewer, nothing said of another of their chats can have landed on a chat
+/// merging into `keep`.
+fn could_chain(db: &Connection, keep: i64) -> Result<bool> {
+    let jids: i64 = db
+        .prepare_cached("SELECT count(*) FROM person_jids WHERE person = (SELECT person FROM chats WHERE n = ?1)")?
+        .query_row([keep], |r| r.get(0))?;
+    Ok(jids >= 3)
+}
+
 /// Merges chat `gone`'s settings into `keep`'s again, by start_merge's rules, as a merge an earlier
-/// jawd started ends: a draft or a pin for another of the person's chats may have landed on `gone`
-/// since, through a chain of merges, and a draft.set that was answered is never lost. Its
-/// frecency, which start_merge added to `keep`'s, isn't added twice.
+/// jawd started for a person with three JIDs or more ends: a draft or a pin for another of the
+/// person's chats may have landed on `gone` since, through a chain of merges, and a draft.set that
+/// was answered is never lost. Its frecency, which start_merge added to `keep`'s, isn't added twice.
 fn merge_settings_again(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64) -> Result<()> {
     let seq = stamps.seq(CHAT, Some(keep));
     let changed = db

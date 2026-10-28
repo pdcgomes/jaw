@@ -679,7 +679,11 @@ async fn a_chain_of_merges_made_after_jaw_db_opened_still_ends_in_one_chat_with_
 /// - `ended-chain`: the new number's chat, then the LID's with l0 to l9, read here up to l9, then
 ///   the old number's with 205 messages, the numbers' read on the phone; the same two merges, the
 ///   LID's ended and a step of the old number's taken, so l0 to l9 wait in the old number's chat;
-/// - `standing-chain`: the same, with one message in the old number's chat and no step taken.
+/// - `standing-chain`: the same, with one message in the old number's chat and no step taken;
+/// - `two-chats`: the new number's chat, then the LID's with l0 to l209, pinned, muted, with a
+///   draft and a 24-hour timer, which the new number's takes as the LID's starts merging into it;
+///   a step taken, then the new number's chat unpinned, unmuted, archived, its draft sent and its
+///   timer turned off.
 fn from_before(name: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let packed = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/merge-chains/{name}.db.zst"));
@@ -817,7 +821,8 @@ async fn settings_and_told(store: &Store) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_chain_an_earlier_jawd_left_ends_the_same_whichever_commit_jawd_is_killed_after() {
-    for (name, first) in [("x1-chain", OLD), ("ended-chain", OLD), ("standing-chain", LID)] {
+    let fixtures = [("x1-chain", OLD), ("ended-chain", OLD), ("standing-chain", LID), ("two-chats", LID)];
+    for (name, first) in fixtures {
         let home = from_before(name);
         let store = Store::open(home.path()).unwrap();
         // The flatten's one commit, then each step's, as the merging task takes them; a kill
@@ -933,6 +938,35 @@ async fn what_was_undone_in_the_chat_that_stays_during_a_merge_this_jawd_started
     merged(&store, LID).await;
     assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
     assert_eq!(settings(&store, NEW).await, (String::new(), 0, 0), "neither comes back as the merge ends");
+}
+
+/// What a merge brings of chat `jid`'s settings: its draft, or empty, when it was pinned, until
+/// when it's muted, whether it's archived, and its disappearing timer in seconds.
+async fn brought(store: &Store, jid: &'static str) -> (String, i64, i64, bool, i64) {
+    query(store, move |db| {
+        Ok(db.query_row(
+            "SELECT coalesce(draft, ''), pinned, muted_until, archived, ephemeral FROM chats WHERE id = ?1",
+            [jid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_was_undone_in_the_chat_that_stays_while_an_earlier_jawd_merged_a_persons_two_chats_stays_undone() {
+    let home = from_before("two-chats");
+    let store = Store::open(home.path()).unwrap();
+    // The LID's chat still holds what the new number's took as the merge started, and the new
+    // number's what was done to it since; with two JIDs, nothing can have landed on the LID's.
+    let lid = ("typed under the LID".to_string(), AT + 60, AT + 9_000_000, false, 86_400);
+    assert_eq!(brought(&store, LID).await, lid);
+    let undone = (String::new(), 0, 0, true, 0);
+    assert_eq!(brought(&store, NEW).await, undone);
+    merged(&store, LID).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
+    assert_eq!(brought(&store, NEW).await, undone, "nothing comes back as the merge ends, the timer included");
+    assert_eq!(store.count("messages").unwrap(), 211, "every message, once");
 }
 
 #[tokio::test(flavor = "multi_thread")]
