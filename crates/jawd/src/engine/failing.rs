@@ -27,6 +27,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
+use wa_proto::wa_web_protobufs_history_sync::conversation::EndOfHistoryTransferType;
 use wa_proto::wa_web_protobufs_history_sync::history_sync::HistorySyncType;
 use wa_proto::wa_web_protobufs_history_sync::{Conversation, HistorySync, HistorySyncMsg};
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
@@ -402,7 +403,8 @@ fn notification(n: u64, session: &str) -> pb::Event {
 }
 
 /// A few messages from before the oldest jaw has in the chat, an hour apart, as the phone sends
-/// older history: from the other person in a one-to-one chat, from a member in a group.
+/// older history: from the other person in a one-to-one chat, from a member in a group; and that
+/// it keeps more of the chat than it sent.
 fn older(n: u64, request: &pb::HistoryRequest) -> HistorySync {
     let group = request.chat.ends_with("@g.us");
     let participant = group.then(|| MEMBER.to_string());
@@ -426,9 +428,18 @@ fn older(n: u64, request: &pb::HistoryRequest) -> HistorySync {
             msg_order_id: Some(k as u64),
         })
         .collect();
+    let conversation = Conversation {
+        id: request.chat.clone(),
+        messages,
+        end_of_history_transfer: Some(true),
+        end_of_history_transfer_type: Some(
+            EndOfHistoryTransferType::CompleteOnDemandSyncButMoreMsgRemainOnPrimary as i32,
+        ),
+        ..Default::default()
+    };
     HistorySync {
         sync_type: HistorySyncType::OnDemand as i32,
-        conversations: vec![Conversation { id: request.chat.clone(), messages, ..Default::default() }],
+        conversations: vec![conversation],
         chunk_order: Some(1),
         progress: Some(100),
         ..Default::default()

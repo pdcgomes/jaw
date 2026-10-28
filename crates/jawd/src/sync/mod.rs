@@ -45,11 +45,15 @@ pub struct Live {
     caught_chats: HashSet<String>,
     /// Merges whose steps kept failing, left until jawd starts again.
     pub merges_stuck: u64,
-    /// When jawd first asked the phone something it hasn't answered yet, older history so far.
-    /// WhatsApp never says the phone is offline, so a question unanswered for `phone_patience` is
-    /// how jawd finds out.
+    /// When jawd first asked the phone something it's known to answer and hasn't yet, older
+    /// history so far. WhatsApp never says the phone is offline, so a question unanswered for
+    /// `phone_patience` is how jawd finds out.
     phone: watch::Sender<Option<Instant>>,
+    /// The chats whose history the phone has said, in this run, it keeps more of than it has sent,
+    /// so a question about one has an answer to come.
+    more_on_phone: HashSet<String>,
     pub phone_patience: Duration,
+    pub phone_give_up: Duration,
 }
 
 impl Default for Live {
@@ -64,36 +68,68 @@ impl Default for Live {
             caught_chats: HashSet::new(),
             merges_stuck: 0,
             phone: watch::Sender::new(None),
+            more_on_phone: HashSet::new(),
             phone_patience: PHONE_PATIENCE,
+            phone_give_up: PHONE_GIVE_UP,
         }
     }
 }
 
-/// How long the phone has to answer before jawd says it's offline: an online phone answers a
-/// request for older history in a few seconds, one woken by a push in a few more.
+/// How long the phone has to answer before jawd says it's offline, counted while the connection is
+/// online, and afresh each time it comes back, since the answer may be waiting for it: an online
+/// phone answers a request for older history in a few seconds, one woken by a push in a few more.
 pub const PHONE_PATIENCE: Duration = Duration::from_secs(20);
+/// How long after asking jawd gives a question up, so one the phone never answers (a request lost
+/// on the way, say) can't have jawd say it's offline for ever.
+pub const PHONE_GIVE_UP: Duration = Duration::from_secs(120);
 
-/// Notes that jawd has asked the phone something, unless it's still waiting for an earlier answer.
-fn asked_phone(live: &Shared) {
+/// Notes that jawd has asked the phone something it's known to answer, unless it's still waiting
+/// for an earlier answer; says when, if this is the question it waits for now.
+fn asked_phone(live: &Shared) -> Option<Instant> {
     let now = Instant::now();
-    live.lock().expect("live state").phone.send_if_modified(|asked| {
+    let noted = live.lock().expect("live state").phone.send_if_modified(|asked| {
         if asked.is_some() {
             return false;
         }
         *asked = Some(now);
         true
     });
+    noted.then_some(now)
 }
 
-/// The phone has answered: it has sent history, so it's online.
-fn phone_answered(live: &Shared) {
-    live.lock().expect("live state").forget_question();
+/// The phone is online if it sends anything: history, an answer to a peer's request, a message
+/// sent from it or a receipt. It's the account's device 0, whose JID is the account's own with no
+/// device, where another of your devices has one.
+fn heard_from(live: &Shared, sender: &str) {
+    let mut live = live.lock().expect("live state");
+    let phone = live.me.borrow().jids.iter().any(|jid| jid == sender);
+    if phone {
+        live.forget_question();
+    }
 }
 
 impl Live {
-    /// Stops waiting for the phone's answer: it has come, or the device it would come to is gone.
+    /// Stops waiting for the phone's answer: it has come, or it's given up.
     fn forget_question(&mut self) {
         self.phone.send_if_modified(|asked| asked.take().is_some());
+    }
+
+    /// Forgets what the phone said and was asked: the device it would answer is gone.
+    fn forget_phone(&mut self) {
+        self.forget_question();
+        self.more_on_phone.clear();
+    }
+
+    /// Notes what a history blob says of each chat's history the phone keeps: more of it than it
+    /// sent, or none.
+    fn phone_keeps(&mut self, remains: Vec<(String, bool)>) {
+        for (chat, more) in remains {
+            if more {
+                self.more_on_phone.insert(chat);
+            } else {
+                self.more_on_phone.remove(&chat);
+            }
+        }
     }
 
     /// Whether jawd is catching up after time offline, between WhatsApp saying what's waiting and
@@ -188,7 +224,7 @@ pub async fn logged_out(store: &Store, live: &Shared, reason: &str) -> anyhow::R
     let connection = {
         let mut live = live.lock().expect("live state");
         live.account = Account { state: AccountState::Unlinked, me: None };
-        live.forget_question();
+        live.forget_phone();
         live.cut_short();
         live.connection = Connection::new(ConnectionState::LoggedOut);
         live.connection.reason = Some(reason.into());
@@ -276,15 +312,22 @@ pub async fn run(
     // The stops sync has said, as the supervisor counts them; it starts the next engine only once
     // sync has said the last, so nothing the next engine sends can come before it.
     let mut said = engine.as_ref().map_or(0, Supervisor::follow);
-    let (mut phone, patience) = {
+    let (mut phone, timing) = {
         let live = live.lock().expect("live state");
-        (live.phone.subscribe(), live.phone_patience)
+        (live.phone.subscribe(), PhoneTiming { patience: live.phone_patience, give_up: live.phone_give_up })
     };
+    // Since when the connection has been online without a break, which the phone's patience
+    // counts from.
+    let mut online_since: Option<Instant> = None;
     loop {
+        let online = matches!(
+            live.lock().expect("live state").connection.state,
+            ConnectionState::Online | ConnectionState::PhoneOffline
+        );
+        online_since = online.then(|| online_since.unwrap_or_else(Instant::now));
         // An engine's events are all in `incoming` before the supervisor counts its stop, and the
         // next engine's can't come before sync has said it, so taking events first keeps the order
-        // they came in.
-        // What jawd says of the phone is said here too, so it's in order with the engine's word.
+        // they came in. What jawd says of the phone is said here too, in order with the engine's.
         let Incoming { event, ack } = tokio::select! {
             biased;
             incoming = incoming.recv() => match incoming {
@@ -299,8 +342,8 @@ pub async fn run(
                 }
                 continue;
             }
-            () = phone_due(&mut phone, &live, patience) => {
-                phone_said(&live, &pushes, patience);
+            () = phone_due(&mut phone, &live, timing, online_since) => {
+                phone_said(&live, &pushes, timing, online_since);
                 continue;
             }
         };
@@ -308,6 +351,7 @@ pub async fn run(
         match event.kind {
             Some(pb::event::Kind::Message(message)) => {
                 let info = message.info.clone().unwrap_or_default();
+                heard_from(&live, &info.sender);
                 caught(&live, &pushes, &info.chat);
                 store.inbox("message", info.timestamp_ms, message.encode_to_vec(), ack);
             }
@@ -319,7 +363,10 @@ pub async fn run(
             Some(pb::event::Kind::Bench(bench)) => kept("bench", bench.payload, ack),
             // Each engine fetches app state again in full, so jawd needn't keep the versions.
             Some(pb::event::Kind::AppStateSynced(_)) => {}
-            Some(pb::event::Kind::Receipt(receipt)) => kept("receipt", receipt.encode_to_vec(), ack),
+            Some(pb::event::Kind::Receipt(receipt)) => {
+                heard_from(&live, &receipt.sender);
+                kept("receipt", receipt.encode_to_vec(), ack)
+            }
             Some(pb::event::Kind::Connection(connection)) => {
                 let (pushed, me, account) = {
                     let mut live = live.lock().expect("live state");
@@ -445,23 +492,55 @@ fn restarting(live: &Shared, pushes: &broadcast::Sender<Push>) {
     push(pushes, "connection", connection);
 }
 
-/// Waits until what jawd says of the phone should change: a question it hasn't answered for
-/// `patience` while the connection is otherwise online, or its answer while jawd says it's offline.
-/// It's made again after each event, so the connection's changes are seen.
-async fn phone_due(phone: &mut watch::Receiver<Option<Instant>>, live: &Shared, patience: Duration) {
+/// How long jawd waits for the phone: `patience` online before it says the phone is offline, and
+/// `give_up` from asking before it stops waiting.
+#[derive(Clone, Copy)]
+struct PhoneTiming {
+    patience: Duration,
+    give_up: Duration,
+}
+
+/// Where a question asked `at` has waited online from: the later of then and the connection's last
+/// coming online.
+fn waited_from(at: Instant, online_since: Option<Instant>) -> Instant {
+    online_since.map_or(at, |since| since.max(at))
+}
+
+/// When what jawd says of the phone may next change, if nothing else does first: a question's
+/// patience used up online, or its giving up; or now, while jawd says the phone is offline and no
+/// question waits.
+fn phone_next(
+    asked: Option<Instant>,
+    state: ConnectionState,
+    online_since: Option<Instant>,
+    timing: PhoneTiming,
+) -> Option<Instant> {
+    match (asked, state) {
+        (None, ConnectionState::PhoneOffline) => Some(Instant::now()),
+        (None, _) => None,
+        (Some(at), ConnectionState::Online) => {
+            Some((waited_from(at, online_since) + timing.patience).min(at + timing.give_up))
+        }
+        (Some(at), _) => Some(at + timing.give_up),
+    }
+}
+
+/// Waits until what jawd says of the phone should change. It's made again after each event, so the
+/// connection's changes are seen.
+async fn phone_due(
+    phone: &mut watch::Receiver<Option<Instant>>,
+    live: &Shared,
+    timing: PhoneTiming,
+    online_since: Option<Instant>,
+) {
     loop {
         let asked = *phone.borrow_and_update();
         let state = live.lock().expect("live state").connection.state;
-        let due = match (asked, state) {
-            (None, ConnectionState::PhoneOffline) => return,
-            (Some(at), ConnectionState::Online) if at.elapsed() >= patience => return,
-            (Some(at), ConnectionState::Online) => Some(at + patience),
-            _ => None,
-        };
-        let changed = match due {
+        let changed = match phone_next(asked, state, online_since, timing) {
+            Some(due) if due <= Instant::now() => return,
             Some(due) => tokio::select! {
                 changed = phone.changed() => changed,
-                () = tokio::time::sleep_until(due.into()) => Ok(()),
+                () = tokio::time::sleep_until(due.into()) => return,
             },
             None => phone.changed().await,
         };
@@ -472,11 +551,16 @@ async fn phone_due(phone: &mut watch::Receiver<Option<Instant>>, live: &Shared, 
 }
 
 /// Says the phone is offline while a question has waited `patience` for it with the connection
-/// otherwise online, and online again once it has answered. Arrivals and sends go on either way.
-fn phone_said(live: &Shared, pushes: &broadcast::Sender<Push>, patience: Duration) {
+/// online, and online again once it has answered or the question is given up. Arrivals and sends go
+/// on either way.
+fn phone_said(live: &Shared, pushes: &broadcast::Sender<Push>, timing: PhoneTiming, online_since: Option<Instant>) {
     let connection = {
         let mut live = live.lock().expect("live state");
-        let waiting = live.phone.borrow().is_some_and(|at| at.elapsed() >= patience);
+        if live.phone.borrow().is_some_and(|at| at.elapsed() >= timing.give_up) {
+            live.forget_question();
+        }
+        let asked = *live.phone.borrow();
+        let waiting = asked.is_some_and(|at| waited_from(at, online_since).elapsed() >= timing.patience);
         let state = match (live.connection.state, waiting) {
             (ConnectionState::Online, true) => ConnectionState::PhoneOffline,
             (ConnectionState::PhoneOffline, false) => ConnectionState::Online,
@@ -608,7 +692,7 @@ fn apply(live: &mut Live, connection: &pb::Connection) {
     };
     if matches!(connection.state(), State::Unlinked | State::LoggedOut) {
         live.account = Account { state: AccountState::Unlinked, me: None };
-        live.forget_question();
+        live.forget_phone();
     } else if !connection.jid.is_empty() {
         let phone = connection.jid.split(['@', ':', '.']).next().unwrap_or_default();
         // A name WhatsApp said in app state stands until the engine knows one too.
@@ -656,8 +740,12 @@ pub enum Refused {
     Engine(EngineError),
 }
 
-/// Asks the phone for the MORE messages before the oldest jaw has in `chat`; once the request has
-/// gone, jawd waits for the phone's answer.
+/// Asks the phone for the MORE messages before the oldest in `chat` that WhatsApp has: not one of
+/// yours still to go, or failed, which the phone hasn't got. jawd waits for the answer only when
+/// one is known to come, for a chat the phone has said it keeps more of, since whether it answers
+/// at all once nothing older is left isn't known, and its silence then would look like it's
+/// offline. The question is noted before it goes, so its answer can't come first, and dropped if
+/// it couldn't go.
 pub async fn history_more(store: &Store, engine: &Supervisor, live: &Shared, chat: String) -> Result<(), Refused> {
     let asked = chat.clone();
     let oldest = store
@@ -666,7 +754,7 @@ pub async fn history_more(store: &Store, engine: &Supervisor, live: &Shared, cha
             Ok(db
                 .query_row(
                     "SELECT m.id, m.mine, m.at FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = ?1
-                    ORDER BY m.at, m.n LIMIT 1",
+                    AND NOT (m.mine AND coalesce(m.status, '') IN ('pending', 'failed')) ORDER BY m.at, m.n LIMIT 1",
                     [&asked],
                     |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?, r.get::<_, i64>(2)?)),
                 )
@@ -675,11 +763,19 @@ pub async fn history_more(store: &Store, engine: &Supervisor, live: &Shared, cha
         .await
         .map_err(|e| Refused::NotFound(format!("can't read the chat: {e:#}")))?;
     let Some((id, mine, at)) = oldest else {
-        return Err(Refused::NotFound(format!("jaw has no messages in {chat} to ask for older ones before")));
+        return Err(Refused::NotFound(format!(
+            "jaw has no message WhatsApp has in {chat} to ask for older ones before"
+        )));
     };
+    let known = live.lock().expect("live state").more_on_phone.contains(&chat);
+    let noted = if known { asked_phone(live) } else { None };
     let request = pb::HistoryRequest { chat, oldest_id: id, oldest_from_me: mine, oldest_ms: at, count: MORE };
-    engine.call(pb::command::Kind::HistoryRequest(request)).await.map_err(Refused::Engine)?;
-    asked_phone(live);
+    if let Err(e) = engine.call(pb::command::Kind::HistoryRequest(request)).await {
+        if let Some(noted) = noted {
+            live.lock().expect("live state").phone.send_if_modified(|asked| asked.take_if(|at| *at == noted).is_some());
+        }
+        return Err(Refused::Engine(e));
+    }
     Ok(())
 }
 

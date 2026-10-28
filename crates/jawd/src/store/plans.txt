@@ -1717,7 +1717,7 @@ SELECT m.gone, g.id, k.id FROM chat_merges m JOIN chats g ON g.n = m.gone JOIN c
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/sync/mod.rs
-SELECT m.id, m.mine, m.at FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = ?1 ORDER BY m.at, m.n LIMIT 1
+SELECT m.id, m.mine, m.at FROM chats c JOIN messages m ON m.chat = c.n WHERE c.id = ?1 AND NOT (m.mine AND coalesce(m.status, '') IN ('pending', 'failed')) ORDER BY m.at, m.n LIMIT 1
     SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
     SEARCH m USING INDEX messages_by_time (chat=?)
 

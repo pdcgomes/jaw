@@ -2092,42 +2092,318 @@ fn phone_answers() -> crate::engine::Incoming {
     crate::engine::Incoming { event: pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(message)) }, ack: None }
 }
 
+/// Sync with no engine, taking the events the test sends, already knowing the account's JIDs, and
+/// giving the phone `patience` and giving a question up after `give_up`.
+fn phoning(
+    store: &Store,
+    home: &Path,
+    patience: Duration,
+    give_up: Duration,
+) -> (Shared, mpsc::Sender<crate::engine::Incoming>, broadcast::Receiver<Push>, tokio::task::JoinHandle<()>) {
+    let mut live = starting(store, true);
+    live.me.send_replace(me());
+    live.phone_patience = patience;
+    live.phone_give_up = give_up;
+    let (tx, incoming) = mpsc::channel(16);
+    let (live, told, running) = syncing_from(store, home, None, incoming, live);
+    (live, tx, told, running)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_question_the_phone_leaves_unanswered_has_jawd_say_it_is_offline_until_it_answers() {
     use pb::connection::State;
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
     let patience = Duration::from_millis(300);
-    let mut live = starting(&store, true);
-    live.phone_patience = patience;
-    let live: Shared = Arc::new(Mutex::new(live));
-    let (tx, incoming) = mpsc::channel(16);
-    let (pushes, mut told) = broadcast::channel(64);
-    let running = tokio::spawn(run(incoming, store.clone(), live.clone(), pushes, None, home.path().to_path_buf()));
+    let (live, tx, mut told, running) = phoning(&store, home.path(), patience, PHONE_GIVE_UP);
     tx.send(connection_event(State::Connected)).await.unwrap();
     assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    let asked = Instant::now();
     asked_phone(&live);
-    let asked = std::time::Instant::now();
     assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
     assert!(asked.elapsed() >= patience, "only once it has had its patience: {:?}", asked.elapsed());
-    tx.send(connection_event(State::Disconnected)).await.unwrap();
-    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Offline));
-    tx.send(connection_event(State::Connected)).await.unwrap();
-    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
-    let again = next_connection_within(&mut told, WAIT).await;
-    assert_eq!(again, Some(ConnectionState::PhoneOffline), "connected again, the question still waits");
     tx.send(phone_answers()).await.unwrap();
     let answered = next_connection_within(&mut told, WAIT).await;
     assert_eq!(answered, Some(ConnectionState::Online), "the phone's history says it's back");
+    let asked = Instant::now();
     asked_phone(&live);
-    assert_eq!(
-        next_connection_within(&mut told, Duration::from_millis(150)).await,
-        None,
-        "a new question has its patience"
-    );
     assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
+    assert!(asked.elapsed() >= patience, "a new question has its patience: {:?}", asked.elapsed());
     drop(tx);
     running.await.unwrap();
+}
+
+/// A receipt `sender` sent of Ana's message, of WhatsApp's `kind`.
+fn receipt_from(sender: &str, kind: &str) -> crate::engine::Incoming {
+    let receipt = pb::Receipt {
+        chat: ANA.into(),
+        sender: sender.into(),
+        from_me: true,
+        ids: vec!["3EB0ANA".into()],
+        timestamp_ms: AT,
+        r#type: kind.into(),
+        ..Default::default()
+    };
+    crate::engine::Incoming { event: pb::Event { seq: 0, kind: Some(pb::event::Kind::Receipt(receipt)) }, ack: None }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn anything_the_phone_itself_sends_says_it_is_online_and_another_of_your_devices_doesnt() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let patience = Duration::from_millis(300);
+    let (live, tx, mut told, running) = phoning(&store, home.path(), patience, PHONE_GIVE_UP);
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    until("the account's LID", || live.lock().unwrap().me.borrow().jids.contains(&"100000000001@lid".to_string()))
+        .await;
+    asked_phone(&live);
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
+    tx.send(receipt_from("351910000001:5@s.whatsapp.net", "read-self")).await.unwrap();
+    let elsewhere = next_connection_within(&mut told, patience).await;
+    assert_eq!(elsewhere, None, "reading on WhatsApp Web, another of your devices, says nothing of the phone");
+    tx.send(receipt_from("351910000001@s.whatsapp.net", "read-self")).await.unwrap();
+    assert_eq!(
+        next_connection_within(&mut told, WAIT).await,
+        Some(ConnectionState::Online),
+        "reading on the phone does"
+    );
+    asked_phone(&live);
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
+    let mut sent = live_message(ANA, "", "3EB0FROMPHONE", AT, text("sent from the phone"));
+    sent.info.as_mut().unwrap().sender = "100000000001@lid".into();
+    let sent =
+        crate::engine::Incoming { event: pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(sent)) }, ack: None };
+    tx.send(sent).await.unwrap();
+    let answered = next_connection_within(&mut told, WAIT).await;
+    assert_eq!(answered, Some(ConnectionState::Online), "and so does a message sent from it, by its LID too");
+    drop(tx);
+    running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_phones_patience_counts_only_online_so_a_reconnect_with_its_answer_on_the_way_says_nothing_of_it() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let patience = Duration::from_secs(1);
+    let (live, tx, mut told, running) = phoning(&store, home.path(), patience, PHONE_GIVE_UP);
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    asked_phone(&live);
+    tx.send(connection_event(State::Disconnected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Offline));
+    tokio::time::sleep(patience * 2).await;
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    let early = next_connection_within(&mut told, patience / 4).await;
+    assert_eq!(early, None, "the time offline didn't count, so it isn't offline at once");
+    // The phone's answer, which waited for the connection.
+    tx.send(phone_answers()).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, patience * 2).await, None, "and nothing flaps once it comes");
+    drop(tx);
+    running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phone_offline_doesnt_outlast_a_reconnect_or_an_engine_restart_and_comes_back_only_after_a_whole_patience() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let engine = Scripted::default();
+    let (supervisor, incoming) = supervised_pausing(&engine, Duration::from_millis(200));
+    let patience = Duration::from_secs(1);
+    let mut live = starting(&store, true);
+    live.phone_patience = patience;
+    let (live, mut told, running) = syncing_from(&store, home.path(), Some(supervisor), incoming, live);
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    asked_phone(&live);
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
+    engine.send(connection_event(State::Disconnected).event).await;
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Offline));
+    let back = Instant::now();
+    engine.send(connection_event(State::Connected).event).await;
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online), "back, it's online");
+    assert_eq!(next_connection_within(&mut told, patience / 4).await, None, "and not offline again at once");
+    assert_eq!(
+        next_connection_within(&mut told, WAIT).await,
+        Some(ConnectionState::PhoneOffline),
+        "the question waits"
+    );
+    assert!(back.elapsed() >= patience, "but has its whole patience again: {:?}", back.elapsed());
+    engine.stop.notify_one();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::EngineRestarting));
+    let restarted = Instant::now();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online), "the next engine's word");
+    assert_eq!(next_connection_within(&mut told, patience / 4).await, None, "not offline again at once");
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
+    assert!(restarted.elapsed() >= patience, "only after its whole patience again: {:?}", restarted.elapsed());
+    running.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_is_given_up_after_a_while_so_phone_offline_doesnt_stick() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (patience, give_up) = (Duration::from_millis(200), Duration::from_secs(1));
+    let (live, tx, mut told, running) = phoning(&store, home.path(), patience, give_up);
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    let asked = Instant::now();
+    asked_phone(&live);
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online), "given up");
+    assert!(asked.elapsed() >= give_up, "only once its time is up: {:?}", asked.elapsed());
+    assert!(live.lock().unwrap().phone.borrow().is_none(), "nothing waits for the phone");
+    assert_eq!(next_connection_within(&mut told, patience * 3).await, None);
+    drop(tx);
+    running.await.unwrap();
+}
+
+/// An engine that takes requests for older history, noting each with whether jawd was waiting for
+/// the phone's answer when it came, and fails them while `failing`.
+#[derive(Clone)]
+struct Asking {
+    live: Shared,
+    asked: Arc<Mutex<Vec<(pb::HistoryRequest, bool)>>>,
+    failing: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::engine::Engine for Asking {
+    fn kind(&self) -> &'static str {
+        "asking"
+    }
+
+    fn start(
+        &self,
+        _events: mpsc::Sender<crate::engine::Incoming>,
+    ) -> crate::engine::BoxFuture<'_, anyhow::Result<crate::engine::Instance>> {
+        let engine = self.clone();
+        Box::pin(async move {
+            let (commands, mut outgoing) = crate::engine::Commands::for_tests();
+            tokio::spawn(async move {
+                while let Some(out) = outgoing.recv().await {
+                    let crate::engine::Outgoing::Command { kind: pb::command::Kind::HistoryRequest(request), reply } =
+                        out
+                    else {
+                        continue;
+                    };
+                    let waiting = engine.live.lock().unwrap().phone.borrow().is_some();
+                    engine.asked.lock().unwrap().push((request, waiting));
+                    let answer = if engine.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                        Err(EngineError::Failed { message: "websocket not connected".into(), retry: true })
+                    } else {
+                        Ok(pb::reply::Kind::Done(pb::Done {}))
+                    };
+                    let _ = reply.send(answer);
+                }
+            });
+            let hello =
+                pb::Hello { protocol: crate::engine::PROTOCOL, program: "asking".into(), whatsmeow: String::new() };
+            Ok(crate::engine::Instance { hello, commands, exited: Box::pin(std::future::pending()) })
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn older_history_is_asked_for_before_the_oldest_message_whatsapp_has_and_waited_for_only_once_the_phone_keeps_more()
+ {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let message = |id: &str, at: i64, mine: bool, status: Option<&'static str>| {
+        Change::Message(crate::store::Message {
+            chat: ANA.into(),
+            id: id.into(),
+            at,
+            sender: (!mine).then(|| ANA.into()),
+            mine,
+            kind: "text",
+            status,
+            text: Some(id.into()),
+            summary: id.into(),
+            ..crate::store::Message::default()
+        })
+    };
+    store
+        .apply(
+            Lane::Live,
+            vec![
+                Change::Chat(crate::store::Chat { id: ANA.into(), ..crate::store::Chat::default() }),
+                message("3EB0UNSENT", AT, true, Some("pending")),
+                message("3EB0REFUSED", AT + 1_000, true, Some("failed")),
+                message("3EB0ANA", AT + 2_000, false, None),
+                message("3EB0SENT", AT + 3_000, true, Some("sent")),
+            ],
+        )
+        .await
+        .unwrap();
+    let live: Shared = Arc::new(Mutex::new(starting(&store, true)));
+    let engine = Asking { live: live.clone(), asked: Arc::default(), failing: Arc::default() };
+    let (events, _incoming) = mpsc::channel(8);
+    let supervisor = Supervisor::spawn(Arc::new(engine.clone()), events, crate::engine::supervisor::Backoff::default());
+    until("the engine to run", || supervisor.status().state.name() == "running").await;
+    let asked = || engine.asked.lock().unwrap().clone();
+    assert!(matches!(history_more(&store, &supervisor, &live, ANA.into()).await, Ok(())));
+    let (request, _) = asked()[0].clone();
+    assert_eq!(
+        (request.oldest_id.as_str(), request.oldest_from_me, request.oldest_ms),
+        ("3EB0ANA", false, AT + 2_000),
+        "before Ana's, the oldest the phone has: what you sent that's still to go, or failed, it hasn't got"
+    );
+    assert!(live.lock().unwrap().phone.borrow().is_none(), "nothing waits: the phone hasn't said it keeps more");
+    live.lock().unwrap().phone_keeps(vec![(ANA.into(), true)]);
+    assert!(matches!(history_more(&store, &supervisor, &live, ANA.into()).await, Ok(())));
+    assert!(asked()[1].1, "once it has, the question is noted before it goes");
+    assert!(live.lock().unwrap().phone.borrow().is_some(), "and its answer waited for");
+    live.lock().unwrap().forget_question();
+    engine.failing.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(history_more(&store, &supervisor, &live, ANA.into()).await.is_err());
+    assert!(asked()[2].1, "noted before it went");
+    assert!(live.lock().unwrap().phone.borrow().is_none(), "and dropped once it couldn't");
+}
+
+/// `blob(id)`, its conversation saying `end` of what the phone keeps of Ana's chat.
+fn blob_ending(
+    id: &str,
+    end: wa_proto::wa_web_protobufs_history_sync::conversation::EndOfHistoryTransferType,
+) -> Vec<u8> {
+    let mut history = wa_proto::wa_web_protobufs_history_sync::HistorySync::decode(blob(id).as_slice()).unwrap();
+    history.conversations[0].end_of_history_transfer = Some(true);
+    history.conversations[0].end_of_history_transfer_type = Some(end as i32);
+    history.encode_to_vec()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_history_blob_says_which_chats_the_phone_keeps_more_of() {
+    use wa_proto::wa_web_protobufs_history_sync::conversation::EndOfHistoryTransferType as End;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    notifications(&store, 2).await;
+    let engine = Scripted::default();
+    engine.blobs.lock().unwrap().extend([
+        ("more".to_string(), Blob::Here(blob_ending("h1", End::CompleteOnDemandSyncButMoreMsgRemainOnPrimary))),
+        ("none".to_string(), Blob::Here(blob_ending("h2", End::CompleteAndNoMoreMessageRemainOnPrimary))),
+    ]);
+    let (supervisor, _incoming) = supervised(&engine);
+    until("the engine to run", || supervisor.status().state.name() == "running").await;
+    let live = knowing();
+    let (offered, offers) = mpsc::unbounded_channel();
+    let fetching = tokio::spawn(fetch::run(
+        offers,
+        store.clone(),
+        supervisor,
+        live.clone(),
+        home.path().join("spool"),
+        Merges::default(),
+    ));
+    let keeps = || live.lock().unwrap().more_on_phone.contains(ANA);
+    offered.send(offer(1, "more")).unwrap();
+    until("the phone to keep more of Ana's chat", keeps).await;
+    offered.send(offer(2, "none")).unwrap();
+    until("and then none of it", || !keeps()).await;
+    fetching.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -306,7 +306,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `resync` | `watch`: watch it again |
 | `layout` | As `layout.get`'s result: the layout another connection of the same interface just kept. See Layouts |
 
-WhatsApp never says the phone is offline, so `connection` says `phone_offline` once something jawd asked the phone (older history, so far) has gone 20 seconds unanswered while it's otherwise online, and `online` again once the phone answers; messages still arrive and send meanwhile.
+WhatsApp never says the phone is offline, so `connection` says `phone_offline` once something jawd asked the phone and knows it has an answer to (older history in a chat the phone has said it keeps more of, so far) has gone 20 seconds unanswered online, counted afresh each time the connection comes back, and `online` again once the phone sends anything, or two minutes after jawd asked; messages still arrive and send meanwhile.
 
 ## Voice (proposed)
 

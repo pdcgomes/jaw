@@ -287,10 +287,18 @@ fn with_the_phone_offline_older_history_waits_and_says_so_while_messages_still_g
     let jawd = Jawd::demo(&["--fail", "phone-offline", "--phone-patience", "1"]);
     let stored = |s: &Status| s.stored.map_or(0, |stored| stored.messages);
     let before = stored(&status_of(jawd.home()).expect("jawd answers"));
-    jawd.toggle();
-    until("the phone to go offline", || jawd.log().contains("failure (phone-offline) is on"));
+    // Online, the phone answers at once, and says it keeps more of the chat, so the next question
+    // has an answer to come.
     let frame = jawd.snapshot("<up><up><up><up><up><up>");
     assert!(frame.contains("asking your phone for older messages"), "moving past the oldest message:\n{frame}");
+    jawd.until("the phone's older messages", |s| {
+        stored(s) >= before + 3 && s.history.as_ref().is_some_and(|history| history.blobs >= 1)
+    });
+    assert_eq!(status_of(jawd.home()).expect("jawd answers").connection.state, ConnectionState::Online);
+    jawd.toggle();
+    until("the phone to go offline", || jawd.log().contains("failure (phone-offline) is on"));
+    let frame = jawd.snapshot(&"<up>".repeat(12));
+    assert!(frame.contains("asking your phone for older messages"), "moving past the oldest message again:\n{frame}");
     jawd.until("jawd to say the phone is offline", |s| s.connection.state == ConnectionState::PhoneOffline);
     let frame = jawd.snapshot("still goes\n");
     assert!(header(&frame).contains("jaw  online · phone offline: photos and older history wait for it"), "{frame}");
@@ -298,7 +306,7 @@ fn with_the_phone_offline_older_history_waits_and_says_so_while_messages_still_g
     assert!(jawd.status().contains("whatsapp  online, but the phone is offline"), "{}", jawd.status());
     jawd.toggle();
     jawd.until("the phone's older messages", |s| {
-        s.connection.state == ConnectionState::Online && stored(s) >= before + 4
+        s.connection.state == ConnectionState::Online && stored(s) >= before + 7
     });
     let frame = jawd.snapshot("");
     assert!(header(&frame).contains("jaw  online"), "{frame}");

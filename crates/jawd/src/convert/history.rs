@@ -32,6 +32,9 @@ pub struct Walked {
     pub conversations: usize,
     /// The message rows among the changes.
     pub messages: usize,
+    /// Each conversation whose end the phone says something of, by the chat it went into: whether
+    /// the phone keeps more of its history than it has sent.
+    pub remains: Vec<(String, bool)>,
     /// The blob as the phone sent it, less the messages that became rows, whose raws are kept with
     /// them: every conversation's settings and the messages that didn't (edits, reactions and the
     /// like), the push names, statuses, past participants and everything jaw doesn't read yet, the
@@ -66,6 +69,7 @@ pub fn walk(data: &[u8], me: &Me, chunk: usize, mut take: impl FnMut(Vec<Change>
         progress: head.progress,
         conversations: 0,
         messages: 0,
+        remains: Vec::new(),
         rest: Vec::new(),
     };
     let mut changes = Vec::new();
@@ -77,6 +81,9 @@ pub fn walk(data: &[u8], me: &Me, chunk: usize, mut take: impl FnMut(Vec<Change>
         };
         let conversation = conversation_head(encoded)?;
         let (id, chat) = chat(&conversation);
+        if let Some(more) = more_on_phone(&conversation) {
+            walked.remains.push((id.clone(), more));
+        }
         // Where it was read comes first and depends on all its messages, so they're converted
         // once to find it and again as they're handed over, rather than held.
         let mut reading = Reading::new(&conversation);
@@ -113,6 +120,17 @@ pub fn walk(data: &[u8], me: &Me, chunk: usize, mut take: impl FnMut(Vec<Change>
         return Err(Unwalked::Stopped);
     }
     Ok(walked)
+}
+
+/// Whether the phone says it keeps more of a conversation's history than it has sent, if it says.
+fn more_on_phone(conversation: &Conversation) -> Option<bool> {
+    use wa_proto::wa_web_protobufs_history_sync::conversation::EndOfHistoryTransferType as End;
+    match End::try_from(conversation.end_of_history_transfer_type?).ok()? {
+        End::CompleteButMoreMessagesRemainOnPrimary | End::CompleteOnDemandSyncButMoreMsgRemainOnPrimary => Some(true),
+        End::CompleteAndNoMoreMessageRemainOnPrimary | End::CompleteOnDemandSyncWithMoreMsgOnPrimaryButNoAccess => {
+            Some(false)
+        }
+    }
 }
 
 /// Hands `changes` over once there are `chunk` of them.

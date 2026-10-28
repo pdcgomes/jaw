@@ -220,7 +220,7 @@ async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, s
         .map_err(|e| Failed::Later(format!("{e:#}")))?;
     let stored = storing.elapsed();
     let _ = tokio::fs::remove_file(&path).await;
-    let Walked { sync_type, chunk_order, progress, conversations, messages, .. } = walked;
+    let Walked { sync_type, chunk_order, progress, conversations, messages, remains, .. } = walked;
     let kind = HistorySyncType::try_from(sync_type).map(|t| t.as_str_name()).unwrap_or("?");
     eprintln!(
         "jawd: history {kind} chunk {}: {conversations} chats, {messages} messages, {:.1} MB, fetched in {:.2} s and stored in {:.2} s ({:.0} a second, {transactions} transactions); the phone says {}%",
@@ -232,6 +232,7 @@ async fn one(offer: &Offer, store: &Store, engine: &Supervisor, live: &Shared, s
         progress.unwrap_or_default()
     );
     let mut live = live.lock().expect("live state");
+    live.phone_keeps(remains);
     let history = live.history.get_or_insert_with(HistoryProgress::default);
     history.blobs += 1;
     history.conversations += conversations as u64;
