@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use jaw_proto::send::{ChatArchive, ChatMarkUnread, ChatMute, ChatPin, Star};
-use jaw_proto::sync::{Notice, Tone};
-use jaw_proto::{AccountState, Error, Push, code};
+use jaw_proto::sync::Tone;
+use jaw_proto::{AccountState, Error, code};
 use prost::Message as _;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
@@ -308,7 +308,7 @@ pub(super) fn undo_of(index: &[String]) -> Option<Undo> {
     }
 }
 
-/// What a patch did, as the notice for a patch given up on names it.
+/// What a patch did, as the notice for one given up on names it.
 pub(super) fn what_it_did(patch: &pb::AppStatePatch) -> &'static str {
     let value = SyncActionValue::decode(patch.value.as_slice()).unwrap_or_default();
     let on = |set: Option<bool>| set.unwrap_or(false);
@@ -325,22 +325,50 @@ pub(super) fn what_it_did(patch: &pb::AppStatePatch) -> &'static str {
         Some("markChatAsRead") => "marking a chat unread",
         Some("star") if on(value.star_action.as_ref().and_then(|a| a.starred)) => "starring a message",
         Some("star") => "unstarring a message",
-        Some("deleteMessageForMe") => "telling your other devices you deleted a message",
-        _ => "telling your other devices of a change",
+        Some("deleteMessageForMe") => "deleting a message for you",
+        _ => "a change",
     }
 }
 
-/// Keeps app-state row `outbox`, which WhatsApp refused for good or which ran out of tries, in
-/// quarantine with why, puts back what its patch set, says so to every interface, and fetches the
-/// patch's collection again, so the chat ends as the phone has it. One that ran out of tries on
-/// failures that could be retried (`retryable`) may have reached WhatsApp all the same, which the
-/// notice says.
+/// Why jaw gave up on an app-state patch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GivenUp {
+    /// WhatsApp refused it for good.
+    Refused,
+    /// It ran out of tries on failures that could be retried, so WhatsApp may have it after all.
+    OutOfTries,
+    /// Its outbox row doesn't decode, so it never went.
+    Undecodable,
+}
+
+/// What every interface is told of `patch`, given up on for `why` with `error`.
+fn notice_for(why: GivenUp, patch: Option<&pb::AppStatePatch>, error: &str) -> String {
+    let what = patch.map_or("a change", what_it_did);
+    let deletion = patch.is_some_and(|patch| patch.index.first().is_some_and(|kind| kind == "deleteMessageForMe"));
+    match why {
+        // Its message stays deleted here, so it mustn't read as put back.
+        GivenUp::Refused if deletion => {
+            format!("WhatsApp refused telling your other devices you deleted a message: {error}")
+        }
+        GivenUp::Refused => format!("WhatsApp refused {what}: {error}"),
+        GivenUp::OutOfTries => format!("jaw couldn't confirm {what} with WhatsApp: {error}"),
+        GivenUp::Undecodable => format!("jaw couldn't tell your other devices of {what}: {error}"),
+    }
+}
+
+/// Keeps app-state row `outbox`, given up on for `why`, in quarantine with `error` and its patch,
+/// puts back what the patch set, tells every interface, and fetches the patch's collection again,
+/// so the chat ends as the phone has it. The store puts the field back only while the patch is its
+/// index's latest, since a later patch's intent stands; the fetch then brings back what was held
+/// back for the index. A deletion for you puts nothing back and fetches nothing, its message
+/// staying deleted here; a patch that doesn't decode, whose collection nobody knows, fetches every
+/// collection.
 pub(super) async fn refused(
     inner: &Inner,
     outbox: i64,
     patch: Option<&pb::AppStatePatch>,
     error: String,
-    retryable: bool,
+    why: GivenUp,
 ) {
     let undo = patch.and_then(|patch| undo_of(&patch.index));
     // Empty names are every collection.
@@ -349,14 +377,10 @@ pub(super) async fn refused(
         Some(_) => None,
         None => Some(Vec::new()),
     };
-    let what = patch.map_or("telling your other devices of a change", what_it_did);
-    let text = if retryable {
-        format!("jaw couldn't tell your other devices about {what}: {error}")
-    } else {
-        format!("WhatsApp refused {what}: {error}")
-    };
+    let text = notice_for(why, patch, &error);
+    eprintln!("jawd: outbox row {outbox}: {text}");
     settle(inner, vec![Change::Outbox(Step::Refused { outbox, error, undo })]).await;
-    say(inner, text);
+    super::notice(inner, text, Tone::Warning);
     if let Some(names) = fetch {
         fetch_again(inner, names);
     }
@@ -390,12 +414,6 @@ fn fetch_again(inner: &Inner, names: Vec<String>) {
             "jawd: stopped fetching app state again after giving up on a patch; the next engine to start fetches it"
         );
     });
-}
-
-/// Says `text` to every interface, as a warning.
-fn say(inner: &Inner, text: String) {
-    let params = serde_json::to_value(Notice { text, tone: Tone::Warning }).expect("jawd's own types serialize");
-    let _ = inner.pushes.send(Push { method: "notice".into(), params });
 }
 
 /// Commits a chat action, synced, and queues the patches it wrote after the chat's earlier sends; a
@@ -609,8 +627,34 @@ mod tests {
                 "unmuting a chat",
                 "marking a chat read",
                 "unstarring a message",
-                "telling your other devices you deleted a message"
+                "deleting a message for you"
             ]
+        );
+    }
+
+    #[test]
+    fn a_patch_given_up_on_is_said_as_why_it_was() {
+        let pin = pinned(ANA, true, AT);
+        let deletion = actions::deleted_for_me(&target(ANA, "d1", false, Some(ANA)), AT);
+        assert_eq!(notice_for(GivenUp::Refused, Some(&pin), "e"), "WhatsApp refused pinning a chat: e");
+        assert_eq!(
+            notice_for(GivenUp::Refused, Some(&deletion), "e"),
+            "WhatsApp refused telling your other devices you deleted a message: e",
+            "nothing put back, the message staying deleted here"
+        );
+        assert_eq!(
+            notice_for(GivenUp::OutOfTries, Some(&pin), "e"),
+            "jaw couldn't confirm pinning a chat with WhatsApp: e",
+            "true whether or not WhatsApp took it"
+        );
+        assert_eq!(
+            notice_for(GivenUp::OutOfTries, Some(&deletion), "e"),
+            "jaw couldn't confirm deleting a message for you with WhatsApp: e"
+        );
+        assert_eq!(
+            notice_for(GivenUp::Undecodable, None, "e"),
+            "jaw couldn't tell your other devices of a change: e",
+            "WhatsApp never saw it"
         );
     }
 }

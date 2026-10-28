@@ -48,6 +48,7 @@ use jaw_proto::send::{
     ChatArchive, ChatInfo, ChatMarkUnread, ChatMute, ChatPin, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo,
     PollVote, React, Read, SendContact, SendEvent, SendLocation, SendPoll, SendRetry, SendText, Star, Typing,
 };
+use jaw_proto::sync::{Notice, Tone};
 use jaw_proto::{Error, Push, code};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -405,6 +406,12 @@ async fn durably(inner: &Inner, changes: Vec<Change>, what: &str) -> Result<Appl
         return Err(Error::new(code::INTERNAL, format!("jawd couldn't {what}; what failed is kept in quarantine")));
     }
     Ok(applied)
+}
+
+/// Says `text` to every interface, as a notice in `tone`.
+fn notice(inner: &Inner, text: String, tone: Tone) {
+    let params = serde_json::to_value(Notice { text, tone }).expect("jawd's own types serialize");
+    let _ = inner.pushes.send(Push { method: "notice".into(), params });
 }
 
 /// Asks the engine running now, if there is one.

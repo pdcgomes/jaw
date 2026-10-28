@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jaw_proto::send::{Delete, DeleteFor, Edit, React};
-use jaw_proto::sync::{Notice, Tone};
-use jaw_proto::{Error, Push, code};
+use jaw_proto::sync::Tone;
+use jaw_proto::{Error, code};
 use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
@@ -422,9 +422,7 @@ pub(super) fn withdrawn(inner: &Inner, kind: &str) {
         "vote" => "Your vote",
         _ => return,
     };
-    let notice = Notice { text: format!("{what} wasn't sent: the message was deleted for everyone"), tone: Tone::Info };
-    let params = serde_json::to_value(notice).expect("jawd's own types serialize");
-    let _ = inner.pushes.send(Push { method: "notice".into(), params });
+    super::notice(inner, format!("{what} wasn't sent: the message was deleted for everyone"), Tone::Info);
 }
 
 /// Says to every interface that WhatsApp refused an action, which the row it showed on is back as
@@ -437,7 +435,5 @@ pub(super) fn refused(inner: &Inner, kind: &str, why: &str) {
         "vote" => "your vote",
         _ => return,
     };
-    let notice = Notice { text: format!("WhatsApp refused {what}: {why}"), tone: Tone::Warning };
-    let params = serde_json::to_value(notice).expect("jawd's own types serialize");
-    let _ = inner.pushes.send(Push { method: "notice".into(), params });
+    super::notice(inner, format!("WhatsApp refused {what}: {why}"), Tone::Warning);
 }

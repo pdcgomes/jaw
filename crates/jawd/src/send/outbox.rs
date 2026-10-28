@@ -23,6 +23,7 @@ use tokio::sync::Notify;
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_web::{WebMessageInfo, web_message_info};
 
+use super::chat_actions::GivenUp;
 use super::link;
 use super::quote::{self, Mentioned, Quote};
 use super::{Inner, TEXT_MOST, durably, engine, internal, no_chat, now_ms, query, retryable};
@@ -483,7 +484,7 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
             Ok(patch) => (pb::command::Kind::AppStatePatch(patch.clone()), Some(patch)),
             Err(e) => {
                 let error = format!("its app state doesn't decode: {e}");
-                super::chat_actions::refused(&inner, outbox, None, error, false).await;
+                super::chat_actions::refused(&inner, outbox, None, error, GivenUp::Undecodable).await;
                 return Next::Done;
             }
         }
@@ -543,10 +544,8 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
     }
     let gives_up = !retryable(&failure) || row.attempts + 1 >= ATTEMPTS_MOST;
     if gives_up && app_state {
-        let retried = retryable(&failure);
-        let why = if retried { "ran out of tries" } else { "was refused" };
-        eprintln!("jawd: app state {} in {} {why}: {failure}", row.id, row.chat);
-        super::chat_actions::refused(&inner, outbox, patch.as_ref(), failure.to_string(), retried).await;
+        let why = if retryable(&failure) { GivenUp::OutOfTries } else { GivenUp::Refused };
+        super::chat_actions::refused(&inner, outbox, patch.as_ref(), failure.to_string(), why).await;
         return Next::Done;
     }
     let step = match (gives_up, may_have_gone) {

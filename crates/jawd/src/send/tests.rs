@@ -4678,7 +4678,7 @@ async fn a_patch_that_runs_out_of_tries_is_kept_in_quarantine_fetched_again_and_
     let index = vec!["pin_v1".to_string(), ANA.to_string()];
     assert_eq!(indexes, [("app_state_patch".into(), lost.into(), index)], "kept with why and its patch, never dropped");
     let said = notices(&mut pushes, Duration::from_millis(300)).await;
-    assert_eq!(said, [format!("jaw couldn't tell your other devices about pinning a chat: {lost}")]);
+    assert_eq!(said, [format!("jaw couldn't confirm pinning a chat with WhatsApp: {lost}")]);
     // Put back and fetched again, it ends as WhatsApp has it: pinned, at the time jaw pinned it.
     running
         .until("Ana's chat pinned again", move |db| {
