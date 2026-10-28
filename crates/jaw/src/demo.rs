@@ -960,6 +960,9 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_chat_info(&chat));
     }
 
+    /// The made-up phone has no history older than what the account has.
+    fn history_more(&mut self, _chat: &str) {}
+
     fn voice_play(&mut self, message: Option<&str>, at: Option<f64>, speed: f64) {
         let message = message.map(String::from);
         self.defer(move |a| a.on_voice_play(message, at, speed));

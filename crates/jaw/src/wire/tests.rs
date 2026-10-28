@@ -10,6 +10,7 @@ use crate::view::View;
 use crate::view::tests::shown;
 use chrono::FixedOffset;
 use jaw_proto::settings::{Messages, Settings};
+use ratatui::crossterm::event::{Event as Input, KeyModifiers, MouseEvent, MouseEventKind};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc::{Receiver, channel};
@@ -55,6 +56,9 @@ struct Kept {
     meanwhile: Option<Value>,
     /// The version it says it is at hello, if not jaw's own.
     version: Option<String>,
+    /// Whether a chat's window reaches its first message, as one whose history jaw.db has whole
+    /// does, so only the phone has older ones.
+    whole: bool,
 }
 
 /// A jawd that answers hello, the windows and find with the protocol's fixtures, takes messages
@@ -103,7 +107,13 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             hello
         }
         "chats.watch" => fixture("chats.watch.result")["result"].clone(),
-        "messages.watch" | "watch.move" => fixture("messages.watch.result")["result"].clone(),
+        "messages.watch" | "watch.move" => {
+            let mut window = fixture("messages.watch.result")["result"].clone();
+            if kept.whole {
+                window["older"] = json!(false);
+            }
+            window
+        }
         "find" if params["query"] == "ar" => fixture("find.result")["result"].clone(),
         "find" => json!({ "results": [] }),
         "send.text" if params["text"] == "one too many" => {
@@ -185,7 +195,9 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             }
             json!({ "settings": settings })
         }
-        "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" => json!({}),
+        "unwatch" | "send.retry" | "draft.set" | "read" | "typing" | "focus" | "chat.opened" | "history.more" => {
+            json!({})
+        }
         _ => {
             kept.refused.push(method.clone());
             return error(code::UNKNOWN_METHOD, &format!("jawd doesn't know {method}"), Value::Null);
@@ -375,6 +387,52 @@ fn each_message_goes_with_a_key_of_its_own_and_what_jawd_does_not_serve_yet_is_s
     run::press_live(&mut v, &rx, "<c-k>pin this\n").unwrap();
     let screen = until(&mut v, &rx, "pinning");
     assert!(screen.contains("pinning comes with the next step"), "{screen}");
+}
+
+/// Moving up past the oldest message jaw has in a chat, by key or by scrolling, asks the phone for
+/// older ones, once for that message; while jaw.db has older ones it asks nothing.
+#[test]
+fn moving_past_the_oldest_message_jaw_has_asks_the_phone_for_older_ones_once() {
+    let jawd = scripted();
+    let (mut v, rx) = conversation_on(&jawd);
+    run::press_live(&mut v, &rx, "<up><up><up><up>").unwrap();
+    assert!(jawd.asked("history.more").is_empty(), "jaw.db has older ones: {:?}", jawd.asked("history.more"));
+
+    let jawd = scripted();
+    jawd.kept.lock().unwrap().whole = true;
+    let (mut v, rx) = conversation_on(&jawd);
+    run::press_live(&mut v, &rx, "<up>").unwrap();
+    assert!(jawd.asked("history.more").is_empty(), "the newest message isn't the oldest");
+    run::press_live(&mut v, &rx, "<up><up><pgup><up>").unwrap();
+    assert!(until_true(&mut v, &rx, |_| !jawd.asked("history.more").is_empty()));
+    assert!(frame(&mut v).contains("asking your phone for older messages"));
+    scroll_up_in_conversation(&mut v);
+    run::settle_live(&mut v, &rx, Duration::from_millis(300));
+    assert_eq!(jawd.asked("history.more"), vec![json!({ "chat": ANA })], "once for the oldest message");
+
+    let jawd = scripted();
+    jawd.kept.lock().unwrap().whole = true;
+    let (mut v, rx) = conversation_on(&jawd);
+    scroll_up_in_conversation(&mut v);
+    assert!(until_true(&mut v, &rx, |_| !jawd.asked("history.more").is_empty()), "scrolling past it asks too");
+    assert_eq!(jawd.asked("history.more"), vec![json!({ "chat": ANA })]);
+}
+
+/// The voice message's waveform in the fixture's conversation, which no other part of the screen shows.
+const WAVEFORM: &str = "▶ ▁▁▁▁▂▂▂▂▄▄▄▄";
+
+/// jaw on `jawd`, once it shows the open chat's messages.
+fn conversation_on(jawd: &Scripted) -> (View, Receiver<crate::run::Event>) {
+    let (mut v, rx) = view_on(jawd.socket.clone(), 140, 30);
+    let screen = until(&mut v, &rx, WAVEFORM);
+    assert!(screen.contains(WAVEFORM), "{screen}");
+    (v, rx)
+}
+
+/// Turns the mouse's wheel up once over the conversation.
+fn scroll_up_in_conversation(v: &mut View) {
+    let (column, row) = crate::view::tests::cell_of(&frame(v), WAVEFORM);
+    v.on_input(Input::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column, row, modifiers: KeyModifiers::NONE }));
 }
 
 #[test]

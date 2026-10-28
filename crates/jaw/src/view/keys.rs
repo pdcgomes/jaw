@@ -228,6 +228,19 @@ impl View {
         self.select(&newest);
     }
 
+    /// Moving up past the oldest message jaw has in the chat asks the phone for older ones, once
+    /// for each oldest message; they come into the window as the phone sends them.
+    fn ask_for_older(&mut self) {
+        let Some(w) = self.messages.as_ref().filter(|w| w.loaded && !w.older) else { return };
+        let (Some(chat), Some(oldest)) = (self.open.clone(), w.oldest().map(|m| m.id.clone())) else { return };
+        if self.asked_older.as_ref().is_some_and(|(c, o)| *c == chat && *o == oldest) {
+            return;
+        }
+        self.asked_older = Some((chat.clone(), oldest));
+        self.jawd.history_more(&chat);
+        self.say("asking your phone for older messages");
+    }
+
     /// Selects a message, moving the conversation only as far as it takes to show it whole.
     fn select(&mut self, m: &Message) {
         self.focus = Focus::Message(m.id.clone());
@@ -285,6 +298,9 @@ impl View {
             KeyCode::Esc => self.focus = Focus::Typing,
             KeyCode::Up | KeyCode::Char('k') if !ctrl && !alt => {
                 if let Some(prev) = step(self, -1) {
+                    if prev.id == m.id {
+                        self.ask_for_older();
+                    }
                     self.select(&prev);
                 }
             }
@@ -297,6 +313,9 @@ impl View {
             }
             KeyCode::PageUp => {
                 if let Some(prev) = step(self, -10) {
+                    if prev.id == m.id {
+                        self.ask_for_older();
+                    }
                     self.select(&prev);
                 }
             }
@@ -455,6 +474,11 @@ impl View {
 
     /// Scrolls the conversation `by` rows, up for positive, anchored on what's at the top.
     fn scroll_rows(&mut self, by: i32) {
+        let Some(w) = self.messages.as_ref() else { return };
+        // Scrolling up with the oldest message's first line already on screen goes past it.
+        if by > 0 && w.oldest().and_then(|m| self.placed.get(&m.id)).is_some_and(|p| p.top >= 0) {
+            self.ask_for_older();
+        }
         let Some(w) = self.messages.as_ref() else { return };
         let (id, top) = match &self.scroll {
             Scroll::Anchor { id, top, .. } => (id.clone(), *top),

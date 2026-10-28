@@ -1063,6 +1063,9 @@ pub trait Jawd {
     fn message_info(&mut self, chat: &str, message: &str);
     /// Asks for a chat's members; they come as `Update::Members`.
     fn chat_info(&mut self, chat: &str);
+    /// Asks the phone for messages from before the oldest jaw has in `chat`; they come into its
+    /// window once the phone answers.
+    fn history_more(&mut self, chat: &str);
     fn draft(&mut self, chat: &str, text: &str);
     /// Everything in the chat up to and including `up_to` has been seen.
     fn read(&mut self, chat: &str, up_to: &str);

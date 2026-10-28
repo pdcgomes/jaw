@@ -2051,7 +2051,7 @@ fn mouse(v: &mut View, rx: &Receiver<Event>, kind: MouseEventKind, (column, row)
 }
 
 /// The cell `text` starts on, the first time the screen has it: its column and its row.
-fn cell_of(screen: &str, text: &str) -> (u16, u16) {
+pub fn cell_of(screen: &str, text: &str) -> (u16, u16) {
     let row = row_of(screen, text).unwrap_or_else(|| panic!("no {text:?} on the screen:\n{screen}"));
     let line = screen.lines().nth(row).unwrap_or_default();
     (line[..line.find(text).unwrap_or_default()].width() as u16, row as u16)

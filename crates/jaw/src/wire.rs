@@ -812,6 +812,10 @@ impl Jawd for Wire {
         self.ask("chat.info", json!({ "chat": chat }), Asked::Members(chat.to_string()));
     }
 
+    fn history_more(&mut self, chat: &str) {
+        self.ask("history.more", json!({ "chat": chat }), Asked::Did("asking your phone for older messages"));
+    }
+
     fn draft(&mut self, chat: &str, text: &str) {
         self.owe("draft.set", chat, json!({ "chat": chat, "text": text }));
     }

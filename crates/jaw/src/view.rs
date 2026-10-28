@@ -176,6 +176,8 @@ pub struct View {
     logged_out: Option<Option<String>>,
     /// The number being typed for a phone code.
     phone: Option<String>,
+    /// The chat and oldest message jaw last asked the phone for older messages before.
+    asked_older: Option<(String, String)>,
 
     chats: Chats<Chat>,
     messages: Option<Messages<Message>>,
@@ -324,6 +326,7 @@ impl View {
             link_asked: false,
             logged_out: None,
             phone: None,
+            asked_older: None,
             chats: Chats::new("all", Place::top(LIST_ROWS)),
             messages: None,
             open: None,
