@@ -59,7 +59,7 @@ The app fills a `Situation` from jawd's pushes and asks it; the harness makes on
 
 ### What stays in JawApp
 
-`AppModel`, `Agent`, `Launch`, `Bench`, the commands and the menus, and `MainWindowController`, which keeps the window around `WindowContent`: its frame and its autosave, the title bar's sidebar button, the sheets, the palette's panel and the display link. The app target defines no `NSView`, `NSViewController` or SwiftUI `View` of its own.
+`AppModel`, `Agent`, `Launch`, `Bench`, the commands and the menus, and `MainWindowController`, which keeps the window around `WindowContent`: its frame and its autosave, the sheets, the palette's panel and the display link. The window's title bar, its style and the sidebar's button beside the window's buttons, is described once in JawUI as `TitleBar`, which the window uses and the harness measures and draws (decided while building phase two, so a screen shows the whole window). The app target defines no `NSView`, `NSViewController` or SwiftUI `View` of its own.
 
 ### The system's settings as values
 
