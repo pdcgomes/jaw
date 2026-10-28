@@ -222,16 +222,6 @@ final class AppModel {
                   said: notice.map { Situation.Said($0.text, until: $0.until, warn: $0.warn) })
     }
 
-    /// The status line's left half: jawd's state when it isn't online, as the terminal's header says it.
-    var stateLine: (String, Bool)? {
-        situation.stateLine.map { ($0.text, $0.warn) }
-    }
-
-    /// How the focused chat is, without its name, which its box and header already say.
-    var chatLine: String? {
-        situation.chatLine(focused: conversation?.chat, now: Date())
-    }
-
     /// The chats that need you, those no pane shows: mentions first, then people, then groups, each
     /// by its unread, as the spike's status line reads them from the chat list it already watches.
     var needs: [ChatRow] {

@@ -17,7 +17,7 @@ public final class WindowContent: NSViewController {
     let sidebarItem: NSSplitViewItem
     let listItem: NSSplitViewItem
     /// The sidebar's and the chat list's folding before focus mode, to put back; nil out of it.
-    var beforeFocus: (Bool, Bool)?
+    private(set) var beforeFocus: (Bool, Bool)?
 
     /// Below this width the sidebar folds away.
     public static let sidebarFold: CGFloat = 960
@@ -60,7 +60,10 @@ public final class WindowContent: NSViewController {
         }
     }
 
-    public init(sidebar: SidebarController, chatList: ChatListController, detail: DetailController, bar: BottomBar) {
+    /// The content from its parts, the split keeping its dividers under `autosaveName` when it has one.
+    public init(sidebar: SidebarController, chatList: ChatListController, detail: DetailController, bar: BottomBar,
+                autosaveName: String? = nil)
+    {
         self.sidebar = sidebar
         self.chatList = chatList
         self.detail = detail
@@ -78,7 +81,7 @@ public final class WindowContent: NSViewController {
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(listItem)
         split.addSplitViewItem(detailItem)
-        split.splitView.autosaveName = "jaw.split"
+        split.splitView.autosaveName = autosaveName
     }
 
     @available(*, unavailable)
@@ -111,25 +114,29 @@ public final class WindowContent: NSViewController {
     }
 
     /// Folds the sidebar and the chat list for the content's own width, as the window asks when it's
-    /// resized, unless focus mode has them folded; at once under Reduce Motion.
-    public func fold(chatOpen: Bool) {
+    /// resized, unless focus mode has them folded. It folds at once under Reduce Motion, and a still
+    /// screen passes `animated: false`, so it's drawn folded.
+    public func fold(chatOpen: Bool, animated: Bool = true) {
         guard !inFocusMode else { return }
         let width = view.bounds.width
-        collapse(sidebarItem, width < Self.sidebarFold)
-        collapse(listItem, width < Self.listFold && chatOpen)
+        collapse(sidebarItem, width < Self.sidebarFold, animated: animated)
+        collapse(listItem, width < Self.listFold && chatOpen, animated: animated)
     }
 
-    /// Focus mode: the sidebar and the chat list fold away for the focused pane, and come back as they were.
-    public func focusMode(_ on: Bool) {
+    /// Focus mode: the sidebar and the chat list fold away for the focused pane, and come back as they
+    /// were. It folds at once under Reduce Motion, and a still screen passes `animated: false`, so it's
+    /// drawn folded.
+    public func focusMode(_ on: Bool, animated: Bool = true) {
         if on {
             guard !inFocusMode else { return }
             beforeFocus = (sidebarItem.isCollapsed, listItem.isCollapsed)
-            collapse(sidebarItem, true)
-            collapse(listItem, true)
+            collapse(sidebarItem, true, animated: animated)
+            collapse(listItem, true, animated: animated)
         } else {
-            collapse(sidebarItem, beforeFocus?.0 ?? false)
-            collapse(listItem, beforeFocus?.1 ?? false)
+            let was = beforeFocus
             beforeFocus = nil
+            collapse(sidebarItem, was?.0 ?? false, animated: animated)
+            collapse(listItem, was?.1 ?? false, animated: animated)
         }
     }
 
@@ -141,8 +148,8 @@ public final class WindowContent: NSViewController {
         collapse(listItem, !listItem.isCollapsed)
     }
 
-    func collapse(_ item: NSSplitViewItem, _ collapsed: Bool) {
-        (Motion.reduced() ? item : item.animator()).isCollapsed = collapsed
+    func collapse(_ item: NSSplitViewItem, _ collapsed: Bool, animated: Bool = true) {
+        (animated && !Motion.reduced() ? item.animator() : item).isCollapsed = collapsed
     }
 
     /// Shows what jawd's situation says: the status line, from the situation, the chats and the focused
@@ -163,9 +170,12 @@ public final class WindowContent: NSViewController {
         case let kind?:
             detail.show(state: kind, roles: roles)
         case nil:
-            if let panes {
-                detail.show(panes: panes.grid, views: panes.views, focused: panes.focused, box: panes.box, roles: roles, look: panes.look)
-            }
+            if let panes { show(panes, roles: roles) }
         }
+    }
+
+    /// Lays the panes out in the panes' place, with the focused chat's box under them.
+    public func show(_ panes: Panes, roles: Roles) {
+        detail.show(panes: panes.grid, views: panes.views, focused: panes.focused, box: panes.box, roles: roles, look: panes.look)
     }
 }

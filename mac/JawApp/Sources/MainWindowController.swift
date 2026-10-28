@@ -5,9 +5,9 @@ import JawUI
 import QuartzCore
 import SwiftUI
 
-/// The window: the sidebar, the chat list and the panes on macOS 26's split view, the status line
-/// along the bottom of the whole window. Below 960 points the sidebar folds away, and below 740 the
-/// chat list does too, as the terminal folds.
+/// The window around its content, `WindowContent`: its frame and where it's kept, the title bar's
+/// sidebar button, the sheets, the palette's panel and the display link that drains jawd's pushes.
+/// It fills the content from the model, and asks it to fold as the window is resized.
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let model: AppModel
@@ -31,16 +31,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     let palette = PalettePanel()
     var editorSheet: NSWindow?
     var sidebarToggle: IconButton?
-    var status: NSHostingView<StatusLine> {
-        bar.status
-    }
     var displayLink: CADisplayLink?
     var settings: NSWindow?
 
     init(model: AppModel) {
         self.model = model
         content = WindowContent(sidebar: SidebarController(), chatList: ChatListController(folder: model.folder, roles: model.roles),
-                                detail: DetailController(), bar: BottomBar(commands: { [weak model] in model?.allCommands ?? [] }))
+                                detail: DetailController(), bar: BottomBar(commands: { [weak model] in model?.allCommands ?? [] }),
+                                autosaveName: "jaw.split")
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
@@ -146,7 +144,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// Lays the panes out as the model's layout has them, the focused one outlined.
     func showPanes() {
         guard let panes = panesShown, model.stateView == nil else { return }
-        detail.show(panes: panes.grid, views: panes.views, focused: panes.focused, box: panes.box, roles: model.roles, look: panes.look)
+        content.show(panes, roles: model.roles)
     }
 
     func restyle() {
