@@ -829,6 +829,47 @@ async fn until_said(told: &mut broadcast::Receiver<Push>, state: &str) -> Vec<St
     said
 }
 
+/// What the outbox holds: each message's ID, its state and its attempts.
+async fn attempts(running: &Running) -> Vec<(String, String, i64)> {
+    running
+        .query(|db| {
+            Ok(db
+                .prepare(
+                    "SELECT m.id, o.state, o.attempts FROM outbox o JOIN messages m ON m.n = o.message ORDER BY o.n",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_sent_while_the_engine_restarts_waits_with_no_attempt_counted_and_goes_once_it_is_back() {
+    use crate::engine::failing::{Failing, Failure};
+    let home = tempfile::tempdir().unwrap();
+    let world: Arc<World> = Arc::default();
+    world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    let failing = Arc::new(Failing::new(DemoEngine::sharing(vec![demo::connected()], world.clone()), Failure::Crash));
+    let engine: Arc<dyn crate::engine::Engine> = failing.clone();
+    let running = Running::running(home.path(), world, Some(engine), true, quick()).await;
+    running.chats(&[ANA]).await;
+    let mut told = running.pushes.subscribe();
+    failing.turn(true).await;
+    until_said(&mut told, "engine_restarting").await;
+    let id = running.send(ANA, "while it starts again").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(running.world.sends().is_empty(), "nothing is tried with no engine to take it");
+    assert_eq!(running.status(ANA, &id).await.as_deref(), Some("pending"));
+    assert_eq!(
+        attempts(&running).await,
+        [(id.clone(), "queued".to_string(), 0)],
+        "it waits, and nothing counts as tried"
+    );
+    failing.turn(false).await;
+    running.until_status(ANA, &id, "read").await;
+    assert_eq!(running.world.sends().len(), 1, "once the next engine is connected it goes, once");
+}
+
 /// Notifications, as a test sees them.
 struct Notified(mpsc::UnboundedSender<crate::notify::Notice>);
 
