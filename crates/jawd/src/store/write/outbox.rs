@@ -63,7 +63,7 @@ pub const ACTIONS_KEPT: i64 = 1_000;
 pub enum Step {
     /// A message of yours to send: its row, pending, and its outbox row, with `raw`, the
     /// WAWebProtobufsE2E.Message to send, unless the interface's `key` already named one or the
-    /// outbox is full. Its chat's draft is cleared, since it's what was sent. What it came to is
+    /// outbox is full. Text clears its chat's draft, since it's what was sent. What it came to is
     /// put in `written`.
     Enqueue { message: Box<Message>, kind: &'static str, raw: Vec<u8>, key: Option<String>, written: Written },
     /// The server has outbox row `outbox`'s message.
@@ -666,8 +666,9 @@ struct Outgoing<'a> {
 }
 
 /// Writes a message of yours to send, pending, with its outbox row and the key that names it. One
-/// sent in its chat reads the chat, as replying does, and clears its draft, since it's what was
-/// typed there; a forward does neither (`Sent`).
+/// sent in its chat reads the chat, as replying does, and text sent there clears its draft, since
+/// it's what was typed there, where a poll or a contact card leaves what's typed as it is; a forward
+/// does neither (`Sent`).
 fn enqueue_one(
     db: &Connection,
     stamps: &mut Stamps,
@@ -693,7 +694,7 @@ fn enqueue_one(
     let enqueued =
         Enqueued::Queued { message: Some(n), id: message.id.clone(), chat, chat_n: Some(chat_n), outbox: Some(outbox) };
     let seq = stamps.seq(CHAT, Some(chat_n));
-    if sent == Sent::Here && db.prepare_cached(CLEAR_DRAFT)?.execute([chat_n, seq])? > 0 {
+    if sent == Sent::Here && kind == "text" && db.prepare_cached(CLEAR_DRAFT)?.execute([chat_n, seq])? > 0 {
         stamps.record(db, CHAT, chat_n, Some(chat_n), seq)?;
         return Ok((enqueued, true));
     }

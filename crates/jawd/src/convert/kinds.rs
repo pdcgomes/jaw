@@ -3,6 +3,7 @@
 //! needs to be drawn. M1 reads text fully and gives every other kind its row and summary; later
 //! steps deepen each kind from the raw protobuf the row keeps.
 
+use jaw_proto::vcard;
 use serde_json::{Value, json};
 use wa_proto::wa_web_protobufs_e2e as e2e;
 
@@ -418,19 +419,46 @@ fn live_location(x: &e2e::LiveLocationMessage) -> Body {
     body.detail(json!({ "location": place(x.degrees_latitude, x.degrees_longitude) }))
 }
 
+/// The name a contact card goes by: the one its message gives it, or failing that its vCard's own.
+fn card_name(x: &e2e::ContactMessage) -> Option<String> {
+    let given = x.display_name.as_deref().map(str::trim).filter(|name| !name.is_empty());
+    given.map(str::to_string).or_else(|| vcard::read(x.vcard.as_deref()?).into_iter().next()?.name)
+}
+
+/// A contact card: its name and its vCard as it came, found by its name.
 fn contact(x: &e2e::ContactMessage) -> Body {
-    let name = x.display_name.as_deref().filter(|n| !n.is_empty());
-    let mut body = Body::new("contact", name.map_or("Contact".to_string(), |name| format!("Contact: {name}")));
-    body.text = name.map(str::to_string);
+    let name = card_name(x);
+    let summary = name.as_deref().map_or("Contact".to_string(), |name| format!("Contact: {name}"));
+    let mut body = Body::new("contact", spans::one_line(&summary, SUMMARY));
+    body.text = name.clone();
     body.detail(json!({ "contact": { "name": name, "vcard": x.vcard } }))
 }
 
+/// Several contact cards in one message, shown as one card is: named as the message names them, or
+/// by their names, with each card's vCard after the one before, as several contacts export to one
+/// file; found by their names.
 fn contacts(x: &e2e::ContactsArrayMessage) -> Body {
-    let names: Vec<&str> = x.contacts.iter().filter_map(|c| c.display_name.as_deref()).collect();
-    let mut body = Body::new("contact", format!("{} contacts", x.contacts.len()));
+    if let [only] = x.contacts.as_slice() {
+        return contact(only);
+    }
+    let names: Vec<String> = x.contacts.iter().filter_map(card_name).collect();
+    let given = x.display_name.as_deref().map(str::trim).filter(|name| !name.is_empty());
+    let name = given.map(str::to_string).or_else(|| (!names.is_empty()).then(|| names.join(", ")));
+    let mut vcards = String::new();
+    for card in x.contacts.iter().filter_map(|c| c.vcard.as_deref()).filter(|v| !v.trim().is_empty()) {
+        if !vcards.is_empty() && !vcards.ends_with('\n') {
+            vcards.push_str("\r\n");
+        }
+        vcards.push_str(card);
+    }
+    let summary = match x.contacts.len() {
+        0 => "Contact".to_string(),
+        n => format!("{n} contacts"),
+    };
+    let mut body = Body::new("contact", summary);
     body.text = (!names.is_empty()).then(|| names.join(", "));
-    let cards: Vec<Value> = x.contacts.iter().map(|c| json!({ "name": c.display_name, "vcard": c.vcard })).collect();
-    body.detail(json!({ "contacts": cards }))
+    let vcards = (!vcards.is_empty()).then_some(vcards);
+    body.detail(json!({ "contact": { "name": name, "vcard": vcards } }))
 }
 
 /// A poll's creation, whichever version WhatsApp sent it as.

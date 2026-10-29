@@ -16,6 +16,7 @@ pub mod send;
 pub mod settings;
 pub mod sync;
 pub mod themes;
+pub mod vcard;
 pub mod windows;
 
 /// The version this crate speaks. jawd serves one, and refuses a hello with another.

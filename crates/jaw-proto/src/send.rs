@@ -1,5 +1,5 @@
-//! Sending: `send.text`, `send.poll` and `send.retry`, `chat.start`, `draft.set`, `read` and
-//! `typing`; and the message actions: `react`, `edit`, `delete`, `forward`, `poll.vote`,
+//! Sending: `send.text`, `send.poll`, `send.contact` and `send.retry`, `chat.start`, `draft.set`,
+//! `read` and `typing`; and the message actions: `react`, `edit`, `delete`, `forward`, `poll.vote`,
 //! `message.info` and `chat.info`.
 
 use serde::{Deserialize, Serialize};
@@ -98,6 +98,23 @@ pub enum Place {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         address: Option<String>,
     },
+}
+
+/// `send.contact`'s params: one contact card or several, in one message; answered as `send.text` is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendContact {
+    pub chat: String,
+    pub cards: Vec<Card>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// A contact card: the name it goes by and the card itself, one vCard 3.0, as the Contacts app
+/// exports one (`crate::vcard` reads and makes them).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Card {
+    pub name: String,
+    pub vcard: String,
 }
 
 /// `poll.vote`'s params: your vote in poll `message`, the options chosen by name, none to take your

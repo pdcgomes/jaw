@@ -10,12 +10,13 @@
 //! name their people as WhatsApp writes them (`quote`); reactions, edits and deletions go as
 //! messages of their own through the outbox (`actions`); `forward` sends messages again as new
 //! ones of yours (`forward`); `message.info` gives each recipient's receipts, and `chat.info` a
-//! chat's members (`info`). Polls (`poll`), places (`places`) and events (`events`) go as text
-//! does. Text with a URL goes with its page's preview when the page answers in time (`link`), and
-//! the next message to its chat waits for it, so none overtakes another.
+//! chat's members (`info`). Polls (`poll`), places (`places`), events (`events`) and contact cards
+//! (`contact`) go as text does. Text with a URL goes with its page's preview when the page answers
+//! in time (`link`), and the next message to its chat waits for it, so none overtakes another.
 
 mod actions;
 pub mod bench;
+mod contact;
 mod events;
 mod forward;
 mod info;
@@ -38,8 +39,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jaw_proto::send::{
-    ChatInfo, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, PollVote, React, Read, SendEvent, SendLocation,
-    SendPoll, SendRetry, SendText, Typing,
+    ChatInfo, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, PollVote, React, Read, SendContact, SendEvent,
+    SendLocation, SendPoll, SendRetry, SendText, Typing,
 };
 use jaw_proto::{Error, Push, code};
 use rusqlite::Connection;
@@ -227,6 +228,7 @@ impl Sending {
             "send.poll" => result(poll::send_poll(inner, params_of::<SendPoll>(method, params)?).await?),
             "send.location" => result(places::send_location(inner, params_of::<SendLocation>(method, params)?).await?),
             "send.event" => result(events::send_event(inner, params_of::<SendEvent>(method, params)?).await?),
+            "send.contact" => result(contact::send_contact(inner, params_of::<SendContact>(method, params)?).await?),
             "poll.vote" => poll::vote(inner, params_of::<PollVote>(method, params)?).await,
             "send.retry" => outbox::retry(inner, params_of::<SendRetry>(method, params)?).await,
             "chat.start" => result(start::start(inner, params_of::<ChatStart>(method, params)?).await?),
@@ -249,6 +251,7 @@ impl Sending {
         "send.poll",
         "send.location",
         "send.event",
+        "send.contact",
         "poll.vote",
         "send.retry",
         "chat.start",

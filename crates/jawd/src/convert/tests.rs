@@ -313,6 +313,62 @@ fn a_location_is_found_by_its_name_and_its_address_and_shows_as_its_fields() {
 }
 
 #[test]
+fn a_contact_row_is_its_name_and_vcard_for_one_card_or_several_each_cards_vcard_after_the_last() {
+    let marta = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Lopes;Marta;;Dr.ª;\r\nFN:Dr.ª Marta Lopes\r\n\
+        item1.TEL;waid=351213456789:+351 21 345 6789\r\nEND:VCARD";
+    let rui = "BEGIN:VCARD\nVERSION:3.0\nFN:Rui Costa\nTEL;waid=351913333333:+351913333333\nEND:VCARD\n";
+    let card = |name: Option<&str>, vcard: &str| e2e::ContactMessage {
+        display_name: name.map(str::to_string),
+        vcard: Some(vcard.into()),
+        ..Default::default()
+    };
+    let detail = |m: &Message| serde_json::from_str::<serde_json::Value>(m.detail.as_deref().unwrap()).unwrap();
+    let one = |c: e2e::ContactMessage| row(e2e::Message { contact_message: Some(Box::new(c)), ..Default::default() });
+    let m = one(card(Some(" Marta "), marta));
+    assert_eq!((m.kind, m.summary.as_str(), m.text.as_deref()), ("contact", "Contact: Marta", Some("Marta")));
+    assert_eq!(
+        detail(&m),
+        serde_json::json!({ "contact": { "name": "Marta", "vcard": marta } }),
+        "the card as it came"
+    );
+    let m = one(card(None, marta));
+    assert_eq!(
+        (m.summary.as_str(), m.text.as_deref(), &detail(&m)["contact"]["name"]),
+        ("Contact: Dr.ª Marta Lopes", Some("Dr.ª Marta Lopes"), &serde_json::json!("Dr.ª Marta Lopes")),
+        "named as its vCard names it when the message doesn't"
+    );
+    let m = one(e2e::ContactMessage::default());
+    assert_eq!((m.summary.as_str(), m.text.as_deref()), ("Contact", None));
+    assert_eq!(detail(&m), serde_json::json!({ "contact": { "name": null, "vcard": null } }));
+
+    let several = |name: Option<&str>, cards: Vec<e2e::ContactMessage>| {
+        row(e2e::Message {
+            contacts_array_message: Some(Box::new(e2e::ContactsArrayMessage {
+                display_name: name.map(str::to_string),
+                contacts: cards,
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    };
+    let m = several(None, vec![card(None, marta), card(Some("Rui"), rui)]);
+    assert_eq!((m.summary.as_str(), m.text.as_deref()), ("2 contacts", Some("Dr.ª Marta Lopes, Rui")));
+    let both = format!("{marta}\r\n{rui}");
+    assert_eq!(detail(&m), serde_json::json!({ "contact": { "name": "Dr.ª Marta Lopes, Rui", "vcard": both } }));
+    let read: Vec<_> = jaw_proto::vcard::read(&both).into_iter().map(|c| c.name.unwrap()).collect();
+    assert_eq!(read, ["Dr.ª Marta Lopes", "Rui Costa"], "each card still a card of its own");
+    let m = several(Some("2 contacts"), vec![card(Some("Rui"), rui), card(Some("Marta"), marta)]);
+    assert_eq!(detail(&m)["contact"]["name"], "2 contacts", "named as the message names them");
+    assert_eq!(detail(&m)["contact"]["vcard"], format!("{rui}{marta}"), "no line added after one that ends in one");
+    let m = several(Some("1 contact"), vec![card(Some("Rui"), rui)]);
+    assert_eq!(
+        (m.summary.as_str(), detail(&m)),
+        ("Contact: Rui", serde_json::json!({ "contact": { "name": "Rui", "vcard": rui } }))
+    );
+    assert_eq!(several(None, vec![]).summary, "Contact");
+}
+
+#[test]
 fn a_poll_of_any_version_is_its_question_and_options() {
     let poll = e2e::PollCreationMessage {
         name: Some("Dinner where?".into()),
