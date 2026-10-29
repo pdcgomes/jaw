@@ -2650,6 +2650,17 @@ fn someone_typing_shows_after_the_newest_message_at_their_margin_and_in_the_row_
     v.scroll = Scroll::Anchor { id: oldest.id.clone(), sort: oldest.sort.clone(), top: 0 };
     let screen = frame(&mut v);
     assert!(!screen.contains("• • •") && screen.contains("Rui recording…"), "{screen}");
+    // Nor do the messages make room for it there: they're drawn as they are with nobody typing.
+    let conversation = |screen: &str| -> Vec<String> {
+        let lines: Vec<&str> = screen.lines().collect();
+        let title = lines.iter().position(|l| l.contains("╭ Família Gomes")).unwrap();
+        let the_box = lines.iter().rposition(|l| l.contains("╭──")).unwrap();
+        let left = lines[title].split("╭ Família Gomes").next().unwrap().chars().count();
+        lines[title + 1..the_box].iter().map(|l| l.chars().skip(left).collect()).collect()
+    };
+    v.apply(Update::Typing(Typists::new()));
+    let unsaid = frame(&mut v);
+    assert_eq!(conversation(&screen), conversation(&unsaid), "{screen}\n{unsaid}");
 
     // Once nobody is typing, nothing says anyone is.
     v.scroll = Scroll::Bottom;

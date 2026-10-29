@@ -115,12 +115,18 @@ impl Default for Typing {
 
 impl Typing {
     pub fn new(timing: Timing) -> Typing {
+        Typing::keeping(timing, CHANGES_KEPT)
+    }
+
+    /// The same, keeping `kept` rounds of changes told for a connection that falls behind, which
+    /// tests make few.
+    pub(super) fn keeping(timing: Timing, kept: usize) -> Typing {
         let inner = Inner {
             timing,
             intake: Mutex::default(),
             woken: Notify::new(),
             told: Mutex::default(),
-            changes: broadcast::channel(CHANGES_KEPT).0,
+            changes: broadcast::channel(kept).0,
             heard: AtomicU64::default(),
             dropped: AtomicU64::default(),
             sent: AtomicU64::default(),
@@ -664,6 +670,12 @@ mod tests {
         seen.now(chat).map(|who| who.iter().map(|t| (t.name.clone(), t.state)).collect()).unwrap_or_default()
     }
 
+    #[test]
+    fn typing_fades_25_s_after_it_was_last_said_is_told_at_most_every_50_ms_and_waits_1024_at_most() {
+        let Timing { fade, pace } = Timing::default();
+        assert_eq!((fade, pace, INTAKE_MOST), (Duration::from_secs(25), Duration::from_millis(50), 1_024));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn typing_is_told_with_whoever_types_named_as_their_messages_are_and_by_person() {
         let mut bed = Bed::new(Timing { fade: LONG, pace: ms(20) }).await;
@@ -724,6 +736,9 @@ mod tests {
         bed.typing.message(ANA_LID, ANA_LID, ANA);
         bed.until(ANA, &[]).await;
         assert_eq!(bed.told(GROUP), [("Rui".to_string(), RECORDING)]);
+        // Rui's by a LID jaw doesn't know him by, with the number he typed by beside it, ends his.
+        bed.typing.message(GROUP, "100000000003@lid", RUI);
+        bed.until(GROUP, &[]).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

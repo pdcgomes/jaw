@@ -4682,8 +4682,12 @@ async fn typing_bed(fade: Duration) -> (Bed, Typing, watch::Sender<bool>) {
 
 /// `typing_bed`, its windows paced by `timing`.
 async fn typing_bed_paced(fade: Duration, timing: Timing) -> (Bed, Typing, watch::Sender<bool>) {
+    typing_bed_of(Typing::new(typing::Timing { fade, pace: ms(20) }), timing).await
+}
+
+/// `typing_bed`, who's typing told from `typing` and its windows paced by `timing`.
+async fn typing_bed_of(typing: Typing, timing: Timing) -> (Bed, Typing, watch::Sender<bool>) {
     let mut bed = Bed::new(timing);
-    let typing = Typing::new(typing::Timing { fade, pace: ms(20) });
     bed.feed = bed.feed.with_typing(typing.clone());
     let hearing = watch::channel(true).0;
     let me = watch::channel(crate::convert::Me::new(["351919999999@s.whatsapp.net".to_string()])).0;
@@ -4792,6 +4796,13 @@ async fn a_watch_says_whos_typing_in_its_chats_and_a_typing_push_follows_each_ch
     watcher.call("unwatch", json!({"watch": conversation})).await.unwrap();
     typing.heard(GROUP, &person(10), Composing);
     watcher.until_typing(&[(GROUP, &["Rui", "Zé"])]).await;
+
+    // Moved down the list, the window's answer says who's typing in the chats it shows now.
+    let moved = json!({"watch": list, "around": person(4), "before": 1, "after": 1});
+    let moved = watcher.call("watch.move", moved).await.unwrap();
+    assert_eq!(watcher.windows[&list].ids(), [person(3), person(4), person(5)]);
+    assert_eq!(answered_typing(&moved), want(&[(&person(5), &["+351910000005"])]), "{moved}");
+    assert_eq!(watcher.typing_names(), want(&[(&person(5), &["+351910000005"])]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4882,11 +4893,53 @@ async fn a_chat_that_comes_into_a_window_is_told_whos_typing_there_just_after_th
         "its typing came before the push that brought it: {:?}",
         watcher.pushes
     );
-    // The chat that left is forgotten, by the interface as by jawd: nothing more comes for it.
+    // The chat that left is forgotten, by the interface as by jawd: nothing more comes for it while
+    // it's out, as it stops and then records,
     typing.heard(&person(1), &person(1), Paused);
     typing.heard(OPEN, OPEN, Composing);
     watcher.until_typing(&[(&person(5), &["+351910000005"]), (OPEN, &["Ana"])]).await;
+    typed(&typing, &person(1), &[]).await;
+    typing.heard(&person(1), &person(1), Recording);
+    typed(&typing, &person(1), &["+351910000001"]).await;
+    watcher.run_for(ms(100)).await;
     assert_eq!(watcher.told.iter().filter(|(chat, _)| chat == &person(1)).count(), 1, "{:?}", watcher.told);
+    // and once it's back, unpinned, it's told who's typing there as any chat brought in is.
+    let seq = bed.apply(vec![Change::Chat(Chat { id: person(5), pinned: Some(0), ..Chat::default() })]).await;
+    watcher.settle(seq).await;
+    watcher.until_typing(&[(OPEN, &["Ana"]), (&person(1), &["+351910000001"])]).await;
+    assert_eq!(watcher.windows[&list].ids(), [OPEN.to_string(), GROUP.into(), person(1)]);
+    assert_eq!(watcher.typing[&person(1)][0]["state"], "recording", "{:?}", watcher.told);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_falls_behind_the_typing_told_looks_again_at_every_chat_its_windows_show() {
+    // Each change is told at once, and a connection keeps the last two rounds it hasn't taken.
+    let typing = Typing::keeping(typing::Timing { fade: NEVER, pace: ms(1) }, 2);
+    let (bed, typing, _hearing) = typing_bed_of(typing, brisk()).await;
+    let mut watcher = bed.watcher(64);
+    watcher.watch("chats.watch", json!({"around": "top", "after": 3})).await;
+    typing.heard(OPEN, OPEN, Composing);
+    watcher.until_typing(&[(OPEN, &["Ana"])]).await;
+
+    // While the connection takes nothing, Ana stops, and six rounds more are told, each in a chat
+    // its window doesn't show, so the round that told hers is gone by the time it looks.
+    typing.heard(OPEN, OPEN, Paused);
+    typed(&typing, OPEN, &[]).await;
+    let unshown = [person(2), person(3), person(4), person(5)];
+    for (n, chat) in unshown.iter().chain(&unshown[..2]).enumerate() {
+        let name = format!("+{}", chat.trim_end_matches("@s.whatsapp.net"));
+        let (state, now) = if n < 4 { (Composing, vec![name.as_str()]) } else { (Paused, vec![]) };
+        typing.heard(chat, chat, state);
+        typed(&typing, chat, &now).await;
+    }
+
+    // Once it takes them, it finds it fell behind and tells its interface how things are in every
+    // chat its window shows: nobody typing in Ana's, and nothing for those that didn't change.
+    watcher.until_typing(&[]).await;
+    watcher.run_for(ms(100)).await;
+    let told: Vec<(&str, usize)> =
+        watcher.told.iter().map(|(chat, who)| (chat.as_str(), who.as_array().map_or(0, Vec::len))).collect();
+    assert_eq!(told, [(OPEN, 1), (OPEN, 0)], "{:?}", watcher.told);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4907,13 +4960,31 @@ async fn a_connection_whose_interface_reads_nothing_holds_one_typing_for_each_ch
         }
         assert!(watcher.lines.len() <= room);
     }
-    // It reads again: what's owed comes, one push a chat, as things are now.
+    // jawd tells the newest, which the connection takes while its interface still reads nothing.
     typed(&typing, GROUP, &["Rui", "Zé"]).await;
     typed(&typing, OPEN, &[]).await;
-    watcher.until_typing(&[(GROUP, &["Rui", "Zé"])]).await;
+    let until = Instant::now() + ms(100);
+    while let Ok(ready) = tokio::time::timeout_at(until.into(), watcher.client.ready()).await {
+        watcher.client.handle(ready).await;
+    }
+    assert_eq!(watcher.lines.len(), room, "its queue is full");
+    // It reads again, a line at a time: what's owed comes as there's room, one push a chat, as
+    // things are now.
+    let newest = want(&[(GROUP, &["Rui", "Zé"])]);
+    let end = Instant::now() + TYPED;
+    while watcher.typing_names() != newest {
+        assert!(Instant::now() < end, "its interface was left with {:?}: {:?}", watcher.typing_names(), watcher.told);
+        if let Ok(line) = watcher.lines.try_recv() {
+            watcher.take(&line);
+        }
+        if let Ok(ready) = tokio::time::timeout(ms(10), watcher.client.ready()).await {
+            watcher.client.handle(ready).await;
+        }
+    }
     tokio::time::sleep(ms(100)).await;
     watcher.run_for(ms(100)).await;
-    assert_eq!(watcher.typing_names(), want(&[(GROUP, &["Rui", "Zé"])]));
+    watcher.drain();
+    assert_eq!(watcher.typing_names(), newest);
     assert!(watcher.told.len() <= room + 2 + 2, "{} pushes: {:?}", watcher.told.len(), watcher.told);
     let stats = typing.stats();
     assert!(stats.merged >= 100, "{stats:?}");
