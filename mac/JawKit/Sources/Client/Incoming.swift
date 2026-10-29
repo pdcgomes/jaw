@@ -2,7 +2,7 @@ import Foundation
 
 /// What a request's result is read as, so each line is decoded once, into the value it is.
 public enum Expect: Sendable, Hashable {
-    case json, sent, chat, info, chatInfo, status, layout, saved
+    case json, sent, chat, info, chatInfo, status, layout, saved, folder
 }
 
 /// A request's answer, read as what it was asked for.
@@ -15,11 +15,13 @@ public enum Reply: Sendable, Hashable {
     case status(Status)
     case layout(KeptLayout)
     case saved(Saved)
+    /// The folder made, or nil when it went before jawd read it back.
+    case folder(FolderRow?)
 }
 
 /// What the reader expects of the reply with an id: looked up as the line decodes.
 enum Want: Sendable {
-    case hello, find, chats, messages, library, nothing
+    case hello, find, chats, messages, library, folders, roster, nothing
     case reply(Expect)
 }
 
@@ -39,12 +41,16 @@ enum Incoming: Sendable {
     case chats(UInt64, ChatsWatched)
     case messages(UInt64, MessagesWatched)
     case library(UInt64, LibraryWatched)
+    case folders(UInt64, FoldersWatched)
+    case roster(UInt64, RosterWatched)
     case error(UInt64, JawError)
     /// A reply that isn't jaw's protocol, and why.
     case bad(UInt64, String)
     case chatsPush(ChatsPush)
     case messagesPush(MessagesPush)
     case libraryPush(LibraryPush)
+    case foldersPush(FoldersPush)
+    case rosterPush(RosterPush)
     case typing(TypingPush)
     case resync(String)
     case connection(Connection)
@@ -79,6 +85,8 @@ struct IncomingLine: Decodable {
                 case .chats: value = try .chats(id, c.decode(ChatsWatched.self, forKey: .result))
                 case .messages: value = try .messages(id, c.decode(MessagesWatched.self, forKey: .result))
                 case .library: value = try .library(id, c.decode(LibraryWatched.self, forKey: .result))
+                case .folders: value = try .folders(id, c.decode(FoldersWatched.self, forKey: .result))
+                case .roster: value = try .roster(id, c.decode(RosterWatched.self, forKey: .result))
                 case .nothing: value = .reply(id, .json(.null))
                 case .reply(.json): value = try .reply(id, .json(c.decode(JSONValue.self, forKey: .result)))
                 case .reply(.sent): value = try .reply(id, .sent(c.decode(Sent.self, forKey: .result)))
@@ -88,6 +96,7 @@ struct IncomingLine: Decodable {
                 case .reply(.status): value = try .reply(id, .status(c.decode(Status.self, forKey: .result)))
                 case .reply(.layout): value = try .reply(id, .layout(c.decode(KeptLayout.self, forKey: .result)))
                 case .reply(.saved): value = try .reply(id, .saved(c.decode(Saved.self, forKey: .result)))
+                case .reply(.folder): value = try .reply(id, .folder(c.decode(FolderMade.self, forKey: .result).folder))
                 }
             } catch {
                 value = .bad(id, "what jawd sent isn't jaw's protocol: \(error)")
@@ -103,6 +112,8 @@ struct IncomingLine: Decodable {
             case "chats": value = try .chatsPush(c.decode(ChatsPush.self, forKey: .params))
             case "messages": value = try .messagesPush(c.decode(MessagesPush.self, forKey: .params))
             case "library": value = try .libraryPush(c.decode(LibraryPush.self, forKey: .params))
+            case "folders": value = try .foldersPush(c.decode(FoldersPush.self, forKey: .params))
+            case "roster": value = try .rosterPush(c.decode(RosterPush.self, forKey: .params))
             case "typing": value = try .typing(c.decode(TypingPush.self, forKey: .params))
             case "resync": value = try .resync(c.decode(WatchRef.self, forKey: .params).watch)
             case "connection": value = try .connection(c.decode(Connection.self, forKey: .params))

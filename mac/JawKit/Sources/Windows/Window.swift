@@ -34,9 +34,12 @@ public struct Update<R: WindowRow>: Sendable {
     /// A library window's note, as a watch's or move's answer says it: nil in an update that says
     /// nothing of it, and `.some(nil)` from an answer that had none.
     public var note: String??
+    /// The folder tree's slots, whole, when they changed.
+    public var favourites: [Favourite]?
 
     public init(seq: UInt64 = 0, remove: [String] = [], upsert: [R] = [], total: UInt64? = nil, older: Bool? = nil,
-                newer: UInt64? = nil, moved: Moved? = nil, counts: LibraryCounts? = nil, note: String?? = nil)
+                newer: UInt64? = nil, moved: Moved? = nil, counts: LibraryCounts? = nil, note: String?? = nil,
+                favourites: [Favourite]? = nil)
     {
         self.seq = seq
         self.remove = remove
@@ -47,6 +50,7 @@ public struct Update<R: WindowRow>: Sendable {
         self.moved = moved
         self.counts = counts
         self.note = note
+        self.favourites = favourites
     }
 }
 
@@ -65,6 +69,7 @@ public struct Merged<R: WindowRow>: Sendable {
     var moved: Moved?
     var kinds: LibraryCounts?
     var note: String??
+    var favourites: [Favourite]?
 
     public init() {}
 
@@ -93,16 +98,17 @@ public struct Merged<R: WindowRow>: Sendable {
         moved = update.moved ?? moved
         kinds = update.counts ?? kinds
         if let said = update.note { note = said }
+        favourites = update.favourites ?? favourites
     }
 
     public var isEmpty: Bool {
         remove.isEmpty && upsert.isEmpty && total == nil && older == nil && newer == nil && moved == nil && kinds == nil
-            && note == nil
+            && note == nil && favourites == nil
     }
 
     public func update() -> Update<R> {
         Update(seq: seq, remove: Array(remove), upsert: Array(upsert.values), total: total, older: older,
-               newer: newer, moved: moved, counts: kinds, note: note)
+               newer: newer, moved: moved, counts: kinds, note: note, favourites: favourites)
     }
 
     /// The upserts it holds, for a test's check that a merge keeps no more than the window does.
@@ -273,6 +279,47 @@ public struct Chats<R: WindowRow>: Sendable {
 
     public var isHeld: Bool {
         held != nil
+    }
+}
+
+/// A roster: a folder's people from the smallest `sort` up, online first, then by when last seen,
+/// then those jawd has no last seen for, as jawd sorts them.
+public struct People<R: WindowRow>: Sendable {
+    public var folder: String
+    public var place: Place
+    var rows = Rows<R>()
+    /// How many people the folder has.
+    public var total: UInt64 = 0
+    public var seq: UInt64 = 0
+    public var loaded = false
+
+    public init(folder: String, place: Place) {
+        self.folder = folder
+        self.place = place
+    }
+
+    /// Applies an update; returns the ids that left.
+    @discardableResult
+    public mutating func apply(_ update: Update<R>) -> [String] {
+        let gone = rows.apply(remove: update.remove, upsert: update.upsert)
+        if let total = update.total { self.total = total }
+        if let moved = update.moved { place = moved.place }
+        seq = max(seq, update.seq)
+        loaded = true
+        return gone
+    }
+
+    public func get(_ id: String) -> R? {
+        rows.byID[id]
+    }
+
+    public var count: Int {
+        rows.byID.count
+    }
+
+    /// From the smallest `sort` up.
+    public var list: [R] {
+        rows.order.map { rows.byID[$0.id]! }
     }
 }
 

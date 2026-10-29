@@ -70,6 +70,23 @@ final class FakeJawd: Sendable {
         """
     }
 
+    /// What jawd answers request `id` with, from a fixture: its line with the id changed.
+    static func answer(_ name: String, id: UInt64) -> String {
+        guard case var .object(line)? = try? JSONValue.parse(fixture(name)) else { return "" }
+        line["id"] = .number(Double(id))
+        return (try? JSONEncoder().encode(JSONValue.object(line))).map { String(decoding: $0, as: UTF8.self) } ?? ""
+    }
+
+    /// A push from a fixture, as it is.
+    static func pushed(_ name: String) -> String {
+        ((try? fixture(name)).map { String(decoding: $0, as: UTF8.self) } ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// jawd turning request `id` down.
+    static func refusal(_ id: UInt64, code: Int, _ message: String) -> String {
+        "{\"id\":\(id),\"error\":{\"code\":\(code),\"message\":\"\(message)\"}}"
+    }
+
     func accepting() {
         while true {
             let fd = accept(listener, nil, nil)

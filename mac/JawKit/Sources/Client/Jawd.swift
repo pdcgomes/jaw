@@ -62,6 +62,14 @@ public final class Jawd {
         ask("library.shown", LibraryShown(items: Array(items.prefix(LibraryShown.most))), .quiet)
     }
 
+    public func watchFolders() -> WindowID {
+        client.watchFolders()
+    }
+
+    public func watchRoster(_ folder: String, _ place: Place) -> WindowID {
+        client.watchRoster(folder, place)
+    }
+
     public func move(_ window: WindowID, _ place: Place) {
         client.move(window, place)
     }
@@ -163,6 +171,54 @@ public final class Jawd {
 
     public func historyMore(_ chat: String) {
         ask("history.more", ChatRef(chat: chat), .quiet)
+    }
+
+    // MARK: - Folders and favourites
+
+    /// Makes a folder of yours, named in place: `named` with its row once it's made, or with none if
+    /// it went before jawd read it back, or `notNamed` with jawd's words for the field.
+    public func folderCreate(name: String, parent: String?) {
+        ask("folder.create", FolderCreate(name: name, parent: parent), .naming, expect: .folder)
+    }
+
+    public func folderRename(_ folder: String, name: String) {
+        ask("folder.rename", FolderRename(folder: folder, name: name), .naming)
+    }
+
+    /// Nests a folder of yours in `parent`, or puts it back at the top, at `position` among its new
+    /// siblings or last; `said` once jawd has done it.
+    public func folderMove(_ folder: String, parent: String?, position: Int?, said: String?) {
+        ask("folder.move", FolderMove(folder: folder, parent: parent, position: position), .filed(said))
+    }
+
+    public func folderDelete(_ folder: String, said: String?) {
+        ask("folder.delete", FolderID(folder: folder), .filed(said))
+    }
+
+    public func folderAdd(_ folder: String, item: String, said: String?) {
+        ask("folder.add", FolderItem(folder: folder, item: item), .filed(said))
+    }
+
+    public func folderRemove(_ folder: String, item: String, said: String?) {
+        ask("folder.remove", FolderItem(folder: folder, item: item), .filed(said))
+    }
+
+    /// Files `item` in `to`, and takes it out of `from` only once jawd has it there, so a failure
+    /// between the two leaves it in both, never in neither, and says so with `both`; a half whose
+    /// answer a drop lost is asked again once jawd is back, since adding and removing are idempotent.
+    public func moveItem(_ item: String, from: String, to: String, said: String?, both: String) {
+        ask(Moving(item: item, from: from, to: to, said: said, both: both))
+    }
+
+    func ask(_ moving: Moving) {
+        let folder = moving.removing ? moving.from : moving.to
+        ask(moving.removing ? "folder.remove" : "folder.add", FolderItem(folder: folder, item: moving.item), .moving(moving))
+    }
+
+    /// Puts a folder or a chat on `slot`, taking it off the slot it had and putting out what the slot
+    /// held; nil empties the slot.
+    public func favouriteSet(slot: Int, target: String?, said: String?) {
+        ask("favourite.set", FavouriteSet(slot: slot, target: target), .filed(said))
     }
 
     public func focus(_ focused: Bool) {
@@ -310,6 +366,12 @@ public final class Jawd {
         for (window, update) in frame.library.sorted(by: { $0.key < $1.key }) {
             out.append(.library(window, update))
         }
+        for (window, update) in frame.folders.sorted(by: { $0.key < $1.key }) {
+            out.append(.folders(window, update))
+        }
+        for (window, update) in frame.roster.sorted(by: { $0.key < $1.key }) {
+            out.append(.roster(window, update))
+        }
         // After the windows, which may bring in the chats it's for.
         if let typing = frame.typing { out.append(.typing(typing)) }
         return out
@@ -344,7 +406,7 @@ public final class Jawd {
             case let .failure(failure): out.append(.findFailed(id: view, cancelled: false, why: failure.description))
             }
         case let .window(window, failure):
-            if window == lookup?.window { lookFailed(failure, &out) } else { out.append(.windowFailed(window, failure.description)) }
+            if window == lookup?.window { lookFailed(failure, &out) } else { out.append(.windowFailed(window, failure)) }
         case let .connection(c):
             out.append(.connection(c))
         case let .link(step):
@@ -380,6 +442,18 @@ public final class Jawd {
             out.append(.layout(kept))
         case let (.save(ticket, message), .saved(saved)):
             out.append(.saved(ticket: ticket, message: message, path: saved.path, why: nil))
+        case let (.naming, .folder(row)):
+            out.append(.named(row))
+        case (.naming, _):
+            out.append(.named(nil))
+        case let (.filed(said), _):
+            if let said { out.append(.notice(said, .info)) }
+        case let (.moving(moving), _) where !moving.removing:
+            var rest = moving
+            rest.removing = true
+            ask(rest)
+        case let (.moving(moving), _):
+            if let said = moving.said { out.append(.notice(said, .info)) }
         default:
             break
         }
@@ -422,12 +496,25 @@ public final class Jawd {
         let first: Date
     }
 
+    /// Move to: `item` filed in `to`, then taken out of `from` once jawd has it there.
+    struct Moving {
+        let item: String
+        let from: String
+        let to: String
+        let said: String?
+        /// What's said if it ends in both folders.
+        let both: String
+        /// Whether jawd has it in `to`, so taking it out of `from` is what's left.
+        var removing = false
+    }
+
     /// What a dropped connection lost the answer to, asked for again with its key once jawd is
     /// back, in the order it was first asked, so two edits of a message end as the second.
     enum Again {
         case send(Sending)
         case sendPoll(Polling)
         case act(Acting)
+        case move(Moving)
     }
 
     struct OwedKey: Hashable {
@@ -464,6 +551,12 @@ public final class Jawd {
         /// `media.fetch` for a message, and `media.save` under its ticket.
         case fetch(String)
         case save(String, String)
+        /// A folder's name, made or changed in place.
+        case naming
+        /// A folder change, and what's said once jawd has done it.
+        case filed(String?)
+        /// A half of Move to.
+        case moving(Moving)
         case quiet
     }
 
@@ -529,6 +622,8 @@ public final class Jawd {
                                   said: "jawd was away too long to tell whether it was done, so look in the chat before \(acting.what) again"))
             case let .act(acting):
                 ask(acting)
+            case let .move(moving):
+                ask(moving)
             }
         }
         for owed in owed.values.sorted(by: { "\($0.key)" < "\($1.key)" }) {
@@ -582,6 +677,20 @@ public final class Jawd {
             return [.notFetched(message: message, why: Self.whyNot(failure, "downloading"))]
         case let .save(ticket, message):
             return [.saved(ticket: ticket, message: message, path: nil, why: Self.whyNot(failure, "saving"))]
+        case .naming:
+            return [.notNamed(Self.whyNot(failure, "naming folders"))]
+        case .filed:
+            return [.notice(Self.whyNot(failure, "filing"), .warning)]
+        case let .moving(moving):
+            // The second half is asked as the first's answer is read, so a drop can cut it off unsent.
+            if failure == .lost || (moving.removing && failure == .unreachable) {
+                again.append(.move(moving))
+                return []
+            }
+            if moving.removing {
+                return [.notice("\(moving.both): \(Self.whyNot(failure, "taking it out"))", .warning)]
+            }
+            return [.notice(Self.whyNot(failure, "moving between folders"), .warning)]
         case .status, .quiet:
             return []
         }
@@ -625,10 +734,17 @@ public enum JawUpdate: Sendable {
     case chats(WindowID, Update<ChatRow>)
     case messages(WindowID, Update<MessageRow>)
     case library(WindowID, Update<LibraryRow>)
+    case folders(WindowID, Update<FolderRow>)
+    case roster(WindowID, Update<RosterRow>)
     /// Who's typing in each chat the windows show, all of it as it is now: a chat left out has
     /// nobody typing.
     case typing(Typists)
-    case windowFailed(WindowID, String)
+    /// A folder named in place: made, with its row, or renamed, or made and gone before jawd read it
+    /// back, with none.
+    case named(FolderRow?)
+    /// A name jawd turned down, in its words, for under the field.
+    case notNamed(String)
+    case windowFailed(WindowID, Failure)
     /// A message jawd has, as the box's key named it.
     case sent(key: String, message: String, row: MessageRow?)
     /// A message jawd didn't take: its text goes back to its box, with why.

@@ -67,12 +67,15 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         case "status": .reply(.status)
         case "layout.get": .reply(.layout)
         case "media.save": .reply(.saved)
+        case "folders.watch": .folders
+        case "roster.watch": .roster
+        case "folder.create": .reply(.folder)
         default: .reply(.json)
         }
         let value = try incoming(name, want)
         switch value {
         case .skip, .bad: Issue.record("\(name) doesn't decode: \(value)")
-        case let .push(method, _) where ["chats", "messages", "library", "typing", "resync", "connection", "notice", "link"].contains(method):
+        case let .push(method, _) where ["chats", "messages", "library", "typing", "resync", "connection", "notice", "link", "folders", "roster"].contains(method):
             Issue.record("\(name) decodes only as an untyped push")
         default: break
         }
@@ -369,13 +372,14 @@ func pushed(_ line: String) -> Incoming {
             "nor on its own, without Presence's try?")
 }
 
-@Test func `a folder is smart or yours by its id, whether or not its rule came`() throws {
+@Test func `a folder is built in, smart or yours by its id, whether or not its rule came`() throws {
     let rows = try JSONDecoder().decode([FolderRow].self, from: Data(#"""
     [{"id":"smart:8","v":0,"parent":null,"name":"Waiting on me","position":0,"smart":null,"unread":0,"mentions":0,"count":0,"favourite":null},
      {"id":"starred","v":0,"parent":null,"name":"Starred","position":5,"smart":null,"unread":0,"mentions":0,"count":0,"favourite":null}]
     """#.utf8))
     #expect(rows[0].isSmart && !rows[0].isYours, "a smart folder whose rule jawd couldn't read")
     #expect(!rows[1].isYours && !rows[1].isSmart, "a built-in folder jawd adds later is never yours")
+    #expect(rows[1].isBuiltIn && !rows[0].isBuiltIn, "but built in, so it shows among the built-in folders")
 }
 
 @Test func `a chat row says the folders it sits in and its slot, as the protocol's text has them`() throws {

@@ -95,6 +95,16 @@ public final class Client: Sendable {
         open(.library, filter.chat ?? "", place, filter: filter)
     }
 
+    /// Watches the folder tree: every folder and the favourite slots, one window, watched whole.
+    public func watchFolders() -> WindowID {
+        open(.folders, "", .top(0))
+    }
+
+    /// Watches a folder's roster, its people from the top.
+    public func watchRoster(_ folder: String, _ place: Place) -> WindowID {
+        open(.roster, folder, place)
+    }
+
     /// Moves a window, for scrolling. Moves asked while one is in flight wait for it, and only the
     /// latest is sent.
     public func move(_ window: WindowID, _ place: Place) {
@@ -113,6 +123,8 @@ public final class Client: Sendable {
             s.chats[window] = nil
             s.messages[window] = nil
             s.library[window] = nil
+            s.folders[window] = nil
+            s.roster[window] = nil
             guard let w = s.windows[window] else { return (nil, false) }
             if w.asking != nil {
                 s.windows[window]!.closing = true
@@ -157,12 +169,16 @@ public final class Client: Sendable {
                 chats: s.chats.mapValues { $0.update() },
                 messages: s.messages.mapValues { $0.update() },
                 library: s.library.mapValues { $0.update() },
+                folders: s.folders.mapValues { $0.update() },
+                roster: s.roster.mapValues { $0.update() },
                 typing: s.typingChanged ? s.typing : nil,
             )
             s.events.removeAll(keepingCapacity: true)
             s.chats.removeAll(keepingCapacity: true)
             s.messages.removeAll(keepingCapacity: true)
             s.library.removeAll(keepingCapacity: true)
+            s.folders.removeAll(keepingCapacity: true)
+            s.roster.removeAll(keepingCapacity: true)
             s.typingChanged = false
             if !frame.isEmpty { s.stats.frames += 1 }
             return frame
@@ -221,7 +237,7 @@ public final class Client: Sendable {
         let id = s.id()
         let place = w.place
         let data: Data
-        if let watch = w.watch, !again {
+        if let watch = w.watch, !again, w.kind != .folders {
             let moving = WatchMove(watch: watch, around: place.around, before: place.before, after: place.after)
             data = Lines.encode(id: id, method: "watch.move", params: moving)
         } else {
@@ -242,6 +258,12 @@ public final class Client: Sendable {
                 let watch = LibraryWatch(filter: w.filter ?? LibraryFilter(), around: place.around, before: place.before,
                                          after: place.after)
                 data = Lines.encode(id: id, method: "library.watch", params: watch)
+            case .folders:
+                data = Lines.encode(id: id, method: "folders.watch", params: FoldersWatch(have: have))
+            case .roster:
+                // As a chat list, a roster comes whole, its have saying which people left.
+                let watch = RosterWatch(folder: w.of, around: place.around, before: place.before, after: place.after, have: have)
+                data = Lines.encode(id: id, method: "roster.watch", params: watch)
             }
         }
         let landingAgain: Bool? = (w.watch == nil || again) ? again : nil
@@ -422,9 +444,11 @@ public final class Client: Sendable {
                 case .find: .find
                 case let .window(landing):
                     switch s.windows[landing.window]?.kind {
-                    case .messages: .messages
-                    case .library: .library
-                    case .chats, nil: .chats
+                    case .messages?: .messages
+                    case .library?: .library
+                    case .folders?: .folders
+                    case .roster?: .roster
+                    case .chats?, nil: .chats
                     }
                 case .unwatch, nil: .nothing
                 }
@@ -518,6 +542,14 @@ public final class Client: Sendable {
             let update = Update<LibraryRow>(seq: push.seq, remove: push.remove, upsert: push.upsert, total: push.total,
                                             older: push.older, counts: push.counts)
             return windowPush(push.watch, generation) { s, window in s.mergeLibrary(window, update) }
+        case let .foldersPush(push):
+            if push.unread > 0 { _ = event(.unreadable(Self.unread(push.unread, "folders", push.why)), generation, urgent: false) }
+            let update = Update<FolderRow>(seq: push.seq, remove: push.remove, upsert: push.upsert, favourites: push.favourites)
+            return windowPush(push.watch, generation) { s, window in s.mergeFolders(window, update) }
+        case let .rosterPush(push):
+            if push.unread > 0 { _ = event(.unreadable(Self.unread(push.unread, "people", push.why)), generation, urgent: false) }
+            let update = Update<RosterRow>(seq: push.seq, remove: push.remove, upsert: push.upsert, total: push.total)
+            return windowPush(push.watch, generation) { s, window in s.mergeRoster(window, update) }
         case let .typing(push):
             let (current, changed) = state.withLock { s -> (Bool, Bool) in
                 guard s.current(generation) else { return (false, false) }
@@ -575,6 +607,12 @@ public final class Client: Sendable {
                 _ = event(.unreadable(Self.unread(watched.unread, "library items", watched.why)), generation, urgent: false)
             }
             return reply(id, .success(.library(watched)), generation)
+        case let .folders(id, watched):
+            if watched.unread > 0 { _ = event(.unreadable(Self.unread(watched.unread, "folders", watched.why)), generation, urgent: false) }
+            return reply(id, .success(.folders(watched)), generation)
+        case let .roster(id, watched):
+            if watched.unread > 0 { _ = event(.unreadable(Self.unread(watched.unread, "people", watched.why)), generation, urgent: false) }
+            return reply(id, .success(.roster(watched)), generation)
         }
     }
 
@@ -639,6 +677,8 @@ public final class Client: Sendable {
         case chats(ChatsWatched)
         case messages(MessagesWatched)
         case library(LibraryWatched)
+        case folders(FoldersWatched)
+        case roster(RosterWatched)
     }
 
     func reply(_ id: UInt64, _ outcome: Result<Answer, Failure>, _ generation: UInt64) -> Bool {
@@ -699,6 +739,10 @@ public final class Client: Sendable {
                     watch = watched.watch
                 case let .library(watched):
                     watch = watched.watch
+                case let .folders(watched):
+                    watch = watched.watch
+                case let .roster(watched):
+                    watch = watched.watch
                 default:
                     failed = (window, .jawd(JawError(code: ErrorCode.internal, message: "jawd's answer to a watch wasn't one")))
                     return true
@@ -739,6 +783,13 @@ public final class Client: Sendable {
                                                     note: .some(watched.note))
                     if moved { update.moved = Moved(place: place, newer: 0) }
                     s.mergeLibrary(window, update)
+                case let .folders(watched):
+                    s.mergeFolders(window, Update<FolderRow>(seq: watched.seq, remove: watched.remove, upsert: watched.rows,
+                                                             favourites: watched.favourites))
+                case let .roster(watched):
+                    var update = Update<RosterRow>(seq: watched.seq, remove: watched.remove, upsert: watched.rows, total: watched.total)
+                    if moved { update.moved = Moved(place: place, newer: 0) }
+                    s.mergeRoster(window, update)
                 default:
                     break
                 }
@@ -754,7 +805,7 @@ public final class Client: Sendable {
                     return true
                 }
                 let gone = if case let .jawd(error) = failure { error.code == ErrorCode.notFound } else { false }
-                if landing.again == true, gone {
+                if landing.again == true, gone, Self.fallback(w.kind, place) != place {
                     s.windows[window]!.place = Self.fallback(w.kind, place)
                     lines.append(contentsOf: [asking(&s, window, again: true)].compactMap(\.self))
                 } else if w.place != place {
@@ -786,6 +837,8 @@ public final class Client: Sendable {
         switch kind {
         case .chats, .library: return .top(rows)
         case .messages: return .newest(rows)
+        case .folders: return place
+        case .roster: return .top(rows)
         }
     }
 }
@@ -853,11 +906,13 @@ public struct Frame: Sendable {
     public var chats: [WindowID: Update<ChatRow>]
     public var messages: [WindowID: Update<MessageRow>]
     public var library: [WindowID: Update<LibraryRow>]
+    public var folders: [WindowID: Update<FolderRow>] = [:]
+    public var roster: [WindowID: Update<RosterRow>] = [:]
     /// Who's typing in the chats the windows show, all of it as it is now, when it changed.
     public var typing: Typists?
 
     public var isEmpty: Bool {
-        events.isEmpty && chats.isEmpty && messages.isEmpty && library.isEmpty && typing == nil
+        events.isEmpty && chats.isEmpty && messages.isEmpty && library.isEmpty && folders.isEmpty && roster.isEmpty && typing == nil
     }
 }
 
@@ -879,7 +934,7 @@ struct Unreached: Error {
 }
 
 enum Kind: Sendable {
-    case chats, messages, library
+    case chats, messages, library, folders, roster
 }
 
 /// A watch or a move in flight.
@@ -929,12 +984,13 @@ struct Win: Sendable {
     }
 
     /// Whether it shows `chat`, for who's typing there: a chat list among its rows, a conversation
-    /// as its chat; a library shows nobody typing.
+    /// as its chat; the folder tree and a roster show no chats, and a library nobody typing.
     func shows(_ chat: String) -> Bool {
         switch kind {
         case .chats: ids.contains(chat)
         case .messages: of == chat
         case .library: false
+        case .folders, .roster: false
         }
     }
 }
@@ -964,6 +1020,8 @@ struct State: Sendable {
     var chats: [WindowID: Merged<ChatRow>] = [:]
     var messages: [WindowID: Merged<MessageRow>] = [:]
     var library: [WindowID: Merged<LibraryRow>] = [:]
+    var folders: [WindowID: Merged<FolderRow>] = [:]
+    var roster: [WindowID: Merged<RosterRow>] = [:]
     /// Who's typing in the chats the windows show, as jawd last said, and whether that changed since
     /// the caller last drained.
     var typing: Typists = [:]
@@ -1048,6 +1106,20 @@ struct State: Sendable {
         guard var w = windows[window], !w.closing else { return }
         w.seq = max(w.seq ?? update.seq, update.seq)
         library[window, default: Merged()].add(update, ids: &w.ids)
+        windows[window] = w
+    }
+
+    mutating func mergeFolders(_ window: WindowID, _ update: Update<FolderRow>) {
+        guard var w = windows[window], !w.closing else { return }
+        w.seq = max(w.seq ?? update.seq, update.seq)
+        folders[window, default: Merged()].add(update, ids: &w.ids)
+        windows[window] = w
+    }
+
+    mutating func mergeRoster(_ window: WindowID, _ update: Update<RosterRow>) {
+        guard var w = windows[window], !w.closing else { return }
+        w.seq = max(w.seq ?? update.seq, update.seq)
+        roster[window, default: Merged()].add(update, ids: &w.ids)
         windows[window] = w
     }
 }

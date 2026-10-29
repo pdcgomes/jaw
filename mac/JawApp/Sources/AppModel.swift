@@ -237,8 +237,10 @@ final class AppModel {
             say("no chat started: \(why)", warn: true)
         case let .status(status):
             window?.showStatus(status)
-        case let .windowFailed(w, why):
-            if let id = libraryWindows[w] { libraries[id]?.refuse(why) } else { say("a window couldn't be watched: \(why)", warn: true) }
+        case let .windowFailed(w, why) where libraryWindows[w] != nil:
+            if let id = libraryWindows[w] { libraries[id]?.refuse("\(why)") }
+        case let .windowFailed(_, failure):
+            say("a window couldn't be watched: \(failure)", warn: true)
         case let .layout(kept) where kept.interface == TerminalPanes.interface:
             terminalPanes(kept)
         case let .looked(chat, found):
@@ -248,7 +250,7 @@ final class AppModel {
             say("not downloaded: \(why)", warn: true)
         case let .saved(ticket, message, path, why):
             savedAnswer(ticket, message, path, why)
-        case .push, .chats, .layout:
+        case .push, .chats, .layout, .folders, .roster, .named, .notNamed:
             break
         }
     }
