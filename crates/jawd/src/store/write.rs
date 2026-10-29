@@ -950,7 +950,11 @@ fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsett
 /// after that it only moves forward. WhatsApp saying so means it knows, and unmarks the chat;
 /// your reading it here owes it receipts for what that reads, and leaves the mark to the phone.
 /// WhatsApp saying so of a chat merged into this one, by its JID, says nothing of whether this
-/// one's messages were read, so how far WhatsApp was told doesn't move for it.
+/// one's messages were read, so how far WhatsApp was told doesn't move for it. Nor does it, said by
+/// this chat's own JID, say anything of the messages that came under another of the person's JIDs,
+/// which a merge leaves owed: while one of those lies past how far WhatsApp was told, that stays,
+/// and the receipts go, again for what the phone did read, which is harmless. A read with the
+/// phone's counts moves it as before, since kept below them it would owe what they count unread.
 fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     let jid = chat_jid(db, &read.chat)?;
     let own = user_jid(&read.chat) == jid;
@@ -977,6 +981,7 @@ fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     let Some(was) = chat_read(db, chat)? else { return Ok(false) };
     let mut now = was.clone();
     let taken = !was.known || was.phone_unread.is_some() || was.at.is_none_or(|read| read < at);
+    let speaks = !read.here && own && (read.phone.is_some() || !came_elsewhere(db, chat, was.told, at)?);
     if read.here {
         if !taken {
             return Ok(false);
@@ -989,10 +994,10 @@ fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
         let (phone_unread, phone_mentions) = read.phone.map_or((None, None), |(u, m)| (Some(u.into()), Some(m.into())));
         (now.at, now.known, now.phone_unread, now.phone_mentions) = (Some(at), true, phone_unread, phone_mentions);
         now.marked = false;
-        if own {
+        if speaks {
             now.told = None;
         }
-    } else if own {
+    } else if speaks {
         // jaw is further on; WhatsApp now knows the chat is read this far.
         now.told = now.told.map(|told| told.max(at));
     }
@@ -1009,6 +1014,19 @@ fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     }
     stamps.unsettle(chat);
     Ok(true)
+}
+
+/// Whether chat `chat` has a message from others after `told` and up to `to` that came under
+/// another of its person's JIDs than the chat's own, as a merge brings them.
+fn came_elsewhere(db: &Connection, chat: i64, told: Option<(i64, i64)>, to: (i64, i64)) -> Result<bool> {
+    let Some(from) = told else { return Ok(false) };
+    Ok(db
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND (at, n) <= (?4, ?5)
+                AND mine = 0 AND kind NOT IN ('system', 'call') AND sender IN
+                    (SELECT j.n FROM chats c JOIN person_jids j ON j.person = c.person WHERE c.n = ?1 AND j.jid <> c.id))",
+        )?
+        .query_row(params![chat, from.0, from.1, to.0, to.1], |r| r.get(0))?)
 }
 
 /// Merges chat `gone`'s read position into `keep`'s, as a merge starts and again just before

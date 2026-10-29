@@ -1055,3 +1055,217 @@ async fn a_phone_read_naming_the_chat_by_a_jid_merged_into_it_never_cancels_the_
     all.push("l5".into());
     assert_eq!(owed(&store, NEW).await, all, "still owed after a read further on");
 }
+
+/// The number's chat with n0 to n4, read on the phone past every message, and the LID's with l0 to
+/// l4, never read, merged: the number's chat owes l0 to l4, whose reading WhatsApp hasn't heard of.
+async fn read_on_the_phone_and_merged() -> (tempfile::TempDir, Store) {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let mut changes: Vec<Change> = (0..5).map(|i| message(NEW, &format!("n{i}"), AT + i)).collect();
+    changes.extend((0..5).map(|i| message(LID, &format!("l{i}"), AT + 10 + i)));
+    store.apply(Lane::Live, changes).await.unwrap();
+    let on_the_phone = Change::Read(Read { chat: NEW.into(), at: AT + 5_000, ..Read::default() });
+    store.apply(Lane::Live, vec![on_the_phone]).await.unwrap();
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    merged(&store, LID).await;
+    assert_eq!(owed(&store, NEW).await, ids("l", 0..5), "whether the phone read the LID's can't be known");
+    (home, store)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_read_of_the_chat_that_stays_by_its_own_jid_never_cancels_the_receipts_for_what_came_under_another() {
+    let (_home, store) = read_on_the_phone_and_merged().await;
+    let on_the_phone = |at| Change::Read(Read { chat: NEW.into(), at, ..Read::default() });
+    let mut all = ids("l", 0..5);
+    // The same read again, as a resync sends it, naming the chat that stays by its own JID.
+    store.apply(Lane::Live, vec![on_the_phone(AT + 5_000)]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, all, "still owed after the same read again");
+    // Nor does one further on, past a message that came since under the number.
+    store.apply(Lane::Live, vec![message(NEW, "n5", AT + 6_000)]).await.unwrap();
+    store.apply(Lane::Live, vec![on_the_phone(AT + 7_000)]).await.unwrap();
+    all.push("n5".into());
+    assert_eq!(owed(&store, NEW).await, all, "still owed after a read further on, n5's again, which is harmless");
+    // Once those have gone, a read by the number past only what came under it tells WhatsApp of it.
+    let told = query(&store, |db| {
+        let n: i64 = db.query_row("SELECT n FROM chats WHERE id = ?1", [NEW], |r| r.get(0))?;
+        outbox::owed(db, n)
+    })
+    .await;
+    let Owing::Receipts(told) = told else { panic!("the new number's chat owes receipts: {told:?}") };
+    let told = outbox::Step::Told { chat: told.chat, from: told.from, upto: told.upto };
+    store.apply(Lane::Live, vec![Change::Outbox(told)]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new());
+    store.apply(Lane::Live, vec![message(NEW, "n6", AT + 8_000)]).await.unwrap();
+    let here = Change::Read(Read { chat: NEW.into(), ids: vec!["n6".into()], here: true, ..Read::default() });
+    store.apply(Lane::Live, vec![here]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, ["n6"], "read here");
+    store.apply(Lane::Live, vec![message(LID, "l5", AT + 8_500)]).await.unwrap();
+    store.apply(Lane::Live, vec![on_the_phone(AT + 8_100)]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "then on the phone, by the JID n6 came under");
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 1)], "l5, after it, still unread");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_read_with_the_phones_counts_never_leaves_owed_what_they_count_unread() {
+    let (_home, store) = read_on_the_phone_and_merged().await;
+    store.apply(Lane::Live, vec![message(NEW, "n5", AT + 6_000), message(NEW, "n6", AT + 6_001)]).await.unwrap();
+    // History's read of the number's chat: 3 unread on the phone, more than it brought, so l4, n5
+    // and n6 count unread.
+    let history = Read { chat: NEW.into(), at: AT + 6_001, phone: Some((3, 0)), ..Read::default() };
+    store.apply(Lane::Live, vec![Change::Read(history)]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 3)]);
+    let owed = owed(&store, NEW).await;
+    assert!(!owed.iter().any(|id| ["l4", "n5", "n6"].contains(&id.as_str())), "{owed:?}");
+}
+
+/// A xorshift generator, so a failing seed can be run again.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n.max(1)
+    }
+}
+
+/// A random history of Ana's number's chat and her LID's: messages from her in each, and some of
+/// yours, then, in a random order, more of both, reads on the phone by either JID (to a time, or
+/// naming a message, as a receipt from your phone does) and here, the join that starts the LID's
+/// chat merging into the number's, and steps of the merge; then the merge stepped to its end and
+/// everything sent again, as a resync sends it. The phone's counts are left out, since a read with
+/// them moves how far WhatsApp was told as before.
+fn reads_and_a_merge(seed: u64) -> Vec<Then> {
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let (mut at, mut next) = (AT, 0);
+    let mut came: [Vec<String>; 2] = Default::default();
+    let mut fresh = |prefix: &str| {
+        next += 1;
+        format!("{prefix}{next}")
+    };
+    let mut script = Vec::new();
+    for (j, jid) in [NEW, LID].into_iter().enumerate() {
+        let mut first = Vec::new();
+        for k in 0..1 + rng.below([30, 450][j]) {
+            at += 1;
+            if k > 0 && rng.below(8) == 0 {
+                first.push(Change::Message(mine(jid, &fresh("y"), at)));
+            } else {
+                let id = fresh(["n", "l"][j]);
+                first.push(message(jid, &id, at));
+                came[j].push(id);
+            }
+        }
+        script.push(Then::Arrive(first));
+    }
+    let ops = 30 + rng.below(30);
+    let joined = rng.below(ops / 2);
+    for i in 0..ops {
+        if i == joined {
+            script.push(Then::Arrive(vec![join(NEW, LID)]));
+        }
+        at += 1 + rng.below(20) as i64;
+        let j = rng.below(2) as usize;
+        let jid = [NEW, LID][j];
+        let named = |rng: &mut Rng| came[j][rng.below(came[j].len() as u64) as usize].clone();
+        let change = match rng.below(20) {
+            0..=4 => {
+                let id = fresh(["n", "l"][j]);
+                came[j].push(id.clone());
+                message(jid, &id, at)
+            }
+            5 => Change::Message(mine(jid, &fresh("y"), at)),
+            6..=9 => Change::Read(Read { chat: jid.into(), at: at - rng.below(600) as i64, ..Read::default() }),
+            10..=11 => Change::Read(Read { chat: jid.into(), at, ids: vec![named(&mut rng)], ..Read::default() }),
+            12..=15 => {
+                Change::Read(Read { chat: jid.into(), ids: vec![named(&mut rng)], here: true, ..Read::default() })
+            }
+            _ => {
+                script.push(Then::Step);
+                continue;
+            }
+        };
+        script.push(Then::Arrive(vec![change]));
+    }
+    script.push(Then::Rest);
+    let again: Vec<Then> = script
+        .iter()
+        .filter_map(|then| match then {
+            Then::Arrive(changes) => Some(Then::Arrive(changes.clone())),
+            Then::Step | Then::Rest => None,
+        })
+        .collect();
+    script.extend(again);
+    script.push(Then::Rest);
+    script
+}
+
+/// Each message one of the person's chats owes a read receipt for, by ID: from others, after how
+/// far WhatsApp was told of its chat, and up to where that was read.
+async fn owing(store: &Store) -> Vec<String> {
+    column(
+        store,
+        "SELECT m.id FROM chats c JOIN messages m ON m.chat = c.n
+        WHERE c.told_at IS NOT NULL AND m.mine = 0 AND m.kind NOT IN ('system', 'call')
+            AND (m.at, m.n) > (c.told_at, c.told_n) AND (m.at, m.n) <= (c.read_at, coalesce(c.read_n, 9223372036854775807))
+        ORDER BY m.id",
+    )
+    .await
+}
+
+/// Message `id`'s JID it came under, and whether its chat is read past it.
+async fn came_and_read(store: &Store, id: String) -> (String, bool) {
+    query(store, move |db| {
+        Ok(db.query_row(
+            "SELECT j.jid, (m.at, m.n) <= (c.read_at, coalesce(c.read_n, 9223372036854775807))
+            FROM messages m JOIN chats c ON c.n = m.chat JOIN person_jids j ON j.n = m.sender WHERE m.id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get::<_, Option<bool>>(1)?.unwrap_or(false))),
+        )?)
+    })
+    .await
+}
+
+/// Plays one of `reads_and_a_merge`'s histories, failing at the first read on the phone that leaves
+/// a receipt no longer owed for a message still read that came under a JID it doesn't name.
+async fn no_read_cancels_what_it_cant_vouch_for(seed: u64) {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    for (i, then) in reads_and_a_merge(seed).into_iter().enumerate() {
+        let changes = match then {
+            Then::Arrive(changes) => changes,
+            Then::Step => {
+                step(&store, LID).await;
+                continue;
+            }
+            Then::Rest => {
+                merged(&store, LID).await;
+                continue;
+            }
+        };
+        let named = match &changes[..] {
+            [Change::Read(read)] if !read.here => Some(read.chat.clone()),
+            _ => None,
+        };
+        let before = owing(&store).await;
+        store.apply(Lane::Live, changes).await.unwrap();
+        let Some(named) = named else { continue };
+        let after = owing(&store).await;
+        for id in before.into_iter().filter(|id| !after.contains(id)) {
+            let (under, read) = came_and_read(&store, id.clone()).await;
+            assert!(
+                !read || under == named,
+                "seed {seed}, op {i}: a read on the phone by {named} left {id}, which came under {under}, owed no more"
+            );
+        }
+    }
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW], "seed {seed}: one chat at the end");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_random_histories_of_reads_and_a_merge_a_phone_read_leaves_owed_what_came_under_a_jid_it_doesnt_name() {
+    for seed in 1..=24 {
+        no_read_cancels_what_it_cant_vouch_for(seed).await;
+    }
+}

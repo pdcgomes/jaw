@@ -3021,6 +3021,16 @@ UPDATE chats SET marked_unread = ?2, v = ?3 WHERE n = ?1
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
+SELECT EXISTS (SELECT 1 FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND (at, n) <= (?4, ?5) AND mine = 0 AND kind NOT IN ('system', 'call') AND sender IN (SELECT j.n FROM chats c JOIN person_jids j ON j.person = c.person WHERE c.n = ?1 AND j.jid <> c.id))
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 2
+      SEARCH messages USING INDEX messages_by_time (chat=? AND at>? AND at<?)
+      LIST SUBQUERY 1
+        SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+        SEARCH j USING INDEX person_jids_by_person (person=?)
+        CREATE BLOOM FILTER
+
+-- src/store/write.rs
 SELECT at, n FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND mine = 0 AND kind NOT IN ('system', 'call') ORDER BY at, n LIMIT 1
     SEARCH messages USING COVERING INDEX messages_by_time (chat=? AND at>?)
 
