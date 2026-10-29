@@ -100,7 +100,7 @@ enum Bench {
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
                 || key.hasPrefix("menu-key:") || key == "promise" || key == "window"
-                || key == "sidebar" || key.hasPrefix("folder:")
+                || key == "sidebar" || key.hasPrefix("folder:") || key == "tree:samples" || key == "show:sidebar"
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key == "promise" { keepPromise(model) }
@@ -116,6 +116,8 @@ enum Bench {
                     }
                 }
             }
+            if key == "show:sidebar" { model.window?.content.showSidebar(animated: false) }
+            if key == "tree:samples" { model.window?.sidebar.apply(Samples.folderUpdate) }
             if key.hasPrefix("folder:"), let i = Int(key.dropFirst(7)), !(model.window?.sidebar.pick(row: i) ?? false) {
                 FileHandle.standardError.write(Data("\(key): no folder at row \(i)\n".utf8))
             }
@@ -173,7 +175,9 @@ enum Bench {
                 } else if key.hasPrefix("vote:") || key.hasPrefix("poll:") {
                     FileHandle.standardError.write(Data("\(key): \(pollSaid(model.conversation?.newestPoll))\(model.notice.map { " · said \"\($0.0)\"" } ?? "")\n".utf8))
                 } else if key == "sidebar", let sidebar = model.window?.sidebar {
-                    FileHandle.standardError.write(Data("sidebar: \(sidebar.said.joined(separator: " | ")) · picked \(sidebar.picked) · selected \(sidebar.selected ?? "nothing")\n".utf8))
+                    let keys = model.window?.window?.isKeyWindow == true
+                        && (model.window?.window?.firstResponder as? NSView)?.isDescendant(of: sidebar.view) == true ? " · with the keys" : ""
+                    FileHandle.standardError.write(Data("sidebar: \(sidebar.said.joined(separator: " | ")) · picked \(sidebar.picked) · selected \(sidebar.selected ?? "nothing")\(keys)\n".utf8))
                 } else {
                     let open = model.window.flatMap { w in w.palette.isVisible ? w.palette.model : nil }
                     let palette = open.map { p in

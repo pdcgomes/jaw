@@ -37,14 +37,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     init(model: AppModel) {
         self.model = model
+        // A snapshot takes nothing from the last run and leaves nothing for the next: every checkout's
+        // snapshots on the build Mac share the app's defaults.
+        let keeps = model.launch.snapshot == nil
         content = WindowContent(sidebar: SidebarController(), chatList: ChatListController(folder: model.folder, roles: model.roles),
                                 detail: DetailController(), bar: BottomBar(commands: { [weak model] in model?.allCommands ?? [] }),
-                                autosaveName: "jaw.split")
+                                autosaveName: keeps ? "jaw.split" : nil)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780), styleMask: TitleBar.style,
                               backing: .buffered, defer: false)
         window.title = "Jaw"
         window.minSize = NSSize(width: 520, height: 420)
-        window.setFrameAutosaveName("jaw")
+        if keeps { window.setFrameAutosaveName("jaw") }
         super.init(window: window)
         window.delegate = self
 
@@ -55,7 +58,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
 
         sidebar.host = model
-        sidebar.keepsOpen = "jaw.sidebar.open"
+        if keeps { sidebar.keepsOpen = "jaw.sidebar.open" }
         chatList.host = model
         palette.model.find = { [weak model] id, query, kinds, chat, limit in
             model?.jawd.find(id: id, query: query, kinds: kinds, chat: chat, limit: limit)

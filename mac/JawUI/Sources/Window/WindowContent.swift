@@ -151,6 +151,11 @@ public final class WindowContent: NSViewController {
         collapse(sidebarItem, !sidebarItem.isCollapsed, animated: true)
     }
 
+    /// Unfolds the sidebar, as naming a folder in place needs it; a still screen passes `animated: false`.
+    public func showSidebar(animated: Bool = true) {
+        collapse(sidebarItem, false, animated: animated)
+    }
+
     public func toggleChatList() {
         collapse(listItem, !listItem.isCollapsed, animated: true)
     }

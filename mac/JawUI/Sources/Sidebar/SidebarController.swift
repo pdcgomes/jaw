@@ -111,10 +111,12 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         (outline.item(atRow: outline.selectedRow) as? Item)?.id
     }
 
-    /// Picks the folder on `row`, as a click does; false when the row isn't a folder.
+    /// Picks the folder on `row` as a click does, the tree taking the keys; false when the row isn't a
+    /// folder.
     @discardableResult
     public func pick(row: Int) -> Bool {
         guard row >= 0, let id = (outline.item(atRow: row) as? Item)?.id, tree.row(id) != nil else { return false }
+        outline.window?.makeFirstResponder(outline)
         outline.selectRowIndexes([row], byExtendingSelection: false)
         return true
     }
