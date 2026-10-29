@@ -17,8 +17,9 @@ use sha2::{Digest, Sha256};
 
 /// jaw.db's migrations, in order. A table's class says what may be done to it (see "Migrations" in
 /// the design); migrations from 5 on declare it beside each table, and those made before are:
-/// - raw: `inbox`, `history_raw`, `app_state` (the app state not applied yet), `pending` (what
-///   waits for a message, with its raw);
+/// - raw: `inbox`, `history_raw`, `app_state` (the app state not applied yet, and what's held back
+///   while jaw's own change to the same setting is on its way), `pending` (what waits for a message,
+///   with its raw);
 /// - fetched from WhatsApp: `person_jids`, `group_members`, `poll_options`, and `media`'s
 ///   description of each file (its `path`, `state`, `progress` and previews are jaw's own);
 /// - jaw's own: `folders`, `folder_items`, `outbox`, `sync_state`, and `reactions`, `receipts` and

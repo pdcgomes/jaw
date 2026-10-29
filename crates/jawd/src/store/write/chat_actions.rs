@@ -7,9 +7,9 @@
 //! (`app_state_awaiting`), and WhatsApp sends app state back in the order it took it, so what it
 //! sends for that index meanwhile came before the patch: it's kept raw but not applied
 //! (`held_back`), since the patch sets every device as the row already is. A patch WhatsApp refuses
-//! for good, while it's its index's latest, is undone here (`undo`): what it set goes back to how a
-//! chat is when nothing has set it, since fetching its collection again brings only what WhatsApp
-//! holds, and the fetch then sets it as the phone has it.
+//! for good, or that runs out of tries, while it's its index's latest, is undone here (`undo`): what
+//! it set goes back to how a chat is when nothing has set it, since fetching its collection again
+//! brings only what WhatsApp holds, and the fetch then sets it as the phone has it.
 
 use std::sync::{Arc, Mutex};
 
@@ -1120,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_that_gives_up_as_failed_ends_its_indexs_wait_with_it() {
+    fn a_patch_failed_for_good_rather_than_refused_still_ends_its_indexs_wait_with_it() {
         let db = db();
         chats(&db, &[ANA]);
         let index = ["pin_v1", ANA];
