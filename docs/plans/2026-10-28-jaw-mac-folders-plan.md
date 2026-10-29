@@ -13,7 +13,7 @@
 What the design leaves open, each with its options and the lean the plan builds; none blocks a task, and each is a small change in the one place named. Questions 5 to 7 were decided after the plan's review, as the Mac's conventions have them; the others are built as their leans.
 
 1. **Move to when the chat is in this folder only through a subfolder.** The design greys Remove from then, and says nothing of Move to, which would file the chat in the other folder and take it out of one it isn't directly in, leaving it here through the subfolder. A: greyed with Remove from, since neither can take it out of this folder (lean); B: Move to takes it out of the subfolder that holds it here; C: offered, and the chat stays here through the subfolder. Task 6 builds A, in `FolderMenu.commands`.
-2. **Who's folded under "N offline".** The design lists a folder's people "online, typing and recording first, then by when last seen, as jawd sorts them, the rest folded under N offline", and the wireframe lists Mãe, last seen 12 minutes ago, above "▸ 3 offline"; the terminal, under All, folds everyone who isn't online, typing or recording, and under a folder folds nobody. A: under a folder, those jawd has no last seen for (who hide it, or whom WhatsApp hasn't told jawd about) are folded and the rest listed as jawd sorts them; under All, as the terminal, everyone not online, typing or recording (lean, as the wireframe and the terminal draw them); B: everyone not online, typing or recording, everywhere; C: under a folder nobody, as the terminal. Task 13 builds A, in one closure of `RosterLines.lines`.
+2. **Who's folded under "N offline".** The design lists a folder's people "online, typing and recording first, then by when last seen, as jawd sorts them, the rest folded under N offline", and the wireframe lists Mãe, last seen 12 minutes ago, above "▸ 3 offline"; the terminal, under All, folds everyone who isn't online, typing or recording, and under a folder folds nobody. A: under a folder, those jawd has no last seen for (who hide it, or whom WhatsApp hasn't told jawd about) are folded and the rest listed as jawd sorts them; under All, as the terminal, everyone not online, typing or recording (lean, as the wireframe and the terminal draw them); B: everyone not online, typing or recording, everywhere; C: under a folder nobody, as the terminal. Whichever, someone typing or recording in their chat is listed, never folded: jawd's presence is `online`, `seen` or `hidden`, and typing shows from the chat's typing (the protocol's "Presence and typing in chats"), so it doesn't move them in jawd's order. Task 13 builds A, in `RosterLines.lines`.
 3. **Saying which folder the list shows when the sidebar's folded.** Below 960 points, after ⌘B and in focus mode, nothing on screen names the list's folder, and ⌥⇧↓ or ⌘1 can change it; the terminal names it in its footer when neither its list nor its sidebar is drawn, with the key that shows its chats. A: the status line names a folder a key picks while the sidebar isn't shown, adding the key that shows its chats when the list isn't shown either (lean); B: a title over the chat list, always; C: nothing. Task 12 builds A, in `FolderTree.pickedLine`.
 4. **Move to and Remove from beyond the chat list.** The design gives the pane's menu "the chat's actions as the chat list's menu has them", and the wireframe draws the pane's menu with Add to Folder and Favourite only. A: every chat menu (the list's, the pane's, the menu bar's Chat menu) has Move to and Remove from while the list shows one of your folders that holds the chat, directly or through a subfolder, by one rule (lean: each action written once); B: the chat list's menu only. Task 6 builds A, in `FolderMenu.entries` and `ChatMenu.folderItems`.
 5. **A folder made in place.** Decided: a folder made from the sidebar (⇧⌘N, the sidebar's New Folder… and a folder's New Folder Inside…) is picked, so the list shows it, as Notes and Reminders select a new item in their sidebars; one made from a chat's Add to Folder ▸ New Folder… isn't, and the list keeps what it showed, since that files the chat there and shouldn't take the list away. Task 7 builds it, in `SidebarController.named(_:)`.
@@ -28,7 +28,7 @@ What the design leaves open, each with its options and the lean the plan builds;
 - Everything drawn lives in JawUI and is made from values; the app target defines no view or view controller of its own (the harness's second rule, which `mac-harness` adds to `scripts/check-harness`, fails the build on one once it's on main); `AppModel` is the only code that talks to jawd. The harness names neither `Jawd` nor `Client` (`scripts/check-harness`).
 - Every new screen has a harness scene (`JawHarness/Sources/Scenes/`, registered in `BuiltInScenes.swift`), checked in its sweep. Menus aren't screens a harness picture can hold (AppKit draws them in windows of their own); they're checked by JawUI's tests and the snapshot's `menu:` steps.
 - Each command is written once, with its menu title, palette phrase, key and menu; right-click menus are made from `MenuEntry` values worked out from rows, by `Menus.menu(_:command:)` and `Menus.items(_:command:)` (`mac/README.md`; the menus plan's task 1). An item under a title of its own has no tick; one whose title is its command's takes the command's tick.
-- The words are the design's: "Add to Folder", "New Folder…", "Move to", "Remove from <folder>", "Favourite", "Remove from Favourites", "New Folder Inside…", "Rename", "Delete…", "Folders", "Smart Folders", "Open Chat", "Start Chat", "Open in New Pane", "typing…", "recording…", "online", "N offline"; in the menu bar "New Folder" ⇧⌘N, "Rename Folder", "Delete Folder…" ⌘⌫, "Previous Folder" ⌥⇧↑, "Next Folder" ⌥⇧↓ and "Favourites" with ⌘1 to ⌘9. Where the design gives none, the terminal's are the reference (the parity plan's rule 1) with the Mac's keys in the terminal's place: "Ana Ribeiro filed in Family", "Ana Ribeiro taken out of Family", "Family moved to the top", "⌘3 goes to Family", "⌘3 is free", "nothing is on ⌘3; …".
+- The words are the design's: "Add to Folder", "New Folder…", "Move to", "Remove from <folder>", "Favourite", "Remove from Favourites", "New Folder Inside…", "Rename", "Delete…", "Folders", "Smart Folders", "Open Chat", "Start Chat", "Open in New Pane", "typing…", "recording…" (once jawd says which: a chat row's `typing` says only who, task 13), "online", "N offline"; in the menu bar "New Folder" ⇧⌘N, "Rename Folder", "Delete Folder…" ⌘⌫, "Previous Folder" ⌥⇧↑, "Next Folder" ⌥⇧↓ and "Favourites" with ⌘1 to ⌘9. Where the design gives none, the terminal's are the reference (the parity plan's rule 1) with the Mac's keys in the terminal's place: "Ana Ribeiro filed in Family", "Ana Ribeiro taken out of Family", "Family moved to the top", "⌘3 goes to Family", "⌘3 is free", "nothing is on ⌘3; …".
 - What jawd refuses is said in jawd's words: under the name field for a name, in the status line for anything else.
 - Nothing asks jawd as a menu opens: every menu is made from rows the app holds (the design's Budgets).
 - Before jawd serves folders (a jawd from main answers `folders.watch` with -32601), the sidebar keeps All and Archived, no menu has a folder item, nothing says a window couldn't be watched, and ⇧⌘N, ⌘1 to ⌘9, ⌥⇧↑ and ⌥⇧↓ say what they wait on when chosen ("folders come with jawd's M6", "favourites come with jawd's M6"), as the parity plan's rule 2 has a step land before jawd's part.
@@ -40,10 +40,10 @@ What the design leaves open, each with its options and the lean the plan builds;
 
 ## Where it's built, and what it waits on
 
-- **The branch.** `mac-folders` is made from main, which has the menus this plan builds on (`654037e` to `e7999d6`, then the palette's ⌘↩ through `openInNewPane` and VoiceOver's press on a button); its one commit of its own before task 1 is this plan. The menus' code the tasks name (`MenuEntry`, `Menus`, `ChatMenu`, `chatCommands(for:)`, `openInNewPane(_:)`, `MenuPopUp`, the snapshot's `menu:` steps) is main's, as the menus plan built it. The branch is built in a worktree made from it, `~/src/jaw-mac-folders` (`git -C ~/src/jaw-mac-menus worktree add ~/src/jaw-mac-folders mac-folders`), and `build-mac` copies that to `~/src/build-mac/jaw/jaw-mac-folders` on the build Mac.
+- **The branch.** `mac-folders` is made from main, which has the menus this plan builds on (`654037e` to `e7999d6`, then the palette's ⌘↩ through `openInNewPane` and VoiceOver's press on a button); its commits of its own before task 1 are this plan and its amendments, rebased onto main at f917587, whose Mac code the tasks' sketches are written against. The menus' code the tasks name (`MenuEntry`, `Menus`, `ChatMenu`, `chatCommands(for:)`, `openInNewPane(_:)`, `MenuPopUp`, the snapshot's `menu:` steps) is main's, as the menus plan built it. Main since has the menu bar as a `MenuBar`, which runs a command on Return only for its own modifiers, the palette's `.newPane` pick, and a snapshot that waits for the chat list to settle before pressing its keys; none of them changes what a task does. The branch is built in a worktree made from it, `~/src/jaw-mac-folders` (`git -C ~/src/jaw-mac-menus worktree add ~/src/jaw-mac-folders mac-folders`), and `build-mac` copies that to `~/src/build-mac/jaw/jaw-mac-folders` on the build Mac.
 - **Landing.** As the menus did, `mac-folders` lands on main once its tasks are done and reviewed, each task and then the whole branch, rather than being merged by the Mac builder: rebased onto main's tip, again if main moves first, and pushed from `~/src/jaw-mac-folders`, the worktree it was built in ("After the plan" has the steps). Its last commit before it lands takes step 2.1's rows out of `mac/parity.toml`, so main has `make check-parity` passing, as the parity plan's working rules have a step land: from task 2 on the Mac sends `folders.watch` and the folder requests, and the check fails on a gap the Mac has closed that the list still holds. Tasks 1 to 14 can land before `folders` is on main, as the parity plan's rule 2 has a step land before jawd's part, each folder action saying what it waits on; task 15 then follows on `mac-folders` rebased onto a main that has `folders`, and lands the same way. Each time the branch lands, the build Mac's folder (`ssh build-mac rm -rf src/build-mac/jaw/jaw-mac-folders`) and `target` in the worktree (jawd's debug build, several gigabytes) are deleted, which `build-mac` and task 15 make again if it follows; once task 15 has landed, so is the worktree.
 - **The harness's second phase.** `mac-harness` (not on main yet) moves the window's content into JawUI as `WindowContent`, which takes a `SidebarController` and leaves `MainWindowController` to wire it, as it does here. Every change to the sidebar is inside `SidebarController`; where a task changes `MainWindowController` or `AppModel.stateView`, it says what the same change is if `WindowContent` is in the checkout by then.
-- **jawd.** The protocol is `folders` at cc585c0, in its second audit (`git show folders:protocol/README.md`, "Folders and the roster"). Each task says what it waits on and what it can't try until `folders` lands; nothing is tried end to end until `folders` is on main and `mac-folders` is rebased onto it, which is task 15. Before then, the snapshot on `--demo`, whose jawd is built from the worktree, main's without folders, checks that the app falls back as it should.
+- **jawd.** The protocol is `folders` at 53981ad, rebased onto main's 8591529, its audit under way after two looks (`git show folders:protocol/README.md`: "Folders and the roster", "roster.watch", "Presence" and "Presence and typing in chats"). Since the plan was first written there, someone's presence is `online`, `seen` (with `at`) or `hidden`, and `known`; who's typing or recording isn't a presence any more but shows from the chat's typing, which jaw.db never holds, so it never moves a roster row (the roster fixture's Ana is `online` where she was `typing`). jawd sends no typing yet: a chat row's `typing` is always empty, and the `typing` push the protocol describes isn't sent; when typing comes it comes as that push, and the row's field goes. The Mac reads who's typing from the chat's row, as a pane reads it today, and the parity plan's step 3.1, which moves the panes' typing onto the push, moves the roster's with it, so typing shows in the roster on a real jawd from then. Each task says what it waits on and what it can't try until `folders` lands; nothing is tried end to end until `folders` is on main and `mac-folders` is rebased onto it, which is task 15. Before then, the snapshot on `--demo`, whose jawd is built from the worktree, main's without folders, checks that the app falls back as it should.
 
 ## Files
 
@@ -74,7 +74,7 @@ What the design leaves open, each with its options and the lean the plan builds;
 
 ### Task 1: JawKit's folder, slot and roster types, against the folders branch's fixtures
 
-**Waits on jawd:** nothing to build: the twelve fixtures are `folders`' at cc585c0. Nothing here meets a real jawd until task 15.
+**Waits on jawd:** nothing to build: the twelve fixtures are `folders`' at 53981ad, where someone's presence is `online`, `seen` or `hidden` and the roster fixture's Ana is `online`. Nothing here meets a real jawd until task 15.
 
 **Files:**
 - Create: `mac/Tests/JawKitTests/Ahead/` with `folders.watch.request.json`, `folders.watch.result.json`, `folders.push.json`, `roster.watch.request.json`, `roster.watch.result.json`, `roster.push.json`, `folder.create.request.json`, `folder.create.result.json`, `folder.add.request.json`, `folder.add.result.json`, `favourite.set.request.json`, `favourite.set.result.json`
@@ -83,7 +83,7 @@ What the design leaves open, each with its options and the lean the plan builds;
 - Test: `mac/Tests/JawKitTests/FixtureTests.swift`
 
 **Interfaces:**
-- Produces: `public struct FolderRow: WindowRow, Decodable, Hashable` (`id`, `v`, `parent: String?`, `name`, `position: Int`, `smart: JSONValue?`, `unread`, `mentions`, `count: Int`, `favourite: Int?`; `sort` is `""`; `static let builtIn: Set<String>`; `isBuiltIn`, `isSmart`, `isYours`; `init(id:v:parent:name:position:smart:unread:mentions:count:favourite:)` with every parameter but `id` and `name` defaulted); `public struct Favourite: Decodable, Sendable, Hashable` (`slot: Int`, `folder`, `chat`, `name: String?`, `target: String?`; `init(slot:folder:chat:name:)`); `FoldersWatched` (`watch`, `seq`, `rows`, `remove`, `favourites: [Favourite]`); `FoldersPush` (`watch`, `seq`, `upsert`, `remove`, `favourites: [Favourite]?`); `public enum PresenceState: String` (`online`, `typing`, `recording`, `seen`, `hidden`); `public struct Presence` (`state`, `at: Int64?`, `known: Bool`, `around: Bool`; `init(state:at:known:)`); `public struct RosterRow: WindowRow, Decodable, Hashable` (`id`, `v`, `sort`, `name`, `phone`, `about`, `avatar`, `presence`, `chat: String?`, `folders: [String]`; `init(id:v:sort:name:phone:presence:chat:folders:)`); `RosterWatched` (`watch`, `seq`, `total`, `rows`, `remove`), `RosterPush` (`watch`, `seq`, `total?`, `upsert`, `remove`); the params `FoldersWatch(have:)` and `RosterWatch(folder:around:before:after:have:)` (internal), `FolderCreate(name:parent:)`, `FolderRename(folder:name:)`, `FolderMove(folder:parent:position:)`, `FolderID(folder:)`, `FolderItem(folder:item:)`, `FavouriteSet(slot:target:)` (public), and `FolderMade` (`folder`, internal), `folder.create`'s answer. `ChatRow` gains `folders: [String]` and `favourite: Int?`, and its memberwise init a last parameter `folders: [String] = []`.
+- Produces: `public struct FolderRow: WindowRow, Decodable, Hashable` (`id`, `v`, `parent: String?`, `name`, `position: Int`, `smart: JSONValue?`, `unread`, `mentions`, `count: Int`, `favourite: Int?`; `sort` is `""`; `static let builtIn: Set<String>`; `isBuiltIn`, `isSmart`, `isYours`; `init(id:v:parent:name:position:smart:unread:mentions:count:favourite:)` with every parameter but `id` and `name` defaulted); `public struct Favourite: Decodable, Sendable, Hashable` (`slot: Int`, `folder`, `chat`, `name: String?`, `target: String?`; `init(slot:folder:chat:name:)`); `FoldersWatched` (`watch`, `seq`, `rows`, `remove`, `favourites: [Favourite]`); `FoldersPush` (`watch`, `seq`, `upsert`, `remove`, `favourites: [Favourite]?`); `public enum PresenceState: String` (`online`, `seen`, `hidden`; typing and recording aren't among them, as they show from the chat's typing); `public struct Presence` (`state`, `at: Int64?`, `known: Bool`, `around: Bool`, which is online; `init(state:at:known:)`); `public struct RosterRow: WindowRow, Decodable, Hashable` (`id`, `v`, `sort`, `name`, `phone`, `about`, `avatar`, `presence`, `chat: String?`, `folders: [String]`; `init(id:v:sort:name:phone:presence:chat:folders:)`); `RosterWatched` (`watch`, `seq`, `total`, `rows`, `remove`), `RosterPush` (`watch`, `seq`, `total?`, `upsert`, `remove`); the params `FoldersWatch(have:)` and `RosterWatch(folder:around:before:after:have:)` (internal), `FolderCreate(name:parent:)`, `FolderRename(folder:name:)`, `FolderMove(folder:parent:position:)`, `FolderID(folder:)`, `FolderItem(folder:item:)`, `FavouriteSet(slot:target:)` (public), and `FolderMade` (`folder`, internal), `folder.create`'s answer. `ChatRow` gains `folders: [String]` and `favourite: Int?`, and its memberwise init a last parameter `folders: [String] = []`.
 
 - [ ] **Step 1: Copy the fixtures**
 
@@ -99,7 +99,7 @@ for f in mac/Tests/JawKitTests/Ahead/*.json; do git show folders:protocol/fixtur
 ls mac/Tests/JawKitTests/Ahead | wc -l
 ```
 
-Expected: no output from `cmp`, and `12`. Only these twelve: `folders`' `find.result.json` is older than main's (main's 1c13a65 changed it after the branch was made) and its `status.result.json` only adds fields JawKit ignores.
+Expected: no output from `cmp`, and `12`. Only these twelve: `folders`' other fixtures are main's at 8591529, which it's rebased onto, so main's own are as new or newer (main has since added layout book fixtures, which `folders` hasn't), and its `status.result.json` only adds the `presence` and `folders` counts, which JawKit ignores.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -190,7 +190,7 @@ and add, after `each request JawKit writes equals its fixture`:
 
     let roster = try JSONDecoder().decode(Answer<RosterWatched>.self, from: fixture("roster.watch.result.json")).result
     #expect(roster.total == 6 && roster.rows.map(\.id) == ["person:1", "person:4", "person:5"])
-    #expect(roster.rows.map(\.presence.state) == [.typing, .seen, .hidden])
+    #expect(roster.rows.map(\.presence.state) == [.online, .seen, .hidden], "Ana online: typing shows from her chat, not here")
     #expect(roster.rows.map(\.presence.around) == [true, false, false])
     #expect(roster.rows[1].presence.at == 1_792_145_000_000 && !roster.rows[2].presence.known)
     #expect(roster.rows[0].chat == "351912345678@s.whatsapp.net" && roster.rows[1].chat == nil)
@@ -405,10 +405,11 @@ public struct FoldersPush: Decodable, Sendable {
     }
 }
 
-/// How someone is: around (online, typing or recording), last seen, or hidden, when they hide it or
-/// WhatsApp hasn't told jawd.
+/// How someone is: online, last seen, or hidden, when they hide it or WhatsApp hasn't told jawd.
+/// Typing and recording aren't among them: they show from the chat's typing, which jaw.db never
+/// holds, so they never move someone in a roster.
 public enum PresenceState: String, Decodable, Sendable, Hashable {
-    case online, typing, recording, seen, hidden
+    case online, seen, hidden
 
     /// A state jawd may add later reads as hidden, which says nothing.
     public init(from decoder: any Decoder) throws {
@@ -440,13 +441,14 @@ public struct Presence: Decodable, Sendable, Hashable {
         case state, at, known
     }
 
-    /// Online, typing or recording.
+    /// Online. Someone typing or recording in their chat is around too, which the roster reads from
+    /// the chat.
     public var around: Bool {
-        state == .online || state == .typing || state == .recording
+        state == .online
     }
 }
 
-/// Someone in a roster, which reads from the smallest `sort` up: around first, then by when last
+/// Someone in a roster, which reads from the smallest `sort` up: online first, then by when last
 /// seen, then those jawd has no last seen for, each by name.
 public struct RosterRow: WindowRow, Decodable, Hashable {
     /// `person:` and a number.
@@ -727,7 +729,7 @@ Expected: `** BUILD SUCCEEDED **`.
 
 ```bash
 git add mac/Tests/JawKitTests/Ahead mac/JawKit/Sources/Protocol/Folders.swift mac/JawKit/Sources/Protocol/Rows.swift mac/Tests/JawKitTests/FixtureTests.swift
-git commit -m "JawKit reads jawd's folder tree, its favourite slots, the roster and the folder requests as the folders branch's protocol has them, ahead of its landing: a folder row knows a built-in folder from a smart one and one of yours, a push's slots are nil when none changed, someone's presence reads as hidden when jawd says a state it doesn't know, a chat row says the folders it sits in and its slot, and folder.move and favourite.set send a null parent or target where the protocol takes one; the branch's twelve fixtures are copied into JawKit's tests and read only until protocol/fixtures has them, a test checking each against the file that lands, and only those twelve, since its find and status fixtures are older than main's"
+git commit -m "JawKit reads jawd's folder tree, its favourite slots, the roster and the folder requests as the folders branch's protocol has them, ahead of its landing: a folder row knows a built-in folder from a smart one and one of yours, a push's slots are nil when none changed, someone's presence is online, last seen or hidden, typing and recording showing from the chat rather than as a presence, and reads as hidden when jawd says a state it doesn't know, a chat row says the folders it sits in and its slot, and folder.move and favourite.set send a null parent or target where the protocol takes one; the branch's twelve fixtures are copied into JawKit's tests and read only until protocol/fixtures has them, a test checking each against the file that lands, and only those twelve, since the branch's others are main's from before it was rebased"
 ```
 
 ---
@@ -1121,8 +1123,8 @@ In `mac/JawKit/Sources/Windows/Window.swift`: in `Update`, add after `public var
 and a last parameter `favourites: [Favourite]? = nil` to its init, set with `self.favourites = favourites`. In `Merged`, add `var favourites: [Favourite]?` after `var moved: Moved?`; in `add(_:ids:)`, after `moved = update.moved ?? moved`, add `favourites = update.favourites ?? favourites`; in `isEmpty`, add `&& favourites == nil`; and in `update()` pass `favourites: favourites`. After `Chats`, add:
 
 ```swift
-/// A roster: a folder's people from the smallest `sort` up, online, typing and recording first, then
-/// by when last seen, then those jawd has no last seen for, as jawd sorts them.
+/// A roster: a folder's people from the smallest `sort` up, online first, then by when last seen,
+/// then those jawd has no last seen for, as jawd sorts them.
 public struct People<R: WindowRow>: Sendable {
     public var folder: String
     public var place: Place
@@ -3775,7 +3777,7 @@ git commit -m "Folders are named in place in the sidebar: New Folder, ⇧⌘N, i
 
 ### Task 8: A folder's menu
 
-**Waits on jawd:** nothing to build. Before `folders` lands, the snapshot checks that a folder has no menu; nesting, moving and deleting on a real jawd, and its refusals (moving a folder into itself, a name a sibling has), are task 15's.
+**Waits on jawd:** nothing to build. Before `folders` lands, the snapshot checks that a folder has no menu; nesting, moving and deleting on a real jawd, and its refusals (moving a folder into itself, a name a sibling has, deleting a folder whose subfolder would then sit beside one of its name, each error 4 and said in the status line in jawd's words), are task 15's.
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Sidebar/SidebarController.swift` (`SidebarHost`, the outline's menu, `hasKeys`)
@@ -4968,19 +4970,21 @@ git commit -m "⌥⇧↑ and ⌥⇧↓ go to the folder before or after from any
 
 ### Task 13: The roster under the tree
 
-**Waits on jawd:** nothing to build; the roster is drawn from `Samples.people`, and its window is task 2's, against `FakeJawd`. Before `folders` lands the roster isn't shown and isn't watched; a real jawd's people, their presence coming and going and jawd following them as the roster is watched, are task 15's.
+**Waits on jawd:** nothing to build; the roster is drawn from `Samples.people`, and its window is task 2's, against `FakeJawd`. Before `folders` lands the roster isn't shown and isn't watched; a real jawd's people, their presence coming and going and jawd following them as the roster is watched, are task 15's. Who's typing in the roster waits on jawd sending typing at all: today's chat rows carry `typing` empty and the `typing` push isn't sent ("Presence and typing in chats"), so it's tested here from `Samples`, and seen on a real jawd once jawd sends the push and the parity plan's step 3.1 reads it for the panes and the roster alike.
 
 **Files:**
 - Create: `mac/JawUI/Sources/Sidebar/RosterLines.swift`, `mac/JawUI/Sources/Sidebar/RosterController.swift`
 - Modify: `mac/JawUI/Sources/Sidebar/SidebarController.swift` (the split, `roster`, `keepsDivider`)
 - Modify: `mac/JawUI/Sources/Samples.swift` (`people`)
-- Modify: `mac/JawApp/Sources/Folders.swift` (`watchRoster()`, the roster's host), `AppModel.swift` (`rosterWindow`, `apply(_:)`, `pick(folder:saying:)`), `MainWindowController.swift`, `Bench.swift` (`roster`), `mac/README.md`
+- Modify: `mac/JawApp/Sources/Folders.swift` (`watchRoster()`, the roster's host, `rosterTyping()`), `AppModel.swift` (`rosterWindow`, `apply(_:)`, `pick(folder:saying:)`), `MainWindowController.swift`, `Bench.swift` (`roster`), `mac/README.md`
 - Modify: `mac/JawHarness/Sources/Scenes/SidebarScenes.swift` (the roster's scene, and the roster hidden in the tree's bands), `BuiltInScenes.swift`, `mac/Tests/JawHarnessTests/ScenesTests.swift`
 - Test: `mac/Tests/JawUITests/RosterTests.swift`; modify `SidebarTests.swift`
 
 **Interfaces:**
-- Consumes: `People`, `RosterRow`, `Presence`, `Jawd.watchRoster`, `JawUpdate.roster` (task 2); `FolderTree` (task 3); `HeadingCell` (task 4); `AvatarCache`, `AvatarView`, `Format.ago(_:now:)`.
-- Produces: `public enum RosterLine` (`title(String)`, `heading(String, around: Int, of: Int)`, `person(RosterRow, group: String)`, `offline(group: String, count: Int, open: Bool)`); `RosterLines.lines(_:folder:tree:open:) -> [RosterLine]` and `RosterLines.said(_:now:) -> RosterLines.Said` (`text`, `online`); `public protocol RosterHost` with `roster(_:move:)`; `RosterController` with `host`, `people`, `tree`, `roles`, `root`, `now`, `show(folder:)`, `apply(_:)`, `toggle(_:)`, `said`, `rows` (200), `most` (1,000, the most jawd keeps after the top), and internally `lines`, `table`, `grow(visibleTo:)`; `SidebarController.roster` and `keepsDivider`; `Samples.people`; `AppModel.rosterWindow`, `watchRoster()`; the snapshot's `roster` step.
+- Consumes: `People`, `RosterRow`, `Presence`, `Jawd.watchRoster`, `JawUpdate.roster` (task 2); `FolderTree` (task 3); `HeadingCell` (task 4); `AvatarCache`, `AvatarView`, `Format.ago(_:now:)`; `ChatRow.typing`, `ChatListController.row(_:)` and a pane's `chat`, on main.
+- Produces: `public enum RosterLine` (`title(String)`, `heading(String, around: Int, of: Int)`, `person(RosterRow, group: String)`, `offline(group: String, count: Int, open: Bool)`); `RosterLines.lines(_:folder:tree:open:typing:) -> [RosterLine]` and `RosterLines.said(_:typing:now:) -> RosterLines.Said` (`text`, `online`); `public protocol RosterHost` with `roster(_:move:)`; `RosterController` with `host`, `people`, `tree`, `typing: Set<String>`, `roles`, `root`, `now`, `show(folder:)`, `apply(_:)`, `toggle(_:)`, `said`, `rows` (200), `most` (1,000, the most jawd keeps after the top), and internally `lines`, `table`, `grow(visibleTo:)`; `SidebarController.roster` and `keepsDivider`; `Samples.people`; `AppModel.rosterWindow`, `watchRoster()`, `rosterTyping()`; the snapshot's `roster` step.
+
+Someone's presence is `online`, `seen` or `hidden` (task 1); who's typing or recording shows from the chat's typing, which never moves them in jawd's order (the protocol's "Presence and typing in chats"). The roster reads it from each person's one-to-one chat, from the chat's row where the chat list or a pane holds it, as a pane reads its typing on main (`ChatRow.typing`, person ids): someone typing there is around, listed rather than folded, and says typing… in the online colour, never faintly, as typing shows only while jawd hears it. A chat row says who's typing, not whether they're recording, so recording reads typing… too, as the chat list and a pane's header say it, until jawd's `typing` push says which (the parity plan's step 3.1, which moves the panes' typing and this onto it).
 
 The roster grows only once the last person it holds is on a line in sight, never past the 1,000 people jawd keeps after the top (it refuses more with -32602): with its folds closed its lines are few, so the lines in sight say nothing of how near the end of its people it is.
 
@@ -4989,16 +4993,17 @@ The roster grows only once the last person it holds is on a line in sight, never
 Add to `mac/JawUI/Sources/Samples.swift`, after `folderUpdate`:
 
 ```swift
-    /// People as a roster sends them, from the smallest sort up: Ana typing, Marta and Rui online, Mãe
-    /// last seen 12 minutes ago where jawd isn't following her now, Inês and Tiago last seen longer
-    /// ago, then four who hide it; filed in `folders`' Family, Cousins, Climbing and Work, and Leonor in
-    /// none.
+    /// People as a roster sends them, from the smallest sort up: Ana, Marta and Rui online, Mãe last
+    /// seen 12 minutes ago where jawd isn't following her now, Inês and Tiago last seen longer ago,
+    /// then four who hide it; filed in `folders`' Family, Cousins, Climbing and Work, and Leonor in
+    /// none. Who's typing comes from their chats, so a test or a scene says it with the roster's
+    /// `typing`.
     public static var people: [RosterRow] {
         func seen(_ ago: Int64) -> String {
             "1~\(Int64.max - (now - ago))~"
         }
         return [
-            RosterRow(id: "person:1", v: 1, sort: "0~ana ribeiro\u{1}000000000001", name: "Ana Ribeiro", presence: Presence(state: .typing),
+            RosterRow(id: "person:1", v: 1, sort: "0~ana ribeiro\u{1}000000000001", name: "Ana Ribeiro", presence: Presence(state: .online),
                       chat: direct.id, folders: ["folder:1"]),
             RosterRow(id: "person:20", v: 1, sort: "0~marta\u{1}000000000020", name: "Marta", presence: Presence(state: .online),
                       folders: ["folder:3"]),
@@ -5033,8 +5038,8 @@ import Testing
 
 /// The roster: under All, grouped by your top folders, then Others, each with who's around listed and
 /// the rest folded; under a folder, its people as jawd sorts them, those jawd has no last seen for
-/// folded; faint where jawd isn't following someone; how each is, in words; and more people asked for
-/// as it scrolls.
+/// folded; someone typing in their chat around and listed; faint where jawd isn't following someone;
+/// how each is, in words; and more people asked for as it scrolls.
 
 /// The roster's lines as words.
 func lineWords(_ lines: [RosterLine]) -> [String] {
@@ -5091,21 +5096,34 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     #expect(lineWords(RosterLines.lines([], folder: "groups", tree: Samples.tree, open: [])) == ["People in Groups:"], "Groups holds nobody")
 }
 
-@Test func `how someone is: typing and recording in the online colour, online, a time ago, and nothing when they hide it`() {
+@Test func `someone typing in their chat is around and listed, never folded, though jawd has no last seen for them`() {
+    let typing: Set<String> = ["person:7"]
+    #expect(Array(lineWords(RosterLines.lines(Samples.people, folder: "all", tree: Samples.tree, open: [], typing: typing))[1 ... 4])
+        == ["Family 2 of 5", "Ana Ribeiro", "Avó Lurdes", "▸ 3 offline"], "Avó Lurdes hides her presence, and her chat says she's typing")
+    #expect(lineWords(RosterLines.lines(familyPeople, folder: "folder:1", tree: Samples.tree, open: [], typing: typing))
+        == ["People in Family:", "Ana Ribeiro", "Mãe", "Inês Gomes", "Avó Lurdes", "▸ 1 offline"], "where jawd sorts her, after those last seen")
+}
+
+@Test func `how someone is: typing in the online colour while their chat says so, online, a time ago, and nothing when they hide it`() {
     let now = Samples.now
-    #expect(RosterLines.said(Presence(state: .typing), now: now) == RosterLines.Said(text: "typing…", online: true))
-    #expect(RosterLines.said(Presence(state: .recording), now: now) == RosterLines.Said(text: "recording…", online: true))
+    #expect(RosterLines.said(Presence(state: .seen, at: now - 60000, known: false), typing: true, now: now) == RosterLines.Said(text: "typing…", online: true),
+            "their chat says they're typing or recording, whatever jawd last knew of their presence")
     #expect(RosterLines.said(Presence(state: .online), now: now) == RosterLines.Said(text: "online", online: false))
     #expect(RosterLines.said(Presence(state: .seen, at: now - 12 * 60000), now: now).text == "12 min ago")
     #expect(RosterLines.said(Presence(state: .hidden), now: now).text.isEmpty)
 }
 
 @MainActor
-@Test func `the roster draws its lines, faint where jawd isn't following someone, and opens a fold`() {
+@Test func `the roster draws its lines, typing from the chat and never faint, faint where jawd isn't following someone, and opens a fold`() {
     let r = roster(RosterStub())
-    #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro typing…", "▸ 4 offline"])
+    #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro online", "▸ 4 offline"])
+    r.typing = ["person:1"]
+    #expect(r.said[2] == "Ana Ribeiro typing…", "her chat says she's typing")
     r.toggle("folder:1")
     #expect(r.said[3] == "▾ 4 offline" && r.said[4] == "Mãe 12 min ago (faint)")
+    r.typing = ["person:1", "person:2"]
+    #expect(Array(r.said[1 ... 4]) == ["Family 2 of 5", "Ana Ribeiro typing…", "Mãe typing…", "▾ 3 offline"],
+            "typing shows only while jawd hears it, so it's never faint")
 }
 
 @MainActor
@@ -5175,11 +5193,16 @@ public enum RosterLine: Hashable, Sendable {
 /// The roster as the sidebar draws it, and how someone is, in words.
 public enum RosterLines {
     /// Under All, grouped by your top folders in their order, then everyone else under Others, each
-    /// group's online, typing and recording people listed and the rest folded, as the terminal groups
-    /// them; under any other folder, its people as jawd sorts them, those jawd has no last seen for
-    /// folded. A fold in `open` lists its people after it.
-    public static func lines(_ people: [RosterRow], folder: String, tree: FolderTree, open: Set<String>) -> [RosterLine] {
+    /// group's people who are around listed and the rest folded, as the terminal groups them; under
+    /// any other folder, its people as jawd sorts them, those jawd has no last seen for folded.
+    /// Someone is around while online, or while their chat says they're typing or recording, which
+    /// `typing` holds by person id, since jawd keeps no typing on people's rows; someone typing is
+    /// never folded. A fold in `open` lists its people after it.
+    public static func lines(_ people: [RosterRow], folder: String, tree: FolderTree, open: Set<String>,
+                             typing: Set<String> = []) -> [RosterLine]
+    {
         var out: [RosterLine] = [.title(folder == "all" ? "People" : "People in \(tree.label(folder))")]
+        let around = { (p: RosterRow) in p.presence.around || typing.contains(p.id) }
         func group(_ key: String, _ members: [RosterRow], listed: (RosterRow) -> Bool) {
             out += members.filter(listed).map { .person($0, group: key) }
             let folded = members.filter { !listed($0) }
@@ -5188,7 +5211,7 @@ public enum RosterLines {
             if open.contains(key) { out += folded.map { .person($0, group: key) } }
         }
         guard folder == "all" else {
-            group(folder, people) { $0.presence.state != .hidden }
+            group(folder, people) { $0.presence.state != .hidden || typing.contains($0.id) }
             return out
         }
         var placed: Set<String> = []
@@ -5197,13 +5220,13 @@ public enum RosterLines {
             let members = people.filter { !under.isDisjoint(with: $0.folders) }
             guard !members.isEmpty else { continue }
             placed.formUnion(members.map(\.id))
-            out.append(.heading(top.name, around: members.count { $0.presence.around }, of: members.count))
-            group(top.id, members) { $0.presence.around }
+            out.append(.heading(top.name, around: members.count(where: around), of: members.count))
+            group(top.id, members, listed: around)
         }
         let rest = people.filter { !placed.contains($0.id) }
         if !rest.isEmpty {
-            out.append(.heading("Others", around: rest.count { $0.presence.around }, of: rest.count))
-            group("others", rest) { $0.presence.around }
+            out.append(.heading("Others", around: rest.count(where: around), of: rest.count))
+            group("others", rest, listed: around)
         }
         return out
     }
@@ -5214,12 +5237,12 @@ public enum RosterLines {
         public var online: Bool
     }
 
-    /// Typing… or recording…, in the online colour; online; when last seen, as a time ago; nothing when
-    /// they hide it.
-    public static func said(_ presence: Presence, now: Int64) -> Said {
-        switch presence.state {
-        case .typing: Said(text: "typing…", online: true)
-        case .recording: Said(text: "recording…", online: true)
+    /// Typing…, in the online colour, while their chat says they're typing or recording: a chat's row
+    /// says who, not which, so recording reads typing… too, as a pane's header says it. Otherwise
+    /// online; when last seen, as a time ago; nothing when they hide it.
+    public static func said(_ presence: Presence, typing: Bool = false, now: Int64) -> Said {
+        if typing { return Said(text: "typing…", online: true) }
+        return switch presence.state {
         case .online: Said(text: "online", online: false)
         case .seen: Said(text: presence.at.map { Format.ago($0, now: now) } ?? "", online: false)
         case .hidden: Said(text: "", online: false)
@@ -5253,6 +5276,12 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     /// The tree, which groups the people under All and names the folder.
     public var tree = FolderTree() {
         didSet { rebuild() }
+    }
+
+    /// Who's typing or recording in their one-to-one chat now, by person id, as the app reads it from
+    /// the chats' rows.
+    public var typing: Set<String> = [] {
+        didSet { if typing != oldValue { rebuild() } }
     }
 
     public var roles: Roles? {
@@ -5340,20 +5369,25 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     }
 
     func rebuild() {
-        lines = RosterLines.lines(people.list, folder: people.folder, tree: tree, open: open)
+        lines = RosterLines.lines(people.list, folder: people.folder, tree: tree, open: open, typing: typing)
         if isViewLoaded { table.reloadData() }
+    }
+
+    /// How someone is, typing… from their chat while it says so.
+    func how(_ p: RosterRow) -> RosterLines.Said {
+        RosterLines.said(p.presence, typing: typing.contains(p.id), now: now())
     }
 
     /// The roster as it's drawn, a line each, for the tests and the snapshot: its title with a colon, a
     /// group's heading with who's around of how many, someone with how they are and "(faint)" where
-    /// jawd isn't following them, and a fold with ▸ or ▾.
+    /// jawd isn't following them and they aren't typing, and a fold with ▸ or ▾.
     public var said: [String] {
         lines.map { line in
             switch line {
             case let .title(text): "\(text):"
             case let .heading(name, around, of): "\(name) \(around) of \(of)"
             case let .person(p, _):
-                [p.name, RosterLines.said(p.presence, now: now()).text, p.presence.known ? "" : "(faint)"].filter { !$0.isEmpty }
+                [p.name, how(p).text, p.presence.known || typing.contains(p.id) ? "" : "(faint)"].filter { !$0.isEmpty }
                     .joined(separator: " ")
             case let .offline(_, count, open): "\(open ? "▾" : "▸") \(count) offline"
             }
@@ -5408,7 +5442,7 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
             return cell
         case let .person(p, _):
             let cell = (tableView.makeView(withIdentifier: PersonCell.id, owner: self) as? PersonCell) ?? PersonCell()
-            cell.show(p, said: RosterLines.said(p.presence, now: now()), avatar: avatars.image(p.avatar, root: root), roles: roles)
+            cell.show(p, said: how(p), avatar: avatars.image(p.avatar, root: root), roles: roles)
             return cell
         case let .offline(_, count, open):
             let cell = (tableView.makeView(withIdentifier: GroupCell.id, owner: self) as? GroupCell) ?? GroupCell()
@@ -5419,8 +5453,8 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
 }
 
 /// Someone's row: a dot in the online colour while they're around, their avatar, their name and how
-/// they are, all faint where jawd isn't following them now; their about text, when they have one, as
-/// its tooltip.
+/// they are, all faint where jawd isn't following them now, unless they're typing, which shows only
+/// while jawd hears it; their about text, when they have one, as its tooltip.
 final class PersonCell: NSTableCellView {
     static let id = NSUserInterfaceItemIdentifier("person")
     let dot = NSView()
@@ -5460,9 +5494,10 @@ final class PersonCell: NSTableCellView {
         toolTip = p.about
         setAccessibilityLabel([p.name, said.text].filter { !$0.isEmpty }.joined(separator: ", "))
         guard let roles else { return }
-        let faint = !p.presence.known
+        // `said.online` is typing, from their chat.
+        let faint = !p.presence.known && !said.online
         avatar.show(p.name, id: p.id, image: image, roles: roles)
-        dot.layer?.backgroundColor = (p.presence.around && !faint ? roles.online : roles.online.opacity(0)).cgColor
+        dot.layer?.backgroundColor = ((p.presence.around || said.online) && !faint ? roles.online : roles.online.opacity(0)).cgColor
         Labels.style(name, faint ? .tertiary : .primary, roles: roles)
         state.textColor = (faint ? roles.tertiary : said.online ? roles.online : roles.secondary).nsColor
     }
@@ -5550,7 +5585,7 @@ in `roles`' `didSet`, add `roster.roles = roles` first; in `apply(_:)`, in the b
 - [ ] **Step 5: Run the JawUI tests to see them pass**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: `** TEST SUCCEEDED **`, with the seven new tests among those passed.
+Expected: `** TEST SUCCEEDED **`, with the eight new tests among those passed.
 
 - [ ] **Step 6: Wire the app**
 
@@ -5569,14 +5604,26 @@ extension AppModel: RosterHost {
     func roster(_: RosterController, move place: Place) {
         if let w = rosterWindow { jawd.move(w, place) }
     }
+
+    /// Who in the roster is typing or recording in their one-to-one chat, from that chat's row where
+    /// the chat list or a pane holds it, as a pane reads its typing; nobody whose chat neither holds,
+    /// as jawd sends typing only for the chats an interface's windows show.
+    func rosterTyping() -> Set<String> {
+        guard let roster = window?.sidebar.roster else { return [] }
+        return Set(roster.people.list.compactMap { p in
+            guard let chat = p.chat, let row = window?.chatList.row(chat) ?? panes[chat]?.chat, row.typing.contains(p.id) else { return nil }
+            return p.id
+        })
+    }
 }
 ```
 
-In `mac/JawApp/Sources/AppModel.swift`: add `var rosterWindow: WindowID?` after `var lookingUp: Lookup?`; in the `.hello` case, after `window?.chatList.root = w.root`, add `window?.sidebar.roster.root = w.root`; in the tree's `.folders` case, at its end, add `if rosterWindow == nil, tree.served { watchRoster() }`; add, before `case let .windowFailed(_, failure):`, which would otherwise take a roster's failure first (the case that ignores `.roster` keeps ignoring a roster that's no longer watched),
+In `mac/JawApp/Sources/AppModel.swift`: add `var rosterWindow: WindowID?` after `var lookingUp: Lookup?`; in the `.hello` case, after `window?.chatList.root = w.root`, add `window?.sidebar.roster.root = w.root`; in the tree's `.folders` case, at its end, add `if rosterWindow == nil, tree.served { watchRoster() }`; at the end of the list's `.chats` case, after `glance.chatsChanged()` and its `if`, add `window?.sidebar.roster.typing = rosterTyping()`, as the chat rows it reads came with that update; and add, before `case let .windowFailed(_, failure):`, which would otherwise take a roster's failure first (the case that ignores `.roster` keeps ignoring a roster that's no longer watched),
 
 ```swift
         case let .roster(w, u) where w == rosterWindow:
             window?.sidebar.roster.apply(u)
+            window?.sidebar.roster.typing = rosterTyping()
         case let .windowFailed(w, failure) where w == rosterWindow:
             say("the people couldn't be watched: \(failure)", warn: true)
 ```
@@ -5624,6 +5671,7 @@ private struct RosterScene: View {
             r.roles = roles
             _ = r.view
             r.apply(Update(seq: 1, upsert: people, total: UInt64(people.count)))
+            r.typing = ["person:1"]
             if let open { r.toggle(open) }
             return r
         }
@@ -5633,7 +5681,7 @@ private struct RosterScene: View {
     var body: some View {
         SpecimenGroup(
             title: "Under All, with Family's fold open, and under Family",
-            note: "Under All: Family 1 of 5 with Ana typing…, its 4 folded; Climbing 2 of 3 with Marta and Rui online; Work and Others with theirs folded. Opened, Family lists Mãe, Inês, Avó Lurdes and Sofia. Under Family: Ana typing…, Mãe 12 min ago, faint, as jawd isn't following her, and Inês 2 h ago, then 2 offline. typing… is in the online colour, a green dot marks who's around, and no name is cut off.",
+            note: "Ana's chat says she's typing in each. Under All: Family 1 of 5 with Ana typing…, its 4 folded; Climbing 2 of 3 with Marta and Rui online; Work and Others with theirs folded. Opened, Family lists Mãe, Inês, Avó Lurdes and Sofia. Under Family: Ana typing…, Mãe 12 min ago, faint, as jawd isn't following her, and Inês 2 h ago, then 2 offline. typing… is in the online colour, a green dot marks who's around, and no name is cut off.",
             roles: roles,
         ) {
             HStack(alignment: .top, spacing: Space.l) {
@@ -5664,7 +5712,7 @@ Expected: `roster: People:` both times, the roster unwatched and hidden, as jawd
 
 ```bash
 git add mac/JawUI/Sources mac/JawApp/Sources mac/README.md mac/JawHarness/Sources mac/Tests/JawUITests mac/Tests/JawHarnessTests/ScenesTests.swift
-git commit -m "The roster sits under the folder tree, under a divider kept at the height it's left: the picked folder's people as jawd sorts them, online, typing and recording first, then by when last seen, those jawd has no last seen for folded under N offline; under All, grouped by your top folders and then the others, each with who's around listed and the rest folded, as the terminal groups them; each row with its avatar, its name and how they are, typing… or recording… in the online colour, faint where jawd isn't following them now, their about text as its tooltip, and how long ago they were seen said again once a minute while it's on screen; 200 at a time from the top, 200 more once the last person held comes into sight, never past the 1,000 jawd keeps; watched again for each folder picked, and neither shown nor watched before jawd serves folders; the harness's sidebar bands hide it, as it has a scene of its own"
+git commit -m "The roster sits under the folder tree, under a divider kept at the height it's left: the picked folder's people as jawd sorts them, online first, then by when last seen, those jawd has no last seen for folded under N offline; under All, grouped by your top folders and then the others, each with who's around listed and the rest folded, as the terminal groups them; someone whose one-to-one chat says they're typing or recording is around and listed, read from the chat's row where the chat list or a pane holds it, as a pane reads its typing, since jawd's presence is online, last seen or hidden and typing shows from the chat; each row with its avatar, its name and how they are, typing… in the online colour, never faint, online, or when last seen, faint where jawd isn't following them now, their about text as its tooltip, and how long ago they were seen said again once a minute while it's on screen; 200 at a time from the top, 200 more once the last person held comes into sight, never past the 1,000 jawd keeps; watched again for each folder picked, and neither shown nor watched before jawd serves folders; the harness's sidebar bands hide it, as it has a scene of its own"
 ```
 
 ---
@@ -5760,6 +5808,7 @@ func `the sidebar draws as its reference, the tree over Family's people`(dark: B
     s.select("folder:1")
     s.roster.show(folder: "folder:1")
     s.roster.apply(Update(seq: 1, upsert: familyPeople, total: UInt64(familyPeople.count)))
+    s.roster.typing = ["person:1"]
     s.view.layoutSubtreeIfNeeded()
     try await Task.sleep(for: .milliseconds(100))
     let bounds = s.view.bounds
