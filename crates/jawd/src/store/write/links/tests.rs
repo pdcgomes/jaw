@@ -3,7 +3,7 @@ use serde_json::json;
 
 use super::*;
 use crate::store::read::{self, Around};
-use crate::store::{Amend, Amendment, Applied, Change, Lane, Message, Person, Store, schema};
+use crate::store::{Amend, Amendment, Applied, Change, Lane, Message, Person, STEPS_WITHIN, Store, schema};
 use crate::work::{Priority, Report};
 
 const ANA: &str = "351910000002@s.whatsapp.net";
@@ -175,9 +175,11 @@ async fn a_messages_links_follow_it_through_a_copy_an_edit_a_deletion_and_a_merg
     )
     .await;
     apply(&store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
+    let deadline = std::time::Instant::now() + STEPS_WITHIN;
     while query(&store, |db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get::<_, i64>(0))?)).await
         > 0
     {
+        assert!(std::time::Instant::now() < deadline, "the merge never finished");
         apply(&store, vec![Change::MergeStep(None)]).await;
     }
     let moved = links(&store).await;
@@ -389,7 +391,9 @@ async fn measure_the_links_backfill_and_what_links_cost_a_write() {
     let began = std::time::Instant::now();
     let mut transactions = 0;
     while backfill_left(&store).await.is_some() {
-        transactions += store.apply(Lane::Background, vec![Change::Backfill(LINKS); 64]).await.unwrap().transactions;
+        let applied = store.apply(Lane::Background, vec![Change::Backfill(LINKS); 64]).await.unwrap();
+        assert_eq!(applied.quarantined, 0, "a step failed");
+        transactions += applied.transactions;
     }
     let backfilled = began.elapsed();
     let runs = store.report().run.unwrap();
@@ -591,7 +595,9 @@ async fn a_message_still_waiting_to_be_indexed_when_the_backfill_links_it_gets_o
         .unwrap();
     assert_eq!(linked, STEP / 3 + 1, "the first step's links are in");
     assert_eq!((documents, waiting), (indexed, 0), "their words wait for the index step");
+    let deadline = std::time::Instant::now() + STEPS_WITHIN;
     while backfill_left(&store).await.is_some() {
+        assert!(std::time::Instant::now() < deadline, "the backfill never ended");
         store.apply(Lane::Background, vec![Change::Backfill(LINKS)]).await.unwrap();
     }
     store.indexed().await.unwrap();
@@ -710,10 +716,12 @@ async fn links_and_their_index_stay_exact_through_random_copies_edits_deletions_
             done.push(change);
             links_exact(home.path(), &format!("seed {seed} step {step}"));
         }
+        let deadline = std::time::Instant::now() + STEPS_WITHIN;
         while query(&store, |db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get::<_, i64>(0))?))
             .await
             > 0
         {
+            assert!(std::time::Instant::now() < deadline, "seed {seed}: the merge never finished");
             store.apply(Lane::Live, vec![Change::MergeStep(None)]).await.unwrap();
         }
         store.indexed().await.unwrap();
@@ -729,8 +737,9 @@ async fn the_backfill_among_writes_restarts_and_repeats_leaves_links_and_their_i
     before_links(home.path(), 700);
     let mut rng = Rng(7);
     let mut store = Store::open(home.path()).unwrap();
-    let mut step = 0;
+    let (mut step, deadline) = (0, std::time::Instant::now() + STEPS_WITHIN);
     while store.backfill_left(LINKS).unwrap() > 0 {
+        assert!(std::time::Instant::now() < deadline, "the backfill never ended, at step {step}");
         step += 1;
         for _ in 0..3 {
             let n = 1 + rng.below(700) as i64;

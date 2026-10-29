@@ -5,10 +5,10 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::web_message_info::StubType;
 use wa_proto::waai_common_deprecated::{AiRichResponseSubMessage, AiRichResponseSubMessageType};
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::*;
-use crate::store::{Applied, LIMITS, Lane, Limits, Store, schema};
+use crate::store::{Applied, LIMITS, Lane, Limits, STEPS_WITHIN, Store, schema};
 use crate::work::{Priority, Report};
 
 const GROUP: &str = "120363000000000001@g.us";
@@ -166,7 +166,9 @@ async fn a_step_meeting_many_to_convert_ends_once_it_has_converted_for_a_while_a
     .await;
     assert!((1..64).contains(&converted), "a step converting 64 in a row ends once it has for a while: {converted}");
     assert_eq!(after, converted, "and the next goes on from the first it didn't convert");
+    let deadline = Instant::now() + STEPS_WITHIN;
     while store.backfill_left(KINDS).unwrap() > 0 {
+        assert!(Instant::now() < deadline, "the backfill never ended");
         backfill(&store).await;
     }
     assert_eq!(store.count("messages WHERE kind = 'text'").unwrap(), 64);
@@ -288,7 +290,9 @@ async fn a_copy_coming_onto_an_earlier_jawds_unreadable_stand_in_shows_and_keeps
     let mentioned = mentions(&store).await;
     assert!(mentioned >= 1, "the live answer mentions you, after where history's copy read to");
 
+    let deadline = Instant::now() + STEPS_WITHIN;
     while store.backfill_left(KINDS).unwrap() > 0 {
+        assert!(Instant::now() < deadline, "the backfill never ended");
         backfill(&store).await;
     }
     for (n, said) in [(1, "Lisbon is the capital."), (2, "Lisbon is a city.")] {
@@ -336,7 +340,9 @@ async fn a_disk_filling_as_a_message_converts_fails_its_step_which_is_tried_agai
     let home = tempfile::tempdir().unwrap();
     templates(home.path(), &["t1".to_string(), FILLS.to_string()]);
     let store = Store::open(home.path()).unwrap();
+    let deadline = Instant::now() + STEPS_WITHIN;
     while store.backfill_left(KINDS).unwrap() > 0 {
+        assert!(Instant::now() < deadline, "the backfill never ended");
         backfill(&store).await;
     }
     assert!(FILLED.load(std::sync::atomic::Ordering::Relaxed), "the disk filled once");
@@ -350,7 +356,9 @@ async fn a_message_whose_conversion_fails_or_panics_is_kept_in_quarantine_and_th
     let ids: Vec<String> = ["t1", PANICS, "t3", FAILS, "t5"].iter().map(|id| id.to_string()).collect();
     let raws = templates(home.path(), &ids);
     let store = Store::open(home.path()).unwrap();
+    let deadline = Instant::now() + STEPS_WITHIN;
     while store.backfill_left(KINDS).unwrap() > 0 {
+        assert!(Instant::now() < deadline, "the backfill never ended");
         assert_eq!(backfill(&store).await.quarantined, 0, "no step fails for one message");
     }
     let rows: Vec<(String, String, i64)> = query(&store, |db| {
@@ -996,7 +1004,9 @@ async fn what_jawd_couldnt_show_is_converted_again_from_its_raw_protobuf_and_ame
     let before = shown(&store).await;
 
     let mut changed = 0;
+    let deadline = Instant::now() + STEPS_WITHIN;
     while store.backfill_left(KINDS).unwrap() > 0 {
+        assert!(Instant::now() < deadline, "the backfill never ended");
         let applied = backfill(&store).await;
         assert_eq!(applied.quarantined, 0, "{applied:?}");
         changed += applied.changed;

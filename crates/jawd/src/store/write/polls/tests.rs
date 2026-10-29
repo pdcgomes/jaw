@@ -6,7 +6,9 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 use super::*;
 use crate::store::links::POLLS;
 use crate::store::read::Around;
-use crate::store::{Amend, Amendment, Applied, Change, Lane, Message, Packed, Person, Store, read, schema};
+use crate::store::{
+    Amend, Amendment, Applied, Change, Lane, Message, Packed, Person, STEPS_WITHIN, Store, read, schema,
+};
 use crate::work::{Priority, Report};
 
 const GROUP: &str = "120363000000000001@g.us";
@@ -323,9 +325,7 @@ async fn a_merged_polls_votes_are_each_voters_newest_of_both_copies() {
     )
     .await;
     apply(&store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
-    while count(&store, "chat_merges").await > 0 {
-        apply(&store, vec![Change::MergeStep(None)]).await;
-    }
+    merged(&store).await;
     let kept: String = query(&store, |db| {
         Ok(db.query_row("SELECT c.id FROM messages m JOIN chats c ON c.n = m.chat WHERE m.id = 'p1'", [], |r| {
             r.get::<_, String>(0)
@@ -369,8 +369,11 @@ fn joined(jids: &[&str]) -> Change {
     Change::Person(Person { jids: jids.iter().map(|jid| jid.to_string()).collect(), ..Person::default() })
 }
 
+/// Takes the merges' steps until none is left, failing should that take longer than STEPS_WITHIN.
 async fn merged(store: &Store) {
+    let deadline = std::time::Instant::now() + STEPS_WITHIN;
     while count(store, "chat_merges").await > 0 {
+        assert!(std::time::Instant::now() < deadline, "the merge never finished");
         apply(store, vec![Change::MergeStep(None)]).await;
     }
 }
@@ -703,7 +706,9 @@ async fn measure_the_polls_backfill_and_what_votes_cost() {
     let began = std::time::Instant::now();
     let mut transactions = 0;
     while store.backfill_left(POLLS).unwrap() > 0 {
-        transactions += store.apply(Lane::Background, vec![Change::Backfill(POLLS); 64]).await.unwrap().transactions;
+        let applied = store.apply(Lane::Background, vec![Change::Backfill(POLLS); 64]).await.unwrap();
+        assert_eq!(applied.quarantined, 0, "a step failed");
+        transactions += applied.transactions;
     }
     let backfilled = began.elapsed();
     let runs = store.report().run.unwrap();

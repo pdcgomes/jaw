@@ -78,6 +78,12 @@ pub fn migrate_for_tests(db: &mut Connection) -> Result<()> {
     schema::migrate(db)
 }
 
+/// How long a test takes a backfill's or a merge's steps until they're done before it fails: a step
+/// that fails each time is rolled back and kept in quarantine, so it never moves on, and the test
+/// would otherwise take it again for good.
+#[cfg(test)]
+pub const STEPS_WITHIN: Duration = Duration::from_secs(60);
+
 /// How a batch of changes went into the database.
 #[derive(Clone, Debug, Default)]
 pub struct Applied {
