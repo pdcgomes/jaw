@@ -4563,4 +4563,49 @@ mod folders {
         );
         check(&bed, &watcher, &watched, "her renamed").await;
     }
+
+    /// Presence, following and nobody's presence known read again only the rosters, whatever else is
+    /// watched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn presence_reads_again_only_the_rosters() {
+        let bed = Bed::new(brisk());
+        let mut watcher = bed.watcher(64);
+        bed.apply(vec![
+            Change::Person(named(ANA, "Ana")),
+            Change::Person(named(RUI, "Rui")),
+            Change::Message(text(ANA, "a1", AT, Some(ANA), "olá")),
+            Change::Message(text(CLIMBING, "c1", AT + 1, Some(ANA), "sábado?")),
+            Change::Message(mentioning(CLIMBING, "c2", AT + 2, RUI, ANA)),
+        ])
+        .await;
+        let ana = person_n(&bed, ANA).await;
+        let family = create(&bed, "Family", None).await;
+        done(&bed, |done| Step::File { folder: family, item: Item::Person(ana), done }).await;
+        watcher.watch("chats.watch", json!({"folder": "all", "around": "top", "after": 50})).await;
+        watcher.watch("chats.watch", json!({"folder": format!("folder:{family}"), "around": "top", "after": 50})).await;
+        watcher.watch("folders.watch", json!({})).await;
+        watcher.watch("messages.watch", json!({"chat": ANA, "around": "newest", "before": 10})).await;
+        watcher.watch("messages.watch", json!({"chat": CLIMBING, "around": "newest", "before": 10})).await;
+        watcher.watch("roster.watch", json!({"folder": "all", "around": "top", "after": 20})).await;
+        watcher
+            .watch("roster.watch", json!({"folder": format!("folder:{family}"), "around": "top", "after": 20}))
+            .await;
+        let seq = bed.apply(Vec::new()).await;
+        watcher.settle(seq).await;
+        let said = |state| Change::Folders(Step::Presence { jid: ANA.into(), state });
+        let following = |people| Change::Folders(Step::Following { people });
+        for (what, change) in [
+            ("online", said(Presence::Online)),
+            ("followed", following(vec![ana])),
+            ("gone away", said(Presence::Away(Some(AT + 5)))),
+            ("no longer followed", following(Vec::new())),
+            ("back online", said(Presence::Online)),
+            ("nobody's presence known", Change::Folders(Step::Unknown)),
+        ] {
+            let before = bed.feed.reads();
+            let seq = bed.apply(vec![change]).await;
+            watcher.settle(seq).await;
+            assert_eq!(bed.feed.reads() - before, 2, "{what}: only the two rosters are read again");
+        }
+    }
 }
