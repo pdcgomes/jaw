@@ -376,3 +376,84 @@ fn reconnecting_watches_again_with_the_rows_held_and_ends_as_a_fresh_watch() {
     assert_eq!(client.stats().resyncs, 1);
     assert!(messages.place.around == Around::Newest && messages.following());
 }
+
+/// Who's typing, as the client keeps it: each answer says it for every chat of its window, the one
+/// both a chat list and a conversation show included; a push changes it for a chat a window shows
+/// and nothing for one none does; a chat is forgotten as it leaves every window; and all of it once
+/// the connection goes.
+#[test]
+fn typing_is_kept_for_the_chats_the_windows_show_as_answers_and_pushes_say_and_forgotten_with_the_connection() {
+    let fake = Fake::new();
+    let client: Client = Client::start(fake.config(), || {});
+    let mut peer = fake.accept();
+    peer.greet();
+    connected(&client);
+    let who = |name: &str, state: &str| json!([{"id": format!("person:{}", name.len()), "name": name, "state": state}]);
+    let typing = |frame: &Frame<ChatRow, MessageRow>| -> Option<Vec<(String, String)>> {
+        frame.typing.as_ref().map(|t| t.iter().map(|(chat, who)| (chat.clone(), who[0].name.clone())).collect())
+    };
+    let held = |pairs: &[(&str, &str)]| -> Option<Vec<(String, String)>> {
+        Some(pairs.iter().map(|(chat, name)| (chat.to_string(), name.to_string())).collect())
+    };
+
+    client.watch_chats("all", Place::top(10));
+    let watch = peer.request();
+    let mut list = watched("w1", 1, vec![chat("a", 1), chat("b", 1)]);
+    list["typing"] = json!({"a": who("Ana", "typing"), "b": who("Rui", "recording")});
+    peer.answer(&watch, list);
+    let mut last = None;
+    drain_until(&client, |frame| {
+        last = typing(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[("a", "Ana"), ("b", "Rui")]));
+
+    // The conversation of a chat the list shows answers with its typing, which stays.
+    let conversation = client.watch_messages("a", Place::newest(10));
+    let watch = peer.request();
+    let mut messages = watched("w2", 1, vec![message(1)]);
+    messages["typing"] = json!({"a": who("Ana", "typing")});
+    peer.answer(&watch, messages);
+    drain_until(&client, |frame| !frame.messages.is_empty());
+    let status = client.request("status", Value::Null).unwrap();
+    let asked = peer.request();
+    peer.answer(&asked, json!({}));
+    drain_until(&client, |frame| {
+        assert_eq!(frame.typing, None, "what the conversation's answer said changed nothing");
+        frame.events.iter().any(|e| matches!(e, Event::Reply { id, .. } if *id == status))
+    });
+
+    // A push ends Rui's; one for a chat no window shows is let go of.
+    peer.send(json!({"method": "typing", "params": {"chat": "b", "who": []}}));
+    peer.send(json!({"method": "typing", "params": {"chat": "z", "who": who("Zé", "typing")}}));
+    drain_until(&client, |frame| {
+        last = typing(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[("a", "Ana")]));
+
+    // The list lets go of Ana's chat, which the conversation still shows; then it's unwatched.
+    let push = json!({"watch": "w1", "seq": 2, "remove": ["a"]});
+    peer.send(json!({"method": "chats", "params": push}));
+    drain_until(&client, |frame| !frame.chats.is_empty());
+    client.unwatch(conversation);
+    drain_until(&client, |frame| {
+        last = typing(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[]), "forgotten once no window shows it");
+
+    // Gone with the connection.
+    peer.send(json!({"method": "typing", "params": {"chat": "b", "who": who("Rui", "typing")}}));
+    drain_until(&client, |frame| {
+        last = typing(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[("b", "Rui")]));
+    drop(peer);
+    drain_until(&client, |frame| {
+        last = typing(&frame);
+        last.is_some()
+    });
+    assert_eq!(last, held(&[]), "nothing kept once the connection ends");
+}

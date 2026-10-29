@@ -14,7 +14,7 @@
 //! chat of its window, a `typing` push for its chat, and it's forgotten as a chat leaves every
 //! window and when the connection drops. A frame carries all of it when it changed.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
@@ -1088,9 +1088,10 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
             w.ids = ids;
         }
         if let Some(mut answered) = answered {
-            let shown: Vec<String> = match state.windows.get(&window) {
+            // Each chat once, whether it's held, answered or both.
+            let shown: BTreeSet<String> = match state.windows.get(&window) {
                 Some(w) => state.typing.keys().chain(answered.keys()).filter(|chat| w.shows(chat)).cloned().collect(),
-                None => Vec::new(),
+                None => BTreeSet::new(),
             };
             for chat in shown {
                 let who = answered.remove(&chat).unwrap_or_default();
