@@ -80,6 +80,8 @@ message Connection {
     TEMPORARY_BAN = 8;
     CONNECT_FAILED = 9;
     KEEPALIVE_TIMEOUT = 10;
+    // After KEEPALIVE_TIMEOUT, WhatsApp answers the keepalive again, on the same connection.
+    KEEPALIVE_RESTORED = 11;
   }
   State state = 1;
   string reason = 2;

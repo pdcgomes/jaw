@@ -382,7 +382,7 @@ func TestEveryKindJawdMustStoreGoesOnFromAClientReplacedAfterALogoutAndWhatItSay
 		acked(t, jawd, frame.GetEvent().Seq)
 	}
 	for _, evt := range []any{
-		&events.Connected{}, &events.Disconnected{}, &events.KeepAliveTimeout{}, &events.StreamReplaced{},
+		&events.Connected{}, &events.Disconnected{}, &events.KeepAliveTimeout{}, &events.KeepAliveRestored{}, &events.StreamReplaced{},
 		&events.ClientOutdated{}, &events.ConnectFailure{}, &events.TemporaryBan{}, &events.PairSuccess{},
 		&events.OfflineSyncPreview{}, &events.OfflineSyncCompleted{}, &events.AppStateSyncComplete{},
 	} {

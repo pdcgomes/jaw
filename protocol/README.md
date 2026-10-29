@@ -318,6 +318,8 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 
 WhatsApp never says the phone is offline, so `connection` says `phone_offline` once something jawd asked the phone and knows it has an answer to (older history in a chat the phone has said it keeps more of, so far) has gone 20 seconds unanswered online, counted afresh each time the connection comes back, and `online` again once the phone sends anything, or two minutes after jawd asked; messages still arrive and send meanwhile.
 
+When WhatsApp stops answering the engine's keepalive pings, `connection` says `connecting` while the connection stays open: what you send waits, as it does whenever jawd is connecting, and what arrives still comes. Once a ping gets through again it says `online`, or `catching_up` with how far the catch-up has got if one was under way, since a timeout doesn't end one, and what waited goes, once. If the pings go on failing for 3 minutes, the engine connects again, and `online` comes with the new connection, ending a catch-up the old one left.
+
 ## Voice (proposed)
 
 Proposed with the `jaw-voice` crate in M5, for jawd to wire in; until then the `voice.*` rows above are the draft. It keeps their names and fills in what they leave open.

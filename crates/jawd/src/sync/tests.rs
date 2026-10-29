@@ -2210,6 +2210,169 @@ async fn a_stop_while_sync_waits_on_jaw_db_for_longer_than_the_pause_is_still_sa
     running.abort();
 }
 
+/// A live message from Ana in `chat`, as the engine hands it over.
+fn arriving(chat: &str, id: &str) -> crate::engine::Incoming {
+    let message = live_message(chat, ANA, id, AT, text("while you were away"));
+    crate::engine::Incoming { event: pb::Event { seq: 0, kind: Some(pb::event::Kind::Message(message)) }, ack: None }
+}
+
+/// WhatsApp's word that what waited offline has all come, `count` things in all.
+fn offline_done(count: u32) -> crate::engine::Incoming {
+    let done = pb::OfflineDone { count };
+    crate::engine::Incoming { event: pb::Event { seq: 0, kind: Some(pb::event::Kind::OfflineDone(done)) }, ack: None }
+}
+
+/// The next `n` `connection` and `notice` pushes, as far as they come, each within WAIT.
+async fn next_told(told: &mut broadcast::Receiver<Push>, n: usize) -> Vec<Push> {
+    let mut said = Vec::new();
+    while said.len() < n {
+        match tokio::time::timeout(WAIT, told.recv()).await {
+            Ok(Ok(push)) if push.method == "connection" || push.method == "notice" => said.push(push),
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    said
+}
+
+/// What a `connection` push says: its state, and how far a catch-up has got of how much.
+fn connection_of(push: &Push) -> (String, Option<u64>, Option<u64>) {
+    assert_eq!(push.method, "connection", "{push:?}");
+    let connection: jaw_proto::Connection = serde_json::from_value(push.params.clone()).unwrap();
+    (push.params["state"].as_str().unwrap().to_string(), connection.done, connection.total)
+}
+
+fn said(state: &str, done: Option<u64>, total: Option<u64>) -> (String, Option<u64>, Option<u64>) {
+    (state.to_string(), done, total)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pings_that_get_through_again_after_a_keepalive_timeout_say_online_with_nothing_written_to_jaw_db() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tx, incoming) = mpsc::channel(16);
+    let (_live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    until("the account and its JIDs to be stored", || store.remembered(ME).is_ok_and(|me| me.is_some())).await;
+    let kept = || (store.remembered(ACCOUNT).unwrap(), store.remembered(ME).unwrap());
+    let before = kept();
+    // Holding jaw.db's writer holds sync on any write it waits for, so the word after one would wait.
+    let holder = Connection::open(home.path().join("jaw.db")).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
+    // Named otherwise than at the connection, so that writing what a restore says would show.
+    let mut restored = connection_event(State::KeepaliveRestored);
+    if let Some(pb::event::Kind::Connection(c)) = restored.event.kind.as_mut() {
+        (c.lid, c.push_name) = ("100000000077:12@lid".into(), "Someone else".into());
+    }
+    tx.send(restored).await.unwrap();
+    tx.send(connection_event(State::Disconnected)).await.unwrap();
+    let states = next_connections(&mut told, 3).await;
+    let expected = [ConnectionState::Connecting, ConnectionState::Online, ConnectionState::Offline];
+    assert_eq!(states, expected, "the restore is online, and waits on nothing in jaw.db");
+    holder.execute_batch("ROLLBACK").unwrap();
+    drop(tx);
+    running.await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    store.apply(Lane::Live, Vec::new()).await.unwrap();
+    assert_eq!(kept(), before, "nor writes anything there");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pings_that_get_through_again_during_a_catch_up_put_it_back_as_far_as_it_has_got_and_its_summary_comes_at_its_end()
+ {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tx, incoming) = mpsc::channel(16);
+    let (live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    tx.send(crate::engine::Incoming { event: offline_preview(10), ack: None }).await.unwrap();
+    tx.send(arriving(ANA, "3EB0AWAY1")).await.unwrap();
+    tx.send(arriving(GROUP, "3EB0AWAY2")).await.unwrap();
+    tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
+    tx.send(arriving(ANA, "3EB0AWAY3")).await.unwrap();
+    tx.send(connection_event(State::KeepaliveRestored)).await.unwrap();
+    let pushed: Vec<_> = next_told(&mut told, 4).await.iter().map(connection_of).collect();
+    let expected = [
+        said("online", None, None),
+        said("catching_up", Some(0), Some(10)),
+        said("connecting", None, None),
+        said("catching_up", Some(3), Some(10)),
+    ];
+    assert_eq!(pushed, expected, "the catch-up back, as far as it has got");
+    assert!(crate::feed::catching_up(live.clone())(), "still held, as the feed and the notifications read it");
+    tx.send(offline_done(3)).await.unwrap();
+    let ended = next_told(&mut told, 2).await;
+    assert_eq!(ended.len(), 2, "{ended:?}");
+    assert_eq!(connection_of(&ended[0]), said("online", None, None), "it ends with WhatsApp's word");
+    let summary = (ended[1].method.as_str(), ended[1].params["text"].as_str());
+    assert_eq!(summary, ("notice", Some("While you were away: 3 messages in 2 chats")), "and its summary after");
+    assert!(!live.lock().unwrap().catching_up());
+    drop(tx);
+    running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keepalive_timeout_during_a_catch_up_holds_it_until_whatsapp_says_it_is_done_and_its_summary_comes_after() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tx, incoming) = mpsc::channel(16);
+    let (live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    tx.send(crate::engine::Incoming { event: offline_preview(10), ack: None }).await.unwrap();
+    tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
+    for (chat, id) in [(ANA, "3EB0AWAY1"), (GROUP, "3EB0AWAY2"), (ANA, "3EB0AWAY3")] {
+        tx.send(arriving(chat, id)).await.unwrap();
+    }
+    let states = next_connections(&mut told, 3).await;
+    assert_eq!(states, [ConnectionState::Online, ConnectionState::CatchingUp, ConnectionState::Connecting]);
+    until("the messages to be counted", || live.lock().unwrap().catch_up.as_ref().is_some_and(|c| c.stored == 3)).await;
+    {
+        let live = live.lock().unwrap();
+        assert!(live.catching_up(), "the timeout doesn't end the catch-up");
+        assert_eq!(live.catch_up.as_ref().unwrap().seconds, None, "so the chat list and notifications wait for it");
+    }
+    assert!(crate::feed::catching_up(live.clone())(), "as the feed and the notifications read it");
+    tx.send(offline_done(3)).await.unwrap();
+    let ended = next_told(&mut told, 2).await;
+    assert_eq!(ended.len(), 2, "{ended:?}");
+    assert_eq!(connection_of(&ended[0]), said("online", None, None), "it ends with WhatsApp's word");
+    let summary = (ended[1].method.as_str(), ended[1].params["text"].as_str());
+    assert_eq!(summary, ("notice", Some("While you were away: 3 messages in 2 chats")), "and its summary after");
+    assert!(!live.lock().unwrap().catching_up());
+    drop(tx);
+    running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_after_a_keepalive_timeout_during_a_catch_up_is_a_new_one_so_the_catch_up_ends_and_it_is_online() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tx, incoming) = mpsc::channel(16);
+    let (live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    tx.send(crate::engine::Incoming { event: offline_preview(10), ack: None }).await.unwrap();
+    tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
+    // whatsmeow reconnects after three minutes of failed pings, saying nothing of the old connection.
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    let states = next_connections(&mut told, 4).await;
+    let expected =
+        [ConnectionState::Online, ConnectionState::CatchingUp, ConnectionState::Connecting, ConnectionState::Online];
+    assert_eq!(states, expected, "the new connection isn't taken for part of the old one's catch-up");
+    {
+        let live = live.lock().unwrap();
+        assert!(!live.catching_up(), "the catch-up the old connection cut short ended");
+        assert!(live.catch_up.as_ref().unwrap().seconds.is_some(), "so the chat list and notifications go on");
+    }
+    drop(tx);
+    running.await.unwrap();
+}
+
 /// The phone's message saying older history is ready, as it sends one to its own account.
 fn phone_answers() -> crate::engine::Incoming {
     let notification = e2e::HistorySyncNotification { direct_path: Some("on-demand".into()), ..Default::default() };

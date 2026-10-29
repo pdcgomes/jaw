@@ -94,6 +94,8 @@ const (
 	Connection_TEMPORARY_BAN     Connection_State = 8
 	Connection_CONNECT_FAILED    Connection_State = 9
 	Connection_KEEPALIVE_TIMEOUT Connection_State = 10
+	// After KEEPALIVE_TIMEOUT, WhatsApp answers the keepalive again, on the same connection.
+	Connection_KEEPALIVE_RESTORED Connection_State = 11
 )
 
 // Enum value maps for Connection_State.
@@ -110,19 +112,21 @@ var (
 		8:  "TEMPORARY_BAN",
 		9:  "CONNECT_FAILED",
 		10: "KEEPALIVE_TIMEOUT",
+		11: "KEEPALIVE_RESTORED",
 	}
 	Connection_State_value = map[string]int32{
-		"STATE_UNSPECIFIED": 0,
-		"UNLINKED":          1,
-		"CONNECTING":        2,
-		"CONNECTED":         3,
-		"DISCONNECTED":      4,
-		"LOGGED_OUT":        5,
-		"STREAM_REPLACED":   6,
-		"CLIENT_OUTDATED":   7,
-		"TEMPORARY_BAN":     8,
-		"CONNECT_FAILED":    9,
-		"KEEPALIVE_TIMEOUT": 10,
+		"STATE_UNSPECIFIED":  0,
+		"UNLINKED":           1,
+		"CONNECTING":         2,
+		"CONNECTED":          3,
+		"DISCONNECTED":       4,
+		"LOGGED_OUT":         5,
+		"STREAM_REPLACED":    6,
+		"CLIENT_OUTDATED":    7,
+		"TEMPORARY_BAN":      8,
+		"CONNECT_FAILED":     9,
+		"KEEPALIVE_TIMEOUT":  10,
+		"KEEPALIVE_RESTORED": 11,
 	}
 )
 
@@ -5171,7 +5175,7 @@ const file_engine_proto_rawDesc = "" +
 	"\x10app_state_synced\x18\x0e \x01(\v2\x1a.jaw.engine.AppStateSyncedH\x00R\x0eappStateSynced\x128\n" +
 	"\bpresence\x18\x0f \x01(\v2\x1a.jaw.engine.PresenceUpdateH\x00R\bpresence\x12,\n" +
 	"\x06typing\x18\x10 \x01(\v2\x12.jaw.engine.TypingH\x00R\x06typingB\x06\n" +
-	"\x04kind\"\x8c\x03\n" +
+	"\x04kind\"\xa4\x03\n" +
 	"\n" +
 	"Connection\x122\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x1c.jaw.engine.Connection.StateR\x05state\x12\x16\n" +
@@ -5179,7 +5183,7 @@ const file_engine_proto_rawDesc = "" +
 	"\buntil_ms\x18\x03 \x01(\x03R\auntilMs\x12\x10\n" +
 	"\x03jid\x18\x04 \x01(\tR\x03jid\x12\x10\n" +
 	"\x03lid\x18\x05 \x01(\tR\x03lid\x12\x1b\n" +
-	"\tpush_name\x18\x06 \x01(\tR\bpushName\"\xd5\x01\n" +
+	"\tpush_name\x18\x06 \x01(\tR\bpushName\"\xed\x01\n" +
 	"\x05State\x12\x15\n" +
 	"\x11STATE_UNSPECIFIED\x10\x00\x12\f\n" +
 	"\bUNLINKED\x10\x01\x12\x0e\n" +
@@ -5194,7 +5198,8 @@ const file_engine_proto_rawDesc = "" +
 	"\rTEMPORARY_BAN\x10\b\x12\x12\n" +
 	"\x0eCONNECT_FAILED\x10\t\x12\x15\n" +
 	"\x11KEEPALIVE_TIMEOUT\x10\n" +
-	"\"\x8e\x01\n" +
+	"\x12\x16\n" +
+	"\x12KEEPALIVE_RESTORED\x10\v\"\x8e\x01\n" +
 	"\x04Link\x12$\n" +
 	"\x02qr\x18\x01 \x01(\v2\x12.jaw.engine.QrCodeH\x00R\x02qr\x12\x14\n" +
 	"\x04code\x18\x02 \x01(\tH\x00R\x04code\x12(\n" +

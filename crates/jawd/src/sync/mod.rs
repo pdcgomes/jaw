@@ -691,7 +691,7 @@ fn apply(live: &mut Live, connection: &pb::Connection) {
         }
         State::Unlinked => ConnectionState::Offline,
         State::Connecting | State::KeepaliveTimeout => ConnectionState::Connecting,
-        State::Connected => ConnectionState::Online,
+        State::Connected | State::KeepaliveRestored => ConnectionState::Online,
         State::LoggedOut => ConnectionState::LoggedOut,
         State::ClientOutdated => ConnectionState::UpdateNeeded,
         State::TemporaryBan => ConnectionState::Banned,
@@ -710,12 +710,25 @@ fn apply(live: &mut Live, connection: &pb::Connection) {
         };
     }
     // A catch-up lasts as long as its connection: one cut short ends, so a connection after it (the
-    // account linked again, or the same one back) isn't taken for part of it.
-    if !matches!(connection.state(), State::Connected | State::KeepaliveTimeout) {
+    // account linked again, or the same one back) isn't taken for part of it. A keepalive timeout,
+    // the only word that leaves a catch-up connecting, doesn't end one, since whatsmeow keeps the
+    // connection until its pings get through again; but it can reconnect instead, with no
+    // Disconnected, so Connected after a timeout is a new connection.
+    let reconnected = connection.state() == State::Connected && live.connection.state == ConnectionState::Connecting;
+    if reconnected
+        || !matches!(connection.state(), State::Connected | State::KeepaliveTimeout | State::KeepaliveRestored)
+    {
         live.cut_short();
     }
-    // Connected can come after WhatsApp said what's waiting, and the catch-up goes on.
+    // Connected can come after WhatsApp said what's waiting, and the catch-up goes on; pings that get
+    // through again put back the catch-up their timeout hid.
     if live.catching_up() && state == ConnectionState::Online {
+        if connection.state() == State::KeepaliveRestored {
+            let catch_up = live.catch_up.as_ref().map(|c| (c.messages, c.stored));
+            live.connection = Connection::new(ConnectionState::CatchingUp);
+            live.connection.total = catch_up.map(|(messages, _)| messages);
+            live.connection.done = catch_up.map(|(_, stored)| stored);
+        }
         return;
     }
     live.connection = Connection::new(state);

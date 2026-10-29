@@ -34,6 +34,9 @@ type Engine struct {
 	acks      *link.Acks
 	log       waLog.Logger
 	container *sqlstore.Container
+	// told is the connection state the engine told jawd last, so the keepalive's aren't said out of
+	// order (keepalive.go).
+	told told
 	// client is whatsmeow's client for the device in session.db, replaced by one on a fresh device
 	// once the account is logged out (renew); retired is the last one replaced so.
 	client  atomic.Pointer[whatsmeow.Client]
@@ -67,7 +70,9 @@ func Run(ctx context.Context, l *link.Link, home, program, whatsmeowVersion stri
 }
 
 func newEngine(ctx context.Context, l *link.Link, log waLog.Logger) *Engine {
-	return &Engine{ctx: ctx, link: l, acks: link.NewAcks(), log: log}
+	e := &Engine{ctx: ctx, link: l, acks: link.NewAcks(), log: log}
+	e.told.apart, e.told.connected = whatsmeow.KeepAliveIntervalMin, connected
+	return e
 }
 
 // hello sends the engine's Hello and checks jawd's.
@@ -235,7 +240,7 @@ func (e *Engine) loggedOut(client *whatsmeow.Client, reason events.ConnectFailur
 		return
 	}
 	why := strings.TrimPrefix(reason.String(), reason.NumberString()+": ")
-	e.send(&enginepb.Event{Kind: &enginepb.Event_Connection{Connection: &enginepb.Connection{State: enginepb.Connection_LOGGED_OUT, Reason: why}}})
+	e.tell(&enginepb.Connection{State: enginepb.Connection_LOGGED_OUT, Reason: why})
 	e.renew(client)
 }
 
@@ -316,7 +321,9 @@ func (e *Engine) say(evt any) {
 	case *events.Disconnected:
 		e.connection(enginepb.Connection_DISCONNECTED, "")
 	case *events.KeepAliveTimeout:
-		e.connection(enginepb.Connection_KEEPALIVE_TIMEOUT, fmt.Sprintf("%d keepalives failed", v.ErrorCount))
+		e.timedOut(v)
+	case *events.KeepAliveRestored:
+		e.restored()
 	case *events.StreamReplaced:
 		e.connection(enginepb.Connection_STREAM_REPLACED, "")
 	case *events.ClientOutdated:
@@ -326,7 +333,7 @@ func (e *Engine) say(evt any) {
 	case *events.TemporaryBan:
 		state := e.state(enginepb.Connection_TEMPORARY_BAN, v.Code.String())
 		state.UntilMs = time.Now().Add(v.Expire).UnixMilli()
-		e.send(&enginepb.Event{Kind: &enginepb.Event_Connection{Connection: state}})
+		e.tell(state)
 	case *events.PairSuccess:
 		e.send(&enginepb.Event{Kind: &enginepb.Event_Link{Link: &enginepb.Link{Step: &enginepb.Link_Done{Done: &enginepb.Linked{
 			Jid:          v.ID.String(),
@@ -360,7 +367,7 @@ func (e *Engine) state(state enginepb.Connection_State, reason string) *enginepb
 }
 
 func (e *Engine) connection(state enginepb.Connection_State, reason string) {
-	e.send(&enginepb.Event{Kind: &enginepb.Event_Connection{Connection: e.state(state, reason)}})
+	e.tell(e.state(state, reason))
 }
 
 // message is a whatsmeow message as jawd takes it: the raw protobuf, still wrapped, and what only
