@@ -1553,6 +1553,34 @@ async fn a_full_app_state_refetch_that_fails_is_tried_again_while_its_engine_run
     running.abort();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_app_state_refetch_that_fails_spends_no_try_while_whatsapp_cant_be_reached() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let engine = Scripted::default();
+    *engine.failing_resyncs.lock().unwrap() = 1;
+    let (supervisor, incoming) = supervised(&engine);
+    let running = tokio::spawn(run(
+        incoming,
+        store.clone(),
+        Arc::default(),
+        broadcast::channel(16).0,
+        Some(supervisor.clone()),
+        home.path().to_path_buf(),
+        Default::default(),
+        crate::feed::Typing::default(),
+    ));
+    until("the first engine's resync", || engine.asked("resync") == 1).await;
+    engine.send(connection_event(pb::connection::State::Disconnected).event).await;
+    // Out of reach for longer than the wait before the first try again, 1 s.
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert_eq!(engine.asked("resync"), 1, "no try is spent while WhatsApp can't be reached");
+    engine.send(connected()).await;
+    until("the refetch tried again once WhatsApp could be reached", || engine.asked("resync") == 2).await;
+    assert_eq!(supervisor.status().restarts, 0, "by the same engine");
+    running.abort();
+}
+
 fn blob(id: &str) -> Vec<u8> {
     use wa_proto::wa_web_protobufs_history_sync::{Conversation, HistorySync, HistorySyncMsg};
     HistorySync {

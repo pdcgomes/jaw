@@ -9,17 +9,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use jaw_proto::{Connection, ConnectionState, Push};
+use jaw_proto::{Connection, Push};
 use tokio::sync::{broadcast, watch};
 
 use super::{Inner, engine};
 use crate::engine::pb;
-
-/// Whether WhatsApp can hear from jawd now: with the phone offline it can, as messages still
-/// arrive and send then.
-pub(super) fn connected(connection: &Connection) -> bool {
-    matches!(connection.state, ConnectionState::Online | ConnectionState::CatchingUp | ConnectionState::PhoneOffline)
-}
+use crate::presence::reachable;
 
 /// Tells WhatsApp you're online or away as focus comes and goes, once each has held long enough,
 /// and again each time the connection comes back, waking whatever waits for it.
@@ -58,7 +53,7 @@ pub(super) async fn follow(
             changed = focused.changed(), if following => following = changed.is_ok(),
             push = pushes.recv() => match push {
                 Ok(push) if push.method == "connection" => {
-                    let now = serde_json::from_value::<Connection>(push.params).is_ok_and(|c| connected(&c));
+                    let now = serde_json::from_value::<Connection>(push.params).is_ok_and(|c| reachable(c.state));
                     inner.connected.send_if_modified(|was| std::mem::replace(was, now) != now);
                     if now && !online {
                         told = None;

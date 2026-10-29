@@ -189,7 +189,7 @@ impl Sending {
     ) -> anyhow::Result<Sending> {
         let Makers { previews, media } = makers;
         let (notices, pushes) = (pushes.clone(), pushes.subscribe());
-        let online = presence::connected(&live.lock().expect("live state").connection);
+        let online = crate::presence::reachable(live.lock().expect("live state").connection.state);
         let copies = media.as_ref().map_or_else(|| watch::channel(0).1, Media::copies_changed);
         let inner = Arc::new(Inner {
             store,

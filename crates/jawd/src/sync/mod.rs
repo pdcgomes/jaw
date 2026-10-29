@@ -475,6 +475,8 @@ pub async fn run(
                             avatars.clone(),
                             merges.clone(),
                             resync,
+                            live.clone(),
+                            pushes.clone(),
                         ));
                     }
                 }

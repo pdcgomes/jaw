@@ -2,7 +2,10 @@
 //! every group with its members, every app-state collection again in full, the phone numbers of
 //! LIDs jaw has none for, and avatars for the chats at the top of the list.
 
-use super::{Avatars, Merges};
+use jaw_proto::Push;
+use tokio::sync::broadcast;
+
+use super::{Avatars, Merges, Shared};
 use crate::convert::people;
 use crate::engine::pb;
 use crate::engine::supervisor::Supervisor;
@@ -14,8 +17,17 @@ pub const COLLECTIONS: [&str; 5] = ["critical_block", "critical_unblock_low", "r
 /// The most LIDs asked about at once.
 const LIDS: usize = 5_000;
 
-/// Brings the account's people, groups and, when `resync`, app state in.
-pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, merges: Merges, resync: bool) {
+/// Brings the account's people, groups and, when `resync`, app state in; a refetch that fails is
+/// tried again once WhatsApp can be reached, as `live` says and `pushes` tell of as it changes.
+pub async fn run(
+    store: Store,
+    engine: Supervisor,
+    avatars: Avatars,
+    merges: Merges,
+    resync: bool,
+    live: Shared,
+    pushes: broadcast::Sender<Push>,
+) {
     match engine.call(pb::command::Kind::Contacts(pb::Contacts {})).await {
         Ok(pb::reply::Kind::ContactList(list)) => store_changes(&store, people::contacts(&list), "contacts").await,
         Ok(other) => eprintln!("jawd: the engine answered contacts with {other:?}"),
@@ -30,7 +42,7 @@ pub async fn run(store: Store, engine: Supervisor, avatars: Avatars, merges: Mer
         Err(e) => eprintln!("jawd: can't list the groups: {e}"),
     }
     if resync && !resynced(&engine).await {
-        tokio::spawn(resync_again(engine.clone()));
+        tokio::spawn(resync_again(engine.clone(), live, pushes.subscribe()));
     }
     lids(&store, &engine).await;
     merges.poke();
@@ -64,19 +76,34 @@ const RESYNC_MOST: std::time::Duration = std::time::Duration::from_secs(60);
 const RESYNC_TRIES: u32 = 10;
 
 /// Tries the full refetch again while the engine that failed it runs, since until it succeeds
-/// what an engine stopped in the middle of left behind stays missing. An engine started again
-/// fetches it itself.
-async fn resync_again(engine: Supervisor) {
+/// what an engine stopped in the middle of left behind stays missing. Each try waits until WhatsApp
+/// can be reached, as a send does, so tries are spent only then. An engine started again fetches
+/// it itself.
+async fn resync_again(engine: Supervisor, live: Shared, mut pushes: broadcast::Receiver<Push>) {
     let restarts = engine.status().restarts;
     let mut pause = RESYNC_FIRST;
     for _ in 0..RESYNC_TRIES {
         tokio::time::sleep(pause).await;
-        if engine.status().restarts != restarts || resynced(&engine).await {
+        if !reached(&live, &mut pushes).await || engine.status().restarts != restarts || resynced(&engine).await {
             return;
         }
         pause = (pause * 2).min(RESYNC_MOST);
     }
     eprintln!("jawd: gave up fetching the app state again; the next engine to connect fetches it");
+}
+
+/// Waits until WhatsApp can be reached, as `live` says, looking again each time something is
+/// pushed, since sync pushes each change of the connection once `live` has it; false once nothing
+/// is left to push, as jawd stops.
+async fn reached(live: &Shared, pushes: &mut broadcast::Receiver<Push>) -> bool {
+    loop {
+        if crate::presence::reachable(live.lock().expect("live state").connection.state) {
+            return true;
+        }
+        if let Err(broadcast::error::RecvError::Closed) = pushes.recv().await {
+            return false;
+        }
+    }
 }
 
 async fn store_changes(store: &Store, changes: Vec<Change>, what: &str) {
