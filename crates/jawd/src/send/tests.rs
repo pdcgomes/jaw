@@ -1412,6 +1412,20 @@ async fn each_sending_call_that_keeps_something_is_one_synced_commit() {
     let before = synced();
     running.call("typing", json!({ "chat": ANA, "state": "composing" })).await.unwrap();
     assert_eq!(synced() - before, 0, "typing keeps nothing");
+    // The chat actions need a linked account, which with no engine only jaw.db could say.
+    running.live.lock().unwrap().account.state = jaw_proto::AccountState::Linked;
+    let chat_actions = [
+        ("chat.pin", json!({ "chat": ANA, "pinned": true })),
+        ("chat.archive", json!({ "chat": ANA, "archived": true })),
+        ("chat.mute", json!({ "chat": ANA, "until": -1 })),
+        ("chat.mark_unread", json!({ "chat": ANA, "unread": true })),
+        ("star", json!({ "message": "m1", "starred": true })),
+    ];
+    for (method, params) in chat_actions {
+        let before = synced();
+        running.call(method, params.clone()).await.unwrap();
+        assert_eq!(synced() - before, 1, "{method} {params}");
+    }
     let actions = [
         ("react", json!({ "message": "m1", "emoji": "👍" })),
         ("edit", json!({ "message": id, "text": "three" })),
