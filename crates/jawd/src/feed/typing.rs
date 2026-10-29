@@ -9,7 +9,9 @@
 //! Whoever types is named as a message from them is, read once while they type. Each chat's typing
 //! is told to connections at most once each `Timing::pace`: the first change after a quiet spell at
 //! once, then the newest of those that follow, the rest merged into it; each connection's windows
-//! then send their interface a `typing` push for the chats they show (`client`).
+//! then send their interface a `typing` push for the chats they show (`client`). While typing comes
+//! fast the task takes it at most once each `BATCH`, so a busy group costs a round of its work for
+//! many changes, and the chats told in one round reach connections as one.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,9 +44,12 @@ impl Default for Timing {
 
 /// The most of the engine's typing, and of the messages that end it, waiting to be taken.
 pub const INTAKE_MOST: usize = 1_024;
-/// How many changes told a connection can fall behind by before it looks again at every chat it
-/// shows.
+/// How many rounds of changes told a connection can fall behind by before it looks again at every
+/// chat it shows.
 const CHANGES_KEPT: usize = 1_024;
+/// The shortest time between two of the task's rounds while typing keeps coming; a change after a
+/// quiet spell is taken at once.
+const BATCH: Duration = Duration::from_millis(5);
 
 /// What waits in the intake, in the order it came.
 enum Came {
@@ -86,8 +91,8 @@ struct Inner {
     /// What connections are told: each chat's typists, oldest first, for the chats where someone is,
     /// by the chat's id as its row has it.
     told: Mutex<HashMap<String, Arc<[Typist]>>>,
-    /// The chats whose typing was told, as they are.
-    changes: broadcast::Sender<Arc<str>>,
+    /// The chats whose typing was told, each round's together.
+    changes: broadcast::Sender<Arc<[Arc<str>]>>,
     heard: AtomicU64,
     dropped: AtomicU64,
     sent: AtomicU64,
@@ -191,13 +196,13 @@ impl Typing {
 /// A connection's view of who's typing: the chats whose typing was told since, and each chat's now.
 pub struct Watching {
     inner: Arc<Inner>,
-    changes: broadcast::Receiver<Arc<str>>,
+    changes: broadcast::Receiver<Arc<[Arc<str>]>>,
 }
 
 impl Watching {
-    /// The next chat whose typing was told, or how many changes this fell behind by. Cancelling it
-    /// loses nothing.
-    pub async fn changed(&mut self) -> Result<Arc<str>, RecvError> {
+    /// The next chats whose typing was told together, or how many rounds of them this fell behind
+    /// by. Cancelling it loses nothing.
+    pub async fn changed(&mut self) -> Result<Arc<[Arc<str>]>, RecvError> {
         match self.changes.recv().await {
             // Its sender lives as long as this does.
             Err(RecvError::Closed) => std::future::pending().await,
@@ -256,13 +261,15 @@ impl Chat {
         }
     }
 
-    /// Ends the typing of whoever `ends` says, owing the change if anyone's did.
-    fn end(&mut self, inner: &Inner, ends: impl Fn(&Typer) -> bool) {
+    /// Ends the typing of whoever `ends` says, owing the change if anyone's did, and says whether.
+    fn end(&mut self, inner: &Inner, ends: impl Fn(&Typer) -> bool) -> bool {
         let before = self.typers.len();
         self.typers.retain(|typer| !ends(typer));
-        if self.typers.len() != before {
+        let ended = self.typers.len() != before;
+        if ended {
             self.owe(inner);
         }
+        ended
     }
 }
 
@@ -274,6 +281,8 @@ struct Typists {
     chats: HashMap<String, Chat>,
     chat_ids: HashMap<String, Option<String>>,
     people: HashMap<String, Option<Arc<Who>>>,
+    /// Whether someone started or stopped typing since the chats and people read were last pruned.
+    moved: bool,
 }
 
 /// What typing a chat presence says: typing, recording, or none, for a pause.
@@ -347,9 +356,8 @@ impl Typists {
         let Some(state) = typist_state(state) else {
             // A pause ends their typing there, whichever of their JIDs it comes by.
             let person = self.people.get(&sender).cloned().flatten().map(|who| who.n);
-            if let Some(chat) = self.chat(&chat) {
-                chat.end(inner, |typer| person == Some(typer.who.n) || typer.who.jids.contains(&sender));
-            }
+            let ends = |typer: &Typer| person == Some(typer.who.n) || typer.who.jids.contains(&sender);
+            self.moved |= self.chat(&chat).is_some_and(|chat| chat.end(inner, ends));
             return;
         };
         let Some(Some(id)) = self.chat_ids.get(&chat).cloned() else { return };
@@ -371,6 +379,7 @@ impl Typists {
             None => {
                 typists.typers.push(Typer { who, state, until });
                 typists.owe(inner);
+                self.moved = true;
             }
         }
     }
@@ -382,23 +391,21 @@ impl Typists {
             senders.iter().filter(|jid| !jid.is_empty()).map(|jid| convert::user_jid(jid)).collect();
         let people: Vec<i64> =
             senders.iter().filter_map(|jid| self.people.get(jid).cloned().flatten()).map(|who| who.n).collect();
-        if let Some(chat) = self.chat(chat) {
-            chat.end(inner, |typer| {
-                people.contains(&typer.who.n) || typer.who.jids.iter().any(|jid| senders.contains(jid))
-            });
-        }
+        let ends =
+            |typer: &Typer| people.contains(&typer.who.n) || typer.who.jids.iter().any(|jid| senders.contains(jid));
+        self.moved |= self.chat(chat).is_some_and(|chat| chat.end(inner, ends));
     }
 
     /// Everyone's typing ends, as when WhatsApp hears you're away or can't be reached.
     fn end_all(&mut self, inner: &Inner) {
         for chat in self.chats.values_mut() {
-            chat.end(inner, |_| true);
+            self.moved |= chat.end(inner, |_| true);
         }
     }
 
     fn fade(&mut self, now: Instant, inner: &Inner) {
         for chat in self.chats.values_mut() {
-            chat.end(inner, |typer| typer.until <= now);
+            self.moved |= chat.end(inner, |typer| typer.until <= now);
         }
     }
 
@@ -435,8 +442,8 @@ impl Typists {
             changed.push(id.clone());
         }
         drop(told);
-        for id in changed {
-            let _ = inner.changes.send(Arc::from(id));
+        if !changed.is_empty() {
+            let _ = inner.changes.send(changed.into_iter().map(Arc::from).collect());
         }
         self.chats
             .retain(|_, chat| !chat.typers.is_empty() || chat.owed || chat.told_at.is_some_and(|at| now < at + pace));
@@ -484,13 +491,19 @@ async fn until(at: Option<Instant>) {
 async fn run(inner: Arc<Inner>, store: Store, me: watch::Receiver<convert::Me>, mut hearing: watch::Receiver<bool>) {
     let mut typists = Typists::default();
     let mut following = true;
+    let mut round: Option<Instant> = None;
     loop {
+        // While it keeps coming, what comes waits for the next round with whatever comes meanwhile.
+        if let Some(next) = round.map(|at| at + BATCH).filter(|next| *next > Instant::now()) {
+            tokio::time::sleep_until(next.into()).await;
+        }
         let due = typists.due(inner.timing.pace);
         tokio::select! {
             _ = inner.woken.notified() => {}
             changed = hearing.changed(), if following => following = changed.is_ok(),
             _ = until(due) => {}
         }
+        round = Some(Instant::now());
         // As it is now, whatever woke this: what was said after you went away isn't taken. With
         // nothing left to say whether WhatsApp hears you, it doesn't.
         let on = following && *hearing.borrow_and_update();
@@ -517,10 +530,12 @@ async fn run(inner: Arc<Inner>, store: Store, me: watch::Receiver<convert::Me>, 
         }
         let now = Instant::now();
         typists.fade(now, &inner);
-        typists.forget();
         // The chats messages are looked for in are those of the typing about to be told, so a
-        // message that comes once a connection has heard of it is taken.
-        {
+        // message that comes once a connection has heard of it is taken. They and what's read for
+        // typing change only as someone starts or stops; between, typing said since only adds to
+        // them, which `heard` does as it comes.
+        if std::mem::take(&mut typists.moved) {
+            typists.forget();
             let mut intake = inner.intake.lock().expect("typing's intake");
             let waiting: Vec<String> = intake
                 .came
@@ -775,7 +790,9 @@ mod tests {
         let (mut tells, mut last) = (0u64, Instant::now());
         loop {
             match tokio::time::timeout(pace * 3 / 2, bed.seen.changed()).await {
-                Ok(Ok(chat)) if &*chat == GROUP => (tells, last) = (tells + 1, Instant::now()),
+                Ok(Ok(chats)) if chats.iter().all(|chat| &**chat == GROUP) => {
+                    (tells, last) = (tells + 1, Instant::now())
+                }
                 Ok(other) => panic!("{other:?}"),
                 Err(_) if burst.is_finished() => break,
                 Err(_) => {}

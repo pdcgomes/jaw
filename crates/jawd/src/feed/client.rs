@@ -65,8 +65,8 @@ const KEPT_MOST: u64 = 16 << 20;
 /// What a client waits for.
 pub enum Ready {
     Changes(Result<Arc<Changes>, RecvError>),
-    /// A chat whose typing was told, or how many such changes it fell behind by.
-    Typing(Result<Arc<str>, RecvError>),
+    /// The chats whose typing was told together, or how many rounds of them it fell behind by.
+    Typing(Result<Arc<[Arc<str>]>, RecvError>),
     Flush,
     /// The queue to the interface has room again.
     Room,
@@ -1308,9 +1308,11 @@ impl Client {
         match ready {
             Ready::Changes(Ok(changes)) => self.mark(&changes),
             // A change waiting for the interface gives way to the newer, which is read as it goes.
-            Ready::Typing(Ok(chat)) => {
-                if self.shows(&chat) && !self.typing_owed.insert(chat.to_string()) {
-                    self.typing.merged();
+            Ready::Typing(Ok(chats)) => {
+                for chat in chats.iter() {
+                    if self.shows(chat) && !self.typing_owed.insert(chat.to_string()) {
+                        self.typing.merged();
+                    }
                 }
             }
             Ready::Typing(Err(_)) => {
