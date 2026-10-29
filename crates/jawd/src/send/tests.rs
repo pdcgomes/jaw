@@ -4626,6 +4626,47 @@ async fn a_line_about_the_chat_or_a_deleted_message_isnt_starred_but_a_star_can_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_message_youre_deleting_for_everyone_isnt_starred_while_your_deletion_is_on_its_way_but_its_star_can_go() {
+    let home = tempfile::tempdir().unwrap();
+    let timing = Timing { unconfirmed_for: Duration::from_secs(1), ..quick() };
+    let running = Running::timed(home.path(), world(), true, true, timing).await;
+    running.chats(&[ANA]).await;
+    let id = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &id, "sent").await;
+    let star = |starred: bool| running.call("star", json!({ "message": id, "starred": starred }));
+    star(true).await.unwrap();
+    until_stored(&running).await;
+    // The deletion's first try fails on the way, and its next is refused when it may have gone.
+    running.world.fail_chats(&[ANA.to_string()]);
+    running.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+    star(false).await.unwrap();
+    let refused = star(true).await.unwrap_err();
+    assert_eq!(refused.code, code::NOT_ALLOWED, "{}", refused.message);
+    let queued = |kind: &str| (kind.to_string(), "queued".to_string());
+    assert_eq!(outbox_rows(&running).await.0, [queued("revoke"), queued("app_state")], "the unstar alone written");
+    assert!(!row(&running, ANA, &id).await.unwrap().starred);
+    running.world.until(|asked| asked.iter().filter(|k| matches!(k, pb::command::Kind::Send(_))).count() >= 2).await;
+    eventually(&running, "the deletion's first try failed on the way", |db: &Connection| {
+        Ok(db.query_row("SELECT attempts FROM outbox WHERE kind = 'revoke'", [], |r| r.get::<_, i64>(0))? > 0)
+    })
+    .await;
+    running.world.refuse_next(1);
+    running.world.stop_failing_chats();
+    let revoke_is = |state: &'static str| {
+        move |db: &Connection| {
+            Ok(db.query_row("SELECT state FROM outbox WHERE kind = 'revoke'", [], |r| r.get::<_, String>(0))? == state)
+        }
+    };
+    eventually(&running, "the deletion waiting for a receipt", revoke_is("unconfirmed")).await;
+    assert_eq!(star(true).await.unwrap_err().code, code::NOT_ALLOWED, "while it waits for a receipt");
+    // No receipt comes in its time, so it's kept for a late one, and the message shows as it was.
+    eventually(&running, "the deletion kept for a late receipt", revoke_is("failed")).await;
+    assert!(!row(&running, ANA, &id).await.unwrap().deleted);
+    star(true).await.unwrap();
+    assert!(row(&running, ANA, &id).await.unwrap().starred);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn marking_and_starring_refuse_what_the_other_chat_actions_refuse() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;

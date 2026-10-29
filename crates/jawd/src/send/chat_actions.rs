@@ -254,6 +254,9 @@ pub(super) async fn star(inner: &Arc<Inner>, star: Star) -> Result<Value, Error>
     if star.starred && target.deleted {
         return Err(Error::new(code::NOT_ALLOWED, "a deleted message can't be starred"));
     }
+    if star.starred && target.deleting {
+        return Err(Error::new(code::NOT_ALLOWED, "it's being deleted for everyone, so it can't be starred"));
+    }
     let doing = if star.starred { "star the message" } else { "unstar the message" };
     act(inner, target.chat.clone(), doing, false, |at| {
         let patch = queued(starred(&target, star.starred, at))?;
