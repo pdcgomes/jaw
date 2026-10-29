@@ -19,6 +19,9 @@ const AT: i64 = 1_792_000_000_000;
 
 /// The ID of a message whose conversion panics, as `copied` does for it in tests.
 pub(super) const PANICS: &str = "3EB0PANICS";
+/// The ID of a message whose conversion fails once its copy is written, as `copied` does for it in
+/// tests.
+pub(super) const FAILS: &str = "3EB0FAILS";
 /// The ID of a message whose copy fills the disk once it's written, the first time only.
 pub(super) const FILLS: &str = "3EB0FILLS";
 pub(super) static FILLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -392,7 +395,7 @@ async fn every_message_with_a_file_gets_the_copy_it_would_arriving_now_and_nothi
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_step_meeting_many_to_copy_ends_once_it_has_copied_for_a_while_and_the_next_goes_on() {
+async fn a_step_meeting_many_to_copy_copies_one_and_the_next_goes_on_after_it() {
     let home = tempfile::tempdir().unwrap();
     let photos: Vec<Before> =
         (0..64u8).map(|k| Before::kept(from_ana(&format!("3EB0P{k:02}"), photo_message(k)))).collect();
@@ -407,12 +410,8 @@ async fn a_step_meeting_many_to_copy_ends_once_it_has_copied_for_a_while_and_the
         )?)
     })
     .await;
-    assert!((1..64).contains(&copied), "a step meeting 64 to copy in a row ends once it has for a while: {copied}");
-    assert_eq!(
-        (after, last),
-        (copied, Some(copied)),
-        "what it copied is the first in a row, and the next goes on after"
-    );
+    assert_eq!(copied, 1, "a step meeting 64 to copy in a row copies one");
+    assert_eq!((after, last), (1, Some(1)), "what it copied is the first in a row, and the next goes on after it");
     backfill_all(&store).await;
     assert_eq!(store.count("media").unwrap(), 64);
 }
@@ -604,6 +603,42 @@ async fn a_message_whose_conversion_panics_is_kept_in_quarantine_and_the_rest_ge
     assert_eq!(kept, [(format!("{ANA} {PANICS}"), raw)], "kept in quarantine with its raw protobuf");
     let panicked = versions(&store).await.into_iter().find(|(id, ..)| id == PANICS).unwrap();
     assert_eq!(panicked, (PANICS.to_string(), 0, 0), "with no version or event of its own");
+}
+
+/// A message whose conversion fails once its copy is written is kept in quarantine, and what it
+/// stamped goes with what it wrote. Here the HD copy of a photo, kept by an earlier jawd as a photo
+/// of its own and stored before it, fails once it has given the photo its HD copy, and the photo's
+/// own step follows in the same transaction, as a background transaction's steps do; a live write
+/// makes the two steps one transaction whatever the load. The photo's copy then takes a seq of its
+/// own and writes its event, so windows are told of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_failing_once_its_copy_is_written_leaves_nothing_stamped_for_its_transaction() {
+    let home = tempfile::tempdir().unwrap();
+    let messages = [
+        Before {
+            info: from_ana(FAILS, hd_child(ANA, "3EB0PHOTO", photo_message(11))),
+            shown_as: Some(from_ana(FAILS, photo_message(11))),
+            deleted: false,
+        },
+        Before::kept(from_ana("3EB0PHOTO", photo_message(1))),
+    ];
+    before_media(home.path(), 17, &messages);
+    let store = Store::open(home.path()).unwrap();
+    let applied = store.apply(Lane::Live, vec![Change::Backfill(COPIES); 2]).await.unwrap();
+    assert_eq!((applied.transactions, store.backfill_left(COPIES).unwrap()), (1, 0), "both steps in one transaction");
+    let copied: Vec<String> = copies(&store).await.into_iter().map(|(copy, _)| copy).collect();
+    assert_eq!((copied, store.count("quarantine").unwrap()), (vec!["3EB0PHOTO sd".to_string()], 1));
+    let untold: Vec<(String, i64)> = query(&store, |db| {
+        Ok(db
+            .prepare(
+                "SELECT id, v FROM messages m WHERE v > 0
+                    AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type = 'message' AND e.key = m.n AND e.seq = m.v)",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    assert!(untold.is_empty(), "versions with no event: {untold:?}");
 }
 
 /// Measures the backfill on one made of `JAW_MEASURE_MESSAGES` messages from before media in, one

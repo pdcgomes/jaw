@@ -103,6 +103,10 @@ fn copied(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
         }
     }
     #[cfg(test)]
+    if id == tests::FAILS {
+        return Err(anyhow!("reading its copy failed once it was written, as a test asks"));
+    }
+    #[cfg(test)]
     if id == tests::FILLS && !tests::FILLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         let full = rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL);
         return Err(rusqlite::Error::SqliteFailure(full, Some("the disk filled, as a test asks".into())).into());
