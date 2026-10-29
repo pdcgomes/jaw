@@ -10,22 +10,22 @@
 
 ## Questions
 
-What the design leaves open, each with its options and the lean the plan builds; none blocks a task, and each is a small change in the one place named.
+What the design leaves open, each with its options and the lean the plan builds; none blocks a task, and each is a small change in the one place named. Questions 5 to 7 were decided after the plan's review, as the Mac's conventions have them; the others are built as their leans.
 
-1. **Move to when the chat is in this folder only through a subfolder.** The design greys Remove from then, and says nothing of Move to, which would file the chat in the other folder and take it out of one it isn't directly in, leaving it here through the subfolder. A: greyed with Remove from, since neither can take it out of this folder (lean); B: Move to takes it out of the subfolder that holds it here; C: offered, and the chat stays here through the subfolder. Task 5 builds A, in `FolderMenu.commands`.
-2. **Who's folded under "N offline".** The design lists a folder's people "online, typing and recording first, then by when last seen, as jawd sorts them, the rest folded under N offline", and the wireframe lists Mãe, last seen 12 minutes ago, above "▸ 3 offline"; the terminal, under All, folds everyone who isn't online, typing or recording, and under a folder folds nobody. A: under a folder, those jawd has no last seen for (who hide it, or whom WhatsApp hasn't told jawd about) are folded and the rest listed as jawd sorts them; under All, as the terminal, everyone not online, typing or recording (lean, as the wireframe and the terminal draw them); B: everyone not online, typing or recording, everywhere; C: under a folder nobody, as the terminal. Task 12 builds A, in one closure of `RosterLines.lines`.
-3. **Saying which folder the list shows when the sidebar's folded.** Below 960 points, after ⌘B and in focus mode, nothing on screen names the list's folder, and ⌥⇧↓ or ⌘1 can change it; the terminal names it in its footer when neither its list nor its sidebar is drawn, with the key that shows its chats. A: the status line names a folder a key picks while the sidebar isn't shown, adding the key that shows its chats when the list isn't shown either (lean); B: a title over the chat list, always; C: nothing. Task 11 builds A, in `FolderTree.pickedLine`.
-4. **Move to and Remove from beyond the chat list.** The design gives the pane's menu "the chat's actions as the chat list's menu has them", and the wireframe draws the pane's menu with Add to Folder and Favourite only. A: every chat menu (the list's, the pane's, the menu bar's Chat menu) has Move to and Remove from while the list shows one of your folders that holds the chat, directly or through a subfolder, by one rule (lean: each action written once); B: the chat list's menu only. Task 5 builds A, in `FolderMenu.entries`.
-5. **A folder made in place.** A: it stays where it was made, and the list keeps what it showed, since New Folder… in a chat's Add to Folder files the chat there and shouldn't take the list away (lean); B: it's picked, so the list shows it, as Finder selects a new folder. Task 6 builds A.
-6. **Clicking away from the name field.** The design has Return keep the name and Esc drop it. A: anything else that ends the editing, such as a click elsewhere, drops it as Esc does, so nothing is asked of jawd that wasn't confirmed (lean); B: it keeps what's typed, as Return does and as Finder does. Task 6 builds A.
-7. **Communities dragged onto folders.** The chat list lets no community be dragged today, since one can't go in a pane. A: still none; a community's menu files it (lean); B: a community drags onto your folders, and the panes refuse it. Task 8 builds A.
-8. **The favourites in the Find menu.** "The Find menu lists them with what's on each", and an empty slot's key has to answer, since it says so in the status line, so it needs an item. A: a Favourites submenu of the Find menu with the nine slots, each titled by what's on it or Empty, ⌘1 to ⌘9 beside them (lean); B: the nine in the Find menu itself; C: only the slots held, the empty ones' keys answered by hidden items. Task 9 builds A.
+1. **Move to when the chat is in this folder only through a subfolder.** The design greys Remove from then, and says nothing of Move to, which would file the chat in the other folder and take it out of one it isn't directly in, leaving it here through the subfolder. A: greyed with Remove from, since neither can take it out of this folder (lean); B: Move to takes it out of the subfolder that holds it here; C: offered, and the chat stays here through the subfolder. Task 6 builds A, in `FolderMenu.commands`.
+2. **Who's folded under "N offline".** The design lists a folder's people "online, typing and recording first, then by when last seen, as jawd sorts them, the rest folded under N offline", and the wireframe lists Mãe, last seen 12 minutes ago, above "▸ 3 offline"; the terminal, under All, folds everyone who isn't online, typing or recording, and under a folder folds nobody. A: under a folder, those jawd has no last seen for (who hide it, or whom WhatsApp hasn't told jawd about) are folded and the rest listed as jawd sorts them; under All, as the terminal, everyone not online, typing or recording (lean, as the wireframe and the terminal draw them); B: everyone not online, typing or recording, everywhere; C: under a folder nobody, as the terminal. Task 13 builds A, in one closure of `RosterLines.lines`.
+3. **Saying which folder the list shows when the sidebar's folded.** Below 960 points, after ⌘B and in focus mode, nothing on screen names the list's folder, and ⌥⇧↓ or ⌘1 can change it; the terminal names it in its footer when neither its list nor its sidebar is drawn, with the key that shows its chats. A: the status line names a folder a key picks while the sidebar isn't shown, adding the key that shows its chats when the list isn't shown either (lean); B: a title over the chat list, always; C: nothing. Task 12 builds A, in `FolderTree.pickedLine`.
+4. **Move to and Remove from beyond the chat list.** The design gives the pane's menu "the chat's actions as the chat list's menu has them", and the wireframe draws the pane's menu with Add to Folder and Favourite only. A: every chat menu (the list's, the pane's, the menu bar's Chat menu) has Move to and Remove from while the list shows one of your folders that holds the chat, directly or through a subfolder, by one rule (lean: each action written once); B: the chat list's menu only. Task 6 builds A, in `FolderMenu.entries` and `ChatMenu.folderItems`.
+5. **A folder made in place.** Decided: a folder made from the sidebar (⇧⌘N, the sidebar's New Folder… and a folder's New Folder Inside…) is picked, so the list shows it, as Notes and Reminders select a new item in their sidebars; one made from a chat's Add to Folder ▸ New Folder… isn't, and the list keeps what it showed, since that files the chat there and shouldn't take the list away. Task 7 builds it, in `SidebarController.named(_:)`.
+6. **Clicking away from the name field.** The design has Return keep the name and Esc drop it. Decided: anything else that ends the editing, such as a click elsewhere, keeps what's typed as Return does, as Finder, Notes and Xcode keep a name, unless it's empty or unchanged; Esc alone drops it. If jawd turns the name down once the keys have gone elsewhere, the row shows jawd's words without taking the keys back, and Esc or another click away drops it. Task 7 builds it, in `SidebarController.controlTextDidEndEditing(_:)`.
+7. **Communities dragged onto folders.** The chat list lets no community be dragged today, since one can't go in a pane. Decided: a community's row drags onto your folders like any chat, as the design has "a chat from the chat list" dragged there and a community's row is one, carrying a pasteboard type of its own that the panes don't register, so it can't be dropped on a pane. Task 9 builds it.
+8. **The favourites in the Find menu.** "The Find menu lists them with what's on each", and an empty slot's key has to answer, since it says so in the status line, so it needs an item. A: a Favourites submenu of the Find menu with the nine slots, each titled by what's on it or Empty, ⌘1 to ⌘9 beside them (lean); B: the nine in the Find menu itself; C: only the slots held, the empty ones' keys answered by hidden items. Task 10 builds A.
 
 ## Global Constraints
 
 - macOS 26 and later, Swift 6 language mode, warnings as errors (`mac/Project.swift`).
 - No font, radius or line width set by hand outside `JawUI/Sources/Components`: `mac/scripts/check-components` fails the build on one.
-- Everything drawn lives in JawUI and is made from values; the app target defines no view or view controller of its own (the harness's second rule, which `mac-harness` adds to `scripts/check-harness`, fails the build on one once it's in `mac-m1`); `AppModel` is the only code that talks to jawd. The harness names neither `Jawd` nor `Client` (`scripts/check-harness`).
+- Everything drawn lives in JawUI and is made from values; the app target defines no view or view controller of its own (the harness's second rule, which `mac-harness` adds to `scripts/check-harness`, fails the build on one once it's on main); `AppModel` is the only code that talks to jawd. The harness names neither `Jawd` nor `Client` (`scripts/check-harness`).
 - Every new screen has a harness scene (`JawHarness/Sources/Scenes/`, registered in `BuiltInScenes.swift`), checked in its sweep. Menus aren't screens a harness picture can hold (AppKit draws them in windows of their own); they're checked by JawUI's tests and the snapshot's `menu:` steps.
 - Each command is written once, with its menu title, palette phrase, key and menu; right-click menus are made from `MenuEntry` values worked out from rows, by `Menus.menu(_:command:)` and `Menus.items(_:command:)` (`mac/README.md`; the menus plan's task 1). An item under a title of its own has no tick; one whose title is its command's takes the command's tick.
 - The words are the design's: "Add to Folder", "New Folder…", "Move to", "Remove from <folder>", "Favourite", "Remove from Favourites", "New Folder Inside…", "Rename", "Delete…", "Folders", "Smart Folders", "Open Chat", "Start Chat", "Open in New Pane", "typing…", "recording…", "online", "N offline"; in the menu bar "New Folder" ⇧⌘N, "Rename Folder", "Delete Folder…" ⌘⌫, "Previous Folder" ⌥⇧↑, "Next Folder" ⌥⇧↓ and "Favourites" with ⌘1 to ⌘9. Where the design gives none, the terminal's are the reference (the parity plan's rule 1) with the Mac's keys in the terminal's place: "Ana Ribeiro filed in Family", "Ana Ribeiro taken out of Family", "Family moved to the top", "⌘3 goes to Family", "⌘3 is free", "nothing is on ⌘3; …".
@@ -34,48 +34,47 @@ What the design leaves open, each with its options and the lean the plan builds;
 - Before jawd serves folders (a jawd from main answers `folders.watch` with -32601), the sidebar keeps All and Archived, no menu has a folder item, nothing says a window couldn't be watched, and ⇧⌘N, ⌘1 to ⌘9, ⌥⇧↑ and ⌥⇧↓ say what they wait on when chosen ("folders come with jawd's M6", "favourites come with jawd's M6"), as the parity plan's rule 2 has a step land before jawd's part.
 - `folders`' fixtures are copied with `git show folders:protocol/fixtures/<file>`, never from another checkout. Never touch `~/src/jaw-mac-m1`, `~/src/jaw-folders` or `~/src/jaw-harness`, nor `mac-menus`' checkout, `~/src/jaw-mac-menus`; never open `~/Library/Application Support/jaw`; never stop a process by name; the app's snapshot runs `--demo`.
 - Nothing here is jawd's data layer (`scripts/check-data-audit.py`'s paths), so it needs no database audit.
-- Tests run on the build Mac, never on this one: `mac/scripts/build-mac test JawKit`, `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests` and `mac/scripts/build-mac build jaw`, each printing only jaw's diagnostics and `** TEST SUCCEEDED **` or `** BUILD SUCCEEDED **`.
+- Tests run on the build Mac, never on this one: `mac/scripts/build-mac test JawKit`, `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests` and `mac/scripts/build-mac build jaw`, each printing only jaw's diagnostics and `** TEST SUCCEEDED **` or `** BUILD SUCCEEDED **`. If `build-mac` prints `==> build-mac doesn't answer; running here`, interrupt it at once (Ctrl-C) and report that the build Mac is down: it would go on to build and run the app on this Mac, where the Mac app is never built.
 - Commits are on `mac-folders`, in the repository's style: one or more plain sentences saying what changed and why, no prefix, British spelling.
 - Scratch goes in `/tmp/jaw-mac-folders/`, deleted when the work is done; a Rust build runs `df -h` first and uses `CARGO_INCREMENTAL=0`.
 
 ## Where it's built, and what it waits on
 
-- **The branch.** `mac-folders` was made from `mac-menus` at 5b31719, on top of `mac-m1`. It's built in a worktree of its own, `~/src/jaw-mac-folders` (`git -C ~/src/jaw-mac-menus worktree add ~/src/jaw-mac-folders mac-folders`), so `mac-menus`' checkout stays with its builder; `build-mac` copies it to `~/src/build-mac/jaw/jaw-mac-folders` on the build Mac.
-- **The hand-over.** As `mac-menus` is handed over: once `mac-menus` is in `mac-m1`, `mac-folders` is rebased onto `mac-m1`'s tip for the Mac builder to fast-forward `mac-m1` to, again if `mac-m1` moves first; it isn't merged, since `mac-m1` is rebased onto main from time to time.
-- **The harness's second phase.** `mac-harness` (not in `mac-m1` yet) moves the window's content into JawUI as `WindowContent`, which takes a `SidebarController` and leaves `MainWindowController` to wire it, as it does here. Every change to the sidebar is inside `SidebarController`; where a task changes `MainWindowController` or `AppModel.stateView`, it says what the same change is if `WindowContent` is in the checkout by then.
-- **jawd.** The protocol is `folders` at cc585c0, in its second audit (`git show folders:protocol/README.md`, "Folders and the roster"). Each task says what it waits on and what it can't try until `folders` lands; nothing is tried end to end until `folders` is on main and `mac-m1` has it, which is task 14. Before then, the snapshot on `--demo`, whose jawd is built from this checkout's main, checks that the app falls back as it should.
-- **The parity check.** `mac/parity.toml` and `make check-parity` are on main, not on `mac-m1`. When `mac-folders` reaches a checkout that has them, its 2.1 rows come out in the same change (task 14).
+- **The branch.** `mac-folders` is made from main, which has the menus this plan builds on (`654037e` to `e7999d6`, then the palette's ⌘↩ through `openInNewPane` and VoiceOver's press on a button); its one commit of its own before task 1 is this plan. The menus' code the tasks name (`MenuEntry`, `Menus`, `ChatMenu`, `chatCommands(for:)`, `openInNewPane(_:)`, `MenuPopUp`, the snapshot's `menu:` steps) is main's, as the menus plan built it. The branch is built in a worktree made from it, `~/src/jaw-mac-folders` (`git -C ~/src/jaw-mac-menus worktree add ~/src/jaw-mac-folders mac-folders`), and `build-mac` copies that to `~/src/build-mac/jaw/jaw-mac-folders` on the build Mac.
+- **Landing.** As the menus did, `mac-folders` lands on main once its tasks are done and reviewed, each task and then the whole branch, rather than being merged by the Mac builder: rebased onto main's tip, again if main moves first, and pushed from `~/src/jaw-mac-folders`, the worktree it was built in ("After the plan" has the steps). Its last commit before it lands takes step 2.1's rows out of `mac/parity.toml`, so main has `make check-parity` passing, as the parity plan's working rules have a step land: from task 2 on the Mac sends `folders.watch` and the folder requests, and the check fails on a gap the Mac has closed that the list still holds. Tasks 1 to 14 can land before `folders` is on main, as the parity plan's rule 2 has a step land before jawd's part, each folder action saying what it waits on; task 15 then follows on `mac-folders` rebased onto a main that has `folders`, and lands the same way. Each time the branch lands, the build Mac's folder (`ssh build-mac rm -rf src/build-mac/jaw/jaw-mac-folders`) and `target` in the worktree (jawd's debug build, several gigabytes) are deleted, which `build-mac` and task 15 make again if it follows; once task 15 has landed, so is the worktree.
+- **The harness's second phase.** `mac-harness` (not on main yet) moves the window's content into JawUI as `WindowContent`, which takes a `SidebarController` and leaves `MainWindowController` to wire it, as it does here. Every change to the sidebar is inside `SidebarController`; where a task changes `MainWindowController` or `AppModel.stateView`, it says what the same change is if `WindowContent` is in the checkout by then.
+- **jawd.** The protocol is `folders` at cc585c0, in its second audit (`git show folders:protocol/README.md`, "Folders and the roster"). Each task says what it waits on and what it can't try until `folders` lands; nothing is tried end to end until `folders` is on main and `mac-folders` is rebased onto it, which is task 15. Before then, the snapshot on `--demo`, whose jawd is built from the worktree, main's without folders, checks that the app falls back as it should.
 
 ## Files
 
-- `mac/Tests/JawKitTests/Ahead/` (create, task 1): the twelve fixtures copied from `folders`, deleted in task 14.
+- `mac/Tests/JawKitTests/Ahead/` (create, task 1): the twelve fixtures copied from `folders`, deleted in task 15.
 - `mac/JawKit/Sources/Protocol/Folders.swift` (create, task 1): `FolderRow`, `Favourite`, `FoldersWatched`, `FoldersPush`, `PresenceState`, `Presence`, `RosterRow`, `RosterWatched`, `RosterPush`, and the requests' params.
 - `mac/JawKit/Sources/Protocol/Rows.swift` (modify, task 1): a chat row's `folders` and `favourite`.
-- `mac/JawKit/Sources/Client/Incoming.swift`, `Client.swift`, `Jawd.swift`, `mac/JawKit/Sources/Windows/Window.swift` (modify, task 2): the tree's and a roster's windows, `People`, the slots in `Update` and `Merged`, the folder requests, `JawUpdate`'s new cases.
-- `mac/JawUI/Sources/Sidebar/FolderTree.swift` (create, task 3; grown in 4, 8 and 11): the tree as jawd keeps it and what's read from it.
-- `mac/JawUI/Sources/Sidebar/SidebarController.swift` (rewrite, task 3; grown in 6, 7, 8, 11 and 12): the outline of the tree, picking, and the roster under it.
-- `mac/JawUI/Sources/Sidebar/SidebarCells.swift` (create, task 3; grown in 6 and 7): a folder's row, a heading's, the name field's.
-- `mac/JawUI/Sources/Sidebar/SidebarNaming.swift` (create, task 6): naming in place.
-- `mac/JawUI/Sources/Sidebar/SidebarDrops.swift` (create, task 7; grown in 8): a folder's menu and the drops.
-- `mac/JawUI/Sources/Sidebar/FolderMenu.swift` (create, task 5; grown in 6, 7 and 9): `Filed`, `FolderAct`, the folder items' entries and commands, and what's said once jawd has done each.
-- `mac/JawUI/Sources/Sidebar/RosterLines.swift` and `RosterController.swift` (create, task 12; grown in 13): the roster's lines, words and menu, and its view.
-- `mac/JawUI/Sources/ChatList/ChatMenu.swift` (modify, tasks 5 and 9): the chat's menus with their folder items.
-- `mac/JawUI/Sources/ChatList/ChatListController.swift` (modify, tasks 4, 8, 11 and 14): the empty folder's line, the pasteboard types, `isShown`, `drawn`.
-- `mac/JawUI/Sources/Commands/Command.swift` (modify, task 5): a command's indent.
-- `mac/JawUI/Sources/Conversation/ConversationController.swift` (modify, task 5): m.
-- `mac/JawUI/Sources/Samples.swift` (modify, tasks 3 and 12): a folder tree, its slots, and people.
-- `mac/JawApp/Sources/Folders.swift` (create, task 3; grown in 5 to 13): the sidebar's and the roster's host, the folder acts, the favourites.
-- `mac/JawApp/Sources/AppModel.swift`, `ChatMenus.swift`, `Commands.swift`, `MainWindowController.swift`, `AppDelegate.swift`, `Bench.swift` (modify, from task 2 on): the windows, the acts, the commands, the snapshot's steps.
-- `mac/JawHarness/Sources/Scenes/SidebarScenes.swift` (create, task 3; grown in 4, 6, 12 and 14), `BuiltInScenes.swift`, `Fixtures/Fixtures.swift` (task 14): the sidebar, an empty folder, naming in place, the roster, jawd's own tree.
-- `mac/README.md` (modify, tasks 3, 6, 7, 12, 13 and 14): the snapshot's new steps, and what the sidebar is.
-- `mac/parity.toml` (modify, task 14, when the checkout has it): step 2.1's rows out.
-- Tests (create): `mac/Tests/JawKitTests/FolderClientTests.swift`; `mac/Tests/JawUITests/FolderTreeTests.swift`, `SidebarTests.swift`, `FolderMenuTests.swift`, `NamingTests.swift`, `FolderPaletteTests.swift`, `RosterTests.swift`, `SidebarPictureTests.swift` and its references; (modify) `FixtureTests.swift`, `FakeJawd.swift`, `LiveTests.swift`, `CommandTests.swift`, `ChatListTests.swift`, `PaneMenuTests.swift`, `ScenesTests.swift`.
+- `mac/JawKit/Sources/Client/Incoming.swift`, `Client.swift`, `Jawd.swift`, `mac/JawKit/Sources/Windows/Window.swift` (modify, task 2): the tree's and a roster's windows, `People`, the slots in `Update` and `Merged`, the folder requests, Move to finished after a drop, `JawUpdate`'s new cases.
+- `mac/JawUI/Sources/Sidebar/FolderTree.swift` (create, task 3; grown in 5, 9 and 12): the tree as jawd keeps it and what's read from it.
+- `mac/JawUI/Sources/Sidebar/SidebarController.swift` (rewrite, task 4; grown in 7, 8, 9, 12 and 13): the outline of the tree, picking, and the roster under it.
+- `mac/JawUI/Sources/Sidebar/SidebarCells.swift` (create, task 4; grown in 7 and 8): a folder's row, a heading's, the name field's.
+- `mac/JawUI/Sources/Sidebar/SidebarNaming.swift` (create, task 7): naming in place.
+- `mac/JawUI/Sources/Sidebar/SidebarDrops.swift` (create, task 8; grown in 9): a folder's menu and the drops.
+- `mac/JawUI/Sources/Sidebar/FolderMenu.swift` (create, task 6; grown in 7, 8, 10 and 11): `Filed`, `FolderAct`, the folder items' entries and commands, the palette's folder actions, and what's said once jawd has done each.
+- `mac/JawUI/Sources/Sidebar/RosterLines.swift` and `RosterController.swift` (create, task 13; grown in 14): the roster's lines, words and menu, and its view.
+- `mac/JawUI/Sources/ChatList/ChatMenu.swift` (modify, tasks 6 and 10): the chat's folder items, the same in each of its menus.
+- `mac/JawUI/Sources/ChatList/ChatListController.swift` (modify, tasks 5, 6, 9, 12 and 15): the empty folder's line, a community's menu and drag, the pasteboard types, `isShown`, `drawn`.
+- `mac/JawUI/Sources/Commands/Command.swift` (modify, task 6): a command's indent.
+- `mac/JawUI/Sources/Conversation/ConversationController.swift` (modify, task 6): m.
+- `mac/JawUI/Sources/Samples.swift` (modify, tasks 3 and 13): a folder tree, its slots, and people.
+- `mac/JawApp/Sources/Folders.swift` (create, task 4; grown in 6 to 14): the sidebar's and the roster's host, the folder acts, the menu bar's folder items, the favourites.
+- `mac/JawApp/Sources/AppModel.swift`, `ChatMenus.swift`, `Commands.swift`, `MainWindowController.swift`, `Bench.swift` (modify, from task 2 on): the windows, the acts, the commands, the snapshot's steps.
+- `mac/JawHarness/Sources/Scenes/SidebarScenes.swift` (create, task 4; grown in 5, 7, 13 and 15), `BuiltInScenes.swift`, `Fixtures/Fixtures.swift` (task 15): the sidebar, an empty folder, naming in place, the roster, jawd's own tree.
+- `mac/README.md` (modify, tasks 4, 7, 8, 13, 14 and 15): the snapshot's new steps, and what the sidebar is.
+- `mac/parity.toml` (modify, in the branch's last commit before it lands): step 2.1's rows out.
+- Tests (create): `mac/Tests/JawKitTests/FolderClientTests.swift`; `mac/Tests/JawUITests/FolderTreeTests.swift`, `SidebarTests.swift`, `FolderMenuTests.swift`, `NamingTests.swift`, `FolderPaletteTests.swift`, `RosterTests.swift`, `SidebarPictureTests.swift` and its references; (modify) `FixtureTests.swift`, `FakeJawd.swift`, `LiveTests.swift`, `CommandTests.swift`, `ChatListTests.swift`, `ChatListMenuTests.swift`, `PaneMenuTests.swift`, `ScenesTests.swift`.
 
 ---
 
 ### Task 1: JawKit's folder, slot and roster types, against the folders branch's fixtures
 
-**Waits on jawd:** nothing to build: the twelve fixtures are `folders`' at cc585c0. Nothing here meets a real jawd until task 14.
+**Waits on jawd:** nothing to build: the twelve fixtures are `folders`' at cc585c0. Nothing here meets a real jawd until task 15.
 
 **Files:**
 - Create: `mac/Tests/JawKitTests/Ahead/` with `folders.watch.request.json`, `folders.watch.result.json`, `folders.push.json`, `roster.watch.request.json`, `roster.watch.result.json`, `roster.push.json`, `folder.create.request.json`, `folder.create.result.json`, `folder.add.request.json`, `folder.add.result.json`, `favourite.set.request.json`, `favourite.set.result.json`
@@ -735,7 +734,7 @@ git commit -m "JawKit reads jawd's folder tree, its favourite slots, the roster 
 
 ### Task 2: The client watches the tree and a roster, and asks for folder changes
 
-**Waits on jawd:** nothing to build; `FakeJawd` answers from the copied fixtures. A real jawd's tree, and its refusal of a request in its own words, are tried in task 14.
+**Waits on jawd:** nothing to build; `FakeJawd` answers from the copied fixtures. A real jawd's tree, and its refusal of a request in its own words, are tried in task 15.
 
 **Files:**
 - Modify: `mac/JawKit/Sources/Client/Incoming.swift` (`Expect`, `Reply`, `Want`, `Incoming`, `IncomingLine`)
@@ -748,7 +747,7 @@ git commit -m "JawKit reads jawd's folder tree, its favourite slots, the roster 
 
 **Interfaces:**
 - Consumes: task 1's types.
-- Produces: `Client.watchFolders() -> WindowID`, `Client.watchRoster(_ folder: String, _ place: Place) -> WindowID`; `Frame.folders: [WindowID: Update<FolderRow>]` and `Frame.roster: [WindowID: Update<RosterRow>]`; `Update.favourites: [Favourite]?`, the init's last parameter `favourites:`, and `Merged` keeping the newest that isn't nil; `public struct People<R: WindowRow>` (`folder`, `place`, `total`, `seq`, `loaded`, `apply(_:) -> [String]`, `get(_:)`, `count`, `list`, from the smallest `sort` up); `Expect.folder` and `Reply.folder(FolderRow)`; on `Jawd`: `watchFolders() -> WindowID`, `watchRoster(_:_:) -> WindowID`, `folderCreate(name: String, parent: String?)`, `folderRename(_ folder: String, name: String)`, `folderMove(_ folder: String, parent: String?, position: Int?, said: String?)`, `folderDelete(_ folder: String, said: String?)`, `folderAdd(_ folder: String, item: String, said: String?)`, `folderRemove(_ folder: String, item: String, said: String?)`, `moveItem(_ item: String, from: String, to: String, said: String?)`, `favouriteSet(slot: Int, target: String?, said: String?)`; `JawUpdate.folders(WindowID, Update<FolderRow>)`, `.roster(WindowID, Update<RosterRow>)`, `.named(FolderRow?)` (made, with its row, or renamed, with none) and `.notNamed(String)` (jawd's words); `JawUpdate.windowFailed(WindowID, Failure)` in place of `(WindowID, String)`. What's `said` comes as `.notice(said, .info)` once jawd has answered.
+- Produces: `Client.watchFolders() -> WindowID`, `Client.watchRoster(_ folder: String, _ place: Place) -> WindowID`; `Frame.folders: [WindowID: Update<FolderRow>]` and `Frame.roster: [WindowID: Update<RosterRow>]`; `Update.favourites: [Favourite]?`, the init's last parameter `favourites:`, and `Merged` keeping the newest that isn't nil; `public struct People<R: WindowRow>` (`folder`, `place`, `total`, `seq`, `loaded`, `apply(_:) -> [String]`, `get(_:)`, `count`, `list`, from the smallest `sort` up); `Expect.folder` and `Reply.folder(FolderRow)`; on `Jawd`: `watchFolders() -> WindowID`, `watchRoster(_:_:) -> WindowID`, `folderCreate(name: String, parent: String?)`, `folderRename(_ folder: String, name: String)`, `folderMove(_ folder: String, parent: String?, position: Int?, said: String?)`, `folderDelete(_ folder: String, said: String?)`, `folderAdd(_ folder: String, item: String, said: String?)`, `folderRemove(_ folder: String, item: String, said: String?)`, `moveItem(_ item: String, from: String, to: String, said: String?, both: String)` (`both` is what's said if the chat ends in both folders: "Ana Ribeiro is now in both Cousins and Family"), `favouriteSet(slot: Int, target: String?, said: String?)`; `JawUpdate.folders(WindowID, Update<FolderRow>)`, `.roster(WindowID, Update<RosterRow>)`, `.named(FolderRow?)` (made, with its row, or renamed, with none) and `.notNamed(String)` (jawd's words); `JawUpdate.windowFailed(WindowID, Failure)` in place of `(WindowID, String)`. What's `said` comes as `.notice(said, .info)` once jawd has answered. A move whose answer a drop lost, in either half, is asked again once jawd is back, as a lost send or action is; a window whose watch again after a drop jawd refuses as gone, at the place it would fall back to, fails with `.windowFailed` rather than being asked again for ever.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -793,8 +792,9 @@ import Testing
 
 /// The client watches jawd's folder tree and a roster, and asks for what the folder items do: the
 /// tree whole with its slots, its pushes merged, watched again whole with the folders held; a roster
-/// like a chat list; a jawd without folders refusing the tree; Move to's two requests in their order;
-/// a name's answer and refusal; and what's said once jawd has done each.
+/// like a chat list; a jawd without folders refusing the tree; a deleted folder's list failing once
+/// it's watched again; Move to's two requests in their order, finished after a drop, and what's said
+/// when it ends in both folders; a name's answer and refusal; and what's said once jawd has done each.
 
 /// A script that answers as jawd's folders branch does: the tree, a roster and a made folder from its
 /// fixtures, a roster's move as its watch, and every other request done.
@@ -812,6 +812,19 @@ final class HeldBack: Sendable {
     let id = Mutex<UInt64?>(nil)
 }
 
+/// How many times the fake was asked for something; a class, since a script can't hold a `Mutex`.
+final class Counted: Sendable {
+    let n = Mutex(0)
+
+    /// Counts one more, and says how many there have been.
+    func next() -> Int {
+        n.withLock { n in
+            n += 1
+            return n
+        }
+    }
+}
+
 func trees(_ all: [JawUpdate], _ window: WindowID) -> [Update<FolderRow>] {
     all.compactMap { if case let .folders(w, u) = $0, w == window { u } else { nil } }
 }
@@ -822,6 +835,15 @@ func rosters(_ all: [JawUpdate], _ window: WindowID) -> [Update<RosterRow>] {
 
 func notices(_ all: [JawUpdate]) -> [String] {
     all.compactMap { if case let .notice(text, _) = $0 { text } else { nil } }
+}
+
+/// Waits until jawd has everything asked before now: requests go out in order on the one socket, so
+/// once a marker asked after them arrives, anything they'd have sent with them has arrived too.
+@MainActor
+func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
+    let before = requests(fake, "favourite.set").count
+    jawd.favouriteSet(slot: 9, target: nil, said: nil)
+    return await eventually { requests(fake, "favourite.set").count == before + 1 }
 }
 
 @MainActor
@@ -854,7 +876,7 @@ func notices(_ all: [JawUpdate]) -> [String] {
         _ = await drain(jawd) { !trees($0, window).isEmpty }
         fake.send(FakeJawd.pushed("folders.push.json"))
         fake.send(#"{"method":"folders","params":{"watch":"w5","seq":81242,"upsert":[{"id":"folder:9","v":81241,"parent":null,"name":"Family","position":0,"smart":null,"unread":5,"mentions":1,"count":6,"favourite":1}]}}"#)
-        try await Task.sleep(for: .milliseconds(200))
+        #expect(await eventually { jawd.client.state.withLock { $0.windows[window]?.seq } == 81242 }, "both pushes read")
         let merged = trees(jawd.drain(), window)
         #expect(merged.count == 1, "one update for the frame")
         #expect(merged.first?.upsert.map(\.unread) == [5], "a folder's counts change without its v, so the later row wins")
@@ -891,6 +913,27 @@ func notices(_ all: [JawUpdate]) -> [String] {
         #expect(await eventually { requests(fake, "folders.watch").count == 2 }, "a jawd back with folders gives the tree")
     }
 
+    @Test func `a folder's list that jawd no longer has, watched again after a drop, fails rather than asking for ever`() async throws {
+        let watched = Counted()
+        let fake = try FakeJawd { method, params, id in
+            guard method == "chats.watch" else { return ordinary(method, params, id) }
+            return watched.next() == 1 ? ordinary(method, params, id)
+                : [FakeJawd.refusal(id, code: ErrorCode.notFound, "jawd has no folder 9")]
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        let window = jawd.watchChats("folder:9", .top(50))
+        _ = await drain(jawd) { $0.contains { if case .chats = $0 { true } else { false } } }
+        fake.drop()
+        let all = await drain(jawd) { $0.contains { if case .windowFailed = $0 { true } else { false } } }
+        let failure = try #require(all.compactMap { if case let .windowFailed(w, f) = $0, w == window { f } else { nil } }.first)
+        #expect(failure.code == ErrorCode.notFound)
+        #expect(requests(fake, "chats.watch").count <= 3, "the first watch, and at most two after the drop")
+        #expect(await settled(jawd, fake))
+        #expect(requests(fake, "chats.watch").count <= 3, "and none after it failed")
+    }
+
     @Test func `a roster's people come from the smallest sort up, then its pushes, and it grows when moved`() async throws {
         let fake = try FakeJawd(script: foldering)
         defer { fake.stop() }
@@ -925,10 +968,10 @@ func notices(_ all: [JawUpdate]) -> [String] {
         let jawd = connected(fake)
         defer { jawd.close() }
         _ = await drain(jawd) { helloed($0) == 1 }
-        jawd.moveItem("351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10", said: "Ana Ribeiro moved from Family to Cousins")
+        jawd.moveItem("351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10",
+                      said: "Ana Ribeiro moved from Family to Cousins", both: "Ana Ribeiro is now in both Cousins and Family")
         #expect(await eventually { add.id.withLock { $0 } != nil })
-        try await Task.sleep(for: .milliseconds(100))
-        _ = jawd.drain()
+        #expect(await settled(jawd, fake))
         #expect(requests(fake, "folder.add") == [.object(["folder": .string("folder:10"), "item": .string("351912345678@s.whatsapp.net")])])
         #expect(requests(fake, "folder.remove").isEmpty, "nothing taken out before jawd has it in the other folder")
         let id = try #require(add.id.withLock { $0 })
@@ -946,11 +989,46 @@ func notices(_ all: [JawUpdate]) -> [String] {
         let jawd = connected(fake)
         defer { jawd.close() }
         _ = await drain(jawd) { helloed($0) == 1 }
-        jawd.moveItem("351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10", said: "Ana Ribeiro moved from Family to Cousins")
+        jawd.moveItem("351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10",
+                      said: "Ana Ribeiro moved from Family to Cousins", both: "Ana Ribeiro is now in both Cousins and Family")
         let all = await drain(jawd) { !notices($0).isEmpty }
         #expect(notices(all) == ["jawd has no folder 10"])
-        try await Task.sleep(for: .milliseconds(100))
-        #expect(requests(fake, "folder.remove").isEmpty, "left in both, never in neither")
+        #expect(await settled(jawd, fake))
+        #expect(requests(fake, "folder.remove").isEmpty, "left where it was, never in neither")
+    }
+
+    @Test(arguments: ["folder.add", "folder.remove"])
+    func `a move cut off by a drop in either half is finished once jawd is back`(half: String) async throws {
+        let asked = Counted()
+        let fake = try FakeJawd { method, params, id in
+            method == half && asked.next() == 1 ? [] : ordinary(method, params, id)
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = await drain(jawd) { helloed($0) == 1 }
+        jawd.moveItem("351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10",
+                      said: "Ana Ribeiro moved from Family to Cousins", both: "Ana Ribeiro is now in both Cousins and Family")
+        #expect(await eventually { requests(fake, half).count == 1 })
+        fake.drop()
+        let all = await drain(jawd) { notices($0).contains("Ana Ribeiro moved from Family to Cousins") }
+        #expect(requests(fake, half).count == 2, "asked again once jawd is back: adding and removing are idempotent")
+        #expect(requests(fake, "folder.remove").last == .object(["folder": .string("folder:9"), "item": .string("351912345678@s.whatsapp.net")]))
+        #expect(notices(all).filter { $0.hasPrefix("Ana Ribeiro") } == ["Ana Ribeiro moved from Family to Cousins"])
+    }
+
+    @Test func `a move whose taking out jawd refuses says the chat is in both folders now, in jawd's words`() async throws {
+        let fake = try FakeJawd { method, params, id in
+            method == "folder.remove" ? [FakeJawd.refusal(id, code: ErrorCode.notFound, "jawd has no folder 9")] : ordinary(method, params, id)
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = await drain(jawd) { helloed($0) == 1 }
+        jawd.moveItem("351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10",
+                      said: "Ana Ribeiro moved from Family to Cousins", both: "Ana Ribeiro is now in both Cousins and Family")
+        let all = await drain(jawd) { !notices($0).isEmpty }
+        #expect(notices(all) == ["Ana Ribeiro is now in both Cousins and Family: jawd has no folder 9"])
     }
 
     @Test func `a name comes back made with its row, renamed with none, or turned down in jawd's words`() async throws {
@@ -1174,7 +1252,13 @@ and to the switch that merges, after its `.messages` case,
                     s.mergeRoster(window, update)
 ```
 
-9. In `fallback(_:_:)`, add `case .folders: return place` and `case .roster: return .top(rows)`.
+9. In `fallback(_:_:)`, add `case .folders: return place` and `case .roster: return .top(rows)`. In `landed(_:_:_:)`'s failure case, make the first condition
+
+```swift
+                if landing.again == true, gone, Self.fallback(w.kind, place) != place {
+```
+
+so a window jawd calls gone at the very place it would fall back to fails, through the `else` below, as `.window`, rather than being asked again at that place for ever: a deleted folder's list, which is at the top or falls back to it, now fails after at most two asks, and the app takes the list back to All (task 5).
 
 10. Make `Kind` `case chats, messages, folders, roster`.
 
@@ -1253,9 +1337,15 @@ after `historyMore(_:)`, add
     }
 
     /// Files `item` in `to`, and takes it out of `from` only once jawd has it there, so a failure
-    /// between the two leaves it in both, never in neither.
-    public func moveItem(_ item: String, from: String, to: String, said: String?) {
-        ask("folder.add", FolderItem(folder: to, item: item), .moving(item: item, from: from, said: said))
+    /// between the two leaves it in both, never in neither, and says so with `both`; a half whose
+    /// answer a drop lost is asked again once jawd is back, since adding and removing are idempotent.
+    public func moveItem(_ item: String, from: String, to: String, said: String?, both: String) {
+        ask(Moving(item: item, from: from, to: to, said: said, both: both))
+    }
+
+    func ask(_ moving: Moving) {
+        let folder = moving.removing ? moving.from : moving.to
+        ask(moving.removing ? "folder.remove" : "folder.add", FolderItem(folder: folder, item: moving.item), .moving(moving))
     }
 
     /// Puts a folder or a chat on `slot`, taking it off the slot it had and putting out what the slot
@@ -1265,15 +1355,38 @@ after `historyMore(_:)`, add
     }
 ```
 
-In `take(_:_:)`, make the window's case `out.append(.windowFailed(window, failure))`. In `Asked`, add after `case status`
+In `take(_:_:)`, make the window's case `out.append(.windowFailed(window, failure))`. After `Acting`, add
+
+```swift
+    /// Move to: `item` filed in `to`, then taken out of `from` once jawd has it there.
+    struct Moving {
+        let item: String
+        let from: String
+        let to: String
+        let said: String?
+        /// What's said if it ends in both folders.
+        let both: String
+        /// Whether jawd has it in `to`, so taking it out of `from` is what's left.
+        var removing = false
+    }
+```
+
+add `case move(Moving)` to `Again`, and in `askAgain(_:)`, after `case let .act(acting): ask(acting)`,
+
+```swift
+            case let .move(moving):
+                ask(moving)
+```
+
+with no day's limit, since asking again can't do it twice. In `Asked`, add after `case status`
 
 ```swift
         /// A folder's name, made or changed in place.
         case naming
         /// A folder change, and what's said once jawd has done it.
         case filed(String?)
-        /// Move to's first half: once jawd has `item` in the other folder, it's taken out of `from`.
-        case moving(item: String, from: String, said: String?)
+        /// A half of Move to.
+        case moving(Moving)
 ```
 
 In `answered(_:_:_:)`, add before `default:`
@@ -1285,8 +1398,12 @@ In `answered(_:_:_:)`, add before `default:`
             out.append(.named(nil))
         case let (.filed(said), _):
             if let said { out.append(.notice(said, .info)) }
-        case let (.moving(item, from, said), _):
-            ask("folder.remove", FolderItem(folder: from, item: item), .filed(said))
+        case let (.moving(moving), _) where !moving.removing:
+            var rest = moving
+            rest.removing = true
+            ask(rest)
+        case let (.moving(moving), _):
+            if let said = moving.said { out.append(.notice(said, .info)) }
 ```
 
 In `refused(_:_:)`, add before `case .status, .quiet:`
@@ -1296,7 +1413,15 @@ In `refused(_:_:)`, add before `case .status, .quiet:`
             return [.notNamed(Self.whyNot(failure, "naming folders"))]
         case .filed:
             return [.notice(Self.whyNot(failure, "filing"), .warning)]
-        case .moving:
+        case let .moving(moving):
+            // The second half is asked as the first's answer is read, so a drop can cut it off unsent.
+            if failure == .lost || (moving.removing && failure == .unreachable) {
+                again.append(.move(moving))
+                return []
+            }
+            if moving.removing {
+                return [.notice("\(moving.both): \(Self.whyNot(failure, "taking it out"))", .warning)]
+            }
             return [.notice(Self.whyNot(failure, "moving between folders"), .warning)]
 ```
 
@@ -1343,7 +1468,7 @@ with
 - [ ] **Step 6: Run the tests to see them pass**
 
 Run: `mac/scripts/build-mac test JawKit`
-Expected: `** TEST SUCCEEDED **`, with the eight new tests among those passed and every earlier one still passing.
+Expected: `** TEST SUCCEEDED **`, with the twelve new tests among those passed and every earlier one still passing.
 
 Run: `mac/scripts/build-mac build jaw`
 Expected: `** BUILD SUCCEEDED **`.
@@ -1352,28 +1477,23 @@ Expected: `** BUILD SUCCEEDED **`.
 
 ```bash
 git add mac/JawKit/Sources mac/JawApp/Sources/AppModel.swift mac/Tests/JawKitTests
-git commit -m "The client watches jawd's folder tree and a folder's roster as windows of their own, and asks for what the folder items do: the tree comes whole with its slots, its pushes merged between frames keeping the newest row, though a folder's counts change without its version, and the newest slots, which a push leaves out when none changed; it's watched again whole after a drop or a resync, saying the folders held and no since, which jawd ignores for the tree; a roster is a window like the chat list's, its people from the smallest sort up in People; Move to files an item in the other folder and takes it out of this one only once jawd has answered for the first, so a failure between them leaves it in both, never in neither; a folder named in place comes back with its row, or with jawd's refusal for the field; filing and the slots say what was done once jawd has done it; and a window jawd refuses carries its failure, so the app can tell a jawd without folders, which turns the tree down with -32601 and is asked again when it's back"
+git commit -m "The client watches jawd's folder tree and a folder's roster as windows of their own, and asks for what the folder items do: the tree comes whole with its slots, its pushes merged between frames keeping the newest row, though a folder's counts change without its version, and the newest slots, which a push leaves out when none changed; it's watched again whole after a drop or a resync, saying the folders held and no since, which jawd ignores for the tree; a roster is a window like the chat list's, its people from the smallest sort up in People; a window jawd calls gone at the place it would fall back to, as a deleted folder's list is, fails rather than being asked again there for ever; Move to files an item in the other folder and takes it out of this one only once jawd has answered for the first, so a failure between them leaves it in both, never in neither, a half that a drop cut off is asked again once jawd is back, as lost sends and actions are, since both halves are idempotent, and a second half jawd refuses says the chat is in both folders now; a folder named in place comes back with its row, or with jawd's refusal for the field; filing and the slots say what was done once jawd has done it; and a window jawd refuses carries its failure, so the app can tell a jawd without folders, which turns the tree down with -32601 and is asked again when it's back"
 ```
 
 ---
 
-### Task 3: The tree in the sidebar
+### Task 3: The folder tree's model
 
-**Waits on jawd:** nothing to build; the sidebar is drawn from `Samples`. On `--demo` before `folders` lands, the snapshot checks the fallback: All and Archived, nothing said. A real jawd's tree in the sidebar is task 14's.
+**Waits on jawd:** nothing to build; the tree is made from `Samples` and from updates written as the fixtures have them. A real jawd's tree is task 15's.
 
 **Files:**
 - Create: `mac/JawUI/Sources/Sidebar/FolderTree.swift`
-- Rewrite: `mac/JawUI/Sources/Sidebar/SidebarController.swift`
-- Create: `mac/JawUI/Sources/Sidebar/SidebarCells.swift`
 - Modify: `mac/JawUI/Sources/Samples.swift` (a tree, its slots, and the chats' folders)
-- Create: `mac/JawApp/Sources/Folders.swift` (the app's folders: the sidebar's host)
-- Modify: `mac/JawApp/Sources/AppModel.swift` (watching the tree, `pick(folder:)`), `MainWindowController.swift` (the sidebar's host and colours, the palette's folders), `Commands.swift` (the sidebar command's words), `Bench.swift` (`sidebar`, `folder:<row>`), `mac/README.md`
-- Create: `mac/JawHarness/Sources/Scenes/SidebarScenes.swift`; modify `mac/JawHarness/Sources/BuiltInScenes.swift`, `mac/Tests/JawHarnessTests/ScenesTests.swift`
-- Test: `mac/Tests/JawUITests/FolderTreeTests.swift`, `mac/Tests/JawUITests/SidebarTests.swift`
+- Test: `mac/Tests/JawUITests/FolderTreeTests.swift`
 
 **Interfaces:**
-- Consumes: `FolderRow`, `Favourite`, `Update.favourites` (tasks 1 and 2); `Jawd.watchFolders()`, `JawUpdate.folders`, `JawUpdate.windowFailed(WindowID, Failure)` (task 2).
-- Produces: `public struct FolderTree: Sendable, Equatable` with `init()` (All and Archived), `init(_ rows: [FolderRow], favourites: [Favourite])`, `rows`, `favourites`, `served`, `apply(_ update: Update<FolderRow>)`, `row(_:)`, `builtIn`, `smart`, `children(of parent: String?) -> [FolderRow]`, `yours: [(row: FolderRow, depth: Int)]`, `order: [String]`, `subtree(_:) -> Set<String>`, `ancestors(_:) -> [String]` (nearest first), `label(_:) -> String`, `slot(of target: String) -> Int?`, `favourite(_ slot: Int) -> Favourite?`, `slotName(_ slot: Int) -> String?`, `badges(_:) -> Badges` (`digit: Int?`, `mention: Bool`, `unread: Int`); `public protocol SidebarHost` with `sidebar(_:pick:)`; `SidebarController` with `host`, `tree`, `picked`, `roles`, `keepsOpen: String?`, `apply(_:)`, `select(_:)`, `pick(row:) -> Bool`, `expand(_:)`, `said: [String]`, and internally `outline`, `items`, `item(_:)`, `children(_:)`, `restoreOpen()`, `reselect()`, `foldersHeading`, `smartHeading`; `FolderCell`, `HeadingCell`; `Samples.folders`, `Samples.favourites`, `Samples.tree`, `Samples.folderUpdate`; `AppModel.foldersWindow`, `AppModel.tree`; the snapshot's `sidebar` and `folder:<row>` steps.
+- Consumes: `FolderRow`, `Favourite`, `Update.favourites` (tasks 1 and 2).
+- Produces: `public struct FolderTree: Sendable, Equatable` with `init()` (All and Archived), `init(_ rows: [FolderRow], favourites: [Favourite])`, `rows`, `favourites`, `served`, `apply(_ update: Update<FolderRow>)`, `row(_:)`, `builtIn`, `smart`, `children(of parent: String?) -> [FolderRow]`, `yours: [(row: FolderRow, depth: Int)]`, `order: [String]`, `subtree(_:) -> Set<String>`, `ancestors(_:) -> [String]` (nearest first), `label(_:) -> String`, `slot(of target: String) -> Int?`, `favourite(_ slot: Int) -> Favourite?`, `slotName(_ slot: Int) -> String?`, `badges(_:) -> Badges` (`digit: Int?`, `mention: Bool`, `unread: Int`), and internally `shape`; `Samples.folders`, `Samples.favourites`, `Samples.tree`, `Samples.folderUpdate`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1481,84 +1601,10 @@ import Testing
 }
 ```
 
-Create `mac/Tests/JawUITests/SidebarTests.swift`:
-
-```swift
-import AppKit
-@testable import JawKit
-import JawThemes
-@testable import JawUI
-import Testing
-
-/// The sidebar draws jawd's folder tree: the built-in folders, then Folders, yours nested, then Smart
-/// Folders, each with its counts, an @ and its ⌘ digit; picking a row picks its folder.
-
-@MainActor
-final class SideHost: SidebarHost {
-    var picked: [String] = []
-
-    func sidebar(_: SidebarController, pick folder: String) {
-        picked.append(folder)
-    }
-}
-
-@MainActor
-func sidebar(_ host: SideHost? = nil) -> SidebarController {
-    let s = SidebarController()
-    s.host = host
-    s.roles = Catalog.jaw.roles(dark: true)
-    _ = s.view
-    s.view.frame = NSRect(x: 0, y: 0, width: 220, height: 600)
-    return s
-}
-
-@MainActor
-@Test func `before jawd serves folders, the sidebar has All and Archived`() {
-    let s = sidebar()
-    #expect(s.said == ["All", "Archived"] && s.picked == "all")
-}
-
-@MainActor
-@Test func `the tree comes under its headings, yours nested, with counts, an @ and the ⌘ digits from the slots`() {
-    let s = sidebar()
-    s.apply(Samples.folderUpdate)
-    #expect(s.said == ["All @ 12", "Unread @ 12", "Groups @ 5", "Communities 1", "Archived", "Folders:", "Family ⌘1 @ 3 ▸", "Climbing ⌘3",
-                       "Friends 2", "Work ▸", "Smart Folders:", "Waiting on me 2", "Mentions me @ 1", "Muted, unread"])
-    s.expand("folder:1")
-    #expect(Array(s.said[6 ... 7]) == ["Family ⌘1 @ 3 ▾", "  Cousins 1"])
-}
-
-@MainActor
-@Test func `picking a row picks its folder, and the app's own pick selects it without asking again`() {
-    let host = SideHost()
-    let s = sidebar(host)
-    s.apply(Samples.folderUpdate)
-    #expect(s.pick(row: 7))
-    #expect(host.picked == ["folder:3"] && s.picked == "folder:3")
-    #expect(!s.pick(row: 5), "a heading isn't a folder")
-    s.select("folder:2")
-    #expect(s.picked == "folder:2" && host.picked == ["folder:3"], "not asked for again")
-    #expect(s.said[6] == "Family ⌘1 @ 3 ▾", "the folder it's in opened to show it")
-}
-
-@MainActor
-@Test func `counts that change draw their rows again, and a folder that comes lays the tree out again, keeping what's open`() {
-    let s = sidebar()
-    s.apply(Samples.folderUpdate)
-    s.expand("folder:1")
-    s.apply(Update(seq: 301, upsert: [FolderRow(id: "folder:2", v: 50, parent: "folder:1", name: "Cousins", position: 0, unread: 4)]))
-    #expect(s.said[7] == "  Cousins 4")
-    s.apply(Update(seq: 302, upsert: [FolderRow(id: "folder:8", v: 62, parent: "folder:1", name: "Parents", position: 1)]))
-    #expect(Array(s.said[6 ... 8]) == ["Family ⌘1 @ 3 ▾", "  Cousins 4", "  Parents"])
-}
-```
-
-In `mac/Tests/JawHarnessTests/ScenesTests.swift`, put `"sidebar"` after `"chat-list"` in the list `every scene draws as wide as it says…` expects.
-
 - [ ] **Step 2: Run the tests to see them fail**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: the build fails with `cannot find 'FolderTree' in scope` and `cannot find type 'SidebarHost' in scope`.
+Expected: the build fails with `cannot find 'FolderTree' in scope`.
 
 - [ ] **Step 3: Write the tree**
 
@@ -1720,7 +1766,124 @@ public struct FolderTree: Sendable, Equatable {
 }
 ```
 
-- [ ] **Step 4: Write the sidebar**
+- [ ] **Step 4: Run the tests to see them pass**
+
+Run: `mac/scripts/build-mac test JawUITests`, then `mac/scripts/build-mac build jaw`
+Expected: `** TEST SUCCEEDED **`, with the six new tests among those passed, and `** BUILD SUCCEEDED **`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mac/JawUI/Sources/Sidebar/FolderTree.swift mac/JawUI/Sources/Samples.swift mac/Tests/JawUITests/FolderTreeTests.swift
+git commit -m "JawUI keeps jawd's folder tree as a value that the sidebar, the menus and the keys read: All and Archived until jawd sends it, then the built-in folders, yours nested by parent and position, the smart ones by theirs, and the nine favourite slots, which come whole when one changes; a row sent again with the same version is the newer, as a folder's counts change without it, an older one changes nothing and a removed one goes; a slot says what's on it, a folder of yours whose name another of yours has is named by its path, and a row's badges are its ⌘ digit, an @ for its mentions and its unread total, none for Archived; Samples gains the tree the tests and the harness draw"
+```
+
+---
+
+### Task 4: The tree in the sidebar
+
+**Waits on jawd:** nothing to build; the sidebar is drawn from `Samples`. On `--demo` before `folders` lands, the snapshot checks the fallback: All and Archived, nothing said. A real jawd's tree in the sidebar is task 15's.
+
+**Files:**
+- Rewrite: `mac/JawUI/Sources/Sidebar/SidebarController.swift`
+- Create: `mac/JawUI/Sources/Sidebar/SidebarCells.swift`
+- Create: `mac/JawApp/Sources/Folders.swift` (the app's folders: the sidebar's host)
+- Modify: `mac/JawApp/Sources/AppModel.swift` (watching the tree, `pick(folder:)`), `MainWindowController.swift` (the sidebar's host and colours, the palette's folders), `Commands.swift` (the sidebar command's words), `Bench.swift` (`sidebar`, `folder:<row>`), `mac/README.md`
+- Create: `mac/JawHarness/Sources/Scenes/SidebarScenes.swift`; modify `mac/JawHarness/Sources/BuiltInScenes.swift`, `mac/Tests/JawHarnessTests/ScenesTests.swift`
+- Test: `mac/Tests/JawUITests/SidebarTests.swift`
+
+**Interfaces:**
+- Consumes: `FolderTree`, `Samples.tree`, `Samples.folderUpdate` (task 3); `Jawd.watchFolders()`, `JawUpdate.folders`, `JawUpdate.windowFailed(WindowID, Failure)` (task 2).
+- Produces: `public protocol SidebarHost` with `sidebar(_:pick:)`; `SidebarController` with `host`, `tree`, `picked`, `roles`, `keepsOpen: String?`, `apply(_:)`, `select(_:)`, `pick(row:) -> Bool`, `expand(_:)`, `said: [String]`, and internally `outline`, `items`, `item(_:)`, `children(_:)`, `restoreOpen()`, `reselect()`, `foldersHeading`, `smartHeading`; `FolderCell`, `HeadingCell`; `AppModel.foldersWindow`, `AppModel.tree`; the snapshot's `sidebar` and `folder:<row>` steps.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `mac/Tests/JawUITests/SidebarTests.swift`:
+
+```swift
+import AppKit
+@testable import JawKit
+import JawThemes
+@testable import JawUI
+import Testing
+
+/// The sidebar draws jawd's folder tree: the built-in folders, then Folders, yours nested, then Smart
+/// Folders, each with its counts, an @ and its ⌘ digit; picking a row picks its folder.
+
+@MainActor
+final class SideHost: SidebarHost {
+    var picked: [String] = []
+
+    func sidebar(_: SidebarController, pick folder: String) {
+        picked.append(folder)
+    }
+}
+
+@MainActor
+func sidebar(_ host: SideHost? = nil) -> SidebarController {
+    let s = SidebarController()
+    s.host = host
+    s.roles = Catalog.jaw.roles(dark: true)
+    _ = s.view
+    s.view.frame = NSRect(x: 0, y: 0, width: 220, height: 600)
+    return s
+}
+
+@MainActor
+@Test func `before jawd serves folders, the sidebar has All and Archived`() {
+    let s = sidebar()
+    #expect(s.said == ["All", "Archived"] && s.picked == "all")
+}
+
+@MainActor
+@Test func `the tree comes under its headings, yours nested, with counts, an @ and the ⌘ digits from the slots`() {
+    let s = sidebar()
+    s.apply(Samples.folderUpdate)
+    #expect(s.said == ["All @ 12", "Unread @ 12", "Groups @ 5", "Communities 1", "Archived", "Folders:", "Family ⌘1 @ 3 ▸", "Climbing ⌘3",
+                       "Friends 2", "Work ▸", "Smart Folders:", "Waiting on me 2", "Mentions me @ 1", "Muted, unread"])
+    s.expand("folder:1")
+    #expect(Array(s.said[6 ... 7]) == ["Family ⌘1 @ 3 ▾", "  Cousins 1"])
+}
+
+@MainActor
+@Test func `picking a row picks its folder, and the app's own pick selects it without asking again`() {
+    let host = SideHost()
+    let s = sidebar(host)
+    s.apply(Samples.folderUpdate)
+    #expect(s.pick(row: 7))
+    #expect(host.picked == ["folder:3"] && s.picked == "folder:3")
+    #expect(!s.pick(row: 5), "a heading isn't a folder")
+    s.select("folder:2")
+    #expect(s.picked == "folder:2" && host.picked == ["folder:3"], "not asked for again")
+    #expect(s.said[6] == "Family ⌘1 @ 3 ▾", "the folder it's in opened to show it")
+}
+
+@MainActor
+@Test func `counts that change draw their rows again, and a folder that comes lays the tree out again, keeping what's open`() {
+    let s = sidebar()
+    let window = NSWindow(contentViewController: s)
+    defer { withExtendedLifetime(window) {} }
+    s.apply(Samples.folderUpdate)
+    s.expand("folder:1")
+    s.view.layoutSubtreeIfNeeded()
+    // `said` reads the tree, so the drawn cell is what shows the row was drawn again.
+    let cousins = { (s.outline.view(atColumn: 0, row: 7, makeIfNecessary: true) as? FolderCell)?.count.stringValue }
+    #expect(cousins() == "1" && s.outline.rowView(atRow: 7, makeIfNecessary: false) != nil, "Cousins' row is on screen")
+    s.apply(Update(seq: 301, upsert: [FolderRow(id: "folder:2", v: 50, parent: "folder:1", name: "Cousins", position: 0, unread: 4)]))
+    #expect(cousins() == "4", "the row on screen drawn again, not only the tree changed")
+    s.apply(Update(seq: 302, upsert: [FolderRow(id: "folder:8", v: 62, parent: "folder:1", name: "Parents", position: 1)]))
+    #expect(Array(s.said[6 ... 8]) == ["Family ⌘1 @ 3 ▾", "  Cousins 4", "  Parents"])
+}
+```
+
+In `mac/Tests/JawHarnessTests/ScenesTests.swift`, put `"sidebar"` after `"chat-list"` in the list `every scene draws as wide as it says…` expects.
+
+- [ ] **Step 2: Run the tests to see them fail**
+
+Run: `mac/scripts/build-mac test JawUITests`
+Expected: the build fails with `cannot find type 'SidebarHost' in scope`.
+
+- [ ] **Step 3: Write the sidebar**
 
 Replace `mac/JawUI/Sources/Sidebar/SidebarController.swift` with:
 
@@ -2078,12 +2241,12 @@ final class HeadingCell: NSTableCellView {
 }
 ```
 
-- [ ] **Step 5: Run the JawUI tests to see them pass**
+- [ ] **Step 4: Run the JawUI tests to see them pass**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: `** TEST SUCCEEDED **`, with the ten new tests among those passed.
+Expected: `** TEST SUCCEEDED **`, with the four new tests among those passed.
 
-- [ ] **Step 6: Wire the app**
+- [ ] **Step 5: Wire the app**
 
 Create `mac/JawApp/Sources/Folders.swift`:
 
@@ -2155,7 +2318,7 @@ and add `" · folder \(model.folder)"` to the end of the panes' line, before its
 
 In `mac/README.md`, in the paragraph on the app's options, after the `menu:` steps, add: "`sidebar`, which prints the folder tree as it's drawn, a row a line, and the folder picked, and `folder:<row>`, which picks the tree's row as a click does".
 
-- [ ] **Step 7: Write the harness's scene**
+- [ ] **Step 6: Write the harness's scene**
 
 Create `mac/JawHarness/Sources/Scenes/SidebarScenes.swift`:
 
@@ -2217,54 +2380,64 @@ private struct SidebarScene: View {
 
 In `mac/JawHarness/Sources/BuiltInScenes.swift`, add `catalog.register(.sidebar)` after `catalog.register(.chatList)`.
 
-- [ ] **Step 8: Run every suite and build the app**
+- [ ] **Step 7: Run every suite and build the app**
 
 Run: `mac/scripts/build-mac test JawUITests`, then `mac/scripts/build-mac test JawHarnessTests`, then `mac/scripts/build-mac build jaw`
 Expected: `** TEST SUCCEEDED **`, `** TEST SUCCEEDED **` and `** BUILD SUCCEEDED **`.
 
 Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac shot sidebar /tmp/jaw-mac-folders/sidebar.png`, and look at the picture: both bands as their notes say.
 
-- [ ] **Step 9: See the fallback on the demo**
+- [ ] **Step 8: See the fallback on the demo**
 
-The snapshot runs `target/debug/jawd --engine demo`, built here from this checkout, whose jawd is main's and doesn't serve folders. If `target/debug/jawd` isn't in the worktree, run `df -h .` (a debug build of jawd and its dependencies takes several gigabytes), then `CARGO_INCREMENTAL=0 cargo build -p jawd --bin jawd`; it's kept for the later tasks' snapshots and deleted after the plan. Never copy another checkout's.
+The snapshot runs `target/debug/jawd --engine demo`, built here from this checkout, whose jawd is main's and doesn't serve folders. If `target/debug/jawd` isn't in the worktree, run `df -h .` (a debug build of jawd and its dependencies takes several gigabytes), then `CARGO_INCREMENTAL=0 cargo build -p jawd --bin jawd`; it's kept for the later tasks' snapshots and deleted when tasks 1 to 14 land (task 15 builds it again from a main with folders). Never copy another checkout's.
 
-Run: `mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/sidebar-demo.png --keys "sidebar,folder:1,sidebar"`
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/sidebar-demo.png --keys "sidebar,folder:1,sidebar"`
 Expected, among the log's lines: `sidebar: All | Archived · picked all`; then the panes' line for `folder:1`, with `· folder archived` in it; then `sidebar: All | Archived · picked archived`; and no line with `a window couldn't be watched` or `the folders couldn't be watched`.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add mac/JawUI/Sources/Sidebar mac/JawUI/Sources/Samples.swift mac/JawApp/Sources mac/README.md mac/JawHarness/Sources mac/Tests/JawUITests/FolderTreeTests.swift mac/Tests/JawUITests/SidebarTests.swift mac/Tests/JawHarnessTests/ScenesTests.swift
+git add mac/JawUI/Sources/Sidebar mac/JawApp/Sources mac/README.md mac/JawHarness/Sources mac/Tests/JawUITests/SidebarTests.swift mac/Tests/JawHarnessTests/ScenesTests.swift
 git commit -m "The sidebar draws jawd's folder tree: the built-in folders first without a heading, then Folders, yours nested by parent and position, each opened and closed with its triangle and kept so from launch to launch, then Smart Folders, each row with its unread total, none for Archived, an @ when it has mentions and its ⌘ digit from the favourite slots; a push that changes only counts draws those rows again and one that changes the tree's shape lays it out again; picking a row makes the chat list its folder's window, and a folder the app picks is selected, the folders it's in opened; the app watches the tree at launch, and from a jawd that doesn't serve it yet keeps All and Archived and says nothing; the palette's folders are picked as the sidebar's are; the harness draws the sidebar before jawd's tree and with it; and the snapshot's sidebar and folder:<row> steps print the tree and pick a row"
 ```
 
 ---
 
-### Task 4: A folder's chats
+### Task 5: A folder's chats
 
-**Waits on jawd:** nothing to build. A folder of yours filling and emptying on a real jawd, and one deleted from the terminal leaving the list on All, are tried in task 14.
+**Waits on jawd:** nothing to build. A folder of yours filling and emptying on a real jawd, and one deleted from another interface leaving the list on All, are tried in task 15.
 
 **Files:**
-- Modify: `mac/JawUI/Sources/Sidebar/FolderTree.swift` (`emptyLine(_:)`)
+- Modify: `mac/JawUI/Sources/Sidebar/FolderTree.swift` (`emptyLine(_:)`, `showing(_:)`)
 - Modify: `mac/JawUI/Sources/ChatList/ChatListController.swift` (`emptyLine`, `emptyLabel`)
 - Modify: `mac/JawApp/Sources/AppModel.swift` (`pick(folder:)`, `apply(_:)`, `stateView`)
 - Modify: `mac/JawHarness/Sources/Scenes/SidebarScenes.swift`, `mac/JawHarness/Sources/BuiltInScenes.swift`, `mac/Tests/JawHarnessTests/ScenesTests.swift`
 - Test: `mac/Tests/JawUITests/FolderTreeTests.swift`, `mac/Tests/JawUITests/ChatListTests.swift`
 
 **Interfaces:**
-- Consumes: `FolderTree`, `SidebarController.select(_:)`, `AppModel.tree` (task 3).
-- Produces: `FolderTree.emptyLine(_ id: String) -> String?`; `ChatListController.emptyLine: String?` and its internal `emptyLabel`; the harness's `empty-folder` scene.
+- Consumes: `FolderTree` (task 3), `SidebarController.select(_:)`, `AppModel.tree` (task 4).
+- Produces: `FolderTree.emptyLine(_ id: String) -> String?` and `FolderTree.showing(_ folder: String) -> String`; `ChatListController.emptyLine: String?` and its internal `emptyLabel`; the harness's `empty-folder` scene.
 
 - [ ] **Step 1: Write the failing tests**
 
 Add to `mac/Tests/JawUITests/FolderTreeTests.swift`:
 
 ```swift
-@Test func `an empty folder says so: yours that chats can be dragged there, the others that nothing's there now, All nothing`() {
+@Test func `an empty folder says so in the terminal's words, and All says nothing, the panes' place speaking for it`() {
     let tree = Samples.tree
-    #expect(tree.emptyLine("folder:1") == "Nothing in Family yet: drag chats here")
-    #expect(tree.emptyLine("unread") == "Nothing in Unread now" && tree.emptyLine("smart:2") == "Nothing in Mentions me now")
+    #expect(tree.emptyLine("folder:1") == "No chats in this folder." && tree.emptyLine("unread") == "No chats in this folder.")
+    #expect(tree.emptyLine("smart:2") == "No chats in this folder.")
     #expect(tree.emptyLine("all") == nil && tree.emptyLine("folder:99") == nil)
+}
+
+@Test func `the list keeps its folder while the tree has it, and goes back to All once the folder's gone`() {
+    var tree = FolderTree()
+    #expect(tree.showing("archived") == "archived" && tree.showing("folder:1") == "folder:1", "nothing's gone before jawd's tree")
+    tree.apply(Samples.folderUpdate)
+    #expect(tree.showing("folder:1") == "folder:1" && tree.showing("smart:2") == "smart:2")
+    tree.apply(Update(seq: 301, remove: ["folder:1"]))
+    #expect(tree.showing("folder:1") == "all", "deleted from another interface")
+    #expect(tree.showing("folder:2") == "folder:2", "a folder that was in it is still there")
 }
 ```
 
@@ -2278,7 +2451,7 @@ Add to `mac/Tests/JawUITests/ChatListTests.swift`:
     list.emptyLine = Samples.tree.emptyLine("folder:1")
     #expect(list.emptyLabel.isHidden, "nothing said before the window comes")
     list.apply(Update(seq: 1, upsert: [], total: 0))
-    #expect(!list.emptyLabel.isHidden && list.emptyLabel.stringValue == "Nothing in Family yet: drag chats here")
+    #expect(!list.emptyLabel.isHidden && list.emptyLabel.stringValue == "No chats in this folder.")
     list.apply(Update(seq: 2, upsert: [Samples.direct], total: 1))
     #expect(list.emptyLabel.isHidden)
 }
@@ -2289,19 +2462,23 @@ and add `@testable import JawKit` to that file's imports if it isn't there. In `
 - [ ] **Step 2: Run the tests to see them fail**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: the build fails with `value of type 'FolderTree' has no member 'emptyLine'` and `value of type 'ChatListController' has no member 'emptyLine'`.
+Expected: the build fails with `value of type 'FolderTree' has no member 'emptyLine'`, `value of type 'FolderTree' has no member 'showing'` and `value of type 'ChatListController' has no member 'emptyLine'`.
 
 - [ ] **Step 3: Write the code**
 
 Add to `FolderTree`, after `badges(_:)`:
 
 ```swift
-    /// What the chat list says while a folder has no chats: yours, that chats can be dragged there; a
-    /// built-in or smart one, that nothing's there now; none for All, whose empty list the panes' place
-    /// speaks for.
+    /// What the chat list says while a folder has no chats, in the terminal's words; none for All,
+    /// whose empty list the panes' place speaks for.
     public func emptyLine(_ id: String) -> String? {
-        guard id != "all", let row = rows[id] else { return nil }
-        return row.isYours ? "Nothing in \(row.name) yet: drag chats here" : "Nothing in \(row.name) now"
+        id == "all" || rows[id] == nil ? nil : "No chats in this folder."
+    }
+
+    /// The folder the chat list shows once the tree has changed: the one it showed, or All once that
+    /// one's gone, as when another interface deletes it.
+    public func showing(_ folder: String) -> String {
+        !served || rows[folder] != nil ? folder : "all"
     }
 ```
 
@@ -2350,8 +2527,9 @@ In `mac/JawApp/Sources/AppModel.swift`: in `pick(folder:)`, before `window?.chat
 ```swift
         case let .folders(w, u) where w == foldersWindow:
             window?.sidebar.apply(u)
-            if tree.served, tree.row(folder) == nil {
-                pick(folder: "all")
+            let showing = tree.showing(folder)
+            if showing != folder {
+                pick(folder: showing)
             } else {
                 window?.chatList.emptyLine = tree.emptyLine(folder)
             }
@@ -2374,7 +2552,7 @@ extension HarnessScene {
     static var emptyFolder: HarnessScene {
         HarnessScene(
             id: "empty-folder", title: "An empty folder", symbol: "folder",
-            synopsis: "A folder's chat list with nothing in it: yours says chats can be dragged there, a built-in one that nothing's there now",
+            synopsis: "A folder's chat list with nothing in it, saying so in the terminal's words",
             section: .chatList, covers: [ChatListController.self], width: 640,
         ) { EmptyFolderScene(roles: $0.roles) }
     }
@@ -2387,7 +2565,7 @@ private struct EmptyFolderScene: View {
     var body: some View {
         SpecimenGroup(
             title: "Family and Unread, empty",
-            note: "\"Nothing in Family yet: drag chats here\" and \"Nothing in Unread now\", centred near the top of the list in the secondary colour, wrapping rather than cut off.",
+            note: "\"No chats in this folder.\" in each, as the terminal says it, centred near the top of the list in the secondary colour, not cut off.",
             roles: roles,
         ) {
             HStack(spacing: Space.l) {
@@ -2418,26 +2596,29 @@ Expected: `** TEST SUCCEEDED **`, `** TEST SUCCEEDED **`, `** BUILD SUCCEEDED **
 
 ```bash
 git add mac/JawUI/Sources mac/JawApp/Sources/AppModel.swift mac/JawHarness/Sources mac/Tests/JawUITests mac/Tests/JawHarnessTests/ScenesTests.swift
-git commit -m "A folder's chat list says when it's empty: one of yours that chats can be dragged there, a built-in or smart one that nothing's there now, once its window has come and not while it comes; the panes' place says there are no chats yet only while the list shows All, where it said so for any empty folder; a folder that goes, deleted from another interface, leaves the list on All, and one jawd won't show says why in jawd's words and does the same; and the harness draws an empty folder of yours and an empty Unread"
+git commit -m "A folder's chat list says when it's empty, in the terminal's words, No chats in this folder., once its window has come and not while it comes; the panes' place says there are no chats yet only while the list shows All, where it said so for any empty folder; a folder that goes, deleted from another interface, leaves the list on All, as FolderTree.showing decides from the tree, and one jawd won't show, as a deleted folder's list watched again, says why in jawd's words and does the same; and the harness draws an empty folder of yours and an empty Unread"
 ```
 
 ---
 
-### Task 5: Filing from a chat's menus
+### Task 6: Filing from a chat's menus
 
-**Waits on jawd:** nothing to build; the menus are tested from `Samples`' tree. Before `folders` lands, the snapshot checks that no menu has a folder item; a chat filed, moved and taken out on a real jawd, with jawd's words for a refusal, is task 14's.
+**Waits on jawd:** nothing to build; the menus are tested from `Samples`' tree. Before `folders` lands, the snapshot checks that no menu has a folder item; a chat filed, moved and taken out on a real jawd, with jawd's words for a refusal, is task 15's.
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Commands/Command.swift` (a command's `indent`)
 - Create: `mac/JawUI/Sources/Sidebar/FolderMenu.swift`
-- Modify: `mac/JawUI/Sources/ChatList/ChatMenu.swift` (the menus with their folder items)
+- Modify: `mac/JawUI/Sources/ChatList/ChatMenu.swift` (`folderItems`, and the menus with them)
+- Modify: `mac/JawUI/Sources/ChatList/ChatListController.swift` (two doc comments: a community's row has a menu now)
 - Modify: `mac/JawUI/Sources/Conversation/ConversationController.swift` (`folderMenu`, m)
-- Modify: `mac/JawApp/Sources/Folders.swift`, `ChatMenus.swift`, `AppModel.swift` (`makePane`, `chatMenuFolders`), `AppDelegate.swift`, `Commands.swift` (m in the Message menu), `Bench.swift` (m's key)
-- Test: `mac/Tests/JawUITests/FolderMenuTests.swift`; modify `CommandTests.swift`, `PaneMenuTests.swift`
+- Modify: `mac/JawApp/Sources/Folders.swift`, `ChatMenus.swift`, `AppModel.swift` (`makePane`, `folderItemsMade`), `MainWindowController.swift` (`refresh()`), `Commands.swift` (m in the Message menu), `Bench.swift` (m's key)
+- Test: `mac/Tests/JawUITests/FolderMenuTests.swift`; modify `CommandTests.swift`, `PaneMenuTests.swift`, `ChatListMenuTests.swift` (a comment)
 
 **Interfaces:**
-- Consumes: `FolderTree` (task 3), `Jawd.folderAdd`, `folderRemove`, `moveItem` (task 2), `ChatMenu`, `MenuEntry`, `Menus.items(_:command:)`, `MenuPopUp` (the menus plan).
-- Produces: `Command.indent: Int` and the convenience init's `indent: Int = 0`, after `palette:`; `public struct Filed: Sendable, Hashable` (`id`, `name`, `folders`, `chat: String?`; `init(_: ChatRow)`, `init(_: RosterRow)`); `public enum FolderAct: Sendable, Equatable` with `add(item:to:)`, `remove(item:from:)`, `move(item:from:to:)` (later tasks add cases); `FolderMenu.addTo(_ tree:) -> [MenuEntry]`, `FolderMenu.entries(_ item: Filed, tree:, list:) -> [MenuEntry]`, `FolderMenu.commands(_ item: Filed, tree:, list:, act:) -> [Command]` (ids `file:<folder>`, `move:<folder>`, `unfile`), `FolderMenu.said(_:name:tree:) -> String?`; `ChatMenu.list(_:tree:in:)`, `ChatMenu.pane(_:tree:in:)`, `ChatMenu.with(_:_:)`; `ConversationController.folderMenu: (() -> NSMenu?)?`; in the app `folderCommands(for:)`, `focusedFolderItems()`, `addToFolderMenu(for:)`, `folderAct(_:name:)`, `ChatMenuFolders`.
+- Consumes: `FolderTree` (task 3), `Jawd.folderAdd`, `folderRemove`, `moveItem` (task 2), `ChatMenu`, `MenuEntry`, `Menus.items(_:command:)`, `MenuPopUp` (the menus plan, on main).
+- Produces: `Command.indent: Int` and the convenience init's `indent: Int = 0`, after `palette:`; `public struct Filed: Sendable, Hashable` (`id`, `name`, `folders`, `chat: String?`; `init(_: ChatRow)`, `init(_: RosterRow)`); `public enum FolderAct: Sendable, Equatable` with `add(item:to:)`, `remove(item:from:)`, `move(item:from:to:)` (later tasks add cases); `FolderMenu.addTo(_ tree:) -> [MenuEntry]`, `FolderMenu.entries(_ item: Filed, tree:, list:) -> [MenuEntry]`, `@MainActor FolderMenu.commands(_ item: Filed, tree:, list:, act:) -> [Command]` (ids `file:<folder>`, `move:<folder>`, `unfile`), `FolderMenu.said(_:name:tree:) -> String?`, `FolderMenu.inBoth(_ name: String, from:, to:, tree:) -> String`; `ChatMenu.folderItems(_:tree:in:)`, `ChatMenu.list(_:tree:in:)`, `ChatMenu.pane(_:tree:in:)`, `ChatMenu.with(_:_:)`; `ConversationController.folderMenu: (() -> NSMenu?)?`; in the app `folderCommands(for:)`, `focusedFolderItems()`, `folderItemsKey`, `chatMenuFoldersChanged()`, `addToFolderMenu(for:)`, `folderAct(_:name:)`.
+
+`FolderMenu` stays a plain enum, whose `entries`, `said` and `inBoth` tests call without the main actor; `commands` is `@MainActor`, since it makes `Command`s, which are (`Command.swift`), and the project has no default isolation (`Project.swift`). Later tasks' `folderCommands`, `favouriteCommands` and `paletteCommands` are `@MainActor` for the same reason.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2451,7 +2632,7 @@ import Testing
 
 /// A chat's folder items say where it's filed and do what they say: Add to Folder, ticked where it
 /// sits directly; Move to and Remove from only in one of your folders that holds it, greyed while it's
-/// there only through a folder in it; none before jawd serves folders.
+/// there only through a folder in it; the same in each of its menus; none before jawd serves folders.
 
 /// A menu made from entries and the commands bound to them, as the app makes one as it opens.
 @MainActor
@@ -2558,14 +2739,26 @@ func ana(in folders: [String]) -> ChatRow {
             "search.chat"])
 }
 
-@Test func `what's said once jawd has filed a chat, taken it out or moved it`() {
+@Test func `a chat's folder items are one list, which the chat list's menu, the pane's and the menu bar's Chat menu all have`() {
+    let chat = ana(in: ["folder:1"])
+    let items = ChatMenu.folderItems(chat, tree: Samples.tree, in: "folder:1")
+    #expect(items.map(head) == ["Add to Folder", "Move to", "unfile"])
+    #expect(Array(ChatMenu.list(chat, tree: Samples.tree, in: "folder:1").suffix(items.count)) == items)
+    #expect(Array(ChatMenu.pane(chat, tree: Samples.tree, in: "folder:1").dropLast(2).suffix(items.count)) == items, "before Search This Chat")
+    #expect(ChatMenu.folderItems(chat, tree: Samples.tree, in: "all").map(head) == ["Add to Folder"])
+}
+
+@Test func `what's said once jawd has filed a chat, taken it out or moved it, and when a move leaves it in both folders`() {
     let tree = Samples.tree
     #expect(FolderMenu.said(.add(item: "x", to: "folder:1"), name: "Ana Ribeiro", tree: tree) == "Ana Ribeiro filed in Family")
     #expect(FolderMenu.said(.remove(item: "x", from: "folder:2"), name: "Ana Ribeiro", tree: tree) == "Ana Ribeiro taken out of Cousins")
     #expect(FolderMenu.said(.move(item: "x", from: "folder:1", to: "folder:5"), name: "Ana Ribeiro", tree: tree)
         == "Ana Ribeiro moved from Family to Work")
+    #expect(FolderMenu.inBoth("Ana Ribeiro", from: "folder:1", to: "folder:5", tree: tree) == "Ana Ribeiro is now in both Work and Family")
 }
 ```
+
+In `mac/Tests/JawUITests/ChatListMenuTests.swift`, make the comment on `ListHost`'s `chatList(_:menuItemsFor:)` `/// None for a community's row, as the app's host has none before jawd serves folders; after, it has the folder items alone.`, where it said the app's host has none: the test host stands in for the app before jawd serves folders, as the VoiceOver test's community row needs.
 
 Add to `mac/Tests/JawUITests/CommandTests.swift`:
 
@@ -2606,7 +2799,7 @@ Add to `mac/Tests/JawUITests/PaneMenuTests.swift`:
 - [ ] **Step 2: Run the tests to see them fail**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: the build fails with `cannot find 'FolderMenu' in scope`, `extra argument 'indent' in call` and `value of type 'ConversationController' has no member 'folderMenu'`.
+Expected: the build fails with `cannot find 'FolderMenu' in scope`, `type 'ChatMenu' has no member 'folderItems'`, `extra argument 'indent' in call` and `value of type 'ConversationController' has no member 'folderMenu'`.
 
 - [ ] **Step 3: Write the entries and the commands**
 
@@ -2669,7 +2862,8 @@ public enum FolderMenu {
 
     /// A chat's or someone's folder items: Add to Folder ▸; and while the list shows one of your
     /// folders that holds the item, directly or through a folder in it, Move to ▸ and Remove from it.
-    /// None before jawd serves folders.
+    /// Move to lists every folder of yours, as Add to Folder does, the list's own greyed: left out, the
+    /// folders in it would be indented under nothing. None before jawd serves folders.
     public static func entries(_ item: Filed, tree: FolderTree, list: String) -> [MenuEntry] {
         guard tree.served else { return [] }
         let add = MenuEntry.submenu("Add to Folder", addTo(tree))
@@ -2686,6 +2880,7 @@ public enum FolderMenu {
     /// sits directly, filing it there or taking it out; Move to's, filing it in another and taking it
     /// out of the list's; and Remove from. Move to's and Remove from are greyed while the item is in
     /// the list's folder only through a folder in it, since neither can take it out of this one.
+    @MainActor
     public static func commands(_ item: Filed, tree: FolderTree, list: String,
                                 act: @escaping @MainActor @Sendable (FolderAct) -> Void) -> [Command]
     {
@@ -2722,6 +2917,12 @@ public enum FolderMenu {
         case let .move(_, from, to): "\(name) moved from \(tree.label(from)) to \(tree.label(to))"
         }
     }
+
+    /// What the status line says, before jawd's words, when Move to leaves the item in both folders:
+    /// jawd filed it in `to` and didn't take it out of `from`.
+    public static func inBoth(_ name: String, from: String, to: String, tree: FolderTree) -> String {
+        "\(name) is now in both \(tree.label(to)) and \(tree.label(from))"
+    }
 }
 ```
 
@@ -2730,16 +2931,23 @@ At the end of `mac/JawUI/Sources/ChatList/ChatMenu.swift`, add:
 ```swift
 /// A chat's menus with their folder items, from the tree as they open.
 public extension ChatMenu {
-    /// The chat list's menu: a chat's actions, then Add to Folder, Move to and Remove from; a
-    /// community's row has the folder items alone, and its groups the whole menu.
+    /// A chat's folder items, one list for the chat list's menu, the pane's and the menu bar's Chat
+    /// menu: Add to Folder, and Move to and Remove from while the list shows one of your folders that
+    /// holds it.
+    static func folderItems(_ chat: ChatRow, tree: FolderTree, in folder: String) -> [MenuEntry] {
+        FolderMenu.entries(Filed(chat), tree: tree, list: folder)
+    }
+
+    /// The chat list's menu: a chat's actions, then its folder items; a community's row has the folder
+    /// items alone, and its groups the whole menu.
     static func list(_ chat: ChatRow, tree: FolderTree, in folder: String) -> [MenuEntry] {
-        with(list(chat), FolderMenu.entries(Filed(chat), tree: tree, list: folder))
+        with(list(chat), folderItems(chat, tree: tree, in: folder))
     }
 
     /// The pane's menu: its chat's folder items after its actions, before Search This Chat.
     static func pane(_ chat: ChatRow, tree: FolderTree, in folder: String) -> [MenuEntry] {
         var out = pane(chat)
-        let folders = FolderMenu.entries(Filed(chat), tree: tree, list: folder)
+        let folders = folderItems(chat, tree: tree, in: folder)
         if !folders.isEmpty { out.insert(contentsOf: [.separator] + folders, at: out.count - 2) }
         return out
     }
@@ -2750,6 +2958,8 @@ public extension ChatMenu {
     }
 }
 ```
+
+In `mac/JawUI/Sources/ChatList/ChatListController.swift`, a community's row has a menu now, so make the end of `menu(for:)`'s doc comment "the table's menu to be filled for; none when the host has none." and the end of `ChatCell.accessibilityPerformShowMenu()`'s "the chat's menu under its row, none when the host has none.", where both said there was none on a community's row.
 
 - [ ] **Step 4: Write m**
 
@@ -2772,7 +2982,7 @@ in `selectionKey(_:)`, add `case "m": fileChat()` after `case "i": …`; in `act
 - [ ] **Step 5: Run the JawUI tests to see them pass**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: `** TEST SUCCEEDED **`, with the nine new tests among those passed.
+Expected: `** TEST SUCCEEDED **`, with the ten new tests among those passed.
 
 - [ ] **Step 6: Wire the app**
 
@@ -2788,7 +2998,34 @@ Add to `mac/JawApp/Sources/Folders.swift`, inside the extension:
     func focusedFolderItems() -> [NSMenuItem] {
         guard let chat = conversation?.chat else { return [] }
         let bound = folderCommands(for: Filed(chat))
-        return Menus.items(FolderMenu.entries(Filed(chat), tree: tree, list: folder)) { id in bound.first { $0.id == id } }
+        return Menus.items(ChatMenu.folderItems(chat, tree: tree, in: folder)) { id in bound.first { $0.id == id } }
+    }
+
+    static let folderItemTag = 7301
+
+    /// What the menu bar's folder items are made from: the focused chat, the folders it's in, the
+    /// list's folder, and your folders' places and names.
+    var folderItemsKey: [String] {
+        guard let chat = conversation?.chat, tree.served else { return [] }
+        return [chat.id, folder, chat.folders.joined(separator: ",")] + tree.yours.map { "\($0.depth) \($0.row.id) \($0.row.name)" }
+    }
+
+    /// The menu bar's Chat menu ends with the focused chat's folder items, made again only when what
+    /// they're made from changes, as the Layouts menu is made again when the layouts change: a delegate
+    /// filling them as the menu opens would be asked again each time AppKit looks for a key's item.
+    func chatMenuFoldersChanged() {
+        let key = folderItemsKey
+        guard key != folderItemsMade, let menu = NSApp.mainMenu?.item(withTitle: MenuPlace.chat.rawValue)?.submenu else { return }
+        folderItemsMade = key
+        for item in menu.items where item.tag == Self.folderItemTag {
+            menu.removeItem(item)
+        }
+        let items = focusedFolderItems()
+        guard !items.isEmpty else { return }
+        for item in [NSMenuItem.separator()] + items {
+            item.tag = Self.folderItemTag
+            menu.addItem(item)
+        }
     }
 
     /// m: the chat's Add to Folder, as a menu of its own under the pane's header.
@@ -2807,48 +3044,15 @@ Add to `mac/JawApp/Sources/Folders.swift`, inside the extension:
         switch act {
         case let .add(item, to): jawd.folderAdd(to, item: item, said: said)
         case let .remove(item, from): jawd.folderRemove(from, item: item, said: said)
-        case let .move(item, from, to): jawd.moveItem(item, from: from, to: to, said: said)
+        case let .move(item, from, to):
+            jawd.moveItem(item, from: from, to: to, said: said, both: FolderMenu.inBoth(name, from: from, to: to, tree: tree))
         }
     }
-```
-
-and after the extension:
-
-```swift
-/// The menu bar's Chat menu ends with the focused chat's folder items, made as it opens from the tree
-/// and the chat's row, as its right-click menus are.
-@MainActor
-final class ChatMenuFolders: NSObject, NSMenuDelegate {
-    static let tag = 7301
-    weak var model: AppModel?
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        for item in menu.items where item.tag == Self.tag {
-            menu.removeItem(item)
-        }
-        let items = model?.focusedFolderItems() ?? []
-        guard !items.isEmpty else { return }
-        for item in [NSMenuItem.separator()] + items {
-            item.tag = Self.tag
-            menu.addItem(item)
-        }
-    }
-}
 ```
 
 In `mac/JawApp/Sources/ChatMenus.swift`: in `chatMenuItems(for:)`, make `bound` `chatCommands(for: { chat }) + [inNewPane] + folderCommands(for: Filed(chat))` and its entries `ChatMenu.list(chat, tree: tree, in: folder)`; in `paneMenu(for:)`, make `bound` `chatCommands(for: { chat }) + folderCommands(for: Filed(chat))` and its entries `ChatMenu.pane(chat, tree: tree, in: folder)`.
 
-In `mac/JawApp/Sources/AppModel.swift`: add after `let glance = Glance()`
-
-```swift
-    lazy var chatMenuFolders: ChatMenuFolders = {
-        let filler = ChatMenuFolders()
-        filler.model = self
-        return filler
-    }()
-```
-
-and in `makePane(_:place:)`, after `c.messageMenuTail = …`,
+In `mac/JawApp/Sources/AppModel.swift`: add `var folderItemsMade: [String] = []` after `var foldersWindow: WindowID?`, the key the menu bar's folder items were last made from, and in `makePane(_:place:)`, after `c.messageMenuTail = …`,
 
 ```swift
         c.folderMenu = { [weak self, weak c] in
@@ -2857,7 +3061,7 @@ and in `makePane(_:place:)`, after `c.messageMenuTail = …`,
         }
 ```
 
-In `mac/JawApp/Sources/AppDelegate.swift`, after `NSApp.mainMenu = Menus.bar(model.allCommands)`, add `NSApp.mainMenu?.item(withTitle: MenuPlace.chat.rawValue)?.submenu?.delegate = model.chatMenuFolders`.
+In `mac/JawApp/Sources/MainWindowController.swift`, add `model.chatMenuFoldersChanged()` at the end of `refresh()`, which runs after each frame of jawd's updates and each change of focus, so the Chat menu's folder items follow a push, a pane focused or a folder picked by the next frame and cost a comparison of a few strings otherwise. If `WindowContent` is in the checkout by then, the call still goes at the end of `MainWindowController.refresh()`.
 
 In `mac/JawApp/Sources/Commands.swift`, add `("file", "Add to Folder…", "Add this chat to a folder", "m")` to the Message section's list, after `("copy.text", …)`.
 
@@ -2868,24 +3072,24 @@ In `mac/JawApp/Sources/Bench.swift`, add `"m": 46, "n": 45` to `codes`.
 Run: `mac/scripts/build-mac build jaw`
 Expected: `** BUILD SUCCEEDED **`.
 
-Run: `mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/menus.png --keys "menu:list:0,menu:header,up,m"`
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/menus.png --keys "menu:list:0,menu:header,up,m"`
 Expected, among the log's lines: `menu:list:0:` and `menu:header:` as the menus plan's task 6 has them, neither with `Add to Folder`; and for `m`, the panes' line with `· said "folders come with jawd's M6"` in it.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add mac/JawUI/Sources mac/JawApp/Sources mac/Tests/JawUITests
-git commit -m "A chat's menus file it in folders: Add to Folder lists your folders as a tree, indented, with a tick on each the chat sits in directly, a click filing it there or taking it out; while the list shows one of your folders that holds the chat, Move to files it in another and takes it out of this one, and Remove from takes it out, both greyed while it's there only through a folder in it; the chat list's menu, the pane's and the menu bar's Chat menu have them by one rule, a community's row has them alone, and none has them before jawd serves folders; m with a message selected opens its chat's Add to Folder under the pane's header; and what jawd has done is said in the terminal's words once it has"
+git commit -m "A chat's menus file it in folders: Add to Folder lists your folders as a tree, indented, with a tick on each the chat sits in directly, a click filing it there or taking it out; while the list shows one of your folders that holds the chat, Move to files it in another and takes it out of this one, listing the list's own folder greyed so the tree keeps its shape, and Remove from takes it out, both greyed while it's there only through a folder in it; the chat list's menu, the pane's and the menu bar's Chat menu have the same folder items, ChatMenu.folderItems, the menu bar's made again only when the focused chat, its folders, the list's folder or the tree changes rather than each time AppKit looks for a key, a community's row has them alone, and none has them before jawd serves folders; m with a message selected opens its chat's Add to Folder under the pane's header; and what jawd has done is said in the terminal's words once it has, or, when a move leaves the chat in both folders, that it's in both"
 ```
 
 ---
 
-### Task 6: Naming in place
+### Task 7: Naming in place
 
-**Waits on jawd:** nothing to build; the field is tested against a host standing in for the app. Before `folders` lands, ⇧⌘N says it comes with jawd's M6; jawd's own refusals under the field (a name a sibling has, error 4; an empty one, -32602) are seen in task 14.
+**Waits on jawd:** nothing to build; the field is tested against a host standing in for the app. Before `folders` lands, ⇧⌘N, and the palette's New folder, which the palette lists then as it lists any command of the app's, say it comes with jawd's M6; jawd's own refusals under the field (a name a sibling has, error 4; an empty one, -32602) are seen in task 15.
 
 **Files:**
-- Modify: `mac/JawUI/Sources/Sidebar/SidebarController.swift` (`naming`, the field's row, `FolderOutline`, `SidebarHost`)
+- Modify: `mac/JawUI/Sources/Sidebar/SidebarController.swift` (`naming`, the field's row, `FolderOutline`, `SidebarHost`, `apply(_:)` and `roles` keeping the field)
 - Create: `mac/JawUI/Sources/Sidebar/SidebarNaming.swift`
 - Modify: `mac/JawUI/Sources/Sidebar/SidebarCells.swift` (`NamingCell`)
 - Modify: `mac/JawUI/Sources/Sidebar/FolderMenu.swift` (`newFolder` and `rename` acts; New Folder…)
@@ -2894,8 +3098,10 @@ git commit -m "A chat's menus file it in folders: Add to Folder lists your folde
 - Test: `mac/Tests/JawUITests/NamingTests.swift`; modify `SidebarTests.swift` (`SideHost`), `FolderMenuTests.swift`
 
 **Interfaces:**
-- Consumes: `SidebarController`, `FolderTree` (task 3), `FolderMenu`, `FolderAct` (task 5), `Jawd.folderCreate`, `folderRename`, `JawUpdate.named`, `.notNamed` (task 2).
-- Produces: `SidebarController.Naming` (`parent`, `renaming`, `filing: Filed?`, `text`, `refused`, `asked`), `naming: Naming?`, `beginNaming(parent:filing:text:)`, `beginRenaming(_:)`, `cancelNaming()`, `named(_ row: FolderRow?)`, `notNamed(_ why: String)`; `SidebarHost.sidebar(_:name:as:)`; `FolderAct.newFolder(parent: String?, filing: Filed?)` and `.rename(String)`; the command `file.new`; the app's `folder.new` (⇧⌘N) and `folder.rename` (↩) commands and `newFolder()`; `MainWindowController.showSidebar()`; the snapshot's `type:<text>` step and `esc` key.
+- Consumes: `FolderTree` (task 3), `SidebarController` (task 4), `FolderMenu`, `FolderAct` (task 6), `Jawd.folderCreate`, `folderRename`, `JawUpdate.named`, `.notNamed` (task 2).
+- Produces: `SidebarController.Naming` (`parent`, `renaming`, `filing: Filed?`, `text`, `refused`, `asked`, `away`), `naming: Naming?`, `beginNaming(parent:filing:text:)`, `beginRenaming(_:)`, `cancelNaming()`, `named(_ row: FolderRow?)`, `notNamed(_ why: String)`, and internally `keepingNaming(_:)` and `focusField(_:)`; `SidebarHost.sidebar(_:name:as:)`; `FolderAct.newFolder(parent: String?, filing: Filed?)` and `.rename(String)`; the command `file.new`; the app's `folder.new` (⇧⌘N) and `folder.rename` (↩) commands and `newFolder()`; `MainWindowController.showSidebar()`; the snapshot's `type:<text>` step and `esc` key.
+
+The Questions' 5 and 6 were decided after the plan's review, and this task builds them: a folder made from the sidebar, with ⇧⌘N, New Folder… or New Folder Inside…, is picked, as Notes and Reminders select a new item in their sidebars, while one made from a chat's Add to Folder isn't; and a click away keeps the name typed, as Finder keeps it, unless it's empty or unchanged, Esc alone dropping it. A push from jawd while a name is typed, a folder's counts or another interface's new folder, leaves the field with the keys, what's typed and the caret where they were.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2918,9 +3124,11 @@ import JawThemes
 @testable import JawUI
 import Testing
 
-/// New Folder and Rename open a field in place in the tree: Return asks for the name typed, once while
-/// jawd answers; jawd's refusal is said under the field, which stays open; Esc, or the field given up
-/// any other way, drops it; once jawd has made the folder its row is there.
+/// New Folder and Rename open a field in place in the tree: Return, or a click elsewhere, asks for the
+/// name typed, once while jawd answers, unless it's empty or unchanged; jawd's refusal is said under
+/// the field, which stays open, and doesn't take back keys that have gone elsewhere; Esc drops it; a
+/// push from jawd leaves it as it is; once jawd has made the folder its row is there, picked when it
+/// was made from the sidebar.
 
 /// A sidebar with the sample tree in an offscreen window, so its field can take the keys.
 @MainActor
@@ -2957,6 +3165,17 @@ func fieldEditor(_ window: NSWindow) throws -> NSTextView {
     #expect(host.named.first?.1.parent == nil && host.named.first?.1.renaming == nil)
     s.named(FolderRow(id: "folder:7", v: 70, name: "Parents", position: 4))
     #expect(s.naming == nil && s.said[10] == "Parents")
+    #expect(s.picked == "folder:7" && host.picked == ["folder:7"], "made from the sidebar, it's picked, as Notes picks a new folder")
+}
+
+@MainActor
+@Test func `a folder made from a chat's Add to Folder isn't picked, so the list keeps what it showed`() {
+    let host = SideHost()
+    let (s, window) = namingSidebar(host)
+    defer { window.close() }
+    s.beginNaming(parent: nil, filing: Filed(Samples.direct), text: "Parents")
+    s.named(FolderRow(id: "folder:7", v: 70, name: "Parents", position: 4))
+    #expect(s.naming == nil && s.picked == "all" && host.picked.isEmpty)
 }
 
 @MainActor
@@ -2985,7 +3204,7 @@ func fieldEditor(_ window: NSWindow) throws -> NSTextView {
 }
 
 @MainActor
-@Test func `Esc drops the field, and giving it up any other way drops it as Esc does`() throws {
+@Test func `Esc drops the field, and a click elsewhere keeps the name typed, as Finder does, unless it's empty or unchanged`() throws {
     let host = SideHost()
     let (s, window) = namingSidebar(host)
     defer { window.close() }
@@ -2995,7 +3214,54 @@ func fieldEditor(_ window: NSWindow) throws -> NSTextView {
     #expect(s.naming == nil && !s.said.contains("[Temp]") && host.named.isEmpty)
     s.beginNaming(parent: nil)
     window.makeFirstResponder(s.outline)
-    #expect(s.naming == nil, "a click elsewhere drops it")
+    #expect(s.naming == nil && host.named.isEmpty, "an empty name given up is dropped")
+    s.beginRenaming("folder:3")
+    window.makeFirstResponder(s.outline)
+    #expect(s.naming == nil && host.named.isEmpty, "and an unchanged one")
+    s.beginNaming(parent: nil)
+    try fieldEditor(window).insertText("Parents", replacementRange: NSRange(location: NSNotFound, length: 0))
+    window.makeFirstResponder(s.outline)
+    #expect(host.named.map(\.0) == ["Parents"], "a click elsewhere asks for what's typed")
+    #expect(s.naming?.asked == true && s.said.contains("[Parents]"), "the row waits for jawd's answer")
+}
+
+@MainActor
+@Test func `a name a click elsewhere kept that jawd turns down is said without taking the keys back, and Esc or another click away drops it`() throws {
+    let host = SideHost()
+    let (s, window) = namingSidebar(host)
+    defer { window.close() }
+    s.beginNaming(parent: "folder:1")
+    try fieldEditor(window).insertText("Cousins", replacementRange: NSRange(location: NSNotFound, length: 0))
+    window.makeFirstResponder(s.outline)
+    s.notNamed("a folder there is called Cousins already")
+    #expect(window.firstResponder === s.outline, "the keys stay where they went")
+    #expect(s.said[8] == "  [Cousins] · a folder there is called Cousins already")
+    let esc = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                            context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+    s.outline.keyDown(with: esc)
+    #expect(s.naming == nil && !s.said.contains { $0.contains("[Cousins]") }, "Esc in the tree drops it")
+    s.beginNaming(parent: "folder:1")
+    try fieldEditor(window).insertText("Cousins", replacementRange: NSRange(location: NSNotFound, length: 0))
+    window.makeFirstResponder(s.outline)
+    s.notNamed("a folder there is called Cousins already")
+    s.focusField()
+    window.makeFirstResponder(s.outline)
+    #expect(s.naming == nil && host.named.count == 2, "given up again once jawd has turned it down: dropped, not asked again")
+}
+
+@MainActor
+@Test func `a push while a name is typed leaves the field with the keys, what's typed and the caret where it was`() throws {
+    let host = SideHost()
+    let (s, window) = namingSidebar(host)
+    defer { window.close() }
+    s.beginRenaming("folder:3")
+    try fieldEditor(window).insertText("Climbing club", replacementRange: NSRange(location: NSNotFound, length: 0))
+    s.apply(Update(seq: 301, upsert: [FolderRow(id: "folder:3", v: 50, name: "Climbing", position: 1, unread: 4, count: 8, favourite: 3)]))
+    #expect(window.firstResponder is NSTextView && s.said[7] == "[Climbing club]", "the renamed folder's counts changed")
+    s.apply(Update(seq: 302, upsert: [FolderRow(id: "folder:8", v: 62, name: "Neighbours", position: 4)]))
+    #expect(try fieldEditor(window).string == "Climbing club" && s.said[7] == "[Climbing club]", "another interface made a folder")
+    #expect(try fieldEditor(window).selectedRange() == NSRange(location: 13, length: 0), "the caret where it was")
+    #expect(s.naming?.renaming == "folder:3" && host.named.isEmpty, "nothing asked of jawd")
 }
 
 @MainActor
@@ -3111,14 +3377,18 @@ and add the row's height:
 7. At the end of the file, add:
 
 ```swift
-/// The tree's outline: Return on a folder of yours renames it, as Finder's does.
+/// The tree's outline: Return on a folder of yours renames it, as Finder's does, and Esc drops a name
+/// left in the tree without the keys, as one jawd turned down after a click away.
 final class FolderOutline: NSOutlineView {
     weak var sidebar: SidebarController?
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 || event.keyCode == 76, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
-           let sidebar, sidebar.naming == nil, sidebar.tree.row(sidebar.picked)?.isYours == true
-        {
+        let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
+        if event.keyCode == 53, plain, let sidebar, sidebar.naming?.asked == false {
+            sidebar.cancelNaming()
+            return
+        }
+        if event.keyCode == 36 || event.keyCode == 76, plain, let sidebar, sidebar.naming == nil, sidebar.tree.row(sidebar.picked)?.isYours == true {
             sidebar.beginRenaming(sidebar.picked)
             return
         }
@@ -3126,6 +3396,31 @@ final class FolderOutline: NSOutlineView {
     }
 }
 ```
+
+8. Make `apply(_:)` keep a name being typed. Drawing a row again replaces its cell, which ends the editing in it, so the folder being renamed isn't drawn again while its field is open, its counts waiting for the field to close; and a push that lays the tree out again goes through `keepingNaming(_:)`, below, which gives the field back the keys, what's typed and its selection:
+
+```swift
+    /// jawd's tree, changed. A row whose counts alone changed is drawn again where it is; a change to
+    /// the tree's shape lays it out again, keeping what's open, so a flood of messages costs the
+    /// sidebar a few rows' drawing. A name being typed keeps its field, its text and its caret.
+    public func apply(_ update: Update<FolderRow>) {
+        let before = tree
+        tree.apply(update)
+        guard isViewLoaded else { return }
+        if before.shape != tree.shape || before.served != tree.served {
+            keepingNaming {
+                outline.reloadData()
+                restoreOpen()
+            }
+            return
+        }
+        for id in tree.rows.keys where id != naming?.renaming && (before.row(id) != tree.row(id) || before.badges(id) != tree.badges(id)) {
+            if let item = items[id] { outline.reloadItem(item) }
+        }
+    }
+```
+
+and make `roles`' `didSet` lay the outline out the same way, `keepingNaming { outline.reloadData(); restoreOpen() }`, after its `guard`.
 
 Create `mac/JawUI/Sources/Sidebar/SidebarNaming.swift`:
 
@@ -3145,6 +3440,9 @@ public extension SidebarController {
         public var refused: String?
         /// Asked of jawd and not answered yet, so Return doesn't ask again meanwhile.
         public var asked = false
+        /// jawd turned down what's typed while the keys were elsewhere, so giving the field up again
+        /// drops it rather than asking for it again; typing clears it.
+        public var away = false
     }
 }
 
@@ -3173,7 +3471,8 @@ extension SidebarController: NSTextFieldDelegate {
         focusField()
     }
 
-    /// Esc, or the field given up any other way: the folder isn't made, or keeps its name.
+    /// Esc, or a name given up empty, unchanged or as jawd last turned it down: the folder isn't made,
+    /// or keeps its name.
     public func cancelNaming() {
         guard naming != nil else { return }
         naming = nil
@@ -3182,19 +3481,28 @@ extension SidebarController: NSTextFieldDelegate {
     }
 
     /// jawd made the folder or renamed it: the field closes, and a folder made is there at once, before
-    /// the tree's push brings it too.
+    /// the tree's push brings it too. One made from the sidebar, with nothing to file in it, is picked,
+    /// as Notes and Reminders select a new item in their sidebars; one made from a chat's Add to Folder
+    /// leaves the list where it was.
     public func named(_ row: FolderRow?) {
+        let picks = naming.map { $0.renaming == nil && $0.filing == nil } ?? false
         naming = nil
         if let row { tree.apply(Update(upsert: [row])) }
         outline.reloadData()
         restoreOpen()
+        guard let row, picks else { return }
+        picked = row.id
+        reselect()
+        host?.sidebar(self, pick: row.id)
     }
 
-    /// jawd turned the name down: its words go under the field, which keeps the keys and what's typed.
+    /// jawd turned the name down: its words go under the field, which keeps what's typed, and the keys
+    /// if it has them; keys gone elsewhere aren't taken back.
     public func notNamed(_ why: String) {
         guard var n = naming else { return }
         n.refused = why
         n.asked = false
+        n.away = !typingName
         naming = n
         let row = outline.row(forItem: items[n.renaming ?? Self.namingRow])
         guard row >= 0, let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? NamingCell else { return }
@@ -3210,19 +3518,41 @@ extension SidebarController: NSTextFieldDelegate {
         host?.sidebar(self, name: n.text, as: n)
     }
 
-    func focusField() {
+    /// Gives the field the keys, its text all selected, or `selection`, as it was before the tree was
+    /// laid out again.
+    func focusField(_ selection: NSRange? = nil) {
         let row = outline.row(forItem: items[naming?.renaming ?? Self.namingRow])
         guard row >= 0, let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NamingCell else { return }
         outline.scrollRowToVisible(row)
         keepingField = true
         view.window?.makeFirstResponder(cell.field)
         keepingField = false
-        cell.field.currentEditor()?.selectAll(nil)
+        if let selection {
+            cell.field.currentEditor()?.selectedRange = selection
+        } else {
+            cell.field.currentEditor()?.selectAll(nil)
+        }
+    }
+
+    /// Whether the name field has the keys.
+    var typingName: Bool {
+        naming != nil && ((view.window?.firstResponder as? NSTextView)?.delegate as? NSTextField)?.delegate === self
+    }
+
+    /// Lays the tree out again without giving up a name being typed: the field is drawn again with
+    /// what's typed and, when it had the keys, given them back with its selection as it was.
+    func keepingNaming(_ change: () -> Void) {
+        let selection = typingName ? (view.window?.firstResponder as? NSTextView)?.selectedRange() : nil
+        keepingField = true
+        change()
+        keepingField = false
+        if let selection { focusField(selection) }
     }
 
     public func controlTextDidChange(_ note: Notification) {
         guard let field = note.object as? NSTextField else { return }
         naming?.text = field.stringValue
+        naming?.away = false
     }
 
     public func control(_: NSControl, textView _: NSTextView, doCommandBy selector: Selector) -> Bool {
@@ -3238,11 +3568,15 @@ extension SidebarController: NSTextFieldDelegate {
         }
     }
 
-    /// The field given up other than by Return or Esc, as a click elsewhere gives it up, drops it as Esc
-    /// does, unless jawd is answering for it.
+    /// The field given up other than by Return or Esc, as a click elsewhere gives it up: the name typed
+    /// is asked for as Return asks, as Finder, Notes and Xcode keep a name, unless it's empty, unchanged
+    /// or what jawd turned down while the keys were elsewhere, which drop it as Esc does. Nothing while
+    /// jawd is answering for it.
     public func controlTextDidEndEditing(_: Notification) {
         guard !keepingField, let n = naming, !n.asked else { return }
-        cancelNaming()
+        let text = n.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text != n.renaming.flatMap({ tree.row($0)?.name }), !n.away else { return cancelNaming() }
+        commitNaming()
     }
 }
 ```
@@ -3321,7 +3655,7 @@ and in `said(_:name:tree:)`, add `case .newFolder, .rename: nil`.
 - [ ] **Step 4: Run the JawUI tests to see them pass**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: `** TEST SUCCEEDED **`, with the six new tests among those passed.
+Expected: `** TEST SUCCEEDED **`, with the nine new tests among those passed.
 
 - [ ] **Step 5: Wire the app**
 
@@ -3427,33 +3761,33 @@ Add a band to `SidebarScene` in `mac/JawHarness/Sources/Scenes/SidebarScenes.swi
 Run: `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests`, `mac/scripts/build-mac build jaw`
 Expected: `** TEST SUCCEEDED **`, `** TEST SUCCEEDED **`, `** BUILD SUCCEEDED **`.
 
-Run: `mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/naming.png --keys "cmd+shift+n,sidebar"`
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/naming.png --keys "cmd+shift+n,sidebar"`
 Expected: the panes' line for `cmd+shift+n` with `· said "folders come with jawd's M6"` in it, and `sidebar: All | Archived · picked all`.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add mac/JawUI/Sources mac/JawApp/Sources mac/README.md mac/JawHarness/Sources mac/Tests/JawUITests
-git commit -m "Folders are named in place in the sidebar: New Folder, ⇧⌘N, in the folder picked when it's yours or at the top, and New Folder… at the end of a chat's Add to Folder, which files the chat in it once jawd has made it, open a field in a row where the folder will go, the folders it's in opened; Return asks jawd for it, once while jawd answers, and Esc, or a click elsewhere, drops it; Return on a folder of yours, or Rename Folder, opens the same field on its row; jawd's refusal of a name is said under the field in jawd's words, the row growing to hold it, and the field keeps the keys and what's typed; a folder made is in the tree at once, the list showing what it showed; and the snapshot's type: step and esc key reach the field"
+git commit -m "Folders are named in place in the sidebar: New Folder, ⇧⌘N, in the folder picked when it's yours or at the top, and New Folder… at the end of a chat's Add to Folder, which files the chat in it once jawd has made it, open a field in a row where the folder will go, the folders it's in opened; Return, or a click elsewhere, as Finder, Notes and Xcode keep a name, asks jawd for it, once while jawd answers, unless it's empty or unchanged, and Esc drops it; Return on a folder of yours, or Rename Folder, opens the same field on its row; jawd's refusal of a name is said under the field in jawd's words, the row growing to hold it, and the field keeps what's typed without taking back keys that have gone elsewhere, Esc or giving it up again then dropping it; a push from jawd while a name is typed, its folder's counts or another interface's new folder, leaves the field with the keys, its text and its caret; a folder made is in the tree at once, picked when it was made from the sidebar, as Notes and Reminders select a new item, and not when made from a chat's Add to Folder, which leaves the list where it was; and the snapshot's type: step and esc key reach the field"
 ```
 
 ---
 
-### Task 7: A folder's menu
+### Task 8: A folder's menu
 
-**Waits on jawd:** nothing to build. Before `folders` lands, the snapshot checks that a folder has no menu; nesting, moving and deleting on a real jawd, and its refusals (moving a folder into itself, a name a sibling has), are task 14's.
+**Waits on jawd:** nothing to build. Before `folders` lands, the snapshot checks that a folder has no menu; nesting, moving and deleting on a real jawd, and its refusals (moving a folder into itself, a name a sibling has), are task 15's.
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Sidebar/SidebarController.swift` (`SidebarHost`, the outline's menu, `hasKeys`)
-- Create: `mac/JawUI/Sources/Sidebar/SidebarDrops.swift` (the menu now, the drops in task 8)
+- Create: `mac/JawUI/Sources/Sidebar/SidebarDrops.swift` (the menu now, the drops in task 9)
 - Modify: `mac/JawUI/Sources/Sidebar/SidebarCells.swift` (VoiceOver's Show Menu on a folder)
 - Modify: `mac/JawUI/Sources/Sidebar/FolderMenu.swift` (a folder's entries and commands, `moveFolder` and `delete`)
 - Modify: `mac/JawApp/Sources/Folders.swift`, `MainWindowController.swift` (`askFolderDelete(_:)`), `Commands.swift` (Delete Folder…), `Bench.swift` (`menu:folder:<row>`, `menu:sidebar`), `mac/README.md`
 - Test: `mac/Tests/JawUITests/FolderMenuTests.swift`, `SidebarTests.swift`
 
 **Interfaces:**
-- Consumes: `SidebarController`, `FolderCell` (task 3), `FolderMenu`, `FolderAct`, `folderAct(_:name:)` (tasks 5 and 6), `Jawd.folderMove`, `folderDelete` (task 2), `MenuPopUp`.
-- Produces: `SidebarHost.sidebar(_:menuFor folder: String?) -> [NSMenuItem]` (nil for a heading, the field or the space under the rows); `SidebarController.menuItems(forRow:) -> [NSMenuItem]` and `hasKeys: Bool`; `FolderAct.moveFolder(String, to: String?, position: Int?)` and `.delete(String)`; `FolderMenu.folderEntries(_ folder: String?, tree:) -> [MenuEntry]` and `FolderMenu.folderCommands(_ folder: String?, tree:, act:) -> [Command]` (ids `folder.new.top`, `folder.new.inside`, `folder.rename`, `folder.to.top`, `folder.to:<folder>`, `folder.delete`); `MainWindowController.askFolderDelete(_:)`; the app's `folder.delete` command (⌘⌫); the snapshot's `menu:folder:<row>` and `menu:sidebar`.
+- Consumes: `SidebarController`, `FolderCell` (task 4), `FolderMenu`, `FolderAct`, `folderAct(_:name:)` (tasks 6 and 7), `Jawd.folderMove`, `folderDelete` (task 2), `MenuPopUp`.
+- Produces: `SidebarHost.sidebar(_:menuFor folder: String?) -> [NSMenuItem]` (nil for a heading, the field or the space under the rows); `SidebarController.menuItems(forRow:) -> [NSMenuItem]` and `hasKeys: Bool`; `FolderAct.moveFolder(String, to: String?, position: Int?)` and `.delete(String)`; `FolderMenu.folderEntries(_ folder: String?, tree:) -> [MenuEntry]` and `@MainActor FolderMenu.folderCommands(_ folder: String?, tree:, act:) -> [Command]`, on the main actor as `commands` is, since it makes `Command`s, while the enum and `folderEntries` stay off it for the tests that call them without it (ids `folder.new.top`, `folder.new.inside`, `folder.rename`, `folder.to.top`, `folder.to:<folder>`, `folder.delete`); `MainWindowController.askFolderDelete(_:)`; the app's `folder.delete` command (⌘⌫); the snapshot's `menu:folder:<row>` and `menu:sidebar`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3646,6 +3980,7 @@ add to `FolderMenu`
     }
 
     /// The commands those entries name, bound to `folder`.
+    @MainActor
     public static func folderCommands(_ folder: String?, tree: FolderTree,
                                       act: @escaping @MainActor @Sendable (FolderAct) -> Void) -> [Command]
     {
@@ -3754,7 +4089,7 @@ and add `menu:folder:<row>, menu:sidebar` to the unknown step's list. In `mac/RE
 Run: `mac/scripts/build-mac build jaw`
 Expected: `** BUILD SUCCEEDED **`.
 
-Run: `mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/folder-menu.png --keys "menu:folder:0,menu:sidebar"`
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/folder-menu.png --keys "menu:folder:0,menu:sidebar"`
 Expected: `menu:folder:0: ` and `menu:sidebar: `, each with nothing after it: no menu before jawd serves folders.
 
 - [ ] **Step 7: Commit**
@@ -3766,20 +4101,22 @@ git commit -m "A folder in the sidebar has a menu: one of yours has New Folder I
 
 ---
 
-### Task 8: Dragging onto the tree
+### Task 9: Dragging onto the tree
 
-**Waits on jawd:** nothing to build; the drops' rules are tested on their own and the outline's answers to AppKit with a private pasteboard. A chat dragged onto a folder on a real jawd, and a folder nested by a drag, are task 14's.
+**Waits on jawd:** nothing to build; the drops' rules are tested on their own and the outline's answers to AppKit with a private pasteboard. A chat dragged onto a folder on a real jawd, and a folder nested by a drag, are task 15's.
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Sidebar/FolderTree.swift` (`Dragged`, `drop(_:onto:at:)`)
 - Modify: `mac/JawUI/Sources/Sidebar/SidebarDrops.swift` (the outline's drag and drop), `SidebarController.swift` (`SidebarHost`, the types registered)
-- Modify: `mac/JawUI/Sources/ChatList/ChatListController.swift` (the pasteboard types)
+- Modify: `mac/JawUI/Sources/ChatList/ChatListController.swift` (the pasteboard types, a community's row dragged)
 - Modify: `mac/JawApp/Sources/Folders.swift`
-- Test: `mac/Tests/JawUITests/FolderTreeTests.swift`, `SidebarTests.swift`
+- Test: `mac/Tests/JawUITests/FolderTreeTests.swift`, `SidebarTests.swift`, `ChatListTests.swift`
 
 **Interfaces:**
-- Consumes: `FolderTree`, `SidebarController` (task 3), `FolderAct.add`, `.moveFolder` (tasks 5 and 7), `folderAct(_:name:)`.
-- Produces: `FolderTree.Dragged` (`item(String, name: String)`, `folder(String)`) and `FolderTree.drop(_:onto:at:) -> FolderAct?`; `SidebarHost.sidebar(_:do act: FolderAct, name: String)`; `SidebarController.place(_:_:) -> (target: String?, at: Int?)?` and `SidebarController.dragged(_ board: NSPasteboard) -> FolderTree.Dragged?`; `NSPasteboard.PasteboardType.jawPerson` and `.jawFolder`. A community still doesn't drag (the Questions' 7, A).
+- Consumes: `FolderTree` (task 3), `SidebarController` (task 4), `FolderAct.add`, `.moveFolder` (tasks 6 and 8), `folderAct(_:name:)`.
+- Produces: `FolderTree.Dragged` (`item(String, name: String)`, `folder(String)`) and `FolderTree.drop(_:onto:at:) -> FolderAct?`; `SidebarHost.sidebar(_:do act: FolderAct, name: String)`; `SidebarController.place(_:_:) -> (target: String?, at: Int?)?`, `SidebarController.dropTarget(_:row:) -> Item?` and `SidebarController.dragged(_ board: NSPasteboard) -> FolderTree.Dragged?`; `NSPasteboard.PasteboardType.jawPerson`, `.jawFolder` and `.jawCommunity`.
+
+The Questions' 7 was decided after the plan's review: a community's row drags onto your folders like any chat, as the design has "a chat from the chat list" dragged there, carrying `.jawCommunity` rather than `.jawChat`, which the panes register alone (`GridView`), so it can't be dropped on a pane. And a chat dropped near a row's edge, where AppKit proposes a drop between the rows, which a chat can't take, goes onto the folder under the pointer, as `setDropItem(_:dropChildIndex:)` retargets it, rather than being refused.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3849,13 +4186,48 @@ and the tests:
     board.clearContents()
     board.writeObjects([family])
     #expect(SidebarController.dragged(board) == .folder("folder:1"))
+    board.clearContents()
+    let community = NSPasteboardItem()
+    community.setString("120363000000000000@g.us", forType: .jawCommunity)
+    community.setString("Bairro Alto", forType: .string)
+    board.writeObjects([community])
+    #expect(SidebarController.dragged(board) == .item("120363000000000000@g.us", name: "Bairro Alto"), "a community files as a chat does")
+}
+
+@MainActor
+@Test func `a chat dropped near a row's edge goes onto the folder under the pointer, and a folder dropped there goes between the rows`() {
+    let s = sidebar()
+    s.apply(Samples.folderUpdate)
+    let chat = FolderTree.Dragged.item("ana@s.whatsapp.net", name: "Ana")
+    #expect(s.dropTarget(chat, row: 6)?.id == "folder:1", "Family's row")
+    #expect(s.dropTarget(chat, row: 0) == nil && s.dropTarget(chat, row: 5) == nil, "not All, nor the Folders heading")
+    #expect(s.dropTarget(.folder("folder:3"), row: 6) == nil, "a folder near a row's edge goes between the rows, as AppKit proposes")
+}
+```
+
+Add to `mac/Tests/JawUITests/ChatListTests.swift`:
+
+```swift
+@MainActor
+@Test func `a community's row drags with a type of its own, which no pane takes, and a chat's as before`() throws {
+    let list = ChatListController(folder: "all", roles: Catalog.jaw.roles(dark: true))
+    _ = list.view
+    list.shown = Samples.chats
+    list.table.reloadData()
+    let at = try #require(Samples.chats.firstIndex { $0.kind == .community })
+    let community = try #require(list.tableView(list.table, pasteboardWriterForRow: at) as? NSPasteboardItem)
+    #expect(community.string(forType: .jawCommunity) == Samples.chats[at].id && community.string(forType: .jawChat) == nil)
+    #expect(community.string(forType: .string) == Samples.chats[at].name)
+    let direct = try #require(Samples.chats.firstIndex { $0.kind == .direct })
+    let chat = try #require(list.tableView(list.table, pasteboardWriterForRow: direct) as? NSPasteboardItem)
+    #expect(chat.string(forType: .jawChat) == Samples.chats[direct].id && chat.string(forType: .jawCommunity) == nil)
 }
 ```
 
 - [ ] **Step 2: Run the tests to see them fail**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: the build fails with `type 'FolderTree' has no member 'Dragged'` and `value of type 'SidebarController' has no member 'place'`.
+Expected: the build fails with `type 'FolderTree' has no member 'Dragged'`, `value of type 'SidebarController' has no member 'place'` and `type 'NSPasteboard.PasteboardType' has no member 'jawCommunity'`.
 
 - [ ] **Step 3: Write the drops**
 
@@ -3897,6 +4269,22 @@ In `mac/JawUI/Sources/ChatList/ChatListController.swift`, add to the pasteboard 
     static let jawPerson = NSPasteboard.PasteboardType("dev.badcoffee.jaw.person")
     /// A folder of yours' id, dragged in the sidebar.
     static let jawFolder = NSPasteboard.PasteboardType("dev.badcoffee.jaw.folder")
+    /// A community's id, dragged from the chat list onto a folder; no pane registers it, as a community
+    /// can't go in a pane.
+    static let jawCommunity = NSPasteboard.PasteboardType("dev.badcoffee.jaw.community")
+```
+
+and replace `tableView(_:pasteboardWriterForRow:)` with
+
+```swift
+    /// A chat dragged out of the list, onto a pane or a folder; a community's row, onto a folder only.
+    public func tableView(_: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        guard row < shown.count else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(shown[row].id, forType: shown[row].kind == .community ? .jawCommunity : .jawChat)
+        item.setString(shown[row].name, forType: .string)
+        return item
+    }
 ```
 
 In `mac/JawUI/Sources/Sidebar/SidebarController.swift`: add to `SidebarHost`
@@ -3909,7 +4297,7 @@ In `mac/JawUI/Sources/Sidebar/SidebarController.swift`: add to `SidebarHost`
 and in `loadView()`, after the menu,
 
 ```swift
-        outline.registerForDraggedTypes([.jawChat, .jawPerson, .jawFolder])
+        outline.registerForDraggedTypes([.jawChat, .jawCommunity, .jawPerson, .jawFolder])
         outline.setDraggingSourceOperationMask(.move, forLocal: true)
 ```
 
@@ -3928,11 +4316,21 @@ extension SidebarController {
         return (id, index == NSOutlineViewDropOnItemIndex ? nil : index)
     }
 
-    /// What a drag carries: a folder of yours, or a chat or someone with their name.
+    /// What a drag carries: a folder of yours, or a chat, a community or someone with their name.
     static func dragged(_ board: NSPasteboard) -> FolderTree.Dragged? {
         if let id = board.string(forType: .jawFolder) { return .folder(id) }
-        guard let id = board.string(forType: .jawChat) ?? board.string(forType: .jawPerson) else { return nil }
+        guard let id = board.string(forType: .jawChat) ?? board.string(forType: .jawCommunity) ?? board.string(forType: .jawPerson)
+        else { return nil }
         return .item(id, name: board.string(forType: .string) ?? id)
+    }
+
+    /// Where a chat, a community or someone dropped between the rows goes: onto the folder of yours on
+    /// `row`, the one under the pointer, as AppKit proposes between the rows near a row's edge and only a
+    /// folder takes them; nil when that row isn't one of yours, and for a folder, which goes between.
+    func dropTarget(_ dragged: FolderTree.Dragged, row: Int) -> Item? {
+        guard case .item = dragged, row >= 0, let item = outline.item(atRow: row) as? Item, tree.drop(dragged, onto: item.id, at: nil) != nil
+        else { return nil }
+        return item
     }
 
     public func outlineView(_: NSOutlineView, pasteboardWriterForItem item: Any) -> (any NSPasteboardWriting)? {
@@ -3943,12 +4341,17 @@ extension SidebarController {
         return board
     }
 
-    public func outlineView(_: NSOutlineView, validateDrop info: any NSDraggingInfo, proposedItem item: Any?,
+    public func outlineView(_ outlineView: NSOutlineView, validateDrop info: any NSDraggingInfo, proposedItem item: Any?,
                             proposedChildIndex index: Int) -> NSDragOperation
     {
-        guard let dragged = Self.dragged(info.draggingPasteboard), let spot = place(item, index),
-              tree.drop(dragged, onto: spot.target, at: spot.at) != nil
-        else { return [] }
+        guard let dragged = Self.dragged(info.draggingPasteboard) else { return [] }
+        if index != NSOutlineViewDropOnItemIndex,
+           let onto = dropTarget(dragged, row: outline.row(at: outline.convert(info.draggingLocation, from: nil)))
+        {
+            outlineView.setDropItem(onto, dropChildIndex: NSOutlineViewDropOnItemIndex)
+            return .move
+        }
+        guard let spot = place(item, index), tree.drop(dragged, onto: spot.target, at: spot.at) != nil else { return [] }
         return .move
     }
 
@@ -3977,7 +4380,7 @@ Add to the extension in `mac/JawApp/Sources/Folders.swift`:
 - [ ] **Step 4: Run the tests and build the app**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: `** TEST SUCCEEDED **`, with the four new tests among those passed.
+Expected: `** TEST SUCCEEDED **`, with the six new tests among those passed.
 
 Run: `mac/scripts/build-mac build jaw`
 Expected: `** BUILD SUCCEEDED **`.
@@ -3986,26 +4389,26 @@ Expected: `** BUILD SUCCEEDED **`.
 
 ```bash
 git add mac/JawUI/Sources mac/JawApp/Sources/Folders.swift mac/Tests/JawUITests
-git commit -m "Chats and folders are dragged onto the sidebar's tree: a chat from the list dropped onto a folder of yours is filed there, and a folder of yours dropped onto another is nested in it, or between two rows goes there, counted among its new siblings as jawd counts them; built-in and smart folders take no drops, no folder goes into itself or a folder under it, and a drag onto a pane works as it did; someone from the roster will drop the same way, by their person id"
+git commit -m "Chats and folders are dragged onto the sidebar's tree: a chat from the list dropped onto a folder of yours is filed there, near a row's edge too, where it goes onto the folder under the pointer, and a folder of yours dropped onto another is nested in it, or between two rows goes there, counted among its new siblings as jawd counts them; a community's row drags onto your folders as a chat's does, with a pasteboard type of its own that no pane takes, so it can't be dropped on a pane; built-in and smart folders take no drops, no folder goes into itself or a folder under it, and a drag onto a pane works as it did; someone from the roster will drop the same way, by their person id"
 ```
 
 ---
 
-### Task 9: Favourites
+### Task 10: Favourites
 
-Favourite ▸ comes here, with ⌘1 to ⌘9, rather than with the other folder items in task 5, so the slots are built and tested in one place: a chat's menus, a folder's, the keys and the Find menu all read `FolderTree`'s slots.
+Favourite ▸ comes here, with ⌘1 to ⌘9, rather than with the other folder items in task 6, so the slots are built and tested in one place: a chat's menus, a folder's, the keys and the Find menu all read `FolderTree`'s slots.
 
-**Waits on jawd:** nothing to build. Before `folders` lands, ⌘1 to ⌘9 say favourites come with jawd's M6; a slot set from the Mac showing in the terminal's Alt-digit, and a favourite chat opened that the list doesn't hold, are task 14's.
+**Waits on jawd:** nothing to build. Before `folders` lands, ⌘1 to ⌘9 say favourites come with jawd's M6; a slot set from the Mac showing in the terminal's Alt-digit, and a favourite chat opened that the list doesn't hold, are task 15's.
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Sidebar/FolderMenu.swift` (`favourites`, `favouriteCommands`, the act, its words; Favourite in a folder's menu; the slots' commands in `commands` and `folderCommands`)
-- Modify: `mac/JawUI/Sources/ChatList/ChatMenu.swift` (Favourite in a chat's menus)
-- Modify: `mac/JawApp/Sources/Folders.swift` (`goToFavourite`, `openChat`, `Lookup`, the act), `AppModel.swift` (`lookingUp`, `apply(_:)`), `Commands.swift` (`favouriteCommands()`, `allCommands`), `MainWindowController.swift` (`favouritesChanged()`), `Bench.swift` (the digits' keys)
+- Modify: `mac/JawUI/Sources/ChatList/ChatMenu.swift` (Favourite in `folderItems`, so in each of a chat's menus)
+- Modify: `mac/JawApp/Sources/Folders.swift` (`goToFavourite`, `openChat`, `Lookup`, the act, the slots in `folderItemsKey`), `AppModel.swift` (`lookingUp`, `apply(_:)`), `Commands.swift` (`favouriteCommands()`, `allCommands`), `MainWindowController.swift` (`favouritesChanged()`), `Bench.swift` (the digits' keys)
 - Test: `mac/Tests/JawUITests/FolderMenuTests.swift`
 
 **Interfaces:**
-- Consumes: `FolderTree.slot(of:)`, `favourite(_:)`, `slotName(_:)` (task 3), `FolderMenu`, `FolderAct` (tasks 5 to 7), `Jawd.favouriteSet` (task 2), `AppModel.open(_:opened:)`, `openInNewPane(_:)` (the menus plan).
-- Produces: `FolderAct.favourite(slot: Int, target: String?)`; `FolderMenu.favourites(_ target: String?, tree:) -> [MenuEntry]` and `FolderMenu.favouriteCommands(_ target: String?, name: String, tree:, act:) -> [Command]` (ids `favourite.slot:<n>`, `favourite.off`), which `commands` (for the item's chat, as "this chat") and `folderCommands` (for the folder, by its label) now include; the app's `favourite.1` to `favourite.9` commands (⌘1 to ⌘9, Find ▸ Favourites), `goToFavourite(_:)`, `openChat(_:name:inNewPane:)`, `favouritesChanged()`.
+- Consumes: `FolderTree.slot(of:)`, `favourite(_:)`, `slotName(_:)` (task 3), `FolderMenu`, `FolderAct` (tasks 6 to 8), `ChatMenu.folderItems` and the app's `folderItemsKey` (task 6), `Jawd.favouriteSet` (task 2), `AppModel.open(_:opened:)`, `openInNewPane(_:)` (the menus plan, on main).
+- Produces: `FolderAct.favourite(slot: Int, target: String?)`; `FolderMenu.favourites(_ target: String?, tree:) -> [MenuEntry]` and `@MainActor FolderMenu.favouriteCommands(_ target: String?, name: String, tree:, act:) -> [Command]`, on the main actor as `commands` is (ids `favourite.slot:<n>`, `favourite.off`), which `commands` (for the item's chat, as "this chat") and `folderCommands` (for the folder, by its label) now include; the app's `favourite.1` to `favourite.9` commands (⌘1 to ⌘9, Find ▸ Favourites), `goToFavourite(_:)`, `openChat(_:name:inNewPane:)`, `favouritesChanged()`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4052,7 +4455,7 @@ Add to `mac/Tests/JawUITests/FolderMenuTests.swift`:
 }
 ```
 
-and update the two tests whose menus now end with Favourite: in `a community's row has the folder items alone…`, expect `["Add to Folder", "Move to", "unfile", "—", "Favourite"]` for the community, `[…, "Add to Folder", "Move to", "unfile", "—", "Favourite"]` for the chat in the list, and `[…, "Mark as Unread", "—", "Add to Folder", "—", "Favourite", "—", "search.chat"]` for the pane; and in `a folder of yours has New Folder Inside…`, expect
+and update the three tests whose menus now end with Favourite: in `a community's row has the folder items alone…`, expect `["Add to Folder", "Move to", "unfile", "—", "Favourite"]` for the community, `[…, "Add to Folder", "Move to", "unfile", "—", "Favourite"]` for the chat in the list, and `[…, "Mark as Unread", "—", "Add to Folder", "—", "Favourite", "—", "search.chat"]` for the pane; in `a chat's folder items are one list…`, expect `["Add to Folder", "Move to", "unfile", "—", "Favourite"]` in Family and `["Add to Folder", "—", "Favourite"]` in All, the menu bar's Chat menu having Favourite as the right-click menus do; and in `a folder of yours has New Folder Inside…`, expect
 
 ```swift
     #expect(Array(shows(family).prefix(5)) == ["New Folder Inside…", "Rename", "Move to ▸ [The Top], —, Climbing, Friends, Work, · Clients", "Delete…", "—"])
@@ -4090,6 +4493,7 @@ add to `FolderMenu`
     /// The commands those entries name: a slot puts `target` there, which takes it off its old slot and
     /// puts out what the slot held, as `favourite.set` does; Remove from Favourites empties its slot.
     /// `name` is what the palette calls it: "this chat", or a folder's name.
+    @MainActor
     public static func favouriteCommands(_ target: String?, name: String, tree: FolderTree,
                                          act: @escaping @MainActor @Sendable (FolderAct) -> Void) -> [Command]
     {
@@ -4141,12 +4545,12 @@ and add to `said(_:name:tree:)`
         case let .favourite(slot, target): target == nil ? "⌘\(slot) is free" : "⌘\(slot) goes to \(name)"
 ```
 
-In `mac/JawUI/Sources/ChatList/ChatMenu.swift`, make the folder items in `list(_:tree:in:)` and `pane(_:tree:in:)` `with(FolderMenu.entries(Filed(chat), tree: tree, list: folder), FolderMenu.favourites(chat.id, tree: tree))`.
+In `mac/JawUI/Sources/ChatList/ChatMenu.swift`, make `folderItems(_:tree:in:)` `with(FolderMenu.entries(Filed(chat), tree: tree, list: folder), FolderMenu.favourites(chat.id, tree: tree))`, so the chat list's menu, the pane's and the menu bar's Chat menu all end with Favourite, and its doc comment say so.
 
 - [ ] **Step 4: Run the JawUI tests to see them pass**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: `** TEST SUCCEEDED **`, with the four new tests and the two updated ones among those passed.
+Expected: `** TEST SUCCEEDED **`, with the four new tests and the three updated ones among those passed.
 
 - [ ] **Step 5: Wire the app**
 
@@ -4165,6 +4569,13 @@ add to `folderAct(_:name:)`'s switch
 ```swift
         case let .favourite(slot, target):
             jawd.favouriteSet(slot: slot, target: target, said: said)
+```
+
+make `folderItemsKey` end with the slots, since the menu bar's Favourite says what's on each and ticks the chat's,
+
+```swift
+        return [chat.id, folder, chat.folders.joined(separator: ",")] + tree.yours.map { "\($0.depth) \($0.row.id) \($0.row.name)" }
+            + (1 ... 9).map { "\($0) \(tree.favourite($0)?.target ?? "") \(tree.slotName($0) ?? "")" }
 ```
 
 and add to the extension
@@ -4229,7 +4640,7 @@ In `mac/JawApp/Sources/AppModel.swift`: add `var lookingUp: Lookup?` after `var 
             say("\(failure)", warn: true)
 ```
 
-and in the tree's `.folders` case, after `window?.sidebar.apply(u)`, add `if u.favourites != nil { window?.favouritesChanged() }`.
+and in the tree's `.folders` case, keep what the slots say before `window?.sidebar.apply(u)`, `let slots = (1 ... 9).map { tree.slotName($0) }`, and after it add `if (1 ... 9).map({ tree.slotName($0) }) != slots { window?.favouritesChanged() }`, so the Find menu's Favourites are made again when a slot changes and when a folder on one is renamed, which leaves the slots out of the push.
 
 In `mac/JawApp/Sources/Commands.swift`, add after `layoutCommands()`:
 
@@ -4251,7 +4662,7 @@ and make `allCommands` `layoutCommands() + favouriteCommands() + commands`.
 In `mac/JawApp/Sources/MainWindowController.swift`, add after `layoutsChanged()`:
 
 ```swift
-    /// The slots changed: the Find menu's Favourites say what's on each now.
+    /// The slots changed, or a folder on one was renamed: the Find menu's Favourites say what's on each now.
     func favouritesChanged() {
         let find = model.allCommands.filter { $0.place == .find }
         NSApp.mainMenu?.item(withTitle: MenuPlace.find.rawValue)?.submenu = Menus.menu(find, title: MenuPlace.find.rawValue)
@@ -4265,31 +4676,36 @@ In `mac/JawApp/Sources/Bench.swift`, add `"4": 21, "5": 23, "6": 22, "7": 26, "8
 Run: `mac/scripts/build-mac build jaw`
 Expected: `** BUILD SUCCEEDED **`, and a debug launch doesn't stop on `Menus.problems`: ⌘1 to ⌘9 were free.
 
-Run: `mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/favourites.png --keys "cmd+1,cmd+9"`
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/favourites.png --keys "cmd+1,cmd+9"`
 Expected: both panes' lines with `· said "favourites come with jawd's M6"` in them, and the app running on, so the launch's check of the keys passed.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add mac/JawUI/Sources mac/JawApp/Sources mac/Tests/JawUITests
-git commit -m "Favourites: a chat's menus, a community's row and a folder's menu end with Favourite, the nine slots each saying what's on it and ticked on the one holding it, picking one putting it there, which takes it off its old slot and puts out what the slot held, and Remove from Favourites emptying its slot; ⌘1 to ⌘9, in the Find menu's Favourites and titled by what's on each, pick the slot's folder or open its chat in the focused pane, a chat the list doesn't hold being opened once jawd sends its row in a one-row window of All, then of Archived; an empty slot says so in the status line, and before jawd serves folders each says favourites come with jawd's M6; the sidebar's digits, the menus and the keys all read the slots jawd pushes whole when one changes"
+git commit -m "Favourites: a chat's menus, the menu bar's Chat menu among them, a community's row and a folder's menu end with Favourite, the nine slots each saying what's on it and ticked on the one holding it, picking one putting it there, which takes it off its old slot and puts out what the slot held, and Remove from Favourites emptying its slot; ⌘1 to ⌘9, in the Find menu's Favourites and titled by what's on each, made again when a slot changes or a folder on one is renamed, pick the slot's folder or open its chat in the focused pane, a chat the list doesn't hold being opened once jawd sends its row in a one-row window of All, then of Archived; an empty slot says so in the status line, and before jawd serves folders each says favourites come with jawd's M6; the sidebar's digits, the menus and the keys all read the slots jawd pushes whole when one changes"
 ```
 
 ---
 
-### Task 10: The palette's folder actions
+### Task 11: The palette's folder actions
 
-**Waits on jawd:** nothing to build; the actions are tested by name from `Samples`' tree. Before `folders` lands the palette lists none of them, since its commands come from the tree; a filing from the palette on a real jawd is task 14's.
+**Waits on jawd:** nothing to build; the actions are tested by name from `Samples`' tree. Before `folders` lands the palette lists none of them, since they come from the tree, though it lists New folder, ⇧⌘N's, as it lists every command of the app's, which says what it waits on when chosen (task 7); a filing from the palette on a real jawd is task 15's.
 
 **Files:**
+- Modify: `mac/JawUI/Sources/Sidebar/FolderMenu.swift` (`paletteCommands`)
 - Modify: `mac/JawApp/Sources/Folders.swift` (`folderPaletteCommands()`), `AppModel.swift` (`actions()`)
-- Test: `mac/Tests/JawUITests/FolderPaletteTests.swift`
+- Test: `mac/Tests/JawUITests/FolderPaletteTests.swift`; modify `FolderMenuTests.swift` (`Acts`)
 
 **Interfaces:**
-- Consumes: `FolderMenu.commands`, `folderCommands` with the slots' (tasks 5, 7 and 9), `FolderTree.label(_:)` (task 3), `PaletteModel` and `PaletteAction`.
-- Produces: `AppModel.folderPaletteCommands() -> [Command]`, listed by `actions()` after the app's own, so they never crowd the palette when nothing's typed.
+- Consumes: `FolderMenu.commands`, `folderCommands` with the slots' (tasks 6, 8 and 10), `FolderTree.label(_:)` (task 3), `PaletteModel` and `PaletteAction`.
+- Produces: `@MainActor FolderMenu.paletteCommands(_ chat: Filed?, folder: String, tree:, act: (FolderAct, String) -> Void) -> [Command]`, on the main actor as the commands it gathers are; `AppModel.folderPaletteCommands() -> [Command]`, `paletteCommands` bound to the focused chat, the folder picked and `folderAct(_:name:)`, listed by `actions()` after the app's own, so they never crowd the palette when nothing's typed.
 
-- [ ] **Step 1: Write the failing test**
+The palette's composition is JawUI's, so its tests fail without it: what it lists, nothing before jawd serves folders, and what each action asks for.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `mac/Tests/JawUITests/FolderMenuTests.swift`, add `var names: [String] = []` to `Acts`, after `done`.
 
 Create `mac/Tests/JawUITests/FolderPaletteTests.swift`:
 
@@ -4300,16 +4716,14 @@ import Testing
 
 /// The palette lists each folder action by name, for the focused chat and the folder picked, so it
 /// reaches them without a mode: "Add this chat to Family", "Move this chat to Work", "Put this chat on
-/// ⌘3"; each name once, a folder of yours named by its path where another has its name.
+/// ⌘3"; each name once, a folder of yours named by its path where another has its name; none before
+/// jawd serves folders.
 
 @MainActor
 @Test func `the palette names each folder action for the focused chat and the folder picked, each name once`() {
     var tree = Samples.tree
     tree.apply(Update(seq: 301, upsert: [FolderRow(id: "folder:7", v: 61, parent: "folder:4", name: "Cousins", position: 0)]))
-    let chat = ana(in: ["folder:1"])
-    let commands = FolderMenu.commands(Filed(chat), tree: tree, list: "folder:1") { _ in }
-        + FolderMenu.folderCommands("folder:1", tree: tree) { _ in }
-    let names = commands.filter { $0.inPalette && $0.enabled() }.map(\.phrase)
+    let names = FolderMenu.paletteCommands(Filed(ana(in: ["folder:1"])), folder: "folder:1", tree: tree) { _, _ in }.map(\.phrase)
     #expect(Set(names).count == names.count, "each once: \(names)")
     #expect(names.contains("Take this chat out of Family") && names.contains("Add this chat to Family › Cousins")
         && names.contains("Add this chat to Friends › Cousins") && names.contains("Add this chat to a new folder"))
@@ -4322,35 +4736,71 @@ import Testing
 }
 
 @MainActor
+@Test func `the palette lists no folder action before jawd serves folders, and with no chat focused only the folder picked's`() {
+    #expect(FolderMenu.paletteCommands(Filed(ana(in: [])), folder: "all", tree: FolderTree()) { _, _ in }.isEmpty)
+    let names = FolderMenu.paletteCommands(nil, folder: "folder:3", tree: Samples.tree) { _, _ in }.map(\.phrase)
+    #expect(names.contains("Rename Climbing") && !names.contains { $0.contains("this chat") })
+}
+
+@MainActor
+@Test func `each palette action asks for what it says, naming what it's done to for what's said`() {
+    let acts = Acts()
+    let commands = FolderMenu.paletteCommands(Filed(ana(in: ["folder:1"])), folder: "folder:3", tree: Samples.tree) { act, name in
+        acts.done.append(act)
+        acts.names.append(name)
+    }
+    commands.first { $0.phrase == "Add this chat to Friends" }?.run()
+    commands.first { $0.phrase == "Rename Climbing" }?.run()
+    #expect(acts.done == [.add(item: Samples.direct.id, to: "folder:4"), .rename("folder:3")])
+    #expect(acts.names == ["Ana Ribeiro", "Climbing"])
+}
+
+@MainActor
 @Test func `a folder's name typed in the palette finds its actions first`() {
     let model = PaletteModel()
     let chat = ana(in: ["folder:1"])
-    model.actions = { FolderMenu.commands(Filed(chat), tree: Samples.tree, list: "all") { _ in }.filter(\.inPalette).map(\.paletteAction) }
+    model.actions = { FolderMenu.paletteCommands(Filed(chat), folder: "all", tree: Samples.tree) { _, _ in }.map(\.paletteAction) }
     model.query = "fri"
     #expect(model.items.first.map { $0.title.map(\.s).joined() } == "Add this chat to Friends")
 }
 ```
 
-- [ ] **Step 2: Run the tests to see whether they fail**
+- [ ] **Step 2: Run the tests to see them fail**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: `** TEST SUCCEEDED **`: the phrases were written with the commands in tasks 5 to 9, and these tests pin them. If one fails, the phrase it names is wrong in `FolderMenu`; correct it there, not here.
+Expected: the build fails with `type 'FolderMenu' has no member 'paletteCommands'` and `value of type 'Acts' has no member 'names'`.
 
 - [ ] **Step 3: List them in the palette**
+
+Add to `FolderMenu`, in `mac/JawUI/Sources/Sidebar/FolderMenu.swift`, after `favouriteCommands(_:name:tree:act:)`:
+
+```swift
+    /// The folder actions the palette lists by name, made as it opens: for the focused chat, filing it,
+    /// moving it while the list shows one of your folders, a new folder for it and its slot; for the
+    /// folder picked, a folder inside it, renaming, moving and deleting it, and its slot. Only those the
+    /// palette lists and that can be done now; none before jawd serves folders. `act` is told what to
+    /// do and the name of what it's done to, for what's said.
+    @MainActor
+    public static func paletteCommands(_ chat: Filed?, folder: String, tree: FolderTree,
+                                       act: @escaping @MainActor @Sendable (FolderAct, String) -> Void) -> [Command]
+    {
+        guard tree.served else { return [] }
+        var out: [Command] = []
+        if let chat { out += commands(chat, tree: tree, list: folder) { act($0, chat.name) } }
+        let name = tree.label(folder)
+        out += folderCommands(folder, tree: tree) { act($0, name) }
+        return out.filter { $0.inPalette && $0.enabled() }
+    }
+```
 
 Add to the extension in `mac/JawApp/Sources/Folders.swift`:
 
 ```swift
-    /// The folder actions the palette lists by name, made as it opens: for the focused chat, filing it,
-    /// moving it while the list shows one of your folders, and its slot; for the folder picked, a folder
-    /// inside it, renaming, moving and deleting it, and its slot.
+    /// The folder actions the palette lists, for the focused chat and the folder picked.
     func folderPaletteCommands() -> [Command] {
-        guard tree.served else { return [] }
-        var out: [Command] = []
-        if let chat = conversation?.chat { out += folderCommands(for: Filed(chat)) }
-        let name = tree.label(folder)
-        out += FolderMenu.folderCommands(folder, tree: tree) { [weak self] act in self?.folderAct(act, name: name) }
-        return out
+        FolderMenu.paletteCommands(conversation.map { Filed($0.chat) }, folder: folder, tree: tree) { [weak self] act, name in
+            self?.folderAct(act, name: name)
+        }
     }
 ```
 
@@ -4362,23 +4812,25 @@ In `mac/JawApp/Sources/AppModel.swift`, make `actions()`
     }
 ```
 
-- [ ] **Step 4: Build the app**
+- [ ] **Step 4: Run the tests to see them pass, and build the app**
 
-Run: `mac/scripts/build-mac build jaw`
-Expected: `** BUILD SUCCEEDED **`.
+Run: `mac/scripts/build-mac test JawUITests`, then `mac/scripts/build-mac build jaw`
+Expected: `** TEST SUCCEEDED **`, with the four new tests among those passed, and `** BUILD SUCCEEDED **`. If an expectation on a phrase fails, the phrase is wrong in `FolderMenu`, where tasks 6 to 10 wrote it; correct it there, not here.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add mac/JawApp/Sources mac/Tests/JawUITests/FolderPaletteTests.swift
-git commit -m "The palette lists the folder actions by name, made as it opens, so it reaches them without a mode: for the focused chat, Add this chat to and Take this chat out of each folder of yours, Move this chat to another while the list shows one of yours, a new folder, and Put this chat on each slot with what's there now or Take this chat off its own; for the folder picked, a new folder in it, Rename, Move into or to the top, Delete the folder, and its slot; each name once, a folder of yours named by its path where another of yours has its name, after the app's own actions so nothing crowds them when nothing's typed"
+git add mac/JawUI/Sources mac/JawApp/Sources mac/Tests/JawUITests
+git commit -m "The palette lists the folder actions by name, made as it opens, so it reaches them without a mode: for the focused chat, Add this chat to and Take this chat out of each folder of yours, Move this chat to another while the list shows one of yours, a new folder, and Put this chat on each slot with what's there now or Take this chat off its own; for the folder picked, a new folder in it, Rename, Move into or to the top, Delete the folder, and its slot; each name once, a folder of yours named by its path where another of yours has its name, after the app's own actions so nothing crowds them when nothing's typed; JawUI's FolderMenu.paletteCommands gathers them, tested for what it lists, for listing none before jawd serves folders and for what each asks"
 ```
 
 ---
 
-### Task 11: The folder keys
+### Task 12: The folder keys
 
-**Waits on jawd:** nothing to build. Before `folders` lands, ⌥⇧↑ and ⌥⇧↓ say folders come with jawd's M6; stepping a real jawd's tree is task 14's.
+**Waits on jawd:** nothing to build. Before `folders` lands, ⌥⇧↑ and ⌥⇧↓ say folders come with jawd's M6; stepping a real jawd's tree is task 15's.
+
+The menu bar's keys come before the box's, so ⌥⇧↑ and ⌥⇧↓ take the box's select to the paragraph's start and end, as ⌥↑ and ⌥↓, Previous Chat and Next Chat, already take its move to them: from anywhere, the keys step the folders, as the terminal's Alt-Shift-Up and Alt-Shift-Down do.
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Sidebar/FolderTree.swift` (`step(from:by:)`, `pickedLine(_:sidebarShown:listShown:focusMode:)`)
@@ -4387,7 +4839,7 @@ git commit -m "The palette lists the folder actions by name, made as it opens, s
 - Test: `mac/Tests/JawUITests/FolderTreeTests.swift`, `SidebarTests.swift`
 
 **Interfaces:**
-- Consumes: `FolderTree.order` (task 3), `SidebarController.select(_:)`, `AppModel.focusMode`, `goToFavourite(_:)` (task 9).
+- Consumes: `FolderTree.order` (task 3), `SidebarController.select(_:)` (task 4), `AppModel.focusMode`, `goToFavourite(_:)` (task 10).
 - Produces: `FolderTree.step(from:by:) -> String`; `FolderTree.pickedLine(_ name: String, sidebarShown: Bool, listShown: Bool, focusMode: Bool) -> String?` (the Questions' 3, A); `SidebarController.isShown` and `ChatListController.isShown`; `AppModel.pick(folder:saying:)` and `stepFolder(_:)`; the commands `folder.previous` (⌥⇧↑) and `folder.next` (⌥⇧↓), in the View menu beside Previous Chat and Next Chat.
 
 - [ ] **Step 1: Write the failing tests**
@@ -4502,7 +4954,7 @@ In `mac/JawApp/Sources/Commands.swift`, add after `chat.next`
 Run: `mac/scripts/build-mac test JawUITests`, then `mac/scripts/build-mac build jaw`
 Expected: `** TEST SUCCEEDED **`, with the three new tests among those passed, and `** BUILD SUCCEEDED **`.
 
-Run: `mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/keys.png --keys "opt+shift+down,opt+down"`
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/keys.png --keys "opt+shift+down,opt+down"`
 Expected: the first panes' line with `· said "folders come with jawd's M6"` in it, and the second's focus moved to the list's next chat, as ⌥↓ did before.
 
 - [ ] **Step 5: Commit**
@@ -4514,21 +4966,23 @@ git commit -m "⌥⇧↑ and ⌥⇧↓ go to the folder before or after from any
 
 ---
 
-### Task 12: The roster under the tree
+### Task 13: The roster under the tree
 
-**Waits on jawd:** nothing to build; the roster is drawn from `Samples.people`, and its window is task 2's, against `FakeJawd`. Before `folders` lands the roster isn't shown and isn't watched; a real jawd's people, their presence coming and going and jawd following them as the roster is watched, are task 14's.
+**Waits on jawd:** nothing to build; the roster is drawn from `Samples.people`, and its window is task 2's, against `FakeJawd`. Before `folders` lands the roster isn't shown and isn't watched; a real jawd's people, their presence coming and going and jawd following them as the roster is watched, are task 15's.
 
 **Files:**
 - Create: `mac/JawUI/Sources/Sidebar/RosterLines.swift`, `mac/JawUI/Sources/Sidebar/RosterController.swift`
 - Modify: `mac/JawUI/Sources/Sidebar/SidebarController.swift` (the split, `roster`, `keepsDivider`)
 - Modify: `mac/JawUI/Sources/Samples.swift` (`people`)
 - Modify: `mac/JawApp/Sources/Folders.swift` (`watchRoster()`, the roster's host), `AppModel.swift` (`rosterWindow`, `apply(_:)`, `pick(folder:saying:)`), `MainWindowController.swift`, `Bench.swift` (`roster`), `mac/README.md`
-- Modify: `mac/JawHarness/Sources/Scenes/SidebarScenes.swift`, `BuiltInScenes.swift`, `mac/Tests/JawHarnessTests/ScenesTests.swift`
+- Modify: `mac/JawHarness/Sources/Scenes/SidebarScenes.swift` (the roster's scene, and the roster hidden in the tree's bands), `BuiltInScenes.swift`, `mac/Tests/JawHarnessTests/ScenesTests.swift`
 - Test: `mac/Tests/JawUITests/RosterTests.swift`; modify `SidebarTests.swift`
 
 **Interfaces:**
-- Consumes: `People`, `RosterRow`, `Presence`, `Jawd.watchRoster`, `JawUpdate.roster` (task 2); `FolderTree` (task 3); `HeadingCell` (task 3); `AvatarCache`, `AvatarView`, `Format.ago(_:now:)`.
-- Produces: `public enum RosterLine` (`title(String)`, `heading(String, around: Int, of: Int)`, `person(RosterRow, group: String)`, `offline(group: String, count: Int, open: Bool)`); `RosterLines.lines(_:folder:tree:open:) -> [RosterLine]` and `RosterLines.said(_:now:) -> RosterLines.Said` (`text`, `online`); `public protocol RosterHost` with `roster(_:move:)`; `RosterController` with `host`, `people`, `tree`, `roles`, `root`, `now`, `show(folder:)`, `apply(_:)`, `toggle(_:)`, `said`, `rows` (200), and internally `lines`, `table`, `grow(visibleTo:)`; `SidebarController.roster` and `keepsDivider`; `Samples.people`; `AppModel.rosterWindow`, `watchRoster()`; the snapshot's `roster` step.
+- Consumes: `People`, `RosterRow`, `Presence`, `Jawd.watchRoster`, `JawUpdate.roster` (task 2); `FolderTree` (task 3); `HeadingCell` (task 4); `AvatarCache`, `AvatarView`, `Format.ago(_:now:)`.
+- Produces: `public enum RosterLine` (`title(String)`, `heading(String, around: Int, of: Int)`, `person(RosterRow, group: String)`, `offline(group: String, count: Int, open: Bool)`); `RosterLines.lines(_:folder:tree:open:) -> [RosterLine]` and `RosterLines.said(_:now:) -> RosterLines.Said` (`text`, `online`); `public protocol RosterHost` with `roster(_:move:)`; `RosterController` with `host`, `people`, `tree`, `roles`, `root`, `now`, `show(folder:)`, `apply(_:)`, `toggle(_:)`, `said`, `rows` (200), `most` (1,000, the most jawd keeps after the top), and internally `lines`, `table`, `grow(visibleTo:)`; `SidebarController.roster` and `keepsDivider`; `Samples.people`; `AppModel.rosterWindow`, `watchRoster()`; the snapshot's `roster` step.
+
+The roster grows only once the last person it holds is on a line in sight, never past the 1,000 people jawd keeps after the top (it refuses more with -32602): with its folds closed its lines are few, so the lines in sight say nothing of how near the end of its people it is.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4609,14 +5063,14 @@ final class RosterStub: RosterHost {
 }
 
 @MainActor
-func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Samples.people) -> RosterController {
+func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Samples.people, total: UInt64 = 400) -> RosterController {
     let r = RosterController(folder: folder)
     r.host = host
     r.tree = Samples.tree
     r.now = { Samples.now }
     r.roles = Catalog.jaw.roles(dark: true)
     _ = r.view
-    r.apply(Update(seq: 1, upsert: people, total: 400))
+    r.apply(Update(seq: 1, upsert: people, total: total))
     return r
 }
 
@@ -4647,14 +5101,39 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
 }
 
 @MainActor
-@Test func `the roster draws its lines, faint where jawd isn't following someone, opens a fold and asks for more near its end`() {
-    let host = RosterStub()
-    let r = roster(host)
+@Test func `the roster draws its lines, faint where jawd isn't following someone, and opens a fold`() {
+    let r = roster(RosterStub())
     #expect(Array(r.said.prefix(4)) == ["People:", "Family 1 of 5", "Ana Ribeiro typing…", "▸ 4 offline"])
     r.toggle("folder:1")
     #expect(r.said[3] == "▾ 4 offline" && r.said[4] == "Mãe 12 min ago (faint)")
+}
+
+@MainActor
+@Test func `the roster asks for more only once the last person it holds is in sight, and never past the 1,000 jawd keeps`() throws {
+    let host = RosterStub()
+    let r = roster(host)
     r.grow(visibleTo: r.said.count)
+    #expect(host.moved.isEmpty, "Sofia, the last it holds, is folded under Family's 4 offline")
+    r.toggle("folder:1")
+    let sofia = try #require(r.said.firstIndex { $0.hasPrefix("Sofia Martins") })
+    r.grow(visibleTo: sofia)
+    #expect(host.moved.isEmpty, "the lines in sight end just before her")
+    r.grow(visibleTo: sofia + 1)
     #expect(host.moved == [.top(210)], "200 more than it holds")
+
+    let many = (1 ... 900).map { i in
+        RosterRow(id: "person:\(100 + i)", v: 1, sort: "0~\(100_000 + i)", name: "Someone \(i)", presence: Presence(state: .online),
+                  folders: ["folder:1"])
+    }
+    let full = RosterStub()
+    let big = roster(full, folder: "folder:1", people: many, total: 5000)
+    big.grow(visibleTo: big.said.count)
+    #expect(full.moved == [.top(1000)], "up to the 1,000 jawd keeps, not 1,100")
+    var held = Update<RosterRow>(seq: 2, total: 5000)
+    held.moved = Moved(place: .top(1000), newer: 0)
+    big.apply(held)
+    big.grow(visibleTo: big.said.count)
+    #expect(full.moved == [.top(1000)], "nothing more once it's there")
 }
 ```
 
@@ -4794,6 +5273,8 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
 
     /// How many people the window keeps from the top, grown as the roster scrolls.
     public static let rows: UInt32 = 200
+    /// The most people jawd keeps in a roster's window after the top; it refuses more with -32602.
+    public static let most: UInt32 = 1000
 
     public init(folder: String = "all") {
         people = People(folder: folder, place: .top(Self.rows))
@@ -4890,11 +5371,15 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         grow(visibleTo: visible.location + visible.length)
     }
 
-    /// Asks for 200 more people once the rows in sight come within 20 of the end, while there are more.
+    /// Asks for 200 more people, up to the 1,000 jawd keeps, once the last person held is on a line in
+    /// sight, while the folder has more: with its folds closed the roster's lines are few, so the lines
+    /// in sight say nothing of how near the end of its people it is.
     func grow(visibleTo end: Int) {
-        guard end > lines.count - 20, UInt64(people.count) < people.total, people.place.after < UInt32(people.count) + Self.rows
+        guard UInt64(people.count) < people.total, people.place.after < Self.most, let last = people.list.last?.id,
+              let at = lines.firstIndex(where: { if case let .person(p, _) = $0 { p.id == last } else { false } }), at < end
         else { return }
-        host?.roster(self, move: .top(UInt32(people.count) + Self.rows))
+        let after = min(UInt32(people.count) + Self.rows, Self.most)
+        if after > people.place.after { host?.roster(self, move: .top(after)) }
     }
 
     // MARK: The table
@@ -5065,7 +5550,7 @@ in `roles`' `didSet`, add `roster.roles = roles` first; in `apply(_:)`, in the b
 - [ ] **Step 5: Run the JawUI tests to see them pass**
 
 Run: `mac/scripts/build-mac test JawUITests`
-Expected: `** TEST SUCCEEDED **`, with the six new tests among those passed.
+Expected: `** TEST SUCCEEDED **`, with the seven new tests among those passed.
 
 - [ ] **Step 6: Wire the app**
 
@@ -5163,28 +5648,30 @@ private struct RosterScene: View {
 
 and register it in `BuiltInScenes.swift` after `.emptyFolder`: `catalog.register(.roster)`.
 
+The roster now takes 40% of the sidebar's height, under the tree, which would cut the tree off in `SidebarScene`'s bands. The roster has a scene of its own, so hide it there: in the bands "The tree, Family picked" and "Naming in place", add `s.roster.view.isHidden = true` after `s.apply(Samples.folderUpdate)`, and end each band's note with "The roster, drawn in a scene of its own, is hidden here, so the tree has the whole height."
+
 - [ ] **Step 7: Run every suite, build the app and see the fallback on the demo**
 
 Run: `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests`, `mac/scripts/build-mac build jaw`
 Expected: `** TEST SUCCEEDED **`, `** TEST SUCCEEDED **`, `** BUILD SUCCEEDED **`.
 
-Run: `mac/scripts/build-mac shot roster /tmp/jaw-mac-folders/roster.png`, and look at the picture against its note.
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac shot roster /tmp/jaw-mac-folders/roster.png`, then `mac/scripts/build-mac shot sidebar /tmp/jaw-mac-folders/sidebar.png`, and look at each picture against its notes: the roster's three, and the sidebar's bands with the tree whole and no roster.
 
-Run: `mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/roster-demo.png --keys "roster,folder:1,roster"`
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/roster-demo.png --keys "roster,folder:1,roster"`
 Expected: `roster: People:` both times, the roster unwatched and hidden, as jawd from main serves no folders, and no line saying the people couldn't be watched.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add mac/JawUI/Sources mac/JawApp/Sources mac/README.md mac/JawHarness/Sources mac/Tests/JawUITests mac/Tests/JawHarnessTests/ScenesTests.swift
-git commit -m "The roster sits under the folder tree, under a divider kept at the height it's left: the picked folder's people as jawd sorts them, online, typing and recording first, then by when last seen, those jawd has no last seen for folded under N offline; under All, grouped by your top folders and then the others, each with who's around listed and the rest folded, as the terminal groups them; each row with its avatar, its name and how they are, typing… or recording… in the online colour, faint where jawd isn't following them now, their about text as its tooltip, and how long ago they were seen said again once a minute while it's on screen; 200 at a time from the top, more as it scrolls; watched again for each folder picked, and neither shown nor watched before jawd serves folders"
+git commit -m "The roster sits under the folder tree, under a divider kept at the height it's left: the picked folder's people as jawd sorts them, online, typing and recording first, then by when last seen, those jawd has no last seen for folded under N offline; under All, grouped by your top folders and then the others, each with who's around listed and the rest folded, as the terminal groups them; each row with its avatar, its name and how they are, typing… or recording… in the online colour, faint where jawd isn't following them now, their about text as its tooltip, and how long ago they were seen said again once a minute while it's on screen; 200 at a time from the top, 200 more once the last person held comes into sight, never past the 1,000 jawd keeps; watched again for each folder picked, and neither shown nor watched before jawd serves folders; the harness's sidebar bands hide it, as it has a scene of its own"
 ```
 
 ---
 
-### Task 13: The roster's people
+### Task 14: The roster's people
 
-**Waits on jawd:** nothing to build. Opening someone's chat from the roster, starting one with someone who has none (`chat.start` with `person`) and filing them on a real jawd are task 14's.
+**Waits on jawd:** nothing to build. Opening someone's chat from the roster, starting one with someone who has none (`chat.start` with `person`) and filing them on a real jawd are task 15's.
 
 **Files:**
 - Modify: `mac/JawUI/Sources/Sidebar/RosterController.swift` (opening, the menu, dragging, `RosterTable`)
@@ -5193,7 +5680,7 @@ git commit -m "The roster sits under the folder tree, under a divider kept at th
 - Test: `mac/Tests/JawUITests/RosterTests.swift`, `mac/Tests/JawUITests/SidebarPictureTests.swift`; references `mac/Tests/JawUITests/References/sidebar-dark.png`, `sidebar-light.png`
 
 **Interfaces:**
-- Consumes: `RosterController`, `RosterHost` (task 12), `FolderMenu.entries`, `favourites`, `Filed(_: RosterRow)` (tasks 5 and 9), `folderCommands(for:)`, `openChat(_:name:inNewPane:)` (tasks 5 and 9), `Jawd.startChat(person:)`, `compare(_:_:)` (LayoutTests).
+- Consumes: `RosterController`, `RosterHost` (task 13), `FolderMenu.entries`, `favourites`, `Filed(_: RosterRow)` (tasks 6 and 10), `folderCommands(for:)`, `openChat(_:name:inNewPane:)` (tasks 6 and 10), `Jawd.startChat(person:)`, `compare(_:_:)` (LayoutTests).
 - Produces: `RosterHost.roster(_:open:)` and `roster(_:menuItemsFor:) -> [NSMenuItem]`; `RosterController.menuItems(forRow:)`, `openSelected()`, `person(at:)`; `RosterMenu.open` (`person.open`), `RosterMenu.inNewPane` (`person.pane`), `RosterMenu.entries(_:tree:list:)`; `AppModel.openPerson(_:inNewPane:)`; the snapshot's `menu:roster:<row>`; the sidebar's reference pictures.
 
 - [ ] **Step 1: Write the failing tests**
@@ -5253,7 +5740,8 @@ import Testing
 
 /// The sidebar whole, the tree over the roster, Family picked and open with its people under it, drawn
 /// at 2× by its own views and compared with its reference, dark and light, as LayoutTests compares the
-/// conversation's. The sidebar is the same in either look, so it has a picture for each appearance.
+/// conversation's. The sidebar is the same in either look, so it has a picture for each appearance. It's
+/// 760 points high, so the tree's 60% holds its fifteen rows whole.
 
 @MainActor
 @Test(arguments: [true, false])
@@ -5261,7 +5749,7 @@ func `the sidebar draws as its reference, the tree over Family's people`(dark: B
     let s = SidebarController()
     s.roles = Catalog.jaw.roles(dark: dark)
     s.roster.now = { Samples.now }
-    let window = NSWindow(contentRect: NSRect(x: -30000, y: -30000, width: 220, height: 640), styleMask: [.borderless],
+    let window = NSWindow(contentRect: NSRect(x: -30000, y: -30000, width: 220, height: 760), styleMask: [.borderless],
                           backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
     window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -5419,7 +5907,7 @@ final class RosterTable: NSTableView {
 Run: `mac/scripts/build-mac test JawUITests`
 Expected: the roster's two new tests pass, and the picture test fails twice with `sidebar-dark: no reference yet; wrote sidebar-dark.png to look at and commit` and the same for `sidebar-light`.
 
-Run: `mac/scripts/build-mac references`, then look at `mac/Tests/JawUITests/References/sidebar-dark.png` and `sidebar-light.png`: the tree as the harness's sidebar scene's second band has it, over Family's people as the roster scene's third has them, nothing cut off, the divider between them. Then run `mac/scripts/build-mac test JawUITests` again.
+Run: `mac/scripts/build-mac references`, then look at `mac/Tests/JawUITests/References/sidebar-dark.png` and `sidebar-light.png`: the tree as the harness's sidebar scene's second band has it, over Family's people as the roster scene's third has them, nothing cut off, the divider between them at 60% of the height. Then run `mac/scripts/build-mac test JawUITests` again.
 Expected: `** TEST SUCCEEDED **`.
 
 - [ ] **Step 5: Wire the app**
@@ -5478,7 +5966,7 @@ and add `menu:roster:<row>` to the unknown step's list. In `mac/README.md`, add 
 Run: `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests`, `mac/scripts/build-mac build jaw`
 Expected: `** TEST SUCCEEDED **`, `** TEST SUCCEEDED **`, `** BUILD SUCCEEDED **`.
 
-Run: `mac/scripts/build-mac sweep`, which needs no jawd, and tell the owner the sidebar, empty-folder and roster scenes are on the review canvas (`.atelier/mac-harness.canvas.tsx`) to mark; the marks are read back with `mac/scripts/review-marks`, and a scene marked needs work is fixed in JawUI before the branch is handed over.
+Run: `mac/scripts/build-mac sweep`, which needs no jawd, and tell the owner the sidebar, empty-folder and roster scenes are on the review canvas (`.atelier/mac-harness.canvas.tsx`) to mark; the marks are read back with `mac/scripts/review-marks`, and a scene marked needs work is fixed in JawUI before the branch lands.
 
 - [ ] **Step 7: Commit**
 
@@ -5489,25 +5977,25 @@ git commit -m "Someone in the roster opens: a double click or Return opens their
 
 ---
 
-### Task 14: Tried end to end, once folders lands
+### Task 15: Tried end to end, once folders lands
 
-Do this task only once `folders` is on main and `mac-m1` has it: `git show mac-m1:protocol/fixtures/folders.watch.result.json` prints the tree's fixture, and `mac-folders` has been rebased onto `mac-m1`'s tip after `mac-menus`. Tasks 1 to 13 can be handed over before then, as the parity plan's rule 2 has a step land before jawd's part, each folder action saying what it waits on; this task follows them, as the parity plan's "tried end to end on `jawd demo`".
+Do this task only once `folders` is on main and `mac-folders` has been rebased onto it: `git show HEAD:protocol/fixtures/folders.watch.result.json`, in the worktree, prints the tree's fixture. Tasks 1 to 14 can land before then, as the parity plan's rule 2 has a step land before jawd's part, each folder action saying what it waits on; this task follows them, as the parity plan's "tried end to end on `jawd demo`", on `mac-folders` rebased onto a main that has `folders`. It doesn't touch `mac/parity.toml`: step 2.1's rows come out in the branch's last commit before it lands ("Where it's built" and "After the plan").
 
 **Files:**
 - Delete: `mac/Tests/JawKitTests/Ahead/`
 - Modify: `mac/Tests/JawKitTests/FixtureTests.swift` (protocol/fixtures alone), `mac/Tests/JawKitTests/LiveTests.swift` (folders on a real jawd)
 - Modify: `mac/JawHarness/Sources/Fixtures/Fixtures.swift` (`tree`), `mac/JawHarness/Sources/Scenes/SidebarScenes.swift` (a band from jawd's fixture), `mac/Tests/JawHarnessTests/ScenesTests.swift`
 - Modify: `mac/JawUI/Sources/ChatList/ChatListController.swift` (`drawn`), `mac/JawApp/Sources/Bench.swift` (`--bench pick`)
-- Modify: `mac/parity.toml` (when the checkout has it), `mac/README.md`
+- Modify: `mac/README.md`
 
 **Interfaces:**
-- Consumes: everything above; `DemoJawd`, `drain(_:seconds:until:)`, `helloed(_:)`, `notices(_:)`; `Fixtures.result(_:as:)`.
+- Consumes: everything above; `DemoJawd`, `drain(_:seconds:until:)`, `eventually(seconds:_:)`, `helloed(_:)`, `notices(_:)`; `Fixtures.result(_:as:)`.
 - Produces: `ChatListController.drawn: (() -> Void)?`; `Fixtures.tree: FoldersWatched`; `--bench pick`.
 
 - [ ] **Step 1: Hold the copies against what landed**
 
 Run: `mac/scripts/build-mac test JawKit`
-Expected: `** TEST SUCCEEDED **`, `a fixture copied ahead of jawd is byte for byte the one that lands` among those passed. If it fails for a fixture, `folders` changed it on its way to main: read the landed text (`git show mac-m1:protocol/README.md`, "Folders and the roster") and bring JawKit's types and their tests to it until the suite passes against the landed files, and say what changed in this task's commit.
+Expected: `** TEST SUCCEEDED **`, `a fixture copied ahead of jawd is byte for byte the one that lands` among those passed. If it fails for a fixture, `folders` changed it on its way to main: read the landed text (`git show HEAD:protocol/README.md`, "Folders and the roster") and bring JawKit's types and their tests to it until the suite passes against the landed files, and say what changed in this task's commit.
 
 - [ ] **Step 2: Read protocol/fixtures alone**
 
@@ -5534,7 +6022,7 @@ and add a band to `SidebarScene`, after the tree's:
 ```swift
             SpecimenGroup(
                 title: "From jawd's fixture",
-                note: "protocol/fixtures/folders.watch.result.json as jawd sends it: All with an @ and 12, Unread with ⌘2, an @ and 12, Family with ⌘1, an @ and 3, open to Cousins with 1, and Mentions me with an @ and 1.",
+                note: "protocol/fixtures/folders.watch.result.json as jawd sends it: All with an @ and 12, Unread with ⌘2, an @ and 12, Family with ⌘1, an @ and 3, open to Cousins with 1, and Mentions me with an @ and 1. The roster, drawn in a scene of its own, is hidden here, so the tree has the whole height.",
                 roles: roles,
             ) {
                 ControllerSpecimen {
@@ -5542,6 +6030,7 @@ and add a band to `SidebarScene`, after the tree's:
                     s.roles = roles
                     _ = s.view
                     s.apply(Update(seq: Fixtures.tree.seq, upsert: Fixtures.tree.rows, favourites: Fixtures.tree.favourites))
+                    s.roster.view.isHidden = true
                     s.expand("folder:9")
                     return s
                 }
@@ -5554,7 +6043,7 @@ and add a band to `SidebarScene`, after the tree's:
 In `mac/Tests/JawKitTests/LiveTests.swift`, add to the live suite (the one enabled when `builtJawd` is there):
 
 ```swift
-    @Test func `folders on a real jawd: made, a name refused, filed, moved, on a slot, and after jawd is killed the tree a fresh watch's`() async throws {
+    @Test func `folders on a real jawd: made, a name refused, filed, moved, on a slot, deleted from another interface, and after jawd is killed its list failing once and the tree a fresh watch's`() async throws {
         let demo = try DemoJawd()
         defer { demo.stop() }
         let jawd = Jawd(socket: demo.socket, client: "jaw-mac-live", version: "0", focus: false) { _ in }
@@ -5601,23 +6090,35 @@ In `mac/Tests/JawKitTests/LiveTests.swift`, add to the live suite (the one enabl
 
         jawd.folderAdd(family, item: id, said: "filed")
         take(await drain(jawd) { notices($0).contains("filed") })
-        try await Task.sleep(for: .milliseconds(300))
-        take(jawd.drain())
-        #expect(rows[family]?.count == 1)
-        jawd.moveItem(id, from: family, to: work, said: "moved")
+        #expect(await eventually { take(jawd.drain()); return rows[family]?.count == 1 }, "Family counts the chat once the tree's push comes")
+        jawd.moveItem(id, from: family, to: work, said: "moved", both: "in both")
         take(await drain(jawd) { notices($0).contains("moved") })
-        try await Task.sleep(for: .milliseconds(300))
-        take(jawd.drain())
-        #expect(rows[family]?.count == 0 && rows[work]?.count == 1, "in the other folder and out of the first")
+        #expect(await eventually { take(jawd.drain()); return rows[family]?.count == 0 && rows[work]?.count == 1 },
+                "in the other folder and out of the first")
         jawd.favouriteSet(slot: 1, target: work, said: "on")
         take(await drain(jawd) { notices($0).contains("on") })
-        try await Task.sleep(for: .milliseconds(300))
-        take(jawd.drain())
-        #expect(slots == [Favourite(slot: 1, folder: work)])
+        #expect(await eventually { take(jawd.drain()); return slots == [Favourite(slot: 1, folder: work)] })
+
+        let inFamily = jawd.watchChats(family, .top(10))
+        take(await drain(jawd) { all in all.contains { if case let .chats(w, _) = $0 { w == inFamily } else { false } } })
+        let other = Jawd(socket: demo.socket, client: "jaw-mac-live-other", version: "0", focus: false) { _ in }
+        other.start()
+        defer { other.close() }
+        _ = await drain(other) { helloed($0) == 1 }
+        other.folderDelete(family, said: "deleted")
+        _ = await drain(other) { notices($0).contains("deleted") }
+        #expect(await eventually { take(jawd.drain()); return rows[family] == nil },
+                "deleted from another interface, it leaves the tree, which FolderTree.showing reads to take the app's list back to All")
 
         demo.kill()
         try demo.start()
-        take(await drain(jawd, seconds: 20) { all in helloed(all) == 1 && all.contains { if case .folders = $0 { true } else { false } } })
+        let back = await drain(jawd, seconds: 20) { all in
+            helloed(all) == 1 && all.contains { if case .folders = $0 { true } else { false } }
+                && all.contains { if case let .windowFailed(w, _) = $0 { w == inFamily } else { false } }
+        }
+        take(back)
+        #expect(back.contains { if case let .windowFailed(w, f) = $0 { w == inFamily && f.code == ErrorCode.notFound } else { false } },
+                "its list, watched again, fails once rather than being asked for ever, and the app takes the list back to All")
         let fresh = Jawd(socket: demo.socket, client: "jaw-mac-live-fresh", version: "0", focus: false) { _ in }
         fresh.start()
         defer { fresh.close() }
@@ -5678,7 +6179,7 @@ and after `opens(_:_:_:)`
     }
 ```
 
-Measure it as the README's "What it costs" was measured: on the build Mac, a Release build against a release `jawd demo` of a million messages in a folder of its own, five runs, the load average beside them. The design's budget is that picking a folder draws its chats within the 30 ms of opening a chat. Add a row to the table, "Picking a folder | 30 ms p99 | …", saying why if it's over. The design's last budget, that the sidebar adds nothing to the keypress budget in a flood, waits for the keypress bench the README says isn't measured yet; task 3 draws only a push's changed rows so that it holds.
+Measure it as the README's "What it costs" was measured: on the build Mac, a Release build against a release `jawd demo` of a million messages in a folder of its own, five runs, the load average beside them. The design's budget is that picking a folder draws its chats within the 30 ms of opening a chat. Add a row to the table, "Picking a folder | 30 ms p99 | …", saying why if it's over. The design's last budget, that the sidebar adds nothing to the keypress budget in a flood, waits for the keypress bench the README says isn't measured yet; task 4 draws only a push's changed rows so that it holds.
 
 - [ ] **Step 5: Run the suites, and the app on the demo with folders**
 
@@ -5687,25 +6188,27 @@ Run: `df -h .`, then `CARGO_INCREMENTAL=0 cargo build -p jawd --bin jawd`, so `t
 Run: `mac/scripts/build-mac test JawKit`, `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests`, `mac/scripts/build-mac build jaw`
 Expected: `** TEST SUCCEEDED **` three times, the live folders test among JawKit's passed, and `** BUILD SUCCEEDED **`.
 
-Run: `mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/e2e.png --keys "sidebar,cmd+shift+n,type:Family,return,sidebar,menu:list:0,menu:folder:6,menu:sidebar,cmd+1,roster,opt+shift+down,sidebar"`
+`build-mac snapshot` prints only the last 12 lines of the app's log, a line for each step and one for the result, so the steps go in two runs, each on a demo folder of its own.
+
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/e2e-folders.png --keys "sidebar,cmd+shift+n,type:Family,return,sidebar,folder:0,menu:list:0,menu:folder:6,menu:sidebar"`
 Expected, among the log's lines:
 - the first `sidebar:` with the demo's built-in folders, their counts, then `Smart Folders: | Waiting on me … | Mentions me … | Muted, unread …`, and `· picked all`;
-- the second with `Folders: | Family` after `Archived`;
+- the second with `Folders: | Family` after `Archived`, and `· picked folder:` with Family's number, as a folder made from the sidebar is picked (the Questions' 5);
+- for `folder:0`, the panes' line with `· folder all`;
 - `menu:list:0:` ending `— | Add to Folder ▸ (Family | — | New Folder…) | — | Favourite ▸ (⌘1  empty | ⌘2  empty | … | ⌘9  empty)`;
-- `menu:folder:6: New Folder Inside… | Rename | Move to ▸ ([The Top]) | Delete… | — | Favourite ▸ (…)`, and `menu:sidebar: New Folder…`;
+- `menu:folder:6: New Folder Inside… | Rename | [Move to] ▸ ([The Top]) | Delete… | — | Favourite ▸ (…)`, Move to greyed because its only item is, as a submenu whose items are all greyed is greyed itself, and `menu:sidebar: New Folder…`;
+- and no line saying a window or the folders couldn't be watched.
+
+Run: `mkdir -p /tmp/jaw-mac-folders && mac/scripts/build-mac snapshot /tmp/jaw-mac-folders/e2e-keys.png --keys "cmd+1,roster,opt+shift+down,sidebar"`
+Expected, among the log's lines:
 - for `cmd+1`, `· said "nothing is on ⌘1; a chat's or a folder's Favourite menu puts one there"`;
-- `roster: People: | Others …`, the demo's people, none filed yet, with how each is;
-- for `opt+shift+down`, `· folder unread`, and the last `sidebar:` ending `· picked unread`;
+- `roster: People: | Others …`, the demo's people, none filed, with how each is;
+- for `opt+shift+down`, `· folder unread`, and the `sidebar:` line ending `· picked unread`;
 - and no line saying a window, the folders or the people couldn't be watched.
 
-- [ ] **Step 6: Take the parity check's rows out**
+A folder deleted from another interface while the app shows it is tried by the live test above, as the snapshot drives one interface alone: the tree's push takes the folder out, which `FolderTree.showing` reads to put the list back on All (task 5's test), and the folder's list, watched again, fails once with error 3, which the app answers the same way (task 5).
 
-If the checkout has `mac/parity.toml` (`mac-m1` rebased onto a main that has it), delete from its `[requests]` the lines for `folders.watch`, `roster.watch`, `folder.create`, `folder.rename`, `folder.move`, `folder.delete`, `folder.add`, `folder.remove` and `favourite.set`, and from its `[pushes]` those for `folders` and `roster`, all step 2.1.
-
-Run: `make check-parity`
-Expected: it passes, listing no step 2.1. If the checkout has no `mac/parity.toml`, say so in the hand-over: the parity workstream takes the rows out when `mac-m1` reaches main.
-
-- [ ] **Step 7: Say what the sidebar is, and sweep**
+- [ ] **Step 6: Say what the sidebar is, and sweep**
 
 In `mac/README.md`, add to "How the interface is put together":
 
@@ -5715,19 +6218,21 @@ In `mac/README.md`, add to "How the interface is put together":
 
 Run: `mac/scripts/build-mac sweep`, and tell the owner the sidebar, empty-folder and roster scenes are on the review canvas (`.atelier/mac-harness.canvas.tsx`) to mark.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add -A mac/Tests/JawKitTests mac/JawHarness/Sources mac/Tests/JawHarnessTests mac/JawUI/Sources/ChatList/ChatListController.swift mac/JawApp/Sources/Bench.swift mac/README.md
-git add mac/parity.toml 2>/dev/null || true
-git commit -m "The Mac's folders and roster tried end to end now jawd's folders are on main: the fixtures copied ahead of it were the files that landed, so JawKit reads protocol/fixtures alone again and the harness draws a tree from jawd's own fixture; a live test makes folders on jawd demo, has a sibling's name turned down in jawd's words, files a chat, moves it, puts a folder on a slot, and after jawd is killed has the tree a fresh watch's; the bench times picking each folder; the snapshot on the demo shows the tree, a folder made in place, the menus with their folder items, the roster and the folder keys; and the parity list's step 2.1 rows are out, as the Mac sends and reads them now"
+git commit -m "The Mac's folders and roster tried end to end now jawd's folders are on main: the fixtures copied ahead of it were the files that landed, so JawKit reads protocol/fixtures alone again and the harness draws a tree from jawd's own fixture; a live test makes folders on jawd demo, has a sibling's name turned down in jawd's words, files a chat, moves it, puts a folder on a slot, has another interface delete a folder the first is watching, which leaves its tree, and after jawd is killed has that folder's list fail once and the tree a fresh watch's, each waiting on what it checks rather than for a time; the bench times picking each folder; and two snapshots on the demo show the tree, a folder made in place and picked, the menus with their folder items, the roster and the folder keys"
 ```
 
 ---
 
 ## After the plan
 
-- Delete `/tmp/jaw-mac-folders` (the snapshots and shots) and `target` in `~/src/jaw-mac-folders` (jawd's builds, several gigabytes).
-- The build Mac keeps `~/src/build-mac/jaw/jaw-mac-folders` with its `build/DerivedData`: delete it once `mac-m1` has `mac-folders` (`ssh build-mac rm -rf src/build-mac/jaw/jaw-mac-folders`), and then the worktree (`git -C ~/src/jaw-mac-menus worktree remove ~/src/jaw-mac-folders`).
-- Tell the owner `mac-folders` is ready, rebased onto `mac-m1`'s tip after `mac-menus`, for the Mac builder to fast-forward `mac-m1` to, with what each commit does, the leans of this plan's Questions that it builds, and, until task 14 is done, that the folder items, the roster and ⌘1 to ⌘9 wait on `folders` and say so.
+The branch lands on main as "Where it's built" says, from `~/src/jaw-mac-folders`, once its tasks are done and reviewed: tasks 1 to 14 alone if `folders` isn't on main yet, and task 15 then lands the same way.
+
+- The branch's last commit before it lands takes step 2.1's rows out of `mac/parity.toml`, if they're still in: delete from its `[requests]` the lines for `folders.watch`, `roster.watch`, `folder.create`, `folder.rename`, `folder.move`, `folder.delete`, `folder.add`, `folder.remove` and `favourite.set`, and from its `[pushes]` those for `folders` and `roster`; run `make check-parity`, which passes, listing no step 2.1; and commit `mac/parity.toml` alone: `git commit -m "The parity list's step 2.1 rows are out, as the Mac sends jawd's folder requests and reads its folders and roster now"`.
+- Rebase onto main's tip; run `df -h .`, then `CARGO_INCREMENTAL=0 make mac-test`, which builds jawd from the worktree and runs the four suites, then `mac/scripts/build-mac build jaw` and `make check-parity`; and push to main, again from the rebase if main moved first.
+- Each time it has landed, delete the build Mac's folder, `~/src/build-mac/jaw/jaw-mac-folders` with its `build/DerivedData` (`ssh build-mac rm -rf src/build-mac/jaw/jaw-mac-folders`), `/tmp/jaw-mac-folders` (the snapshots and shots) and `target` in the worktree (jawd's debug builds, several gigabytes), which task 15 builds again from a main with folders; once task 15 has landed, delete the worktree too (`git -C ~/src/jaw-mac-menus worktree remove ~/src/jaw-mac-folders`).
+- Tell the owner `mac-folders` has landed on main, with what each commit does, the leans of this plan's Questions that it builds and the three decided after its review, and, until task 15 is done, that the folder items, the roster and ⌘1 to ⌘9 wait on `folders` and say so.
 
