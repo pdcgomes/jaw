@@ -2801,8 +2801,8 @@ mod tests {
     }
 
     #[test]
-    fn migration_17_keeps_one_wait_an_index_for_one_outbox_row_each() {
-        let mut db = at(None, 16);
+    fn migration_19_keeps_one_wait_an_index_for_one_outbox_row_each() {
+        let mut db = at(None, 18);
         migrate(&mut db).unwrap();
         let wait = |key: &str, outbox: i64| {
             db.execute(
