@@ -34,9 +34,9 @@ What the design leaves open, each with its options and the lean the plan builds;
 - Before jawd serves folders (a jawd from main answers `folders.watch` with -32601), the sidebar keeps All and Archived, no menu has a folder item, nothing says a window couldn't be watched, and ⇧⌘N, ⌘1 to ⌘9, ⌥⇧↑ and ⌥⇧↓ say what they wait on when chosen ("folders come with jawd's M6", "favourites come with jawd's M6"), as the parity plan's rule 2 has a step land before jawd's part.
 - `folders`' fixtures are copied with `git show folders:protocol/fixtures/<file>`, never from another checkout. Never touch `~/src/jaw-mac-m1`, `~/src/jaw-folders` or `~/src/jaw-harness`, nor `mac-menus`' checkout, `~/src/jaw-mac-menus`; never open `~/Library/Application Support/jaw`; never stop a process by name; the app's snapshot runs `--demo`.
 - Nothing here is jawd's data layer (`scripts/check-data-audit.py`'s paths), so it needs no database audit.
-- Tests run on the build Mac, never on this one: `mac/scripts/build-mac test JawKit`, `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests` and `mac/scripts/build-mac build jaw`, each printing only jaw's diagnostics and `** TEST SUCCEEDED **` or `** BUILD SUCCEEDED **`. If `build-mac` prints `==> build-mac doesn't answer; running here`, interrupt it at once (Ctrl-C) and report that the build Mac is down: it would go on to build and run the app on this Mac, where the Mac app is never built.
+- Tests run on the build Mac, never on this one: `mac/scripts/build-mac test JawKit`, `mac/scripts/build-mac test JawUITests`, `mac/scripts/build-mac test JawHarnessTests` and `mac/scripts/build-mac build jaw`, each printing only jaw's diagnostics and `** TEST SUCCEEDED **` or `** BUILD SUCCEEDED **`. Before each `build-mac` command, check the build Mac answers, `ssh -o BatchMode=yes -o ConnectTimeout=5 build-mac true`, and if it doesn't, stop and report that the build Mac is down: `build-mac` would otherwise fall back to building and running the app on this Mac (`==> build-mac doesn't answer; running here`), where the Mac app is never built.
 - Commits are on `mac-folders`, in the repository's style: one or more plain sentences saying what changed and why, no prefix, British spelling.
-- Scratch goes in `/tmp/jaw-mac-folders/`, deleted when the work is done; a Rust build runs `df -h` first and uses `CARGO_INCREMENTAL=0`.
+- Scratch goes in `/tmp/jaw-mac-folders/`; a Rust build runs `df -h` first and uses `CARGO_INCREMENTAL=0`. Each task deletes the pictures and logs it made there once it has looked at them, before it reports, naming in its report any it leaves for the owner to see.
 
 ## Where it's built, and what it waits on
 
@@ -2605,6 +2605,8 @@ git commit -m "A folder's chat list says when it's empty, in the terminal's word
 
 ### Task 6: Filing from a chat's menus
 
+> **Since the plan's last review:** a pane's chat row is refreshed only by the chat list's pushes, so a chat a pane shows but the list doesn't hold keeps the `folders` it was opened with, and after it's filed from the pane its ticks, the menu bar's and Move to or Remove from go stale. When jawd answers a filing of a chat a pane shows, update that pane's row's `folders` as the answer implies (added, removed, or moved), so its menus read right; test it with a pane showing a chat the list doesn't hold.
+
 **Waits on jawd:** nothing to build; the menus are tested from `Samples`' tree. Before `folders` lands, the snapshot checks that no menu has a folder item; a chat filed, moved and taken out on a real jawd, with jawd's words for a refusal, is task 15's.
 
 **Files:**
@@ -3087,6 +3089,8 @@ git commit -m "A chat's menus file it in folders: Add to Folder lists your folde
 ---
 
 ### Task 7: Naming in place
+
+> **Since the plan's last review:** if another interface deletes the folder being renamed, or a new folder's parent, the field's row goes but the naming state stays, so Return on the tree does nothing until Esc. In `apply`, cancel the naming when the folder it renames, or the parent a new folder is being made in, leaves the tree; test both.
 
 **Waits on jawd:** nothing to build; the field is tested against a host standing in for the app. Before `folders` lands, ⇧⌘N, and the palette's New folder, which the palette lists then as it lists any command of the app's, say it comes with jawd's M6; jawd's own refusals under the field (a name a sibling has, error 4; an empty one, -32602) are seen in task 15.
 
@@ -6283,5 +6287,6 @@ The branch lands on main as "Where it's built" says, from `~/src/jaw-mac-folders
 - The branch's last commit before it lands takes step 2.1's rows out of `mac/parity.toml`, if they're still in: delete from its `[requests]` the lines for `folders.watch`, `roster.watch`, `folder.create`, `folder.rename`, `folder.move`, `folder.delete`, `folder.add`, `folder.remove` and `favourite.set`, and from its `[pushes]` those for `folders` and `roster`; run `make check-parity`, which passes, listing no step 2.1; and commit `mac/parity.toml` alone: `git commit -m "The parity list's step 2.1 rows are out, as the Mac sends jawd's folder requests and reads its folders and roster now"`.
 - Rebase onto main's tip; run `df -h .`, then `CARGO_INCREMENTAL=0 make mac-test`, which builds jawd from the worktree and runs the four suites, then `mac/scripts/build-mac build jaw` and `make check-parity`; and push to main, again from the rebase if main moved first.
 - Each time it has landed, delete the build Mac's folder, `~/src/build-mac/jaw/jaw-mac-folders` with its `build/DerivedData` (`ssh build-mac rm -rf src/build-mac/jaw/jaw-mac-folders`), `/tmp/jaw-mac-folders` (the snapshots and shots) and `target` in the worktree (jawd's debug builds, several gigabytes), which task 15 builds again from a main with folders; once task 15 has landed, delete the worktree too (`git -C ~/src/jaw-mac-menus worktree remove ~/src/jaw-mac-folders`).
+- The roster reads typing from each person's chat row (task 13), which today's jawd always sends empty; when the parity plan's step 3.1 moves the panes onto jawd's typing push, it has to feed `RosterController.typing` from that push too, or the roster never shows anyone typing. Add that line to step 3.1 in `docs/plans/2026-10-27-jaw-mac-parity-plan.md` in the branch's last commit.
 - Tell the owner `mac-folders` has landed on main, with what each commit does, the leans of this plan's Questions that it builds and the three decided after its review, and, until task 15 is done, that the folder items, the roster and ⌘1 to ⌘9 wait on `folders` and say so.
 
