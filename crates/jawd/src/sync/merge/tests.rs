@@ -624,6 +624,47 @@ async fn a_merge_that_failed_before_it_went_on_into_another_chat_is_quarantined_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_failed_merge_renamed_onto_a_row_already_under_its_new_name_keeps_one_row_with_its_own_error() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    store
+        .apply(Lane::Live, vec![message(NEW, "n0", AT), message(OLD, "o0", AT + 1), message(LID, "l0", AT + 2)])
+        .await
+        .unwrap();
+    let side = Connection::open(home.path().join("jaw.db")).unwrap();
+    side.busy_timeout(Duration::from_secs(5)).unwrap();
+    side.execute_batch(
+        "CREATE TRIGGER stays BEFORE UPDATE OF chat ON messages WHEN old.id = 'l0'
+        BEGIN SELECT RAISE(ABORT, 'not yet'); END;",
+    )
+    .unwrap();
+    store.apply(Lane::Live, vec![join(OLD, LID)]).await.unwrap();
+    let asked = waiting(&store).await.unwrap().remove(0);
+    assert_eq!(asked.reference, merge_reference(LID, OLD));
+    let failed = store.apply(Lane::Background, vec![Change::MergeStep(Some(asked))]).await.unwrap();
+    assert_eq!(failed.quarantined, 1);
+    // A row already under the name the LID's merge takes as the old number's starts merging too,
+    // which no jawd leaves: put in by hand.
+    side.execute(
+        "INSERT INTO quarantine (at, source, ref, error) VALUES (1, 'merge', ?1, 'left from before')",
+        [merge_reference(LID, NEW)],
+    )
+    .unwrap();
+    let joined = store.apply(Lane::Live, vec![join(LID, NEW)]).await.unwrap();
+    assert_eq!(joined.quarantined, 0, "the join is made");
+    let both = [(OLD.to_string(), NEW.to_string()), (LID.to_string(), NEW.to_string())];
+    assert_eq!(merging(&store).await, both);
+    let kept = column::<String>(&store, "SELECT ref || ': ' || error FROM quarantine ORDER BY n").await;
+    assert_eq!(kept.len(), 1, "one row for the merge: {kept:?}");
+    assert!(kept[0].starts_with(&format!("{}: ", merge_reference(LID, NEW))), "{kept:?}");
+    assert!(kept[0].contains("not yet"), "with the error of its own last step: {kept:?}");
+    side.execute_batch("DROP TRIGGER stays").unwrap();
+    merged(&store, OLD).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW]);
+    assert_eq!(store.count("quarantine").unwrap(), 0, "what failed has since succeeded");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_chain_of_merges_made_after_jaw_db_opened_still_ends_in_one_chat_with_what_was_sent_meanwhile() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
