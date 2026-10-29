@@ -66,7 +66,31 @@ func (e *Engine) sendMessage(c *enginepb.Send) *enginepb.Reply {
 	if err := proto.Unmarshal(c.Raw, message); err != nil {
 		return failure(fmt.Sprintf("that isn't a message to send: %v", err), false)
 	}
+	if why := unsendable(message); why != "" {
+		return failure(why, false)
+	}
 	return e.sendWithID(to, c.Id, message)
+}
+
+// unsendable says why a message jawd made can't be right, for the kinds a phone couldn't show: a
+// contact card without its vCard, or a message of several with none, or with one without its vCard.
+// One card goes as WhatsApp's ContactMessage and several as a ContactsArrayMessage, which whatsmeow
+// sends as the phones do, its media type vcard or contact_array.
+func unsendable(m *waE2E.Message) string {
+	if card := m.GetContactMessage(); card != nil && strings.TrimSpace(card.GetVcard()) == "" {
+		return "a contact card goes with its vCard"
+	}
+	if cards := m.GetContactsArrayMessage(); cards != nil {
+		if len(cards.GetContacts()) == 0 {
+			return "a message of contact cards has one card at least"
+		}
+		for _, card := range cards.GetContacts() {
+			if strings.TrimSpace(card.GetVcard()) == "" {
+				return "each contact card goes with its vCard"
+			}
+		}
+	}
+	return ""
 }
 
 // sendWithID sends message to `to` with the ID jawd made for it, and says what the server answered.

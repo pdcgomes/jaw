@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/pdcgomes/jaw/engine/internal/link"
 	"github.com/pdcgomes/jaw/engine/internal/link/enginepb"
@@ -104,6 +106,63 @@ func TestAVoteThatCantBeRightIsRefusedForGoodBeforeItGoes(t *testing.T) {
 		"nobody sent it":      {Chat: "120363000000000002@g.us", Id: "3EB0BB", PollId: "3EB0AA", PollSender: "@s.whatsapp.net"},
 	} {
 		failure := e.pollVote(vote).GetFailure()
+		if failure == nil || failure.Retry {
+			t.Errorf("%s: %v", name, failure)
+		}
+	}
+}
+
+const marta = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Marta Lopes\r\nTEL;TYPE=CELL;waid=351213456789:+351213456789\r\nEND:VCARD\r\n"
+
+func card(name, vcard string) *waE2E.ContactMessage {
+	return &waE2E.ContactMessage{DisplayName: proto.String(name), Vcard: proto.String(vcard)}
+}
+
+// sent is message as jawd sends it, and as the engine reads it back.
+func sent(t *testing.T, message *waE2E.Message) (raw []byte, read *waE2E.Message) {
+	raw, err := proto.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read = &waE2E.Message{}
+	if err := proto.Unmarshal(raw, read); err != nil {
+		t.Fatal(err)
+	}
+	return raw, read
+}
+
+func TestContactCardsGoAsOneCardsMessageOrAnArrayOfSeveralWithTheirVCardsAsJawdMadeThem(t *testing.T) {
+	_, one := sent(t, &waE2E.Message{ContactMessage: card("Marta", marta)})
+	if why := unsendable(one); why != "" || one.GetContactMessage().GetVcard() != marta || one.GetContactMessage().GetDisplayName() != "Marta" {
+		t.Fatalf("one card: %q, %v", why, one)
+	}
+	several := &waE2E.ContactsArrayMessage{
+		DisplayName: proto.String("2 contacts"),
+		Contacts:    []*waE2E.ContactMessage{card("Marta", marta), card("Rui", "BEGIN:VCARD\nFN:Rui\nEND:VCARD")},
+		ContextInfo: &waE2E.ContextInfo{Expiration: proto.Uint32(86_400)},
+	}
+	_, array := sent(t, &waE2E.Message{ContactsArrayMessage: several})
+	cards := array.GetContactsArrayMessage().GetContacts()
+	if why := unsendable(array); why != "" || len(cards) != 2 || cards[0].GetVcard() != marta || cards[1].GetDisplayName() != "Rui" {
+		t.Fatalf("several cards: %q, %v", why, array)
+	}
+	if array.GetContactsArrayMessage().GetContextInfo().GetExpiration() != 86_400 {
+		t.Fatalf("the chat's timer went missing: %v", array)
+	}
+	if _, text := sent(t, &waE2E.Message{Conversation: proto.String("olá")}); unsendable(text) != "" {
+		t.Fatal("text was taken for a card")
+	}
+}
+
+func TestAContactCardThatCantBeRightIsRefusedForGoodBeforeItGoes(t *testing.T) {
+	e := newEngine(context.Background(), nil, NewLogger("test", "error"))
+	for name, message := range map[string]*waE2E.Message{
+		"a card without its vCard": {ContactMessage: card("Marta", " \r\n")},
+		"no cards":                 {ContactsArrayMessage: &waE2E.ContactsArrayMessage{DisplayName: proto.String("0 contacts")}},
+		"one of several without":   {ContactsArrayMessage: &waE2E.ContactsArrayMessage{Contacts: []*waE2E.ContactMessage{card("Marta", marta), {DisplayName: proto.String("Rui")}}}},
+	} {
+		raw, _ := sent(t, message)
+		failure := e.sendMessage(&enginepb.Send{Chat: "351910000002@s.whatsapp.net", Id: "3EB0CC", Raw: raw}).GetFailure()
 		if failure == nil || failure.Retry {
 			t.Errorf("%s: %v", name, failure)
 		}
