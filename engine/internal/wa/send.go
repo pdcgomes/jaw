@@ -150,10 +150,16 @@ func (e *Engine) pollVote(c *enginepb.PollVote) *enginepb.Reply {
 // you're not in or can't write in, a chat that can't be sent to, a message the server won't take
 // (too large, blocked and the like, which it answers with a 4xx code), or one that can't be encoded.
 // An app-state patch WhatsApp took, which whatsmeow then couldn't fetch back, is sent again whatever
-// the fetch's error, since app state is the same however often it's sent.
+// the fetch's error, since app state is the same however often it's sent. One the server refuses
+// goes by its error's code as a message does, but for a conflict (409): whatsmeow has applied the
+// changes it conflicted with and sent the patch once more by then, and it may go through later.
 func retryable(err error) bool {
 	if strings.Contains(err.Error(), "failed to fetch app state after sending update") {
 		return true
+	}
+	if errors.Is(err, whatsmeow.ErrAppStateUpdate) {
+		code := appStateCode(err)
+		return code == 409 || transient(code)
 	}
 	switch {
 	case errors.Is(err, whatsmeow.ErrRecipientADJID),
@@ -205,6 +211,23 @@ func serverCode(err error) int {
 	}
 	code, _ := strconv.Atoi(fields[len(fields)-1])
 	return code
+}
+
+// appStateCode is the code of the error node WhatsApp's server answered a refused app-state patch
+// with, which whatsmeow quotes only in its error's text, or 0 when it quotes none.
+func appStateCode(err error) int {
+	_, node, found := strings.Cut(err.Error(), "<error ")
+	if !found {
+		return 0
+	}
+	node, _, _ = strings.Cut(node, ">")
+	_, code, found := strings.Cut(node, `code="`)
+	if !found {
+		return 0
+	}
+	code, _, _ = strings.Cut(code, `"`)
+	n, _ := strconv.Atoi(code)
+	return n
 }
 
 func (e *Engine) markRead(c *enginepb.MarkRead) *enginepb.Reply {

@@ -11,6 +11,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/types/events"
@@ -69,8 +70,16 @@ func (timeout) Error() string   { return "i/o timeout" }
 func (timeout) Timeout() bool   { return true }
 func (timeout) Temporary() bool { return true }
 
+// refusedWith is the error whatsmeow returns when WhatsApp's server refuses an app-state patch to
+// collection name, quoting the error node it answered with.
+func refusedWith(name appstate.WAPatchName, code string) error {
+	node := waBinary.Node{Tag: "error", Attrs: waBinary.Attrs{"code": code, "text": "refused"}}
+	return fmt.Errorf("%w (%s): %s", whatsmeow.ErrAppStateUpdate, name, &node)
+}
+
 func TestASendThatMightWorkLaterIsTriedAgainAndOneThatCantIsNot(t *testing.T) {
 	var netErr net.Error = timeout{}
+	noErrorNode := waBinary.Node{Tag: "collection", Attrs: waBinary.Attrs{"name": "regular_low", "type": "error"}}
 	for _, err := range []error{
 		whatsmeow.ErrNotConnected,
 		fmt.Errorf("%w 500", whatsmeow.ErrServerReturnedError),
@@ -82,6 +91,15 @@ func TestASendThatMightWorkLaterIsTriedAgainAndOneThatCantIsNot(t *testing.T) {
 		errors.New("failed to get user info for 351910000002@s.whatsapp.net to fill LID cache"),
 		fmt.Errorf("failed to fetch app state after sending update: %w",
 			fmt.Errorf("failed to fetch app state regular_low patches: %w", &whatsmeow.IQError{Code: 404})),
+		// whatsmeow has applied the changes a 409 came with and sent the patch once more.
+		refusedWith(appstate.WAPatchRegularLow, "409"),
+		fmt.Errorf("%w (also, applying patches in the response failed: %w)",
+			refusedWith(appstate.WAPatchRegularLow, "409"), errors.New("mismatching LTHash")),
+		refusedWith(appstate.WAPatchRegularLow, "408"),
+		refusedWith(appstate.WAPatchRegularLow, "429"),
+		refusedWith(appstate.WAPatchRegularLow, "500"),
+		refusedWith(appstate.WAPatchRegularHigh, "503"),
+		fmt.Errorf("%w: %s", whatsmeow.ErrAppStateUpdate, &noErrorNode),
 	} {
 		if !retryable(err) {
 			t.Errorf("%v isn't tried again", err)
@@ -97,6 +115,12 @@ func TestASendThatMightWorkLaterIsTriedAgainAndOneThatCantIsNot(t *testing.T) {
 		fmt.Errorf("failed to get devices: %w", &whatsmeow.IQError{Code: 404}),
 		errors.New("no LID found for 351910000002@s.whatsapp.net from server"),
 		errors.New("failed to marshal message: proto: invalid"),
+		refusedWith(appstate.WAPatchRegularLow, "400"),
+		refusedWith(appstate.WAPatchRegularLow, "403"),
+		refusedWith(appstate.WAPatchRegularLow, "404"),
+		refusedWith(appstate.WAPatchRegularLow, "405"),
+		// A deletion for you goes to regular_high, as a mute and a star do.
+		refusedWith(appstate.WAPatchRegularHigh, "400"),
 	} {
 		if retryable(err) {
 			t.Errorf("%v is tried again", err)
