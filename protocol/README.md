@@ -599,12 +599,12 @@ Proposed with jawd's M7, for jawd to build, as jaw's design's "Scheduled message
 
 ### Sending later
 
-- **Every send takes `at`:** `send.text`, `send.poll` and `forward` as jawd serves them now, and `send.media`, `voice.send` and Composing's `send.event`, `send.contact`, `send.location` and `send.gif` as each is served. With `at` (milliseconds since the epoch), jawd keeps what the request would have sent, to send at that time, and answers `scheduled`, the item's row, in place of `message`. `at` must be at least a minute ahead and at most 366 days; otherwise it's -32602 with `data` `{"param": "at"}`.
+- **Every send takes `at`:** `send.text`, `send.poll`, `send.contact` and `forward` as jawd serves them now, and `send.media`, `voice.send` and Composing's `send.event`, `send.location` and `send.gif` as each is served. With `at` (milliseconds since the epoch), jawd keeps what the request would have sent, to send at that time, and answers `scheduled`, the item's row, in place of `message`. `at` must be at least a minute ahead and at most 366 days; otherwise it's -32602 with `data` `{"param": "at"}`.
 - **`send.text`, `send.poll`, `send.media` and `voice.send` take `repeat` too,** a rule (below). With it, `at` is its first time, and can be left out for the rule's first time from a minute ahead.
 - **The request is checked as a send is,** when it's scheduled: a chat jawd doesn't have is error 3, text that's only spaces -32602 and too long error 5, a `reply` jawd doesn't have error 3 and one deleted error 4, mentions as Message actions says, a poll's question and options as `send.poll` says, and each forwarded message as `forward` does. Media is planned and transcoded when it's scheduled, so a file that can't go says so then, and its files are kept in jaw's folder until its last time; a voice message is the stopped recording, and a GIF is fetched when it's scheduled, since `gif.search`'s results last an hour.
 - **`key`,** as `send.text` takes it: asking again with the same key within a day answers with the same item as it is now and keeps nothing new; if it has gone by then, it's error 4 as a change would be (below), and error 3 once it's been cancelled.
 - **A `forward`** to several chats is an item for each, answered as a list of rows in `scheduled`, each item forwarding every message named, in order. Forwards take `at` and not `repeat`.
-- **Scheduling clears the chat's draft,** as sending does, since what was typed has gone where it was meant to go; a forward leaves the chats' drafts, as forwarding does.
+- **Scheduling text clears the chat's draft,** as sending it does, since what was typed has gone where it was meant to go; a poll or a contact card leaves what's typed, as sending one does, and a forward leaves the chats' drafts, as forwarding does.
 
 ### The rule
 
