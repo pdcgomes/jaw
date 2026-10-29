@@ -272,11 +272,13 @@ const UPLOADED: &str = "UPDATE media SET direct_path = ?2, state = 'remote', err
 /// to ask the phone again. That's a copy waiting for the answer, one a later job downloads
 /// meanwhile, and one wanted again since it was asked for: by a start, which wants again what a
 /// stopped jawd left waiting, whose answer that jawd may have acked and not converted; or as the
-/// phone couldn't be asked again then.
+/// phone couldn't be asked again then. A copy whose file is in place, through another message with
+/// the same file, stays as it is, as for an upload (UPLOADED).
 const NO_FILE: &str = "UPDATE media SET state = 'gone', error = ?2, wanted = NULL, asked = 0, arrived = 0,
         progress = NULL
     WHERE message = ?1 AND variant = 'sd' AND (state IN ('waiting_for_phone', 'downloading')
-        OR state = 'remote' AND wanted IS NOT NULL AND retried_at IS NOT NULL)";
+        OR state = 'remote' AND wanted IS NOT NULL AND retried_at IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM media_files f WHERE f.sha256 = media.sha256 AND f.path IS NOT NULL)";
 /// The phone couldn't upload the file again, or its answer couldn't be read: a copy waiting for the
 /// answer, or one a later job downloads meanwhile, is expired, saying why; one still wanted is
 /// tried again, which asks the phone again.

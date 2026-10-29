@@ -2714,10 +2714,12 @@ async fn stored_photo(store: &Store, id: &str, sha256: u8) -> (i64, i64) {
         ..Message::default()
     };
     store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+    let id = id.to_string();
     store
         .reads()
-        .query(Priority::Interactive, |db| {
-            Ok(db.query_row("SELECT message, wanted FROM media", [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+        .query(Priority::Interactive, move |db| {
+            let mine = "SELECT message, wanted FROM media WHERE message = (SELECT n FROM messages WHERE id = ?1)";
+            Ok(db.query_row(mine, [id], |r| Ok((r.get(0)?, r.get(1)?)))?)
         })
         .await
         .unwrap()
@@ -2783,6 +2785,47 @@ async fn a_late_no_file_after_the_phone_uploaded_the_file_leaves_it_to_be_downlo
         .await
         .unwrap();
     assert_eq!((state.as_str(), wanted.is_some(), path.as_deref()), ("remote", true, Some("/v/t62/uploaded-again")));
+}
+
+/// The phone is asked for a photo's file, which another message with the same file downloads
+/// meanwhile, and the owner opens the photo: the phone's "no file" then changes nothing, as an
+/// upload would, so the copy shows its file with no error, still wanted until its job settles it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_no_file_for_a_copy_whose_file_is_already_in_place_changes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (n, wanted) = stored_photo(&store, "3EB0ASKEDFOR", 7).await;
+    stored_photo(&store, "3EB0SAMEFILE", 7).await;
+    let steps = [
+        Step::Downloading { message: n, variant: "sd" },
+        Step::AskedPhone { message: n, variant: "sd", wanted, at: now_ms() },
+        Step::Placed { sha256: vec![7; 32], path: "media/files/same.jpg".into(), bytes: 1_000, at: now_ms() },
+        Step::Want { message: n, variant: "sd", at: now_ms(), asked: true },
+    ];
+    for step in steps {
+        store.apply(Lane::Live, vec![Change::Media(step)]).await.unwrap();
+    }
+    let copy = || async {
+        let copy: (String, Option<i64>, Option<String>, i64) = store
+            .reads()
+            .query(Priority::Interactive, move |db| {
+                Ok(db.query_row(
+                    "SELECT md.state, md.wanted, md.error, m.v FROM media md JOIN messages m ON m.n = md.message
+                        WHERE md.message = ?1 AND md.variant = 'sd'",
+                    [n],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        copy
+    };
+    let opened = copy().await;
+    assert_eq!((opened.0.as_str(), opened.1.is_some(), opened.2.as_deref()), ("remote", true, None));
+    let answer = crate::store::media::Answer::NotFound;
+    let answered = Step::Answered { chat: ANA.into(), id: "3EB0ASKEDFOR".into(), answer, at: now_ms() };
+    store.apply(Lane::Live, vec![Change::Media(answered)]).await.unwrap();
+    assert_eq!(copy().await, opened, "the phone's late answer changes nothing");
 }
 
 /// The audit's K8: a photo jaw.db already held before migration 20, as an earlier jawd converted it:
