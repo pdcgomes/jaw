@@ -50,6 +50,8 @@ const CHANGES_KEPT: usize = 1_024;
 /// The shortest time between two of the task's rounds while typing keeps coming; a change after a
 /// quiet spell is taken at once.
 const BATCH: Duration = Duration::from_millis(5);
+/// How often the chats and people read for typing that has ended are let go of.
+const FORGET_EVERY: Duration = Duration::from_secs(1);
 
 /// What waits in the intake, in the order it came.
 enum Came {
@@ -229,6 +231,8 @@ impl Watching {
 /// A person as their typing shows them.
 struct Who {
     n: i64,
+    /// `person:` and `n`, as the protocol names them.
+    id: String,
     name: String,
     /// Every JID they're known by, without devices.
     jids: Vec<String>,
@@ -332,9 +336,9 @@ impl Typists {
         match named {
             Ok((chats, people)) => {
                 self.chat_ids.extend(chats.into_iter().map(|(id, jid)| (jid, id)));
-                let people = people
-                    .into_iter()
-                    .map(|(who, jid)| (jid, who.map(|(n, name, jids)| Arc::new(Who { n, name, jids }))));
+                let people = people.into_iter().map(|(who, jid)| {
+                    (jid, who.map(|(n, name, jids)| Arc::new(Who { n, id: format!("person:{n}"), name, jids })))
+                });
                 self.people.extend(people);
             }
             Err(e) => eprintln!("jawd: can't name who's typing, so they show once they say it again: {e:#}"),
@@ -423,11 +427,7 @@ impl Typists {
             let who: Vec<Typist> = chat
                 .typers
                 .iter()
-                .map(|typer| Typist {
-                    id: format!("person:{}", typer.who.n),
-                    name: typer.who.name.clone(),
-                    state: typer.state,
-                })
+                .map(|typer| Typist { id: typer.who.id.clone(), name: typer.who.name.clone(), state: typer.state })
                 .collect();
             if told.get(id).map_or(who.is_empty(), |was| **was == *who) {
                 Inner::count(&inner.merged);
@@ -492,6 +492,7 @@ async fn run(inner: Arc<Inner>, store: Store, me: watch::Receiver<convert::Me>, 
     let mut typists = Typists::default();
     let mut following = true;
     let mut round: Option<Instant> = None;
+    let mut forgot = Instant::now();
     loop {
         // While it keeps coming, what comes waits for the next round with whatever comes meanwhile.
         if let Some(next) = round.map(|at| at + BATCH).filter(|next| *next > Instant::now()) {
@@ -530,12 +531,18 @@ async fn run(inner: Arc<Inner>, store: Store, me: watch::Receiver<convert::Me>, 
         }
         let now = Instant::now();
         typists.fade(now, &inner);
-        // The chats messages are looked for in are those of the typing about to be told, so a
-        // message that comes once a connection has heard of it is taken. They and what's read for
-        // typing change only as someone starts or stops; between, typing said since only adds to
-        // them, which `heard` does as it comes.
-        if std::mem::take(&mut typists.moved) {
+        // What's read for typing that has ended is let go of now and then rather than as it ends,
+        // which costs a look at everyone typing, so someone who stops and starts again soon is
+        // read once.
+        if forgot.elapsed() >= FORGET_EVERY {
             typists.forget();
+            forgot = Instant::now();
+        }
+        // The chats messages are looked for in are those of the typing about to be told, so a
+        // message that comes once a connection has heard of it is taken. They change only as
+        // someone starts or stops; between, typing said since only adds to them, which `heard`
+        // does as it comes.
+        if std::mem::take(&mut typists.moved) {
             let mut intake = inner.intake.lock().expect("typing's intake");
             let waiting: Vec<String> = intake
                 .came
