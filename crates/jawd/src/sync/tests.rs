@@ -2294,6 +2294,9 @@ async fn pings_that_get_through_again_during_a_catch_up_put_it_back_as_far_as_it
     tx.send(arriving(GROUP, "3EB0AWAY2")).await.unwrap();
     tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
     tx.send(arriving(ANA, "3EB0AWAY3")).await.unwrap();
+    until("the message to be counted", || live.lock().unwrap().catch_up.as_ref().is_some_and(|c| c.stored == 3)).await;
+    let connecting = live.lock().unwrap().connection.clone();
+    assert_eq!(connecting, jaw_proto::Connection::new(ConnectionState::Connecting), "no progress said as connecting");
     tx.send(connection_event(State::KeepaliveRestored)).await.unwrap();
     let pushed: Vec<_> = next_told(&mut told, 4).await.iter().map(connection_of).collect();
     let expected = [

@@ -641,6 +641,11 @@ fn caught(live: &Shared, pushes: &broadcast::Sender<Push>, chat: &str) {
         let Some(catch_up) = live.catch_up.as_mut() else { return };
         catch_up.stored += 1;
         let stored = catch_up.stored;
+        // While a keepalive timeout has the connection say connecting, the catch-up counts on, and
+        // says how far it has got once the pings get through again.
+        if live.connection.state != ConnectionState::CatchingUp {
+            return;
+        }
         live.connection.done = Some(stored);
         (stored % PROGRESS_EVERY == 0).then(|| live.connection.clone())
     };
