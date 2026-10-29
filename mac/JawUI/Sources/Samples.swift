@@ -13,22 +13,61 @@ public enum Samples {
     public static let group = ChatRow(
         id: "120363012345678901@g.us", v: 40, sort: "0~1792144500000~4", kind: .group, name: "Lisbon Climbing",
         last: Last(from: "Rui", mine: false, summary: "Saturday at 9?", at: now - 60000), unread: 3, mentions: 1,
+        folders: ["folder:3"],
     )
 
     public static let direct = ChatRow(
         id: "351912345678@s.whatsapp.net", v: 42, sort: "1~1792145060000~17", name: "Ana Ribeiro",
         last: Last(from: nil, mine: true, summary: "yes, the one at the lake", status: .read, at: now - 120_000),
-        pinned: true, draft: "see you",
+        pinned: true, draft: "see you", folders: ["folder:1"],
     )
 
     public static var chats: [ChatRow] {
         var muted = ChatRow(id: "351913000000@s.whatsapp.net", v: 30, sort: "0~1792100000000~9", name: "Mãe",
-                            last: Last(from: nil, mine: false, summary: "have you eaten?", at: now - 3 * 86_400_000), unread: 1)
+                            last: Last(from: nil, mine: false, summary: "have you eaten?", at: now - 3 * 86_400_000), unread: 1,
+                            folders: ["folder:1"])
         muted.mutedUntil = -1
         let community = ChatRow(id: "120363000000000009@g.us", v: 20, sort: "0~1792000000000~3", kind: .community,
                                 name: "Climbing Portugal",
                                 last: Last(from: "Sofia", mine: false, summary: "new routes at Sintra", at: now - 9 * 86_400_000))
         return [direct, group, muted, community]
+    }
+
+    /// A folder tree as jawd's M6 sends one: the built-in folders, yours (Family with Cousins in it,
+    /// Climbing, Friends, and Work with Clients in it) and the three smart folders jaw starts with.
+    /// Its counts are drawn for the sidebar, not summed from `chats`.
+    public static var folders: [FolderRow] {
+        [
+            FolderRow(id: "all", name: "All", position: 0, unread: 12, mentions: 1, count: 312),
+            FolderRow(id: "unread", name: "Unread", position: 1, unread: 12, mentions: 1, count: 5),
+            FolderRow(id: "groups", name: "Groups", position: 2, unread: 5, mentions: 1, count: 40),
+            FolderRow(id: "communities", name: "Communities", position: 3, unread: 1, count: 4),
+            FolderRow(id: "archived", name: "Archived", position: 4, unread: 2, count: 30),
+            FolderRow(id: "folder:1", v: 50, name: "Family", position: 0, unread: 3, mentions: 1, count: 6, favourite: 1),
+            FolderRow(id: "folder:2", v: 50, parent: "folder:1", name: "Cousins", position: 0, unread: 1, count: 2),
+            FolderRow(id: "folder:3", v: 50, name: "Climbing", position: 1, count: 7, favourite: 3),
+            FolderRow(id: "folder:4", v: 50, name: "Friends", position: 2, unread: 2, count: 9),
+            FolderRow(id: "folder:5", v: 50, name: "Work", position: 3, count: 4),
+            FolderRow(id: "folder:6", v: 50, parent: "folder:5", name: "Clients", position: 0, count: 2),
+            FolderRow(id: "smart:1", name: "Waiting on me", position: 0, smart: .object(["waiting": .number(86400)]), unread: 2, count: 2),
+            FolderRow(id: "smart:2", name: "Mentions me", position: 1, smart: .object(["mentions": .bool(true)]), unread: 1, mentions: 1,
+                      count: 1),
+            FolderRow(id: "smart:3", name: "Muted, unread", position: 2, smart: .object(["muted": .bool(true), "unread": .bool(true)])),
+        ]
+    }
+
+    /// Family on ⌘1, Ana's chat on ⌘2, Climbing on ⌘3.
+    public static let favourites = [
+        Favourite(slot: 1, folder: "folder:1"), Favourite(slot: 2, chat: direct.id, name: direct.name), Favourite(slot: 3, folder: "folder:3"),
+    ]
+
+    public static var tree: FolderTree {
+        FolderTree(folders, favourites: favourites)
+    }
+
+    /// The tree's window's first update.
+    public static var folderUpdate: Update<FolderRow> {
+        Update(seq: 300, upsert: folders, favourites: favourites)
     }
 
     static func m(_ n: Int, _ spans: [Span], at: Int64, from: Sender? = nil, mine: Bool = false, kind: MessageKind = .text,
