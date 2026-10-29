@@ -107,20 +107,32 @@ impl Drop for Exclusive {
 /// a folder; then removes the partial files a stopped jawd left in them, before any job runs, since
 /// a running job's partial file looks the same. Says how many it removed.
 pub(super) fn prepare(home: &Path) -> anyhow::Result<usize> {
+    prepare_syncing(home, &|folder| std::fs::File::open(folder)?.sync_all())
+}
+
+/// `prepare`, syncing each folder with `sync`.
+pub(super) fn prepare_syncing(home: &Path, sync: &dyn Fn(&Path) -> std::io::Result<()>) -> anyhow::Result<usize> {
+    // Link previews' thumbnails make media/ as they make media/links, at any moment and without
+    // syncing it in jaw's folder, so one made meanwhile is synced as if it were made here, and one
+    // found made is synced in jaw's folder once the cache's folders are made in it.
+    let found = home.join("media").is_dir();
+    let mut made = false;
     for folder in ["media", FILES, PREVIEWS] {
         let path = home.join(folder);
         if path.is_dir() {
             continue;
         }
-        // Link previews' thumbnails make media/ as they make media/links, at any moment and without
-        // syncing it in jaw's folder, so one made meanwhile is synced as if it were made here.
         match std::fs::DirBuilder::new().mode(0o700).create(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {}
             Err(e) => return Err(e.into()),
         }
-        std::fs::File::open(&path)?.sync_all()?;
-        std::fs::File::open(path.parent().unwrap_or(home))?.sync_all()?;
+        made = true;
+        sync(&path)?;
+        sync(path.parent().unwrap_or(home))?;
+    }
+    if found && made {
+        sync(home)?;
     }
     let mut removed = 0;
     for folder in [FILES, PREVIEWS] {

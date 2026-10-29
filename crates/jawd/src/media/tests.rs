@@ -2388,12 +2388,34 @@ fn preparing_the_cache_beside_a_link_thumbnail_never_fails() {
             std::fs::DirBuilder::new().recursive(true).create(&links).unwrap();
         });
         barrier.wait();
-        if let Err(e) = super::cache::prepare(home.path()) {
+        // What's raced is the making of folders; the drive's flushes would only slow each start.
+        if let Err(e) = super::cache::prepare_syncing(home.path(), &|_| Ok(())) {
             failed.push(format!("{e:#}"));
         }
         other.join().unwrap();
     }
     assert!(failed.is_empty(), "{} of 300 starts failed: {:?}", failed.len(), failed.first());
+}
+
+/// A media/ link previews' thumbnails made, which they sync only inside media/links, is synced in
+/// jaw's folder once the cache's folders are made in it, so they can't go with it in a power cut;
+/// a start that makes nothing syncs nothing.
+#[test]
+fn the_cache_made_in_a_media_folder_another_made_syncs_that_folder_in_jaws() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::DirBuilder::new().recursive(true).create(home.path().join("media/links")).unwrap();
+    let synced = std::sync::Mutex::new(Vec::new());
+    let record = |folder: &Path| {
+        synced.lock().unwrap().push(folder.to_path_buf());
+        Ok(())
+    };
+    super::cache::prepare_syncing(home.path(), &record).unwrap();
+    let first = std::mem::take(&mut *synced.lock().unwrap());
+    for folder in [home.path().to_path_buf(), home.path().join("media"), home.path().join(FILES)] {
+        assert!(first.contains(&folder), "{folder:?} synced: {first:?}");
+    }
+    super::cache::prepare_syncing(home.path(), &record).unwrap();
+    assert_eq!(*synced.lock().unwrap(), Vec::<std::path::PathBuf>::new(), "nothing synced again");
 }
 
 /// The audit's K4: the owner opens a photo the phone was asked for and hasn't answered yet; the
