@@ -8,8 +8,8 @@ import Testing
 @Test func `before jawd sends its tree there are All and Archived, and its first update replaces them`() {
     var tree = FolderTree()
     #expect(!tree.served && tree.builtIn.map(\.id) == ["all", "archived"] && tree.yours.isEmpty && tree.smart.isEmpty)
-    tree.apply(Samples.folderUpdate)
-    #expect(tree.served && tree.builtIn.map(\.name) == ["All", "Unread", "Groups", "Communities", "Archived"])
+    tree.apply(Update(seq: 300, upsert: Samples.folders.filter { $0.id != "archived" }, favourites: Samples.favourites))
+    #expect(tree.served && tree.builtIn.map(\.name) == ["All", "Unread", "Groups", "Communities"], "an Archived the update doesn't have goes")
 }
 
 @Test func `your folders nest by parent and sit by position, and the smart ones come by theirs`() {
@@ -21,6 +21,16 @@ import Testing
     #expect(tree.order == ["all", "unread", "groups", "communities", "archived", "folder:1", "folder:2", "folder:3", "folder:4",
                            "folder:5", "folder:6", "smart:1", "smart:2", "smart:3"])
     #expect(tree.subtree("folder:5") == ["folder:5", "folder:6"] && tree.ancestors("folder:2") == ["folder:1"])
+}
+
+@Test func `a folder two levels down is in yours at its depth, in the top folder's subtree, and named by its path from the top`() {
+    var tree = Samples.tree
+    tree.apply(Update(seq: 301, upsert: [FolderRow(id: "folder:7", v: 61, parent: "folder:2", name: "Climbing", position: 0)]))
+    #expect(tree.yours.map { String(repeating: "·", count: $0.depth) + $0.row.name }
+        == ["Family", "·Cousins", "··Climbing", "Climbing", "Friends", "Work", "·Clients"])
+    #expect(tree.subtree("folder:1") == ["folder:1", "folder:2", "folder:7"])
+    #expect(tree.ancestors("folder:7") == ["folder:2", "folder:1"], "nearest first")
+    #expect(tree.label("folder:7") == "Family › Cousins › Climbing")
 }
 
 @Test func `a built-in folder a newer jawd adds shows among the built-in ones`() {
@@ -35,6 +45,7 @@ import Testing
     let tree = Samples.tree
     #expect(tree.badges("folder:1") == FolderTree.Badges(digit: 1, mention: true, unread: 3))
     #expect(tree.badges("folder:3") == FolderTree.Badges(digit: 3, mention: false, unread: 0))
+    #expect(tree.badges("folder:4") == FolderTree.Badges(digit: nil, mention: false, unread: 2), "unread messages that don't mention you have no @")
     #expect(tree.badges("archived").unread == 0, "Archived has no unread total, as the terminal's")
 }
 
@@ -63,4 +74,5 @@ import Testing
     tree.apply(Update(seq: 301, upsert: [FolderRow(id: "folder:7", v: 61, parent: "folder:4", name: "Cousins", position: 0)]))
     #expect(tree.label("folder:2") == "Family › Cousins" && tree.label("folder:7") == "Friends › Cousins")
     #expect(tree.label("folder:3") == "Climbing" && tree.label("all") == "All")
+    #expect(tree.label("folder:6") == "Clients", "a folder whose name no other of yours has is named alone, however deep")
 }

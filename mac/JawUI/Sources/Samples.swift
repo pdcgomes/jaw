@@ -16,11 +16,15 @@ public enum Samples {
         folders: ["folder:3"],
     )
 
-    public static let direct = ChatRow(
-        id: "351912345678@s.whatsapp.net", v: 42, sort: "1~1792145060000~17", name: "Ana Ribeiro",
-        last: Last(from: nil, mine: true, summary: "yes, the one at the lake", status: .read, at: now - 120_000),
-        pinned: true, draft: "see you", folders: ["folder:1"],
-    )
+    public static let direct: ChatRow = {
+        var direct = ChatRow(
+            id: "351912345678@s.whatsapp.net", v: 42, sort: "1~1792145060000~17", name: "Ana Ribeiro",
+            last: Last(from: nil, mine: true, summary: "yes, the one at the lake", status: .read, at: now - 120_000),
+            pinned: true, draft: "see you", folders: ["folder:1"],
+        )
+        direct.favourite = 2
+        return direct
+    }()
 
     public static var chats: [ChatRow] {
         var muted = ChatRow(id: "351913000000@s.whatsapp.net", v: 30, sort: "0~1792100000000~9", name: "Mãe",

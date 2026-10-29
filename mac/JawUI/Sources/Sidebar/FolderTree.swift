@@ -127,7 +127,7 @@ public struct FolderTree: Sendable, Equatable {
     /// What's on a slot, as its menus say it: the folder's name, or the chat's.
     public func slotName(_ slot: Int) -> String? {
         guard let f = favourite(slot) else { return nil }
-        if let folder = f.folder { return rows[folder] != nil ? label(folder) : folder }
+        if let folder = f.folder { return label(folder) }
         return f.name ?? f.chat
     }
 
@@ -145,9 +145,15 @@ public struct FolderTree: Sendable, Equatable {
         return Badges(digit: slot(of: id), mention: (row?.mentions ?? 0) > 0, unread: id == "archived" ? 0 : row?.unread ?? 0)
     }
 
-    /// What lays the tree out: each folder's place and name, and whether it's smart. A change to
-    /// anything else, such as its counts, draws its row again where it is.
-    var shape: [String: String] {
-        rows.mapValues { "\($0.parent ?? "")\u{1}\($0.position)\u{1}\($0.name)\u{1}\($0.isSmart)" }
+    /// What lays the tree out: each folder's place and name. A change to anything else, such as its
+    /// counts, draws its row again where it is.
+    var shape: [String: Shape] {
+        rows.mapValues { Shape(parent: $0.parent, position: $0.position, name: $0.name) }
+    }
+
+    struct Shape: Hashable {
+        let parent: String?
+        let position: Int
+        let name: String
     }
 }
