@@ -262,8 +262,7 @@ fn set(db: &Connection, stamps: &mut Stamps, jid: &str, setting: &Setting) -> Re
 /// WhatsApp sends for the index waits behind until the patch's echo, known by its time, comes.
 fn queue(db: &Connection, jid: &str, patch: &Patch) -> Result<i64> {
     let outbox = app_state_row(db, jid, &patch.id, &patch.raw)?;
-    let awaited: Option<i64> = db.prepare_cached(AWAITED_AT)?.query_row([&patch.key], |r| r.get(0)).optional()?;
-    if awaited == Some(patch.at) {
+    if awaited_at(db, &patch.key)? == Some(patch.at) {
         bail!(
             "{} awaits jaw's patch at {} already, and no two of its patches for an index carry one time",
             patch.key,
@@ -272,6 +271,17 @@ fn queue(db: &Connection, jid: &str, patch: &Patch) -> Result<i64> {
     }
     db.prepare_cached(AWAIT)?.execute(params![patch.key, patch.at, outbox])?;
     Ok(outbox)
+}
+
+/// The time jaw's latest patch for index `key` carries, while it waits for its echo.
+fn awaited_at(db: &Connection, key: &str) -> Result<Option<i64>> {
+    Ok(db.prepare_cached(AWAITED_AT)?.query_row([key], |r| r.get(0)).optional()?)
+}
+
+/// Whether jaw's latest change to chat `jid`'s mark, read or unread, waits for its echo, under the
+/// index its patch and that echo name.
+pub(super) fn marking(db: &Connection, jid: &str) -> Result<bool> {
+    Ok(awaited_at(db, &serde_json::to_string(&["markChatAsRead", jid])?)?.is_some())
 }
 
 /// Whether what WhatsApp sent for index `key`, at inbox row `seq` with its time `at`, is held back:
@@ -723,6 +733,39 @@ mod tests {
     }
 
     #[test]
+    fn a_read_on_another_device_while_jaws_mark_unread_waits_leaves_the_mark_so_marking_read_then_isnt_so_already() {
+        let db = db();
+        written(&db, &[from_ana("m1", AT), from_ana("m2", AT + 10)]);
+        let index = ["markChatAsRead", ANA];
+        let (unread_at, read_at) = (AT + 1_000, AT + 2_000);
+        assert!(matches!(acted(&db, ANA, mark_at(ANA, true, "m2", unread_at, "u1")), Acted::Queued { .. }));
+        let (.., marked, unread, _) = chat(&db, ANA);
+        assert_eq!((marked, unread, queued(&db).len()), (true, 2, 1), "marked, two unread, and its patch queued");
+        // Your phone reads the chat before jaw's patch reaches WhatsApp, and its read-self receipt comes.
+        let receipt = Read { chat: ANA.into(), at: AT + 500, ids: vec!["m2".into()], ..Read::default() };
+        written(&db, &[Change::Read(receipt)]);
+        let (.., marked, unread, _) = chat(&db, ANA);
+        assert_eq!(
+            (marked, unread),
+            (true, 0),
+            "read up to its newest, and still marked, since WhatsApp takes jaw's mark unread after the read"
+        );
+        let again = acted(&db, ANA, mark_at(ANA, false, "m2", read_at, "r1"));
+        assert!(matches!(again, Acted::Queued { .. }), "marking it read isn't so already: {again:?}");
+        assert_eq!((chat(&db, ANA).3, queued(&db).len()), (false, 2), "the mark taken off, and its patch queued");
+        arrives(&db, &index, &unread_value(unread_at), 1);
+        assert!(!chat(&db, ANA).3, "the mark unread's echo, taken before the mark read, is held back");
+        arrives(&db, &index, &read_value(read_at), 2);
+        assert_eq!((chat(&db, ANA).3, awaited(&db, &index)), (false, None), "the mark read's ends the wait");
+        written(&db, &[from_ana("m3", AT + 3_000)]);
+        arrives(&db, &index, &unread_value(AT + 4_000), 3);
+        assert!(chat(&db, ANA).3, "your phone marks it unread");
+        let receipt = Read { chat: ANA.into(), at: AT + 5_000, ids: vec!["m3".into()], ..Read::default() };
+        written(&db, &[Change::Read(receipt)]);
+        assert!(!chat(&db, ANA).3, "with nothing of jaw's on its way, a read on another device takes the mark off");
+    }
+
+    #[test]
     fn a_refused_mark_read_of_a_chat_jaw_holds_none_of_the_messages_of_leaves_the_phones_count() {
         let db = db();
         counted_on_the_phone(&db, true);
@@ -988,10 +1031,26 @@ mod tests {
         }
     }
 
+    /// A chat marked unread at `at`, naming no message, as jaw's patch carries it.
+    fn unread_value(at: i64) -> action::SyncActionValue {
+        let mut value = read_value(at);
+        if let Some(action) = value.mark_chat_as_read_action.as_mut() {
+            action.read = Some(false);
+        }
+        value
+    }
+
     /// Chat `chat`, none of whose messages jaw holds, marked read from jaw at `at`.
     fn mark_read_at(chat: &str, at: i64, id: &str) -> Does {
         let patch = patch_of(&["markChatAsRead", chat], &read_value(at), id);
         Does::Set(Setting::MarkUnread { unread: false, newest: None, patch })
+    }
+
+    /// Chat `chat` marked unread from jaw at `at`, or read up to `newest`, its newest message.
+    fn mark_at(chat: &str, unread: bool, newest: &str, at: i64, id: &str) -> Does {
+        let value = if unread { unread_value(at) } else { read_value(at) };
+        let patch = patch_of(&["markChatAsRead", chat], &value, id);
+        Does::Set(Setting::MarkUnread { unread, newest: Some(newest.into()), patch })
     }
 
     /// What WhatsApp sends for `index`, converted from inbox row `seq` as the drain converts it.
@@ -1252,9 +1311,10 @@ mod tests {
         assert_eq!((chat(&db, ANA).0, queued(&db).len()), (AT, 1), "nothing written or queued");
     }
 
-    /// Each statement a chat action runs, and what the converter and jawd status read of what each
-    /// index waits for, as SQLite plans them on a fresh database with no statistics: each reads an
-    /// index and sorts nothing. The count is store.count's, of a table with a row an index at most.
+    /// Each statement a chat action runs, and what the converter, a read on another device and jawd
+    /// status read of what each index waits for, as SQLite plans them on a fresh database with no
+    /// statistics: each reads an index and sorts nothing. The count is store.count's, of a table
+    /// with a row an index at most.
     #[test]
     fn every_statement_a_chat_action_runs_reads_an_index_and_sorts_nothing() {
         let db = db();

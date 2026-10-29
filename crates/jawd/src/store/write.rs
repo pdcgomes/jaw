@@ -1063,8 +1063,10 @@ fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsett
 
 /// Moves where a chat was read up to. Until WhatsApp or you have said where it is, or while the
 /// phone's own counts stand in for it, the position is taken as said, even if it's earlier;
-/// after that it only moves forward. WhatsApp saying so means it knows, and unmarks the chat;
-/// your reading it here owes it receipts for what that reads, and leaves the mark to the phone.
+/// after that it only moves forward. WhatsApp saying so means it knows, and unmarks the chat,
+/// unless jaw's own change to the mark is on its way: WhatsApp takes that after this read, so the
+/// mark stays as jaw left it. Your reading it here owes it receipts for what that reads, and leaves
+/// the mark to the phone.
 /// In a one-to-one chat whose person has more than one JID, WhatsApp saying so by one of them, the
 /// chat's own or one merged into it, says only that what came under that JID was read: while a
 /// message from others that came under another lies past how far WhatsApp was told, up to the
@@ -1115,7 +1117,7 @@ fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     } else if taken {
         let (phone_unread, phone_mentions) = read.phone.map_or((None, None), |(u, m)| (Some(u.into()), Some(m.into())));
         (now.at, now.known, now.phone_unread, now.phone_mentions) = (Some(at), true, phone_unread, phone_mentions);
-        now.marked = false;
+        now.marked = now.marked && chat_actions::marking(db, &jid)?;
         if speaks {
             now.told = None;
         } else if several {
