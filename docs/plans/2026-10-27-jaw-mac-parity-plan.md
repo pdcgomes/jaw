@@ -160,6 +160,14 @@ Since `unknown-kinds` landed on 28 October (7f8fc11), jawd shows most of what it
 - **The Mac's:** JawKit's rows take `invite`, done; what's left is the card in both looks, in place of the line: what it invites to, the group's or channel's name, and when it expires.
 - **The check:** nothing, since it's a kind and not a request; the parity canvas carries it.
 
+### 3.9 Contact cards
+
+Once `send-contact` lands, jawd serves `send.contact` (one card or several, each a name and a vCard 3.0) and shows every card, received or yours, as the protocol's `contact` row: its name and its vCard, holding each card one after another when a message shares several. The terminal sends one from the palette's Send a contact, made from one of jawd's people's name and number, draws each card as its name and numbers, and starts a chat with whoever a card shares on Enter.
+
+- **The Mac's** is the box design's B3 contact form: the system's contact picker, the card as a vCard from the Contacts framework (CNContactVCardSerialization), and `send.contact`; its cards already draw `contact.name`, and Message and Add to Contacts on a card are Phase 4's.
+- **Needs from jawd:** `send-contact`, built and in audit.
+- **The check:** `send.contact`.
+
 ## Phase 4 · The Mac's own, after the gaps
 
 The rest of Mac-M2 (the viewer, MapKit's maps, contact cards' Message and Add to Contacts, animated stickers with P4) and Mac-M5 (Redlamp's themes, the animations, the Mimic's chomp everywhere, notifications with Reply and Mark as Read with P2, the Dock badge with P3, Settings whole with P5, accessibility, a signed and notarized build with updates). Each starts once the gaps of its area are closed, so the viewer can follow 2.3 while voice is still waiting on jawd.
