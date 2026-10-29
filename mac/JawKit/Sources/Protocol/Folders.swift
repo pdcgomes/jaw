@@ -7,15 +7,15 @@ import Foundation
 /// `communities`, `archived`), smart (`smart:` and a number) or yours (`folder:` and a number).
 public struct FolderRow: WindowRow, Decodable, Hashable {
     public var id: String
-    /// Its version. jawd keeps it as the folder's counts change, so a row sent again with the same
-    /// `v` is the newer, as any window's upsert is.
+    /// Its version, which stays as it was when only the folder's counts change, so a row sent again
+    /// with the same `v` is the newer, as any window's upsert is.
     public var v: UInt64
     /// The folder it's in; nil at the top.
     public var parent: String?
     public var name: String
     /// Its place among its siblings of its kind.
     public var position: Int
-    /// A smart folder's rule; nil for the others.
+    /// A smart folder's rule; nil for the others and for a rule jawd couldn't read.
     public var smart: JSONValue?
     /// Its chats' and its subfolders' chats' unread messages, and those that mention you, each chat
     /// counted once.
@@ -40,12 +40,12 @@ public struct FolderRow: WindowRow, Decodable, Hashable {
     }
 
     public var isSmart: Bool {
-        smart != nil
+        id.hasPrefix("smart:")
     }
 
     /// One of yours, which you name, nest, move and file into.
     public var isYours: Bool {
-        !isBuiltIn && !isSmart
+        id.hasPrefix("folder:")
     }
 
     public init(id: String, v: UInt64 = 0, parent: String? = nil, name: String, position: Int = 0, smart: JSONValue? = nil,
@@ -196,8 +196,8 @@ public struct Presence: Decodable, Sendable, Hashable {
     }
 }
 
-/// Someone in a roster, which reads from the smallest `sort` up: online first, then by when last
-/// seen, then those jawd has no last seen for, each by name.
+/// Someone in a roster, which reads from the smallest `sort` up: online first, by name; then by
+/// when last seen, the most recent first; then those jawd has no last seen for, by name.
 public struct RosterRow: WindowRow, Decodable, Hashable {
     /// `person:` and a number.
     public var id: String
@@ -312,8 +312,8 @@ struct FoldersWatch: Encodable, Sendable {
     }
 }
 
-/// `roster.watch`'s params: a folder's people from the top. `offline` is always true, since the
-/// sidebar counts the people it folds.
+/// `roster.watch`'s params: a folder's people, from the top or around someone in it. `offline` is
+/// always true, since the sidebar counts the people it folds.
 struct RosterWatch: Encodable, Sendable {
     var folder: String
     var around: Around
@@ -434,7 +434,7 @@ public struct FavouriteSet: Encodable, Sendable, Hashable {
     }
 }
 
-/// `folder.create`'s answer: the folder made.
+/// `folder.create`'s answer: the folder made, or nil when it went before jawd read it back.
 struct FolderMade: Decodable, Sendable {
-    var folder: FolderRow
+    var folder: FolderRow?
 }

@@ -345,9 +345,13 @@ func pushed(_ line: String) -> Incoming {
     #expect(push.favourites == [Favourite(slot: 1, folder: "folder:9")], "the slots whole, as one changed")
     let quiet = try JSONDecoder().decode(FoldersPush.self, from: Data(#"{"watch":"w5","seq":81242,"upsert":[]}"#.utf8))
     #expect(quiet.favourites == nil, "no slot changed, so the slots stay as they were")
+    let emptied = try JSONDecoder().decode(FoldersPush.self, from: Data(#"{"watch":"w5","seq":81243,"favourites":[]}"#.utf8))
+    #expect(emptied.favourites == [], "every slot emptied, which isn't none changed")
 
-    let made = try JSONDecoder().decode(Answer<FolderMade>.self, from: fixture("folder.create.result.json")).result.folder
+    let made = try #require(JSONDecoder().decode(Answer<FolderMade>.self, from: fixture("folder.create.result.json")).result.folder)
     #expect(made.id == "folder:10" && made.parent == "folder:9" && made.name == "Cousins" && made.count == 0)
+    let gone = try JSONDecoder().decode(FolderMade.self, from: Data(#"{"folder":null}"#.utf8))
+    #expect(gone.folder == nil, "the folder went before jawd read it back")
 
     let roster = try JSONDecoder().decode(Answer<RosterWatched>.self, from: fixture("roster.watch.result.json")).result
     #expect(roster.total == 6 && roster.rows.map(\.id) == ["person:1", "person:4", "person:5"])
@@ -358,8 +362,20 @@ func pushed(_ line: String) -> Incoming {
     #expect(roster.rows[1].folders == ["folder:10"] && roster.rows[0].about == "Lisboa")
     let came = try JSONDecoder().decode(Pushed<RosterPush>.self, from: fixture("roster.push.json")).params
     #expect(came.upsert.map(\.presence.state) == [.online] && came.upsert.first?.sort.hasPrefix("0~") == true)
+    #expect(came.total == nil, "no total, so the roster's stays as it was")
     let odd = try JSONDecoder().decode(Presence.self, from: Data(#"{"state":"away"}"#.utf8))
     #expect(odd.state == .hidden && odd.known, "a state jawd may add later says nothing")
+    #expect(try JSONDecoder().decode([PresenceState].self, from: Data(#"["away"]"#.utf8)) == [.hidden],
+            "nor on its own, without Presence's try?")
+}
+
+@Test func `a folder is smart or yours by its id, whether or not its rule came`() throws {
+    let rows = try JSONDecoder().decode([FolderRow].self, from: Data(#"""
+    [{"id":"smart:8","v":0,"parent":null,"name":"Waiting on me","position":0,"smart":null,"unread":0,"mentions":0,"count":0,"favourite":null},
+     {"id":"starred","v":0,"parent":null,"name":"Starred","position":5,"smart":null,"unread":0,"mentions":0,"count":0,"favourite":null}]
+    """#.utf8))
+    #expect(rows[0].isSmart && !rows[0].isYours, "a smart folder whose rule jawd couldn't read")
+    #expect(!rows[1].isYours && !rows[1].isSmart, "a built-in folder jawd adds later is never yours")
 }
 
 @Test func `a chat row says the folders it sits in and its slot, as the protocol's text has them`() throws {
