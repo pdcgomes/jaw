@@ -1413,7 +1413,7 @@ becomes:
 - **Now, done** ([its plan](2026-10-28-jaw-mac-panes-kept-by-jawd-plan.md)): Open the Terminal's Panes, in the Layouts menu and the palette: `layout.get` with `interface` `jaw`, the tree read as a grid into the unsaved panes, its focused pane taking the keys. This is the other interface's layout, which the terminal doesn't open yet (Owner, 26 Oct, "each able to open the other's"). A pane whose chat the chat list doesn't hold, archived or past its first 120, gets its row from a window of one row around the chat, in `all` and then `archived`, so no pane waits for good, the app's own layouts' included: it opens, or its slot says why, that the chat is gone or jawd's words for refusing the lookup.
 ```
 
-At the end of the "With P10" bullet, add: `P10's protocol text and fixtures are on layout-book-2; this half's own plan is written next, against them, and built with the first half once the harness's second phase is on main ([the first half's plan](2026-10-28-jaw-mac-panes-kept-by-jawd-plan.md) says what it covers).` Leave "Where it starts" as it is, since it says where the plan started.
+At the end of the "With P10" bullet, add: `P10 is on main since 817bc02, its protocol text and fixtures with it; this half has a plan of its own, [the layout book plan](2026-10-28-jaw-mac-layout-book-kept-by-jawd-plan.md), built after the first half once the harness's second phase is on main.` Leave "Where it starts" as it is, since it says where the plan started.
 
 - [ ] **Step 3: Run the check**
 
@@ -1425,7 +1425,7 @@ Expected: the first exits 0, as it has since Task 1, its step 1.1 still reading 
 ```bash
 git add mac/README.md docs/plans/2026-10-27-jaw-mac-parity-plan.md
 git commit -F- <<'EOF'
-Parity step 1.1's first half is done: the parity plan says what Open the Terminal's Panes does and how a pane whose chat the chat list doesn't hold gets its row or says why it can't, and that the second half's own plan is written next, against P10's protocol text and fixtures on layout-book-2, to be built with the first once the harness's second phase is on main; the Mac README says how the terminal's tree is read, how a pane's chat is looked up and what a slot whose chat won't have a pane says; make check-parity passes, as it has since layout.get's row left mac/parity.toml
+Parity step 1.1's first half is done: the parity plan says what Open the Terminal's Panes does and how a pane whose chat the chat list doesn't hold gets its row or says why it can't, and that the second half, with P10 on main since 817bc02, has a plan of its own, the layout book plan, built after the first once the harness's second phase is on main; the Mac README says how the terminal's tree is read, how a pane's chat is looked up and what a slot whose chat won't have a pane says; make check-parity passes, as it has since layout.get's row left mac/parity.toml
 EOF
 ```
 
@@ -1436,9 +1436,9 @@ Report each task's runs, the pictures looked at (`before.png`, `nothing.png` and
 
 ---
 
-## Part B, with P10: its own plan, written next
+## Part B, with P10: its own plan
 
-The step's second half has no code here. P10's protocol text and fixtures are on `layout-book-2` (`~/src/jaw-layout-book-2`): its "Layouts" section in both formats (8dddcd2, "The protocol's Layouts in both formats", which was ca8b697 before the branch was rebased) and the books' fixtures, `protocol/fixtures/layout.*.book.json` (1d1812b, which was 0f72070). Part B's own plan is written next, against those fixtures and `FakeJawd`, and it's built with Part A once the harness's second phase is on main. It's tried end to end on `jawd demo`, and by the owner, once jawd's part is on main. This is what that text settles, and what that plan covers:
+The step's second half has no code here. P10 is on main since 817bc02, its audit approved (`docs/audits/2026-10-28-layout-book.md`): its "Layouts" section in both formats (d8fe2b6, with 1d378f5's change to a round trip between formats) and the books' fixtures, `protocol/fixtures/layout.*.book.json` (6f65045). Part B's own plan, [the layout book plan](2026-10-28-jaw-mac-layout-book-kept-by-jawd-plan.md), is built against those fixtures and `FakeJawd` after Part A, once the harness's second phase is on main, and tries it end to end on `jawd demo`; the owner tries it on his account. This is what that text settles, as this plan read it before P10 landed; where the layout book plan says otherwise, it's right:
 
 - **Part A still works after P10.** `layout.get` takes an optional `format`, 1 or 2, and answers by default in the format the layout was kept in, so Part A's request, which names none, still gets the terminal's tree.
 - **jawd reads the terminal's tree as a grid.** Asked for `format` 2 (`layout.get.request.book.json`), jawd lays the tree out as `PaneGrid.from` does and answers a book holding only its unnamed layout: that grid, its slots numbered in the tree's order, and the focused pane's slot as `unnamedFocus` (`layout.get.result.book.json`). Part B can ask for that, and keep `TerminalPanes` for an answer that's still a tree, from an older jawd that doesn't know `format`.
