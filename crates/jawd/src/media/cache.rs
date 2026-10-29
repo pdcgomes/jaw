@@ -140,6 +140,16 @@ pub(super) fn start(inner: &Arc<Inner>) {
     tokio::spawn(clean(inner.clone()));
 }
 
+impl Inner {
+    /// The cache's size: `cache_bytes`, or what a test has it be now.
+    pub(super) fn cache_limit(&self) -> u64 {
+        match &self.config.limit {
+            Some(limit) => limit.load(std::sync::atomic::Ordering::Relaxed),
+            None => self.config.cache_bytes,
+        }
+    }
+}
+
 /// The hash a file in the cache is named by: the hex its name starts with.
 fn hash_of(name: &str) -> Option<Vec<u8>> {
     from_hex(name.get(..64)?).filter(|_| name.as_bytes().get(64) == Some(&b'.'))
@@ -264,13 +274,14 @@ async fn tidy(inner: &Arc<Inner>) -> anyhow::Result<bool> {
         })
         .await?;
     let bytes = bytes.max(0) as u64;
-    if bytes <= inner.config.cache_bytes {
+    let limit = inner.cache_limit();
+    if bytes <= limit {
         return Ok(false);
     }
     // Down to nine tenths of the limit, so the cache doesn't drop a file for every one it places;
     // only what a drop removes counts, so files it keeps (a starred message's, one waiting to be
     // sent, one a job holds) are gone past rather than taken as room made.
-    let mut over = bytes - inner.config.cache_bytes * 9 / 10;
+    let mut over = bytes - limit * 9 / 10;
     let mut after: (i64, Vec<u8>) = (i64::MIN, Vec::new());
     while over > 0 {
         let from = after.clone();

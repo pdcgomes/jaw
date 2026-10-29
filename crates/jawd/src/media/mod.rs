@@ -79,6 +79,8 @@ pub struct Config {
     pub retry_most: Duration,
     /// The free space to take instead of asking the file system, as a test sets it.
     pub free: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// The cache's size to keep to instead of `cache_bytes`, as a test changes it while jawd runs.
+    pub limit: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// How often the previews and thumbnails made since the last time are made durable.
     pub settle_every: Duration,
     /// How often every file's previews and thumbnail are looked at for what broke them during a run.
@@ -111,6 +113,7 @@ impl Default for Config {
             retry_first: Duration::from_secs(2),
             retry_most: Duration::from_secs(300),
             free: None,
+            limit: None,
             settle_every: Duration::from_secs(5),
             look_every: Duration::from_secs(7 * 24 * 3600),
             check_after: Duration::ZERO,
@@ -284,7 +287,7 @@ impl Media {
         MediaStatus {
             cache_bytes,
             cache_files,
-            cache_limit: inner.config.cache_bytes,
+            cache_limit: inner.cache_limit(),
             auto_bytes: inner.config.auto_bytes,
             wanted: count("media WHERE wanted IS NOT NULL"),
             downloading: inner.schedule.running() as u64,

@@ -573,12 +573,15 @@ async fn history_gone_from_the_server_waits_to_be_asked_for_before_the_phone_is_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_cache_drops_what_was_used_longest_ago_but_never_a_starred_or_unsent_file_and_only_after_a_synced_commit() {
-    let rig = rig(Config { cache_bytes: 120_000, ..quick() }).await;
+    // Room for every file until the test lets go of the files it holds as jobs would, so no pass of
+    // the cleaner begins while they're held, which would step past them and drop newer ones.
+    let limit = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+    let rig = rig(Config { cache_bytes: 120_000, limit: Some(limit.clone()), ..quick() }).await;
     // Rows read here want nothing, as if no window showed them, so no want lands after its file has
     // gone and downloads it again.
     rig.store.files().watch(mpsc::channel(1).0);
     let pictures: Vec<Picture> = (0..4).map(|n| Picture::lake(400 + n * 40, 300 + n * 30)).collect();
-    // Held until the counter of synced commits is read, so nothing can be dropped before.
+    // Held until the counter of synced commits is read, and the cache then given its size.
     let mut held = Vec::new();
     for picture in &pictures[1..] {
         held.push(rig.media.inner.claims.share(&picture.sha256).await);
@@ -602,9 +605,10 @@ async fn the_cache_drops_what_was_used_longest_ago_but_never_a_starred_or_unsent
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     rig.until_nothing_wanted("every job settled").await;
-    assert_eq!(rig.media.status().evicted, 0, "nothing is dropped while a job may name it");
+    assert_eq!(rig.media.status().evicted, 0, "nothing is dropped while the cache has room");
     let synced = rig.store.storage().synced_commits;
     drop(held);
+    limit.store(120_000, std::sync::atomic::Ordering::Relaxed);
     rig.media.inner.clean.notify_one();
     let mut status = rig.media.status();
     for _ in 0..500 {
