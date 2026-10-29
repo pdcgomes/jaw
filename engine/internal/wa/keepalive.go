@@ -11,11 +11,12 @@ import (
 	"github.com/pdcgomes/jaw/engine/internal/link/enginepb"
 )
 
-// told is the connection state the engine told jawd last, and when. whatsmeow dispatches a
-// keepalive's timeout and its restore each on a goroutine of its own, as it does Connected and
-// Disconnected, so either can reach the engine after a later word on the connection. Every state is
-// said under told's lock, so jawd hears them in the order they're noted, and the keepalive's only
-// when they're newer than the state said last (timedOut, restored).
+// told is the connection state the engine told jawd last, and when, which for Connected is when its
+// connection began (tellConnected). whatsmeow dispatches a keepalive's timeout and its restore each
+// on a goroutine of its own, as it does Connected and Disconnected, so either can reach the engine
+// after a later word on the connection. Every state is said under told's lock, so jawd hears them in
+// the order they're noted, and the keepalive's only when they're newer than the state said last
+// (timedOut, restored).
 type told struct {
 	sync.Mutex
 	state enginepb.Connection_State
@@ -42,12 +43,24 @@ func connected(client *whatsmeow.Client) bool {
 func (e *Engine) tell(c *enginepb.Connection) {
 	e.told.Lock()
 	defer e.told.Unlock()
-	e.tellLocked(c)
+	e.tellLocked(c, time.Now())
 }
 
-// tellLocked says c to jawd and notes it as the connection state said last, with told locked.
-func (e *Engine) tellLocked(c *enginepb.Connection) {
-	e.told.state, e.told.at = c.State, time.Now()
+// tellConnected says the client running now is connected, as of when its connection began, which
+// whatsmeow notes before it dispatches Connected. It dispatches Connected only once the IQs after
+// the handshake are answered, each in up to 75 s, and its keepalive runs from the handshake on, so
+// the connection's own timeouts can be older than its Connected, but never than its beginning.
+func (e *Engine) tellConnected(began time.Time) {
+	c := e.state(enginepb.Connection_CONNECTED, "")
+	e.told.Lock()
+	defer e.told.Unlock()
+	e.tellLocked(c, began)
+}
+
+// tellLocked says c to jawd and notes it as the connection state said last, as of at, with told
+// locked.
+func (e *Engine) tellLocked(c *enginepb.Connection, at time.Time) {
+	e.told.state, e.told.at = c.State, at
 	e.send(&enginepb.Event{Kind: &enginepb.Event_Connection{Connection: c}})
 }
 
@@ -68,7 +81,7 @@ func (e *Engine) timedOut(v *events.KeepAliveTimeout) {
 	if !newer {
 		return
 	}
-	e.tellLocked(c)
+	e.tellLocked(c, time.Now())
 	t.lastPing, t.failed = v.LastSuccess, v.ErrorCount
 }
 
@@ -90,5 +103,5 @@ func (e *Engine) restored() {
 	if t.state != enginepb.Connection_KEEPALIVE_TIMEOUT || time.Now().Before(next) {
 		return
 	}
-	e.tellLocked(c)
+	e.tellLocked(c, time.Now())
 }

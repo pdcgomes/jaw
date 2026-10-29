@@ -22,9 +22,16 @@ func connectedEngine(t *testing.T, apart time.Duration) (*Engine, *link.Link, *a
 	up.Store(true)
 	e.told.apart = apart
 	e.told.connected = func(*whatsmeow.Client) bool { return up.Load() }
-	go e.handleFrom(e.cli(), &events.Connected{})
+	go e.handleFrom(e.cli(), connects(e.cli(), time.Now()))
 	saidNext(t, jawd, enginepb.Connection_CONNECTED)
 	return e, jawd, up, closeLink
+}
+
+// connects is whatsmeow's Connected for client's connection that began at began, which whatsmeow
+// notes before it dispatches Connected.
+func connects(client *whatsmeow.Client, began time.Time) *events.Connected {
+	client.LastSuccessfulConnect = began
+	return &events.Connected{}
 }
 
 // saidNext checks the engine's next word to jawd is the connection state want, and returns it.
@@ -79,7 +86,7 @@ func TestARestoreFromAClientReplacedAfterALogoutSaysNothingWhereTheRunningClient
 	saysNothing(t, e, old, &events.KeepAliveRestored{}, "the replaced client's restore")
 	// The phone links jaw again, and the fresh client's keepalive times out.
 	paired(t, fresh.Store, 13)
-	go e.handleFrom(fresh, &events.Connected{})
+	go e.handleFrom(fresh, connects(fresh, time.Now()))
 	saidNext(t, jawd, enginepb.Connection_CONNECTED)
 	go e.handleFrom(fresh, failedPings(1, time.Now()))
 	saidNext(t, jawd, enginepb.Connection_KEEPALIVE_TIMEOUT)
@@ -107,7 +114,11 @@ func TestAKeepalivesWordOlderThanALaterConnectionStateSaysNothing(t *testing.T) 
 		lastPing := time.Now()
 		go e.handleFrom(client, failedPings(1, lastPing))
 		saidNext(t, jawd, enginepb.Connection_KEEPALIVE_TIMEOUT)
-		go e.handleFrom(client, later.evt)
+		evt := later.evt
+		if _, ok := evt.(*events.Connected); ok {
+			evt = connects(client, time.Now())
+		}
+		go e.handleFrom(client, evt)
 		saidNext(t, jawd, later.state)
 		// Long enough that only the later state can tell the restore is older.
 		time.Sleep(3 * apart)
@@ -210,7 +221,7 @@ func TestARestoreRacingADisconnectNeverHasTheLastWord(t *testing.T) {
 		close(start)
 		both.Wait()
 		// Said after both, so every word of theirs comes before it.
-		go e.handleFrom(client, &events.Connected{})
+		go e.handleFrom(client, connects(client, time.Now()))
 		var last enginepb.Connection_State
 		for state := next(); state != enginepb.Connection_CONNECTED; state = next() {
 			last = state
@@ -258,6 +269,28 @@ func TestATimeoutIsJudgedAgainstTheStateSaidLast(t *testing.T) {
 	saidNext(t, jawd, enginepb.Connection_DISCONNECTED)
 	lastPing := time.Now().Add(-apart * 3 / 2)
 	saysNothing(t, e, client, failedPings(1, lastPing), "a timeout that could have come before the Disconnected")
+}
+
+// whatsmeow's keepalive runs from the handshake on, and its Connected comes only once the IQs after
+// it are answered, so a timeout after a late Connected is judged by when its connection began: the
+// connection's own is said, and one from before it isn't.
+func TestATimeoutAfterALateConnectedIsJudgedByWhenItsConnectionBegan(t *testing.T) {
+	const apart = 200 * time.Millisecond
+	e, jawd, _, closeLink := connectedEngine(t, apart)
+	defer closeLink()
+	client := e.cli()
+	go e.handleFrom(client, &events.Disconnected{})
+	saidNext(t, jawd, enginepb.Connection_DISCONNECTED)
+	// whatsmeow connects again, notes the connection began a round trip after the handshake its
+	// keepalive starts at, and says Connected three pings later.
+	handshake := time.Now()
+	began := handshake.Add(apart / 10)
+	time.Sleep(time.Until(began.Add(3 * apart)))
+	go e.handleFrom(client, connects(client, began))
+	saidNext(t, jawd, enginepb.Connection_CONNECTED)
+	saysNothing(t, e, client, failedPings(1, handshake.Add(-2*apart)), "a failure of the connection before")
+	go e.handleFrom(client, failedPings(1, handshake))
+	saidNext(t, jawd, enginepb.Connection_KEEPALIVE_TIMEOUT)
 }
 
 // After n failures since the last ping that got through, a restore can't come sooner than the

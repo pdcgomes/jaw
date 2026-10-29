@@ -317,7 +317,7 @@ func (e *Engine) say(evt any) {
 	case *events.ChatPresence:
 		e.send(&enginepb.Event{Kind: &enginepb.Event_Typing{Typing: typing(v)}})
 	case *events.Connected:
-		e.connection(enginepb.Connection_CONNECTED, "")
+		e.tellConnected(e.cli().LastSuccessfulConnect)
 	case *events.Disconnected:
 		e.connection(enginepb.Connection_DISCONNECTED, "")
 	case *events.KeepAliveTimeout:
