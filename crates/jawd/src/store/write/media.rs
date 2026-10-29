@@ -160,6 +160,9 @@ pub enum Step {
     Answered { chat: String, id: String, answer: Answer, at: i64 },
     /// jawd is given a copy to do at `at`: an interface asked for it (`asked`), or showed it.
     Want { message: i64, variant: &'static str, at: i64, asked: bool },
+    /// A message jaw.db held from before it kept media, which an interface names before the copies
+    /// backfill has reached it, takes the copy of its file now, as that backfill gives it one.
+    Copy { message: i64 },
     /// A copy's download is cancelled: nothing more is done for it.
     Cancel { message: i64, variant: &'static str },
     /// A file was placed, asked for, saved or shown at `at`.
@@ -546,6 +549,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
             }
             Ok(!sha256s.is_empty())
         }
+        Step::Copy { message } => super::copies::backfilled(db, stamps, *message),
     }
 }
 
@@ -586,6 +590,7 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
         Step::Restarted { .. } => "restarted".into(),
         Step::Flushed { through } => format!("flushed through {through}"),
         Step::Checked { sha256s } => format!("checked {} files", sha256s.len()),
+        Step::Copy { message } => format!("copy {message}"),
     };
     ("media", what, None)
 }

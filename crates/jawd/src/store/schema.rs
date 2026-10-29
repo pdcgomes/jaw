@@ -995,7 +995,12 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // needs, and three tables join it: the cache's files by content hash, the cache's size, and the
     // files no copy names any more. No jawd before this one wrote a row to `media`, so the copy reads
     // an empty table and costs the same however big jaw.db is; nothing refers to `media`, so dropping
-    // the old table leaves no row elsewhere pointing at nothing.
+    // the old table leaves no row elsewhere pointing at nothing. The messages jaw.db already holds
+    // get their files' copies from their raw protobufs by a backfill, which it leaves a row in
+    // `backfills` for. At a million messages, at a load of 55 to 70, opening jaw.db and this step took
+    // 50 to 430 ms, and its backfill 38 to 60 s with one message in ten a photo and 78 to 107 s for
+    // 300,000 photos, each step 0.33 to 0.42 ms at p50 and 1.0 to 1.7 ms at p99 with its commit
+    // (`measure_the_copies_backfill`).
     "
     -- Class: fetched from WhatsApp, for each copy of a message's file as WhatsApp describes it, with
     -- the keys to download it, kept here since an HD copy's come in a message of its own that isn't
@@ -1132,6 +1137,10 @@ pub(super) const MIGRATIONS: &[&str] = &[
     WHEN NOT EXISTS (SELECT 1 FROM media WHERE sha256 = new.sha256) BEGIN
         INSERT OR IGNORE INTO media_drop (sha256) VALUES (new.sha256);
     END;
+
+    -- The files of the messages jaw.db already holds, each copy read from its raw protobuf.
+    INSERT INTO backfills (name, after, upto) SELECT 'copies', 0, seq FROM sqlite_sequence
+        WHERE name = 'messages' AND seq > 0;
     ",
 ];
 

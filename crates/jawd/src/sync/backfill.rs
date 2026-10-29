@@ -1,8 +1,9 @@
 //! The backfills migrations leave, done in the background lane while jaw runs: each a short
 //! transaction at a time, from where the last left off as `backfills` keeps it, until its row goes;
 //! so far the links of the messages jaw.db held before links were kept, the options of its polls,
-//! and the messages jawd couldn't show when they came, converted again. Code works with the data
-//! either way meanwhile. A step that fails is kept in quarantine and tried again later and later.
+//! the messages jawd couldn't show when they came, converted again, and the copies of the files of
+//! the messages it held before media was kept. Code works with the data either way meanwhile. A
+//! step that fails is kept in quarantine and tried again later and later.
 
 use std::time::Duration;
 

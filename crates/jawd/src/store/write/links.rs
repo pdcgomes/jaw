@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::copies::{self, COPIES};
 use super::kinds::{self, KINDS};
 use super::{CHAT, MESSAGE, Stamps, chat_jid, located, now_ms};
 
@@ -15,7 +16,7 @@ pub const LINKS: &str = "links";
 /// The backfill that gives the polls jaw.db held before votes were kept their options.
 pub const POLLS: &str = "polls";
 /// The backfills this jawd knows, which a migration may leave rows for.
-pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS];
+pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS, COPIES];
 /// How many messages one step of a backfill looks at: most are none of its business, and a look at
 /// one that isn't is a read of its row.
 const STEP: i64 = 64;
@@ -47,7 +48,7 @@ const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message 
 type Take = fn(&Connection, &mut Stamps, i64) -> Result<bool>;
 
 /// Takes one step of backfill `name`, if it's still to do: the next STEP messages it hasn't looked
-/// at, each it's for taken as `name` takes one, and once none are left, its row goes. A message
+/// at (fewer for some), each it's for taken as `name` takes one, and once none are left, its row goes. A message
 /// the triggers or the writer have dealt with since is left as it is, so a step taken twice, or
 /// after the message changed, does nothing twice.
 pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Result<bool> {
@@ -58,16 +59,18 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
     else {
         return Ok(false);
     };
-    // How long a step may take messages for, past the first, when taking one costs much.
-    let (next, take, taking): (&str, Take, Option<Duration>) = match name {
-        LINKS => (NEXT_LINKED, link, None),
-        POLLS => (NEXT_POLLS, super::polls::backfilled, None),
-        KINDS => (kinds::NEXT_UNSHOWN, kinds::backfilled, Some(kinds::CONVERTING)),
+    // How long a step may take messages for, past the first, when taking one costs much, and how
+    // many it looks at.
+    let (next, take, taking, step): (&str, Take, Option<Duration>, i64) = match name {
+        LINKS => (NEXT_LINKED, link, None, STEP),
+        POLLS => (NEXT_POLLS, super::polls::backfilled, None, STEP),
+        KINDS => (kinds::NEXT_UNSHOWN, kinds::backfilled, Some(kinds::CONVERTING), STEP),
+        COPIES => (copies::NEXT_COPYLESS, copies::backfilled, Some(copies::COPYING), copies::STEP),
         other => bail!("jawd doesn't know the backfill {other}"),
     };
     let rows: Vec<(i64, Option<bool>)> = db
         .prepare_cached(next)?
-        .query_map(params![after, upto, STEP], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![after, upto, step], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let began = Instant::now();
     let (mut changed, mut took) = (false, false);
@@ -85,7 +88,7 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
     }
     // A step that stopped before the end of what it read goes on, next time, from where it stopped.
     match rows[..looked].last() {
-        Some(&(last, _)) if (looked < rows.len() || rows.len() as i64 == STEP) && last < upto => {
+        Some(&(last, _)) if (looked < rows.len() || rows.len() as i64 == step) && last < upto => {
             db.prepare_cached(BACKFILLED)?.execute(params![name, last])?;
         }
         _ => {

@@ -514,6 +514,10 @@ pub struct Stored {
     /// couldn't show, to convert them again.
     #[serde(default)]
     pub kinds_backfill: u64,
+    /// Messages jaw.db held from before it kept media, still to be looked at for those that bring
+    /// a file, to give each the copy of it its raw protobuf describes.
+    #[serde(default)]
+    pub copies_backfill: u64,
     /// Edits and answers to events encrypted with their message's secret, which jawd can't read
     /// yet, kept for a later jawd with what they change.
     #[serde(default)]

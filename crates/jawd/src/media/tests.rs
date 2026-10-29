@@ -17,6 +17,7 @@ use super::*;
 use crate::engine::demo::{self, DemoEngine, Phone, Picture, World};
 use crate::engine::pb::media_retried::Result as PhoneSaid;
 use crate::engine::supervisor::{Backoff, Supervisor};
+use crate::store::copies::{Before, COPIES, before_media, hd_child};
 use crate::store::{Change, Lane, Message, read};
 
 const ANA: &str = "351912345678@s.whatsapp.net";
@@ -2756,4 +2757,316 @@ async fn a_late_no_file_after_the_phone_uploaded_the_file_leaves_it_to_be_downlo
         .await
         .unwrap();
     assert_eq!((state.as_str(), wanted.is_some(), path.as_deref()), ("remote", true, Some("/v/t62/uploaded-again")));
+}
+
+/// The audit's K8: a photo jaw.db already held before migration 20, as an earlier jawd converted it:
+/// its message and raw protobuf, and no copy, since no jawd before this one wrote one. Shown in a
+/// window and asked for before the copies backfill has reached it, it's fetched, and the backfill,
+/// reaching it, has nothing left to give it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_stored_before_media_in_gets_a_copy_to_show_and_fetch() {
+    let rig = rig(quick()).await;
+    let lake = Picture::lake(640, 480);
+    rig.photo_from_history(&lake, "3EB0BEFORE").await;
+    let db = Connection::open(rig.home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute("DELETE FROM media WHERE message = (SELECT n FROM messages WHERE id = '3EB0BEFORE')", []).unwrap();
+    // The row migration 20 leaves on a jaw.db holding it, which this one, made empty, didn't get;
+    // nothing takes its steps here until the test does.
+    db.execute(
+        "INSERT INTO backfills (name, after, upto) SELECT 'copies', 0, seq FROM sqlite_sequence WHERE name = 'messages'",
+        [],
+    )
+    .unwrap();
+    let row = rig.row(ANA, "3EB0BEFORE").await;
+    assert!(row["media"].get("state").is_none(), "with no copy, it shows only what its message says: {row}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let asked = rig.call("media.fetch", json!({ "message": "3EB0BEFORE" })).await;
+    assert!(asked.is_ok(), "media.fetch before the backfill reached it: {asked:?}");
+    let row = rig.until(ANA, "3EB0BEFORE", "fetched and drawn", previewed).await;
+    assert_eq!(std::fs::read(rig.file(&row["media"]["path"])).unwrap(), *lake.data);
+    rig.until_nothing_wanted("settled").await;
+    let settled = rig.row(ANA, "3EB0BEFORE").await;
+    while rig.store.backfill_left(COPIES).unwrap() > 0 {
+        rig.store.apply(Lane::Background, vec![Change::Backfill(COPIES)]).await.unwrap();
+    }
+    let copies: i64 = db.query_row("SELECT count(*) FROM media", [], |r| r.get(0)).unwrap();
+    assert_eq!(copies, 1, "its copy, once");
+    assert_eq!(rig.row(ANA, "3EB0BEFORE").await, settled, "the backfill changes nothing it shows");
+}
+
+/// Message `id` from Ana, a day old, as `raw`, as jawd keeps it.
+fn kept_from_ana(id: &str, raw: &e2e::Message) -> wa_proto::wa_web_protobufs_web::WebMessageInfo {
+    let Some(pb::event::Kind::Message(mut message)) = demo::text(ANA, ANA, id, now_ms() - 86_400_000, "").kind else {
+        unreachable!("a text is a message")
+    };
+    message.raw = raw.encode_to_vec();
+    crate::convert::web_message(&message).unwrap()
+}
+
+/// An event's message, as its raw protobuf says it.
+fn raw_of(event: &pb::Event) -> e2e::Message {
+    let Some(pb::event::Kind::Message(message)) = &event.kind else { unreachable!("a message") };
+    e2e::Message::decode(message.raw.as_slice()).unwrap()
+}
+
+/// A file of `bytes` made of `seed`, its SHA-256 and where WhatsApp's server keeps it.
+fn file_of(seed: u8, bytes: usize) -> (Arc<Vec<u8>>, Vec<u8>, String) {
+    let data: Vec<u8> = (0..bytes).map(|n| (n as u8).wrapping_mul(31).wrapping_add(seed)).collect();
+    let sha256 = <sha2::Sha256 as sha2::Digest>::digest(&data).to_vec();
+    (Arc::new(data), sha256, format!("/v/t62.7119-24/old-{seed}.enc"))
+}
+
+/// A jaw.db made by a jawd before media in, at version 16, 17 or 18, holding a photo, a voice message, a
+/// video, a document and a sticker, a photo to view once, one deleted, and the HD copy of the photo
+/// kept as a message of its own, none with a copy of its file: once jawd starts on it, its backfill
+/// gives each its copy, and each is fetched, but for those deleted or to view once, whose files jaw
+/// doesn't keep.
+#[tokio::test(flavor = "multi_thread")]
+async fn files_stored_before_media_in_get_their_copies_at_the_upgrade_and_are_fetched() {
+    let maker = World::default();
+    let (photo, hd) = (Picture::lake(640, 480), Picture::lake(1600, 1200));
+    let photo_raw = raw_of(&maker.photo(&photo, ANA, ANA, "3EB0OLDPHOTO", now_ms(), ""));
+    let hd_raw = raw_of(&maker.photo(&hd, ANA, ANA, "3EB0OLDHD", now_ms(), ""));
+    let gone_raw = raw_of(&maker.photo(&Picture::lake(320, 240), ANA, ANA, "3EB0OLDGONE", now_ms(), ""));
+    let (voice, _, _) = file_of(1, 6_000);
+    let voice_raw = raw_of(&maker.voice(voice.clone(), ANA, ANA, "3EB0OLDVOICE", now_ms(), 3));
+    let voice_path = voice_raw.audio_message.as_ref().unwrap().direct_path.clone().unwrap();
+    let mut files = vec![("3EB0OLDPHOTO", photo.data.clone()), ("3EB0OLDHD", hd.data.clone()), ("3EB0OLDVOICE", voice)];
+    let mut serve = vec![(photo.direct_path.clone(), photo.data.clone()), (hd.direct_path.clone(), hd.data.clone())];
+    serve.push((voice_path, files[2].1.clone()));
+    let mut kept = |id: &'static str, seed: u8, raw: &dyn Fn(Vec<u8>, String) -> e2e::Message| {
+        let (data, sha256, path) = file_of(seed, 30_000);
+        serve.push((path.clone(), data.clone()));
+        files.push((id, data));
+        raw(sha256, path)
+    };
+    let keyed =
+        |sha256: Vec<u8>| (Some(sha256.clone()), Some(sha256.iter().rev().copied().collect()), Some(vec![7u8; 32]));
+    let video = kept("3EB0OLDVIDEO", 2, &|sha256, path| {
+        let (file_sha256, file_enc_sha256, media_key) = keyed(sha256);
+        let video = e2e::VideoMessage {
+            mimetype: Some("video/mp4".into()),
+            file_sha256,
+            file_enc_sha256,
+            media_key,
+            direct_path: Some(path),
+            file_length: Some(30_000),
+            seconds: Some(2),
+            ..Default::default()
+        };
+        e2e::Message { video_message: Some(Box::new(video)), ..Default::default() }
+    });
+    let document = kept("3EB0OLDDOC", 3, &|sha256, path| {
+        let (file_sha256, file_enc_sha256, media_key) = keyed(sha256);
+        let document = e2e::DocumentMessage {
+            mimetype: Some("application/pdf".into()),
+            file_sha256,
+            file_enc_sha256,
+            media_key,
+            direct_path: Some(path),
+            file_length: Some(30_000),
+            file_name: Some("menu.pdf".into()),
+            ..Default::default()
+        };
+        e2e::Message { document_message: Some(Box::new(document)), ..Default::default() }
+    });
+    let sticker = kept("3EB0OLDSTICKER", 4, &|sha256, path| {
+        let (file_sha256, file_enc_sha256, media_key) = keyed(sha256);
+        let sticker = e2e::StickerMessage {
+            mimetype: Some("image/webp".into()),
+            file_sha256,
+            file_enc_sha256,
+            media_key,
+            direct_path: Some(path),
+            file_length: Some(30_000),
+            ..Default::default()
+        };
+        e2e::Message { sticker_message: Some(Box::new(sticker)), ..Default::default() }
+    });
+    let once = e2e::Message {
+        view_once_message_v2: Some(Box::new(e2e::FutureProofMessage { message: Some(Box::new(photo_raw.clone())) })),
+        ..Default::default()
+    };
+    let befores = || {
+        let hd = Before {
+            info: kept_from_ana("3EB0OLDHD", &hd_child(ANA, "3EB0OLDPHOTO", hd_raw.clone())),
+            shown_as: Some(kept_from_ana("3EB0OLDHD", &hd_raw)),
+            deleted: false,
+        };
+        vec![
+            Before::kept(kept_from_ana("3EB0OLDPHOTO", &photo_raw)),
+            Before::kept(kept_from_ana("3EB0OLDVOICE", &voice_raw)),
+            Before::kept(kept_from_ana("3EB0OLDVIDEO", &video)),
+            Before::kept(kept_from_ana("3EB0OLDDOC", &document)),
+            Before::kept(kept_from_ana("3EB0OLDSTICKER", &sticker)),
+            Before::kept(kept_from_ana("3EB0OLDONCE", &once)),
+            Before { deleted: true, ..Before::kept(kept_from_ana("3EB0OLDGONE", &gone_raw)) },
+            hd,
+        ]
+    };
+    for version in [16, 17, 18] {
+        let home = Arc::new(tempfile::tempdir().unwrap());
+        before_media(home.path(), version, &befores());
+        let rig = rig_in(home.clone(), quick()).await;
+        // WhatsApp's server keeps the files, as it does for history not long gone.
+        for (path, data) in &serve {
+            rig.world.serve(path, data.clone());
+        }
+        let backfilled = tokio::time::timeout(Duration::from_secs(60), async {
+            while rig.store.backfill_left(COPIES).unwrap() > 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        assert!(backfilled.await.is_ok(), "from version {version}, the backfill never ended");
+        for (id, data) in &files {
+            rig.call("media.fetch", json!({ "message": id })).await.unwrap();
+            let row = rig.until(ANA, id, "fetched", local).await;
+            assert_eq!(std::fs::read(rig.file(&row["media"]["path"])).unwrap(), **data, "from version {version}: {id}");
+        }
+        // The HD copy kept as a photo of its own is its photo's HD copy too.
+        rig.call("media.fetch", json!({ "message": "3EB0OLDPHOTO", "variant": "hd" })).await.unwrap();
+        let row = rig.until(ANA, "3EB0OLDPHOTO", "its HD copy", |row| row["media"]["hd_path"].is_string()).await;
+        assert_eq!(std::fs::read(rig.file(&row["media"]["hd_path"])).unwrap(), *hd.data, "from version {version}");
+        for id in ["3EB0OLDONCE", "3EB0OLDGONE"] {
+            let refused = rig.call("media.fetch", json!({ "message": id })).await.unwrap_err();
+            assert_eq!(refused.code, jaw_proto::code::NOT_ALLOWED, "from version {version}: {id}");
+        }
+        let copied: Vec<String> = rig
+            .query(|db| {
+                Ok(db
+                    .prepare(
+                        "SELECT m.id || ' ' || md.variant FROM media md JOIN messages m ON m.n = md.message
+                        ORDER BY m.n, md.variant",
+                    )?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?)
+            })
+            .await;
+        let expected = [
+            "3EB0OLDPHOTO hd",
+            "3EB0OLDPHOTO sd",
+            "3EB0OLDVOICE sd",
+            "3EB0OLDVIDEO sd",
+            "3EB0OLDDOC sd",
+            "3EB0OLDSTICKER sd",
+            "3EB0OLDONCE sd",
+            "3EB0OLDHD sd",
+        ];
+        assert_eq!(copied, expected, "from version {version}: a copy each but the deleted photo's");
+    }
+}
+
+/// The group in the jaw.db `made_by_main` gives.
+const MADE_GROUP: &str = "120363000000000042@g.us";
+
+/// Files as WhatsApp's server holds them, by where.
+type Served = Vec<(String, Arc<Vec<u8>>)>;
+
+/// A jaw.db as jawd's own sync left it at f917587, before jawd kept media, from what an engine
+/// handed over live and history kept raw, with a message of every kind that brings a file, and the
+/// files WhatsApp's server held for them, by where it held them: `tests/fixtures/media-in/`, whose
+/// `made-at-f917587.rs` has the scene.
+fn made_by_main() -> (Arc<tempfile::TempDir>, Served) {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media-in");
+    let home = Arc::new(tempfile::tempdir().unwrap());
+    let db = zstd::decode_all(std::fs::File::open(fixtures.join("made-by-main.db.zst")).unwrap()).unwrap();
+    std::fs::write(home.path().join("jaw.db"), db).unwrap();
+    let served = zstd::decode_all(std::fs::File::open(fixtures.join("served.json.zst")).unwrap()).unwrap();
+    let served: std::collections::BTreeMap<String, String> = serde_json::from_slice(&served).unwrap();
+    let files = served.into_iter().map(|(path, hex)| (path, Arc::new(crate::store::media::from_hex(&hex).unwrap())));
+    (home, files.collect())
+}
+
+/// The audit's I7 on a jaw.db main's jawd made: once jawd starts on it, every message it holds
+/// that brings a file has its copy, as one arriving now would, but those deleted; the HD copy kept
+/// as a photo of its own is that photo's HD copy too, and one whose photo never came waits for it;
+/// and each is fetched as WhatsApp's server keeps it, but the one to view once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_jaw_db_main_made_gets_the_copy_of_every_file_it_holds_and_each_is_fetched() {
+    let (home, served) = made_by_main();
+    let before: (i64, i64) = Connection::open(home.path().join("jaw.db"))
+        .unwrap()
+        .query_row("SELECT (SELECT user_version FROM pragma_user_version), (SELECT count(*) FROM media)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(before, (17, 0), "main's jaw.db, at version 17, with no copy");
+    let rig = rig_in(home.clone(), quick()).await;
+    for (path, data) in &served {
+        rig.world.serve(path, data.clone());
+    }
+    let backfilled = tokio::time::timeout(Duration::from_secs(60), async {
+        while rig.store.backfill_left(COPIES).unwrap() > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    assert!(backfilled.await.is_ok(), "the backfill never ended");
+    let copied: Vec<(String, String, String, String)> = rig
+        .query(|db| {
+            Ok(db
+                .prepare(
+                    "SELECT c.id, m.id, md.variant, hex(md.sha256) FROM media md JOIN messages m ON m.n = md.message
+                    JOIN chats c ON c.n = m.chat ORDER BY m.id, md.variant",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+    let waiting: Vec<String> = rig
+        .query(|db| {
+            Ok(db
+                .prepare("SELECT target || ' ' || kind FROM pending ORDER BY n")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+    let mut expected: Vec<&str> = vec![
+        "3EB0FXAUDIO sd",
+        "3EB0FXDOC sd",
+        "3EB0FXDOCCAP sd",
+        "3EB0FXEPHEMERAL sd",
+        "3EB0FXGIF sd",
+        "3EB0FXGROUP sd",
+        "3EB0FXHD sd",
+        "3EB0FXLIVE sd",
+        "3EB0FXMINE sd",
+        "3EB0FXONCE sd",
+        "3EB0FXORPHAN sd",
+        "3EB0FXPHOTO hd",
+        "3EB0FXPHOTO sd",
+        "3EB0FXPTV sd",
+        "3EB0FXSTICKER sd",
+        "3EB0FXVIDEO sd",
+        "3EB0FXVOICE sd",
+    ];
+    expected.sort_unstable();
+    let named: Vec<String> = copied.iter().map(|(_, id, variant, _)| format!("{id} {variant}")).collect();
+    assert_eq!(named, expected, "a copy for every file, but the one deleted for everyone's and the text's");
+    assert_eq!(waiting, ["3EB0FXNOPARENT hd"], "the HD copy of a photo jaw.db never had waits for it");
+    assert_eq!(rig.store.count("quarantine").unwrap(), 0);
+    let file_of = |path: &Value| std::fs::read(rig.file(path)).unwrap();
+    let hashed =
+        |data: &[u8]| crate::store::media::to_hex(&<sha2::Sha256 as sha2::Digest>::digest(data)).to_uppercase();
+    for (chat, id, variant, sha256) in copied.iter().filter(|(_, id, variant, _)| id != "3EB0FXONCE" && variant == "sd")
+    {
+        let chat = if chat == MADE_GROUP { MADE_GROUP } else { ANA };
+        rig.call("media.fetch", json!({ "message": id })).await.unwrap();
+        let row = rig.until(chat, id, "fetched", local).await;
+        let data = file_of(&row["media"]["path"]);
+        assert_eq!(&hashed(&data), sha256, "{id} {variant}: the file its copy names");
+        assert!(served.iter().any(|(_, served)| **served == data), "{id}: a file WhatsApp's server held");
+    }
+    rig.call("media.fetch", json!({ "message": "3EB0FXPHOTO", "variant": "hd" })).await.unwrap();
+    let row = rig.until(ANA, "3EB0FXPHOTO", "its HD copy", |row| row["media"]["hd_path"].is_string()).await;
+    let hd = file_of(&row["media"]["hd_path"]);
+    assert_eq!(hd, file_of(&rig.row(ANA, "3EB0FXHD").await["media"]["path"]), "the HD row's file");
+    for (id, code) in [
+        ("3EB0FXONCE", jaw_proto::code::NOT_ALLOWED),
+        ("3EB0FXREVOKED", jaw_proto::code::NOT_ALLOWED),
+        ("3EB0FXDELME", jaw_proto::code::NOT_FOUND),
+        ("3EB0FXTEXT", jaw_proto::code::NOT_FOUND),
+    ] {
+        assert_eq!(rig.call("media.fetch", json!({ "message": id })).await.unwrap_err().code, code, "{id}");
+    }
 }

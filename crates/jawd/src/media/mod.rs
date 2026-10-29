@@ -368,15 +368,39 @@ struct Named {
 
 /// Finds copy `variant` of message `id`, in `chat` or in any chat, as an interface names it: error
 /// 3 for a message or a copy jawd doesn't have, 4 for one deleted or view-once, whose file jaw
-/// doesn't keep, and -32602 for an ID in more than one chat.
+/// doesn't keep, and -32602 for an ID in more than one chat. A message jaw.db held from before it
+/// kept media, which the copies backfill hasn't reached, takes its copy first, so it's fetched,
+/// saved or cancelled as if the backfill were done.
 async fn named(inner: &Inner, id: &str, chat: Option<&str>, variant: Variant) -> Result<Named, Error> {
     let (id, chat, variant) = (id.to_string(), chat.map(str::to_string), variant_name(variant));
+    let look = || {
+        let (id, chat) = (id.clone(), chat.clone());
+        inner.store.reads().query(Priority::Interactive, move |db| find(db, &id, chat.as_deref(), variant))
+    };
+    let message = match look().await.map_err(|e| internal("read jaw.db", e))? {
+        Looked::Named(named) => return Ok(named),
+        Looked::Refused(error) => return Err(error),
+        Looked::Copyless(message, _) => message,
+    };
+    let copy = Change::Media(Step::Copy { message });
     inner
         .store
-        .reads()
-        .query(Priority::Interactive, move |db| find(db, &id, chat.as_deref(), variant))
+        .apply(crate::store::Lane::Live, vec![copy])
         .await
-        .map_err(|e| internal("read jaw.db", e))?
+        .map_err(|e| internal("read the message's file", e))?;
+    match look().await.map_err(|e| internal("read jaw.db", e))? {
+        Looked::Named(named) => Ok(named),
+        Looked::Refused(error) | Looked::Copyless(_, error) => Err(error),
+    }
+}
+
+/// What jaw.db has of a copy an interface named.
+enum Looked {
+    Named(Named),
+    Refused(Error),
+    /// A message with no copy yet, that the copies backfill has still to look at, and the error
+    /// for one with no file.
+    Copyless(i64, Error),
 }
 
 /// A message an interface named and its copy: its n, whether it's deleted or view-once, the copy's
@@ -391,7 +415,10 @@ const NAMED_ANYWHERE: &str = "SELECT m.n, m.deleted, m.view_once, md.sha256, f.p
     FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1
     LEFT JOIN media md ON md.message = m.n AND md.variant = ?2 LEFT JOIN media_files f ON f.sha256 = md.sha256 LIMIT 2";
 
-fn find(db: &Connection, id: &str, chat: Option<&str>, variant: &'static str) -> anyhow::Result<Result<Named, Error>> {
+/// Whether the copies backfill has still to look at message ?2.
+const COPIES_AHEAD: &str = "SELECT 1 FROM backfills WHERE name = ?1 AND after < ?2 AND upto >= ?2";
+
+fn find(db: &Connection, id: &str, chat: Option<&str>, variant: &'static str) -> anyhow::Result<Looked> {
     let row = |r: &rusqlite::Row| -> rusqlite::Result<Found> {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
     };
@@ -407,26 +434,36 @@ fn find(db: &Connection, id: &str, chat: Option<&str>, variant: &'static str) ->
         }
     };
     let (message, deleted, view_once, sha256, local, name, copy) = match found.as_slice() {
-        [] => return Ok(Err(Error::new(code::NOT_FOUND, format!("jawd has no message {id}")))),
+        [] => return Ok(Looked::Refused(Error::new(code::NOT_FOUND, format!("jawd has no message {id}")))),
         [one] => one.clone(),
         _ => {
             let mut error =
                 Error::new(code::INVALID_PARAMS, format!("message {id} is in more than one chat; say which"));
             error.data = Some(serde_json::json!({ "param": "chat" }));
-            return Ok(Err(error));
+            return Ok(Looked::Refused(error));
         }
     };
     if deleted {
-        return Ok(Err(Error::new(code::NOT_ALLOWED, "that message was deleted, so jaw doesn't keep its file")));
+        return Ok(Looked::Refused(Error::new(
+            code::NOT_ALLOWED,
+            "that message was deleted, so jaw doesn't keep its file",
+        )));
     }
     if view_once {
-        return Ok(Err(Error::new(code::NOT_ALLOWED, "jaw doesn't keep the file of a message you can view once")));
+        return Ok(Looked::Refused(Error::new(
+            code::NOT_ALLOWED,
+            "jaw doesn't keep the file of a message you can view once",
+        )));
     }
     if copy.is_none() {
         let what = if variant == "hd" { "HD copy" } else { "file" };
-        return Ok(Err(Error::new(code::NOT_FOUND, format!("message {id} has no {what}"))));
+        let error = Error::new(code::NOT_FOUND, format!("message {id} has no {what}"));
+        if variant == "sd" && db.prepare_cached(COPIES_AHEAD)?.exists(params![crate::store::copies::COPIES, message])? {
+            return Ok(Looked::Copyless(message, error));
+        }
+        return Ok(Looked::Refused(error));
     }
-    Ok(Ok(Named { message, variant, sha256, local, name, id: id.to_string() }))
+    Ok(Looked::Named(Named { message, variant, sha256, local, name, id: id.to_string() }))
 }
 
 /// `media.fetch`: the copy is wanted now, ahead of what downloads by itself, synced before it's

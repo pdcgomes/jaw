@@ -995,6 +995,7 @@ mod tests {
         assert_eq!((&stored["votes_waiting"], &stored["votes_set_aside"]), (&1.into(), &0.into()));
         assert_eq!(stored["polls_backfill"], 0);
         assert_eq!((&stored["kinds_backfill"], &stored["encrypted_kept"]), (&0.into(), &0.into()));
+        assert_eq!(stored["copies_backfill"], 0);
         stop(started, &socket).await;
     }
 

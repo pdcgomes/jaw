@@ -19,7 +19,7 @@ use crate::media::Media;
 use crate::send::Sending;
 use crate::settings::Settings;
 use crate::sock::{APART_MOST, LANE_MOST, Lanes};
-use crate::store::{Store, kinds, links};
+use crate::store::{Store, copies, kinds, links};
 use crate::sync::Shared;
 use crate::work::Report;
 
@@ -278,6 +278,7 @@ impl State {
                     votes_set_aside: store.count("quarantine WHERE source = 'vote'").ok()?,
                     polls_backfill: store.backfill_left(links::POLLS).ok()?,
                     kinds_backfill: store.backfill_left(kinds::KINDS).ok()?,
+                    copies_backfill: store.backfill_left(copies::COPIES).ok()?,
                     encrypted_kept: store.count("pending WHERE kind IN ('secret', 'rsvp')").ok()?,
                 })
             }),

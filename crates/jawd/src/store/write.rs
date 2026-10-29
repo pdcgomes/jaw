@@ -3,6 +3,7 @@
 //! it last changed: interfaces converge however updates arrive, and a client that saw seq S needs
 //! only the rows whose `v` is past S.
 
+pub mod copies;
 pub mod folders;
 pub mod kinds;
 pub mod layout;

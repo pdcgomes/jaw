@@ -126,7 +126,7 @@ fn unshown(message: &Message) -> bool {
     message.kind == "unknown" || message.text.is_none() && message.summary == UNKNOWN
 }
 
-fn account(db: &Connection) -> Result<Me> {
+pub(super) fn account(db: &Connection) -> Result<Me> {
     let me: Option<String> = db.prepare_cached(ME)?.query_row([], |r| r.get(0)).optional()?;
     Ok(Me::new(me.unwrap_or_default().split_whitespace().map(str::to_string)))
 }

@@ -100,6 +100,10 @@ SELECT m.n, m.deleted, m.view_once, md.sha256, f.path, md.name, md.variant FROM 
     SEARCH md USING PRIMARY KEY (message=? AND variant=?) LEFT-JOIN
     SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
 
+-- src/media/mod.rs
+SELECT 1 FROM backfills WHERE name = ?1 AND after < ?2 AND upto >= ?2
+    SEARCH backfills USING PRIMARY KEY (name=?)
+
 -- src/media/previews.rs
 SELECT raw FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
@@ -2004,6 +2008,21 @@ SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_
 -- src/store/schema.rs
 SELECT count(*) FROM sqlite_schema
     SCAN sqlite_master
+
+-- src/store/write/copies.rs
+SELECT n, NOT deleted AND instr(detail, '"media":') > 0 AND NOT EXISTS (SELECT 1 FROM media WHERE message = messages.n AND variant = 'sd') FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/copies.rs
+SELECT chat, id, raw FROM messages WHERE n = ?1 AND NOT deleted
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/copies.rs
+SELECT c.id, m.id, m.raw FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/folders.rs
 DELETE FROM folder_chats
