@@ -383,7 +383,9 @@ pub async fn run(
                 let (pushed, me, account) = {
                     let mut live = live.lock().expect("live state");
                     let was_linked = live.account.state == AccountState::Linked;
-                    apply(&mut live, &connection);
+                    if !apply(&mut live, &connection) {
+                        continue;
+                    }
                     let connected =
                         connection.state() == pb::connection::State::Connected && !connection.jid.is_empty();
                     let me = connected.then(|| convert::Me::new([connection.jid.clone(), connection.lid.clone()]));
@@ -686,9 +688,15 @@ fn caught_up(live: &mut Live, done: &pb::OfflineDone) -> (Connection, Option<Str
     (live.connection.clone(), summary)
 }
 
-/// The account and connection as a Connection event says they are now.
-fn apply(live: &mut Live, connection: &pb::Connection) {
+/// The account and connection as a Connection event says they are now; false when the event says
+/// nothing jawd takes.
+fn apply(live: &mut Live, connection: &pb::Connection) -> bool {
     use pb::connection::State;
+    // Pings get through again only after the timeout that had jawd say connecting, so a restore
+    // heard while it says anything else is older than the word that changed it.
+    if connection.state() == State::KeepaliveRestored && live.connection.state != ConnectionState::Connecting {
+        return false;
+    }
     let mut reason = (!connection.reason.is_empty()).then(|| connection.reason.clone());
     let state = match connection.state() {
         State::Unspecified | State::Disconnected | State::StreamReplaced | State::ConnectFailed => {
@@ -746,13 +754,14 @@ fn apply(live: &mut Live, connection: &pb::Connection) {
             live.connection.total = catch_up.map(|(messages, _)| messages);
             live.connection.done = catch_up.map(|(_, stored)| stored);
         }
-        return;
+        return true;
     }
     live.connection = Connection::new(state);
     live.connection.reason = reason;
     if state == ConnectionState::Banned && connection.until_ms > 0 {
         live.connection.until = Some(connection.until_ms);
     }
+    true
 }
 
 fn link_step(link: pb::Link) -> Option<LinkStep> {

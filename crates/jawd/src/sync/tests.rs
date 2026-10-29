@@ -2444,6 +2444,40 @@ async fn a_connections_own_connected_after_its_keepalive_timeout_puts_its_catch_
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn pings_that_get_through_again_are_taken_only_while_their_timeout_has_jawd_connecting() {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tx, incoming) = mpsc::channel(16);
+    let (live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+    // A restore heard after the connection dropped says nothing: the next push is the engine's next
+    // word.
+    for state in [State::Connected, State::KeepaliveTimeout, State::Disconnected, State::KeepaliveRestored] {
+        tx.send(connection_event(state)).await.unwrap();
+    }
+    tx.send(connection_event(State::ConnectFailed)).await.unwrap();
+    let states = next_connections(&mut told, 4).await;
+    let expected =
+        [ConnectionState::Online, ConnectionState::Connecting, ConnectionState::Offline, ConnectionState::Offline];
+    assert_eq!(states, expected, "the restore after the connection dropped says nothing");
+    // Nor one heard after jawd's own logout, which sync hears of outside its loop.
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
+    assert_eq!(next_connections(&mut told, 2).await, [ConnectionState::Online, ConnectionState::Connecting]);
+    logged_out(&store, &live, "logged out").await.unwrap();
+    tx.send(connection_event(State::KeepaliveRestored)).await.unwrap();
+    tx.send(connection_event(State::Unlinked)).await.unwrap();
+    let after = next_connection_within(&mut told, WAIT).await;
+    assert_eq!(
+        after,
+        Some(ConnectionState::Offline),
+        "the restore after the logout says nothing, nor links the account"
+    );
+    drop(tx);
+    running.await.unwrap();
+}
+
 /// The phone's message saying older history is ready, as it sends one to its own account.
 fn phone_answers() -> crate::engine::Incoming {
     let notification = e2e::HistorySyncNotification { direct_path: Some("on-demand".into()), ..Default::default() };
