@@ -188,19 +188,19 @@ public final class Jawd {
     /// Nests a folder of yours in `parent`, or puts it back at the top, at `position` among its new
     /// siblings or last; `said` once jawd has done it.
     public func folderMove(_ folder: String, parent: String?, position: Int?, said: String?) {
-        ask("folder.move", FolderMove(folder: folder, parent: parent, position: position), .filed(said))
+        ask("folder.move", FolderMove(folder: folder, parent: parent, position: position), .filed(nil, said: said))
     }
 
     public func folderDelete(_ folder: String, said: String?) {
-        ask("folder.delete", FolderID(folder: folder), .filed(said))
+        ask("folder.delete", FolderID(folder: folder), .filed(nil, said: said))
     }
 
     public func folderAdd(_ folder: String, item: String, said: String?) {
-        ask("folder.add", FolderItem(folder: folder, item: item), .filed(said))
+        ask("folder.add", FolderItem(folder: folder, item: item), .filed(.added(item: item, to: folder), said: said))
     }
 
     public func folderRemove(_ folder: String, item: String, said: String?) {
-        ask("folder.remove", FolderItem(folder: folder, item: item), .filed(said))
+        ask("folder.remove", FolderItem(folder: folder, item: item), .filed(.removed(item: item, from: folder), said: said))
     }
 
     /// Files `item` in `to`, and takes it out of `from` only once jawd has it there, so a failure
@@ -218,7 +218,7 @@ public final class Jawd {
     /// Puts a folder or a chat on `slot`, taking it off the slot it had and putting out what the slot
     /// held; nil empties the slot.
     public func favouriteSet(slot: Int, target: String?, said: String?) {
-        ask("favourite.set", FavouriteSet(slot: slot, target: target), .filed(said))
+        ask("favourite.set", FavouriteSet(slot: slot, target: target), .filed(nil, said: said))
     }
 
     public func focus(_ focused: Bool) {
@@ -446,13 +446,15 @@ public final class Jawd {
             out.append(.named(row))
         case (.naming, _):
             out.append(.named(nil))
-        case let (.filed(said), _):
+        case let (.filed(filing, said), _):
+            if let filing { out.append(.filed(filing)) }
             if let said { out.append(.notice(said, .info)) }
         case let (.moving(moving), _) where !moving.removing:
             var rest = moving
             rest.removing = true
             ask(rest)
         case let (.moving(moving), _):
+            out.append(.filed(moving.moved))
             if let said = moving.said { out.append(.notice(said, .info)) }
         default:
             break
@@ -506,6 +508,13 @@ public final class Jawd {
         let both: String
         /// Whether jawd has it in `to`, so taking it out of `from` is what's left.
         var removing = false
+        /// Whether a drop has lost it, its answer or its request, so it's asked again whenever jawd
+        /// is back until jawd has answered.
+        var lost = false
+
+        var moved: Filing {
+            .moved(item: item, from: from, to: to)
+        }
     }
 
     /// What a dropped connection lost the answer to, asked for again with its key once jawd is
@@ -553,8 +562,9 @@ public final class Jawd {
         case save(String, String)
         /// A folder's name, made or changed in place.
         case naming
-        /// A folder change, and what's said once jawd has done it.
-        case filed(String?)
+        /// A folder change, what it does to an item's folders if it files one, and what's said once
+        /// jawd has done it.
+        case filed(Filing?, said: String?)
         /// A half of Move to.
         case moving(Moving)
         case quiet
@@ -682,15 +692,22 @@ public final class Jawd {
         case .filed:
             return [.notice(Self.whyNot(failure, "filing"), .warning)]
         case let .moving(moving):
-            // The second half is asked as the first's answer is read, so a drop can cut it off unsent.
-            if failure == .lost || (moving.removing && failure == .unreachable) {
-                again.append(.move(moving))
+            // The second half is asked as the first's answer is read, and a lost half as jawd comes
+            // back, so a drop can cut either off unsent.
+            if failure == .lost || (failure == .unreachable && (moving.removing || moving.lost)) {
+                var later = moving
+                later.lost = true
+                again.append(.move(later))
                 return []
             }
-            if moving.removing {
-                return [.notice("\(moving.both): \(Self.whyNot(failure, "taking it out"))", .warning)]
+            guard moving.removing else { return [.notice(Self.whyNot(failure, "moving between folders"), .warning)] }
+            // Taking out what isn't there is done already, so not finding `from` or the chat means
+            // it went between the halves, and the chat is in `to` alone.
+            if failure.code == ErrorCode.notFound {
+                return [.filed(moving.moved)] + (moving.said.map { [.notice($0, .info)] } ?? [])
             }
-            return [.notice(Self.whyNot(failure, "moving between folders"), .warning)]
+            return [.filed(.added(item: moving.item, to: moving.to)),
+                    .notice("\(moving.both): \(Self.whyNot(failure, "taking it out"))", .warning)]
         case .status, .quiet:
             return []
         }
@@ -744,6 +761,9 @@ public enum JawUpdate: Sendable {
     case named(FolderRow?)
     /// A name jawd turned down, in its words, for under the field.
     case notNamed(String)
+    /// A filing jawd has done, so a row held for the item can show it where jawd's pushes don't
+    /// reach; what's said of it comes as a notice.
+    case filed(Filing)
     case windowFailed(WindowID, Failure)
     /// A message jawd has, as the box's key named it.
     case sent(key: String, message: String, row: MessageRow?)
@@ -772,4 +792,28 @@ public enum JawUpdate: Sendable {
     /// `media.save`'s answer under its ticket: where the copy is, or why there's none.
     case saved(ticket: String, message: String, path: String?, why: String?)
     case push(method: String, params: JSONValue)
+}
+
+/// What jawd has done to an item's folders, once it answers a filing: filed in one, taken out of
+/// one, or moved from one to another.
+public enum Filing: Sendable, Hashable {
+    case added(item: String, to: String)
+    case removed(item: String, from: String)
+    case moved(item: String, from: String, to: String)
+
+    /// A chat's id, or a `person:` id.
+    public var item: String {
+        switch self {
+        case let .added(item, _), let .removed(item, _), let .moved(item, _, _): item
+        }
+    }
+
+    /// The folders the item is in now, from those a row held for it said.
+    public func applied(to folders: [String]) -> [String] {
+        switch self {
+        case let .added(_, to): folders.contains(to) ? folders : folders + [to]
+        case let .removed(_, from): folders.filter { $0 != from }
+        case let .moved(item, from, to): Filing.added(item: item, to: to).applied(to: folders.filter { $0 != from })
+        }
+    }
 }

@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 @testable import JawKit
 import Synchronization
+import Testing
 
 /// A jawd for tests: it listens on a Unix socket of its own, hands each request to the test's
 /// script, and sends what the script answers. A test pushes, drops the connection, or stops
@@ -70,21 +71,32 @@ final class FakeJawd: Sendable {
         """
     }
 
-    /// What jawd answers request `id` with, from a fixture: its line with the id changed.
+    /// What jawd answers request `id` with, from a fixture: its line with the id changed. A script
+    /// runs on the fake's thread, which can't throw to the test or say which test it serves, so a
+    /// fixture that can't be read is recorded as an issue of the run, and the request turned down
+    /// naming it, which fails the test that asked.
     static func answer(_ name: String, id: UInt64) -> String {
-        guard case var .object(line)? = try? JSONValue.parse(fixture(name)) else { return "" }
+        guard case var .object(line)? = try? JSONValue.parse(fixture(name)) else {
+            Issue.record("FakeJawd can't answer with \(name): no such fixture, or not one JSON object")
+            return refusal(id, code: ErrorCode.internal, "FakeJawd has no fixture \(name)")
+        }
         line["id"] = .number(Double(id))
-        return (try? JSONEncoder().encode(JSONValue.object(line))).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        return encoded(.object(line))
     }
 
     /// A push from a fixture, as it is.
-    static func pushed(_ name: String) -> String {
-        ((try? fixture(name)).map { String(decoding: $0, as: UTF8.self) } ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    static func pushed(_ name: String) throws -> String {
+        try String(decoding: fixture(name), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// jawd turning request `id` down.
+    /// jawd turning request `id` down, in its words.
     static func refusal(_ id: UInt64, code: Int, _ message: String) -> String {
-        "{\"id\":\(id),\"error\":{\"code\":\(code),\"message\":\"\(message)\"}}"
+        encoded(.object(["id": .number(Double(id)), "error": .object(["code": .number(Double(code)), "message": .string(message)])]))
+    }
+
+    /// A line as jawd writes it.
+    static func encoded(_ value: JSONValue) -> String {
+        String(decoding: (try? JSONEncoder().encode(value)) ?? Data(), as: UTF8.self)
     }
 
     func accepting() {

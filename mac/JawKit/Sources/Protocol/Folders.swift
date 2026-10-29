@@ -32,10 +32,7 @@ public struct FolderRow: WindowRow, Decodable, Hashable {
         ""
     }
 
-    /// The folders jaw always has.
-    public static let builtIn: Set<String> = ["all", "unread", "groups", "communities", "archived"]
-
-    /// Neither smart nor yours: the five, and any built-in folder a newer jawd adds.
+    /// Neither smart nor yours: the five above, and any built-in folder a newer jawd adds.
     public var isBuiltIn: Bool {
         !isSmart && !isYours
     }

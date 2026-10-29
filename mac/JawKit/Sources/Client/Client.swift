@@ -100,16 +100,16 @@ public final class Client: Sendable {
         open(.folders, "", .top(0))
     }
 
-    /// Watches a folder's roster, its people from the top.
+    /// Watches a folder's roster, its people from the top or around someone in it.
     public func watchRoster(_ folder: String, _ place: Place) -> WindowID {
         open(.roster, folder, place)
     }
 
     /// Moves a window, for scrolling. Moves asked while one is in flight wait for it, and only the
-    /// latest is sent.
+    /// latest is sent. The tree isn't moved: `watch.move` doesn't take it.
     public func move(_ window: WindowID, _ place: Place) {
         let line = state.withLock { s -> Line? in
-            guard s.windows[window] != nil else { return nil }
+            guard let w = s.windows[window], w.kind != .folders else { return nil }
             s.windows[window]!.place = place
             guard s.windows[window]!.asking == nil, s.live else { return nil }
             return asking(&s, window, again: false)

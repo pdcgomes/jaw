@@ -4,11 +4,12 @@ import Synchronization
 import Testing
 
 /// The client watches jawd's folder tree and a roster, and asks for what the folder items do: the
-/// tree whole with its slots, its pushes merged, watched again whole with the folders held; a roster
-/// like a chat list; a jawd without folders refusing the tree; a deleted folder's list failing once
-/// it's watched again; Move to's two requests in their order, finished after a drop, and what's said
-/// when it ends in both folders; a name's answer, with the folder made or without one gone at once,
-/// and its refusal; and what's said once jawd has done each.
+/// tree whole with its slots, its pushes merged, watched again whole with the folders held, and never
+/// moved; a roster like a chat list; a jawd without folders refusing the tree; a deleted folder's list
+/// failing once it's watched again, after the top it falls back to if it was around a chat; Move to's
+/// two requests in their order, finished after a drop, and what's said when it ends in both folders
+/// or its old one went; a name's answer, with the folder made or without one gone at once, and its
+/// refusal; and, once jawd has done each, what's said and what a filing did to the item's folders.
 
 /// A script that answers as jawd's folders branch does: the tree, a roster and a made folder from its
 /// fixtures, a roster's move as its watch, and every other request done.
@@ -51,6 +52,10 @@ func notices(_ all: [JawUpdate]) -> [String] {
     all.compactMap { if case let .notice(text, _) = $0 { text } else { nil } }
 }
 
+func filings(_ all: [JawUpdate]) -> [Filing] {
+    all.compactMap { if case let .filed(filing) = $0 { filing } else { nil } }
+}
+
 /// Waits until jawd has everything asked before now: requests go out in order on the one socket, so
 /// once a marker asked after them arrives, anything they'd have sent with them has arrived too.
 @MainActor
@@ -58,6 +63,23 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
     let before = requests(fake, "favourite.set").count
     jawd.favouriteSet(slot: 9, target: nil, said: nil)
     return await eventually { requests(fake, "favourite.set").count == before + 1 }
+}
+
+/// A jawd that has deleted folder 9 once its list has been watched: every chat list watched after
+/// the first is turned down as gone.
+func forgetting() throws -> FakeJawd {
+    let watched = Counted()
+    return try FakeJawd { method, params, id in
+        guard method == "chats.watch" else { return ordinary(method, params, id) }
+        return watched.next() == 1 ? ordinary(method, params, id)
+            : [FakeJawd.refusal(id, code: ErrorCode.notFound, "jawd has no folder 9")]
+    }
+}
+
+/// The halves of Move to that `Jawd` keeps to ask again once jawd is back.
+@MainActor
+func moves(_ jawd: Jawd) -> [Jawd.Moving] {
+    jawd.again.compactMap { if case let .move(moving) = $0 { moving } else { nil } }
 }
 
 @MainActor
@@ -74,7 +96,7 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
         #expect(tree.favourites?.map(\.slot) == [1, 2, 3])
         #expect(requests(fake, "folders.watch").first == .object([:]), "watched with nothing held")
 
-        fake.send(FakeJawd.pushed("folders.push.json"))
+        fake.send(try FakeJawd.pushed("folders.push.json"))
         let pushed = await drain(jawd) { !trees($0, window).isEmpty }
         let update = try #require(trees(pushed, window).first)
         #expect(update.upsert.map(\.unread) == [4])
@@ -88,7 +110,7 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
         defer { jawd.close() }
         let window = jawd.watchFolders()
         _ = await drain(jawd) { !trees($0, window).isEmpty }
-        fake.send(FakeJawd.pushed("folders.push.json"))
+        fake.send(try FakeJawd.pushed("folders.push.json"))
         fake.send(#"{"method":"folders","params":{"watch":"w5","seq":81242,"upsert":[{"id":"folder:9","v":81241,"parent":null,"name":"Family","position":0,"smart":null,"unread":5,"mentions":1,"count":6,"favourite":1}]}}"#)
         #expect(await eventually { jawd.client.state.withLock { $0.windows[window]?.seq } == 81242 }, "both pushes read")
         let merged = trees(jawd.drain(), window)
@@ -111,6 +133,19 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
         #expect(again["since"] == nil, "jawd compares the tree row by row, whatever since says")
     }
 
+    @Test func `moving the tree asks nothing of jawd, as it's watched whole`() async throws {
+        let fake = try FakeJawd(script: foldering)
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        let window = jawd.watchFolders()
+        _ = await drain(jawd) { !trees($0, window).isEmpty }
+        jawd.move(window, .top(50))
+        #expect(await settled(jawd, fake))
+        #expect(requests(fake, "folders.watch").count == 1 && requests(fake, "watch.move").isEmpty,
+                "a second watch would leave the first open, its pushes coming twice")
+    }
+
     @Test func `a jawd without folders refuses the tree with its code, and is asked again once it's back`() async throws {
         let fake = try FakeJawd { method, params, id in
             method == "folders.watch" ? [FakeJawd.refusal(id, code: ErrorCode.unknownMethod, "jawd doesn't know folders.watch")]
@@ -128,12 +163,7 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
     }
 
     @Test func `a folder's list that jawd no longer has, watched again after a drop, fails rather than asking for ever`() async throws {
-        let watched = Counted()
-        let fake = try FakeJawd { method, params, id in
-            guard method == "chats.watch" else { return ordinary(method, params, id) }
-            return watched.next() == 1 ? ordinary(method, params, id)
-                : [FakeJawd.refusal(id, code: ErrorCode.notFound, "jawd has no folder 9")]
-        }
+        let fake = try forgetting()
         defer { fake.stop() }
         let jawd = connected(fake)
         defer { jawd.close() }
@@ -141,11 +171,30 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
         _ = await drain(jawd) { $0.contains { if case .chats = $0 { true } else { false } } }
         fake.drop()
         let all = await drain(jawd) { $0.contains { if case .windowFailed = $0 { true } else { false } } }
+        let failedAt = requests(fake, "chats.watch").count
         let failure = try #require(all.compactMap { if case let .windowFailed(w, f) = $0, w == window { f } else { nil } }.first)
         #expect(failure.code == ErrorCode.notFound)
-        #expect(requests(fake, "chats.watch").count <= 3, "the first watch, and at most two after the drop")
+        #expect(failedAt == 2, "the first watch, and one after the drop, at the top it would fall back to")
         #expect(await settled(jawd, fake))
-        #expect(requests(fake, "chats.watch").count <= 3, "and none after it failed")
+        #expect(requests(fake, "chats.watch").count == failedAt, "and none after it failed")
+    }
+
+    @Test func `a list around a chat whose folder went is asked again once at the top, then fails`() async throws {
+        let fake = try forgetting()
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        let window = jawd.watchChats("folder:9", .around("ana", before: 25, after: 25))
+        _ = await drain(jawd) { $0.contains { if case .chats = $0 { true } else { false } } }
+        fake.drop()
+        let all = await drain(jawd) { $0.contains { if case .windowFailed = $0 { true } else { false } } }
+        let failedAt = requests(fake, "chats.watch").count
+        let failure = try #require(all.compactMap { if case let .windowFailed(w, f) = $0, w == window { f } else { nil } }.first)
+        #expect(failure.code == ErrorCode.notFound)
+        #expect(requests(fake, "chats.watch").dropFirst().map { $0["around"]?.string } == ["ana", "top"],
+                "around the chat it held, then once at the top it falls back to")
+        #expect(await settled(jawd, fake))
+        #expect(requests(fake, "chats.watch").count == failedAt, "and none after it failed")
     }
 
     @Test func `a roster's people come from the smallest sort up, then its pushes, and it grows when moved`() async throws {
@@ -160,7 +209,7 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
         }
         #expect(people.list.map(\.id) == ["person:1", "person:4", "person:5"] && people.total == 6)
         #expect(requests(fake, "roster.watch").first == (try JSONValue.parse(fixture("roster.watch.request.json")))["params"])
-        fake.send(FakeJawd.pushed("roster.push.json"))
+        fake.send(try FakeJawd.pushed("roster.push.json"))
         for update in rosters(await drain(jawd) { !rosters($0, window).isEmpty }, window) {
             people.apply(update)
         }
@@ -193,6 +242,8 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
         let all = await drain(jawd) { notices($0).contains("Ana Ribeiro moved from Family to Cousins") }
         #expect(requests(fake, "folder.remove") == [.object(["folder": .string("folder:9"), "item": .string("351912345678@s.whatsapp.net")])])
         #expect(notices(all) == ["Ana Ribeiro moved from Family to Cousins"], "said once it's out of the old one")
+        #expect(filings(all) == [.moved(item: "351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10")],
+                "for a row held for the chat, which jawd's push may not reach")
     }
 
     @Test func `a move whose filing jawd refuses takes nothing out, and says why in jawd's words`() async throws {
@@ -207,6 +258,7 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
                       said: "Ana Ribeiro moved from Family to Cousins", both: "Ana Ribeiro is now in both Cousins and Family")
         let all = await drain(jawd) { !notices($0).isEmpty }
         #expect(notices(all) == ["jawd has no folder 10"])
+        #expect(filings(all).isEmpty, "nothing filed")
         #expect(await settled(jawd, fake))
         #expect(requests(fake, "folder.remove").isEmpty, "left where it was, never in neither")
     }
@@ -230,11 +282,29 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
         #expect(requests(fake, half).count == 2, "asked again once jawd is back: adding and removing are idempotent")
         #expect(requests(fake, "folder.remove").last == .object(["folder": .string("folder:9"), "item": .string("351912345678@s.whatsapp.net")]))
         #expect(notices(all).filter { $0.hasPrefix("Ana Ribeiro") } == ["Ana Ribeiro moved from Family to Cousins"])
+        #expect(filings(all) == [.moved(item: "351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10")])
+    }
+
+    @Test func `a half lost to a drop is kept for jawd's return if jawd goes again before it's sent, as a second half is`() throws {
+        let jawd = Jawd(socket: "/tmp/jawk-never/jaw.sock", client: "jaw-mac-test", version: "0", focus: false) { _ in }
+        let move = Jawd.Moving(item: "351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10",
+                               said: "Ana Ribeiro moved from Family to Cousins", both: "Ana Ribeiro is now in both Cousins and Family")
+        #expect(jawd.refused(.moving(move), .unreachable).count == 1 && jawd.again.isEmpty,
+                "Move to chosen while jawd is away: said, and left to be chosen again")
+        #expect(jawd.refused(.moving(move), .lost).isEmpty)
+        let lost = try #require(moves(jawd).first)
+        jawd.again.removeAll()
+        #expect(jawd.refused(.moving(lost), .unreachable).isEmpty, "asked again once jawd was back, and jawd gone again first")
+        var second = move
+        second.removing = true
+        #expect(jawd.refused(.moving(second), .unreachable).isEmpty, "asked as the first half's answer was read, jawd gone meanwhile")
+        #expect(moves(jawd).map(\.removing) == [false, true], "both kept, to be asked once jawd is back")
     }
 
     @Test func `a move whose taking out jawd refuses says the chat is in both folders now, in jawd's words`() async throws {
         let fake = try FakeJawd { method, params, id in
-            method == "folder.remove" ? [FakeJawd.refusal(id, code: ErrorCode.notFound, "jawd has no folder 9")] : ordinary(method, params, id)
+            method == "folder.remove" ? [FakeJawd.refusal(id, code: ErrorCode.internal, #"couldn't write "jaw.db": the disk is full"#)]
+                : ordinary(method, params, id)
         }
         defer { fake.stop() }
         let jawd = connected(fake)
@@ -243,7 +313,27 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
         jawd.moveItem("351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10",
                       said: "Ana Ribeiro moved from Family to Cousins", both: "Ana Ribeiro is now in both Cousins and Family")
         let all = await drain(jawd) { !notices($0).isEmpty }
-        #expect(notices(all) == ["Ana Ribeiro is now in both Cousins and Family: jawd has no folder 9"])
+        #expect(notices(all) == [#"Ana Ribeiro is now in both Cousins and Family: couldn't write "jaw.db": the disk is full"#])
+        #expect(filings(all) == [.added(item: "351912345678@s.whatsapp.net", to: "folder:10")], "filed in Cousins, and still in Family")
+    }
+
+    @Test func `a move whose old folder went between the halves says it moved, as the chat is in the new one alone`() async throws {
+        let fake = try FakeJawd { method, params, id in
+            method == "folder.remove" ? [FakeJawd.refusal(id, code: ErrorCode.notFound, "jawd has no folder 9")] : ordinary(method, params, id)
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = await drain(jawd) { helloed($0) == 1 }
+        jawd.moveItem("351913550005@s.whatsapp.net", from: "folder:9", to: "folder:10",
+                      said: nil, both: "Sofia is now in both Cousins and Family")
+        jawd.moveItem("351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10",
+                      said: "Ana Ribeiro moved from Family to Cousins", both: "Ana Ribeiro is now in both Cousins and Family")
+        let all = await drain(jawd) { notices($0).contains { $0.hasPrefix("Ana Ribeiro") } }
+        #expect(notices(all) == ["Ana Ribeiro moved from Family to Cousins"],
+                "taking out what isn't there is done already, so error 3 says Family went: the move's own words, or none")
+        #expect(filings(all) == [.moved(item: "351913550005@s.whatsapp.net", from: "folder:9", to: "folder:10"),
+                                 .moved(item: "351912345678@s.whatsapp.net", from: "folder:9", to: "folder:10")])
     }
 
     @Test func `a name comes back made with its row, renamed with none, or turned down in jawd's words`() async throws {
@@ -294,8 +384,22 @@ func settled(_ jawd: Jawd, _ fake: FakeJawd) async -> Bool {
         _ = await drain(jawd) { helloed($0) == 1 }
         jawd.folderAdd("folder:9", item: "person:4", said: "Inês Gomes filed in Family")
         jawd.favouriteSet(slot: 3, target: nil, said: "⌘3 is free")
-        let all = await drain(jawd) { notices($0).count == 2 }
-        #expect(notices(all) == ["Inês Gomes filed in Family", "⌘3 is free"])
+        jawd.folderRemove("folder:10", item: "person:4", said: "Inês Gomes taken out of Cousins")
+        let all = await drain(jawd) { notices($0).count == 3 }
+        #expect(notices(all) == ["Inês Gomes filed in Family", "⌘3 is free", "Inês Gomes taken out of Cousins"])
+        #expect(filings(all) == [.added(item: "person:4", to: "folder:9"), .removed(item: "person:4", from: "folder:10")],
+                "what each filing did to the item's folders; a slot files nothing")
         #expect(requests(fake, "favourite.set").first == .object(["slot": .number(3), "target": .null]))
+    }
+
+    @Test func `a filing says what the item's folders are once jawd has done it`() {
+        let ana = "351912345678@s.whatsapp.net"
+        #expect(Filing.added(item: ana, to: "folder:10").applied(to: ["folder:9"]) == ["folder:9", "folder:10"])
+        #expect(Filing.added(item: ana, to: "folder:9").applied(to: ["folder:9"]) == ["folder:9"], "filed where it was already")
+        #expect(Filing.removed(item: ana, from: "folder:9").applied(to: ["folder:9", "folder:4"]) == ["folder:4"])
+        #expect(Filing.removed(item: ana, from: "folder:9").applied(to: ["folder:4"]) == ["folder:4"], "taken out where it wasn't")
+        #expect(Filing.moved(item: ana, from: "folder:9", to: "folder:10").applied(to: ["folder:9", "folder:4"]) == ["folder:4", "folder:10"])
+        #expect([Filing.added(item: ana, to: "x"), .removed(item: "person:4", from: "x"), .moved(item: ana, from: "x", to: "y")].map(\.item)
+            == [ana, "person:4", ana])
     }
 }
