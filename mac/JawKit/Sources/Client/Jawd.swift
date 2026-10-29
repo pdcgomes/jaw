@@ -702,7 +702,8 @@ public final class Jawd {
             }
             guard moving.removing else { return [.notice(Self.whyNot(failure, "moving between folders"), .warning)] }
             // Taking out what isn't there is done already, so not finding `from` or the chat means
-            // it went between the halves, and the chat is in `to` alone.
+            // it went between the halves, leaving the chat in `to` alone or, when it's the chat that
+            // went, in no folder, its row going too.
             if failure.code == ErrorCode.notFound {
                 return [.filed(moving.moved)] + (moving.said.map { [.notice($0, .info)] } ?? [])
             }
