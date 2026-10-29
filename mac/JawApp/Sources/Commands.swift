@@ -226,7 +226,7 @@ extension AppModel {
             })
         add(Command("actual.size", "Actual Size", phrase: "Actual text size", detail: "in messages", key: Shortcut("0"), place: .view, group: 1)
             { [weak self] in self?.preferences.textSize = 13 })
-        add(Command("sidebar", "Sidebar", phrase: "Show or fold the sidebar", detail: "All and Archived", key: Shortcut("b"), place: .view,
+        add(Command("sidebar", "Sidebar", phrase: "Show or fold the sidebar", detail: "the folders and the people", key: Shortcut("b"), place: .view,
                     group: 2) { [weak self] in self?.window?.toggleSidebar() })
         add(Command("chat.list", "Chat List", phrase: "Show or fold the chat list", detail: "every chat", key: Shortcut("l", [.command, .shift]),
                     place: .view, group: 2) { [weak self] in self?.window?.toggleChatList() })

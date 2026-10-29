@@ -100,6 +100,7 @@ enum Bench {
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
                 || key.hasPrefix("menu-key:") || key == "promise" || key == "window"
+                || key == "sidebar" || key.hasPrefix("folder:")
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key == "promise" { keepPromise(model) }
@@ -114,6 +115,9 @@ enum Bench {
                         FileHandle.standardError.write(Data("\(key): no row \(i)\n".utf8))
                     }
                 }
+            }
+            if key.hasPrefix("folder:"), let i = Int(key.dropFirst(7)), !(model.window?.sidebar.pick(row: i) ?? false) {
+                FileHandle.standardError.write(Data("\(key): no folder at row \(i)\n".utf8))
             }
             if key.hasPrefix("save:") { model.saveLayoutAs(String(key.dropFirst(5))) }
             if key == "revert" { model.revertLayout() }
@@ -168,6 +172,8 @@ enum Bench {
                     FileHandle.standardError.write(Data("\(key): \(menuSaid(String(key.dropFirst(5)), model: model))\n".utf8))
                 } else if key.hasPrefix("vote:") || key.hasPrefix("poll:") {
                     FileHandle.standardError.write(Data("\(key): \(pollSaid(model.conversation?.newestPoll))\(model.notice.map { " · said \"\($0.0)\"" } ?? "")\n".utf8))
+                } else if key == "sidebar", let sidebar = model.window?.sidebar {
+                    FileHandle.standardError.write(Data("sidebar: \(sidebar.said.joined(separator: " | ")) · picked \(sidebar.picked)\n".utf8))
                 } else {
                     let open = model.window.flatMap { w in w.palette.isVisible ? w.palette.model : nil }
                     let palette = open.map { p in
@@ -190,7 +196,7 @@ enum Bench {
                     }.joined()
                     let said = palette + glance + form + selected + library + looking + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
                     let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
-                    FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
+                    FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "") · folder \(model.folder)\(said)\n".utf8))
                 }
                 press(Array(keys.dropFirst()), model: model, then: then)
             }

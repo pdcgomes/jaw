@@ -27,6 +27,7 @@ final class AppModel {
     var link: LinkStep?
     var me: Set<String> = []
     var listWindow: WindowID?
+    var foldersWindow: WindowID?
     var folder = "all"
     /// Who's typing in the chats jawd's windows show, as it last said.
     var typing: Typists = [:]
@@ -126,6 +127,7 @@ final class AppModel {
         jawd.start()
         Opened.sweep()
         listWindow = jawd.watchChats(folder, .top(ChatListController.rows))
+        foldersWindow = jawd.watchFolders()
         preferences.changed.append { [weak self] in self?.restyle() }
         glance.model = self
     }
@@ -237,6 +239,11 @@ final class AppModel {
             say("no chat started: \(why)", warn: true)
         case let .status(status):
             window?.showStatus(status)
+        case let .folders(w, u) where w == foldersWindow:
+            window?.sidebar.apply(u)
+        case let .windowFailed(w, failure) where w == foldersWindow:
+            // A jawd from before M6 doesn't know folders.watch: the sidebar keeps All and Archived.
+            if failure.code != ErrorCode.unknownMethod { say("the folders couldn't be watched: \(failure)", warn: true) }
         case let .windowFailed(w, why) where libraryWindows[w] != nil:
             if let id = libraryWindows[w] { libraries[id]?.refuse("\(why)") }
         case let .windowFailed(_, failure):
@@ -517,6 +524,7 @@ final class AppModel {
 
     func pick(folder id: String) {
         folder = id
+        window?.sidebar.select(id)
         if let w = listWindow { jawd.unwatch(w) }
         window?.chatList.show(folder: id)
         listWindow = jawd.watchChats(id, .top(ChatListController.rows))

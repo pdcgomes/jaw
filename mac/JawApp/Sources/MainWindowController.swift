@@ -54,7 +54,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         sidebarToggle = TitleBar.dress(window) { [weak self] in self?.toggleSidebar() }
 
 
-        sidebar.picked = { [weak model] folder in model?.pick(folder: folder.id) }
+        sidebar.host = model
+        sidebar.keepsOpen = "jaw.sidebar.open"
         chatList.host = model
         palette.model.find = { [weak model] id, query, kinds, chat, limit in
             model?.jawd.find(id: id, query: query, kinds: kinds, chat: chat, limit: limit)
@@ -136,6 +137,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func restyle() {
         window?.appearance = model.preferences.nsAppearance
         chatList.roles = model.roles
+        sidebar.roles = model.roles
         window?.backgroundColor = model.roles.ground.nsColor
         bar.restyle(model.roles)
         sidebarToggle?.roles = model.roles
@@ -221,9 +223,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         case let .link(l): model.openLink(l.link.url)
         case let .linkMessage(l): goTo(message: l.message, in: l.chat)
         case let .folder(f):
-            if SidebarController.folders.contains(where: { $0.id == f.id }) { model.pick(folder: f.id) } else {
-                model.say("folders come with jawd's next step")
-            }
+            if sidebar.tree.row(f.id) != nil { model.pick(folder: f.id) } else { model.say("folders come with jawd's M6") }
         case let .action(action): action.run()
         case let .emoji(message, emoji):
             if let c = model.panes.values.first(where: { $0.window.get(message) != nil }) {
