@@ -1,6 +1,7 @@
 //! jawd stops on SIGTERM within its bound however its engine is doing: missing, so the supervisor
 //! keeps trying to start it again, or never answering, so a start is waiting for its hello; and
-//! however it was started, even with SIGTERM blocked, as jaw's terminal starts it.
+//! however it was started, even with SIGTERM blocked, as jaw's terminal starts it; and `jawd demo`
+//! stops on one while its phases still run.
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -125,4 +126,35 @@ fn jawd_started_with_sigterm_blocked_as_jaw_starts_it_still_stops_on_sigterm_wit
     let log = log(home.path());
     assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
     assert!(log.contains("jawd: SIGTERM, so it stops"), "{log}");
+}
+
+#[test]
+fn jawd_demo_stops_on_one_sigterm_while_its_phases_still_run() {
+    let home = tempfile::tempdir().unwrap();
+    let out = std::fs::File::create(home.path().join("jawd.log")).unwrap();
+    // A small account, whose history goes in at once, and then ten minutes before the next phase.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_jawd"))
+        .env("JAW_HOME", home.path())
+        .env("JAW_ENGINE", home.path().join("no-such-engine"))
+        .env("JAW_NOTIFY", "off")
+        .arg("demo")
+        .arg("--folder")
+        .arg(home.path().join("demo"))
+        .args(["--chats", "3", "--people", "3", "--messages", "30", "--blob", "10", "--after", "600"])
+        .stdin(Stdio::null())
+        .stdout(out.try_clone().unwrap())
+        .stderr(out)
+        .spawn()
+        .expect("jawd demo starts");
+    // Its phases start once it says what jaw would show.
+    let ready = Instant::now() + Duration::from_secs(30);
+    while !log(home.path()).contains("jaw shows them") {
+        assert!(Instant::now() < ready, "jawd demo never served:\n{}", log(home.path()));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (status, took) = terminate(&mut child);
+    let log = log(home.path());
+    assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
+    assert!(log.contains("jawd demo: SIGTERM, so it stops") && log.contains("jawd demo: stopped in"), "{log}");
+    assert!(!log.contains("serving until Ctrl-C"), "the one signal stops it, with no second to wait for:\n{log}");
 }

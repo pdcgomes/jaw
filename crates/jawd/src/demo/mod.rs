@@ -252,14 +252,15 @@ async fn serve(plan: Plan, shape: Shape, history: bool, ended: Option<i64>) -> R
         rng: Mutex::new(Rng(0x5EED_DE30)),
     };
     let exit = plan.exit;
-    let outcome = tokio::select! {
-        done = demo.phases(&plan, history) => done,
+    // A signal while the phases run stops the demo; only phases that finish wait for one.
+    let (outcome, signalled) = tokio::select! {
+        done = demo.phases(&plan, history) => (done, false),
         signal = signals.next() => {
             eprintln!("jawd demo: {signal}, so it stops");
-            Ok(())
+            (Ok(()), true)
         }
     };
-    if outcome.is_ok() && !exit {
+    if outcome.is_ok() && !exit && !signalled {
         println!("jawd demo: serving until Ctrl-C");
         let signal = signals.next().await;
         eprintln!("jawd demo: {signal}, so it stops");
