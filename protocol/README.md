@@ -250,21 +250,28 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `find` | `query`, `kinds` (any of `chat`, `person`, `folder`, `message`, `link`, `media`, `file`; all by default), `chat` (optional), `limit` (of each kind) | `results`, best first, each with its `kind`, a `score`, the match marked, and the row it found, and `counts` of each kind; a newer `find` from the same connection cancels this one. See Finding |
 | `chat.opened` | `chat` | |
 | `library.watch` | `kind` (`photo`, `video`, `voice`, `file`, `link` or `all`), and optionally `chat`, `person`, `since`, `until`, `text`, with `around`, `before`, `after` | `watch`, `total`, `rows`: each the message's media, file or link with its preview, sender, chat and time, and the message's `id` to jump to |
-| `send.text` | `chat`, `text`, `reply`, `mentions`, `preview` (default true), `key` | `message` and `row`. See Sending |
+| `send.text` | `chat`, `text`, `reply`, `mentions`, `preview` (default true), `key`, and `at` and `repeat` to send it later | `message` and `row`, or `scheduled` when it's sent later. See Sending, and Scheduled messages and reminders |
 | `send.retry` | `message` | |
 | `chat.start` | `phone` or `person` | `chat`. See Sending |
-| `send.media` | `chat`, `files` (each a `path`, `kind` and `caption`), `quality` (`sd` or `hd`), `reply` | `messages` |
-| `send.poll` | `chat`, `question`, `options`, `max` (default 1), `key` | `message` and `row`, as `send.text`. See Sending |
+| `send.media` | `chat`, `files` (each a `path`, `kind` and `caption`), `quality` (`sd` or `hd`), `reply`, and `at` and `repeat` | `messages`, or `scheduled` |
+| `send.poll` | `chat`, `question`, `options`, `max` (default 1), `key`, and `at` and `repeat` | `message` and `row`, as `send.text`, or `scheduled`. See Sending |
 | `poll.vote` | `message`, `options` (by name, none to take your vote back), and optionally `chat`, `key` | See Sending |
-| `send.event` | `chat`, `name`, `description`, `start`, `end`, `place`, `call` | `message`. See Composing |
-| `send.contact` | `chat`, `cards` (each a `name` and a `vcard`) | `message`. See Composing |
-| `send.location` | `chat`, `lat`, `lon`, `name`, `address` | `message`. See Composing |
+| `send.event` | `chat`, `name`, `description`, `start`, `end`, `place`, `call`, and `at` | `message`, or `scheduled`. See Composing |
+| `send.contact` | `chat`, `cards` (each a `name` and a `vcard`), and `at` | `message`, or `scheduled`. See Composing |
+| `send.location` | `chat`, `lat`, `lon`, `name`, `address`, and `at` | `message`, or `scheduled`. See Composing |
 | `gif.search` | `query` (empty for what's trending), `limit`, `cursor` | `gifs` and the next `cursor`. See Composing |
-| `send.gif` | `chat`, `gif` (an `id` from `gif.search`), `caption`, `reply` | `message`. See Composing |
+| `send.gif` | `chat`, `gif` (an `id` from `gif.search`), `caption`, `reply`, and `at` | `message`, or `scheduled`. See Composing |
 | `react` | `message`, `emoji` (empty to remove), and optionally `chat`, `key` | |
 | `edit` | `message`, `text`, and optionally `chat`, `key` | |
 | `delete` | `message`, `for` (`me` or `everyone`), and optionally `chat`, `key` | |
-| `forward` | `messages`, `to` (chats), and optionally `chat`, `key` | `messages` |
+| `forward` | `messages`, `to` (chats), and optionally `chat`, `key`, `at` | `messages`, or `scheduled`, one for each chat |
+| `scheduled.edit` | `scheduled`, any of `text`, `captions`, `at`, `repeat`, `reply`, `mentions`, `question`, `options`, `max`, and optionally `v` | `scheduled`. See Scheduled messages and reminders |
+| `scheduled.send_now` | `scheduled`, and optionally `v` | `message` and `row`, or a forward's `messages` |
+| `scheduled.skip`, `scheduled.cancel` | `scheduled`, and optionally `v` | `scheduled.skip`: `scheduled`, null once nothing is left |
+| `scheduled.watch` | optionally `chat`, with `around`, `before`, `after` | `watch`, `seq`, `total`, `held`, `rows` |
+| `when.parse` | `text`, and optionally `repeat` (true) | `at` and `says`, and `repeat` with it |
+| `remind` | `message`, `at` (null to take it away), and optionally `chat` | `reminder`, null once it's taken away |
+| `reminders.watch` | `around`, `before`, `after` | `watch`, `seq`, `total`, `due`, `rows` |
 | `star` | `message`, `starred` | |
 | `read` | `chat`, `up_to` (a message) | See Sending |
 | `typing` | `chat`, `state` (`composing`, `recording` or `paused`) | See Sending |
@@ -279,7 +286,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `voice.play` | `message`, `at`, `speed` | Pushes `playback` |
 | `voice.pause`, `voice.seek`, `voice.speed` | `at` or `speed` | |
 | `voice.record` | `chat` | Pushes `recording` |
-| `voice.stop`, `voice.send`, `voice.cancel` | | `voice.send` returns `message` |
+| `voice.stop`, `voice.send`, `voice.cancel` | `voice.send` takes `at` and `repeat` | `voice.send` returns `message`, or `scheduled` |
 | `folder.create` | `name`, `parent` | `folder` |
 | `folder.rename`, `folder.move`, `folder.delete` | `folder`, and `name` or `parent` and `position` | |
 | `folder.add`, `folder.remove` | `folder`, `item` (a chat's `id` or a `person:` id) | |
@@ -497,6 +504,7 @@ jawd sends them itself, so they come with no interface open: Notification Center
 - A burst in one chat is one notification; what comes in that chat in the next 10 seconds goes as one more when they've passed. More than three chats at once are one summary.
 - Nothing goes while catching up. When a catch-up ends, the chats whose newest message it brought are one notification, that chat's own or a summary such as "12 new messages in 4 chats", however long ago they were sent; so what came while jawd was off is one summary once it has caught up after starting.
 - Muted and archived chats, your own messages, history, and the chat an interface in front is reading stay quiet.
+- A reminder that comes due notifies in a muted or archived chat too, and a scheduled message held past its hour says so, as Scheduled messages and reminders (proposed) has them.
 
 ## Presence
 
@@ -534,6 +542,102 @@ Carrying them on chat rows instead, so that a watch again from `since` brought t
 - **Nothing written.** Who's typing in a chat lives in jawd's memory only: it's never written to jaw.db, moves no `v` or `seq`, and never reaches the writer, so a message's ack costs what it did. Presence is what M6 keeps on people's rows for the roster's order (online, last seen, and whether jawd follows them), sent when a person's `v` changes.
 - **Busy groups.** jawd takes the engine's typing without waiting, and drops and counts what comes faster than it can take. Each chat's typing reaches an interface at most every 50 ms: the newest replaces what wasn't sent yet, and the first change after a quiet spell goes at once, as window updates do. A connection holds at most one unsent `typing` for each chat it shows, which waits with its window updates while the interface isn't reading (see Pushes for windows), so a slow interface holds nothing up and gets the newest once it reads. `jawd status` gains `typing`: the `chats` with someone typing now, and how many changes were `heard`, `dropped` for coming too fast, `sent`, and `merged` into a newer one before they went.
 - **The Mac app** keeps typing by chat and presence by open chat. From them it draws its chat list's "typing…", its header's who's typing and online or last seen, and its status line's left half, for any open chat, whether a chat list shows it or not.
+
+## Scheduled messages and reminders (proposed)
+
+Proposed with jawd's M7, for jawd to build, as jaw's design's "Scheduled messages and reminders" and [its own design](../docs/plans/2026-10-27-jaw-scheduled-messages-and-reminders-design.md) have it, and as the Mac design's proposal P9 asks: everything jaw sends can be given a time instead, once or repeating, and any message a reminder. jawd keeps both, as jaw's own, and does the rest: at its time a scheduled message becomes an ordinary message of yours, sent as its request would have sent it then, and a reminder comes due, notifies and marks its chat unread. WhatsApp sees only ordinary messages, so whoever gets them needs nothing new. Until jawd serves them, none of this is answered.
+
+```json
+{"id":70,"method":"send.text","params":{"chat":"351912345678@s.whatsapp.net","text":"bom dia ☀️","repeat":{"every":"weekday","time":"09:00","zone":"Europe/Lisbon"},"key":"jaw-7a1c"}}
+{"id":70,"result":{"scheduled":{"id":"scheduled:12","v":81402,"sort":"1~1793350800000~000000000012","chat":"351912345678@s.whatsapp.net","chat_name":"Ana Ribeiro","kind":"text","spans":[{"t":"text","s":"bom dia ☀️"}],"reply":null,"at":1793350800000,"repeat":{"every":"weekday","time":"09:00","zone":"Europe/Lisbon","says":"every weekday at 09:00"},"sent":0,"state":"waiting"}}}
+{"id":71,"method":"when.parse","params":{"text":"fri 18:30"}}
+{"id":71,"result":{"at":1793385000000,"says":"Friday 30 October at 18:30"}}
+{"id":72,"method":"scheduled.watch","params":{"around":"top","before":0,"after":50}}
+{"id":72,"result":{"watch":"w9","seq":81402,"total":2,"held":1,"rows":[{"id":"scheduled:9","v":81390,"sort":"0~1793264400000~000000000009","chat":"120363012345678901@g.us","chat_name":"Lisbon Climbing","kind":"text","spans":[{"t":"text","s":"saio agora"}],"reply":null,"at":1793264400000,"repeat":null,"sent":0,"state":"held","why":"late","since":1793264400000},{"id":"scheduled:12","…":"…"}]}}
+{"id":73,"method":"remind","params":{"message":"3EB0A1B2C3D4E5F6","chat":"351912345678@s.whatsapp.net","at":1793350800000}}
+{"id":73,"result":{"reminder":{"id":"reminder:4","v":81410,"sort":"1~1793350800000~000000000004","at":1793350800000,"due":false,"message":"3EB0A1B2C3D4E5F6","chat":"351912345678@s.whatsapp.net","chat_name":"Ana Ribeiro","from":{"id":"person:12","name":"Ana","colour":4},"mine":false,"summary":"did you get the photos from Sunday?","message_at":1792145060000}}}
+{"method":"reminders","params":{"watch":"w10","seq":81530,"due":1,"upsert":[{"id":"reminder:4","v":81530,"sort":"0~1793350800000~000000000004","due":true,"…":"…"}]}}
+```
+
+### Sending later
+
+- **Every send takes `at`:** `send.text`, `send.poll` and `forward` as jawd serves them now, and `send.media`, `voice.send` and Composing's `send.event`, `send.contact`, `send.location` and `send.gif` as each is served. With `at` (milliseconds since the epoch), jawd keeps what the request would have sent, to send at that time, and answers `scheduled`, the item's row, in place of `message`. `at` must be at least a minute ahead and at most 366 days; otherwise it's -32602 with `data` `{"param": "at"}`.
+- **`send.text`, `send.poll`, `send.media` and `voice.send` take `repeat` too,** a rule (below). With it, `at` is its first time, and can be left out for the rule's first time from a minute ahead.
+- **The request is checked as a send is,** when it's scheduled: a chat jawd doesn't have is error 3, text that's only spaces -32602 and too long error 5, a `reply` jawd doesn't have error 3 and one deleted error 4, mentions as Message actions says, a poll's question and options as `send.poll` says, and each forwarded message as `forward` does. Media is planned and transcoded when it's scheduled, so a file that can't go says so then, and its files are kept in jaw's folder until its last time; a voice message is the stopped recording, and a GIF is fetched when it's scheduled, since `gif.search`'s results last an hour.
+- **`key`,** as `send.text` takes it: asking again with the same key within a day answers with the same item as it is now and keeps nothing new; if it has gone by then, it's error 4 as a change would be (below), and error 3 once it's been cancelled.
+- **A `forward`** to several chats is an item for each, answered as a list of rows in `scheduled`, each item forwarding every message named, in order. Forwards take `at` and not `repeat`.
+- **Scheduling clears the chat's draft,** as sending does, since what was typed has gone where it was meant to go; a forward leaves the chats' drafts, as forwarding does.
+
+### The rule
+
+```json
+{"every":"week","days":[1,3],"time":"07:30","zone":"Europe/Lisbon","times":10,"says":"every Monday and Wednesday at 07:30, 10 times","left":10}
+```
+
+- `every`: `day`, `weekday` (Monday to Friday), `week`, `month` or `year`; with `week`, `days` (1 to 7, Monday first); with `month`, `day` (1 to 31, or -1 for the last day); with `year`, `date` (`MM-DD`). Each takes the first time's when it's left out.
+- `time` (`HH:MM`, local) and `zone` (an IANA time zone, jawd's own when it's left out, which is the Mac's): each next time is reckoned in that zone with the system's time zone database, so 09:00 stays 09:00 across a change of hour. A time the change skips goes at the first minute after it, and one the change repeats goes once. A month without the day goes on its last day, and 29 February on the 28th outside leap years.
+- At most one of `until` (`YYYY-MM-DD`, the last day it can go, in its zone) and `times` (how many times it goes, 1 to 1,000).
+- Nothing repeats more than daily, and a repeat is one chat's: there's no rule for every hour, nor for several chats.
+- jawd adds `says`, the rule in words ("every weekday at 09:00"), to every rule it answers, and `left` for one with `times`: how many times it still goes.
+- A rule jawd can't take is -32602 with `data` `{"param": "repeat"}` and `message` saying why.
+
+### Reading a typed time
+
+- **`when.parse`** (`text`, and `repeat` true for a repeat) reads what's typed in jawd's time zone, as every interface shows it: "18:30", "6:30pm", "tomorrow 9", "fri 18:30", "30 oct 18:30", "2026-10-30 18:30", "in 2 hours", "this evening", "next monday 9am"; and with `repeat`, "every day 8:00", "every weekday 9am", "every monday and wednesday 7:30", "every month on the 1st at 9", "every month on the last day at 18:00", "every year on 30 oct at 9", each with "until 1 dec" or "10 times" after it if wanted. It answers `at`, the first time, and `says`, the time in words ("Friday 30 October at 18:30"), and with `repeat`, `repeat`, the rule with its `says`. A time of day alone is its next one; a day alone is at 09:00.
+- What it can't read is -32602, its `message` saying so in words to show ("jaw can't read that time"), and so is a time less than a minute ahead or more than 366 days, as a send would refuse it.
+- It needs nothing from the disk, so it's answered at once, as `hello` is, without waiting for the connection's other requests: an interface can send one at each keystroke, and keeps the answer to its latest.
+
+### Scheduled rows and their window
+
+- **`scheduled.watch`** (optionally `chat`, with `around`, `before` and `after`, and `since` and `have` when watching again) is a window of what's scheduled, every chat's or one's: held items first, longest held first, then the rest by their next time. `around` is `top`, the place above the first row, which takes `after`, or an item's `id`. It's answered at once, as watches are, and pushes `scheduled`, with `upsert`, `remove`, `total` and `held` as they change. `held` is how many of the window's list are held, so an interface can say so with a window of no rows (`after` 0).
+- **A scheduled row:**
+
+| Field | |
+| --- | --- |
+| `id` | `scheduled:` and a number, never used again |
+| `v`, `sort` | As every row's: `sort` is `0~` and when it should have gone for a held item, `1~` and its next time for the rest, then its number |
+| `chat`, `chat_name` | Where it goes, as the chat list names it |
+| `kind` | `text`, `poll`, `forward`, and as their sends are served `media`, `voice`, `event`, `contact`, `location` and `gif` |
+| What it sends | As a message row shows it: `spans` with its mentions marked, `reply`'s quote, a poll's `poll` (`question`, `options` by `name`, `max`), a forward's `forward` (each message's `id`, `from` and one-line `summary`), and `media` with its previews, `voice` with its length and waveform, an event's, a contact's, a place's or a GIF's fields as theirs are served |
+| `at` | Its next time; for a held item that goes once, when it should have gone |
+| `repeat` | The rule, with `says` and `left`, or null when it goes once |
+| `sent` | How many times a repeat has gone |
+| `state` | `waiting`, or `held` with `why`: `late` (not sent within the hour of its time), `missed` (a repeat that missed more than one of its times, `missed` saying how many), `quote_gone` (what it replies to was deleted for everyone), `forward_gone` (what it forwards was deleted) or `outbox_full` (the outbox held its thousand until the hour had passed); and `since`, when what it holds should have gone |
+
+- **Chat rows** gain `scheduled`, how many of the chat's items are waiting or held, and `next_scheduled`, the soonest next time of those waiting, null when none is, so the chat list can mark a chat and a conversation knows whether to watch its scheduled messages. They're counted from the items as the row is read, so they can never disagree with them.
+
+### Changing what's waiting
+
+- **`scheduled.edit`** (`scheduled`, and any of `text`, `reply`, `mentions` for text; `question`, `options`, `max` for a poll; `captions`, one for each file, for media; `at`; `repeat`, null to send it once) changes what's waiting, checked as scheduling checks it. Files, a voice message and what's forwarded can't be changed, -32602 with the `param`; scheduling them again can. A held item given a new `at` waits again. It answers `scheduled`, the row.
+- **`scheduled.send_now`** (`scheduled`) sends it now, as at its time, whether or not WhatsApp can be reached, as `send.text` does: its message waits in the outbox from there. It answers `message` and `row` as `send.text` does, or `messages` for a forward. A held item sends what it holds; a waiting repeat sends its next time's now and goes on from the one after.
+- **`scheduled.skip`** (`scheduled`) skips a repeat's next time, or what a held repeat holds, and answers `scheduled`, the row, or null when that was its last; error 4 for an item that goes once.
+- **`scheduled.cancel`** (`scheduled`) takes it away, every repeat with it, and its files once a synced commit no longer points to them, and answers with nothing.
+- **Each answers once its change is on disk, synced,** and every window showing what it changes gets its rows; asking again changes nothing more. An item jawd doesn't have is error 3, which an interface asking again after a lost answer to `scheduled.cancel` takes as done.
+- **Changes race nothing.** They and the sends at their times go through jaw's one writer, so whichever commits first wins and the other is told. A change that reaches jawd after the item has gone, or after one of its times has gone since the version `v` it names, is error 4 with `data` `{"message": id}`, the message it became (a forward's first, with `messages` naming each), so an interface can offer to edit that within WhatsApp's 15 minutes, or delete it. `v` is the row's version the interface acted on; without it, a change to a repeat applies to the times still to come.
+
+### At its time
+
+- **One timer,** on the wall clock, waits for the soonest time of every item and reminder, so neither the Mac's sleep nor a change of the clock makes one late, and nothing wakes jawd between times. An item due while jawd runs is handed to the outbox within a second of its time, once WhatsApp can be reached.
+- **An ordinary send.** At its time, with WhatsApp reachable, one synced commit writes the message row and its outbox entry as the send would have, with a new ID and, for a poll, a new secret, and in the same commit moves the item to its next time or removes it. From there it's sent, ticked, retried and failed as any message is. It reads nothing in its chat, since you weren't there, and leaves the chat's draft alone; the chat's disappearing timer is the one it has then, and a link's preview is fetched then. A crash before that commit leaves the item due, to go when jawd starts again; after it, the outbox has it, under the one ID it ever goes with.
+- **The hour's grace.** An item goes once its time has come and WhatsApp can be reached, within the hour of its time. Past the hour it's held (`why` `late`), jawd notifies ("Not sent: your message to Ana Ribeiro at 09:00"), and it waits for `scheduled.send_now`, a new `at`, `scheduled.skip` or `scheduled.cancel`. A repeat that missed several of its times holds the latest (`why` `missed`, with how many), and its rule goes on from now: when its next time goes, what it held is let go of, unsent, since the same message has just gone.
+- **Held for a reason.** A message whose quote has been deleted for everyone by its time, or a forward whose message is gone, is held (`quote_gone`, `forward_gone`) rather than sent without what it was written around. One due while the outbox holds its thousand waits for room as if WhatsApp couldn't be reached, and is held (`outbox_full`) past the hour.
+- **Kept awake.** While an item is due in the next 30 minutes and the Mac is awake, jawd keeps it from idling to sleep (a power assertion on macOS, a logind inhibitor on Linux), and lets go once the item has gone to the outbox or is held. The display can still sleep, and closing the lid still sleeps the Mac.
+- **A group you've left by then, or a number no longer on WhatsApp,** fails as a send to it does, and the failed message can be retried.
+- **A chat merged into another,** a person's number and LID becoming one chat, takes its items and reminders with it.
+
+### Reminders
+
+- **`remind`** (`message`, `at`, and optionally `chat`, as the actions on a message name theirs) sets the message's reminder for `at`, or changes it, a snooze being a new `at`, or with `at` null takes it away, which is how it's marked done. `at` must be at least a minute ahead and at most 366 days, -32602 with `param` `at` otherwise. A message has one reminder at most, anyone's message, and asking again changes nothing more. It answers once its change is on disk, synced, with `reminder`, the row, or null once it's taken away. A message jawd doesn't have, or one deleted for you, is error 3. A reminder on a chat, from an interface's chat menu, is `remind` on the chat's newest message, which the chat's row has.
+- **When one comes due,** one synced commit marks it due and marks its chat unread, with the app-state patch that tells your phone, through the outbox, as a chat marked unread from jaw is; a chat marked already changes nothing. jawd then notifies, "Reminder · Ana Ribeiro" and the message's line, in a muted or archived chat too, since you asked, unless an interface in front is showing the chat. It stays due until `remind` takes it away or gives it a new time; reading the chat leaves it due. Reminders that came due while jawd wasn't running are marked due once it starts, however late, and notify as one summary when there are several ("3 reminders came due").
+- **`reminders.watch`** (`around`, `before`, `after`, and `since` and `have` when watching again) is a window of every reminder: those due first, the longest due at the top, then the rest by their time. It's answered at once and pushes `reminders`, with `upsert`, `remove`, `total` and `due`, how many of them are due, as they change.
+- **A reminder row:** `id` (`reminder:` and a number, never used again), `v`, `sort` (`0~` and its time for one due, `1~` and its time for the rest, then its number), `at`, `due`, `message` (its ID, null once it's gone), `chat` and `chat_name`, and the message as its chat shows it now: `from` (absent on yours) and `mine`, its one-line `summary`, and `message_at`, when it was sent. A reminder keeps no copy of its message: one deleted for everyone says so as its row does, and one that disappeared has `gone` true and no `summary`. Deleting a message for you takes its reminder with it.
+- **Message rows** gain `reminder`, `at` and `due`, or null, so a conversation draws its flag; **chat rows** gain `reminders_due`, how many of the chat's reminders are due, counted as the row is read.
+- **WhatsApp's own reminders** aren't in a form jaw can read or write yet, so these are jaw's alone, and your phone sees only the chat marked unread.
+
+### Limits and status
+
+- At most 1,000 scheduled items, waiting or held, a repeat counting once, holding at most 2 GiB of files; and 1,000 reminders not yet done. Past one, the request is error 5, with `data` `{"limit": "scheduled", "most": 1000}`, `{"limit": "scheduled_bytes", "most": 2147483648}` or `{"limit": "reminders", "most": 1000}`, and nothing is kept.
+- `status` gains `scheduled`: how many are `waiting` and `held`, the `next` time, the `bytes` of files kept, the `most` of each, and how many were `refused` for a limit since jawd started; and `reminders`: how many are `due` and `waiting`, the `next` time, the `most` and how many were `refused`; and `awake`, whether jawd is keeping the Mac from idling to sleep for an item now.
 
 ## Versioning
 
