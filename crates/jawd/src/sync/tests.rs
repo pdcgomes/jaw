@@ -2319,6 +2319,33 @@ async fn pings_that_get_through_again_during_a_catch_up_put_it_back_as_far_as_it
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pings_that_get_through_again_during_a_catch_up_put_back_the_messages_waiting_as_its_total_not_all_that_waits()
+{
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let (tx, incoming) = mpsc::channel(16);
+    let (_live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    let preview = pb::OfflinePreview { total: 25, messages: 10, receipts: 15, ..Default::default() };
+    let preview = pb::Event { seq: 0, kind: Some(pb::event::Kind::OfflinePreview(preview)) };
+    tx.send(crate::engine::Incoming { event: preview, ack: None }).await.unwrap();
+    tx.send(arriving(ANA, "3EB0AWAY1")).await.unwrap();
+    tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
+    tx.send(connection_event(State::KeepaliveRestored)).await.unwrap();
+    let pushed: Vec<_> = next_told(&mut told, 4).await.iter().map(connection_of).collect();
+    let expected = [
+        said("online", None, None),
+        said("catching_up", Some(0), Some(10)),
+        said("connecting", None, None),
+        said("catching_up", Some(1), Some(10)),
+    ];
+    assert_eq!(pushed, expected, "the total the catch-up said before the timeout");
+    drop(tx);
+    running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_keepalive_timeout_during_a_catch_up_holds_it_until_whatsapp_says_it_is_done_and_its_summary_comes_after() {
     use pb::connection::State;
     let home = tempfile::tempdir().unwrap();
@@ -2503,6 +2530,32 @@ async fn the_phones_patience_counts_only_online_so_a_reconnect_with_its_answer_o
     // The phone's answer, which waited for the connection.
     tx.send(phone_answers()).await.unwrap();
     assert_eq!(next_connection_within(&mut told, patience * 2).await, None, "and nothing flaps once it comes");
+    drop(tx);
+    running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_phones_patience_doesnt_count_while_a_keepalive_timeout_has_jawd_connecting_and_starts_again_whole_once_the_pings_get_through()
+ {
+    use pb::connection::State;
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let patience = Duration::from_secs(1);
+    let (live, tx, mut told, running) = phoning(&store, home.path(), patience, PHONE_GIVE_UP);
+    tx.send(connection_event(State::Connected)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    asked_phone(&live);
+    tokio::time::sleep(patience / 2).await;
+    tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Connecting));
+    assert_eq!(next_connection_within(&mut told, patience * 2).await, None, "nothing of the phone while connecting");
+    let restored = Instant::now();
+    tx.send(connection_event(State::KeepaliveRestored)).await.unwrap();
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));
+    assert_eq!(next_connection_within(&mut told, patience / 2).await, None, "not offline at once");
+    assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::PhoneOffline));
+    let waited = restored.elapsed();
+    assert!(waited >= patience, "a whole patience again after the restore: {waited:?}");
     drop(tx);
     running.await.unwrap();
 }
