@@ -9,8 +9,30 @@ let fixtures = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     .appending(path: "protocol/fixtures")
 
+/// Fixtures copied from a jawd branch whose protocol isn't on main yet, as the parity plan builds the
+/// Mac ahead of jawd: the `folders` branch's twelve, until it lands. A copy is read only while
+/// protocol/fixtures has no file of its name.
+let ahead = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "Ahead")
+
 func fixture(_ name: String) throws -> Data {
-    try Data(contentsOf: fixtures.appending(path: name))
+    let landed = fixtures.appending(path: name)
+    return try Data(contentsOf: FileManager.default.fileExists(atPath: landed.path) ? landed : ahead.appending(path: name))
+}
+
+/// Every fixture's name: protocol/fixtures', and the copies' still to land.
+func fixtureNames() throws -> [String] {
+    let landed = try FileManager.default.contentsOfDirectory(atPath: fixtures.path)
+    let copies = (try? FileManager.default.contentsOfDirectory(atPath: ahead.path)) ?? []
+    return Set(landed + copies).filter { $0.hasSuffix(".json") }.sorted()
+}
+
+/// A fixture's `result`, or its push's `params`, read as one type.
+struct Answer<T: Decodable>: Decodable {
+    let result: T
+}
+
+struct Pushed<T: Decodable>: Decodable {
+    let params: T
 }
 
 /// Decodes a reply line as a client would, expecting what `want` says it was asked for.
@@ -28,7 +50,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
 }
 
 @Test func `every result and push fixture decodes`() throws {
-    let names = try FileManager.default.contentsOfDirectory(atPath: fixtures.path).filter { $0.hasSuffix(".json") }
+    let names = try fixtureNames()
     #expect(names.count > 40)
     for name in names where !name.contains(".request.") {
         let method = name.components(separatedBy: ".").dropLast(2).joined(separator: ".")
@@ -293,6 +315,89 @@ func pushed(_ line: String) -> Incoming {
     try same("chat.info.request.json", written(id: 46, "chat.info", ChatRef(chat: "120363000000000002@g.us")))
     try same("layout.get.request.json", written(id: 30, "layout.get", LayoutGet(interface: "jaw")))
     try same("status.request.json", written(id: 2, "status", NoParams?.none))
+}
+
+@Test func `a fixture copied ahead of jawd is byte for byte the one that lands`() throws {
+    let copies = ((try? FileManager.default.contentsOfDirectory(atPath: ahead.path)) ?? []).filter { $0.hasSuffix(".json") }
+    for name in copies {
+        let landed = fixtures.appending(path: name)
+        guard FileManager.default.fileExists(atPath: landed.path) else { continue }
+        #expect(try Data(contentsOf: landed) == Data(contentsOf: ahead.appending(path: name)),
+                "\(name) changed on its way to main: copy it again, or delete the copies once they've all landed")
+    }
+}
+
+@Test func `the tree, its slots and the roster read as the folders branch's fixtures have them`() throws {
+    let tree = try JSONDecoder().decode(Answer<FoldersWatched>.self, from: fixture("folders.watch.result.json")).result
+    #expect(tree.watch == "w5" && tree.seq == 81240 && tree.remove.isEmpty && tree.unread == 0)
+    #expect(tree.rows.map(\.id) == ["all", "unread", "folder:9", "folder:10", "smart:7"])
+    #expect(tree.rows.map(\.isBuiltIn) == [true, true, false, false, false])
+    #expect(tree.rows.map(\.isYours) == [false, false, true, true, false])
+    #expect(tree.rows[4].isSmart && tree.rows[4].smart == .object(["mentions": .bool(true)]))
+    #expect(tree.rows[2].parent == nil && tree.rows[3].parent == "folder:9" && tree.rows[3].position == 0)
+    #expect(tree.rows[2].unread == 3 && tree.rows[2].mentions == 1 && tree.rows[2].count == 6 && tree.rows[2].favourite == 1)
+    #expect(tree.favourites == [Favourite(slot: 1, folder: "folder:9"), Favourite(slot: 2, folder: "unread"),
+                                 Favourite(slot: 3, chat: "351912345678@s.whatsapp.net", name: "Ana Ribeiro")])
+    #expect(tree.favourites.map(\.target) == ["folder:9", "unread", "351912345678@s.whatsapp.net"])
+
+    let push = try JSONDecoder().decode(Pushed<FoldersPush>.self, from: fixture("folders.push.json")).params
+    #expect(push.upsert.map(\.unread) == [4] && push.upsert.first?.v == 81241)
+    #expect(push.favourites == [Favourite(slot: 1, folder: "folder:9")], "the slots whole, as one changed")
+    let quiet = try JSONDecoder().decode(FoldersPush.self, from: Data(#"{"watch":"w5","seq":81242,"upsert":[]}"#.utf8))
+    #expect(quiet.favourites == nil, "no slot changed, so the slots stay as they were")
+
+    let made = try JSONDecoder().decode(Answer<FolderMade>.self, from: fixture("folder.create.result.json")).result.folder
+    #expect(made.id == "folder:10" && made.parent == "folder:9" && made.name == "Cousins" && made.count == 0)
+
+    let roster = try JSONDecoder().decode(Answer<RosterWatched>.self, from: fixture("roster.watch.result.json")).result
+    #expect(roster.total == 6 && roster.rows.map(\.id) == ["person:1", "person:4", "person:5"])
+    #expect(roster.rows.map(\.presence.state) == [.online, .seen, .hidden], "Ana online: typing shows from her chat, not here")
+    #expect(roster.rows.map(\.presence.around) == [true, false, false])
+    #expect(roster.rows[1].presence.at == 1_792_145_000_000 && !roster.rows[2].presence.known)
+    #expect(roster.rows[0].chat == "351912345678@s.whatsapp.net" && roster.rows[1].chat == nil)
+    #expect(roster.rows[1].folders == ["folder:10"] && roster.rows[0].about == "Lisboa")
+    let came = try JSONDecoder().decode(Pushed<RosterPush>.self, from: fixture("roster.push.json")).params
+    #expect(came.upsert.map(\.presence.state) == [.online] && came.upsert.first?.sort.hasPrefix("0~") == true)
+    let odd = try JSONDecoder().decode(Presence.self, from: Data(#"{"state":"away"}"#.utf8))
+    #expect(odd.state == .hidden && odd.known, "a state jawd may add later says nothing")
+}
+
+@Test func `a chat row says the folders it sits in and its slot, as the protocol's text has them`() throws {
+    // No fixture on the folders branch shows them, so this is the protocol's chat row with them added.
+    let row = try JSONDecoder().decode(ChatRow.self, from: Data(#"""
+    {"id":"351912345678@s.whatsapp.net","v":42,"sort":"1~1792145060000~000000000017","kind":"direct","name":"Ana Ribeiro",
+     "unread":2,"mentions":0,"pinned":true,"muted_until":null,"archived":false,"marked_unread":false,"draft":null,
+     "community":null,"folders":["folder:9"],"favourite":3}
+    """#.utf8))
+    #expect(row.folders == ["folder:9"] && row.favourite == 3)
+    let bare = try JSONDecoder().decode(ChatRow.self, from: Data(#"{"id":"x@s.whatsapp.net","v":1,"sort":"1"}"#.utf8))
+    #expect(bare.folders.isEmpty && bare.favourite == nil, "absent when it's in none and on no slot")
+}
+
+@Test func `each folder request JawKit writes equals its fixture, or the protocol's text where none shows it`() throws {
+    func same(_ name: String, _ written: JSONValue) throws {
+        #expect(written == (try JSONValue.parse(fixture(name))), "\(name)")
+    }
+    try same("folders.watch.request.json", written(id: 50, "folders.watch", FoldersWatch(have: [])))
+    try same("roster.watch.request.json", written(id: 51, "roster.watch", RosterWatch(
+        folder: "folder:9", around: .top, before: 0, after: 200, have: [],
+    )))
+    try same("folder.create.request.json", written(id: 52, "folder.create", FolderCreate(name: "Cousins", parent: "folder:9")))
+    try same("folder.add.request.json", written(id: 53, "folder.add", FolderItem(folder: "folder:10", item: "person:4")))
+    try same("favourite.set.request.json", written(id: 54, "favourite.set", FavouriteSet(slot: 3, target: "351912345678@s.whatsapp.net")))
+
+    func params(_ p: some Encodable & Sendable) throws -> JSONValue? {
+        try written(id: 1, "x", p)["params"]
+    }
+    #expect(try params(FolderCreate(name: "Work", parent: nil)) == .object(["name": .string("Work")]), "at the top")
+    #expect(try params(FolderRename(folder: "folder:9", name: "Família")) == .object(["folder": .string("folder:9"), "name": .string("Família")]))
+    #expect(try params(FolderMove(folder: "folder:10", parent: nil, position: nil)) == .object(["folder": .string("folder:10"), "parent": .null]),
+            "back to the top, last among its new siblings")
+    #expect(try params(FolderMove(folder: "folder:10", parent: "folder:4", position: 0))
+        == .object(["folder": .string("folder:10"), "parent": .string("folder:4"), "position": .number(0)]))
+    #expect(try params(FolderID(folder: "folder:10")) == .object(["folder": .string("folder:10")]))
+    #expect(try params(FavouriteSet(slot: 3, target: nil)) == .object(["slot": .number(3), "target": .null]), "the slot emptied")
+    #expect(try params(FoldersWatch(have: ["all", "folder:9"])) == .object(["have": .array([.string("all"), .string("folder:9")])]))
 }
 
 @Test func `keys are jaw and 32 hex digits, each its own`() {
