@@ -268,6 +268,39 @@ func TestAPatchIsAnsweredOnceJawdHasKeptItsEchoAndNoOtherIndexOrTimeEndsItsWait(
 	}
 }
 
+// A patch sent before a logout has its echo handed over by the client that sent it, which the
+// engine has replaced by then.
+func TestAnEchoFromAClientReplacedAfterALogoutAnswersItsPatchOnceJawdHasKeptIt(t *testing.T) {
+	e, jawd, closeLink := linkedEngine(t)
+	defer closeLink()
+	old := e.cli()
+	const at = 1_792_000_000_123
+	ana := []string{"pin_v1", "351910000002@s.whatsapp.net"}
+	answered := make(chan *enginepb.Reply, 1)
+	echo := e.echoes.expect(ana, at)
+	go func() { answered <- e.echoed(echo, "pin_v1", time.Minute) }()
+	loggedOutByThePhone(t, e, jawd, old)
+	go e.handleFrom(old, &events.AppState{Index: ana, SyncActionValue: pinnedAt(at)})
+	frame := recv(t, jawd)
+	if frame.GetEvent().GetAppState() == nil {
+		t.Fatalf("its echo came from the replaced client as %v", frame)
+	}
+	select {
+	case reply := <-answered:
+		t.Fatalf("the patch was answered %v after its echo, before jawd had kept it", reply)
+	case <-time.After(20 * time.Millisecond):
+	}
+	acked(t, jawd, frame.GetEvent().Seq)
+	select {
+	case reply := <-answered:
+		if reply.GetDone() == nil {
+			t.Fatalf("its echo, kept, gave %v", reply)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("its echo, kept from the replaced client, didn't end the wait")
+	}
+}
+
 func TestAPatchWhoseEchoDoesntComeBackIsAFailureToTryAgainAndItsWaitIsForgotten(t *testing.T) {
 	e := newEngine(context.Background(), nil, NewLogger("test", "error"))
 	const at = 1_792_000_000_123
