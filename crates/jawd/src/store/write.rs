@@ -953,8 +953,8 @@ fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsett
 /// one's messages were read, so how far WhatsApp was told doesn't move for it. Nor does it, said by
 /// this chat's own JID, say anything of the messages that came under another of the person's JIDs,
 /// which a merge leaves owed: while one of those lies past how far WhatsApp was told, that stays,
-/// and the receipts go, again for what the phone did read, which is harmless. A read with the
-/// phone's counts moves it as before, since kept below them it would owe what they count unread.
+/// and the receipts go, again for what the phone did read, which is harmless, but never for what
+/// the phone's counts call unread (`outbox::owed`).
 fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     let jid = chat_jid(db, &read.chat)?;
     let own = user_jid(&read.chat) == jid;
@@ -981,7 +981,7 @@ fn set_read(db: &Connection, stamps: &mut Stamps, read: &Read) -> Result<bool> {
     let Some(was) = chat_read(db, chat)? else { return Ok(false) };
     let mut now = was.clone();
     let taken = !was.known || was.phone_unread.is_some() || was.at.is_none_or(|read| read < at);
-    let speaks = !read.here && own && (read.phone.is_some() || !came_elsewhere(db, chat, was.told, at)?);
+    let speaks = !read.here && own && !came_elsewhere(db, chat, was.told, at)?;
     if read.here {
         if !taken {
             return Ok(false);

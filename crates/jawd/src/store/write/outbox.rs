@@ -6,7 +6,8 @@
 //! Every failed row can be retried by hand: whatever leaves one nothing could send again (a
 //! deletion for you or for everyone, from anywhere) removes it in the same transaction (`tidied`).
 //! Reading moves the chat's one read position, which sync keeps (`set_read`, `settle`), and the
-//! read receipts owed to WhatsApp are the messages between how far it has been told and there.
+//! read receipts owed to WhatsApp are the messages between how far it has been told and there, but
+//! for the phone's own unread messages while its counts stand.
 //!
 //! An action of yours on a message (a reaction, an edit, a deletion for everyone) goes the same
 //! way, as a message of its own with an ID of its own and its outbox row, and is done to the
@@ -1264,7 +1265,8 @@ pub fn owing(db: &Connection) -> Result<Vec<i64>> {
 }
 
 /// The next lot of what chat `chat` owes WhatsApp, if anything: up to RECEIPTS_AT_ONCE of the
-/// oldest messages owed, going as far as the last of them, or to the read position if that's all.
+/// oldest messages owed, going as far as the last of them, or to the read position if that's all,
+/// but never to the phone's own unread messages while its counts stand, which aren't read.
 pub fn owed(db: &Connection, chat: i64) -> Result<Owing> {
     type Found = (String, String, i64, i64, i64, i64, Option<i64>, bool);
     let found: Option<Found> = db
@@ -1280,6 +1282,12 @@ pub fn owed(db: &Connection, chat: i64) -> Result<Owing> {
     if merged_into {
         return Ok(Owing::Merging { into: chat });
     }
+    // Where WhatsApp would be told up to if it knew as much as jaw: the position, but before the
+    // phone's own unread messages while its counts stand.
+    let (at, n) = match super::chat_read(db, chat)? {
+        Some(read) => super::told_now(db, chat, &super::ChatRead { told: None, ..read })?,
+        None => (at, n),
+    };
     let rows: Vec<(String, Option<String>, i64, i64)> = db
         .prepare_cached(OWED_MESSAGES)?
         .query_map(params![chat, told_at, told_n, at, n, RECEIPTS_AT_ONCE as i64], |r| {

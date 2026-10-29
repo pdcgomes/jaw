@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use super::*;
 use crate::store::outbox::{self, Owing};
@@ -1259,16 +1259,36 @@ async fn a_phone_read_of_the_chat_that_stays_by_its_own_jid_never_cancels_the_re
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_phone_read_with_the_phones_counts_never_leaves_owed_what_they_count_unread() {
-    let (_home, store) = read_on_the_phone_and_merged().await;
-    store.apply(Lane::Live, vec![message(NEW, "n5", AT + 6_000), message(NEW, "n6", AT + 6_001)]).await.unwrap();
-    // History's read of the number's chat: 3 unread on the phone, more than it brought, so l4, n5
-    // and n6 count unread.
-    let history = Read { chat: NEW.into(), at: AT + 6_001, phone: Some((3, 0)), ..Read::default() };
+async fn a_phone_read_with_counts_by_either_jid_leaves_owed_what_came_under_the_lid_but_not_what_they_count_unread() {
+    for named in [NEW, LID] {
+        let (_home, store) = read_on_the_phone_and_merged().await;
+        store.apply(Lane::Live, vec![message(NEW, "n5", AT + 6_000), message(NEW, "n6", AT + 6_001)]).await.unwrap();
+        // History's read of the chat: 3 unread on the phone, more than it brought, so l4, n5 and n6
+        // count unread, and l0 to l3, which came under the LID, are read.
+        let history = Read { chat: named.into(), at: AT + 6_001, phone: Some((3, 0)), ..Read::default() };
+        store.apply(Lane::Live, vec![Change::Read(history)]).await.unwrap();
+        assert_eq!(unread(&store).await, [(NEW.to_string(), 3)], "read by {named}");
+        assert_eq!(owed(&store, NEW).await, ids("l", 0..4), "read by {named}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_into_a_chat_the_phones_counts_stand_in_for_owes_nothing_they_count_unread_until_its_read_here() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let changes = vec![message(NEW, "n0", AT), message(NEW, "n1", AT + 1), message(LID, "l0", AT + 10)];
+    store.apply(Lane::Live, changes).await.unwrap();
+    // History's read of the number's chat: 3 unread on the phone, more than it brought, so n0 and
+    // n1 count unread.
+    let history = Read { chat: NEW.into(), at: AT + 1, phone: Some((3, 0)), ..Read::default() };
     store.apply(Lane::Live, vec![Change::Read(history)]).await.unwrap();
-    assert_eq!(unread(&store).await, [(NEW.to_string(), 3)]);
-    let owed = owed(&store, NEW).await;
-    assert!(!owed.iter().any(|id| ["l4", "n5", "n6"].contains(&id.as_str())), "{owed:?}");
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    merged(&store, LID).await;
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 4)], "the phone's 3, and l0 after where it was read");
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "n0 and n1 count unread");
+    let here = Change::Read(Read { chat: NEW.into(), ids: vec!["l0".into()], here: true, ..Read::default() });
+    store.apply(Lane::Live, vec![here]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, ["n0", "n1", "l0"], "read here");
 }
 
 /// A xorshift generator, so a failing seed can be run again.
@@ -1284,13 +1304,14 @@ impl Rng {
 }
 
 /// A random history of Ana's number's chat and her LID's: messages from her in each, and some of
-/// yours, then, in a random order, more of both, reads on the phone by either JID (to a time, or
-/// naming a message, as a receipt from your phone does) and here, the join that starts the LID's
-/// chat merging into the number's, and steps of the merge; then the merge stepped to its end and
-/// everything sent again, as a resync sends it. The phone's counts are left out, since a read with
-/// them moves how far WhatsApp was told as before.
+/// yours, then, in a random order, more of both, reads on the phone by either JID (to a time, a
+/// third of them with the phone's counts, or naming a message, as a receipt from your phone does)
+/// and here, the join that starts the LID's chat merging into the number's, and steps of the merge;
+/// then the merge stepped to its end and everything sent again, as a resync sends it. The counts
+/// come from a generator of their own, so the rest of a seed's history is the same with or without.
 fn reads_and_a_merge(seed: u64) -> Vec<Then> {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut counting = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
     let (mut at, mut next) = (AT, 0);
     let mut came: [Vec<String>; 2] = Default::default();
     let mut fresh = |prefix: &str| {
@@ -1329,7 +1350,10 @@ fn reads_and_a_merge(seed: u64) -> Vec<Then> {
                 message(jid, &id, at)
             }
             5 => Change::Message(mine(jid, &fresh("y"), at)),
-            6..=9 => Change::Read(Read { chat: jid.into(), at: at - rng.below(600) as i64, ..Read::default() }),
+            6..=9 => {
+                let phone = (counting.below(3) == 0).then(|| (1 + counting.below(6) as u32, 0));
+                Change::Read(Read { chat: jid.into(), at: at - rng.below(600) as i64, phone, ..Read::default() })
+            }
             10..=11 => Change::Read(Read { chat: jid.into(), at, ids: vec![named(&mut rng)], ..Read::default() }),
             12..=15 => {
                 Change::Read(Read { chat: jid.into(), ids: vec![named(&mut rng)], here: true, ..Read::default() })
@@ -1354,34 +1378,93 @@ fn reads_and_a_merge(seed: u64) -> Vec<Then> {
     script
 }
 
+/// The newest place chat `chat` is read up to, the phone's own unread messages left out: its
+/// position, or, while the phone's counts stand, just its newest message from others there that
+/// they don't count.
+fn read_to(db: &Connection, chat: i64) -> anyhow::Result<Option<(i64, i64)>> {
+    let (at, n, unread): (Option<i64>, i64, i64) = db.query_row(
+        "SELECT read_at, coalesce(read_n, 9223372036854775807), coalesce(phone_unread, 0) FROM chats WHERE n = ?1",
+        [chat],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let Some(at) = at else { return Ok(None) };
+    if unread == 0 {
+        return Ok(Some((at, n)));
+    }
+    Ok(db
+        .query_row(
+            "SELECT at, n FROM messages WHERE chat = ?1 AND mine = 0 AND kind NOT IN ('system', 'call')
+                AND (at, n) <= (?2, ?3)
+            ORDER BY at DESC, n DESC LIMIT 1 OFFSET ?4",
+            params![chat, at, n, unread],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
 /// Each message one of the person's chats owes a read receipt for, by ID: from others, after how
-/// far WhatsApp was told of its chat, and up to where that was read.
+/// far WhatsApp was told of its chat, and up to where that was read, but for what the phone's
+/// counts call unread.
 async fn owing(store: &Store) -> Vec<String> {
-    column(
-        store,
-        "SELECT m.id FROM chats c JOIN messages m ON m.chat = c.n
-        WHERE c.told_at IS NOT NULL AND m.mine = 0 AND m.kind NOT IN ('system', 'call')
-            AND (m.at, m.n) > (c.told_at, c.told_n) AND (m.at, m.n) <= (c.read_at, coalesce(c.read_n, 9223372036854775807))
-        ORDER BY m.id",
-    )
+    query(store, |db| {
+        let told: Vec<(i64, i64, i64)> = db
+            .prepare("SELECT n, told_at, told_n FROM chats WHERE told_at IS NOT NULL")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut ids = Vec::new();
+        for (chat, told_at, told_n) in told {
+            let Some((at, n)) = read_to(db, chat)? else { continue };
+            let owed = db
+                .prepare(
+                    "SELECT id FROM messages WHERE chat = ?1 AND mine = 0 AND kind NOT IN ('system', 'call')
+                        AND (at, n) > (?2, ?3) AND (at, n) <= (?4, ?5)",
+                )?
+                .query_map(params![chat, told_at, told_n, at, n], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            ids.extend(owed);
+        }
+        ids.sort();
+        Ok(ids)
+    })
     .await
 }
 
-/// Message `id`'s JID it came under, and whether its chat is read past it.
+/// What `outbox::owed` gives each of the person's chats, by ID, or None while a merge waits.
+async fn owed_by_each(store: &Store) -> Option<Vec<String>> {
+    query(store, |db| {
+        let chats: Vec<i64> =
+            db.prepare("SELECT n FROM chats")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let mut ids = Vec::new();
+        for chat in chats {
+            match outbox::owed(db, chat)? {
+                Owing::Receipts(owed) => ids.extend(owed.messages.into_iter().map(|(id, _)| id)),
+                Owing::Nothing => {}
+                Owing::Merging { .. } => return Ok(None),
+            }
+        }
+        ids.sort();
+        Ok(Some(ids))
+    })
+    .await
+}
+
+/// Message `id`'s JID it came under, and whether its chat is read past it, the phone's own unread
+/// messages left out.
 async fn came_and_read(store: &Store, id: String) -> (String, bool) {
     query(store, move |db| {
-        Ok(db.query_row(
-            "SELECT j.jid, (m.at, m.n) <= (c.read_at, coalesce(c.read_n, 9223372036854775807))
-            FROM messages m JOIN chats c ON c.n = m.chat JOIN person_jids j ON j.n = m.sender WHERE m.id = ?1",
+        let (under, chat, at, n): (String, i64, i64, i64) = db.query_row(
+            "SELECT j.jid, m.chat, m.at, m.n FROM messages m JOIN person_jids j ON j.n = m.sender WHERE m.id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get::<_, Option<bool>>(1)?.unwrap_or(false))),
-        )?)
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        Ok((under, read_to(db, chat)?.is_some_and(|to| (at, n) <= to)))
     })
     .await
 }
 
 /// Plays one of `reads_and_a_merge`'s histories, failing at the first read on the phone that leaves
-/// a receipt no longer owed for a message still read that came under a JID it doesn't name.
+/// a receipt no longer owed for a message still read that came under a JID it doesn't name, and at
+/// the first change after which, while no merge waits, `outbox::owed` gives other than `owing`.
 async fn no_read_cancels_what_it_cant_vouch_for(seed: u64) {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
@@ -1403,8 +1486,11 @@ async fn no_read_cancels_what_it_cant_vouch_for(seed: u64) {
         };
         let before = owing(&store).await;
         store.apply(Lane::Live, changes).await.unwrap();
-        let Some(named) = named else { continue };
         let after = owing(&store).await;
+        if let Some(owed) = owed_by_each(&store).await {
+            assert_eq!(owed, after, "seed {seed}, op {i}: what outbox::owed gives");
+        }
+        let Some(named) = named else { continue };
         for id in before.into_iter().filter(|id| !after.contains(id)) {
             let (under, read) = came_and_read(&store, id.clone()).await;
             assert!(
