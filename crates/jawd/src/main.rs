@@ -1148,6 +1148,65 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_demo_engines_account_shows_its_contact_cards_and_takes_yours_through_the_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let options = Options { no_notify: true, ..Options::default() };
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options).await.unwrap();
+        tokio::spawn(sock::serve(started.state.clone(), listener));
+        let path = socket.clone();
+        let cards = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&path, "test", "0").unwrap();
+            // The row `id` in `chat` once the demo has played it, as its window shows it.
+            let mut card = |chat: &str, id: &str| {
+                let watch = serde_json::json!({ "chat": chat, "around": "newest", "before": 20 });
+                let mut rows = connection.call("messages.watch", watch).unwrap()["rows"].clone();
+                loop {
+                    if let Some(row) = rows.as_array().and_then(|rows| rows.iter().find(|row| row["id"] == id)) {
+                        return row.clone();
+                    }
+                    rows = connection.push().unwrap().params["upsert"].clone();
+                }
+            };
+            let ana = card("351912345678@s.whatsapp.net", "3EB0DEMO0000000F");
+            let climbers = card("120363012345678901@g.us", "3EB0DEMO0000000E");
+            let marta = jaw_proto::vcard::write("Marta Lopes", &["+351213456789"]);
+            let send = serde_json::json!({
+                "chat": "351912345678@s.whatsapp.net",
+                "cards": [{ "name": "Marta Lopes", "vcard": marta }],
+                "key": "jaw-demo-card",
+            });
+            let sent = connection.call("send.contact", send).unwrap();
+            let id = sent["message"].clone();
+            loop {
+                let push = connection.push().unwrap();
+                let upserts = push.params["upsert"].as_array().cloned().unwrap_or_default();
+                if upserts.iter().any(|row| row["id"] == id && row["status"] == "read") {
+                    break;
+                }
+            }
+            (ana, climbers, sent, marta)
+        });
+        let (ana, climbers, sent, marta) = tokio::time::timeout(Duration::from_secs(20), cards)
+            .await
+            .expect("the cards showed and yours went")
+            .unwrap();
+        assert_eq!(ana["kind"], "contact");
+        assert_eq!(ana["contact"]["name"], "Dr.ª Marta Lopes");
+        let read = jaw_proto::vcard::read(ana["contact"]["vcard"].as_str().unwrap());
+        let numbers: Vec<&str> = read[0].phones.iter().map(|phone| phone.dialled()).collect();
+        assert_eq!(numbers, ["+351213456789", "21 000 00 00"], "her card's numbers, the first on WhatsApp");
+        assert_eq!(climbers["contact"]["name"], "2 contacts");
+        let read = jaw_proto::vcard::read(climbers["contact"]["vcard"].as_str().unwrap());
+        let names: Vec<_> = read.iter().map(|card| card.name.clone().unwrap()).collect();
+        assert_eq!(names, ["Inês Gomes", "Tiago Martins"], "both cards in one message");
+        assert_eq!((&sent["row"]["kind"], &sent["row"]["status"]), (&"contact".into(), &"pending".into()));
+        assert_eq!(sent["row"]["contact"], serde_json::json!({ "name": "Marta Lopes", "vcard": marta }));
+        stop(started, &socket).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn jawd_stops_well_within_its_bound_while_messages_pour_into_a_watched_chat() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());

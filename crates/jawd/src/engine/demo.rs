@@ -580,6 +580,15 @@ impl DemoEngine {
                 SATURDAY,
                 "the plan for Saturday",
             ),
+            // Earlier than the rest too: Ana's dentist's card, and two climbers' as one message.
+            contact(ana, ana, "3EB0DEMO0000000F", now - 900_000, &[("Dr.ª Marta Lopes", MARTA)]),
+            contact(
+                climbing,
+                rui,
+                "3EB0DEMO0000000E",
+                now - 450_000,
+                &[("Inês Gomes", INES), ("Tiago Martins", TIAGO)],
+            ),
             // You and the two whose phones answer what you send there, so a mention of one lands;
             // told once the messages are in, so storing them holds none of the messages back, and
             // last, so an interface that sees the group named has the whole script.
@@ -873,6 +882,43 @@ fn answering(send: &pb::Send, who: &str) -> Option<pb::Event> {
     let secret = sent.message_context_info.as_ref()?.message_secret.as_deref()?;
     let id = format!("{}-going", send.id);
     Some(answer_sealed(&send.chat, who, &id, now_ms(), (&send.id, ME, secret), EventResponseType::Going))
+}
+
+/// The made-up account's contact cards, as WhatsApp's phones write them.
+const MARTA: &str = "BEGIN:VCARD\nVERSION:3.0\nN:Lopes;Marta;;Dr.ª;\nFN:Dr.ª Marta Lopes\nORG:Clínica da Graça;\n\
+    item1.TEL;waid=351213456789:+351 21 345 6789\nitem1.X-ABLabel:Mobile\nTEL;type=WORK:21 000 00 00\nEND:VCARD";
+const INES: &str = "BEGIN:VCARD\nVERSION:3.0\nN:Gomes;Inês;;;\nFN:Inês Gomes\n\
+    item1.TEL;waid=351913002210:+351 913 002 210\nitem1.X-ABLabel:Mobile\nEND:VCARD";
+const TIAGO: &str = "BEGIN:VCARD\nVERSION:3.0\nN:Martins;Tiago;;;\nFN:Tiago Martins\n\
+    item1.TEL;waid=351916666666:+351 916 666 666\nitem1.X-ABLabel:Mobile\nEND:VCARD";
+
+/// Contact cards from `sender` in `chat`, each a name and a vCard, as the phones send them: one as
+/// a contact message, several as one message of them all.
+pub fn contact(chat: &str, sender: &str, id: &str, at_ms: i64, cards: &[(&str, &str)]) -> pb::Event {
+    let mut cards: Vec<e2e::ContactMessage> = cards
+        .iter()
+        .map(|(name, vcard)| e2e::ContactMessage {
+            display_name: Some(name.to_string()),
+            vcard: Some(vcard.to_string()),
+            ..Default::default()
+        })
+        .collect();
+    let raw = match cards.len() {
+        1 => e2e::Message { contact_message: Some(Box::new(cards.remove(0))), ..Default::default() },
+        n => {
+            let array = e2e::ContactsArrayMessage {
+                display_name: Some(format!("{n} contacts")),
+                contacts: cards,
+                context_info: None,
+            };
+            e2e::Message { contacts_array_message: Some(Box::new(array)), ..Default::default() }
+        }
+    };
+    let mut event = text(chat, sender, id, at_ms, "");
+    if let Some(pb::event::Kind::Message(message)) = &mut event.kind {
+        message.raw = raw.encode_to_vec();
+    }
+    event
 }
 
 /// `voter`'s vote, as message `id`, in the poll `poll` (its ID and who sent it), choosing `options`
