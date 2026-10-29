@@ -994,7 +994,8 @@ fn a_history_blob_keeps_each_chat_as_the_phone_has_it() {
         ..Default::default()
     };
     let changes = walked(&history.encode_to_vec());
-    let chat = changes.iter().find_map(|c| if let Change::Chat(chat) = c { Some(chat) } else { None }).unwrap();
+    let chat =
+        changes.iter().find_map(|c| if let Change::HistoryChat { chat, .. } = c { Some(chat) } else { None }).unwrap();
     assert_eq!((chat.id.as_str(), chat.pinned, chat.muted_until), (ANA, Some(AT), Some(AT + 3_600_000)));
     let read = changes.iter().find_map(|c| if let Change::Read(read) = c { Some(read) } else { None }).unwrap();
     assert_eq!(read.phone, Some((4, 0)), "the phone counts four unread, more than the blob carries");

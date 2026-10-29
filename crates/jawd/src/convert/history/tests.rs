@@ -71,18 +71,24 @@ mod decoded_whole {
             None
         };
         let name = c.name.clone().or_else(|| c.display_name.clone()).filter(|n| !n.is_empty() && !is_person(&id));
-        changes.push(Change::Chat(Chat {
-            id: id.clone(),
-            kind,
-            name,
-            pinned: c.pinned.map(|at| if at > 0 { ms(u64::from(at)) } else { 0 }),
-            archived: c.archived,
-            muted_until: c.mute_end_time.map(ms),
-            marked_unread: c.marked_as_unread,
-            community: c.parent_group_id.clone(),
-            ephemeral: c.ephemeral_expiration,
-            ..Chat::default()
-        }));
+        let mut jids = vec![c.id.clone()];
+        jids.extend(pn.clone());
+        jids.extend(lid.clone());
+        changes.push(Change::HistoryChat {
+            chat: Chat {
+                id: id.clone(),
+                kind,
+                name,
+                pinned: c.pinned.map(|at| if at > 0 { ms(u64::from(at)) } else { 0 }),
+                archived: c.archived,
+                muted_until: c.mute_end_time.map(ms),
+                marked_unread: c.marked_as_unread,
+                community: c.parent_group_id.clone(),
+                ephemeral: c.ephemeral_expiration,
+                ..Chat::default()
+            },
+            jids,
+        });
         let mut messages = Vec::new();
         for entry in &c.messages {
             let Some(info) = entry.message.as_ref() else { continue };

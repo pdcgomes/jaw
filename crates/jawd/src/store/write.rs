@@ -30,6 +30,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug)]
 pub enum Change {
     Chat(Chat),
+    /// A conversation's chat as a history blob has it, `jids` being every JID the blob gives the
+    /// conversation. Its settings (pinned, archived, muted, marked unread) are the phone's when it
+    /// built the blob, which app state may have changed since, so each fills in only a setting app
+    /// state has said nothing of for the chat: no value WhatsApp sent for its index, and no change
+    /// of jaw's to it on its way.
+    HistoryChat {
+        chat: Chat,
+        jids: Vec<String>,
+    },
     Person(Person),
     Message(Message),
     Opened(Opened),
@@ -623,7 +632,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
         Some(Change::Amend(a)) => {
             ("amendment", format!("{} {} {}", a.chat, a.target, a.what.kind()), a.raw.as_ref().map(|p| p.0.as_slice()))
         }
-        Some(Change::Chat(c)) => ("chat", c.id.clone(), None),
+        Some(Change::Chat(c) | Change::HistoryChat { chat: c, .. }) => ("chat", c.id.clone(), None),
         Some(Change::Person(p)) => ("person", p.jids.join(" "), None),
         Some(Change::Members(m)) => ("members", m.chat.clone(), None),
         Some(Change::AppState { index, value, .. }) => ("app_state", index.join(" "), Some(value.as_slice())),
@@ -719,6 +728,7 @@ pub(super) fn touches_fts(changes: &[Change]) -> bool {
 pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Result<bool> {
     match change {
         Change::Chat(chat) => upsert_chat(db, stamps, chat),
+        Change::HistoryChat { chat, jids } => upsert_chat(db, stamps, &unsaid(db, chat, jids)?),
         Change::Person(person) => upsert_person(db, stamps, person),
         Change::Message(message) => upsert_message(db, stamps, message),
         Change::Opened(opened) => open_chat(db, stamps, opened),
@@ -1547,6 +1557,43 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
         touch_roster(db, stamps, person)?;
     }
     Ok(true)
+}
+
+/// Whether app state has said anything of index `key`: WhatsApp has sent a value for it, kept
+/// whether it was applied or held back, or jaw has a patch for it on its way.
+const SAID: &str = "SELECT EXISTS (SELECT 1 FROM app_state WHERE key = ?1)
+    OR EXISTS (SELECT 1 FROM app_state_awaiting WHERE key = ?1)";
+
+/// History's `chat` less each setting app state has said anything of for it, under any of `jids` or
+/// the JID jaw keeps the chat by, which jaw's own patches name.
+fn unsaid(db: &Connection, chat: &Chat, jids: &[String]) -> Result<Chat> {
+    let kept = chat_jid(db, &chat.id)?;
+    let mut named: Vec<&str> = jids.iter().map(String::as_str).chain([kept.as_str()]).collect();
+    named.sort_unstable();
+    named.dedup();
+    let said = |index: &str| -> Result<bool> {
+        let mut said = db.prepare_cached(SAID)?;
+        for &jid in &named {
+            if said.query_row([serde_json::to_string(&[index, jid])?], |r| r.get(0))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    let mut chat = chat.clone();
+    if chat.pinned.is_some() && said("pin_v1")? {
+        chat.pinned = None;
+    }
+    if chat.archived.is_some() && said("archive")? {
+        chat.archived = None;
+    }
+    if chat.muted_until.is_some() && said("mute")? {
+        chat.muted_until = None;
+    }
+    if chat.marked_unread.is_some() && said("markChatAsRead")? {
+        chat.marked_unread = None;
+    }
+    Ok(chat)
 }
 
 /// The person a JID belongs to, making one if needed.

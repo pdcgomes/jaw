@@ -386,6 +386,7 @@ pub(super) fn undo(db: &Connection, stamps: &mut Stamps, undo: &Undo) -> Result<
 mod tests {
     use prost::Message as _;
     use wa_proto::wa_web_protobuf_sync_action as action;
+    use wa_proto::wa_web_protobufs_history_sync::{Conversation, HistorySync};
 
     use super::*;
     use crate::convert::app_state::FOREVER;
@@ -1299,6 +1300,75 @@ mod tests {
         assert_eq!(awaited(&db, &["pin_v1", RUI]).map(|(at, ..)| at), Some(AT + 3), "whose wait goes on");
         let kept: i64 = db.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0)).unwrap();
         assert_eq!(kept, 2, "and both are kept in quarantine");
+    }
+
+    /// A chat archived at `at`, or brought back, as the phone's mutation carries it.
+    fn archive_value(archived: bool, at: i64) -> action::SyncActionValue {
+        action::SyncActionValue {
+            timestamp: Some(at),
+            archive_chat_action: Some(action::ArchiveChatAction { archived: Some(archived), message_range: None }),
+            ..Default::default()
+        }
+    }
+
+    /// Every change a history blob holding only `conversation` gives, in order, as the converter
+    /// hands them to the writer.
+    fn from_history(conversation: Conversation) -> Vec<Change> {
+        let blob = HistorySync { sync_type: 2, conversations: vec![conversation], ..Default::default() };
+        let mut changes = Vec::new();
+        crate::convert::history::walk(&blob.encode_to_vec(), &crate::convert::Me::default(), 2_000, |chunk| {
+            changes.extend(chunk);
+            true
+        })
+        .unwrap();
+        changes
+    }
+
+    #[test]
+    fn a_history_blob_built_before_jaws_changes_fills_in_only_the_settings_app_state_hasnt_said() {
+        let db = db();
+        chats(&db, &[ANA]);
+        let (linked, pin) = (AT - 60_000, ["pin_v1", ANA]);
+        arrives(&db, &pin, &pin_value(true, linked), 1);
+        assert_eq!(chat(&db, ANA).0, linked, "pinned by app state when the account was linked");
+        assert!(matches!(acted(&db, ANA, pin_at(ANA, false, AT, "u1")), Acted::Queued { .. }));
+        arrives(&db, &pin, &pin_value(false, AT), 2);
+        assert_eq!((chat(&db, ANA).0, awaited(&db, &pin)), (0, None), "unpinned from jaw, and its echo has come");
+        let mute = ["mute", ANA];
+        let muting =
+            Does::Set(Setting::Mute { until: FOREVER, patch: patch_of(&mute, &mute_value(FOREVER, AT + 1), "m1") });
+        assert!(matches!(acted(&db, ANA, muting), Acted::Queued { .. }));
+        // The conversation as the phone had it when the account was linked, converted only now.
+        let then = Conversation {
+            id: ANA.into(),
+            pinned: Some((linked / 1_000) as u32),
+            archived: Some(true),
+            mute_end_time: Some((linked / 1_000 + 3_600) as u64),
+            ..Default::default()
+        };
+        written(&db, &from_history(then));
+        let (pinned, archived, muted, ..) = chat(&db, ANA);
+        assert_eq!(pinned, 0, "jaw's unpin stands, app state having said so");
+        assert_eq!(kept(&db, &pin), Some(pin_value(false, AT).encode_to_vec()), "as WhatsApp's latest has it");
+        assert_eq!(muted, FOREVER, "as does jaw's mute, still on its way");
+        assert!(archived, "and what app state has said nothing of, history fills in");
+    }
+
+    #[test]
+    fn history_leaves_a_setting_app_state_said_under_another_of_the_jids_the_blob_gives_the_conversation() {
+        let db = db();
+        chats(&db, &[ANA]);
+        written(&db, &[Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]);
+        arrives(&db, &["archive", ANA_LID], &archive_value(false, AT), 1);
+        let then = Conversation {
+            id: ANA_LID.into(),
+            pn_jid: Some(ANA.into()),
+            lid_jid: Some(ANA_LID.into()),
+            archived: Some(true),
+            ..Default::default()
+        };
+        written(&db, &from_history(then));
+        assert!(!chat(&db, ANA).1, "app state brought it back by her LID, under which the blob names the conversation");
     }
 
     #[test]

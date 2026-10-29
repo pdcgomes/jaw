@@ -261,8 +261,8 @@ fn ms(time: u64) -> i64 {
     if time < 100_000_000_000 { time * 1000 } else { time }
 }
 
-/// A conversation's chat's JID, and its chat as the phone has it, after the person it joins when
-/// the phone gives both their phone number and LID.
+/// A conversation's chat's JID, and its chat as the phone has it, with every JID the blob gives the
+/// conversation, after the person it joins when the phone gives both their phone number and LID.
 fn chat(c: &Conversation) -> (String, Vec<Change>) {
     let mut id = c.id.clone();
     let pn = c.pn_jid.as_deref().filter(|j| j.ends_with("@s.whatsapp.net")).map(user_jid);
@@ -284,7 +284,7 @@ fn chat(c: &Conversation) -> (String, Vec<Change>) {
         None
     };
     let name = c.name.clone().or_else(|| c.display_name.clone()).filter(|n| !n.is_empty() && !is_person(&id));
-    changes.push(Change::Chat(Chat {
+    let chat = Chat {
         id: id.clone(),
         kind,
         name,
@@ -295,7 +295,9 @@ fn chat(c: &Conversation) -> (String, Vec<Change>) {
         community: c.parent_group_id.clone(),
         ephemeral: c.ephemeral_expiration,
         ..Chat::default()
-    }));
+    };
+    let jids = [Some(&c.id), pn.as_ref(), lid.as_ref()].into_iter().flatten().cloned().collect();
+    changes.push(Change::HistoryChat { chat, jids });
     (id, changes)
 }
 

@@ -4008,6 +4008,14 @@ INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked
     SEARCH group_members USING PRIMARY KEY (chat=?)
 
 -- src/store/write.rs
+SELECT EXISTS (SELECT 1 FROM app_state WHERE key = ?1) OR EXISTS (SELECT 1 FROM app_state_awaiting WHERE key = ?1)
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 1
+      SEARCH app_state USING PRIMARY KEY (key=?)
+    SCALAR SUBQUERY 2
+      SEARCH app_state_awaiting USING PRIMARY KEY (key=?)
+
+-- src/store/write.rs
 SELECT person FROM person_jids WHERE n = ?1
     SEARCH person_jids USING INTEGER PRIMARY KEY (rowid=?)
 
