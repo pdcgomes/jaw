@@ -184,34 +184,6 @@ impl Live {
 
 pub type Shared = Arc<Mutex<Live>>;
 
-/// Keeps jaw's own app-state patches and its full fetches of app state from going to the engine
-/// at once. whatsmeow hands over a fetch's mutations, and a patch's echo, each from a goroutine of
-/// its own, so two at once mix in the inbox, where what's held back for a patch goes by WhatsApp's
-/// order. Each holds its turn across its call to the engine, which answers a patch once its echo is
-/// kept and a fetch once every mutation in it is.
-#[derive(Clone, Default)]
-pub struct AppStateTurn(Arc<tokio::sync::Mutex<()>>);
-
-impl AppStateTurn {
-    /// Waits for the turn, which lasts until what it returns is dropped.
-    pub async fn take(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.0.lock().await
-    }
-
-    /// The turn, if nobody has it or waits for it.
-    pub fn try_take(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
-        self.0.try_lock().ok()
-    }
-
-    /// Resolves once the turn is free.
-    pub fn free(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let turn = self.0.clone();
-        async move {
-            drop(turn.lock().await);
-        }
-    }
-}
-
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
@@ -336,7 +308,7 @@ async fn stored_me(live: &Shared, what: &str) -> convert::Me {
 
 /// Handles the engine's events until it stops sending them. Who's typing, and a message from
 /// someone ending their typing in its chat, go to `typing`, which keeps it in memory, never in
-/// jaw.db. Each full fetch of app state takes its turn with jaw's own patches (`app_state`).
+/// jaw.db.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut incoming: mpsc::Receiver<Incoming>,
@@ -347,7 +319,6 @@ pub async fn run(
     home: PathBuf,
     following: crate::presence::Following,
     typing: crate::feed::Typing,
-    app_state: AppStateTurn,
 ) {
     let (offered, offers) = mpsc::unbounded_channel();
     let avatars = Avatars::new();
@@ -504,7 +475,6 @@ pub async fn run(
                             avatars.clone(),
                             merges.clone(),
                             resync,
-                            app_state.clone(),
                         ));
                     }
                 }

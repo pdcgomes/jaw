@@ -2,7 +2,8 @@
 //! stops (back to the first once it has run a minute), and says how it is for `status`. Once sync
 //! follows the engines' events, each engine after a stop waits for sync to have taken the stop in
 //! too, so nothing it sends comes before. Told to stop, it does at once, whatever it's waiting for,
-//! and starts the engine no more.
+//! and starts the engine no more. It holds the turn jaw's own app-state patches and its full
+//! fetches of app state take with the engine (`AppStateTurn`).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,6 +65,7 @@ pub struct Supervisor {
     stop: Arc<watch::Sender<bool>>,
     /// How many stops whoever follows the engines' events has taken in, once one does.
     taken: Arc<watch::Sender<Option<u32>>>,
+    app_state: AppStateTurn,
 }
 
 impl Supervisor {
@@ -82,7 +84,7 @@ impl Supervisor {
         let (stop, stopping) = watch::channel(false);
         let (taken, taking) = watch::channel(None);
         tokio::spawn(run(engine, events, backoff, status_tx, current_tx, stopping, taking));
-        Supervisor { status, current, stop: Arc::new(stop), taken: Arc::new(taken) }
+        Supervisor { status, current, stop: Arc::new(stop), taken: Arc::new(taken), app_state: AppStateTurn::default() }
     }
 
     /// Has each engine after a stop wait until `taken_in` says the stop is taken in, from now on,
@@ -96,6 +98,11 @@ impl Supervisor {
     /// Says the first `restarts` stops are taken in, so the engine after them may start.
     pub fn taken_in(&self, restarts: u32) {
         self.taken.send_modify(|taken| *taken = Some(taken.map_or(restarts, |taken| taken.max(restarts))));
+    }
+
+    /// The turn each app-state patch and each full fetch of app state takes with the engine.
+    pub fn app_state(&self) -> &AppStateTurn {
+        &self.app_state
     }
 
     /// Ends the engine and starts it no more, and waits until it has: a start under way is given
@@ -128,6 +135,34 @@ impl Supervisor {
                     status.last_exit.unwrap_or_else(|| format!("it's {}", status.state.name())),
                 ))
             }
+        }
+    }
+}
+
+/// Keeps jaw's own app-state patches and its full fetches of app state from going to the engine
+/// at once. whatsmeow hands over a fetch's mutations, and a patch's echo, each from a goroutine of
+/// its own, so two at once mix in the inbox, where what's held back for a patch goes by WhatsApp's
+/// order. Each holds its turn across its call to the engine, which answers a patch once its echo is
+/// kept and a fetch once every mutation in it is.
+#[derive(Clone, Default)]
+pub struct AppStateTurn(Arc<tokio::sync::Mutex<()>>);
+
+impl AppStateTurn {
+    /// Waits for the turn, which lasts until what it returns is dropped.
+    pub async fn take(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.lock().await
+    }
+
+    /// The turn, if nobody has it or waits for it.
+    pub fn try_take(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.0.try_lock().ok()
+    }
+
+    /// Resolves once the turn is free.
+    pub fn free(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let turn = self.0.clone();
+        async move {
+            drop(turn.lock().await);
         }
     }
 }

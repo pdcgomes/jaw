@@ -1183,7 +1183,6 @@ async fn serve_all_pushing(bed: &Bed) -> (std::path::PathBuf, broadcast::Sender<
     let live: crate::sync::Shared = Arc::default();
     let attention = Arc::new(crate::attention::Attention::default());
     let timing = crate::send::Timing::default();
-    let app_state = crate::sync::AppStateTurn::default();
     let sending = crate::send::Sending::start(
         bed.store.clone(),
         None,
@@ -1192,7 +1191,6 @@ async fn serve_all_pushing(bed: &Bed) -> (std::path::PathBuf, broadcast::Sender<
         attention.focus(),
         timing,
         crate::send::Makers { previews: crate::send::link::Previews::off(), media: None },
-        app_state,
     )
     .await;
     let state = State::new(

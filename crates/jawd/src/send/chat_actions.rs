@@ -392,7 +392,7 @@ pub(super) async fn refused(
 /// holds until every mutation is kept.
 fn fetch_again(inner: &Inner, names: Vec<String>) {
     let Some(engine) = inner.engine.clone() else { return };
-    let (app_state, timing, mut connected) = (inner.app_state.clone(), inner.timing, inner.connected.subscribe());
+    let (timing, mut connected) = (inner.timing, inner.connected.subscribe());
     tokio::spawn(async move {
         let restarts = engine.status().restarts;
         let mut pause = timing.retry_first;
@@ -406,7 +406,7 @@ fn fetch_again(inner: &Inner, names: Vec<String>) {
                 return;
             }
             let resync = pb::command::Kind::AppStateResync(pb::AppStateResync { names: names.clone() });
-            let turn = app_state.take().await;
+            let turn = engine.app_state().take().await;
             let answer = engine.call(resync).await;
             drop(turn);
             match answer {

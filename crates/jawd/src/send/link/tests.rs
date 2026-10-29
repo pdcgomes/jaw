@@ -334,7 +334,6 @@ mod sending {
         let engine = DemoEngine::sharing(vec![demo::connected()], world.clone());
         let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
         let mut connected = pushes.subscribe();
-        let app_state = crate::sync::AppStateTurn::default();
         let sync = crate::sync::run(
             incoming,
             store.clone(),
@@ -344,7 +343,6 @@ mod sending {
             home.into(),
             Default::default(),
             crate::feed::Typing::default(),
-            app_state.clone(),
         );
         tokio::spawn(sync);
         let attention = Arc::new(crate::attention::Attention::default());
@@ -361,7 +359,6 @@ mod sending {
             attention.focus(),
             timing,
             Makers { previews, media: None },
-            app_state,
         )
         .await
         .unwrap();

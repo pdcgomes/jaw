@@ -471,7 +471,6 @@ async fn what_a_version_1_jaw_db_holds_waits_for_the_accounts_jids_and_is_conver
         home_path,
         Default::default(),
         crate::feed::Typing::default(),
-        AppStateTurn::default(),
     ));
     // An engine says which account is linked once it has connected, a while after jawd starts.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1514,7 +1513,6 @@ async fn every_engine_that_connects_fetches_app_state_again_and_a_reconnection_o
         home.path().to_path_buf(),
         Default::default(),
         crate::feed::Typing::default(),
-        AppStateTurn::default(),
     ));
     until("the first engine's resync", || engine.asked("resync") == 1).await;
     engine.send(connected()).await;
@@ -1541,7 +1539,6 @@ async fn a_full_app_state_refetch_that_fails_is_tried_again_while_its_engine_run
         home.path().to_path_buf(),
         Default::default(),
         crate::feed::Typing::default(),
-        AppStateTurn::default(),
     ));
     // Tried again after 1 s and then 2 s more.
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -1737,7 +1734,6 @@ async fn after(
         home.to_path_buf(),
         Default::default(),
         crate::feed::Typing::default(),
-        AppStateTurn::default(),
     ));
     for event in events {
         tx.send(event).await.unwrap();
@@ -1868,7 +1864,6 @@ async fn the_engine_next_word_waits_until_the_account_it_said_before_is_stored()
         home.path().to_path_buf(),
         Default::default(),
         crate::feed::Typing::default(),
-        AppStateTurn::default(),
     ));
     let holder = Connection::open(home.path().join("jaw.db")).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -2103,7 +2098,6 @@ fn syncing_from(
         home.to_path_buf(),
         Default::default(),
         crate::feed::Typing::default(),
-        AppStateTurn::default(),
     ));
     (live, told, running)
 }
@@ -2962,7 +2956,6 @@ async fn a_question_put_to_the_phone_before_a_logout_is_forgotten_with_the_devic
         home.path().to_path_buf(),
         Default::default(),
         crate::feed::Typing::default(),
-        AppStateTurn::default(),
     ));
     tx.send(connection_event(State::Connected)).await.unwrap();
     assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));

@@ -512,13 +512,14 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
     };
     // A patch holds its turn with sync's full fetches of app state until the engine answers, once
     // the patch's echo is kept; while another has it, it waits as for the connection.
-    let turn = if app_state && receipts.is_ok() {
-        let Some(turn) = inner.app_state.try_take() else {
-            return Next::After(Box::pin(inner.app_state.free()));
-        };
-        Some(turn)
-    } else {
-        None
+    let turn = match &inner.engine {
+        Some(engine) if app_state && receipts.is_ok() => {
+            let Some(turn) = engine.app_state().try_take() else {
+                return Next::After(Box::pin(engine.app_state().free()));
+            };
+            Some(turn)
+        }
+        _ => None,
     };
     let answered = match receipts {
         Ok(()) => engine(&inner, command).await,

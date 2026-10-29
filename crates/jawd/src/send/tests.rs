@@ -84,7 +84,6 @@ impl Running {
         let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
         let mut connected = pushes.subscribe();
         let typing = crate::feed::Typing::default();
-        let app_state = crate::sync::AppStateTurn::default();
         let sync = crate::sync::run(
             incoming,
             store.clone(),
@@ -94,7 +93,6 @@ impl Running {
             home.into(),
             Default::default(),
             typing.clone(),
-            app_state.clone(),
         );
         tokio::spawn(sync);
         let attention = Arc::new(crate::attention::Attention::default());
@@ -106,7 +104,6 @@ impl Running {
             attention.focus(),
             timing,
             Makers { previews: link::Previews::off(), media: None },
-            app_state,
         )
         .await
         .unwrap();

@@ -60,7 +60,7 @@ use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, pb};
 use crate::media::Media;
 use crate::store::{Applied, Change, Chat, Store, read};
-use crate::sync::{AppStateTurn, Shared};
+use crate::sync::Shared;
 use crate::work::{Priority, Report, Serial};
 
 /// What sending makes messages with: the link previews text goes with, and media, which keeps,
@@ -142,8 +142,6 @@ struct Inner {
     copies: watch::Receiver<u64>,
     /// The account and the connection as sync keeps them, for what needs a linked account.
     live: Shared,
-    /// Each app-state patch's turn with sync's full fetches of app state.
-    app_state: AppStateTurn,
     /// Stops the next attempt that withdraws an action, between reading its row and withdrawing it:
     /// it notifies the first when it stops, and goes on once the second is notified.
     #[cfg(test)]
@@ -179,9 +177,7 @@ impl Sending {
     /// Starts sending: what the outbox held is queued again in each chat's order, read receipts still
     /// owed are sent, and presence follows `focused`, whether any interface is in front, and the
     /// connection, which `live` says now and `pushes` as it changes. Text goes with the link
-    /// previews `makers` makes, and a file with the copies its media makes and uploads. Each
-    /// app-state patch takes its turn with sync's full fetches of app state (`app_state`).
-    #[allow(clippy::too_many_arguments)]
+    /// previews `makers` makes, and a file with the copies its media makes and uploads.
     pub async fn start(
         store: Store,
         engine: Option<Supervisor>,
@@ -190,7 +186,6 @@ impl Sending {
         focused: watch::Receiver<bool>,
         timing: Timing,
         makers: Makers,
-        app_state: AppStateTurn,
     ) -> anyhow::Result<Sending> {
         let Makers { previews, media } = makers;
         let (notices, pushes) = (pushes.clone(), pushes.subscribe());
@@ -214,7 +209,6 @@ impl Sending {
             media,
             copies,
             live,
-            app_state,
             #[cfg(test)]
             pausing: Pause::default(),
             #[cfg(test)]
