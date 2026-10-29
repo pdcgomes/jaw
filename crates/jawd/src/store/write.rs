@@ -411,6 +411,9 @@ struct Unsettled {
     here: Option<(i64, i64)>,
     /// Whether one of yours arrived live, which unmarks the chat.
     mine_live: bool,
+    /// Whether one of yours from your other devices came under another of the person's JIDs than
+    /// the chat's own, which says nothing of the messages that came under the chat's own.
+    mine_by_another: bool,
     /// The newest history message from others, read as it comes while nobody has said where the
     /// chat was read.
     history: Option<(i64, i64)>,
@@ -916,6 +919,14 @@ fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsett
                 }
             }
             None => {
+                // What your other devices sent, and what history brought, tell WhatsApp only of what
+                // came under the JID they came by, so, as for a read (set_read), how far it was told
+                // doesn't move for one of yours that came under another of the person's JIDs, nor
+                // past a message from others that did, which a merge leaves owed.
+                let known = match known {
+                    Some(to) if !moved.mine_by_another && !came_elsewhere(db, chat, now.told, to)? => Some(to),
+                    _ => None,
+                };
                 now.told = told_within(now.told.map(|told| told.max(known.unwrap_or(START))), now.at);
                 now.told = told_if_owed(db, chat, was.told, now.told, now.at)?;
             }
@@ -2236,6 +2247,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         (true, Sent::Elsewhere) => {
             moved.mine = moved.mine.max(place);
             moved.mine_live |= message.live;
+            moved.mine_by_another |= user_jid(&message.chat) != chat_id;
         }
         (true, Sent::Forwarded) => {}
         (false, _) if !message.live => moved.history = moved.history.max(place),

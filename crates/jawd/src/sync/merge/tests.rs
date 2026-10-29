@@ -1291,6 +1291,52 @@ async fn a_merge_into_a_chat_the_phones_counts_stand_in_for_owes_nothing_they_co
     assert_eq!(owed(&store, NEW).await, ["n0", "n1", "l0"], "read here");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn one_of_yours_from_another_device_by_her_number_never_cancels_the_receipts_for_what_came_under_the_lid() {
+    let (_home, store) = read_on_the_phone_and_merged().await;
+    store.apply(Lane::Live, vec![Change::Message(mine(NEW, "y0", AT + 6_000))]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 0)], "it reads the chat");
+    assert_eq!(owed(&store, NEW).await, ids("l", 0..5), "but says nothing of what came under the LID");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_of_yours_from_another_device_by_a_jid_merged_away_never_cancels_the_receipts_the_merge_left_owed() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // The number's chat with n0 to n4, never read, and the LID's read on the phone, with nothing
+    // from Ana in it: merged, the number's chat owes n0 to n4.
+    let changes: Vec<Change> = (0..5).map(|i| message(NEW, &format!("n{i}"), AT + i)).collect();
+    store.apply(Lane::Live, changes).await.unwrap();
+    let on_the_phone = Change::Read(Read { chat: LID.into(), at: AT + 5_000, ..Read::default() });
+    store.apply(Lane::Live, vec![on_the_phone]).await.unwrap();
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    merged(&store, LID).await;
+    assert_eq!(owed(&store, NEW).await, ids("n", 0..5), "whether the phone read the number's can't be known");
+    store.apply(Lane::Live, vec![Change::Message(mine(LID, "y0", AT + 6_000))]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, ids("n", 0..5), "one of yours to the LID says nothing of them either");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_read_as_it_comes_never_cancels_the_receipts_for_what_came_under_the_lid() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // The LID's chat with l0 to l4, never read, and the number's with n0 to n4 from history, read as
+    // they came since nobody has said where it was: merged, the number's chat is read past l0 to l4
+    // and owes them, and n0 to n4 again, which is harmless.
+    let history = |id: &str, at| Change::Message(Message { live: false, ..text(NEW, id, at) });
+    let mut changes: Vec<Change> = (0..5).map(|i| message(LID, &format!("l{i}"), AT + i)).collect();
+    changes.extend((0..5).map(|i| history(&format!("n{i}"), AT + 10 + i)));
+    store.apply(Lane::Live, changes).await.unwrap();
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    merged(&store, LID).await;
+    let mut all = [ids("l", 0..5), ids("n", 0..5)].concat();
+    assert_eq!(owed(&store, NEW).await, all);
+    // More of the number's history, still with nobody saying where it was read.
+    store.apply(Lane::Live, vec![history("n5", AT + 20)]).await.unwrap();
+    all.push("n5".into());
+    assert_eq!(owed(&store, NEW).await, all, "history by the number says nothing of what came under the LID");
+}
+
 /// A xorshift generator, so a failing seed can be run again.
 struct Rng(u64);
 
@@ -1462,9 +1508,10 @@ async fn came_and_read(store: &Store, id: String) -> (String, bool) {
     .await
 }
 
-/// Plays one of `reads_and_a_merge`'s histories, failing at the first read on the phone that leaves
-/// a receipt no longer owed for a message still read that came under a JID it doesn't name, and at
-/// the first change after which, while no merge waits, `outbox::owed` gives other than `owing`.
+/// Plays one of `reads_and_a_merge`'s histories, failing at the first read on the phone, or message
+/// of yours from another device, that leaves a receipt no longer owed for a message still read that
+/// came under a JID other than the one it came by, and at the first change after which, while no
+/// merge waits, `outbox::owed` gives other than `owing`.
 async fn no_read_cancels_what_it_cant_vouch_for(seed: u64) {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
@@ -1481,7 +1528,10 @@ async fn no_read_cancels_what_it_cant_vouch_for(seed: u64) {
             }
         };
         let named = match &changes[..] {
-            [Change::Read(read)] if !read.here => Some(read.chat.clone()),
+            [Change::Read(read)] if !read.here => Some(("a read on the phone", read.chat.clone())),
+            [Change::Message(message)] if message.mine => {
+                Some(("one of yours from another device", message.chat.clone()))
+            }
             _ => None,
         };
         let before = owing(&store).await;
@@ -1490,12 +1540,12 @@ async fn no_read_cancels_what_it_cant_vouch_for(seed: u64) {
         if let Some(owed) = owed_by_each(&store).await {
             assert_eq!(owed, after, "seed {seed}, op {i}: what outbox::owed gives");
         }
-        let Some(named) = named else { continue };
+        let Some((what, named)) = named else { continue };
         for id in before.into_iter().filter(|id| !after.contains(id)) {
             let (under, read) = came_and_read(&store, id.clone()).await;
             assert!(
                 !read || under == named,
-                "seed {seed}, op {i}: a read on the phone by {named} left {id}, which came under {under}, owed no more"
+                "seed {seed}, op {i}: {what} by {named} left {id}, which came under {under}, owed no more"
             );
         }
     }
