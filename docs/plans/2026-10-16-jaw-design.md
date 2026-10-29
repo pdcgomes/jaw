@@ -175,7 +175,7 @@ These are rules; every builder follows them, the tests listed check them, and th
 
 - jawd makes each message's ID up front, in whatsmeow's format, and the engine sends with it (`SendRequestExtra.ID`), so the row shown at once is the real message: pending, sent, delivered, read, played.
 - One queue per chat keeps order; chats send in parallel; failures retry with backoff, then stay marked for a manual retry.
-- Text, replies, mentions, edits, deletes for me or for everyone, reactions, forwards, polls and votes, read receipts (unless they're off on the phone), typing (throttled), drafts kept in jawd for every interface.
+- Text, replies, mentions, edits, deletes for me or for everyone, reactions, forwards, polls and votes, contact cards (one or several in a message, each a vCard), read receipts (unless they're off on the phone), typing (throttled), drafts kept in jawd for every interface.
 - Online only while you're looking: jawd tells WhatsApp you're online while an interface has focus, which terminals report. Otherwise you're away, and your phone keeps its notifications.
 - A new poll carries a fresh secret, which whatsmeow keeps when it sends it; votes go through the engine, which has every poll's secret.
 - A new event carries a fresh secret too, which its answers and edits are sealed with; jawd opens them with the secret it keeps in the event's raw protobuf. A WhatsApp call link isn't added to an event yet: the phones ask WhatsApp's server for one, which the engine can't, so `send.event` refuses `call` for now.

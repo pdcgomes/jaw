@@ -53,7 +53,7 @@ Each is a sheet over the window, keys first: Tab moves, Return sends, Esc cancel
 | `send.media` | files by path, kind, caption, quality, reply | in the protocol, not served on main (M4) |
 | `send.poll` | question, options, max | in the protocol, not served on main (M2) |
 | `send.event` | name, description, start, end, place, call link | proposed in the protocol's Composing (M2) |
-| `send.contact` | vCards | proposed in the protocol's Composing (M4) |
+| `send.contact` | cards, each a name and a vCard | in the protocol's Sending, served from `send-contact` (M4) |
 | `send.location` | latitude, longitude, name, address | proposed in the protocol's Composing (M2) |
 | `gif.search` | query (empty for trending), limit; answers with ids, sizes and preview paths | proposed in the protocol's Composing (after M4); jawd asks Giphy |
 | `send.gif` | a GIF from `gif.search` by its id: jawd fetches its MP4 and sends it as a GIF | proposed in the protocol's Composing (after M4) |
