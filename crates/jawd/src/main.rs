@@ -546,13 +546,18 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
     let store = store::Store::open(home)?;
     std::fs::create_dir_all(home.join("spool"))?;
     sync::running(&store).await?;
-    let (events, incoming) = mpsc::channel(1024);
-    let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
-    let mut starting = sync::starting(&store, supervisor.is_ok());
+    let mut starting = sync::starting(&store, engine.is_ok());
     if let Some(patience) = options.phone_patience {
         starting.phone_patience = patience;
     }
     let live: sync::Shared = Arc::new(std::sync::Mutex::new(starting));
+    let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
+    let typing = feed.typing().clone();
+    if let Ok(engine) = &engine {
+        engine.hear_typing(&typing);
+    }
+    let (events, incoming) = mpsc::channel(1024);
+    let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
     let (pushes, _) = tokio::sync::broadcast::channel(256);
     tokio::spawn(trouble(store.trouble(), pushes.clone()));
     let engine = supervisor.as_ref().ok().cloned();
@@ -565,6 +570,7 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         engine.clone(),
         home.to_path_buf(),
         following.clone(),
+        typing.clone(),
     ));
     let attention = Arc::new(attention::Attention::default());
     let media =
@@ -579,11 +585,12 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         send::link::Previews::default(),
     )
     .await?;
+    let me = live.lock().expect("live state").me();
+    typing.start(store.clone(), me, sending.hearing());
     let mut pools: Vec<Arc<dyn work::Report>> =
         vec![Arc::new(store.clone()), Arc::new(store.reads().clone()), sending.lane()];
     pools.extend(media.lanes());
     let finder = find::Finder::start(store.clone()).await?;
-    let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
     let connection = live.clone();
     let online = Box::new(move || {
         matches!(

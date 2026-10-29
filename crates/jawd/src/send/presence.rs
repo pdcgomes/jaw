@@ -2,7 +2,9 @@
 //! its notifications while you're not looking. Focus has to hold for `Timing::online_after` before
 //! WhatsApp hears you're online, and be gone for `Timing::away_after` before it hears you're away,
 //! so switching windows doesn't flicker. Each time the connection comes back, WhatsApp is told
-//! again, since it forgets; and whatever waits to send hears whether WhatsApp can be reached.
+//! again, since it forgets; and whatever waits to send hears whether WhatsApp can be reached. Others'
+//! typing is heard only while WhatsApp can be reached and has been told you're online, since only
+//! then does it say it (`Inner::hearing`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +32,8 @@ pub(super) async fn follow(
     let mut told: Option<bool> = None;
     let mut following = true;
     loop {
+        let hears = online && told == Some(true);
+        inner.hearing.send_if_modified(|was| std::mem::replace(was, hears) != hears);
         let want = following && *focused.borrow_and_update();
         let wait = match told {
             _ if !online => None,

@@ -37,6 +37,7 @@ async fn sending(home: &Path) -> (Store, Sending, Arc<World>) {
         Some(supervisor.clone()),
         home.into(),
         Default::default(),
+        crate::feed::Typing::default(),
     );
     tokio::spawn(sync);
     let attention = Arc::new(crate::attention::Attention::default());

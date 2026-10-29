@@ -983,6 +983,20 @@ pub fn jids_of(db: &Connection, people: &[i64]) -> Result<Vec<String>> {
     Ok(jids)
 }
 
+/// Whoever `jid` is, as someone typing is shown: their person's n, their name as a message from
+/// them shows it, and every JID they're known by. None when jaw has no person for it.
+pub fn typist(db: &Connection, jid: &str) -> Result<Option<(i64, String, Vec<String>)>> {
+    let found = db
+        .prepare_cached(
+            "SELECT p.n, p.name, p.push_name, p.verified_name FROM person_jids j JOIN people p ON p.n = j.person
+            WHERE j.jid = ?1",
+        )?
+        .query_row([jid], |r| Ok((r.get::<_, i64>(0)?, shown(r.get(1)?, r.get(2)?, r.get(3)?, Some(jid)))))
+        .optional()?;
+    let Some((n, name)) = found else { return Ok(None) };
+    Ok(Some((n, name, jids_of(db, &[n])?)))
+}
+
 /// The oldest seq the feed keeps and its last, or zeros before anything changed. Each is its own
 /// subquery, since SQLite reads one end of the key only when a query asks for one of them.
 pub fn feed_bounds(db: &Connection) -> Result<(i64, i64)> {

@@ -304,7 +304,6 @@ pub(crate) fn chat_row(row: read::ChatRow) -> proto::ChatRow {
         archived: row.archived,
         marked_unread: row.marked_unread,
         draft: row.draft,
-        typing: Vec::new(),
         community: row.community,
         children_unread: row.children_unread.map(|n| n.max(0) as u64),
         folders: row.folders.into_iter().map(|n| format!("folder:{n}")).collect(),

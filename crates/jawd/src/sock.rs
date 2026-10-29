@@ -1079,7 +1079,7 @@ mod tests {
                 reader.read_line(&mut line).unwrap();
                 serde_json::from_str::<Value>(&line).unwrap()
             };
-            stream.write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":1,\"client\":\"test\",\"version\":\"0\"}}\n").unwrap();
+            stream.write_all(format!("{{\"id\":1,\"method\":\"hello\",\"params\":{{\"protocol\":{PROTOCOL},\"client\":\"test\",\"version\":\"0\"}}}}\n").as_bytes()).unwrap();
             read();
             let mut early = 0;
             for id in 10..210u64 {
@@ -1110,18 +1110,15 @@ mod tests {
     async fn hello_comes_first_and_must_match() {
         let (_home, socket) = serving().await;
         tokio::task::spawn_blocking(move || {
-            let replies = exchange(
-                &socket,
-                &[
-                    r#"{"id":1,"method":"status"}"#,
-                    r#"{"id":2,"method":"hello","params":{"protocol":2,"client":"test","version":"9"}}"#,
-                    "not json",
-                    r#"{"method":"hello"}"#,
-                ],
+            let newer = format!(
+                r#"{{"id":2,"method":"hello","params":{{"protocol":{},"client":"test","version":"9"}}}}"#,
+                PROTOCOL + 1
             );
+            let replies =
+                exchange(&socket, &[r#"{"id":1,"method":"status"}"#, &newer, "not json", r#"{"method":"hello"}"#]);
             assert_eq!(replies[0]["error"]["code"], code::VERSION);
             assert_eq!(replies[1]["error"]["code"], code::VERSION);
-            assert_eq!(replies[1]["error"]["data"]["client"], 2);
+            assert_eq!(replies[1]["error"]["data"]["client"], PROTOCOL + 1);
             assert!(replies[1]["error"]["message"].as_str().unwrap().contains("jawd is older"));
             assert_eq!(replies[2]["error"]["code"], code::PARSE);
             assert_eq!(replies[3]["error"]["code"], code::INVALID_REQUEST);
@@ -1181,7 +1178,7 @@ mod tests {
                 reader.read_line(&mut line).unwrap();
                 serde_json::from_str::<Value>(&line).unwrap()
             };
-            stream.write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":1,\"client\":\"test\",\"version\":\"0\"}}\n").unwrap();
+            stream.write_all(format!("{{\"id\":1,\"method\":\"hello\",\"params\":{{\"protocol\":{PROTOCOL},\"client\":\"test\",\"version\":\"0\"}}}}\n").as_bytes()).unwrap();
             reply();
             stream.write_all(b"{\"id\":2,\"method\":\"find\",\"params\":{\"query\":\"jant\"}}\n").unwrap();
             stream.write_all(b"{\"id\":3,\"method\":\"find\",\"params\":{\"query\":\"jantar\"}}\n").unwrap();
@@ -1238,10 +1235,12 @@ mod tests {
         .unwrap();
         tokio::spawn(serve(Arc::new(state), listener));
         let replies = tokio::task::spawn_blocking(move || {
+            let hello =
+                format!(r#"{{"id":1,"method":"hello","params":{{"protocol":{PROTOCOL},"client":"test","version":"0"}}}}"#);
             exchange(
                 &socket,
                 &[
-                    r#"{"id":1,"method":"hello","params":{"protocol":1,"client":"test","version":"0"}}"#,
+                    &hello,
                     r#"{"id":2,"method":"folder.create","params":{"name":"  Family "}}"#,
                     r#"{"id":3,"method":"folder.create","params":{"name":"   "}}"#,
                     r#"{"id":4,"method":"folder.rename","params":{"folder":"all","name":"Everything"}}"#,
@@ -1303,8 +1302,7 @@ mod tests {
             let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
             let mut seen = Vec::new();
             let mut lines = vec![
-                r#"{"id":1,"method":"hello","params":{"protocol":1,"client":"test","version":"0","focus":true}}"#
-                    .to_string(),
+                format!(r#"{{"id":1,"method":"hello","params":{{"protocol":{PROTOCOL},"client":"test","version":"0","focus":true}}}}"#),
                 format!(
                     r#"{{"id":2,"method":"messages.watch","params":{{"chat":"{ana}","around":"newest","before":10}}}}"#
                 ),
@@ -1376,7 +1374,8 @@ mod tests {
     fn raw_hello(socket: &Path, client: &str) -> Value {
         let stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
         let mut heard = BufReader::new(stream.try_clone().unwrap());
-        let hello = json!({"id": 1, "method": "hello", "params": {"protocol": 1, "client": client, "version": "0"}});
+        let hello =
+            json!({"id": 1, "method": "hello", "params": {"protocol": PROTOCOL, "client": client, "version": "0"}});
         (&stream).write_all(format!("{hello}\n").as_bytes()).unwrap();
         let mut line = String::new();
         heard.read_line(&mut line).unwrap();
@@ -1400,8 +1399,10 @@ mod tests {
                 line.clear();
                 heard.read_line(line).map(|_| serde_json::from_str::<Value>(line).unwrap())
             };
-            let hello = r#"{"id":1,"method":"hello","params":{"protocol":1,"client":"test","version":"0"}}"#;
-            let welcome = say(hello, &mut line).unwrap();
+            let hello = format!(
+                r#"{{"id":1,"method":"hello","params":{{"protocol":{PROTOCOL},"client":"test","version":"0"}}}}"#
+            );
+            let welcome = say(&hello, &mut line).unwrap();
             assert!(welcome["result"].get("settings").is_none(), "a client jawd keeps no settings for gets none");
             let kept = a.call("settings.set", json!({"theme": "gruvbox", "messages": "irc"})).unwrap();
             assert_eq!(kept, json!({"settings": {"theme": "gruvbox", "messages": "irc"}}));
@@ -1589,7 +1590,10 @@ mod tests {
             let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
             let mut writer = stream.try_clone().unwrap();
             writer
-                .write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"protocol\":1,\"client\":\"jaw\",\"version\":\"0\"}}\n")
+                .write_all(
+                    format!("{{\"id\":1,\"method\":\"hello\",\"params\":{{\"protocol\":{PROTOCOL},\"client\":\"jaw\",\"version\":\"0\"}}}}\n")
+                        .as_bytes(),
+                )
                 .unwrap();
             for id in 2..asks + 2 {
                 writer.write_all(format!("{{\"id\":{id},\"method\":\"themes\"}}\n").as_bytes()).unwrap();

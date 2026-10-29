@@ -411,6 +411,16 @@ pub fn describe(status: &Status) -> String {
         ));
         lines.push(format!("jobs      {}", jobs.join("; ")));
     }
+    if let Some(typing) = &status.typing {
+        let chats = match typing.chats {
+            1 => "1 chat".to_string(),
+            n => format!("{n} chats"),
+        };
+        lines.push(format!(
+            "typing    someone in {chats} now; {} changes heard, {} dropped for coming too fast, {} waiting of {}; {} pushes sent, {} changes merged into a newer one",
+            typing.heard, typing.dropped, typing.waiting, typing.waiting_most, typing.sent, typing.merged
+        ));
+    }
     for missing in &status.missing {
         lines.push(format!("missing   {}, for {}", missing.what, missing.needed_for));
     }
@@ -483,6 +493,16 @@ mod tests {
         let said = super::describe(&status);
         let refused = "layouts   2 kept of 16, the biggest 312 of 16384 bytes; 3 refused for being past a limit";
         assert!(said.lines().any(|l| l == refused), "{said}");
+    }
+
+    #[test]
+    fn status_says_in_how_many_chats_someone_types_and_what_came_too_fast() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/fixtures/status.result.json")).unwrap();
+        let status: super::Status = serde_json::from_value(fixture["result"].clone()).unwrap();
+        let said = super::describe(&status);
+        let typing = "typing    someone in 2 chats now; 1840 changes heard, 3 dropped for coming too fast, 0 waiting of 1024; 1210 pushes sent, 418 changes merged into a newer one";
+        assert!(said.lines().any(|l| l == typing), "{said}");
     }
 
     #[test]

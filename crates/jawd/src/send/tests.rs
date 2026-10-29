@@ -88,6 +88,7 @@ impl Running {
             supervisor.clone(),
             home.into(),
             Default::default(),
+            crate::feed::Typing::default(),
         );
         tokio::spawn(sync);
         let attention = Arc::new(crate::attention::Attention::default());
@@ -1503,8 +1504,7 @@ fn window(socket: &Path, chat: &str) -> mpsc::UnboundedReceiver<Value> {
     std::thread::spawn(move || {
         let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
         let reader = BufReader::new(stream.try_clone().unwrap());
-        let hello =
-            json!({ "id": 1, "method": "hello", "params": { "protocol": 1, "client": "test", "version": "0" } });
+        let hello = json!({ "id": 1, "method": "hello", "params": { "protocol": jaw_proto::PROTOCOL, "client": "test", "version": "0" } });
         let watch = json!({ "id": 2, "method": "messages.watch", "params": { "chat": chat, "around": "newest", "before": 50 } });
         stream.write_all(format!("{hello}\n{watch}\n").as_bytes()).unwrap();
         for line in reader.lines() {
@@ -1560,7 +1560,8 @@ async fn ask_socket_open(
     tokio::task::spawn_blocking(move || {
         let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let hello = ("hello", json!({ "protocol": 1, "client": "test", "version": "0", "focus": true }));
+        let hello =
+            ("hello", json!({ "protocol": jaw_proto::PROTOCOL, "client": "test", "version": "0", "focus": true }));
         let replies = std::iter::once(hello)
             .chain(requests)
             .enumerate()

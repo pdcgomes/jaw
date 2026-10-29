@@ -6,12 +6,14 @@
 //! shared by every connection watching the same window. A window is always what a fresh query
 //! gives, so it can't drift, and a connection keeps only its windows' rows' hashes: a slow
 //! interface never holds jawd up, it only gets fewer, larger batches, and one that stops reading
-//! for long is told to watch again.
+//! for long is told to watch again. Who's typing in the chats a connection's windows show comes
+//! with each watch's answer and then as `typing` pushes, from what `typing` keeps in memory.
 
 pub mod bench;
 mod client;
 #[cfg(test)]
 mod tests;
+pub mod typing;
 mod window;
 
 use std::collections::HashSet;
@@ -23,6 +25,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, watch};
 
 pub use self::client::{Client, Ready};
+pub use self::typing::Typing;
 pub(crate) use self::window::{chat_row, folder_row, message_row, now_ms};
 use crate::store::{Store, read};
 use crate::work::Priority;
@@ -109,6 +112,7 @@ pub struct Feed {
     catching_up: CatchingUp,
     timing: Timing,
     shared: Arc<client::Shared>,
+    typing: Typing,
 }
 
 impl Feed {
@@ -122,7 +126,20 @@ impl Feed {
         let (changes, _) = broadcast::channel(kept);
         let committed = store.committed();
         tokio::spawn(follow(store.clone(), committed.clone(), changes.clone()));
-        Feed { store, changes, committed, catching_up, timing, shared: Arc::default() }
+        Feed { store, changes, committed, catching_up, timing, shared: Arc::default(), typing: Typing::default() }
+    }
+
+    /// Tells who's typing from `typing` rather than a `Typing` of its own, before any connection
+    /// has its windows.
+    #[cfg(test)]
+    pub(crate) fn with_typing(mut self, typing: Typing) -> Feed {
+        self.typing = typing;
+        self
+    }
+
+    /// Who's typing, which connections' windows tell their interfaces.
+    pub fn typing(&self) -> &Typing {
+        &self.typing
     }
 
     /// The feed's last committed seq.
@@ -133,7 +150,8 @@ impl Feed {
     /// A connection's windows, sending their updates to `out` as lines.
     pub fn client(&self, out: mpsc::Sender<Vec<u8>>) -> Client {
         let changes = self.changes.subscribe();
-        Client::new(self.store.clone(), changes, self.catching_up.clone(), self.timing, out, self.shared.clone())
+        let (store, catching_up, typing) = (self.store.clone(), self.catching_up.clone(), self.typing.watching());
+        Client::new(store, changes, catching_up, self.timing, out, self.shared.clone(), typing)
     }
 
     /// How many times any connection has asked to read one of its windows again since jawd

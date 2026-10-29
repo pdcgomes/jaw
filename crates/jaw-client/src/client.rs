@@ -9,6 +9,10 @@
 //! 2 s, says hello again and watches every window again with the rows its model holds, so the
 //! models end as a fresh watch would leave them. A `resync` is handled the same way. A request
 //! in flight when the connection drops is answered with a failure that says so.
+//!
+//! Who's typing is kept as the protocol says: a watch's or move's answer replaces it for every
+//! chat of its window, a `typing` push for its chat, and it's forgotten as a chat leaves every
+//! window and when the connection drops. A frame carries all of it when it changed.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
@@ -22,8 +26,8 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Select, Sender, TrySendError};
 use jaw_proto::find::{Find, Found};
 use jaw_proto::windows::{
-    ChatRow, ChatsPush, ChatsWatch, ChatsWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, Watch,
-    WatchMove,
+    ChatRow, ChatsPush, ChatsWatch, ChatsWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, TypingPush,
+    Typist, Typists, Watch, WatchMove,
 };
 use jaw_proto::{Connection, Hello, LinkStep, PROTOCOL, Push, Request, Welcome, code};
 use serde::Deserialize;
@@ -152,6 +156,8 @@ pub struct Frame<C, M> {
     pub events: Vec<Event>,
     pub chats: Vec<(WindowId, Update<C>)>,
     pub messages: Vec<(WindowId, Update<M>)>,
+    /// Who's typing in the chats the windows show, all of it as it is now, when it changed.
+    pub typing: Option<Typists>,
     /// When the lines this frame carries were read, up to a thousand or so, for measuring how long
     /// they waited.
     pub read: Vec<Instant>,
@@ -159,7 +165,7 @@ pub struct Frame<C, M> {
 
 impl<C, M> Frame<C, M> {
     pub fn is_empty(&self) -> bool {
-        self.events.is_empty() && self.chats.is_empty() && self.messages.is_empty()
+        self.events.is_empty() && self.chats.is_empty() && self.messages.is_empty() && self.typing.is_none()
     }
 }
 
@@ -236,6 +242,10 @@ struct State<C, M> {
     events: VecDeque<Event>,
     chats: HashMap<WindowId, Merged<C>>,
     messages: HashMap<WindowId, Merged<M>>,
+    /// Who's typing, by chat, for the chats the windows show, and whether it changed since the
+    /// last drain.
+    typing: Typists,
+    typing_changed: bool,
     read: Vec<Instant>,
     /// Whether the caller has been woken, or will be, for what's in the inbox.
     signalled: bool,
@@ -290,6 +300,16 @@ struct Window {
     closing: bool,
 }
 
+impl Window {
+    /// Whether it shows `chat`: a chat list among its rows, a chat's messages as theirs.
+    fn shows(&self, chat: &str) -> bool {
+        match self.kind {
+            Kind::Chats => self.ids.contains(chat),
+            Kind::Messages => self.of == chat,
+        }
+    }
+}
+
 /// A line from jawd, its params and result left unread until it's known what they are.
 #[derive(Deserialize)]
 struct Envelope<'a> {
@@ -342,8 +362,16 @@ fn messages_push<R>(push: MessagesPush<R>) -> (String, Update<R>) {
     (push.watch, update)
 }
 
-/// A watch's or move's result as an update, with jawd's watch id and `newer` then.
-fn chats_watched<R>(watched: ChatsWatched<R>) -> (String, Update<R>, u64) {
+/// A watch's or move's answer: jawd's watch id, the update, `newer` then, and who's typing in the
+/// window's chats.
+struct Landed<R> {
+    watch: String,
+    update: Update<R>,
+    newer: u64,
+    typing: Typists,
+}
+
+fn chats_watched<R>(watched: ChatsWatched<R>) -> Landed<R> {
     let update = Update {
         seq: watched.seq,
         remove: watched.remove,
@@ -351,10 +379,10 @@ fn chats_watched<R>(watched: ChatsWatched<R>) -> (String, Update<R>, u64) {
         total: Some(watched.total),
         ..Update::default()
     };
-    (watched.watch, update, 0)
+    Landed { watch: watched.watch, update, newer: 0, typing: watched.typing }
 }
 
-fn messages_watched<R>(watched: MessagesWatched<R>) -> (String, Update<R>, u64) {
+fn messages_watched<R>(watched: MessagesWatched<R>) -> Landed<R> {
     let update = Update {
         seq: watched.seq,
         remove: watched.remove,
@@ -364,7 +392,7 @@ fn messages_watched<R>(watched: MessagesWatched<R>) -> (String, Update<R>, u64) 
         newer: Some(watched.newer),
         moved: None,
     };
-    (watched.watch, update, watched.newer)
+    Landed { watch: watched.watch, update, newer: watched.newer, typing: watched.typing }
 }
 
 impl<C, M> State<C, M> {
@@ -404,6 +432,34 @@ impl<C, M> State<C, M> {
             self.read.push(at);
         }
     }
+
+    /// Whether a window it keeps shows `chat`.
+    fn shows(&self, chat: &str) -> bool {
+        self.windows.values().any(|w| !w.closing && w.shows(chat))
+    }
+
+    fn set_typing(&mut self, chat: String, who: Vec<Typist>) {
+        if who.is_empty() {
+            self.typing_changed |= self.typing.remove(&chat).is_some();
+        } else if self.typing.get(&chat) != Some(&who) {
+            self.typing.insert(chat, who);
+            self.typing_changed = true;
+        }
+    }
+
+    /// Forgets the typing of the chats no window shows.
+    fn unshown(&mut self) {
+        let gone: Vec<String> = self.typing.keys().filter(|chat| !self.shows(chat)).cloned().collect();
+        for chat in gone {
+            self.typing.remove(&chat);
+            self.typing_changed = true;
+        }
+    }
+
+    fn forget_typing(&mut self) {
+        self.typing_changed |= !self.typing.is_empty();
+        self.typing.clear();
+    }
 }
 
 /// The default anchor of a window's list, keeping as many rows, for a window whose anchor has gone.
@@ -439,6 +495,8 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
             events: VecDeque::new(),
             chats: HashMap::new(),
             messages: HashMap::new(),
+            typing: Typists::new(),
+            typing_changed: false,
             read: Vec::new(),
             signalled: false,
             woken: false,
@@ -504,6 +562,7 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         }
         let watch = w.watch.take();
         state.windows.remove(&window);
+        state.unshown();
         if let Some(watch) = watch {
             state.watches.remove(&watch);
             self.shared.unwatch_line(&mut state, watch);
@@ -530,19 +589,21 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
 
     /// Takes everything that came since the last drain.
     pub fn drain(&self) -> Frame<C, M> {
-        let (events, chats, messages, read) = {
+        let (events, chats, messages, read, typing) = {
             let mut state = self.shared.lock();
             state.signalled = false;
             state.woken = false;
             state.wake_at = None;
             state.drained = Instant::now();
+            let typing = std::mem::take(&mut state.typing_changed).then(|| state.typing.clone());
             let taken = (
                 std::mem::take(&mut state.events),
                 std::mem::take(&mut state.chats),
                 std::mem::take(&mut state.messages),
                 std::mem::take(&mut state.read),
+                typing,
             );
-            if !taken.0.is_empty() || !taken.1.is_empty() || !taken.2.is_empty() {
+            if !taken.0.is_empty() || !taken.1.is_empty() || !taken.2.is_empty() || taken.4.is_some() {
                 state.stats.frames += 1;
             }
             self.shared.changed.notify_all();
@@ -552,6 +613,7 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
             events: events.into(),
             chats: chats.into_iter().map(|(window, merged)| (window, merged.into_update())).collect(),
             messages: messages.into_iter().map(|(window, merged)| (window, merged.into_update())).collect(),
+            typing,
             read,
         }
     }
@@ -870,6 +932,7 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         }
         state.find = None;
         state.watches.clear();
+        state.forget_typing();
         state.windows.retain(|_, w| !w.closing);
         for w in state.windows.values_mut() {
             w.watch = None;
@@ -915,6 +978,22 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                 let push = read::<MessagesPush<M>>(envelope.params, "a messages push").map(messages_push);
                 self.window_push(push, generation, at, |state| &mut state.messages)
             }
+            (None, Some("typing")) => {
+                let Ok(TypingPush { chat, who }) = read(envelope.params, "a typing push") else {
+                    return self.skip(generation);
+                };
+                let mut state = self.lock();
+                if !state.current(generation) {
+                    return false;
+                }
+                state.note_read(at);
+                if state.shows(&chat) {
+                    state.set_typing(chat, who);
+                }
+                let now = state.typing_changed && state.signal(self.config.frame, SETTLE);
+                self.notify(state, now);
+                true
+            }
             (None, Some("resync")) => {
                 let Ok(Watch { watch }) = read(envelope.params, "a resync") else { return self.skip(generation) };
                 let mut state = self.lock();
@@ -931,6 +1010,7 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                     match closing {
                         Some(true) => {
                             state.windows.remove(&window);
+                            state.unshown();
                         }
                         Some(false) => self.ask(&mut state, window, true),
                         None => {}
@@ -983,19 +1063,21 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         }
         state.note_read(at);
         if let Some(&window) = state.watches.get(&watch) {
-            self.merge(state, window, update, false, merges);
+            self.merge(state, window, update, false, None, merges);
         }
         true
     }
 
     /// Merges an update into a window's inbox and wakes the caller: at once for what it's waiting
-    /// for, a watch's or move's answer where it wants the window, and otherwise when it's due.
+    /// for, a watch's or move's answer where it wants the window, and otherwise when it's due. A
+    /// watch's or move's answer says who's typing in every chat of the window (`answered`).
     fn merge<R: Row>(
         &self,
         mut state: MutexGuard<'_, State<C, M>>,
         window: WindowId,
         update: Update<R>,
         awaited: bool,
+        answered: Option<Typists>,
         merges: impl FnOnce(&mut State<C, M>) -> &mut HashMap<WindowId, Merged<R>>,
     ) {
         let Some(w) = state.windows.get_mut(&window).filter(|w| !w.closing) else { return };
@@ -1005,6 +1087,17 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         if let Some(w) = state.windows.get_mut(&window) {
             w.ids = ids;
         }
+        if let Some(mut answered) = answered {
+            let shown: Vec<String> = match state.windows.get(&window) {
+                Some(w) => state.typing.keys().chain(answered.keys()).filter(|chat| w.shows(chat)).cloned().collect(),
+                None => Vec::new(),
+            };
+            for chat in shown {
+                let who = answered.remove(&chat).unwrap_or_default();
+                state.set_typing(chat, who);
+            }
+        }
+        state.unshown();
         let now = if awaited {
             state.signal(Duration::ZERO, Duration::ZERO)
         } else {
@@ -1099,7 +1192,7 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
     fn landed<R: Row>(
         &self,
         landing: Landing,
-        landed: Result<(String, Update<R>, u64), Failure>,
+        landed: Result<Landed<R>, Failure>,
         generation: u64,
         merges: impl FnOnce(&mut State<C, M>) -> &mut HashMap<WindowId, Merged<R>>,
     ) -> bool {
@@ -1112,9 +1205,10 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         let Some(w) = state.windows.get_mut(&window).filter(|w| w.asking == Some(id)) else { return true };
         w.asking = None;
         match landed {
-            Ok((watch, mut update, newer)) => {
+            Ok(Landed { watch, mut update, newer, typing }) => {
                 if w.closing {
                     state.windows.remove(&window);
+                    state.unshown();
                     self.unwatch_line(&mut state, watch);
                     return true;
                 }
@@ -1128,11 +1222,12 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                 if follow {
                     self.ask(&mut state, window, false);
                 }
-                self.merge(state, window, update, !follow, merges);
+                self.merge(state, window, update, !follow, Some(typing), merges);
             }
             Err(failure) => {
                 if w.closing {
                     state.windows.remove(&window);
+                    state.unshown();
                     return true;
                 }
                 let gone = matches!(&failure, Failure::Jawd(error) if error.code == code::NOT_FOUND);

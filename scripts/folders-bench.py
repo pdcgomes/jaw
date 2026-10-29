@@ -67,7 +67,7 @@ class Client:
         self.pushes = {}
         self.lock = threading.Lock()
         threading.Thread(target=self.read, daemon=True).start()
-        self.call("hello", {"protocol": 1, "client": "folders-bench", "version": "0", "focus": True})
+        self.call("hello", {"protocol": 2, "client": "folders-bench", "version": "0", "focus": True})
 
     def read(self):
         for line in self.file:

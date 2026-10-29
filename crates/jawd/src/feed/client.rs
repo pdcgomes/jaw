@@ -16,9 +16,15 @@
 //! A window's last read is kept for the connections that haven't taken it yet, each row as the
 //! JSON it's sent as. The reads kept are counted in bytes, and past `KEPT_MOST` the oldest are let
 //! go, after which a window asks for a read again; a connection watches at most `MOST_WINDOWS`.
+//!
+//! Who's typing goes with the windows: a watch's or move's answer says it for every chat of the
+//! window, and a `typing` push follows for a chat its windows show when its typing changes, and
+//! just after the window's push that brings a chat in with someone typing. A connection keeps what
+//! its interface holds of it, forgetting a chat as it leaves every window, and at most one push
+//! owed for each chat, which waits with the windows' updates while the queue is full.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,7 +33,8 @@ use std::time::Instant;
 
 use jaw_proto::windows::{
     Around, ChatRow, ChatsPush, ChatsWatch, ChatsWatched, Favourite, FolderRow, FoldersPush, FoldersWatch,
-    FoldersWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, RosterRow, RosterWatch, Watch, WatchMove,
+    FoldersWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, RosterRow, RosterWatch, TypingPush,
+    Typist, Typists, Watch, WatchMove,
 };
 use jaw_proto::{Error, Windows, code};
 use rusqlite::Connection;
@@ -38,6 +45,7 @@ use serde_json::value::RawValue;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::{mpsc, watch};
 
+use super::typing::Watching;
 use super::window::{
     self, ChatAnchor, ChatSpec, MessageAnchor, MessageSpec, PersonAnchor, RosterSpec, Rows, Snapshot, Spec,
 };
@@ -57,6 +65,8 @@ const KEPT_MOST: u64 = 16 << 20;
 /// What a client waits for.
 pub enum Ready {
     Changes(Result<Arc<Changes>, RecvError>),
+    /// A chat whose typing was told, or how many such changes it fell behind by.
+    Typing(Result<Arc<str>, RecvError>),
     Flush,
     /// The queue to the interface has room again.
     Room,
@@ -83,6 +93,13 @@ pub struct Client {
     held: bool,
     /// Watches dropped for falling behind, owed a `resync`.
     resync: Vec<String>,
+    typing: Watching,
+    /// Who its interface holds as typing, by chat: what the last answer or push said, for the chats
+    /// its windows show where someone was.
+    typists: HashMap<String, Arc<[Typist]>>,
+    /// The chats shown whose typing may differ from what its interface holds, to tell it once the
+    /// queue has room.
+    typing_owed: BTreeSet<String>,
 }
 
 /// What every connection shares: each distinct window's reads, the bytes of those kept, and how
@@ -655,12 +672,14 @@ fn settle<'a>(
     (update, state)
 }
 
-/// `update` as a watch's or a move's result.
-fn result(watch: String, update: Update) -> Value {
+/// `update` as a watch's or a move's result, with who's typing in the window's chats.
+fn result(watch: String, update: Update, typing: Typists) -> Value {
     let Update { kind, seq, total, older, newer, upsert: rows, remove, favourites } = update;
     let value = match kind {
-        Kind::Chats | Kind::Roster => serde_json::to_value(ChatsWatched { watch, seq, total, rows, remove }),
-        Kind::Messages => serde_json::to_value(MessagesWatched { watch, seq, total, older, newer, rows, remove }),
+        Kind::Chats | Kind::Roster => serde_json::to_value(ChatsWatched { watch, seq, total, rows, remove, typing }),
+        Kind::Messages => {
+            serde_json::to_value(MessagesWatched { watch, seq, total, older, newer, rows, remove, typing })
+        }
         Kind::Folders => {
             let favourites: Vec<Favourite> =
                 favourites.map(|json| serde_json::from_str(json.get()).unwrap_or_default()).unwrap_or_default();
@@ -863,6 +882,24 @@ impl Window {
         Some(self.read.map_or(at, |read| at.max(read + timing.burst)))
     }
 
+    /// Whether it shows `chat`: a chat list among its rows, a chat's messages as theirs.
+    fn shows(&self, chat: &str) -> bool {
+        match &self.spec {
+            Spec::Chats(_) => self.state.held.contains_key(chat),
+            Spec::Messages(messages) => messages.chat == chat,
+            Spec::Folders | Spec::Roster(_) => false,
+        }
+    }
+
+    /// The chats it shows.
+    fn chats(&self) -> Vec<String> {
+        match &self.spec {
+            Spec::Chats(_) => self.state.held.keys().cloned().collect(),
+            Spec::Messages(messages) => vec![messages.chat.clone()],
+            Spec::Folders | Spec::Roster(_) => Vec::new(),
+        }
+    }
+
     /// Takes what its interface now holds, from a read that succeeded; `reordered` says when, if
     /// it took a new order.
     fn keep(&mut self, state: State, reordered: Option<Instant>) {
@@ -891,6 +928,7 @@ impl Client {
         timing: Timing,
         out: mpsc::Sender<Vec<u8>>,
         shared: Arc<Shared>,
+        typing: Watching,
     ) -> Client {
         Client {
             store,
@@ -906,7 +944,67 @@ impl Client {
             blocked: None,
             held: false,
             resync: Vec::new(),
+            typing,
+            typists: HashMap::new(),
+            typing_owed: BTreeSet::new(),
         }
+    }
+
+    /// Whether one of its windows shows `chat`.
+    fn shows(&self, chat: &str) -> bool {
+        self.windows.values().any(|window| window.shows(chat))
+    }
+
+    /// Who's typing in `chats` now, as an answer says it for every chat of its window, which is
+    /// what its interface then holds for them.
+    fn typing_in(&mut self, chats: Vec<String>) -> Typists {
+        let mut typing = Typists::new();
+        for chat in chats {
+            self.typing_owed.remove(&chat);
+            match self.typing.now(&chat) {
+                Some(who) => {
+                    typing.insert(chat.clone(), who.to_vec());
+                    self.typists.insert(chat, who);
+                }
+                None => {
+                    self.typists.remove(&chat);
+                }
+            }
+        }
+        typing
+    }
+
+    /// Forgets the typing of the chats no window shows now, as its interface does.
+    fn forget_unshown(&mut self) {
+        let shown: HashSet<String> = self.windows.values().flat_map(Window::chats).collect();
+        self.typists.retain(|chat, _| shown.contains(chat));
+        self.typing_owed.retain(|chat| shown.contains(chat));
+    }
+
+    /// Sends the `typing` pushes owed for the chats its windows show, each with who's typing there
+    /// now, unless that's what its interface holds; false if the queue had no room for one.
+    fn flush_typing(&mut self) -> bool {
+        while let Some(chat) = self.typing_owed.pop_first() {
+            if !self.shows(&chat) {
+                self.typists.remove(&chat);
+                continue;
+            }
+            let now = self.typing.now(&chat);
+            if now.as_ref() == self.typists.get(&chat) {
+                continue;
+            }
+            let who = now.as_deref().map(<[Typist]>::to_vec).unwrap_or_default();
+            if self.out.try_send(line("typing", TypingPush { chat: chat.clone(), who })).is_err() {
+                self.typing_owed.insert(chat);
+                return false;
+            }
+            self.typing.sent();
+            match now {
+                Some(who) => self.typists.insert(chat, who),
+                None => self.typists.remove(&chat),
+            };
+        }
+        true
     }
 
     /// Takes hello's `since`, the default for the watches this connection sends again.
@@ -978,6 +1076,7 @@ impl Client {
             "unwatch" => {
                 let Watch { watch } = params_of(method, params)?;
                 self.windows.remove(&watch).ok_or_else(|| unknown(&watch))?;
+                self.forget_unshown();
                 Ok(Value::Object(Default::default()))
             }
             _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
@@ -1163,8 +1262,10 @@ impl Client {
         let slot = self.shared.slot(&spec);
         let mut window = Window::new(spec, slot, &self.shared);
         window.keep(state, Some(Instant::now()));
+        let chats = window.chats();
         self.windows.insert(watch.clone(), window);
-        Ok(result(watch, update))
+        let typing = self.typing_in(chats);
+        Ok(result(watch, update, typing))
     }
 
     async fn relocate(&mut self, watch: String, spec: Spec) -> Result<Value, Error> {
@@ -1176,7 +1277,10 @@ impl Client {
         window.spec = spec;
         window.slot = slot;
         window.keep(state, Some(Instant::now()));
-        Ok(result(watch, update))
+        let chats = window.chats();
+        self.forget_unshown();
+        let typing = self.typing_in(chats);
+        Ok(result(watch, update, typing))
     }
 
     /// Waits for a change from the feed, a flush falling due, room for a blocked flush, or a
@@ -1196,12 +1300,23 @@ impl Client {
             _ = room(out) => Ready::Room,
             _ = until(behind_at) => Ready::Behind,
             changes = recv(&mut self.changes) => Ready::Changes(changes),
+            typing = self.typing.changed() => Ready::Typing(typing),
         }
     }
 
     pub async fn handle(&mut self, ready: Ready) {
         match ready {
             Ready::Changes(Ok(changes)) => self.mark(&changes),
+            // A change waiting for the interface gives way to the newer, which is read as it goes.
+            Ready::Typing(Ok(chat)) => {
+                if self.shows(&chat) && !self.typing_owed.insert(chat.to_string()) {
+                    self.typing.merged();
+                }
+            }
+            Ready::Typing(Err(_)) => {
+                let shown: Vec<String> = self.windows.values().flat_map(Window::chats).collect();
+                self.typing_owed.extend(shown);
+            }
             Ready::Changes(Err(RecvError::Lagged(_))) => {
                 // What was lost may reach past the last committed seq this has heard of, so only
                 // a read asked for from now on will do.
@@ -1215,6 +1330,7 @@ impl Client {
             Ready::Behind => {
                 if self.blocked.is_some_and(|since| since.elapsed() >= self.timing.behind) {
                     self.resync.extend(std::mem::take(&mut self.windows).into_keys());
+                    self.forget_unshown();
                 }
             }
         }
@@ -1230,7 +1346,7 @@ impl Client {
     }
 
     fn flush_at(&self) -> Option<Instant> {
-        if !self.resync.is_empty() {
+        if !self.resync.is_empty() || !self.typing_owed.is_empty() {
             return Some(Instant::now());
         }
         let (now, holding) = (Instant::now(), (self.catching_up)());
@@ -1255,6 +1371,10 @@ impl Client {
                 return;
             }
             self.resync.remove(0);
+        }
+        if !self.flush_typing() {
+            self.blocked.get_or_insert_with(Instant::now);
+            return;
         }
         let holding = (self.catching_up)();
         let now = Instant::now();
@@ -1323,6 +1443,7 @@ impl Client {
                     eprintln!("jawd: {watch} still can't be read, so its interface is told to watch it again");
                     self.windows.remove(&watch);
                     self.resync.push(watch);
+                    self.forget_unshown();
                 }
                 return true;
             }
@@ -1333,6 +1454,10 @@ impl Client {
             window.slot = self.shared.slot(&window.spec);
         }
         let (update, state) = settle(&window.state.held, window.state.favourites, &found, None);
+        let list = matches!(window.spec, Spec::Chats(_));
+        let came: Vec<String> =
+            state.held.keys().filter(|id| list && !window.state.held.contains_key(*id)).cloned().collect();
+        let left = list && window.state.held.keys().any(|id| !state.held.contains_key(id));
         match push(watch, update, &window.state) {
             None => window.keep(state, reordered),
             Some(line) => match self.out.try_send(line) {
@@ -1340,12 +1465,24 @@ impl Client {
                 Err(_) => return false,
             },
         }
+        if left {
+            self.forget_unshown();
+        }
+        // A chat its interface didn't hold typing for is told who's typing there just after the
+        // push that brought it in.
+        for chat in came {
+            if !self.typists.contains_key(&chat) && self.typing.now(&chat).is_some() {
+                self.typing_owed.insert(chat);
+            }
+        }
         true
     }
 
-    /// Whether it has updates or resyncs it hasn't sent.
+    /// Whether it has updates, resyncs or typing it hasn't sent.
     #[cfg(test)]
     pub fn pending(&self) -> bool {
-        !self.resync.is_empty() || self.windows.values().any(|window| window.first.is_some() || window.reorder)
+        !self.resync.is_empty()
+            || !self.typing_owed.is_empty()
+            || self.windows.values().any(|window| window.first.is_some() || window.reorder)
     }
 }

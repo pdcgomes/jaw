@@ -64,7 +64,7 @@ impl Peer {
     fn greet(&mut self) {
         let hello = self.request();
         assert_eq!(hello["method"], "hello", "hello comes first: {hello}");
-        let welcome = json!({"protocol": 1, "jawd": "0", "root": "/tmp/jaw", "seq": 0, "account": {"state": "linked"}, "connection": {"state": "online"}});
+        let welcome = json!({"protocol": jaw_proto::PROTOCOL, "jawd": "0", "root": "/tmp/jaw", "seq": 0, "account": {"state": "linked"}, "connection": {"state": "online"}});
         self.answer(&hello, welcome);
     }
 }

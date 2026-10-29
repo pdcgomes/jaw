@@ -52,6 +52,7 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         Some(supervisor.clone()),
         home.to_path_buf(),
         Default::default(),
+        crate::feed::Typing::default(),
     );
     tokio::spawn(sync);
     let chats: Vec<Change> =

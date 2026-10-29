@@ -108,6 +108,8 @@ struct Inner {
     online: Notify,
     /// Whether WhatsApp can be reached now; sends wait for it.
     connected: watch::Sender<bool>,
+    /// Whether WhatsApp says who's typing now: it can be reached, and has been told you're online.
+    hearing: watch::Sender<bool>,
     /// Actions waiting for their message to reach WhatsApp.
     held: outbox::Held,
     reads: reads::Reads,
@@ -165,6 +167,7 @@ impl Sending {
             previews,
             online: Notify::new(),
             connected: watch::channel(online).0,
+            hearing: watch::channel(false).0,
             held: outbox::Held::default(),
             reads: reads::Reads::default(),
             typing: typing::Typists::new(),
@@ -204,6 +207,12 @@ impl Sending {
         let pause = (Arc::default(), Arc::default());
         *self.inner.acting.lock().expect("the test's pause") = Some(pause.clone());
         pause
+    }
+
+    /// Whether WhatsApp says who's typing now: it can be reached, and has been told you're online,
+    /// as it is while an interface has focus.
+    pub fn hearing(&self) -> watch::Receiver<bool> {
+        self.inner.hearing.subscribe()
     }
 
     /// Answers one of the sending methods: `send.text`, `send.retry`, `chat.start`, `draft.set`,

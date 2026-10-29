@@ -1,6 +1,9 @@
 //! Windows: a stretch of rows around an anchor, which jawd keeps current. A watch returns its rows,
 //! then pushes upserts and removals; rows carry a `sort` that compares bytewise and a version `v`,
-//! so applying an update twice, or two out of order, ends the same.
+//! so applying an update twice, or two out of order, ends the same. Who's typing in the window's
+//! chats comes with each watch's answer and then as `typing` pushes, with no `v`.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -104,6 +107,10 @@ pub struct ChatsWatched<R = ChatRow> {
     pub rows: Vec<R>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove: Vec<String>,
+    /// Who's typing in the window's chats now, where someone is. It replaces what the interface
+    /// held for every chat in the window, so a chat left out has nobody typing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub typing: Typists,
 }
 
 /// What `messages.watch` returns, and `watch.move` on a chat's messages.
@@ -119,6 +126,36 @@ pub struct MessagesWatched<R = MessageRow> {
     pub rows: Vec<R>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove: Vec<String>,
+    /// Who's typing in the window's chat now, if anyone is, as a chat list's answer has it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub typing: Typists,
+}
+
+/// Who's typing in each chat where someone is, by the chat's `id`.
+pub type Typists = BTreeMap<String, Vec<Typist>>;
+
+/// Someone typing or recording in a chat.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Typist {
+    /// `person:` and a number.
+    pub id: String,
+    /// Their name as a message from them shows it.
+    pub name: String,
+    pub state: TypistState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypistState {
+    Typing,
+    Recording,
+}
+
+/// The `typing` push: who's typing in a chat now, oldest first; empty once nobody is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypingPush {
+    pub chat: String,
+    pub who: Vec<Typist>,
 }
 
 /// The `chats` push: what changed in a chat-list window. `total` comes when it changed.
@@ -171,9 +208,6 @@ pub struct ChatRow {
     pub archived: bool,
     pub marked_unread: bool,
     pub draft: Option<String>,
-    /// Who's typing or recording now, by person `id`.
-    #[serde(default)]
-    pub typing: Vec<String>,
     /// For a group in a community, the community's `id`.
     pub community: Option<String>,
     /// For a community, its groups' unread total.

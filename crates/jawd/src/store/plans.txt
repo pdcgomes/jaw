@@ -1888,6 +1888,11 @@ SELECT jid FROM person_jids WHERE person IN (SELECT value FROM json_each(?1))
       SCAN json_each VIRTUAL TABLE INDEX 1:
 
 -- src/store/read.rs
+SELECT p.n, p.name, p.push_name, p.verified_name FROM person_jids j JOIN people p ON p.n = j.person WHERE j.jid = ?1
+    SEARCH j USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/read.rs
 SELECT coalesce((SELECT min(seq) FROM events), 0), coalesce((SELECT max(seq) FROM events), 0)
     SCAN CONSTANT ROW
     SCALAR SUBQUERY 1

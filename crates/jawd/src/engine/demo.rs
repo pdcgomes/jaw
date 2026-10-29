@@ -8,7 +8,8 @@
 //! window for it has passed; and app state sent for your other devices is taken. Given an
 //! `Account`, it answers for its contacts and groups, and writes each history blob its phone offers
 //! to the spool as jaw-engine does; events can also be delivered from outside its script, several
-//! waiting for their acks at once.
+//! waiting for their acks at once. Its people type and record as WhatsApp's chat presence says it,
+//! told to jawd's `Typing` directly until the link carries it.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -44,6 +45,8 @@ pub struct DemoEngine {
     world: Arc<World>,
     /// How long it takes before its script plays, as an engine reading its session.db does.
     pause: Duration,
+    /// Whether its people type and record once its script has played, as `new`'s do.
+    typists: bool,
 }
 
 /// A made-up account the demo engine answers for: who's in its contacts and groups, the phone
@@ -152,6 +155,8 @@ pub struct World {
     /// What a test does as the phone is asked, before it answers.
     #[cfg(test)]
     when_asked: Mutex<Option<WhenAsked>>,
+    /// Where its people's typing goes, once jawd has said.
+    typing: Mutex<Option<crate::feed::Typing>>,
 }
 
 /// What a test does as the made-up phone is asked to send a file again.
@@ -173,6 +178,16 @@ pub enum Phone {
 }
 
 impl World {
+    /// Says `sender` is typing (`Composing`) or recording in `chat`, or has stopped, as WhatsApp
+    /// says it, which jawd takes only while WhatsApp would say it: while it's been told you're
+    /// online. Nothing happens before jawd has said where typing goes.
+    pub fn typing(&self, chat: &str, sender: &str, state: pb::chat_presence::State) {
+        let typing = self.typing.lock().expect("the demo world").clone();
+        if let Some(typing) = typing {
+            typing.heard(chat, sender, state);
+        }
+    }
+
     /// Hands `event` to jawd through the engine running now, as WhatsApp would send it, and says how
     /// long jawd took to ack it, or to take it if it needs no ack; None if no engine is running or
     /// jawd has gone. Several can wait for their acks at once.
@@ -465,7 +480,12 @@ impl DemoEngine {
             // last, so an interface that sees the group named has the whole script.
             group(climbing, "Lisbon Climbing", &[ME, MEMBERS[0], MEMBERS[1]]),
         ];
-        DemoEngine { script, world, pause: Duration::ZERO }
+        DemoEngine { script, world, pause: Duration::ZERO, typists: false }.typing()
+    }
+
+    /// The same, its people typing and recording once its script has played (`typists`).
+    fn typing(self) -> DemoEngine {
+        DemoEngine { typists: true, ..self }
     }
 
     /// The made-up account's engine finding no device in its session.db, as after the account was
@@ -478,19 +498,19 @@ impl DemoEngine {
     }
 
     pub fn with(script: Vec<pb::Event>) -> DemoEngine {
-        DemoEngine { script, world: Arc::default(), pause: Duration::ZERO }
+        DemoEngine { script, world: Arc::default(), pause: Duration::ZERO, typists: false }
     }
 
     /// The made-up `account`, which plays `script` and answers what jawd asks about it.
     pub fn for_account(script: Vec<pb::Event>, account: Arc<dyn Account>) -> DemoEngine {
         let world = Arc::new(World { account: Some(account), ..World::default() });
-        DemoEngine { script, world, pause: Duration::ZERO }
+        DemoEngine { script, world, pause: Duration::ZERO, typists: false }
     }
 
     /// An engine on `world`, as an engine started again talks to the same WhatsApp.
     #[cfg(test)]
     pub fn sharing(script: Vec<pb::Event>, world: Arc<World>) -> DemoEngine {
-        DemoEngine { script, world, pause: Duration::ZERO }
+        DemoEngine { script, world, pause: Duration::ZERO, typists: false }
     }
 
     pub fn world(&self) -> Arc<World> {
@@ -719,6 +739,29 @@ async fn comings_and_goings(sender: Sender) {
     }
 }
 
+/// How often the made-up account's people say again that they're typing or recording, as the
+/// phones do every few seconds while it goes on.
+const TYPING_AGAIN: Duration = Duration::from_secs(4);
+
+/// The made-up account's people type and record for as long as the engine runs: Ana in her chat,
+/// Rui recording in Lisbon Climbing, each said again every few seconds, and the group's other
+/// member typing there and stopping in turn. jawd hears it only while WhatsApp would say it.
+async fn typing_while_running(sender: Sender) {
+    use pb::chat_presence::State::{Composing, Paused, Recording};
+    let (ana, climbing) = ("351912345678@s.whatsapp.net", "120363012345678901@g.us");
+    for turn in 0u64.. {
+        // Until this engine is stopped, or jawd has gone.
+        if sender.events.is_closed() || sender.weak.upgrade().is_none() {
+            return;
+        }
+        let world = &sender.world;
+        world.typing(ana, ana, Composing);
+        world.typing(climbing, MEMBERS[0], Recording);
+        world.typing(climbing, MEMBERS[1], if turn % 2 == 0 { Composing } else { Paused });
+        tokio::time::sleep(TYPING_AGAIN).await;
+    }
+}
+
 /// Every number is on the made-up WhatsApp but those starting 999, each known by a LID as well.
 fn on_whatsapp(asked: &pb::OnWhatsApp) -> pb::OnWhatsAppList {
     let users = asked
@@ -770,10 +813,14 @@ impl Engine for DemoEngine {
         "demo"
     }
 
+    fn hear_typing(&self, typing: &crate::feed::Typing) {
+        *self.world.typing.lock().expect("the demo world") = Some(typing.clone());
+    }
+
     fn start(&self, events: mpsc::Sender<Incoming>) -> BoxFuture<'_, Result<Instance>> {
         let script = self.script.clone();
         let world = self.world.clone();
-        let pause = self.pause;
+        let (pause, typists) = (self.pause, self.typists);
         Box::pin(async move {
             let (tx, mut outgoing) = mpsc::unbounded_channel();
             let commands = Commands { tx };
@@ -795,8 +842,11 @@ impl Engine for DemoEngine {
                 tokio::time::sleep(pause).await;
                 for event in script {
                     if !playing.send(event).await {
-                        break;
+                        return;
                     }
+                }
+                if typists {
+                    typing_while_running(playing).await;
                 }
             });
             tokio::spawn(comings_and_goings(sender.clone()));

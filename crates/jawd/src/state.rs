@@ -296,6 +296,7 @@ impl State {
             windows: self.feed.as_ref().map(Feed::windows),
             storage: self.store.as_ref().map(Store::storage),
             layouts: self.layouts.as_ref().map(Layouts::status),
+            typing: self.feed.as_ref().map(|feed| feed.typing().stats()),
             settings: self.settings.as_ref().map(|s| s.by_domain()).unwrap_or_default(),
             settings_ignored: self.settings.as_ref().map(|s| s.ignored()).unwrap_or_default(),
             presence: self.following.as_ref().map(|(following, _)| following.status()),

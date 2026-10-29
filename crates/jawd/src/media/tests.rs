@@ -88,6 +88,7 @@ async fn rig_on(home: Arc<tempfile::TempDir>, store: Store, config: Config) -> R
         Some(supervisor.clone()),
         home.path().to_path_buf(),
         Default::default(),
+        crate::feed::Typing::default(),
     );
     tokio::spawn(sync);
     Rig { home, store, world, media, supervisor, live, pushes }
@@ -2519,6 +2520,7 @@ fn answer_left_in_the_inbox(ahead: usize, media_first: bool) -> (String, Option<
             Some(supervisor.clone()),
             home.path().to_path_buf(),
             Default::default(),
+            crate::feed::Typing::default(),
         );
         let config = Config { phone_wait: Duration::from_secs(60), ..quick() };
         let _media = if media_first {

@@ -158,6 +158,12 @@ impl Live {
             }
         }
     }
+
+    /// The account's own JIDs as they're kept, empty until the engine has said which account is
+    /// linked.
+    pub fn me(&self) -> watch::Receiver<convert::Me> {
+        self.me.subscribe()
+    }
 }
 
 pub type Shared = Arc<Mutex<Live>>;
@@ -284,7 +290,9 @@ async fn stored_me(live: &Shared, what: &str) -> convert::Me {
     me.clone()
 }
 
-/// Handles the engine's events until it stops sending them.
+/// Handles the engine's events until it stops sending them. A message from someone ends their
+/// typing in its chat, which `typing` keeps in memory, never in jaw.db.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut incoming: mpsc::Receiver<Incoming>,
     store: Store,
@@ -293,6 +301,7 @@ pub async fn run(
     engine: Option<Supervisor>,
     home: PathBuf,
     following: crate::presence::Following,
+    typing: crate::feed::Typing,
 ) {
     let (offered, offers) = mpsc::unbounded_channel();
     let avatars = Avatars::new();
@@ -362,6 +371,9 @@ pub async fn run(
             Some(pb::event::Kind::Message(message)) => {
                 let info = message.info.clone().unwrap_or_default();
                 heard_from(&live, &info.sender);
+                if !info.from_me {
+                    typing.message(&info.chat, &info.sender, &info.sender_alt);
+                }
                 caught(&live, &pushes, &info.chat);
                 store.inbox("message", info.timestamp_ms, message.encode_to_vec(), ack);
             }

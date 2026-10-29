@@ -112,6 +112,11 @@ pub trait Engine: Send + Sync + 'static {
     /// Starts an instance, which sends its events to `events` and resolves once it has said hello.
     /// `events` is bounded, so an engine waits when jawd falls behind.
     fn start(&self, events: mpsc::Sender<Incoming>) -> BoxFuture<'_, anyhow::Result<Instance>>;
+
+    /// Where to say who's typing, for an engine whose typing doesn't come over the link: the demo
+    /// engine's, until the link carries WhatsApp's chat presence as M6's `Typing` event, which sync
+    /// hands to the same `Typing::heard`.
+    fn hear_typing(&self, _typing: &crate::feed::Typing) {}
 }
 
 type Waiter = oneshot::Sender<Result<pb::reply::Kind, EngineError>>;

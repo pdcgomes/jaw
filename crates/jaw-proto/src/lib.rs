@@ -18,7 +18,7 @@ pub mod themes;
 pub mod windows;
 
 /// The version this crate speaks. jawd serves one, and refuses a hello with another.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// A request from an interface. Its reply carries the same `id`, which the interface picks.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -278,6 +278,9 @@ pub struct Status {
     /// The layouts kept for interfaces, and the limits on them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layouts: Option<Layouts>,
+    /// Others' typing, which jawd keeps in memory only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing: Option<TypingStats>,
     /// Each domain's settings in effect, by the domain's name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, serde_json::Map<String, Value>>,
@@ -293,6 +296,23 @@ pub struct Status {
     /// The media cache, and what's downloading and waiting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<media::MediaStatus>,
+}
+
+/// Others' typing since jawd started: the chats with someone typing now; the changes WhatsApp sent,
+/// and those of them dropped for coming faster than jawd took them; the changes waiting to be taken
+/// now, and the most that can; the `typing` pushes sent to interfaces; and the changes merged into
+/// a newer one before they went.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypingStats {
+    pub chats: u64,
+    pub heard: u64,
+    pub dropped: u64,
+    #[serde(default)]
+    pub waiting: u64,
+    #[serde(default)]
+    pub waiting_most: u64,
+    pub sent: u64,
+    pub merged: u64,
 }
 
 /// The layouts jawd keeps for interfaces (`layout.set`), and the most it keeps.

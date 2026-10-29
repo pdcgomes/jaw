@@ -470,6 +470,7 @@ async fn what_a_version_1_jaw_db_holds_waits_for_the_accounts_jids_and_is_conver
         None,
         home_path,
         Default::default(),
+        crate::feed::Typing::default(),
     ));
     // An engine says which account is linked once it has connected, a while after jawd starts.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -675,6 +676,7 @@ async fn typing_and_recording_heard_from_whatsapp_write_nothing_to_jaw_db() {
         None,
         home.path().to_path_buf(),
         following.clone(),
+        crate::feed::Typing::default(),
     ));
     // What jaw.db holds once what the writer does after the messages, indexing their words, is done.
     let mut before = every_row(home.path(), rui);
@@ -1430,6 +1432,7 @@ async fn every_engine_that_connects_fetches_app_state_again_and_a_reconnection_o
         Some(supervisor),
         home.path().to_path_buf(),
         Default::default(),
+        crate::feed::Typing::default(),
     ));
     until("the first engine's resync", || engine.asked("resync") == 1).await;
     engine.send(connected()).await;
@@ -1455,6 +1458,7 @@ async fn a_full_app_state_refetch_that_fails_is_tried_again_while_its_engine_run
         Some(supervisor.clone()),
         home.path().to_path_buf(),
         Default::default(),
+        crate::feed::Typing::default(),
     ));
     // Tried again after 1 s and then 2 s more.
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -1641,8 +1645,16 @@ async fn after(
     let live: Shared = Arc::new(Mutex::new(live));
     let (tx, incoming) = mpsc::channel(16);
     let (pushes, mut told) = broadcast::channel(64);
-    let running =
-        tokio::spawn(run(incoming, store.clone(), live.clone(), pushes, None, home.to_path_buf(), Default::default()));
+    let running = tokio::spawn(run(
+        incoming,
+        store.clone(),
+        live.clone(),
+        pushes,
+        None,
+        home.to_path_buf(),
+        Default::default(),
+        crate::feed::Typing::default(),
+    ));
     for event in events {
         tx.send(event).await.unwrap();
     }
@@ -1763,8 +1775,16 @@ async fn the_engine_next_word_waits_until_the_account_it_said_before_is_stored()
     let live: Shared = Arc::new(Mutex::new(starting(&store, true)));
     let (tx, incoming) = mpsc::channel(16);
     let (pushes, mut told) = broadcast::channel(64);
-    let running =
-        tokio::spawn(run(incoming, store.clone(), live, pushes, None, home.path().to_path_buf(), Default::default()));
+    let running = tokio::spawn(run(
+        incoming,
+        store.clone(),
+        live,
+        pushes,
+        None,
+        home.path().to_path_buf(),
+        Default::default(),
+        crate::feed::Typing::default(),
+    ));
     let holder = Connection::open(home.path().join("jaw.db")).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE").unwrap();
     tx.send(connection_event(State::Connected)).await.unwrap();
@@ -1997,6 +2017,7 @@ fn syncing_from(
         supervisor,
         home.to_path_buf(),
         Default::default(),
+        crate::feed::Typing::default(),
     ));
     (live, told, running)
 }
@@ -2854,6 +2875,7 @@ async fn a_question_put_to_the_phone_before_a_logout_is_forgotten_with_the_devic
         None,
         home.path().to_path_buf(),
         Default::default(),
+        crate::feed::Typing::default(),
     ));
     tx.send(connection_event(State::Connected)).await.unwrap();
     assert_eq!(next_connection_within(&mut told, WAIT).await, Some(ConnectionState::Online));

@@ -76,6 +76,7 @@ async fn serve(scratch: &Path, full_flush: bool) -> Result<Served> {
         Some(supervisor.clone()),
         scratch.into(),
         Default::default(),
+        crate::feed::Typing::default(),
     ));
     let feed = Feed::start(store.clone(), Arc::new(|| false), Timing::default());
     let socket = jaw_proto::local::socket(scratch);
@@ -178,7 +179,7 @@ fn watch(
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut line = String::new();
         for request in [
-            json!({ "id": 1, "method": "hello", "params": { "protocol": 1, "client": "bench", "version": "0" } }),
+            json!({ "id": 1, "method": "hello", "params": { "protocol": jaw_proto::PROTOCOL, "client": "bench", "version": "0" } }),
             json!({ "id": 2, "method": "messages.watch", "params": { "chat": ANA, "around": "newest", "before": 20 } }),
         ] {
             stream.write_all(format!("{request}\n").as_bytes())?;
