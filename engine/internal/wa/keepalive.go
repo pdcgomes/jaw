@@ -30,7 +30,10 @@ type told struct {
 	connected func(*whatsmeow.Client) bool
 }
 
-// connected says whether client is connected to WhatsApp and logged in.
+// connected says whether client is connected to WhatsApp and logged in. whatsmeow takes any answer
+// to a waiting ping for one that got through, and answers every waiter itself when the socket drops,
+// once the socket is gone, and when a stream error comes (handleStreamError), once the client isn't
+// logged in, though the socket can still be open: the login check drops that restore.
 func connected(client *whatsmeow.Client) bool {
 	return client.IsConnected() && client.IsLoggedIn()
 }

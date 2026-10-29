@@ -1,6 +1,7 @@
 package wa
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -162,4 +163,116 @@ func TestATimeoutOlderThanTheTimeoutSaidLastSaysNothingAndALaterOneOfItsRunIsSai
 	if said := saidNext(t, jawd, enginepb.Connection_KEEPALIVE_TIMEOUT); said.GetReason() != "3 keepalives failed" {
 		t.Fatalf("the run's third failure said %q", said.GetReason())
 	}
+}
+
+// A restore and a Disconnected dispatched at once, each on a goroutine of its own as whatsmeow
+// does: whichever is said first, jawd's last word is the Disconnected.
+func TestARestoreRacingADisconnectNeverHasTheLastWord(t *testing.T) {
+	const apart = time.Millisecond
+	e, jawd, _, closeLink := connectedEngine(t, apart)
+	defer closeLink()
+	client := e.cli()
+	said := make(chan enginepb.Connection_State, 64)
+	go func() {
+		for {
+			frame, err := jawd.Recv()
+			if err != nil {
+				return
+			}
+			if c := frame.GetEvent().GetConnection(); c != nil {
+				said <- c.GetState()
+			}
+		}
+	}()
+	next := func() enginepb.Connection_State {
+		select {
+		case state := <-said:
+			return state
+		case <-time.After(10 * time.Second):
+			t.Fatal("the engine said nothing more")
+			return 0
+		}
+	}
+	const rounds = 200
+	restoredLast := 0
+	for round := range rounds {
+		go e.handleFrom(client, failedPings(1, time.Now()))
+		if state := next(); state != enginepb.Connection_KEEPALIVE_TIMEOUT {
+			t.Fatalf("round %d: the timeout said %v", round, state)
+		}
+		// Once the next ping could have got through.
+		time.Sleep(3 * apart)
+		start := make(chan struct{})
+		var both sync.WaitGroup
+		both.Add(2)
+		go func() { defer both.Done(); <-start; e.handleFrom(client, &events.KeepAliveRestored{}) }()
+		go func() { defer both.Done(); <-start; e.handleFrom(client, &events.Disconnected{}) }()
+		close(start)
+		both.Wait()
+		// Said after both, so every word of theirs comes before it.
+		go e.handleFrom(client, &events.Connected{})
+		var last enginepb.Connection_State
+		for state := next(); state != enginepb.Connection_CONNECTED; state = next() {
+			last = state
+		}
+		if last != enginepb.Connection_DISCONNECTED {
+			restoredLast++
+		}
+	}
+	if restoredLast > 0 {
+		t.Fatalf("in %d of %d rounds jawd's last word was the restore, after the Disconnected", restoredLast, rounds)
+	}
+}
+
+// The engine whatsmeow runs in counts pings whatsmeow's least interval apart, which the timeout's and
+// the restore's bounds count on.
+func TestTheEngineCountsPingsWhatsmeowsLeastIntervalApart(t *testing.T) {
+	e, _, _, closeLink := engineWithoutSession(t, link.Protocol)
+	defer closeLink()
+	if e.told.apart != whatsmeow.KeepAliveIntervalMin {
+		t.Fatalf("pings counted %v apart, where whatsmeow's least is %v", e.told.apart, whatsmeow.KeepAliveIntervalMin)
+	}
+}
+
+// A timeout is said after a state only when its failure can't have come before it: the nth failure
+// since the last ping that got through comes at least n pings after that ping.
+func TestATimeoutIsSaidAfterAStateOnlyOnceItsFailureCantHaveComeBeforeIt(t *testing.T) {
+	const apart = 2 * time.Second
+	e, jawd, _, closeLink := connectedEngine(t, apart)
+	defer closeLink()
+	client := e.cli()
+	lastPing := time.Now().Add(-apart * 3 / 2)
+	saysNothing(t, e, client, failedPings(1, lastPing), "a first failure that could have come before the Connected")
+	go e.handleFrom(client, failedPings(2, lastPing))
+	saidNext(t, jawd, enginepb.Connection_KEEPALIVE_TIMEOUT)
+}
+
+// A timeout is judged against the state said last, not an earlier one.
+func TestATimeoutIsJudgedAgainstTheStateSaidLast(t *testing.T) {
+	const apart = 2 * time.Second
+	e, jawd, _, closeLink := connectedEngine(t, apart)
+	defer closeLink()
+	client := e.cli()
+	time.Sleep(apart)
+	go e.handleFrom(client, &events.Disconnected{})
+	saidNext(t, jawd, enginepb.Connection_DISCONNECTED)
+	lastPing := time.Now().Add(-apart * 3 / 2)
+	saysNothing(t, e, client, failedPings(1, lastPing), "a timeout that could have come before the Disconnected")
+}
+
+// After n failures since the last ping that got through, a restore can't come sooner than the
+// (n+1)th ping after it.
+func TestARestoreIsSaidOnlyOnceTheNextPingCouldHaveGotThrough(t *testing.T) {
+	const apart = 2 * time.Second
+	e, jawd, _, closeLink := connectedEngine(t, apart)
+	defer closeLink()
+	client := e.cli()
+	lastPing := time.Now()
+	go e.handleFrom(client, failedPings(1, lastPing))
+	saidNext(t, jawd, enginepb.Connection_KEEPALIVE_TIMEOUT)
+	time.Sleep(time.Until(lastPing.Add(apart * 3 / 2)))
+	saysNothing(t, e, client, &events.KeepAliveRestored{}, "a restore between the first and second pings after the last that got through")
+	time.Sleep(time.Until(lastPing.Add(apart * 5 / 2)))
+	go e.handleFrom(client, &events.KeepAliveRestored{})
+	saidNext(t, jawd, enginepb.Connection_KEEPALIVE_RESTORED)
 }
