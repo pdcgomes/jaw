@@ -14,6 +14,9 @@
 //! - `logout`: the phone logs jaw out. Linking again shows a made-up QR code, and once the failure
 //!   is off the phone links the same account again.
 //! - `outdated`: WhatsApp wants a newer version, and refuses this one until the failure is off.
+//! - `keepalive`: WhatsApp stops answering the engine's keepalive pings, as jaw-engine says when
+//!   they time out, and once the failure is off answers them again on the same connection, which
+//!   jaw-engine says too; what's sent and what arrives goes on meanwhile.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -48,6 +51,8 @@ pub enum Failure {
     Logout,
     /// WhatsApp wants a newer version of jaw
     Outdated,
+    /// WhatsApp stops answering the engine's keepalive pings, and answers them again once the failure is off
+    Keepalive,
 }
 
 impl Failure {
@@ -58,6 +63,7 @@ impl Failure {
             Failure::PhoneOffline => "phone-offline",
             Failure::Logout => "logout",
             Failure::Outdated => "outdated",
+            Failure::Keepalive => "keepalive",
         }
     }
 
@@ -69,6 +75,8 @@ impl Failure {
 
 /// Why WhatsApp logged jaw out, as jaw-engine says when the phone removes the device.
 pub const LOGGED_OUT: &str = "logged out from another device";
+/// How jaw-engine says a keepalive ping went unanswered.
+const KEEPALIVE_FAILED: &str = "1 keepalives failed";
 /// How many older messages the phone sends each time it's asked for older history.
 const OLDER: i64 = 3;
 /// A member of the demo's groups but you, whose messages the phone's older history has there.
@@ -213,6 +221,8 @@ async fn react(shared: &Arc<Shared>, world: &Arc<World>, failure: Failure, on: b
         (Failure::PhoneOffline, false) => {
             tokio::spawn(answer_phone(shared.clone(), world.clone()));
         }
+        (Failure::Keepalive, true) => shared.tell(connection(State::KeepaliveTimeout, KEEPALIVE_FAILED)).await,
+        (Failure::Keepalive, false) => shared.tell(connection(State::KeepaliveRestored, "")).await,
     }
 }
 
@@ -582,6 +592,33 @@ mod tests {
         };
         assert_eq!(linked.jid, ME, "the same account");
         assert_eq!(state(&next(&mut rx).await), pb::connection::State::Connected);
+    }
+
+    #[tokio::test]
+    async fn a_keepalive_that_times_out_says_so_and_once_the_failure_is_off_that_it_works_again_while_all_else_goes_on()
+    {
+        use pb::connection::State as Said;
+        let engine = failing(Failure::Keepalive);
+        let (tx, mut rx) = mpsc::channel(8);
+        let instance = engine.start(tx).await.unwrap();
+        assert_eq!(state(&next(&mut rx).await), Said::Connected);
+        engine.turn(true).await;
+        let pb::event::Kind::Connection(out) = next(&mut rx).await else { panic!("no timeout") };
+        assert_eq!((out.state(), out.reason.as_str()), (Said::KeepaliveTimeout, KEEPALIVE_FAILED));
+        let world = engine.demo.world();
+        let arriving = tokio::spawn(async move { world.deliver(demo::text(ANA, ANA, "3EB0STILL", 0, "hi")).await });
+        assert!(matches!(next(&mut rx).await, pb::event::Kind::Message(_)), "what arrives still comes");
+        assert!(arriving.await.unwrap().is_some(), "and is acked");
+        let sent = instance.commands.call(send("3EB0FAILING0004")).await;
+        assert!(matches!(sent, Ok(pb::reply::Kind::Sent(_))), "the connection still takes sends: {sent:?}");
+        engine.turn(false).await;
+        // The recipient's receipts can come first.
+        let restored = loop {
+            if let pb::event::Kind::Connection(connection) = next(&mut rx).await {
+                break connection.state();
+            }
+        };
+        assert_eq!(restored, Said::KeepaliveRestored);
     }
 
     fn history_request(oldest_ms: i64) -> pb::command::Kind {

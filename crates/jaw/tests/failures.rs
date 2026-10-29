@@ -273,6 +273,39 @@ fn with_whatsapp_out_of_reach_the_header_says_so_and_a_message_waits_with_its_cl
     assert!(!gone.is_empty() && gone.iter().all(|line| line.contains('✓') && !line.contains('◷')), "{frame}");
 }
 
+/// The messages jawd on `home` finds with `text`.
+fn found(home: &Path, text: &str) -> usize {
+    let socket = jaw_proto::local::socket(home);
+    let Ok((mut connection, _)) = jaw_client::Connection::open(&socket, "jaw-test", "0") else { return 0 };
+    let find = serde_json::json!({ "query": text, "kinds": ["message"] });
+    connection.call("find", find).ok().and_then(|v| v["results"].as_array().map(Vec::len)).unwrap_or(0)
+}
+
+#[test]
+fn after_a_keepalive_times_out_the_header_says_connecting_and_a_message_sent_then_goes_once_the_pings_get_through() {
+    let jawd = Jawd::demo(&["--fail", "keepalive"]);
+    jawd.toggle();
+    jawd.until("the keepalive to time out", |s| s.connection.state == ConnectionState::Connecting);
+    let frame = jawd.snapshot("sent while the pings fail\n");
+    assert!(header(&frame).contains("jaw  connecting"), "{frame}");
+    let sent = lines_with(&frame, "sent while the pings fail");
+    assert!(!sent.is_empty() && sent.iter().all(|line| line.contains('◷')), "it waits with its clock:\n{frame}");
+    std::thread::sleep(Duration::from_secs(1));
+    let waiting = status_of(jawd.home()).expect("jawd answers");
+    let outbox = waiting.stored.map(|stored| stored.outbox);
+    assert_eq!((waiting.connection.state, outbox), (ConnectionState::Connecting, Some(1)), "nothing goes meanwhile");
+    jawd.toggle();
+    jawd.until("the message to go", |s| {
+        s.connection.state == ConnectionState::Online && s.stored.is_some_and(|stored| stored.outbox == 0)
+    });
+    let frame = jawd.snapshot("");
+    assert!(header(&frame).contains("jaw  online"), "{frame}");
+    let gone = lines_with(&frame, "sent while the pings fail");
+    assert!(!gone.is_empty() && gone.iter().all(|line| line.contains('✓') && !line.contains('◷')), "{frame}");
+    until("the message to be found", || found(jawd.home(), "pings fail") > 0);
+    assert_eq!(found(jawd.home(), "pings fail"), 1, "it went once, as one message");
+}
+
 #[test]
 fn with_jawd_itself_out_of_reach_the_mimic_sleeps() {
     let home = tempfile::tempdir().unwrap();

@@ -877,6 +877,48 @@ async fn a_message_sent_while_the_engine_restarts_waits_with_no_attempt_counted_
     assert_eq!(running.world.sends().len(), 1, "once the next engine is connected it goes, once");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_sent_after_a_keepalive_timeout_waits_uncounted_and_goes_once_when_the_pings_get_through_again() {
+    use crate::engine::failing::{Failing, Failure};
+    let home = tempfile::tempdir().unwrap();
+    let world: Arc<World> = Arc::default();
+    world.replying(Replies { delivered: Duration::from_millis(5), read: Duration::from_millis(5) });
+    let failing =
+        Arc::new(Failing::new(DemoEngine::sharing(vec![demo::connected()], world.clone()), Failure::Keepalive));
+    let engine: Arc<dyn crate::engine::Engine> = failing.clone();
+    let running = Running::running(home.path(), world, Some(engine), true, quick()).await;
+    running.chats(&[ANA]).await;
+    let mut told = running.pushes.subscribe();
+    failing.turn(true).await;
+    until_said(&mut told, "connecting").await;
+    let id = running.send(ANA, "while the pings fail").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(running.world.sends().is_empty(), "nothing is tried while jawd says it's connecting");
+    assert_eq!(running.status(ANA, &id).await.as_deref(), Some("pending"));
+    assert_eq!(
+        attempts(&running).await,
+        [(id.clone(), "queued".to_string(), 0)],
+        "it waits, and nothing counts as tried"
+    );
+    failing.turn(false).await;
+    until_said(&mut told, "online").await;
+    running.until_status(ANA, &id, "read").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(running.world.sends().len(), 1, "once the pings get through it goes, once");
+    // Waiting counted no try, so to WhatsApp it's any message's first: refused, it fails at once,
+    // where one counted as tried may have gone, and would wait a day for a receipt.
+    failing.turn(true).await;
+    until_said(&mut told, "connecting").await;
+    let refused = running.send(ANA, "one WhatsApp refuses").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(attempts(&running).await, [(refused.clone(), "queued".to_string(), 0)]);
+    running.world.refuse_next(1);
+    failing.turn(false).await;
+    running.until_status(ANA, &refused, "failed").await;
+    assert_eq!(attempts(&running).await, [(refused, "failed".to_string(), 1)], "its one try counted");
+    assert_eq!(running.world.sends().len(), 2);
+}
+
 /// Notifications, as a test sees them.
 struct Notified(mpsc::UnboundedSender<crate::notify::Notice>);
 
