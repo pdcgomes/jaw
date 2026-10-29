@@ -715,8 +715,8 @@ impl View {
         if let Some(chat) = self.open.as_deref().and_then(|id| self.chat_known(id)) {
             let name = if keys { format!(" {} ", chat.name) } else { format!("{} ", chat.name) };
             title.push(Span::styled(name, Style::new().fg(if keys { t.fg } else { t.text })));
-            if !chat.typing.is_empty() {
-                title.push(Span::styled(format!("· {} ", self.who_types(chat)), Style::new().fg(t.online)));
+            if let Some(who) = self.who_types(chat) {
+                title.push(Span::styled(format!("· {who} "), Style::new().fg(t.online)));
             }
         }
         let border = if keys && self.settings_panel.is_none() { t.focus } else { t.gutter };

@@ -472,7 +472,7 @@ impl View {
             let y = inner.y + 2 * k as u16;
             let selected = self.selected.as_deref() == Some(id.as_str());
             let open = self.open.as_deref() == Some(id.as_str());
-            let key = (chat.v, open, w, now / fmt::MINUTE, self.communities_open.contains(id));
+            let key = (chat.v, open, w, now / fmt::MINUTE, self.communities_open.contains(id), self.typing_key(id));
             let rows = match self.rows_laid.get(id.as_str()) {
                 Some(laid) if laid.key == key => laid.rows.clone(),
                 _ => {
@@ -517,9 +517,9 @@ impl View {
             right.push(Span::styled(chat.shown_unread().to_string(), style));
         }
         let right_w: usize = right.iter().map(|s| s.width()).sum();
-        let typing = !chat.typing.is_empty();
+        let typing = self.who_types(chat);
         let community = chat.kind == crate::data::ChatKind::Community;
-        let mark = match (typing, community, self.communities_open.contains(&chat.id)) {
+        let mark = match (typing.is_some(), community, self.communities_open.contains(&chat.id)) {
             (true, _, _) => Span::styled("●", Style::new().fg(t.online)),
             (false, true, true) => Span::styled("▾", Style::new().fg(t.comment)),
             (false, true, false) => Span::styled("▸", Style::new().fg(t.comment)),
@@ -544,8 +544,7 @@ impl View {
         let indent = if inside { "    " } else { "  " };
         let preview_w = w.saturating_sub(indent.len());
         let mut second = vec![Span::raw(indent)];
-        if typing {
-            let who = self.who_types(chat);
+        if let Some(who) = typing {
             second.push(Span::styled(fmt::fit(&who, preview_w), Style::new().fg(t.online)));
         } else if let Some(draft) = chat.draft.as_ref().filter(|d| !d.is_empty() && !open) {
             second.push(Span::styled("draft: ", Style::new().fg(t.comment).add_modifier(Modifier::ITALIC)));
@@ -576,9 +575,8 @@ impl View {
         let t = &self.theme;
         let Some(chat) = self.open.as_deref().and_then(|id| self.chat_known(id)) else { return Line::default() };
         let mut more = vec![];
-        if !chat.typing.is_empty() {
-            let who = format!("· {} ", self.who_types(chat));
-            more.push(Span::styled(who, Style::new().fg(t.online)));
+        if let Some(who) = self.who_types(chat) {
+            more.push(Span::styled(format!("· {who} "), Style::new().fg(t.online)));
         }
         self.title(&chat.name, more)
     }
@@ -752,6 +750,54 @@ impl View {
         f.render_widget(centred(lines, area), area);
     }
 
+    /// Who's typing in the open chat, while its conversation follows its newest messages: a row
+    /// each, three at most, as WhatsApp draws them after the newest message, at the margin their
+    /// messages start from. Each is three dots in their messages' colour, in a bubble, or bare in
+    /// the IRC layout, which has no bubbles; in a group, after their name as their messages have
+    /// it. They stand still, as the Mac's do when it isn't looking, so nothing wakes jaw for them.
+    fn typing_lines(&self, window: &Messages<Message>, width: usize) -> Vec<Line<'static>> {
+        if !matches!(self.scroll, Scroll::Bottom) || !window.holds_newest() {
+            return vec![];
+        }
+        let Some(chat) = self.open.as_deref().and_then(|id| self.chat_known(id)) else { return vec![] };
+        let t = &self.theme;
+        let irc = self.settings_shown().messages == jaw_proto::settings::Messages::Irc;
+        let bubble = if irc { Style::new() } else { Style::new().bg(t.surface) };
+        self.typists(&chat.id)
+            .iter()
+            .take(3)
+            .map(|typist| {
+                // The colour their messages are drawn in, or the one jawd gives their person's.
+                let colour = window
+                    .rows()
+                    .rev()
+                    .find_map(|m| m.from.as_ref().filter(|f| f.id == typist.id).map(|f| f.colour))
+                    .unwrap_or_else(|| super::colour_of(&typist.id));
+                let mut spans = vec![];
+                if chat.group() {
+                    let name = fmt::fit(&typist.name, 20);
+                    let pad = layout::NAME.max(fmt::width(&name) + 1) - fmt::width(&name);
+                    spans.push(Span::styled(name, Style::new().fg(t.sender(colour)).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::raw(" ".repeat(pad)));
+                } else {
+                    spans.push(Span::raw(" ".repeat(layout::NAME)));
+                }
+                if !irc {
+                    spans.push(Span::styled(" ", bubble));
+                }
+                let dot = bubble.fg(t.sender(colour)).add_modifier(Modifier::BOLD);
+                for i in 0..3 {
+                    spans.push(Span::styled("•", dot));
+                    if i < 2 || !irc {
+                        spans.push(Span::styled(" ", bubble));
+                    }
+                }
+                let line = Line::from(spans);
+                if line.width() > width { Line::default() } else { line }
+            })
+            .collect()
+    }
+
     fn day_line(&self, label: &str, w: usize) -> Line<'static> {
         let t = &self.theme;
         let label = format!("  {label}  ");
@@ -875,7 +921,11 @@ impl View {
             return;
         }
         let (h, width) = (area.height as i32, area.width as usize);
-        let (blocks, at_bottom) = self.place(&window, width, h);
+        // Who's typing goes after the newest message, in rows of its own the messages make room for.
+        let mut typing = self.typing_lines(&window, width);
+        typing.truncate(h.saturating_sub(2).max(0) as usize);
+        let h_messages = h - typing.len() as i32;
+        let (blocks, at_bottom) = self.place(&window, width, h_messages);
         let t = self.theme;
         let buf = f.buffer_mut();
         let mut placed = HashMap::new();
@@ -940,13 +990,18 @@ impl View {
                 newest_seen = Some(b.sort.clone());
             }
         }
+        if at_bottom && !typing.is_empty() {
+            for (i, line) in typing.iter().enumerate() {
+                put(buf, area.x, area.y + (h_messages + i as i32) as u16, line, area.width);
+            }
+        }
         self.placed = placed;
         if let Some(sort) = newest_seen
             && self.seen.as_ref().is_none_or(|s| *s < sort)
         {
             self.seen = Some(sort);
         }
-        self.settle(&window, &blocks, at_bottom, h);
+        self.settle(&window, &blocks, at_bottom, h_messages);
         let new = self.seen.as_deref().map_or(0, |s| window.count_after(s)) as u32 + window.arrived() as u32;
         if !at_bottom && new > 0 {
             let label = format!("─ {new} new ↓ ");

@@ -8,6 +8,7 @@ pub use jaw_client::Place;
 use jaw_client::{Row, Update as Window};
 use jaw_proto::layout::{Layout, Saved};
 use jaw_proto::settings::{Settings, SettingsSet};
+pub use jaw_proto::windows::{Typist, TypistState, Typists};
 use jaw_proto::{Connection, LinkStep};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -59,9 +60,6 @@ pub struct Chat {
     pub marked_unread: bool,
     #[serde(default)]
     pub draft: Option<String>,
-    /// The names of who's typing or recording now.
-    #[serde(default)]
-    pub typing: Vec<String>,
     /// For a group in a community: the community.
     #[serde(default)]
     pub community: Option<String>,
@@ -852,6 +850,9 @@ pub enum Update {
         chat: String,
         update: Window<Message>,
     },
+    /// Who's typing in each chat the windows show, all of it as it is now: a chat left out has
+    /// nobody typing.
+    Typing(Typists),
     /// The newest messages of `chat`, another than the open one, for the quick look while it's
     /// open; updates for a chat it doesn't show are from a quick look since closed.
     QuickLook {
@@ -1171,7 +1172,7 @@ mod tests {
     /// The rows in protocol/README.md, read as the interface reads them.
     #[test]
     fn the_protocols_rows_read_into_the_interfaces_and_bursts_of_them_apply_as_one() {
-        let chat: Chat = serde_json::from_str(r#"{"id":"351912345678@s.whatsapp.net","v":42,"sort":"1~1792145060000","kind":"direct","name":"Ana Ribeiro","avatar":"media/avatars/5f2c.jpg","last":{"from":"Ana","summary":"did you get the photos from Sunday?","kind":"text","status":null,"at":1792145060000},"unread":2,"mentions":0,"pinned":true,"muted_until":null,"archived":false,"draft":null,"typing":[],"community":null}"#).unwrap();
+        let chat: Chat = serde_json::from_str(r#"{"id":"351912345678@s.whatsapp.net","v":42,"sort":"1~1792145060000","kind":"direct","name":"Ana Ribeiro","avatar":"media/avatars/5f2c.jpg","last":{"from":"Ana","summary":"did you get the photos from Sunday?","kind":"text","status":null,"at":1792145060000},"unread":2,"mentions":0,"pinned":true,"muted_until":null,"archived":false,"draft":null,"community":null}"#).unwrap();
         assert_eq!(
             (chat.name.as_str(), chat.unread, chat.pinned, chat.kind),
             ("Ana Ribeiro", 2, true, ChatKind::Direct)

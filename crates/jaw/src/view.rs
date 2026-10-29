@@ -17,7 +17,7 @@ mod status_line;
 mod voice;
 
 use crate::composer::Composer;
-use crate::data::{Chat, Jawd, Message, Place, Typing, Update, key};
+use crate::data::{Chat, Jawd, Message, Place, Typing, Typist, TypistState, Typists, Update, key};
 use crate::fmt::{self, MINUTE};
 use crate::graphics::{Images, Protocol};
 use crate::layout::{self, Shape};
@@ -28,7 +28,9 @@ use jaw_proto::settings::{Settings, SettingsSet};
 use jaw_proto::{Connection, ConnectionState, LinkStep};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -59,6 +61,15 @@ const EDGE: usize = 20;
 /// How long the first frame waits for jawd's hello, input or not, so it's drawn in the theme jawd
 /// keeps rather than in the default first.
 const FIRST_FRAME_WAIT: Duration = Duration::from_millis(250);
+
+/// How many sender colours jawd chooses among for people's messages.
+const SENDER_COLOURS: i64 = 8;
+
+/// The colour jawd gives the messages of the person `id` names (`person:` and a number): their
+/// number among its sender colours.
+fn colour_of(id: &str) -> u8 {
+    id.strip_prefix("person:").and_then(|n| n.parse::<i64>().ok()).map_or(0, |n| n.rem_euclid(SENDER_COLOURS) as u8)
+}
 
 /// Whether jawd answers.
 #[derive(Clone, Debug, PartialEq)]
@@ -123,9 +134,10 @@ struct Laid {
 }
 
 /// A chat's rows in the list as last drawn, and what they depended on: its version, whether it
-/// was open, the width, and the minute its time was written in.
+/// was open, the width, the minute its time was written in, whether its community was open, and
+/// who was typing in it.
 struct ChatRows {
-    key: (u64, bool, usize, i64, bool),
+    key: (u64, bool, usize, i64, bool, u64),
     rows: Rc<(Line<'static>, Line<'static>)>,
 }
 
@@ -181,6 +193,8 @@ pub struct View {
 
     chats: Chats<Chat>,
     messages: Option<Messages<Message>>,
+    /// Who's typing in the chats the windows show, as jawd last said.
+    typing: Typists,
     /// The open chat, kept by ID however the list moves.
     open: Option<String>,
     /// The chat the list has selected, which is the open one except while picking on a narrow
@@ -331,6 +345,7 @@ impl View {
             asked_older: None,
             chats: Chats::new("all", Place::top(LIST_ROWS)),
             messages: None,
+            typing: Typists::new(),
             open: None,
             selected: None,
             list_top: 0,
@@ -603,6 +618,7 @@ impl View {
                     self.focus = Focus::Typing;
                 }
             }
+            Update::Typing(typing) => self.typing = typing,
             Update::QuickLook { chat, update } => self.quick_look_came(&chat, update),
             Update::Found { id, results, counts } => self.found(id, results, counts),
             Update::FindFailed { id, cancelled, why } => self.find_failed(id, cancelled, why),
@@ -1103,24 +1119,37 @@ impl View {
         self.reach == Reach::Up && (self.linked == Some(false) || self.logged_out.is_some())
     }
 
-    /// Who's typing in a chat, as its row and title say it: in a group, their names where jaw
-    /// knows them; jawd says who by person ID, which jaw names from the open chat's senders.
-    fn who_types(&self, chat: &Chat) -> String {
-        if !chat.group() {
-            return "typing…".into();
+    /// Who's typing in `chat` now, oldest first, as jawd last said.
+    fn typists(&self, chat: &str) -> &[Typist] {
+        self.typing.get(chat).map_or(&[], Vec::as_slice)
+    }
+
+    /// Who's typing in `chat`, in a word, for what's drawn of it to be kept by: 0 while nobody is.
+    fn typing_key(&self, chat: &str) -> u64 {
+        let typists = self.typists(chat);
+        if typists.is_empty() {
+            return 0;
         }
-        let named: Vec<String> = chat
-            .typing
-            .iter()
-            .filter_map(|who| {
-                if !who.starts_with("person:") {
-                    return Some(who.clone());
-                }
-                let window = self.messages.as_ref().filter(|w| w.chat == chat.id)?;
-                window.rows().rev().find_map(|m| m.from.as_ref().filter(|f| f.id == *who).map(|f| f.name.clone()))
-            })
-            .collect();
-        if named.is_empty() { "typing…".into() } else { format!("{} typing…", named.join(", ")) }
+        let mut hasher = DefaultHasher::new();
+        typists.hash(&mut hasher);
+        hasher.finish() | 1
+    }
+
+    /// Who's typing in a chat, as its row and title say it: "typing…", or "recording…" when that's
+    /// what they're all doing; in a group with their names first, as their messages name them.
+    /// None while nobody is.
+    fn who_types(&self, chat: &Chat) -> Option<String> {
+        let typists = self.typists(&chat.id);
+        if typists.is_empty() {
+            return None;
+        }
+        let doing =
+            if typists.iter().all(|t| t.state == TypistState::Recording) { "recording…" } else { "typing…" };
+        if !chat.group() {
+            return Some(doing.into());
+        }
+        let names: Vec<&str> = typists.iter().map(|t| t.name.as_str()).collect();
+        Some(format!("{} {doing}", names.join(", ")))
     }
 
     /// What a message's lines depend on, from the one before it.

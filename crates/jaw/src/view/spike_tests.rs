@@ -80,23 +80,24 @@ fn digest(v: &mut View) -> (u64, String) {
 }
 
 /// The screens the switches could change, with the digest of each as `main` drew it before them,
-/// every switch off. A change made to the default screen on purpose changes these too.
+/// every switch off. A change made to the default screen on purpose changes these too, as Ana
+/// typing, drawn after her newest message, did.
 const AS_IT_WAS: [(State, u16, u16, &str, u64); 14] = [
-    (State::Online, 160, 45, "", 0x150e_d699_1be5_c3a8),
-    (State::Online, 140, 40, "", 0x7883_a78e_0896_e06e),
-    (State::Online, 100, 30, "", 0x81a9_aa21_01c5_e567),
+    (State::Online, 160, 45, "", 0x2a63_98c5_3378_9b5f),
+    (State::Online, 140, 40, "", 0x7196_5711_1739_fa3f),
+    (State::Online, 100, 30, "", 0x5e0a_0206_cb91_ebda),
     (State::Online, 80, 24, "", 0xb982_f07f_f882_04e1),
     (State::Online, 80, 24, "<down>\n", 0xfae9_0b86_f22e_e0a7),
-    (State::Online, 100, 30, "<up>", 0xbf06_df15_7c2f_e04a),
-    (State::Online, 140, 34, "levo o vinho<c-k>", 0x2242_9616_c510_3a94),
-    (State::Online, 100, 30, "?", 0xde97_6c5d_6a5f_7b97),
-    (State::Online, 100, 30, "sim!<a-enter>e levo a sobremesa", 0x09d0_74e0_bbfe_20ea),
-    (State::Online, 120, 30, "<c-b>", 0x43f3_8f0f_3f68_b16c),
+    (State::Online, 100, 30, "<up>", 0x6431_1bf7_677b_ca69),
+    (State::Online, 140, 34, "levo o vinho<c-k>", 0xedca_cdd9_04b7_8f1e),
+    (State::Online, 100, 30, "?", 0x43cd_4b4b_ba93_6031),
+    (State::Online, 100, 30, "sim!<a-enter>e levo a sobremesa", 0xcd60_d4e7_d56a_e3c5),
+    (State::Online, 120, 30, "<c-b>", 0xaa76_6420_9185_269f),
     (State::CatchingUp, 140, 30, "<a-down><a-down><a-down><a-down>", 0xd53c_32d8_d30c_8818),
-    (State::Online, 100, 30, "<c-r>", 0x0d72_2f05_ac1f_aa25),
+    (State::Online, 100, 30, "<c-r>", 0x2db3_5523_f4ea_f39c),
     (State::Online, 140, 40, "<c-l>", 0x768b_3558_bafb_af09),
     // The switches' keys do what they did before them while typing: nothing.
-    (State::Online, 140, 40, "<c-f><c-g><c-p>", 0x7883_a78e_0896_e06e),
+    (State::Online, 140, 40, "<c-f><c-g><c-p>", 0x7196_5711_1739_fa3f),
 ];
 
 #[test]

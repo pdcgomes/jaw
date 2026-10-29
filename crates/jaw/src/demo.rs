@@ -16,7 +16,7 @@ mod voice;
 use crate::data::Place;
 use crate::data::{
     Album, AlbumItem, Chat, ChatKind, FoundKind, Jawd, Kind, Last, Media, Message, Person, Quote, Reaction, Sender,
-    Span, SpanKind, Tick, Typing, Update,
+    Span, SpanKind, Tick, Typing, Typist, TypistState, Typists, Update,
 };
 use crate::fmt::{DAY, MINUTE};
 use crate::run::Event;
@@ -155,6 +155,8 @@ pub struct Account {
     keeps: u32,
     /// The settings the made-up account keeps, as jawd would.
     settings: Settings,
+    /// Who's typing in each chat, as jawd would say it.
+    typing: Typists,
 }
 
 struct Shared {
@@ -184,6 +186,11 @@ impl Demo {
         let now = clock.now();
         let threads = if state == State::New { vec![] } else { made_up(now) };
         let index = threads.iter().enumerate().map(|(i, t)| (t.chat.id.clone(), i)).collect();
+        // Ana is typing as it starts.
+        let mut typing = Typists::new();
+        if state != State::New {
+            typing.insert("ana".into(), vec![typist("person:1", "Ana")]);
+        }
         let seq = threads.iter().map(|t| t.messages.len() as u64).sum();
         let connection = match state {
             State::CatchingUp => {
@@ -224,6 +231,7 @@ impl Demo {
             asks: 0,
             keeps: 0,
             settings: Settings::default(),
+            typing,
         };
         let demo = Demo {
             shared: Arc::new(Shared {
@@ -508,11 +516,12 @@ impl Account {
         let next = BEATS[(i + 1) % BEATS.len()].after;
         let sender = Sender { id: beat.who.0.into(), name: beat.who.1.into(), colour: beat.who.2 };
         let Some(&t) = self.index.get(beat.chat) else { return };
-        if beat.types && self.threads[t].chat.typing.is_empty() {
-            self.set_typing(t, Some(sender.name.clone()));
+        if beat.types && !self.typing.contains_key(beat.chat) {
+            self.set_typing(t, Some(typist(beat.who.0, beat.who.1)));
             self.later.push((self.now() + 2_500, Later::Beat(i)));
             return;
         }
+        // Their message ends their typing, as it does on the phones.
         self.set_typing(t, None);
         let at = self.now();
         let m = self.message(at, Some(sender), markup(beat.text), None);
@@ -520,11 +529,15 @@ impl Account {
         self.after(next, Later::Beat(i + 1));
     }
 
-    fn set_typing(&mut self, t: usize, who: Option<String>) {
-        let chat = &mut self.threads[t].chat;
-        chat.typing = who.into_iter().collect();
-        chat.v += 1;
-        self.push_chat(t);
+    fn set_typing(&mut self, t: usize, who: Option<Typist>) {
+        let chat = self.threads[t].chat.id.clone();
+        let was = match who {
+            Some(who) => self.typing.insert(chat, vec![who]),
+            None => self.typing.remove(&chat),
+        };
+        if was != self.typing.get(&self.threads[t].chat.id).cloned() {
+            self.send(Update::Typing(self.typing.clone()));
+        }
     }
 
     fn message(&mut self, at: i64, from: Option<Sender>, spans: Vec<Span>, status: Option<Tick>) -> Message {
@@ -681,6 +694,8 @@ impl Account {
         let total = rows.len() as u64;
         let moved = Some(Moved { place, newer: 0 });
         self.send(Update::Chats(Window { upsert: rows, total: Some(total), moved, ..Window::default() }));
+        // As jawd's answer says who's typing in the window's chats.
+        self.send(Update::Typing(self.typing.clone()));
     }
 
     fn on_watch_messages(&mut self, chat: &str, place: Place) {
@@ -1153,6 +1168,11 @@ struct Writing {
     seq: u64,
 }
 
+/// Someone typing, as jawd says it.
+fn typist(id: &str, name: &str) -> Typist {
+    Typist { id: id.into(), name: name.into(), state: TypistState::Typing }
+}
+
 fn person(id: &str, name: &str, colour: u8) -> Sender {
     Sender { id: id.into(), name: name.into(), colour }
 }
@@ -1173,7 +1193,6 @@ impl Writing {
             archived: false,
             marked_unread: false,
             draft: None,
-            typing: vec![],
             community: None,
             folders: vec![],
             children_unread: None,
@@ -1291,7 +1310,6 @@ fn made_up(now: i64) -> Vec<Thread> {
 
     let mut w = Writing::new("ana", "Ana Ribeiro", ChatKind::Direct, now);
     w.thread.chat.pinned = true;
-    w.thread.chat.typing = vec!["Ana".into()];
     w.theirs(14.0 * h + 52.0, &ana, "chegaste bem?");
     w.mine(14.0 * h + 50.0, "cheguei, boa noite");
     w.mine(4.0 * h + 50.0, "bom dia! dormiste bem?");

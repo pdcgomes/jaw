@@ -666,13 +666,16 @@ fn until_the_chat_list_comes_nothing_says_there_are_no_chats() {
 
 /// jawd's hello and each window's rows where it was asked to be, as a chat opens, are what the
 /// screen waits for, which the loop draws as they come; the pushes after them wait for a frame.
+/// Who's typing in the chat list's chats comes with its rows, as jawd's answer says it.
 #[test]
 fn jawds_hello_and_a_windows_rows_where_it_was_asked_to_be_are_awaited_and_pushes_are_not() {
     let (mut v, rx) = greeted(140, 30);
     assert!(v.awaited, "jawd's hello");
-    let windows = came(&rx);
+    let (typing, windows): (Vec<Update>, Vec<Update>) =
+        came(&rx).into_iter().partition(|u| matches!(u, Update::Typing(_)));
     assert!(windows.iter().any(|u| matches!(u, Update::Chats(_))) && windows.iter().all(Update::awaited));
-    for u in windows {
+    assert!(matches!(&typing[..], [Update::Typing(t)] if t.contains_key("ana")), "{typing:?}");
+    for u in windows.into_iter().chain(typing) {
         v.apply(u);
     }
     let first = came(&rx);
@@ -2600,4 +2603,58 @@ fn a_communitys_row_shows_its_groups_unread_total() {
     let row = screen.lines().find(|l| l.contains("Bairro de Alvalade")).expect("the community's row");
     let list = row.split("││").nth(1).unwrap_or_default();
     assert!(list.trim_end().ends_with(" 3"), "its groups' 3 unread:\n{screen}");
+}
+
+/// Someone typing shows as WhatsApp shows it: after the newest message, at the margin their
+/// messages start from, three dots in their messages' colour, in a bubble but in the IRC layout,
+/// which has none, and in a group after their name; in the chat list's row, the conversation's
+/// title and the status line, "recording…" when they all are; and nowhere once nobody is, nor
+/// away from the newest messages.
+#[test]
+fn someone_typing_shows_after_the_newest_message_at_their_margin_and_in_the_row_the_title_and_the_status_line() {
+    let (mut v, rx) = view(140, 34);
+    v.experiments = crate::experiments::Experiments::parse("status_line");
+    v.open_chat("familia");
+    run::settle(&mut v, &rx);
+    let typist = |id: &str, name: &str, state| crate::data::Typist { id: id.into(), name: name.into(), state };
+    let both = vec![typist("person:3", "Rui", TypistState::Recording), typist("person:4", "Inês", TypistState::Typing)];
+    v.apply(Update::Typing(Typists::from([("familia".to_string(), both)])));
+    let screen = frame(&mut v);
+    let (rui, ines) = (row_of(&screen, "Rui    • • • ").unwrap(), row_of(&screen, "Inês   • • • ").unwrap());
+    let the_box = screen.lines().enumerate().filter(|(_, l)| l.contains("╭──")).map(|(i, _)| i).last().unwrap();
+    assert_eq!((rui + 1, ines + 1), (ines, the_box), "a row each after the newest message, the box below:\n{screen}");
+    let line = screen.lines().nth(rui).unwrap();
+    let (dots, name) = (line.find("• • •").unwrap(), line.find("Rui").unwrap());
+    assert_eq!(dots - name, layout::NAME + 1, "in a bubble from where their messages start:\n{screen}");
+    assert!(screen.contains("╭ Família Gomes · Rui, Inês typing… ─"), "{screen}");
+    let row = row_of(&screen, "│ ● Família Gomes").unwrap_or_else(|| panic!("its row's dot:\n{screen}"));
+    assert!(screen.lines().nth(row + 1).unwrap().contains("│   Rui, Inês typing…"), "{screen}");
+    let status = screen.lines().rev().nth(1).unwrap();
+    assert!(status.contains("Rui, Inês typing…"), "the status line: {status}");
+
+    // In the IRC layout the dots are bare, where their messages start; and when all who type
+    // record, it says so.
+    v.apply(Update::Settings(Settings { theme: "tokyo-night".into(), messages: Messages::Irc }));
+    v.apply(Update::Typing(Typists::from([(
+        "familia".to_string(),
+        vec![typist("person:3", "Rui", TypistState::Recording)],
+    )])));
+    let screen = frame(&mut v);
+    let line = screen.lines().find(|l| l.contains("Rui   • • •")).unwrap_or_else(|| panic!("{screen}"));
+    assert_eq!(line.find("• • •").unwrap() - line.find("Rui").unwrap(), layout::NAME, "{screen}");
+    assert!(screen.contains("╭ Família Gomes · Rui recording… ─"), "{screen}");
+    assert!(screen.lines().rev().nth(1).unwrap().contains("Rui recording…"), "{screen}");
+
+    // Away from the newest messages, no row says it; the title still does.
+    let oldest = v.messages.as_ref().unwrap().rows().next().unwrap().clone();
+    v.scroll = Scroll::Anchor { id: oldest.id.clone(), sort: oldest.sort.clone(), top: 0 };
+    let screen = frame(&mut v);
+    assert!(!screen.contains("• • •") && screen.contains("Rui recording…"), "{screen}");
+
+    // Once nobody is typing, nothing says anyone is.
+    v.scroll = Scroll::Bottom;
+    v.apply(Update::Typing(Typists::new()));
+    let screen = frame(&mut v);
+    assert!(!screen.contains("• • •") && !screen.contains("recording…") && !screen.contains("● Família"), "{screen}");
+    assert!(screen.contains("╭ Família Gomes ─"), "{screen}");
 }

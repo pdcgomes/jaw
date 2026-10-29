@@ -810,11 +810,20 @@ fn when_jawd_goes_the_screen_keeps_what_it_had_and_comes_back_without_a_jump() {
     jawd.tell.send(Told::Go).unwrap();
     let gone = until(&mut v, &rx, "can't reach jawd");
     assert!(gone.lines().next().unwrap().contains("can't reach jawd · trying again in"), "{gone}");
-    assert_eq!(
-        gone.lines().skip(1).collect::<Vec<_>>(),
-        before.lines().skip(1).collect::<Vec<_>>(),
-        "the screen keeps what it had"
-    );
+    // Who's typing goes with the connection, as the protocol has it: a chat-list row marks it with
+    // a dot and says it under its name.
+    let typed = |line: &str| line.contains("typing…") || line.contains("recording…") || line.contains('●');
+    assert!(before.lines().any(typed) && !gone.lines().any(typed), "{before}\n{gone}");
+    let kept = |screen: &str, other: &str| -> Vec<String> {
+        screen
+            .lines()
+            .zip(other.lines())
+            .skip(1)
+            .filter(|(a, b)| !typed(a) && !typed(b))
+            .map(|(a, _)| a.into())
+            .collect()
+    };
+    assert_eq!(kept(&gone, &before), kept(&before, &gone), "the screen keeps what it had");
     jawd.tell.send(Told::Come).unwrap();
     let back = until(&mut v, &rx, "jaw  online");
     assert_eq!(back, before, "and comes back as it was");

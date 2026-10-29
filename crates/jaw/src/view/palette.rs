@@ -1346,8 +1346,11 @@ impl View {
         let name = Style::new().fg(t.fg);
         match &r.hit {
             Hit::Chat(c) => {
-                let lead =
-                    if c.typing.is_empty() { Span::raw(" ") } else { Span::styled("●", Style::new().fg(t.online)) };
+                let lead = if self.typists(&c.id).is_empty() {
+                    Span::raw(" ")
+                } else {
+                    Span::styled("●", Style::new().fg(t.online))
+                };
                 let mut said = vec![if c.group() { "group".to_string() } else { "chat".to_string() }];
                 if c.unread > 0 {
                     said.push(format!("{} unread", c.unread));

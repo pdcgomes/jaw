@@ -65,8 +65,8 @@ impl View {
         let Some(chat) = self.open.as_deref().and_then(|id| self.chat_known(id)) else { return vec![] };
         let pill = Style::new().bg(t.focus).fg(t.bg).add_modifier(Modifier::BOLD);
         let mut said: Vec<Span<'static>> = vec![];
-        if !chat.typing.is_empty() {
-            said.push(Span::styled(self.who_types(chat), Style::new().fg(t.online)));
+        if let Some(who) = self.who_types(chat) {
+            said.push(Span::styled(who, Style::new().fg(t.online)));
         } else if let Some(p) = self.roster.iter().find(|p| p.chat.as_deref() == Some(chat.id.as_str())) {
             match p.presence.state {
                 PresenceState::Online | PresenceState::Typing => {
@@ -123,7 +123,7 @@ impl View {
             _ => {
                 let first = chat.name.split_whitespace().next().unwrap_or(&chat.name);
                 let mut out = vec![];
-                if !chat.typing.is_empty() {
+                if !self.typists(&chat.id).is_empty() {
                     out.push(Span::styled("● ", Style::new().fg(t.online)));
                 }
                 out.push(Span::styled(fmt::fit(first, NAME), Style::new().fg(t.fg)));

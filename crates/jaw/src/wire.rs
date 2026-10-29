@@ -959,6 +959,10 @@ impl Jawd for Wire {
                 out.push(Update::Messages { chat: chat.clone(), update });
             }
         }
+        // After the windows, which may bring in the chats it's for.
+        if let Some(typing) = frame.typing {
+            out.push(Update::Typing(typing));
+        }
         out
     }
 }
