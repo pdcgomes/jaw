@@ -3469,18 +3469,19 @@ mod tests {
     }
 
     /// Live writes all the while, and among them bursts long enough to copy for one of those
-    /// writes to land in their pass, until the checkpointer has flushed jaw.db after one, however
-    /// busy the machine, or for 60 s.
+    /// writes to land in their pass, until the checkpointer has flushed jaw.db after one, or for
+    /// twelve bursts: it takes three, however busy the machine, and a busy machine makes each
+    /// burst slower, so counting bursts rather than seconds leaves it nothing to run out of.
     async fn outrunning_a_pass(store: &Store) {
         let stop = Arc::new(AtomicBool::new(false));
         let writes = {
             let (store, stop) = (store.clone(), stop.clone());
             tokio::spawn(async move { converting(&store, &stop).await })
         };
-        let (began, mut n) = (Instant::now(), 100_000);
-        while store.wal.flushed.load(Ordering::Relaxed) == 0 && began.elapsed() < Duration::from_secs(60) {
+        let (mut bursts, mut n) = (0, 100_000);
+        while store.wal.flushed.load(Ordering::Relaxed) == 0 && bursts < 12 {
             store.apply(Lane::Live, burst(n, 4_000)).await.unwrap();
-            n += 4_000;
+            (bursts, n) = (bursts + 1, n + 4_000);
         }
         stop.store(true, Ordering::Relaxed);
         writes.await.unwrap();
