@@ -3080,6 +3080,84 @@ async fn a_reaction_or_an_edit_in_the_chat_kept_is_taken_while_other_messages_in
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_or_an_edit_named_in_any_chat_of_a_chain_of_merges_is_refused_while_your_deletion_is_on_its_way() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    let (first, second) = ("100000000001@lid", "100000000002@lid");
+    // Ana's number's chat, the oldest, and her two LIDs' chats; your m1, m2 and m3 are in her
+    // second LID's chat and her number's.
+    running.chats(&[ANA, first, second]).await;
+    for chat in [second, ANA] {
+        for id in ["m1", "m2", "m3"] {
+            let message = Message { chat: chat.into(), ..mine_message(id, now_ms() - 60_000) };
+            running.store.apply(Lane::Live, vec![Change::Message(message)]).await.unwrap();
+        }
+    }
+    // You delete m1 for everyone in her second LID's chat; a reaction to m2 and an edit of m3, named
+    // there, find their message before you delete it there too.
+    let delete = |id: &str| running.call("delete", json!({ "message": id, "chat": second, "for": "everyone" }));
+    delete("m1").await.unwrap();
+    let mut stopped_after_finding = Vec::new();
+    for (method, params) in [
+        ("react", json!({ "message": "m2", "chat": second, "emoji": "👍" })),
+        ("edit", json!({ "message": "m3", "chat": second, "text": "chego às 21h" })),
+    ] {
+        let id = params["message"].as_str().unwrap().to_string();
+        let (stopped, go) = running.sending.pause_next_action();
+        let sending = running.sending.clone();
+        stopped_after_finding.push((method, go, tokio::spawn(async move { sending.call(method, params).await })));
+        stopped.notified().await;
+        delete(&id).await.unwrap();
+    }
+    // Her two LIDs turn out to be one person's, so her second's chat starts merging into her
+    // first's, the older; then her number turns out to be hers too, and both go into its chat.
+    for jids in [vec![first, second], vec![ANA, first, second]] {
+        let person = Person { jids: jids.into_iter().map(String::from).collect(), ..Person::default() };
+        running.store.apply(Lane::Live, vec![Change::Person(person)]).await.unwrap();
+    }
+    let merging: Vec<(String, String)> = running
+        .query(|db| {
+            Ok(db
+                .prepare(
+                    "SELECT g.id, k.id FROM chat_merges m JOIN chats g ON g.n = m.gone JOIN chats k ON k.n = m.keep
+                    ORDER BY g.id",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+    assert_eq!(merging, [(first.to_string(), ANA.to_string()), (second.to_string(), ANA.to_string())]);
+    let by_the_step = "it's deleted for everyone, or being deleted, so it can't be reacted to, edited or voted in";
+    for (method, go, asking) in stopped_after_finding {
+        go.notify_one();
+        let refused = asking.await.unwrap().unwrap_err();
+        assert_eq!((refused.code, refused.message.as_str()), (code::NOT_ALLOWED, by_the_step), "{method}");
+    }
+    // Asked now, in her second LID's chat the reader finds your deletion itself; in the other two
+    // it finds her number's copy, and the step refuses.
+    let found = "it's being deleted for everyone, so it can't be";
+    for (chat, react, edit) in [
+        (second, format!("{found} reacted to"), format!("{found} edited")),
+        (first, by_the_step.to_string(), by_the_step.to_string()),
+        (ANA, by_the_step.to_string(), by_the_step.to_string()),
+    ] {
+        let (reacting, editing) = (
+            json!({ "message": "m1", "chat": chat, "emoji": "👍" }),
+            json!({ "message": "m1", "chat": chat, "text": "chego às 21h" }),
+        );
+        let reacted = running.call("react", reacting).await.unwrap_err();
+        let edited = running.call("edit", editing).await.unwrap_err();
+        assert_eq!((reacted.code, reacted.message), (code::NOT_ALLOWED, react), "react named in {chat}");
+        assert_eq!((edited.code, edited.message), (code::NOT_ALLOWED, edit), "edit named in {chat}");
+    }
+    let copies: i64 =
+        running.query(|db| Ok(db.query_row("SELECT count(*) FROM messages WHERE id = 'm1'", [], |r| r.get(0))?)).await;
+    assert_eq!(copies, 2, "the merges are still to move the copy in her second LID's chat");
+    let queued = ("revoke".to_string(), "queued".to_string());
+    assert_eq!(outbox_rows(&running).await.0, [queued.clone(), queued.clone(), queued], "nothing written");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_action_on_a_message_still_to_go_from_a_chat_being_merged_goes_after_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
