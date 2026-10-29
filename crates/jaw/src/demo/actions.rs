@@ -1,11 +1,11 @@
 //! The made-up account's answers to M2's message actions, as jawd would push them: a reply's
 //! quote and its mentions in the row it sends, one reaction of yours per message, edits for 15
-//! minutes and deletes for everyone for 60 hours, forwards as new messages of yours, each
-//! recipient's receipts, and a chat's members.
+//! minutes and deletes for everyone for 60 hours, forwards as new messages of yours, contact cards
+//! of yours, each recipient's receipts, and a chat's members.
 
 use super::{Account, Later, ME, markup};
 use crate::data::{
-    ChatKind, Kind, Member, Message, MessageInfo, Quote, Reaction, Recipient, Span, SpanKind, Tick, Update,
+    ChatKind, Contact, Kind, Member, Message, MessageInfo, Quote, Reaction, Recipient, Span, SpanKind, Tick, Update,
 };
 use crate::fmt::MINUTE;
 use jaw_client::Update as Window;
@@ -132,6 +132,33 @@ impl Account {
             self.send(Update::Notice("offline: it goes when WhatsApp is back".into()));
             return;
         }
+        self.after(400, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Sent });
+        self.after(1_200, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Delivered });
+        self.after(3_500, Later::Tick { chat, id, tick: Tick::Read });
+    }
+
+    /// Contact cards of yours, shown as jawd shows them, one card by its name and several as how
+    /// many, each card's vCard after the one before; then on their way, ticked as text is.
+    pub(super) fn on_send_contact(&mut self, chat: &str, cards: &[jaw_proto::send::Card]) {
+        let Some(&t) = self.index.get(chat) else { return };
+        let name = match cards {
+            [one] => one.name.clone(),
+            many => format!("{} contacts", many.len()),
+        };
+        let mut vcard = String::new();
+        for card in cards {
+            if !vcard.is_empty() && !vcard.ends_with('\n') {
+                vcard.push_str("\r\n");
+            }
+            vcard.push_str(&card.vcard);
+        }
+        let at = self.now();
+        let mut m = self.message(at, None, vec![], Some(Tick::Pending));
+        m.kind = Kind::Contact;
+        m.summary = Some(format!("◉ {name}"));
+        m.contact = Some(Box::new(Contact { name: Some(name), vcard: Some(vcard) }));
+        let (chat, id) = (chat.to_string(), m.id.clone());
+        self.arrive(t, m);
         self.after(400, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Sent });
         self.after(1_200, Later::Tick { chat: chat.clone(), id: id.clone(), tick: Tick::Delivered });
         self.after(3_500, Later::Tick { chat, id, tick: Tick::Read });

@@ -15,8 +15,8 @@ mod voice;
 
 use crate::data::Place;
 use crate::data::{
-    Album, AlbumItem, Chat, ChatKind, FoundKind, Jawd, Kind, Last, Location, Media, Message, Person, Quote, Reaction,
-    Sender, Span, SpanKind, Tick, Typing, Typist, TypistState, Typists, Update,
+    Album, AlbumItem, Chat, ChatKind, Contact, FoundKind, Jawd, Kind, Last, Location, Media, Message, Person, Quote,
+    Reaction, Sender, Span, SpanKind, Tick, Typing, Typist, TypistState, Typists, Update,
 };
 use crate::fmt::{DAY, MINUTE};
 use crate::run::Event;
@@ -565,6 +565,7 @@ impl Account {
             voice: None,
             location: None,
             event: None,
+            contact: None,
         }
     }
 
@@ -953,6 +954,11 @@ impl Jawd for Demo {
         self.defer(move |a| a.on_send_text(&chat, &text, &key, reply.as_deref(), &mentions));
     }
 
+    fn send_contact(&mut self, chat: &str, cards: &[jaw_proto::send::Card]) {
+        let (chat, cards) = (chat.to_string(), cards.to_vec());
+        self.defer(move |a| a.on_send_contact(&chat, &cards));
+    }
+
     // The made-up account's message IDs are its own and never shared, so it finds a message without
     // its chat.
     fn react(&mut self, _chat: &str, message: &str, emoji: &str) {
@@ -1235,6 +1241,7 @@ impl Writing {
             voice: None,
             location: None,
             event: None,
+            contact: None,
         });
         self.thread.messages.last_mut().expect("just added")
     }
@@ -1390,7 +1397,14 @@ fn made_up(now: i64) -> Vec<Thread> {
             address: Some("R. da Senhora do Monte 50, 1170-361 Lisboa".into()),
             url: None,
         }));
-    w.other(wed + 21.0, Some(&ines), Kind::Contact, "◉ Dr.ª Marta Lopes · +351 213 456 789", "");
+    w.other(wed + 21.0, Some(&ines), Kind::Contact, "◉ Dr.ª Marta Lopes", "").contact = Some(Box::new(Contact {
+        name: Some("Dr.ª Marta Lopes".into()),
+        vcard: Some(
+            "BEGIN:VCARD\nVERSION:3.0\nN:Lopes;Marta;;Dr.ª;\nFN:Dr.ª Marta Lopes\n\
+            item1.TEL;waid=351213456789:+351 213 456 789\nitem1.X-ABLabel:Mobile\nEND:VCARD"
+                .into(),
+        ),
+    }));
     w.mine(3.0 * h, "eu levo o pão e a sobremesa");
     w.theirs(2.0 * h + 20.0, &mae, "boa! 😘");
     w.theirs(2.0 * h + 15.0, &ines, "@Pedro vens buscar a avó?");

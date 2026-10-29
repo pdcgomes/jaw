@@ -1,11 +1,15 @@
 //! M2's message actions from the selected message: r replies, e edits, d deletes, + and 1 to 6
-//! react, f forwards, i shows the info, and Enter opens a link or a file. Each asks jawd and shows
-//! what jawd pushes back (an edited row, a deleted one, the reactions), never a guess of its own.
-//! @ in a group's box completes its members, and what's taken goes as a real mention.
+//! react, f forwards, i shows the info, and Enter opens a link or a file, or starts a chat with
+//! whoever a contact card shares. Each asks jawd and shows what jawd pushes back (an edited row, a
+//! deleted one, the reactions), never a guess of its own. @ in a group's box completes its
+//! members, and what's taken goes as a real mention. A card of yours is made from a person's name
+//! and number, as a vCard 3.0.
 
 use super::{Focus, Overlay, View};
 use crate::data::{Kind, Member, Message, MessageInfo, SpanKind};
 use crate::fmt;
+use jaw_proto::send::Card;
+use jaw_proto::vcard;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
@@ -52,6 +56,34 @@ pub struct Taken {
 pub struct Naming {
     pub at: usize,
     pub query: String,
+}
+
+/// A card being made of someone from their chat, whose number its members will say: the chat the
+/// card goes to, the chat whose person it shares, and the name it goes by.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Carding {
+    pub to: String,
+    pub of: String,
+    pub name: String,
+}
+
+/// The chats a contact card offers: each card's name and each of its numbers, the WhatsApp
+/// account's where the card marks one, each number once.
+pub fn card_numbers(m: &Message) -> Vec<(String, String)> {
+    let Some(contact) = m.contact.as_ref().filter(|_| m.kind == Kind::Contact && !m.deleted) else { return vec![] };
+    let cards = contact.cards();
+    let alone = cards.len() == 1;
+    let mut out: Vec<(String, String)> = vec![];
+    for card in &cards {
+        let name = if alone { contact.name.clone().or(card.name.clone()) } else { card.name.clone() };
+        let name = name.unwrap_or_else(|| "someone".into());
+        for phone in &card.phones {
+            if !out.iter().any(|(_, number)| number == phone.dialled()) {
+                out.push((name.clone(), phone.dialled().to_string()));
+            }
+        }
+    }
+    out
 }
 
 /// A message's text, or what it is, on one line.
@@ -185,7 +217,37 @@ impl View {
         false
     }
 
+    /// Enter on a contact card: a chat with whoever it shares, by their number, or with several
+    /// numbers on it, the palette's list of them to choose from. Says whether it had a number.
+    pub(super) fn chat_from_card(&mut self, m: &Message) -> bool {
+        match card_numbers(m).as_slice() {
+            [] => return false,
+            [(name, number)] => {
+                self.starting = Some(number.clone());
+                self.jawd.start_chat_by_phone(number);
+                self.say(format!("a chat with {name} begins"));
+            }
+            numbers => self.palette_card(m, numbers.to_vec()),
+        }
+        true
+    }
+
+    /// Sends `name`'s card to `chat`, made as a vCard 3.0 from their number, which a card needs.
+    pub(super) fn send_card(&mut self, chat: &str, name: &str, phone: Option<&str>) {
+        let Some(phone) = phone.filter(|phone| phone.chars().any(|c| c.is_ascii_digit())) else {
+            self.say(format!("jawd knows no number for {name}, which a card needs"));
+            return;
+        };
+        let card = Card { name: name.to_string(), vcard: vcard::write(name, &[phone]) };
+        self.jawd.send_contact(chat, &[card]);
+        self.say(format!("sending {name}'s card"));
+    }
+
     pub(super) fn on_members(&mut self, chat: String, members: Vec<Member>) {
+        if let Some(carding) = self.carding.take_if(|c| c.of == chat) {
+            let phone = members.iter().find(|m| !self.me.contains(&m.id)).and_then(|m| m.phone.clone());
+            self.send_card(&carding.to, &carding.name, phone.as_deref());
+        }
         self.members.insert(chat, members);
     }
 

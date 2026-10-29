@@ -349,8 +349,10 @@ impl View {
                 if let Some(m) = self.messages.as_ref().and_then(|w| w.get(id)).filter(|m| m.kind == Kind::Voice) {
                     return self.voice_hints(m);
                 }
-                let editable =
-                    self.messages.as_ref().and_then(|w| w.get(id)).is_some_and(|m| self.not_editable(m).is_none());
+                let m = self.messages.as_ref().and_then(|w| w.get(id));
+                let editable = m.is_some_and(|m| self.not_editable(m).is_none());
+                let card = m.is_some_and(|m| !super::actions::card_numbers(m).is_empty());
+                let opens = if card { "start a chat" } else { "open" };
                 vec![
                     ("r", "reply", true),
                     ("e", "edit", editable),
@@ -358,7 +360,7 @@ impl View {
                     ("+", "react", true),
                     ("f", "forward", true),
                     ("y", "copy", true),
-                    ("⏎", "open", true),
+                    ("⏎", opens, true),
                     ("i", "info", true),
                     ("esc", "back to typing", true),
                 ]

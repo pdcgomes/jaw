@@ -270,6 +270,9 @@ pub struct View {
     /// Each chat's members as jawd said them, and the chats they've been asked for.
     members: HashMap<String, Vec<crate::data::Member>>,
     members_asked: HashSet<String>,
+    /// A card being made of someone whose chat jawd keeps under their LID, waiting for that chat's
+    /// members to say their number.
+    carding: Option<actions::Carding>,
     /// The message whose info the sheet shows, and jawd's answer once it comes.
     info: Option<(String, Option<Result<crate::data::MessageInfo, String>>)>,
     /// The voice message playing or paused, or the recording being listened to, as jawd last
@@ -396,6 +399,7 @@ impl View {
             naming_selected: 0,
             members: HashMap::new(),
             members_asked: HashSet::new(),
+            carding: None,
             info: None,
             playing: None,
             voice_asked: None,

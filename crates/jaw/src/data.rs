@@ -297,6 +297,9 @@ pub struct Message {
     /// For an event: what, when and where, and who's going.
     #[serde(default)]
     pub event: Option<Box<Event>>,
+    /// For a contact card: its name and its vCard, which holds each card when it shares several.
+    #[serde(default)]
+    pub contact: Option<Box<Contact>>,
 }
 
 /// A pin: where it is, which a row may not say, as jawd shows each field it has and null for the
@@ -453,6 +456,21 @@ impl Event {
             _ => {}
         }
         said.join(" · ")
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Contact {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub vcard: Option<String>,
+}
+
+impl Contact {
+    /// Each card it shares, with its name and numbers, in the order they came.
+    pub fn cards(&self) -> Vec<jaw_proto::vcard::Card> {
+        self.vcard.as_deref().map(jaw_proto::vcard::read).unwrap_or_default()
     }
 }
 
@@ -1254,6 +1272,9 @@ pub trait Jawd {
     /// is the interface's name for the message, made once when it was composed: asked again with
     /// it, jawd answers with the message it has rather than sending another.
     fn send_text(&mut self, chat: &str, text: &str, key: &str, reply: Option<&str>, mentions: &[String]);
+    /// Sends contact cards to a chat, each a name and a vCard, in one message, under a key of its
+    /// own, so asking again after a lost answer sends it once.
+    fn send_contact(&mut self, chat: &str, cards: &[jaw_proto::send::Card]);
     /// Reacts to a message with `emoji`, or takes yours away with an empty one. Each action names
     /// the chat its messages are in, where jawd finds them at once, so an ID two chats share is
     /// never in doubt.

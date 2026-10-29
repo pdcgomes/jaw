@@ -43,8 +43,9 @@ struct Sending {
     first: SystemTime,
 }
 
-/// An action on messages, `react`, `edit`, `delete` or `forward`, asked with a key made for it
-/// alone and kept until jawd answers for it, as a message is.
+/// An action on messages, `react`, `edit`, `delete` or `forward`, or contact cards sent with
+/// `send.contact`, asked with a key made for it alone and kept until jawd answers for it, as a
+/// message is.
 struct Acting {
     method: &'static str,
     /// The chat its messages are in.
@@ -815,6 +816,10 @@ impl Jawd for Wire {
             first: SystemTime::now(),
         };
         self.ask("send.text", params, Asked::Send(Box::new(sending)));
+    }
+
+    fn send_contact(&mut self, chat: &str, cards: &[jaw_proto::send::Card]) {
+        self.act("send.contact", chat, json!({ "cards": cards }), "sending a contact", None);
     }
 
     fn react(&mut self, chat: &str, message: &str, emoji: &str) {

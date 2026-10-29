@@ -4,10 +4,11 @@
 //! the costly part of a frame, so the view keeps what this returns per message, version, width and
 //! layout, and lays out only what's on screen.
 
-use crate::data::{Kind, Message, Part, SpanKind, Tick, Voice};
+use crate::data::{Contact, Kind, Message, Part, SpanKind, Tick, Voice};
 use crate::fmt;
 use crate::theme::Theme;
 use chrono::FixedOffset;
+use jaw_proto::vcard;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
@@ -107,6 +108,36 @@ fn voice(m: &Message, v: &Voice, play: Option<Play>, room: usize, ctx: &Ctx) -> 
         out.push((" ●".into(), Style::new().fg(t.unread)));
     }
     out.retain(|(s, _)| !s.is_empty());
+    out
+}
+
+/// A contact card as lines: its name, then its numbers; or, sharing several, the name they go by,
+/// then each card's name and numbers, a line each.
+pub fn card(contact: &Contact, t: &Theme) -> Vec<(String, Style)> {
+    let cards = contact.cards();
+    let name = contact.name.clone().or_else(|| cards.first().and_then(|c| c.name.clone()));
+    let mut out = vec![
+        ("◉ ".to_string(), Style::new().fg(t.muted)),
+        (name.unwrap_or_else(|| "contact".into()), Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
+    ];
+    let numbers = |c: &vcard::Card| c.phones.iter().map(|p| p.number.as_str()).collect::<Vec<_>>().join(", ");
+    let line = Style::new();
+    match cards.as_slice() {
+        [one] if !one.phones.is_empty() => {
+            out.push(("\n".into(), line));
+            out.push((numbers(one), Style::new().fg(t.muted)));
+        }
+        [_] | [] => {}
+        several => {
+            for c in several {
+                out.push(("\n".into(), line));
+                out.push((c.name.clone().unwrap_or_else(|| "someone".into()), Style::new().fg(t.fg)));
+                if !c.phones.is_empty() {
+                    out.push((format!(" · {}", numbers(c)), Style::new().fg(t.muted)));
+                }
+            }
+        }
+    }
     out
 }
 
@@ -342,6 +373,12 @@ fn body(m: &Message, shape: Shape, room: usize, ctx: &Ctx) -> Vec<(String, Style
         return vec![(said.into(), dim)];
     }
     let mut out = vec![];
+    if m.kind == Kind::Contact
+        && let Some(contact) = &m.contact
+    {
+        // Its words are the names on it, which the card shows.
+        return card(contact, t);
+    }
     if m.kind == Kind::Voice
         && let Some(v) = &m.voice
     {
@@ -592,6 +629,7 @@ mod tests {
             voice: None,
             location: None,
             event: None,
+            contact: None,
         }
     }
 
@@ -735,6 +773,38 @@ mod tests {
         assert!(lay(&m, 50)[0].contains("jaw can't show this yet"));
         m.deleted = true;
         assert!(lay(&m, 50)[0].contains("⊘ This message was deleted"));
+    }
+
+    #[test]
+    fn a_contact_card_is_its_name_and_numbers_and_several_are_each_cards_name_and_numbers() {
+        let marta = "BEGIN:VCARD\nVERSION:3.0\nFN:Marta Lopes\nitem1.TEL;waid=351213456789:+351 21 345 6789\n\
+            TEL;type=WORK:21 000 00 00\nEND:VCARD";
+        let rui = "BEGIN:VCARD\nVERSION:3.0\nFN:Rui Costa\nTEL;waid=351913333333:+351 913 333 333\nEND:VCARD";
+        let headed = |lines: &[String], head: &str| {
+            assert!(lines[0].starts_with(&format!("Ana   {head} ")) && lines[0].ends_with("  13:58"), "{lines:?}");
+            lines[1..].to_vec()
+        };
+        let mut m = theirs("Dr.ª Marta");
+        m.kind = Kind::Contact;
+        m.contact = Some(Box::new(Contact { name: Some("Dr.ª Marta".into()), vcard: Some(marta.into()) }));
+        assert_eq!(
+            headed(&lay(&m, 60), "◉ Dr.ª Marta"),
+            ["      +351 21 345 6789, 21 000 00 00"],
+            "its name, as its message gives it, then its numbers, and not the name again from its words"
+        );
+        m.contact =
+            Some(Box::new(Contact { name: Some("2 contacts".into()), vcard: Some(format!("{marta}\r\n{rui}")) }));
+        assert_eq!(
+            headed(&lay(&m, 60), "◉ 2 contacts"),
+            ["      Marta Lopes · +351 21 345 6789, 21 000 00 00", "      Rui Costa · +351 913 333 333"]
+        );
+        m.contact = Some(Box::new(Contact { name: None, vcard: Some("BEGIN:VCARD\nFN:Inês\nEND:VCARD".into()) }));
+        assert!(headed(&lay(&m, 60), "◉ Inês").is_empty(), "a card without numbers, named as its vCard names it");
+        m.contact = None;
+        headed(&lay(&m, 60), "◉ contact");
+        m.contact = Some(Box::new(Contact { name: Some("Dr.ª Marta".into()), vcard: Some(marta.into()) }));
+        m.deleted = true;
+        assert!(headed(&lay(&m, 60), "⊘ This message was deleted").is_empty());
     }
 
     #[test]

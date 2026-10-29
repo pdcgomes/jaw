@@ -75,6 +75,7 @@ fn message(id: &str, v: u64, sort: &str) -> Message {
         voice: None,
         location: None,
         event: None,
+        contact: None,
     }
 }
 
@@ -2765,4 +2766,119 @@ fn a_conversation_says_its_persons_presence_in_its_header_and_the_status_line_an
     assert!(screen.contains("╭ Mãe · recording… ─"), "{screen}");
     let roster = |l: &&str| l.starts_with("│ ● Mãe") && l.split("││").next().is_some_and(|s| s.contains("recording…"));
     assert!(screen.lines().any(|l| roster(&l)), "her roster row, around now:\n{screen}");
+}
+
+#[test]
+fn enter_on_a_contact_card_starts_a_chat_with_its_person_and_the_footer_says_so() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<c-k>marta lopes\n");
+    assert_eq!(v.open.as_deref(), Some("familia"));
+    let Focus::Message(id) = v.focus.clone() else { panic!("{:?}", v.focus) };
+    assert_eq!(shown(&v, &id).unwrap().kind, Kind::Contact);
+    let screen = frame(&mut v);
+    let at = row_of(&screen, "◉ Dr.ª Marta Lopes").unwrap_or_else(|| panic!("the card's name:\n{screen}"));
+    assert!(
+        screen.lines().nth(at + 1).is_some_and(|l| l.contains("+351 213 456 789")),
+        "its number under it:\n{screen}"
+    );
+    assert!(screen.lines().last().unwrap().contains("⏎ start a chat"), "{screen}");
+    press(&mut v, &rx, "y");
+    assert!(
+        v.effects.iter().any(|e| matches!(e, Effect::Copy(text) if text == "◉ Dr.ª Marta Lopes\n+351 213 456 789")),
+        "copied as it's drawn: {:?}",
+        v.effects
+    );
+    press(&mut v, &rx, "\n");
+    assert_eq!(v.open.as_deref(), Some("351213456789@s.whatsapp.net"), "by the WhatsApp account the card names");
+    assert!(frame(&mut v).contains("+351213456789"));
+}
+
+#[test]
+fn a_card_with_several_numbers_asks_which_to_chat_with_and_one_without_says_so() {
+    let (mut v, rx) = view(140, 40);
+    let open = v.open.clone().unwrap();
+    let mut card = theirs("card", "9999999999999~1", NOW - 60_000, "Inês, Tiago");
+    card.kind = Kind::Contact;
+    card.contact = Some(Box::new(crate::data::Contact {
+        name: Some("2 contacts".into()),
+        vcard: Some(format!(
+            "{}\r\n{}",
+            jaw_proto::vcard::write("Inês Gomes", &["351913002210"]),
+            jaw_proto::vcard::write("Tiago Martins", &["+351 916 666 666", "351913002210"])
+        )),
+    }));
+    arrive(&mut v, &open, vec![card.clone()]);
+    v.focus = Focus::Message("card".into());
+    press(&mut v, &rx, "\n");
+    let screen = frame(&mut v);
+    assert!(screen.contains("start a chat · 2 contacts"), "{screen}");
+    let numbers: Vec<(String, palette::Does)> = v
+        .palette_items()
+        .into_iter()
+        .filter_map(|item| match item {
+            palette::Item::Action(a) => Some((a.name, a.does)),
+            _ => None,
+        })
+        .collect();
+    let start = |number: &str| palette::Does::StartPhone(number.into());
+    assert_eq!(
+        numbers,
+        [("Inês Gomes".into(), start("+351913002210")), ("Tiago Martins".into(), start("+351916666666"))],
+        "each number once, by its card's name:\n{screen}"
+    );
+    assert!(screen.contains("+351916666666"), "{screen}");
+    press(&mut v, &rx, "<down>\n");
+    assert!(v.palette.is_none());
+    assert_eq!(v.open.as_deref(), Some("351916666666@s.whatsapp.net"));
+
+    let mut none = theirs("none", "9999999999999~2", NOW - 30_000, "Inês");
+    none.kind = Kind::Contact;
+    none.contact = Some(Box::new(crate::data::Contact {
+        name: Some("Inês".into()),
+        vcard: Some("BEGIN:VCARD\nFN:Inês\nEND:VCARD".into()),
+    }));
+    let open = v.open.clone().unwrap();
+    arrive(&mut v, &open, vec![none]);
+    v.focus = Focus::Message("none".into());
+    press(&mut v, &rx, "\n");
+    assert!(frame(&mut v).contains("there's no number on this card to start a chat with"));
+}
+
+#[test]
+fn the_palette_sends_someones_card_made_from_their_name_and_number_as_a_vcard_3() {
+    let (mut v, rx) = view(140, 40);
+    press(&mut v, &rx, "<c-k>sofia\n");
+    press(&mut v, &rx, "<c-k>send a contact\n");
+    let screen = frame(&mut v);
+    assert!(screen.contains("send a contact · to Sofia Martins"), "{screen}");
+    press(&mut v, &rx, "artur");
+    assert!(frame(&mut v).contains("+351913000031"), "a person shows the number their card would have");
+    press(&mut v, &rx, "\n");
+    assert!(v.palette.is_none());
+    let sent = newest(&v);
+    assert!(sent.mine && sent.kind == Kind::Contact, "{sent:?}");
+    let contact = sent.contact.clone().unwrap();
+    assert_eq!(contact.name.as_deref(), Some("Artur Reis"));
+    let vcard = contact.vcard.unwrap();
+    assert!(vcard.starts_with("BEGIN:VCARD\r\nVERSION:3.0\r\n") && jaw_proto::vcard::is_one(&vcard), "{vcard}");
+    let cards = jaw_proto::vcard::read(&vcard);
+    assert_eq!(cards[0].name.as_deref(), Some("Artur Reis"));
+    assert_eq!(cards[0].phones[0].whatsapp.as_deref(), Some("+351913000031"), "marked as on WhatsApp");
+    let screen = frame(&mut v);
+    assert!(screen.contains("◉ Artur Reis") && screen.contains("sending Artur Reis's card"), "{screen}");
+
+    // Someone with a chat is found as it, their number from its members.
+    press(&mut v, &rx, "<c-k>send a contact\nrui costa\n");
+    let sent = newest(&v);
+    let cards = sent.contact.as_ref().unwrap().cards();
+    assert_eq!(sent.contact.as_ref().unwrap().name.as_deref(), Some("Rui Costa"));
+    let number = cards[0].phones[0].whatsapp.clone().unwrap();
+    let members = v.members.get("rui").expect("asked of the chat");
+    let theirs = members.iter().find(|m| !v.me.contains(&m.id)).and_then(|m| m.phone.clone()).unwrap();
+    let digits = |s: &str| s.chars().filter(char::is_ascii_digit).collect::<String>();
+    assert_eq!(digits(&number), digits(&theirs), "the number its members say");
+    press(&mut v, &rx, "<c-k>send a contact\n");
+    assert!(frame(&mut v).contains("whose card?"), "{}", frame(&mut v));
+    press(&mut v, &rx, "\t");
+    assert!(matches!(v.palette.as_ref().map(|p| &p.mode), Some(palette::Mode::Contact { .. })), "tab doesn't narrow");
 }

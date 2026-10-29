@@ -22,13 +22,17 @@ fn opens(kind: Kind) -> &'static str {
         Kind::Audio => "playing audio files comes later",
         Kind::Location => "its map link opens from your terminal",
         Kind::Event => "its links open from your terminal",
-        Kind::LiveLocation | Kind::Contact | Kind::Poll => "opening these comes with M2",
+        Kind::LiveLocation | Kind::Poll => "opening these comes with M2",
+        Kind::Contact => "there's no number on this card to start a chat with",
         _ => "there's nothing to open in this one",
     }
 }
 
-/// A message's text as it would be pasted.
-fn plain(m: &Message, tz: FixedOffset) -> String {
+/// A message's text as it would be pasted: a contact card's lines as they're drawn.
+fn plain(m: &Message, tz: FixedOffset, t: &crate::theme::Theme) -> String {
+    if let Some(contact) = m.contact.as_ref().filter(|_| m.kind == Kind::Contact && !m.deleted) {
+        return crate::layout::card(contact, t).into_iter().map(|(s, _)| s).collect();
+    }
     let text: String = m.spans.iter().map(|s| s.s.as_str()).collect();
     if m.kind == Kind::Text {
         return text;
@@ -358,12 +362,12 @@ impl View {
                     && self.laid.get(&m.id).is_some_and(|l| l.lines.lines.len() > crate::layout::FOLD);
                 if folded {
                     self.unfolded.insert(m.id.clone());
-                } else if !self.open_in(&m) {
+                } else if !self.chat_from_card(&m) && !self.open_in(&m) {
                     self.say(opens(m.kind));
                 }
             }
             KeyCode::Char('y') => {
-                self.effects.push(Effect::Copy(plain(&m, self.tz)));
+                self.effects.push(Effect::Copy(plain(&m, self.tz, &self.theme)));
                 self.say("copied");
             }
             KeyCode::Char('r') => self.reply_to(&m),

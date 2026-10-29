@@ -6,7 +6,7 @@
 use super::panes::{PaneDo, Split};
 use super::{Overlay, View};
 use crate::composer::Composer;
-use crate::data::{Chat, Counts, Found, FoundKind, Hit, Mark, MarkKind};
+use crate::data::{Chat, ChatKind, Counts, Found, FoundKind, Hit, Mark, MarkKind};
 use crate::find;
 use crate::fmt;
 use jaw_proto::settings::{Messages, SettingsSet};
@@ -101,6 +101,8 @@ pub enum Does {
     QuickLook,
     FocusMode,
     Pane(PaneDo),
+    /// Asks whose card to send in the open chat.
+    SendContact,
 }
 
 /// What the palette is for: finding, or one of a message's actions that picks something.
@@ -141,6 +143,17 @@ pub enum Mode {
     /// Where to move a folder.
     Move {
         folder: String,
+    },
+    /// Whose contact card to send to `chat`: one of jawd's people, or the person of a one-to-one
+    /// chat, found as the palette finds them.
+    Contact {
+        chat: String,
+        name: String,
+    },
+    /// Which of a contact card's numbers to start a chat with: each its card's name and the number.
+    Card {
+        name: String,
+        numbers: Vec<(String, String)>,
     },
 }
 
@@ -433,6 +446,52 @@ impl View {
         self.palette = Some(p);
     }
 
+    /// The palette listing contact card `m`'s numbers, to start a chat with one.
+    pub fn palette_card(&mut self, m: &crate::data::Message, numbers: Vec<(String, String)>) {
+        let mut p = Palette::new();
+        p.narrow = Narrow::Actions;
+        let name = m.contact.as_ref().and_then(|c| c.name.clone()).unwrap_or_else(|| super::actions::one_line(m));
+        p.mode = Mode::Card { name, numbers };
+        p.answered = true;
+        self.palette = Some(p);
+    }
+
+    /// The palette's people, to pick whose card to send to the open chat.
+    fn palette_contact(&mut self) {
+        let Some(chat) = self.open.clone() else {
+            self.palette = None;
+            self.say("open a chat to send a card to it");
+            return;
+        };
+        let name = self.chat_known(&chat).map(|c| c.name.clone()).unwrap_or_default();
+        let mut p = Palette::new();
+        p.mode = Mode::Contact { chat, name };
+        self.palette = Some(p);
+        self.ask();
+    }
+
+    /// Enter while picking whose card to send: theirs, made from their number, which a one-to-one
+    /// chat's JID has, or, kept under their LID, its members say.
+    fn contact_go(&mut self) {
+        let hit = match self.palette_selected() {
+            Some(Item::Found(i)) => self.palette_result(i).map(|f| f.hit.clone()),
+            _ => None,
+        };
+        let Some(hit) = hit else { return };
+        let Some(Palette { mode: Mode::Contact { chat, .. }, .. }) = self.palette.take() else { return };
+        match hit {
+            Hit::Person(person) => self.send_card(&chat, &person.name, person.phone.as_deref()),
+            Hit::Chat(c) => match c.id.split_once('@') {
+                Some((user, "s.whatsapp.net")) => self.send_card(&chat, &c.name, Some(&format!("+{user}"))),
+                _ => {
+                    self.carding = Some(super::actions::Carding { to: chat, of: c.id.clone(), name: c.name });
+                    self.jawd.chat_info(&c.id);
+                }
+            },
+            _ => {}
+        }
+    }
+
     /// The palette's chats, to pick where to forward `m`.
     pub fn palette_forward(&mut self, m: &crate::data::Message) {
         if m.deleted {
@@ -669,6 +728,7 @@ impl View {
             Action::new("Attach files", "photos, videos, documents", Does::Later("attaching comes with M4"))
                 .key("ctrl-o")
                 .later("M4"),
+            Action::new("Send a contact", "someone's card, in this chat", Does::SendContact),
             Action::new("Record a voice message", "in this chat", Does::Record).key("ctrl-r"),
             Action::new("Library", "everything shared, in every chat", Does::Library).key("ctrl-l"),
             Action::new("File this chat into folders", "", Does::File).key("m"),
@@ -733,6 +793,28 @@ impl View {
                     (None, None) => "a new folder".into(),
                 };
                 return vec![Item::Heading("folder", what)];
+            }
+            Mode::Card { name, numbers } => {
+                let mut items = vec![Item::Heading("start a chat", fmt::fit(name, 48))];
+                for (who, number) in numbers {
+                    items.push(Item::Action(Action::new(
+                        who.clone(),
+                        number.clone(),
+                        Does::StartPhone(number.clone()),
+                    )));
+                }
+                return items;
+            }
+            Mode::Contact { name, .. } => {
+                let mut items = vec![Item::Heading("send a contact", format!("to {}", fmt::fit(name, 48)))];
+                let theirs = |r: &&Found| match &r.hit {
+                    Hit::Person(_) => true,
+                    Hit::Chat(c) => matches!(c.kind, ChatKind::Direct | ChatKind::Myself),
+                    _ => false,
+                };
+                let people = p.results.iter().enumerate().filter(|(_, r)| theirs(r)).map(|(i, _)| Item::Found(i));
+                items.extend(people);
+                return items;
             }
             Mode::Move { folder } => {
                 let mut items = vec![Item::Heading("move", format!("{} into", self.folder_name(folder)))];
@@ -910,7 +992,10 @@ impl View {
                 }
                 return;
             }
-            (Mode::React { .. } | Mode::Delete { .. }, KeyCode::Tab | KeyCode::BackTab) => return,
+            (
+                Mode::React { .. } | Mode::Delete { .. } | Mode::Contact { .. } | Mode::Card { .. },
+                KeyCode::Tab | KeyCode::BackTab,
+            ) => return,
             (Mode::File { .. }, KeyCode::Char(' ')) => {
                 let at = p.selected;
                 if let Some((id, _)) = self.your_folders().get(at).cloned() {
@@ -1075,6 +1160,7 @@ impl View {
     pub fn palette_act(&mut self) {
         match self.palette.as_ref().map(|p| &p.mode) {
             Some(Mode::Forward { .. }) => return self.forward_go(),
+            Some(Mode::Contact { .. }) => return self.contact_go(),
             Some(Mode::File { .. }) => return self.file_go(),
             Some(Mode::Name { .. }) => return self.name_go(),
             _ => {}
@@ -1296,6 +1382,7 @@ impl View {
                 close(self);
                 self.pane_do(does);
             }
+            Does::SendContact => self.palette_contact(),
             Does::OnMessage(id, c) => {
                 close(self);
                 let code = if c == '\n' { KeyCode::Enter } else { KeyCode::Char(c) };
@@ -1364,6 +1451,11 @@ impl View {
                 said.extend(r.folders.iter().cloned());
                 (lead, self.marks(&r.text, name), dim(said.join(" · ")))
             }
+            Hit::Person(person) if matches!(self.palette.as_ref().map(|p| &p.mode), Some(Mode::Contact { .. })) => (
+                Span::styled("○", Style::new().fg(t.comment)),
+                self.marks(&r.text, name),
+                dim(person.phone.clone().unwrap_or_else(|| "no number jawd knows".into())),
+            ),
             Hit::Person(_) => (
                 Span::styled("○", Style::new().fg(t.comment)),
                 self.marks(&r.text, name),
@@ -1446,6 +1538,8 @@ impl View {
             Mode::React { .. } => (" react ", " 1-6 the quick ones · type for any other · ⏎ reacts · esc closes "),
             Mode::Delete { .. } => (" delete ", " ↑↓ moves · ⏎ deletes · esc closes "),
             Mode::Forward { .. } => (" forward ", " tab picks a chat · ⏎ forwards · esc closes "),
+            Mode::Contact { .. } => (" contact ", " ↑↓ moves · ⏎ sends their card · esc closes "),
+            Mode::Card { .. } => (" card ", " ↑↓ moves · ⏎ starts a chat · esc closes "),
         };
         let foot = Line::from(Span::styled(foot, Style::new().fg(t.muted)));
         let block = Block::bordered()
@@ -1483,8 +1577,10 @@ impl View {
                 "for how long?"
             } else if let Mode::Name { .. } = p.mode {
                 "the folder's name"
-            } else if let Mode::File { .. } | Mode::Move { .. } = p.mode {
+            } else if let Mode::File { .. } | Mode::Move { .. } | Mode::Card { .. } = p.mode {
                 ""
+            } else if let Mode::Contact { .. } = p.mode {
+                "whose card? a name or a number"
             } else if let Mode::React { .. } = p.mode {
                 "an emoji's name, or 1 to 6"
             } else if let Mode::Delete { .. } = p.mode {
