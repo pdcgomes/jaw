@@ -564,6 +564,7 @@ impl Account {
             album: None,
             voice: None,
             location: None,
+            event: None,
         }
     }
 
@@ -1230,6 +1231,7 @@ impl Writing {
             album: None,
             voice: None,
             location: None,
+            event: None,
         });
         self.thread.messages.last_mut().expect("just added")
     }

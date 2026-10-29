@@ -75,6 +75,17 @@ pub fn ago(at: i64, now: i64, tz: FixedOffset) -> String {
     }
 }
 
+/// When an event is, from its start to its end if it has one: the day and the time it starts,
+/// and the time it ends, with its day too when that's another.
+pub fn planned(start: i64, end: Option<i64>, tz: FixedOffset) -> String {
+    let begins = local(start, tz).format("%a %-d %b, %H:%M").to_string();
+    match end {
+        Some(end) if end > start && same_day(start, end, tz) => format!("{begins} – {}", clock(end, tz)),
+        Some(end) if end > start => format!("{begins} – {}", local(end, tz).format("%a %-d %b, %H:%M")),
+        _ => begins,
+    }
+}
+
 /// When something ends, such as a ban: its date and time.
 pub fn until(at: i64, tz: FixedOffset) -> String {
     local(at, tz).format("%-d %B, %H:%M").to_string()

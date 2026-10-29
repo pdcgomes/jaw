@@ -4,6 +4,7 @@
 
 use super::{Effect, Focus, HOLD, Overlay, Scroll, View};
 use crate::data::{Kind, Message};
+use chrono::FixedOffset;
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -20,13 +21,14 @@ fn opens(kind: Kind) -> &'static str {
         }
         Kind::Audio => "playing audio files comes later",
         Kind::Location => "its map link opens from your terminal",
-        Kind::LiveLocation | Kind::Contact | Kind::Poll | Kind::Event => "opening these comes with M2",
+        Kind::Event => "its links open from your terminal",
+        Kind::LiveLocation | Kind::Contact | Kind::Poll => "opening these comes with M2",
         _ => "there's nothing to open in this one",
     }
 }
 
 /// A message's text as it would be pasted.
-fn plain(m: &Message) -> String {
+fn plain(m: &Message, tz: FixedOffset) -> String {
     let text: String = m.spans.iter().map(|s| s.s.as_str()).collect();
     if m.kind == Kind::Text {
         return text;
@@ -34,6 +36,12 @@ fn plain(m: &Message) -> String {
     if let Some(place) = &m.location {
         let place = place.lines().join("\n");
         return if text.is_empty() { place } else { format!("{place}\n{text}") };
+    }
+    if let Some(event) = &m.event {
+        let lines: Vec<String> =
+            event.lines(tz).into_iter().map(|parts| parts.into_iter().map(|(said, _)| said).collect()).collect();
+        let event = lines.join("\n");
+        return if text.is_empty() { event } else { format!("{event}\n{text}") };
     }
     let summary = crate::layout::summary(m);
     if text.is_empty() { summary } else { format!("{summary}\n{text}") }
@@ -355,7 +363,7 @@ impl View {
                 }
             }
             KeyCode::Char('y') => {
-                self.effects.push(Effect::Copy(plain(&m)));
+                self.effects.push(Effect::Copy(plain(&m, self.tz)));
                 self.say("copied");
             }
             KeyCode::Char('r') => self.reply_to(&m),

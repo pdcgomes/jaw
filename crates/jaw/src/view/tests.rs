@@ -74,6 +74,7 @@ fn message(id: &str, v: u64, sort: &str) -> Message {
         album: None,
         voice: None,
         location: None,
+        event: None,
     }
 }
 

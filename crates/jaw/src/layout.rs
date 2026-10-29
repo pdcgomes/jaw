@@ -4,7 +4,7 @@
 //! the costly part of a frame, so the view keeps what this returns per message, version, width and
 //! layout, and lays out only what's on screen.
 
-use crate::data::{Kind, Message, SpanKind, Tick, Voice};
+use crate::data::{Kind, Message, Part, SpanKind, Tick, Voice};
 use crate::fmt;
 use crate::theme::Theme;
 use chrono::FixedOffset;
@@ -368,6 +368,27 @@ fn body(m: &Message, shape: Shape, room: usize, ctx: &Ctx) -> Vec<(String, Style
         if !m.spans.is_empty() {
             out.push(("\n".into(), plain));
         }
+    } else if let Some(event) = &m.event {
+        let link = Style::new().fg(t.link).add_modifier(Modifier::UNDERLINED);
+        for (i, line) in event.lines(ctx.tz).into_iter().enumerate() {
+            if i > 0 {
+                out.push(("\n".into(), plain));
+            }
+            for (said, part) in line {
+                let style = match part {
+                    Part::Name if event.cancelled => plain.add_modifier(Modifier::BOLD | Modifier::CROSSED_OUT),
+                    Part::Name => plain.add_modifier(Modifier::BOLD),
+                    Part::Cancelled => Style::new().fg(t.warn),
+                    Part::About => plain,
+                    Part::Link => link,
+                    Part::When | Part::Place | Part::Answers => Style::new().fg(t.muted),
+                };
+                out.push((said, style));
+            }
+        }
+        if !m.spans.is_empty() {
+            out.push(("\n".into(), plain));
+        }
     } else if m.kind != Kind::Text {
         let s = summary(m);
         let style = if m.kind == Kind::Unknown { dim } else { Style::new().fg(t.muted) };
@@ -570,6 +591,7 @@ mod tests {
             album: None,
             voice: None,
             location: None,
+            event: None,
         }
     }
 
@@ -770,6 +792,71 @@ mod tests {
         m.location = unplaced.location;
         let lines = lay(&m, 120);
         assert!(lines[0].starts_with("Ana   ⌖ Casa da Ana   ") && lines.len() == 1, "{lines:?}");
+    }
+
+    #[test]
+    fn an_event_shows_when_and_where_it_is_who_is_going_and_your_answer_and_one_cancelled_says_so() {
+        let mut m = theirs("");
+        m.spans.clear();
+        m.kind = Kind::Event;
+        // Saturday 31 October 2026 at 9:00, to 15:00, UTC.
+        let start = 1_793_437_200_000;
+        m.event = Some(Box::new(crate::data::Event {
+            name: "Sintra".into(),
+            description: Some("Bring the rope".into()),
+            start: Some(start),
+            end: Some(start + 6 * 3_600_000),
+            place: Some(crate::data::Venue {
+                lat: Some(38.7803),
+                lon: Some(-9.4989),
+                name: Some("Cabo da Roca".into()),
+                address: Some("Colares".into()),
+                url: None,
+            }),
+            call: Some("https://call.whatsapp.com/voice/abc".into()),
+            going: 2,
+            maybe: 1,
+            mine: Some("maybe".into()),
+            ..Default::default()
+        }));
+        let map = "https://www.openstreetmap.org/?mlat=38.7803&mlon=-9.4989#map=17/38.7803/-9.4989";
+        let lines = lay(&m, 120);
+        assert!(lines[0].starts_with("Ana   ◷ Sintra   ") && lines[0].ends_with("13:58"), "{lines:?}");
+        assert_eq!(
+            lines[1..],
+            [
+                "      Sat 31 Oct, 09:00 – 15:00",
+                "      Bring the rope",
+                "      ⌖ Cabo da Roca, Colares",
+                &format!("      {map}"),
+                "      https://call.whatsapp.com/voice/abc",
+                "      2 going · 1 maybe · you said maybe",
+            ]
+        );
+        let theme = Theme::with(true);
+        let ctx = Ctx { theme: &theme, tz: UTC, me: &[], pictures: false, cell: (8, 16), sharp: false };
+        let shape =
+            Shape { width: 100, name: true, time: true, unfolded: false, pictured: true, play: None, irc: false };
+        let styled = body(&m, shape, 100, &ctx);
+        let style = |s: &str| styled.iter().find(|(t, _)| t == s).map(|(_, style)| *style).unwrap();
+        assert!(style(map).add_modifier.contains(Modifier::UNDERLINED), "the map is a link");
+        assert!(
+            style("https://call.whatsapp.com/voice/abc").add_modifier.contains(Modifier::UNDERLINED),
+            "and the call"
+        );
+        assert!(style("◷ Sintra").add_modifier.contains(Modifier::BOLD));
+
+        let event = m.event.as_mut().unwrap();
+        event.cancelled = true;
+        (event.going, event.maybe, event.mine, event.place, event.call, event.description) =
+            (0, 0, None, None, None, None);
+        event.end = Some(start + 26 * 3_600_000);
+        let lines = lay(&m, 120);
+        assert!(lines[0].starts_with("Ana   ◷ Sintra · cancelled   "), "{lines:?}");
+        assert_eq!(lines[1..], ["      Sat 31 Oct, 09:00 – Sun 1 Nov, 11:00", "      nobody has answered yet"]);
+        let styled = body(&m, shape, 100, &ctx);
+        let style = |s: &str| styled.iter().find(|(t, _)| t == s).map(|(_, style)| *style).unwrap();
+        assert!(style("◷ Sintra").add_modifier.contains(Modifier::CROSSED_OUT), "its name struck through");
     }
 
     #[test]

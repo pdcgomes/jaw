@@ -4,6 +4,7 @@
 //! never waits, since answers arrive as updates on the main thread's channel. `crate::demo` is a
 //! made-up account behind both.
 
+use chrono::FixedOffset;
 pub use jaw_client::Place;
 use jaw_client::{Row, Update as Window};
 use jaw_proto::layout::{Layout, Saved};
@@ -293,6 +294,9 @@ pub struct Message {
     /// For a location: where it is, and what it's called.
     #[serde(default)]
     pub location: Option<Box<Location>>,
+    /// For an event: what, when and where, and who's going.
+    #[serde(default)]
+    pub event: Option<Box<Event>>,
 }
 
 /// A pin: where it is, which a row may not say, as jawd shows each field it has and null for the
@@ -312,23 +316,143 @@ pub struct Location {
     pub url: Option<String>,
 }
 
+/// Where `lat` and `lon` are on OpenStreetMap, which any browser opens without an account.
+fn map(lat: f64, lon: f64) -> String {
+    format!("https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}")
+}
+
+/// A string as shown, unless it's only spaces.
+fn named(s: &Option<String>) -> Option<String> {
+    s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
 impl Location {
     /// Where it is on OpenStreetMap, which any browser opens without an account, when it says.
     pub fn map(&self) -> Option<String> {
-        let (lat, lon) = (self.lat?, self.lon?);
-        Some(format!("https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}"))
+        Some(map(self.lat?, self.lon?))
     }
 
     /// Its lines as shown and pasted: its name, or else its coordinates, its address, its map and
     /// its page.
     pub fn lines(&self) -> Vec<String> {
-        let named = |s: &Option<String>| s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
         let at = || Some(format!("{}, {}", self.lat?, self.lon?));
         let mut out = vec![format!("⌖ {}", named(&self.name).or_else(at).unwrap_or_else(|| "Location".into()))];
         out.extend(named(&self.address).filter(|a| Some(a) != named(&self.name).as_ref()));
         out.extend(self.map());
         out.extend(named(&self.url));
         out
+    }
+}
+
+/// An event, as jawd shows one: its name, what it says, when it starts and ends (milliseconds
+/// since the epoch), where, its call link, whether it's cancelled, and how many are going, maybe
+/// and not going, with what you answered.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Event {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
+    #[serde(default)]
+    pub place: Option<Venue>,
+    #[serde(default)]
+    pub call: Option<String>,
+    #[serde(default)]
+    pub cancelled: bool,
+    #[serde(default)]
+    pub going: u32,
+    #[serde(default)]
+    pub maybe: u32,
+    #[serde(default)]
+    pub not_going: u32,
+    /// `going`, `maybe` or `not_going`, when you've answered.
+    #[serde(default)]
+    pub mine: Option<String>,
+}
+
+/// Where an event is: a pin, or a place by its name alone, without `lat` and `lon`.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Venue {
+    #[serde(default)]
+    pub lat: Option<f64>,
+    #[serde(default)]
+    pub lon: Option<f64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// What a line of an event is, which says how it's drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Name,
+    Cancelled,
+    When,
+    About,
+    Place,
+    Link,
+    Answers,
+}
+
+impl Event {
+    /// Its lines as shown and pasted, each in parts: its name, and cancelled if it is; when; what
+    /// it says; where, and the pin's map; its call link; and who's going, with your answer.
+    pub fn lines(&self, tz: FixedOffset) -> Vec<Vec<(String, Part)>> {
+        let mut out = vec![];
+        let name = named(&Some(self.name.clone())).unwrap_or_else(|| "Event".into());
+        let mut first = vec![(format!("◷ {name}"), Part::Name)];
+        if self.cancelled {
+            first.push((" · cancelled".into(), Part::Cancelled));
+        }
+        out.push(first);
+        if let Some(start) = self.start {
+            out.push(vec![(crate::fmt::planned(start, self.end, tz), Part::When)]);
+        }
+        if let Some(about) = named(&self.description) {
+            out.push(vec![(about, Part::About)]);
+        }
+        if let Some(place) = &self.place {
+            let (name, address) = (named(&place.name), named(&place.address));
+            let at = match (name, address) {
+                (Some(name), Some(address)) if name != address => Some(format!("{name}, {address}")),
+                (Some(said), _) | (None, Some(said)) => Some(said),
+                (None, None) => None,
+            };
+            if let Some(at) = at {
+                out.push(vec![(format!("⌖ {at}"), Part::Place)]);
+            }
+            if let (Some(lat), Some(lon)) = (place.lat, place.lon) {
+                out.push(vec![(map(lat, lon), Part::Link)]);
+            }
+            out.extend(named(&place.url).map(|url| vec![(url, Part::Link)]));
+        }
+        out.extend(named(&self.call).map(|call| vec![(call, Part::Link)]));
+        out.push(vec![(self.answers(), Part::Answers)]);
+        out
+    }
+
+    /// Who's answered, and how: "3 going · 1 maybe · you're going", or that nobody has yet.
+    fn answers(&self) -> String {
+        let counts = [(self.going, "going"), (self.maybe, "maybe"), (self.not_going, "not going")];
+        let mut said: Vec<String> =
+            counts.iter().filter(|(n, _)| *n > 0).map(|(n, what)| format!("{n} {what}")).collect();
+        if said.is_empty() {
+            said.push("nobody has answered yet".into());
+        }
+        match self.mine.as_deref() {
+            Some("going") => said.push("you're going".into()),
+            Some("maybe") => said.push("you said maybe".into()),
+            Some("not_going") => said.push("you're not going".into()),
+            _ => {}
+        }
+        said.join(" · ")
     }
 }
 
