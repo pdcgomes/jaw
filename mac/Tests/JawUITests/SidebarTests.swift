@@ -56,6 +56,69 @@ func sidebar(_ host: SideHost? = nil) -> SidebarController {
 }
 
 @MainActor
+@Test func `the picked folder is selected whenever its row is in sight`() {
+    let host = SideHost()
+    let s = sidebar(host)
+    s.apply(Samples.folderUpdate)
+    let selected = { (s.outline.item(atRow: s.outline.selectedRow) as? SidebarController.Item)?.id }
+    s.select("folder:2")
+    #expect(selected() == "folder:2", "the app's pick selects its row")
+    s.outline.deselectAll(nil)
+    #expect(selected() == "folder:2" && host.picked.isEmpty, "a click on nothing leaves it selected")
+    s.outline.collapseItem(s.items["folder:1"])
+    #expect(selected() == nil && s.picked == "folder:2" && host.picked.isEmpty, "closing Family picks nothing")
+    s.outline.expandItem(s.items["folder:1"])
+    #expect(selected() == "folder:2", "opened again, Cousins is selected again")
+}
+
+@MainActor
+@Test func `closing the folder that holds the picked one with its triangle picks nothing, so the chat list stays where it is`() throws {
+    let host = SideHost()
+    let s = sidebar(host)
+    let window = NSWindow(contentViewController: s)
+    defer { withExtendedLifetime(window) {} }
+    s.apply(Samples.folderUpdate)
+    s.select("folder:2")
+    s.view.layoutSubtreeIfNeeded()
+    window.makeKeyAndOrderFront(nil)
+    window.makeFirstResponder(s.outline)
+    let family = try #require(s.outline.rowView(atRow: 6, makeIfNecessary: true))
+    let triangle = try #require(family.subviews.first { $0.identifier == NSOutlineView.disclosureButtonIdentifier } as? NSButton)
+    triangle.performClick(nil)
+    #expect(s.said[6] == "Family ⌘1 @ 3 ▸", "closed")
+    #expect(host.picked.isEmpty && s.picked == "folder:2" && s.selected == nil)
+}
+
+@MainActor
+@Test func `a heading closed by hand stays closed, and a folder the app picks under a closed heading opens it`() {
+    let s = sidebar()
+    s.apply(Samples.folderUpdate)
+    s.outline.collapseItem(s.items[SidebarController.smartHeading])
+    s.apply(Update(seq: 301, upsert: [FolderRow(id: "folder:8", v: 62, name: "Parents", position: 4)]))
+    s.roles = Catalog.jaw.roles(dark: false)
+    #expect(s.said.last == "Smart Folders:", "a push that lays the tree out again and a restyle leave it closed")
+    s.outline.collapseItem(s.items[SidebarController.foldersHeading])
+    s.select("folder:2")
+    #expect(Array(s.said[5 ... 7]) == ["Folders:", "Family ⌘1 @ 3 ▾", "  Cousins 1"] && s.said.last == "Smart Folders:")
+}
+
+@MainActor
+@Test func `what's left open and what's closed is kept from launch to launch under the key the app gives`() {
+    let key = "jaw.tests.sidebar.\(UUID().uuidString)"
+    defer { UserDefaults.standard.removeObject(forKey: key) }
+    let before = sidebar()
+    before.keepsOpen = key
+    before.apply(Samples.folderUpdate)
+    before.expand("folder:1")
+    before.outline.collapseItem(before.items[SidebarController.smartHeading])
+    let after = sidebar()
+    after.keepsOpen = key
+    after.apply(Samples.folderUpdate)
+    #expect(Array(after.said[6 ... 7]) == ["Family ⌘1 @ 3 ▾", "  Cousins 1"], "Family left open")
+    #expect(after.said.last == "Smart Folders:", "Smart Folders left closed")
+}
+
+@MainActor
 @Test func `counts that change draw their rows again, and a folder that comes lays the tree out again, keeping what's open`() {
     let s = sidebar()
     let window = NSWindow(contentViewController: s)

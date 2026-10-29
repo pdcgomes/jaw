@@ -173,7 +173,7 @@ enum Bench {
                 } else if key.hasPrefix("vote:") || key.hasPrefix("poll:") {
                     FileHandle.standardError.write(Data("\(key): \(pollSaid(model.conversation?.newestPoll))\(model.notice.map { " · said \"\($0.0)\"" } ?? "")\n".utf8))
                 } else if key == "sidebar", let sidebar = model.window?.sidebar {
-                    FileHandle.standardError.write(Data("sidebar: \(sidebar.said.joined(separator: " | ")) · picked \(sidebar.picked)\n".utf8))
+                    FileHandle.standardError.write(Data("sidebar: \(sidebar.said.joined(separator: " | ")) · picked \(sidebar.picked) · selected \(sidebar.selected ?? "nothing")\n".utf8))
                 } else {
                     let open = model.window.flatMap { w in w.palette.isVisible ? w.palette.model : nil }
                     let palette = open.map { p in

@@ -27,8 +27,9 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         }
     }
 
-    /// The defaults key your folders left open are kept under from launch to launch: the app gives one,
-    /// the harness and the tests none, so what they draw doesn't depend on what was opened before.
+    /// The defaults key what's open, the headings and your folders, is kept under from launch to launch:
+    /// the app gives one, the harness and the tests none, so what they draw doesn't depend on what was
+    /// opened before.
     public var keepsOpen: String? {
         didSet {
             guard let keepsOpen, let kept = UserDefaults.standard.stringArray(forKey: keepsOpen) else { return }
@@ -42,10 +43,8 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
     /// One object for each row's id for as long as the sidebar lives: the outline knows its rows by
     /// identity, so what's open stays open as the tree is laid out again.
     var items: [String: Item] = [:]
-    /// Your folders left open.
-    var open: Set<String> = []
-    /// While a folder closes, the selection AppKit moves isn't a pick.
-    var collapsing = false
+    /// What's open: the headings until they're closed by hand, and your folders left open.
+    var open: Set<String> = [SidebarController.foldersHeading, SidebarController.smartHeading]
 
     final class Item: NSObject {
         let id: String
@@ -97,14 +96,19 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
     }
 
     /// The app picked `folder`, from a key, a favourite or the palette: its row is selected, the
-    /// folders it's in opened, and the host isn't asked again.
+    /// heading and the folders it's under opened, and the host isn't asked again.
     public func select(_ folder: String) {
         picked = folder
         guard isViewLoaded else { return }
-        for id in tree.ancestors(folder).reversed() {
+        for id in above(folder) {
             outline.expandItem(item(id))
         }
         reselect()
+    }
+
+    /// The folder whose row is selected: the picked one whenever its row is in sight.
+    public var selected: String? {
+        (outline.item(atRow: outline.selectedRow) as? Item)?.id
     }
 
     /// Picks the folder on `row`, as a click does; false when the row isn't a folder.
@@ -115,11 +119,18 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         return true
     }
 
-    /// Opens a folder of yours to show the folders in it, the ones it's in first.
+    /// Opens a folder of yours to show the folders in it, its heading and the ones it's in first.
     public func expand(_ id: String) {
-        for a in tree.ancestors(id).reversed() + [id] {
+        for a in above(id) + [id] {
             outline.expandItem(item(a))
         }
+    }
+
+    /// What a folder is under, outermost first: its heading, when it has one, then the folders it's in.
+    func above(_ id: String) -> [String] {
+        guard let row = tree.row(id) else { return [] }
+        let heading = row.isYours ? [Self.foldersHeading] : row.isSmart ? [Self.smartHeading] : []
+        return heading + tree.ancestors(id).reversed()
     }
 
     /// The tree as it's drawn, a row a line, for the tests and the snapshot: a heading with a colon, a
@@ -145,18 +156,15 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         let row = outline.row(forItem: items[picked])
         if row >= 0 {
             outline.selectRowIndexes([row], byExtendingSelection: false)
-        } else {
+        } else if outline.selectedRow >= 0 {
             outline.deselectAll(nil)
         }
     }
 
-    /// The headings open, your folders as they were left, and the picked folder selected.
+    /// The headings and your folders open as they were left, and the picked folder selected.
     func restoreOpen() {
-        for heading in [Self.foldersHeading, Self.smartHeading] {
-            outline.expandItem(item(heading))
-        }
-        for (row, _) in tree.yours where open.contains(row.id) {
-            outline.expandItem(item(row.id))
+        for id in [Self.foldersHeading, Self.smartHeading] + tree.yours.map(\.row.id) where open.contains(id) {
+            outline.expandItem(item(id))
         }
         reselect()
     }
@@ -220,30 +228,25 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
     }
 
     public func outlineViewSelectionDidChange(_: Notification) {
-        guard !collapsing, let id = (outline.item(atRow: outline.selectedRow) as? Item)?.id, id != picked, tree.row(id) != nil else {
-            return
-        }
+        guard let id = selected else { return reselect() }
+        guard id != picked, tree.row(id) != nil else { return }
         picked = id
         host?.sidebar(self, pick: id)
     }
 
-    public func outlineViewItemWillCollapse(_: Notification) {
-        collapsing = true
-    }
-
     public func outlineViewItemDidCollapse(_ note: Notification) {
-        collapsing = false
         keep(note, open: false)
         reselect()
     }
 
     public func outlineViewItemDidExpand(_ note: Notification) {
         keep(note, open: true)
+        reselect()
     }
 
     func keep(_ note: Notification, open now: Bool) {
-        guard let id = (note.userInfo?["NSObject"] as? Item)?.id, tree.row(id)?.isYours == true else { return }
-        if now { open.insert(id) } else { open.remove(id) }
-        if let keepsOpen { UserDefaults.standard.set(open.sorted(), forKey: keepsOpen) }
+        guard let id = (note.userInfo?["NSObject"] as? Item)?.id, Self.isHeading(id) || tree.row(id)?.isYours == true else { return }
+        let changed = now ? open.insert(id).inserted : open.remove(id) != nil
+        if changed, let keepsOpen { UserDefaults.standard.set(open.sorted(), forKey: keepsOpen) }
     }
 }
