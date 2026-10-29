@@ -68,6 +68,11 @@ import Testing
     #expect(tree.children(of: "folder:1").isEmpty)
 }
 
+@Test func `a folder the palette finds that the tree doesn't hold waits for jawd's M6 before the tree is served, and is gone after`() {
+    #expect(FolderTree().notHeld("Family") == "folders come with jawd's M6")
+    #expect(Samples.tree.notHeld("Family") == "Family is gone")
+}
+
 @Test func `a slot says what's on it, and a folder of yours is named by its path where another has its name`() {
     var tree = Samples.tree
     #expect(tree.slotName(1) == "Family" && tree.slotName(2) == "Ana Ribeiro" && tree.slotName(4) == nil)

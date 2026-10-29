@@ -226,7 +226,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         case let .link(l): model.openLink(l.link.url)
         case let .linkMessage(l): goTo(message: l.message, in: l.chat)
         case let .folder(f):
-            if sidebar.tree.row(f.id) != nil { model.pick(folder: f.id) } else { model.say("folders come with jawd's M6") }
+            if sidebar.tree.row(f.id) != nil { model.pick(folder: f.id) } else { model.say(sidebar.tree.notHeld(f.name)) }
         case let .action(action): action.run()
         case let .emoji(message, emoji):
             if let c = model.panes.values.first(where: { $0.window.get(message) != nil }) {

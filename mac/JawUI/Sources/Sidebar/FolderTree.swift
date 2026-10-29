@@ -115,6 +115,12 @@ public struct FolderTree: Sendable, Equatable {
         return (ancestors(id).reversed().compactMap { rows[$0]?.name } + [row.name]).joined(separator: " › ")
     }
 
+    /// What's said of a folder the palette found that the tree doesn't hold: before jawd serves the
+    /// tree, that folders come with its M6; after, that the folder is gone.
+    public func notHeld(_ name: String) -> String {
+        served ? "\(name) is gone" : "folders come with jawd's M6"
+    }
+
     /// The slot that holds a folder or a chat.
     public func slot(of target: String) -> Int? {
         favourites.first { $0.target == target }?.slot
