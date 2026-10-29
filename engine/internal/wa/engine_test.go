@@ -345,6 +345,7 @@ func stored() []struct {
 		{&events.JoinedGroup{GroupInfo: types.GroupInfo{JID: group, GroupName: types.GroupName{Name: "Lisbon Climbing"}}}, "group"},
 		{&events.GroupInfo{JID: group, Name: &types.GroupName{Name: "Lisbon Climbing"}}, "group change"},
 		{&events.Picture{JID: ana, PictureID: "123"}, "picture"},
+		{&events.MediaRetry{ChatID: ana, MessageID: "3EB0GONE", Timestamp: time.UnixMilli(1_792_000_000_000)}, "media retried"},
 	}
 }
 
@@ -364,6 +365,8 @@ func kindOf(event *enginepb.Event) string {
 		return "group change"
 	case *enginepb.Event_Picture:
 		return "picture"
+	case *enginepb.Event_MediaRetried:
+		return "media retried"
 	}
 	return fmt.Sprintf("%T", event.GetKind())
 }
