@@ -151,3 +151,54 @@ func sidebar(_ host: SideHost? = nil) -> SidebarController {
     }
     #expect(ends.count == 10 && Set(ends).count == 1, "\(ends)")
 }
+
+@MainActor
+@Test func `on each level every name starts at the same place, whatever its symbol, and your folders and the smart ones start where All does`() {
+    let s = sidebar()
+    let window = NSWindow(contentViewController: s)
+    defer { withExtendedLifetime(window) {} }
+    s.apply(Samples.folderUpdate)
+    s.expand("folder:1")
+    s.view.layoutSubtreeIfNeeded()
+    var starts: [Int: Set<CGFloat>] = [:]
+    for row in 0 ..< s.outline.numberOfRows {
+        guard let cell = s.outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? FolderCell else { continue }
+        cell.layoutSubtreeIfNeeded()
+        starts[s.outline.level(forRow: row), default: []].insert(s.outline.convert(cell.name.bounds, from: cell.name).minX)
+    }
+    #expect(starts.keys.sorted() == [0, 1, 2] && starts.values.allSatisfy { $0.count == 1 }, "\(starts)")
+    #expect(starts[0] == starts[1], "under their headings, in line with All")
+}
+
+@MainActor
+@Test func `on the selection of a tree with the keys a row is drawn in the selected text's colour, and in the theme's once the keys go`() throws {
+    let s = sidebar()
+    let window = NSWindow(contentViewController: s)
+    defer { withExtendedLifetime(window) {} }
+    s.apply(Samples.folderUpdate)
+    s.select("folder:1")
+    s.view.layoutSubtreeIfNeeded()
+    let family = try #require(s.outline.view(atColumn: 0, row: 6, makeIfNecessary: true) as? FolderCell)
+    // What AppKit gives a selected row's cell while its list has the keys in the key window.
+    family.backgroundStyle = .emphasized
+    #expect([family.name, family.digit, family.mention, family.count].allSatisfy { $0.textColor == .alternateSelectedControlTextColor })
+    #expect(family.symbol.contentTintColor == .alternateSelectedControlTextColor)
+    family.backgroundStyle = .normal
+    let roles = Catalog.jaw.roles(dark: true)
+    #expect(family.name.textColor == roles.text.nsColor && family.digit.textColor == roles.tertiary.nsColor)
+    #expect(family.mention.textColor == roles.mention.nsColor && family.count.textColor == roles.secondary.nsColor)
+    #expect(family.symbol.contentTintColor == roles.secondary.nsColor)
+}
+
+@MainActor
+@Test func `VoiceOver reads a folder's row once, from the row itself, with its unread total, mentions and favourite`() throws {
+    let s = sidebar()
+    let window = NSWindow(contentViewController: s)
+    defer { withExtendedLifetime(window) {} }
+    s.apply(Samples.folderUpdate)
+    s.view.layoutSubtreeIfNeeded()
+    let family = try #require(s.outline.view(atColumn: 0, row: 6, makeIfNecessary: true) as? FolderCell)
+    #expect(family.isAccessibilityElement() && family.accessibilityLabel() == "Family, 3 unread, mentions you, favourite 1")
+    let parts = NSAccessibility.unignoredChildren(from: family.accessibilityChildren() ?? [])
+    #expect(parts.isEmpty, "nothing in it read again: \(parts)")
+}

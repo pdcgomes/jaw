@@ -34,7 +34,7 @@ private struct SidebarScene: View {
             }
             SpecimenGroup(
                 title: "The tree, Family picked",
-                note: "All with an @ and 12, Unread with an @ and 12, Groups with an @ and 5, Communities with 1, Archived with no count; under Folders, Family with ⌘1, an @ and 3, open to show Cousins with 1, then Climbing with ⌘3, Friends with 2, and Work, closed, with a triangle for Clients in it; under Smart Folders, Waiting on me with 2, Mentions me with an @ and 1, and Muted, unread. The digits, @s and counts line up on the right, and nothing is cut off. The selection's colour is the window's, which a picture may not show.",
+                note: "All with an @ and 12, Unread with an @ and 12, Groups with an @ and 5, Communities with 1, Archived with no count; under Folders, Family with ⌘1, an @ and 3, open to show Cousins with 1, then Climbing with ⌘3, Friends with 2, and Work, closed, with a triangle for Clients in it; under Smart Folders, Waiting on me with 2, Mentions me with an @ and 1, and Muted, unread. The names start together on each level, the symbols in a column of their own, the digits, @s and counts line up on the right, and nothing is cut off. The selection's colour is the window's, which a picture may not show.",
                 roles: roles,
             ) {
                 ControllerSpecimen {
