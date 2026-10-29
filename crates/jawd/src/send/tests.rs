@@ -4667,6 +4667,43 @@ async fn a_message_youre_deleting_for_everyone_isnt_starred_while_your_deletion_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_star_whose_message_is_deleted_for_everyone_once_it_has_found_it_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let mine = running.send(ANA, "chego às 20h").await;
+    running.until_status(ANA, &mine, "sent").await;
+    running.arrives(ANA, ANA, "a1", now_ms() - 60_000).await;
+    // Your deletion stays queued while WhatsApp can't be reached.
+    until_offline(&running).await;
+    // Each star finds its message as it was, and its message is then deleted for everyone before
+    // its step: by you, from another interface at the same moment, or by Ana.
+    for (id, yours) in [(mine.as_str(), true), ("a1", false)] {
+        let (stopped, go) = running.sending.pause_next_action();
+        let sending = running.sending.clone();
+        let params = json!({ "message": id, "chat": ANA, "starred": true });
+        let asking = tokio::spawn(async move { sending.call("star", params).await });
+        stopped.notified().await;
+        if yours {
+            running.call("delete", json!({ "message": id, "chat": ANA, "for": "everyone" })).await.unwrap();
+        } else {
+            let hers = Amend { what: Amendment::Revoke, ..other_of(ANA, id) };
+            running.store.apply(Lane::Live, vec![Change::Amend(hers)]).await.unwrap();
+        }
+        go.notify_one();
+        let refused = asking.await.unwrap().unwrap_err();
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (code::NOT_ALLOWED, "it's deleted for everyone, or being deleted, so it can't be starred"),
+            "{id}"
+        );
+        assert!(!row(&running, ANA, id).await.unwrap().starred, "{id}");
+    }
+    let revoke = ("revoke".to_string(), "queued".to_string());
+    assert_eq!(outbox_rows(&running).await.0, [revoke], "nothing written behind your deletion");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn marking_and_starring_refuse_what_the_other_chat_actions_refuse() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;

@@ -331,7 +331,7 @@ const RETRYABLE: &str =
 /// Whether message ?1 is deleted for everyone, or being: it is, or your deletion of it for everyone
 /// is on its way, as windows show it then; or, while chats merge, a copy of it merging with it is,
 /// which windows of the chat kept show only once the merge folds it in.
-const SHOWN_DELETED: &str = concat!("SELECT ", shown_deleted!(), " FROM messages t WHERE t.n = ?1");
+pub(super) const SHOWN_DELETED: &str = concat!("SELECT ", shown_deleted!(), " FROM messages t WHERE t.n = ?1");
 /// Whether HD copy ?1 is to be withdrawn: its message deleted for everyone, or being, there or in a
 /// copy merging with it.
 const HD_SHOWN_DELETED: &str = concat!(

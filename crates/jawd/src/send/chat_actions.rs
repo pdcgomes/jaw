@@ -258,6 +258,8 @@ pub(super) async fn star(inner: &Arc<Inner>, star: Star) -> Result<Value, Error>
         return Err(Error::new(code::NOT_ALLOWED, "it's being deleted for everyone, so it can't be starred"));
     }
     let doing = if star.starred { "star the message" } else { "unstar the message" };
+    #[cfg(test)]
+    super::paused(&inner.acting).await;
     act(inner, target.chat.clone(), doing, false, |at| {
         let patch = queued(starred(&target, star.starred, at))?;
         Ok(Does::Star { id: target.id.clone(), starred: star.starred, patch })
@@ -452,6 +454,9 @@ async fn act(
         }
         Some(Acted::Already) => Ok(Value::Object(Default::default())),
         Some(Acted::Gone) => Err(Error::new(code::NOT_FOUND, format!("{chat} went before jawd could {doing}"))),
+        Some(Acted::Deleted) => {
+            Err(Error::new(code::NOT_ALLOWED, "it's deleted for everyone, or being deleted, so it can't be starred"))
+        }
         Some(Acted::Community) => Err(community()),
         Some(Acted::Pinned) => Err(pinned_most()),
         Some(Acted::Full { waiting, failed }) => Err(actions::full(waiting, failed)),

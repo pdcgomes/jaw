@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::outbox::{OUTBOX_MOST, app_state_row, waiting};
+use super::outbox::{OUTBOX_MOST, SHOWN_DELETED, app_state_row, waiting};
 use super::{Amendment, Chat, Doing, Read, Stamps, apply_amendment, chat_jid, located, now_ms, set_read, upsert_chat};
 
 /// The most chats pinned at once, as WhatsApp's apps allow; archived chats don't count.
@@ -97,6 +97,8 @@ pub enum Acted {
     Already,
     /// The chat, or the message, isn't there.
     Gone,
+    /// The message a star names is deleted for everyone, or being, so nothing was written.
+    Deleted,
     /// The chat is a community's own row, whose groups carry these.
     Community,
     /// Pinning it would pin more than PINNED_MOST chats.
@@ -301,7 +303,9 @@ pub(super) fn passed(db: &Connection, seq: i64) -> Result<()> {
 }
 
 /// Stars message `id` in chat `jid`, or takes its star off, unless it's so already, and queues its
-/// patch.
+/// patch. A message deleted for everyone, or being, isn't starred: the request checks on a reader,
+/// but a deletion can commit after that read, and while a chat merges, the copy it read may not be
+/// the one found here.
 fn star(
     db: &Connection,
     stamps: &mut Stamps,
@@ -311,6 +315,9 @@ fn star(
     patch: &Patch,
 ) -> Result<(Acted, bool)> {
     let Some((chat, n)) = located(db, stamps, jid, id)? else { return Ok((Acted::Gone, false)) };
+    if starred && db.prepare_cached(SHOWN_DELETED)?.query_row([n], |r| r.get::<_, bool>(0))? {
+        return Ok((Acted::Deleted, false));
+    }
     let was: bool = db.prepare_cached(STARRED)?.query_row([n], |r| r.get(0))?;
     if was == starred {
         return Ok((Acted::Already, false));
@@ -372,7 +379,7 @@ mod tests {
 
     use super::*;
     use crate::convert::app_state::FOREVER;
-    use crate::store::outbox::Step;
+    use crate::store::outbox::{Step, Written};
     use crate::store::schema;
     use crate::store::{Amend, Change, Drained, Message, Person};
 
@@ -782,6 +789,63 @@ mod tests {
         let star = Does::Star { id: "m1".into(), starred: true, patch: patch("s1") };
         assert_eq!(acted(&db, ANA, star), Acted::Full { waiting: 1_000, failed: 0 });
         assert_eq!((message(&db), queued(&db).len()), (before, 0), "nothing written or queued");
+    }
+
+    #[test]
+    fn a_star_of_a_message_deleted_for_everyone_or_being_writes_nothing_but_its_star_can_go() {
+        let db = db();
+        let yours = Message {
+            chat: ANA.into(),
+            id: "m1".into(),
+            at: AT,
+            mine: true,
+            kind: "text",
+            status: Some("sent"),
+            text: Some("m1".into()),
+            summary: "m1".into(),
+            live: true,
+            ..Message::default()
+        };
+        written(&db, &[Change::Message(yours), from_ana("m2", AT + 1)]);
+        let star = |id: &str, starred: bool, by: &str| Does::Star { id: id.into(), starred, patch: patch(by) };
+        assert!(matches!(acted(&db, ANA, star("m1", true, "s1")), Acted::Queued { .. }));
+        assert!(matches!(acted(&db, ANA, star("m2", true, "s2")), Acted::Queued { .. }));
+        // Your deletion of m1 for everyone is queued, and Ana deletes m2 for everyone.
+        let deleting = Change::Outbox(Step::Act {
+            chat: ANA.into(),
+            target: "m1".into(),
+            id: "x1".into(),
+            effect: Amendment::Revoke,
+            at: AT + 2,
+            raw: vec![1],
+            key: None,
+            written: Written::default(),
+        });
+        let hers = Amend {
+            chat: ANA.into(),
+            target: "m2".into(),
+            sender: Some(ANA.into()),
+            mine: false,
+            at: AT + 3,
+            what: Amendment::Revoke,
+            raw: None,
+        };
+        written(&db, &[deleting, Change::Amend(hers)]);
+        let message = |id: &str| -> (bool, bool, i64) {
+            db.query_row("SELECT starred, deleted, v FROM messages WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap()
+        };
+        assert_eq!((message("m1").1, message("m2").1), (false, true), "m1 being deleted, m2 deleted");
+        for (id, unstar, again) in [("m1", "u1", "s3"), ("m2", "u2", "s4")] {
+            assert!(matches!(acted(&db, ANA, star(id, false, unstar)), Acted::Queued { .. }), "{id}'s star can go");
+            let unstarred = message(id);
+            assert!(!unstarred.0, "{id} unstarred");
+            let rows = queued(&db).len();
+            assert_eq!(acted(&db, ANA, star(id, true, again)), Acted::Deleted, "{id}");
+            assert_eq!((message(id), queued(&db).len()), (unstarred, rows), "{id}: nothing written or queued");
+        }
     }
 
     #[test]
@@ -1202,6 +1266,11 @@ mod tests {
                 "SEARCH chats USING INDEX chats_by_sort (archived=? AND sort>?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("starred", STARRED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
+            (
+                "shown deleted",
+                SHOWN_DELETED,
+                "SEARCH t USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH ra USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 4\nSEARCH ma USING COVERING INDEX chat_merges_by_keep (keep=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH mx USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH ga USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH rb USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 6\nSEARCH mk USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH gk USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 5\nSEARCH rc USING INDEX outbox_by_target (target=?)",
+            ),
             ("the time an index awaits", AWAITED_AT, "SEARCH app_state_awaiting USING PRIMARY KEY (key=?)"),
             ("an index awaiting a patch", AWAIT, ""),
             (
