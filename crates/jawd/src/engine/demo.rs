@@ -25,6 +25,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
 
+use super::pb::chat_presence::State as Said;
 use super::{Ack, BoxFuture, Commands, Engine, EngineError, Incoming, Instance, Outgoing, PROTOCOL, pb};
 use crate::media::drive;
 use crate::store::polls::option_hash;
@@ -747,7 +748,6 @@ const TYPING_AGAIN: Duration = Duration::from_secs(4);
 /// Rui recording in Lisbon Climbing, each said again every few seconds, and the group's other
 /// member typing there and stopping in turn. jawd hears it only while WhatsApp would say it.
 async fn typing_while_running(sender: Sender) {
-    use pb::chat_presence::State::{Composing, Paused, Recording};
     let (ana, climbing) = ("351912345678@s.whatsapp.net", "120363012345678901@g.us");
     for turn in 0u64.. {
         // Until this engine is stopped, or jawd has gone.
@@ -755,9 +755,9 @@ async fn typing_while_running(sender: Sender) {
             return;
         }
         let world = &sender.world;
-        world.typing(ana, ana, Composing);
-        world.typing(climbing, MEMBERS[0], Recording);
-        world.typing(climbing, MEMBERS[1], if turn % 2 == 0 { Composing } else { Paused });
+        world.typing(ana, ana, Said::Composing);
+        world.typing(climbing, MEMBERS[0], Said::Recording);
+        world.typing(climbing, MEMBERS[1], if turn % 2 == 0 { Said::Composing } else { Said::Paused });
         tokio::time::sleep(TYPING_AGAIN).await;
     }
 }

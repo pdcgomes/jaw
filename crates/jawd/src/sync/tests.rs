@@ -2888,3 +2888,67 @@ async fn a_question_put_to_the_phone_before_a_logout_is_forgotten_with_the_devic
     drop(tx);
     running.await.unwrap();
 }
+
+/// A message from someone, as sync takes it from the engine, ends their typing in its chat, by
+/// whichever of their JIDs it comes; one of yours ends nobody's, and nor does theirs elsewhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_from_someone_ends_their_typing_in_its_chat_as_sync_takes_it_from_the_engine() {
+    const ANA_LID: &str = "100000000002@lid";
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let ana =
+        crate::store::Person { jids: vec![ANA.into(), ANA_LID.into()], name: Some("Ana".into()), ..Default::default() };
+    let changes = vec![
+        Change::Person(ana),
+        Change::Chat(crate::store::Chat { id: ANA.into(), ..Default::default() }),
+        Change::Chat(crate::store::Chat { id: GROUP.into(), kind: Some("group"), ..Default::default() }),
+    ];
+    store.apply(Lane::Live, changes).await.unwrap();
+    let timing = crate::feed::typing::Timing { fade: Duration::from_secs(300), pace: Duration::from_millis(20) };
+    let typing = crate::feed::Typing::new(timing);
+    let hearing = watch::channel(true).0;
+    typing.start(
+        store.clone(),
+        watch::channel(convert::Me::new(["351910000001@s.whatsapp.net".into()])).1,
+        hearing.subscribe(),
+    );
+    let seen = typing.watching();
+    let typists = |chat: &str| seen.now(chat).map_or(0, |who| who.len());
+    let (events, incoming) = mpsc::channel(64);
+    let running = tokio::spawn(run(
+        incoming,
+        store.clone(),
+        Arc::default(),
+        broadcast::channel(16).0,
+        None,
+        home.path().to_path_buf(),
+        Default::default(),
+        typing.clone(),
+    ));
+    typing.heard(ANA, ANA, pb::chat_presence::State::Composing);
+    typing.heard(GROUP, ANA, pb::chat_presence::State::Composing);
+    typed(&seen, &[(ANA, 1), (GROUP, 1)], "her typing").await;
+
+    // One of yours in her chat ends nothing; hers in the group, by her LID, ends hers there only.
+    let send = |event: pb::Event| crate::engine::Incoming { event, ack: None };
+    let mut mine = crate::engine::demo::text(ANA, "351910000001@s.whatsapp.net", "m1", AT, "olá");
+    if let Some(pb::event::Kind::Message(message)) = &mut mine.kind {
+        message.info.as_mut().unwrap().from_me = true;
+    }
+    events.send(send(mine)).await.unwrap();
+    events.send(send(crate::engine::demo::text(GROUP, ANA_LID, "m2", AT + 1, "a caminho"))).await.unwrap();
+    typed(&seen, &[(GROUP, 0)], "her group typing's end").await;
+    assert_eq!(typists(ANA), 1, "yours ended nobody's, and hers in the group not hers here");
+    events.send(send(crate::engine::demo::text(ANA, ANA, "m3", AT + 2, "cheguei"))).await.unwrap();
+    typed(&seen, &[(ANA, 0)], "her typing's end in her chat").await;
+    running.abort();
+}
+
+/// Waits until connections are told `chats` each have so many typing, saying `what` if they never are.
+async fn typed(seen: &crate::feed::typing::Watching, chats: &[(&str, usize)], what: &str) {
+    let end = std::time::Instant::now() + Duration::from_secs(15);
+    while chats.iter().any(|(chat, n)| seen.now(chat).map_or(0, |who| who.len()) != *n) {
+        assert!(std::time::Instant::now() < end, "{what} never came");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}

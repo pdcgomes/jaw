@@ -63,7 +63,8 @@ impl Line {
     fn open(socket: &Path) -> Result<Line> {
         let stream = UnixStream::connect(socket).with_context(|| format!("can't reach {}", socket.display()))?;
         let mut line = Line { reader: BufReader::new(stream.try_clone()?), writer: stream, next: 1 };
-        let hello = json!({"protocol": jaw_proto::PROTOCOL, "client": "jawd demo", "version": jaw_version::VERSION});
+        // In front, as jaw is while it shows a chat, so WhatsApp is told you're online.
+        let hello = json!({"protocol": jaw_proto::PROTOCOL, "client": "jawd demo", "version": jaw_version::VERSION, "focus": true});
         line.call("hello", hello)?;
         Ok(line)
     }

@@ -111,6 +111,10 @@ enum Command {
         /// Messages a second to pour in, a quarter of them into the newest chat
         #[arg(long)]
         flood: Option<u32>,
+        /// Chats near the top of the list whose people type, record and stop, each a few times a
+        /// second, from once the history is in until the demo ends; busy groups first
+        #[arg(long, default_value_t = 0)]
+        typing: u32,
         /// How long the flood lasts, timed; it goes on untimed until Ctrl-C without
         #[arg(long)]
         seconds: Option<f64>,
@@ -287,6 +291,7 @@ fn jawd(cli: Cli) -> Result<()> {
             first_run,
             steady,
             flood,
+            typing,
             seconds,
             catch_up,
             in_flight,
@@ -307,6 +312,7 @@ fn jawd(cli: Cli) -> Result<()> {
             first_run,
             steady,
             flood,
+            typing,
             seconds,
             catch_up,
             in_flight,

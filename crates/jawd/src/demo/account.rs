@@ -208,6 +208,20 @@ impl Account {
         &self.chats[c].id
     }
 
+    pub fn group(&self, c: usize) -> bool {
+        self.chats[c].group()
+    }
+
+    /// Someone who can type in chat `c`, as WhatsApp names them: one of a group's members by their
+    /// LID, as their messages there come, `pick` saying which, or a one-to-one chat's person.
+    pub fn typist(&self, c: usize, pick: u64) -> String {
+        let spec = &self.chats[c];
+        match spec.members.is_empty() {
+            false if spec.group() => lid(spec.members[(pick % spec.members.len() as u64) as usize]),
+            _ => spec.id.clone(),
+        }
+    }
+
     /// How many messages chat `c` has in the history.
     pub fn size(&self, c: usize) -> usize {
         self.chats[c].size

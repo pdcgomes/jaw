@@ -27,6 +27,7 @@ use self::probe::{Asker, Expected, PAGE, Watcher};
 use self::usage::Sampler;
 use crate::engine::demo::{self, DemoEngine, World};
 use crate::engine::failing::{Failing, Failure};
+use crate::engine::pb::chat_presence::State as Said;
 use crate::engine::{Engine, pb};
 use crate::state::State;
 use crate::store::Store;
@@ -40,6 +41,8 @@ pub struct Plan {
     pub first_run: bool,
     pub steady: bool,
     pub flood: Option<u32>,
+    /// Chats whose people type, record and stop, each a few times a second.
+    pub typing: u32,
     pub seconds: Option<f64>,
     pub catch_up: Option<u32>,
     pub in_flight: u32,
@@ -103,6 +106,9 @@ const MARKER: &str = "jaw-demo.json";
 
 /// The newest chat, which a quarter of a flood goes to and the demo's interface has open.
 const OPEN: usize = 0;
+/// The chats near the top of the list typing is said in, and how often each changes.
+const TYPING_AMONG: usize = 300;
+const TYPING_EVERY: Duration = Duration::from_millis(150);
 /// A live message this often while history goes in.
 const LIVE_EVERY: Duration = Duration::from_millis(100);
 /// A chat opened this often while something else goes on.
@@ -333,6 +339,7 @@ impl Demo {
             (true, false) => self.history().await?,
             (false, _) => {}
         }
+        let typing = self.keep_typing(plan.typing);
         if plan.after > 0.0 {
             tokio::time::sleep(Duration::from_secs_f64(plan.after)).await;
         }
@@ -351,7 +358,41 @@ impl Demo {
         if let Some(seconds) = plan.idle {
             self.idle(seconds).await?;
         }
+        if let Some(typing) = typing {
+            typing.abort();
+        }
         Ok(())
+    }
+
+    /// `chats` chats near the top of the list, busy groups first, whose people type, record and
+    /// stop for as long as the demo runs, each chat a few times a second.
+    fn keep_typing(&self, chats: u32) -> Option<tokio::task::JoinHandle<()>> {
+        if chats == 0 {
+            return None;
+        }
+        let top = self.account.chats().min(TYPING_AMONG);
+        let mut typed: Vec<usize> = (0..top).filter(|&c| self.account.group(c)).collect();
+        typed.extend((0..top).filter(|&c| !self.account.group(c)));
+        typed.truncate(chats as usize);
+        println!(
+            "jawd demo: someone types, records or stops in {} chats every {} ms",
+            typed.len(),
+            TYPING_EVERY.as_millis()
+        );
+        let (account, world) = (self.account.clone(), self.world.clone());
+        Some(tokio::spawn(async move {
+            let mut rng = Rng(0x7E5E_7E5E);
+            let mut tick = tokio::time::interval(TYPING_EVERY / typed.len().max(1) as u32);
+            for &c in typed.iter().cycle() {
+                tick.tick().await;
+                let state = match rng.below(4) {
+                    0 | 1 => Said::Composing,
+                    2 => Said::Recording,
+                    _ => Said::Paused,
+                };
+                world.typing(account.chat(c), &account.typist(c, rng.next()), state);
+            }
+        }))
     }
 
     fn record(&self, phase: &str, numbers: Value) -> Result<()> {
@@ -869,6 +910,7 @@ impl Demo {
                 "pushes_per_second": (pushed - pushes) as f64 / seconds_taken,
                 "list_pushes_per_second": (listed - lists) as f64 / seconds_taken,
                 "missing": missing,
+                "typing": self.state.feed().map(|feed| feed.typing().stats()),
             }),
         )
     }

@@ -6,7 +6,7 @@ use jaw_proto::{Push, code};
 use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use super::*;
 use crate::engine::demo::{self, DemoEngine, Replies, World};
@@ -3674,4 +3674,32 @@ fn the_statements_sending_runs_itself_read_an_index_and_sort_nothing() {
             .unwrap();
         assert_eq!(plan.join("\n"), expected, "{sql}");
     }
+}
+
+/// Others' typing is heard only while WhatsApp says it: once it has been told you're online, not
+/// while it can't be reached, until it's told again as the connection comes back, and not once it's
+/// told you're away.
+#[tokio::test(flavor = "multi_thread")]
+async fn others_typing_is_heard_only_while_whatsapp_has_been_told_youre_online_and_can_be_reached() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    let mut hearing = running.sending.hearing();
+    async fn until(hearing: &mut watch::Receiver<bool>, now: bool) {
+        let waited = tokio::time::timeout(Duration::from_secs(15), hearing.wait_for(|heard| *heard == now)).await;
+        assert!(waited.is_ok_and(|heard| heard.is_ok()), "never heard {now}");
+    }
+    running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Presence(_)))).await;
+    assert!(!*hearing.borrow(), "not while it's told you're away, with nothing in front");
+    let terminal = running.attention.viewer();
+    terminal.focus(true);
+    until(&mut hearing, true).await;
+    assert_eq!(running.online(), [false, true], "once it's been told you're online");
+    running.connection(jaw_proto::ConnectionState::Offline);
+    until(&mut hearing, false).await;
+    running.connection(jaw_proto::ConnectionState::Online);
+    until(&mut hearing, true).await;
+    assert_eq!(running.online(), [false, true, true], "told again as the connection came back");
+    drop(terminal);
+    until(&mut hearing, false).await;
+    assert_eq!(running.online(), [false, true, true, false], "once it's been told you're away");
 }
