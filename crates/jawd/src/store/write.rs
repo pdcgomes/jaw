@@ -1768,9 +1768,6 @@ fn merge_settings_again(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i
     Ok(())
 }
 
-/// The most merges a chain can hold: one for each of a person's chats but the one that stays.
-const CHAIN_MOST: usize = 64;
-
 /// Whether jaw.db holds a chain of merges, which an earlier jawd made: a chat kept by one merge
 /// that's being merged into another itself.
 pub(super) fn chained(db: &Connection) -> Result<bool> {
@@ -1794,31 +1791,70 @@ fn middle(db: &Connection) -> Result<Option<(i64, i64)>> {
 /// everything that finds a chat through chat_merges follows one: it landed on a chat about to be
 /// removed, and reading the chat that stays didn't read the first. Each merge going into a chat in
 /// the middle goes into the chat that stays, as start_merge now leaves it, with where its chat was
-/// read merged into that one's. Says how many chats were in the middle of a chain.
+/// read merged into that one's. Says how many chats were in the middle of a chain. Each hop along
+/// a chain takes another merge, so a walk still going once it has taken as many as there are has
+/// gone round in a circle, which no jawd makes, and jaw.db is refused, saying how to open it.
 pub(super) fn flatten(db: &Connection, stamps: &mut Stamps) -> Result<usize> {
+    let merges: usize =
+        db.prepare_cached("SELECT count(*) FROM chat_merges")?.query_row([], |r| r.get::<_, i64>(0))?.try_into()?;
     let mut flattened = 0;
     while let Some((chat, next)) = middle(db)? {
         let mut top = next;
         for hop in 0.. {
-            let Some(further) = db
-                .prepare_cached("SELECT gone, keep FROM chat_merges WHERE gone = ?1")?
-                .query_row([top], |r| r.get::<_, i64>(1))
-                .optional()?
-            else {
-                break;
-            };
-            if hop == CHAIN_MOST {
-                bail!("the merges from chat {chat} on go round in a circle");
+            let Some(further) = goes_into(db, top)? else { break };
+            if hop == merges {
+                bail!(circle(db, top, merges)?);
             }
             top = further;
         }
-        let id = |n: i64| -> Result<String> {
-            Ok(db.prepare_cached("SELECT id FROM chats WHERE n = ?1")?.query_row([n], |r| r.get(0))?)
-        };
-        repoint(db, stamps, (chat, &id(chat)?), (top, &id(top)?))?;
+        repoint(db, stamps, (chat, &chat_id(db, chat)?), (top, &chat_id(db, top)?))?;
         flattened += 1;
     }
     Ok(flattened)
+}
+
+/// The chat that chat `gone` is being merged into, if it's being merged.
+fn goes_into(db: &Connection, gone: i64) -> Result<Option<i64>> {
+    Ok(db
+        .prepare_cached("SELECT gone, keep FROM chat_merges WHERE gone = ?1")?
+        .query_row([gone], |r| r.get(1))
+        .optional()?)
+}
+
+fn chat_id(db: &Connection, n: i64) -> Result<String> {
+    Ok(db.prepare_cached("SELECT id FROM chats WHERE n = ?1")?.query_row([n], |r| r.get(0))?)
+}
+
+/// What to say of the merges that go round in a circle through chat `on`, of `merges` in all: each
+/// by its chats' JIDs, and the one to delete for jaw.db to open, that of the chat a merge would
+/// keep, a phone number's or else the oldest, so the others end in it.
+fn circle(db: &Connection, on: i64, merges: usize) -> Result<String> {
+    let mut round = vec![on];
+    while round.len() < merges {
+        match goes_into(db, round[round.len() - 1])? {
+            Some(next) if next != on => round.push(next),
+            _ => break,
+        }
+    }
+    let ids = round.iter().map(|&n| chat_id(db, n)).collect::<Result<Vec<_>>>()?;
+    let kept = (0..round.len()).min_by_key(|&i| (!ids[i].ends_with("@s.whatsapp.net"), round[i])).unwrap_or(0);
+    if round.len() == 1 {
+        return Ok(format!(
+            "the merge of {} into itself goes round in a circle, which no jawd makes; deleting it \
+             (DELETE FROM chat_merges WHERE gone = {on}) lets jaw.db open",
+            ids[0]
+        ));
+    }
+    let each: Vec<String> = (0..round.len()).map(|i| format!("{} into {}", ids[i], ids[(i + 1) % ids.len()])).collect();
+    let (last, rest) = each.split_last().expect("a circle of two chats or more");
+    Ok(format!(
+        "the merges of {} and {last} go round in a circle, which no jawd makes; deleting the merge of {} \
+         (DELETE FROM chat_merges WHERE gone = {}) lets jaw.db open, the others then ending in {}'s chat",
+        rest.join(", "),
+        each[kept],
+        round[kept],
+        ids[kept]
+    ))
 }
 
 /// Has chat `chat` show its newest message, and sort by it, as its rows now are: for the two chats

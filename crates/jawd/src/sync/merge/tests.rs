@@ -911,8 +911,37 @@ async fn a_draft_an_earlier_jawd_put_on_a_middle_chat_whose_first_merge_had_ende
     assert_eq!(settings(&store, NEW).await, ("typed under the LID".into(), 0, 0));
 }
 
+/// Opens jaw.db in `home` on a thread of its own, so a walk that went round a circle for ever fails
+/// the test rather than hanging it: the store, or why jaw.db wasn't opened.
+fn opened_in_time(home: &Path) -> Result<Store, String> {
+    let (opened, open) = mpsc::channel();
+    let path = home.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = opened.send(Store::open(&path).map_err(|e| format!("{e:#}")));
+    });
+    open.recv_timeout(Duration::from_secs(30)).expect("opening jaw.db never ended")
+}
+
+/// The statement a refusal to open jaw.db says to run for it to open.
+fn told_to_run(refused: &str) -> String {
+    let (_, rest) = refused.split_once("(DELETE ").unwrap_or_else(|| panic!("nothing to run in {refused:?}"));
+    format!("DELETE {}", rest.split_once(')').unwrap().0)
+}
+
+/// Takes merge steps until none is left, at most twice as many as there are merges.
+async fn steps_till_done(store: &Store) {
+    let merges = store.count("chat_merges").unwrap();
+    for _ in 0..2 * merges {
+        if store.count("chat_merges").unwrap() == 0 {
+            return;
+        }
+        store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+    }
+    assert_eq!(store.count("chat_merges").unwrap(), 0, "the merges never finished");
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn merges_that_go_round_in_a_circle_keep_jawd_from_opening_jaw_db_and_change_nothing() {
+async fn merges_that_go_round_in_a_circle_keep_jawd_from_opening_jaw_db_saying_how_and_change_nothing() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
     store.apply(Lane::Live, vec![message(OLD, "o0", AT), message(LID, "l0", AT + 1)]).await.unwrap();
@@ -920,20 +949,103 @@ async fn merges_that_go_round_in_a_circle_keep_jawd_from_opening_jaw_db_and_chan
     let db = Connection::open(copy.path().join("jaw.db")).unwrap();
     // The old number's chat and the LID's, each merging into the other, which no jawd makes.
     db.execute("INSERT INTO chat_merges (gone, keep) VALUES (1, 2), (2, 1)", []).unwrap();
-    drop(db);
-    // Opened on a thread of its own, so a walk that went round the circle for ever fails the test
-    // rather than hanging it.
-    let (opened, open) = mpsc::channel();
-    let path = copy.path().to_path_buf();
-    std::thread::spawn(move || {
-        let _ = opened.send(Store::open(&path).err().map(|e| format!("{e:#}")));
-    });
-    let refused = open.recv_timeout(Duration::from_secs(30)).expect("opening jaw.db never ended");
-    let refused = refused.expect("jaw.db isn't opened");
+    let refused = opened_in_time(copy.path()).err().expect("jaw.db isn't opened");
     assert!(refused.contains("go round in a circle"), "{refused}");
-    let db = Connection::open(copy.path().join("jaw.db")).unwrap();
+    assert!(
+        refused.contains(&format!("{LID} into {OLD}")) && refused.contains(&format!("{OLD} into {LID}")),
+        "{refused}"
+    );
     let merges: i64 = db.query_row("SELECT count(*) FROM chat_merges WHERE gone <> keep", [], |r| r.get(0)).unwrap();
     assert_eq!(merges, 2, "nothing written");
+    // What it says to delete is the number's merge, so the LID's ends in the number's chat.
+    let delete = told_to_run(&refused);
+    assert_eq!(delete, "DELETE FROM chat_merges WHERE gone = 1");
+    db.execute(&delete, []).unwrap();
+    drop(db);
+    let store = opened_in_time(copy.path()).unwrap();
+    steps_till_done(&store).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [OLD]);
+    assert_eq!(column::<String>(&store, "SELECT id FROM messages ORDER BY id").await, ["l0", "o0"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_merging_into_itself_keeps_jawd_from_opening_jaw_db_saying_how() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    store.apply(Lane::Live, vec![message(LID, "l0", AT)]).await.unwrap();
+    let copy = killed(home.path());
+    let db = Connection::open(copy.path().join("jaw.db")).unwrap();
+    db.execute("INSERT INTO chat_merges (gone, keep) VALUES (1, 1)", []).unwrap();
+    let refused = opened_in_time(copy.path()).err().expect("jaw.db isn't opened");
+    assert!(refused.contains(&format!("the merge of {LID} into itself goes round in a circle")), "{refused}");
+    db.execute(&told_to_run(&refused), []).unwrap();
+    drop(db);
+    let store = opened_in_time(copy.path()).unwrap();
+    assert_eq!(column::<String>(&store, "SELECT id FROM messages").await, ["l0"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_circle_of_three_with_a_merge_into_it_names_its_own_three_and_opens_once_the_one_named_is_deleted() {
+    const HOSTED: &str = "100000000010@hosted.lid";
+    const TAIL: &str = "100000000011@lid";
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let changes = vec![message(LID, "l0", AT), message(OLD, "o0", AT + 1), message(HOSTED, "h0", AT + 2)];
+    store.apply(Lane::Live, [changes, vec![message(TAIL, "t0", AT + 3)]].concat()).await.unwrap();
+    let copy = killed(home.path());
+    let db = Connection::open(copy.path().join("jaw.db")).unwrap();
+    // The LID's chat into the old number's, that into the hosted LID's and that into the LID's, with
+    // another LID's going into the hosted LID's, which no jawd makes.
+    let n = |jid: &str| -> i64 { db.query_row("SELECT n FROM chats WHERE id = ?1", [jid], |r| r.get(0)).unwrap() };
+    for (gone, keep) in [(LID, OLD), (OLD, HOSTED), (HOSTED, LID), (TAIL, HOSTED)] {
+        db.execute("INSERT INTO chat_merges (gone, keep) VALUES (?1, ?2)", [n(gone), n(keep)]).unwrap();
+    }
+    let refused = opened_in_time(copy.path()).err().expect("jaw.db isn't opened");
+    for (gone, keep) in [(LID, OLD), (OLD, HOSTED), (HOSTED, LID)] {
+        assert!(refused.contains(&format!("{gone} into {keep}")), "{refused}");
+    }
+    assert!(!refused.contains(TAIL), "only the circle's merges: {refused}");
+    let delete = told_to_run(&refused);
+    assert_eq!(delete, format!("DELETE FROM chat_merges WHERE gone = {}", n(OLD)), "the number's merge");
+    db.execute(&delete, []).unwrap();
+    drop(db);
+    let store = opened_in_time(copy.path()).unwrap();
+    steps_till_done(&store).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [OLD]);
+    assert_eq!(column::<String>(&store, "SELECT id FROM messages ORDER BY id").await, ["h0", "l0", "o0", "t0"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chain_of_seventy_merges_an_earlier_jawd_left_is_flattened_and_ends_in_one_chat_rather_than_refused() {
+    // A person with seventy LIDs besides their number, each a chat with a message, the first LID's
+    // merging into the second's, and so on, the last into the number's.
+    const MERGES: i64 = 70;
+    let lid = |i: i64| format!("1000000001{i:02}@lid");
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let mut changes = vec![message(OLD, "o0", AT)];
+    changes.extend((0..MERGES).map(|i| message(&lid(i), &format!("l{i}"), AT + 1 + i)));
+    store.apply(Lane::Live, changes).await.unwrap();
+    let jids = [vec![OLD.to_string()], (0..MERGES).map(lid).collect()].concat();
+    store.apply(Lane::Live, vec![Change::Person(Person { jids, ..Person::default() })]).await.unwrap();
+    assert_eq!(store.count("chat_merges").unwrap(), MERGES as u64, "each LID's chat merging into the number's");
+    let copy = killed(home.path());
+    let db = Connection::open(copy.path().join("jaw.db")).unwrap();
+    for i in 0..MERGES - 1 {
+        db.execute(
+            "UPDATE chat_merges SET keep = (SELECT n FROM chats WHERE id = ?2) WHERE gone = (SELECT n FROM chats WHERE id = ?1)",
+            [lid(i), lid(i + 1)],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let store = opened_in_time(copy.path()).unwrap();
+    let into: Vec<String> =
+        column(&store, "SELECT DISTINCT k.id FROM chat_merges m JOIN chats k ON k.n = m.keep").await;
+    assert_eq!(into, [OLD], "every merge goes into the number's chat");
+    steps_till_done(&store).await;
+    assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [OLD]);
+    assert_eq!(store.count("messages").unwrap(), MERGES as u64 + 1, "every message, once");
 }
 
 #[tokio::test(flavor = "multi_thread")]

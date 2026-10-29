@@ -16,6 +16,10 @@ const ALLOWED: &[(&str, &str)] = &[
     ("SELECT count(*) FROM quarantine", "quarantine holds what failed, a handful of rows"),
     ("SELECT gone, keep FROM chat_merges ORDER BY gone LIMIT 1", "chats being merged, rarely more than one"),
     (
+        "SELECT count(*) FROM chat_merges",
+        "chats being merged, counted once as jaw.db opens with a chain of merges an earlier jawd left",
+    ),
+    (
         "SELECT m.gone, g.id, k.id FROM chat_merges m",
         "chats being merged, a row for each person whose number and LID were just joined, gone once merged",
     ),
