@@ -4772,6 +4772,46 @@ async fn a_patch_that_runs_out_of_tries_is_kept_in_quarantine_fetched_again_and_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_patch_that_doesnt_decode_is_kept_in_quarantine_its_wait_over_every_collection_fetched_and_said() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    let mut pushes = running.pushes.subscribe();
+    until_offline(&running).await;
+    running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
+    // The pin's outbox row is spoilt before it can go.
+    let spoilt = b"not a patch".to_vec();
+    let side = Connection::open(home.path().join("jaw.db")).unwrap();
+    side.busy_timeout(Duration::from_secs(5)).unwrap();
+    let id: String = side.query_row("SELECT id FROM outbox WHERE kind = 'app_state'", [], |r| r.get(0)).unwrap();
+    side.execute("UPDATE outbox SET raw = ?1 WHERE kind = 'app_state'", [&spoilt]).unwrap();
+    drop(side);
+    assert_eq!(running.store.count("app_state_awaiting").unwrap(), 1, "its index waits for it");
+    running.connection(jaw_proto::ConnectionState::Online);
+    until_stored(&running).await;
+    let kept: Vec<(String, String, String, Vec<u8>)> = running
+        .query(|db| {
+            Ok(db
+                .prepare("SELECT source, ref, error, raw FROM quarantine ORDER BY n")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await;
+    let [(source, reference, error, raw)] = kept.as_slice() else { panic!("not kept once in quarantine: {kept:?}") };
+    assert_eq!((source.as_str(), reference, raw), ("app_state_patch", &format!("{ANA} {id}"), &spoilt), "with its raw");
+    assert!(error.starts_with("its app state doesn't decode: "), "{error}");
+    assert_eq!(running.store.count("app_state_awaiting").unwrap(), 0, "its wait over, since it never goes");
+    assert!(patches_sent(&running).is_empty(), "WhatsApp never saw it");
+    let every = |asked: &[pb::command::Kind]| {
+        asked.iter().any(|k| matches!(k, pb::command::Kind::AppStateResync(r) if r.names.is_empty()))
+    };
+    // Its collection unknown, every collection is fetched again.
+    running.world.until(every).await;
+    let said = notices(&mut pushes, Duration::from_millis(300)).await;
+    assert_eq!(said, [format!("jaw couldn't tell your other devices of a change: {error}")]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_pin_asked_while_a_refusals_fetch_again_is_handed_over_goes_after_it_and_ends_pinned_as_asked() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::on(home.path(), phone_with_app_state(Ahead::Chats), true).await;
@@ -4890,10 +4930,16 @@ async fn chat_actions_go_through_the_socket_and_a_window_watched_again_from_its_
     assert!(row(&running, ANA, "m1").await.unwrap().starred);
 }
 
+/// How many of jaw's changes `status` says wait for WhatsApp's echo, asked through `socket`.
+async fn awaiting(socket: &Path) -> Value {
+    ask_socket(socket, vec![("status", Value::Null)]).await[0]["result"]["stored"]["awaiting"].clone()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_change_from_the_phone_while_a_pin_waits_is_held_back_and_the_pin_goes_after_it() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::new(home.path()).await;
+    let socket = serve(&running, home.path());
     running.chats(&[ANA]).await;
     until_offline(&running).await;
     running.call("chat.pin", json!({ "chat": ANA, "pinned": true })).await.unwrap();
@@ -4921,6 +4967,7 @@ async fn a_change_from_the_phone_while_a_pin_waits_is_held_back_and_the_pin_goes
     let held = chat_row(&running, ANA).await;
     assert!(held.pinned && held.v == pinned.v, "held back: jaw's pin goes after it, so it's how every device ends");
     assert!(patches_sent(&running).is_empty(), "jaw's pin still waits");
+    assert_eq!(awaiting(&socket).await, 1, "and status counts it as waiting for its echo");
     running.connection(jaw_proto::ConnectionState::Online);
     until_stored(&running).await;
     let sent = patches_sent(&running);
@@ -4929,6 +4976,7 @@ async fn a_change_from_the_phone_while_a_pin_waits_is_held_back_and_the_pin_goes
     let ana = chat_row(&running, ANA).await;
     assert!(ana.pinned && ana.v == pinned.v, "jaw's echo changes nothing");
     assert_eq!(pinned_at(&running, ANA).await, at, "at the time jaw pinned it");
+    assert_eq!(awaiting(&socket).await, 0, "and once it has come, nothing waits");
 }
 
 #[tokio::test(flavor = "multi_thread")]

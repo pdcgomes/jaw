@@ -433,7 +433,7 @@ async fn act(
 ) -> Result<Value, Error> {
     let outcome = Outcome::default();
     let mut last = inner.enqueue.lock().await;
-    let at = now_ms().max(*last + 1);
+    let at = next(*last, now_ms());
     *last = at;
     let act = Act { chat: chat.clone(), does: does(at)?, outcome: outcome.clone() };
     durably(inner, vec![Change::ChatAction(act)], doing).await?;
@@ -454,6 +454,12 @@ async fn act(
         Some(Acted::Full { waiting, failed }) => Err(actions::full(waiting, failed)),
         None => Err(Error::new(code::INTERNAL, format!("jawd kept nothing, so it couldn't {doing}"))),
     }
+}
+
+/// The time to do a chat action at: `now`, or just after `last`, the last one's, while the clock
+/// hasn't moved past it.
+fn next(last: i64, now: i64) -> i64 {
+    now.max(last + 1)
 }
 
 #[cfg(test)]
@@ -634,6 +640,13 @@ mod tests {
                 "deleting a message for you"
             ]
         );
+    }
+
+    #[test]
+    fn a_chat_action_is_done_later_than_the_last_whatever_the_clock_says() {
+        assert_eq!(next(AT, AT - 5), AT + 1, "a clock gone back");
+        assert_eq!(next(AT, AT), AT + 1, "the same millisecond");
+        assert_eq!(next(AT, AT + 5), AT + 5, "a clock moved on: now");
     }
 
     #[test]
