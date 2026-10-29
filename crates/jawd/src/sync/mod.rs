@@ -37,6 +37,10 @@ pub struct Live {
     pub connection: Connection,
     pub catch_up: Option<CatchUp>,
     catching_up: Option<Instant>,
+    /// Whether the connection running now has said Connected, which whatsmeow says once a
+    /// connection, and only once the IQs after its handshake are answered, so after the
+    /// connection's own keepalive timeout at times.
+    said_connected: bool,
     pub history: Option<HistoryProgress>,
     /// The account's own JIDs, for mentions of it and its own reactions, once jaw.db keeps them;
     /// nothing is converted until then (`stored_me`).
@@ -63,6 +67,7 @@ impl Default for Live {
             connection: Connection::new(ConnectionState::Offline),
             catch_up: None,
             catching_up: None,
+            said_connected: false,
             history: None,
             me: watch::Sender::new(convert::Me::default()),
             caught_chats: HashSet::new(),
@@ -138,10 +143,11 @@ impl Live {
         self.catching_up.is_some()
     }
 
-    /// Ends a catch-up its connection cut short, as its end would but for the summary: the chat
-    /// list and notifications go on with what it brought, and what it didn't bring comes in the
-    /// next connection's.
+    /// Ends the connection running now: a catch-up it cut short ends, as its end would but for the
+    /// summary, so the chat list and notifications go on with what it brought, and what it didn't
+    /// bring comes in the next connection's; and the next Connected is the next connection's.
     fn cut_short(&mut self) {
+        self.said_connected = false;
         if let Some(started) = self.catching_up.take() {
             self.caught_chats.clear();
             if let Some(catch_up) = self.catch_up.as_mut() {
@@ -718,17 +724,23 @@ fn apply(live: &mut Live, connection: &pb::Connection) {
     // account linked again, or the same one back) isn't taken for part of it. A keepalive timeout,
     // the only word that leaves a catch-up connecting, doesn't end one, since whatsmeow keeps the
     // connection until its pings get through again; but it can reconnect instead, with no
-    // Disconnected, so Connected after a timeout is a new connection.
-    let reconnected = connection.state() == State::Connected && live.connection.state == ConnectionState::Connecting;
+    // Disconnected, so Connected after a timeout is a new connection once this one has said it.
+    let reconnected = connection.state() == State::Connected
+        && live.said_connected
+        && live.connection.state == ConnectionState::Connecting;
     if reconnected
         || !matches!(connection.state(), State::Connected | State::KeepaliveTimeout | State::KeepaliveRestored)
     {
         live.cut_short();
     }
+    if connection.state() == State::Connected {
+        live.said_connected = true;
+    }
     // Connected can come after WhatsApp said what's waiting, and the catch-up goes on; pings that get
-    // through again put back the catch-up their timeout hid.
+    // through again, or the connection's own Connected after its timeout, put back the catch-up the
+    // timeout hid.
     if live.catching_up() && state == ConnectionState::Online {
-        if connection.state() == State::KeepaliveRestored {
+        if live.connection.state == ConnectionState::Connecting {
             let catch_up = live.catch_up.as_ref().map(|c| (c.messages, c.stored));
             live.connection = Connection::new(ConnectionState::CatchingUp);
             live.connection.total = catch_up.map(|(messages, _)| messages);

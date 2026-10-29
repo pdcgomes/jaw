@@ -2403,6 +2403,47 @@ async fn a_connection_after_a_keepalive_timeout_during_a_catch_up_is_a_new_one_s
     running.await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connections_own_connected_after_its_keepalive_timeout_puts_its_catch_up_back_and_the_summary_comes_at_its_end()
+ {
+    use pb::connection::State;
+    // Before the connection: the engine starting, or a connection that said Connected and dropped.
+    for before in [vec![State::Connecting], vec![State::Connected, State::Disconnected]] {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let (tx, incoming) = mpsc::channel(16);
+        let (_live, mut told, running) = syncing_from(&store, home.path(), None, incoming, starting(&store, true));
+        for state in &before {
+            tx.send(connection_event(*state)).await.unwrap();
+        }
+        assert_eq!(next_connections(&mut told, before.len()).await.len(), before.len());
+        // One connection, as whatsmeow can order it: the offline preview, the first keepalive timeout
+        // (its keepalive runs from the handshake on), and only then Connected, which whatsmeow says
+        // once the IQs after the handshake are answered.
+        tx.send(crate::engine::Incoming { event: offline_preview(10), ack: None }).await.unwrap();
+        tx.send(arriving(ANA, "3EB0LATE1")).await.unwrap();
+        tx.send(connection_event(State::KeepaliveTimeout)).await.unwrap();
+        tx.send(arriving(GROUP, "3EB0LATE2")).await.unwrap();
+        tx.send(connection_event(State::Connected)).await.unwrap();
+        tx.send(arriving(ANA, "3EB0LATE3")).await.unwrap();
+        tx.send(offline_done(3)).await.unwrap();
+        let pushed = next_told(&mut told, 5).await;
+        let connections: Vec<_> = pushed.iter().take(4).map(connection_of).collect();
+        let expected = [
+            said("catching_up", Some(0), Some(10)),
+            said("connecting", None, None),
+            said("catching_up", Some(2), Some(10)),
+            said("online", None, None),
+        ];
+        assert_eq!(connections, expected, "after {before:?}, the catch-up goes on through the connection's Connected");
+        let summary = pushed.get(4).map(|p| (p.method.as_str(), p.params["text"].as_str()));
+        let whole = Some(("notice", Some("While you were away: 3 messages in 2 chats")));
+        assert_eq!(summary, whole, "after {before:?}, and its summary comes at its end");
+        drop(tx);
+        running.await.unwrap();
+    }
+}
+
 /// The phone's message saying older history is ready, as it sends one to its own account.
 fn phone_answers() -> crate::engine::Incoming {
     let notification = e2e::HistorySyncNotification { direct_path: Some("on-demand".into()), ..Default::default() };
