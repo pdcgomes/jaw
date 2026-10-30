@@ -263,6 +263,7 @@ A client that loses its connection reconnects, sends `hello` with `since` (the l
 | `send.location` | `chat`, `lat`, `lon`, `name`, `address`, and `at` | `message`, or `scheduled`. See Composing |
 | `gif.search` | `query` (empty for what's trending), `limit`, `cursor` | `gifs` and the next `cursor`. See Composing |
 | `send.gif` | `chat`, `gif` (an `id` from `gif.search`), `caption`, `reply`, and `at` | `message`, or `scheduled`. See Composing |
+| `link.preview` | `url` | `link`, as a message row's, or null. See Composing |
 | `react` | `message`, `emoji` (empty to remove), and optionally `chat`, `key` | |
 | `edit` | `message`, `text`, and optionally `chat`, `key` | |
 | `delete` | `message`, `for` (`me` or `everyone`), and optionally `chat`, `key` | |
@@ -344,7 +345,7 @@ Proposed with the `jaw-voice` crate in M5, for jawd to wire in; until then the `
 
 ## Composing (proposed)
 
-Proposed with the Mac app's box (its design, `docs/plans/2026-10-27-jaw-mac-box-design.md`), for jawd to build: sending events, contacts and places, and GIFs found by search. Events and places come in M2 beside polls, contacts in M4 beside media, and GIF search after M4. Until then the rows above are the draft. Each answers as `send.text` does, with the `message` it made, whose row arrives as an upsert; a `key` makes asking again safe, as for the message actions.
+Proposed with the Mac app's box (its design, `docs/plans/2026-10-27-jaw-mac-box-design.md`), for jawd to build: sending events, contacts and places, and GIFs found by search; and, with the Mac app's links and polls (`docs/plans/2026-10-30-jaw-mac-links-and-polls-plan.md`), a link's preview before it's sent. Events and places come in M2 beside polls, contacts in M4 beside media, and GIF search after M4. Until then the rows above are the draft. Each answers as `send.text` does, with the `message` it made, whose row arrives as an upsert; a `key` makes asking again safe, as for the message actions.
 
 ```json
 {"id":40,"method":"send.event","params":{"chat":"120363000000000002@g.us","name":"Sintra","description":"Bring the rope","start":1792231200000,"end":1792252800000,"place":"Cabo da Roca","call":false,"key":"9f2c"}}
@@ -357,6 +358,7 @@ Proposed with the Mac app's box (its design, `docs/plans/2026-10-27-jaw-mac-box-
 - **`send.location`:** a place by `lat` and `lon`, with an optional `name` and `address`. Its row is kind `location`. Live locations aren't sent.
 - **`gif.search`:** jawd asks Giphy, and nothing else in jaw talks to a service besides WhatsApp: only when an interface asks, which it does only while a GIF picker is open and something is typed (an empty `query` asks for what's trending). jawd fetches each result's small looping MP4 into its media cache and answers with paths, so interfaces show files, never URLs. Results are kept for an hour; Giphy's key is jawd's, set by environment. Error 6 when Giphy doesn't answer in 3 seconds.
 - **`send.gif`:** a result by its `id`: jawd fetches its MP4 and sends it as WhatsApp's GIF (a looping video), with the `caption`. Its row is kind `gif`.
+- **`link.preview`** (the Mac design's P11): a link's preview before its message is sent, for a box to show while the link is typed. `url` answers with `link` as a message row has one (`url`, `title`, `description`, and `preview`, its thumbnail's path under `media/links/`), or null when the page gives none, fetched as `send.text`'s preview is: 3 seconds for the page and its image together, public addresses only, 5 redirects, 512 KB of page and 2 MB of image at most, no cookies, saying it's jaw. jawd keeps each answer by its URL for ten minutes, 64 at most, so the `send.text` that follows with `preview` true sends what the box showed without fetching it again, and a newer `link.preview` from the same connection cancels the one before, which is answered with error 7, as `find` is. An interface asks only for a URL that has stayed typed for half a second, so nothing is fetched while it's being typed, and `send.text`'s `preview` false sends the text without one, as an × on the box's preview asks.
 
 ## Message actions (proposed)
 
