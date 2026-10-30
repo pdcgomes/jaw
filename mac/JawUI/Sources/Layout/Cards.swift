@@ -249,7 +249,10 @@ extension MessageLayout.Builder {
     mutating func drawCard(_ r: CGRect) {
         switch m.kind {
         case .image, .video, .gif, .sticker, .videoNote: picture(r)
-        case .voice, .audio: voice(r)
+        case .voice: voice(r)
+        case .audio:
+            voice(r)
+            regions.append((r, .media(item: nil)))
         case .document: file(r)
         case .location, .liveLocation: place(r)
         case .contact: contact(r)
@@ -341,11 +344,15 @@ extension MessageLayout.Builder {
             case .sticker: "face.smiling"
             default: m.viewOnce ? "1.circle" : "photo"
             }
-            symbol(icon, m.kind == .video || m.kind == .gif ? 34 : 26, roles.secondary, centredIn: r)
-            if m.kind != .videoNote { pill(pictureLabel, in: r) }
+            let words = m.media.flatMap { Self.comingWords($0) }
+            if words == nil || m.media?.state == .local {
+                symbol(icon, m.kind == .video || m.kind == .gif ? 34 : 26, roles.secondary, centredIn: r)
+                if m.kind != .videoNote { pill(pictureLabel, in: r) }
+            }
         } else {
             slots.append(PictureSlot(rect: r, radius: round, fit: m.kind == .sticker ? .fit : .fill, source: source, message: m.id))
-            if [.video, .gif, .videoNote].contains(m.kind) { play(in: r, size: m.kind == .videoNote ? 40 : 44) }
+            let here = m.media.map { $0.state == .local } ?? true
+            if [.video, .gif, .videoNote].contains(m.kind), here { play(in: r, size: m.kind == .videoNote ? 40 : 44) }
             if let label = posterLabel, !label.isEmpty {
                 if m.kind == .videoNote {
                     let l = line(label, fonts.small, roles.text)
@@ -359,7 +366,86 @@ extension MessageLayout.Builder {
             }
             if m.media?.hd == true, m.kind == .image { pill("HD", in: r, top: true, right: true) }
         }
-        if !m.viewOnce { regions.append((r, .media(item: nil))) }
+        if !m.viewOnce {
+            coming(r, m.media, item: nil, small: m.kind == .sticker || m.kind == .videoNote)
+            regions.append((r, .media(item: nil)))
+        }
+    }
+
+    /// What a file's state says over its picture, and what a click there does: ↓ and its size while
+    /// it's remote; a ring filling as it comes, with × to stop it; why it can't come, in jawd's
+    /// words, with "Try again" or "Ask the phone again"; "Waiting for your phone"; nothing once it's
+    /// here. `small` is a tile's or a sticker's room, which says what's done without why.
+    mutating func coming(_ r: CGRect, _ media: Media?, item: Int?, small: Bool) {
+        guard let media, media.state != .local else { return }
+        let side: CGFloat = small ? 36 : 44
+        let circle = CGRect(x: (r.midX - side / 2).rounded(), y: (r.midY - side / 2).rounded(), width: side, height: side)
+        put(.fill(circle, roles.ground.opacity(0.6).cgColor, side / 2))
+        switch media.state {
+        case .downloading:
+            let centre = CGPoint(x: circle.midX, y: circle.midY), radius = side / 2 - 4
+            put(.ring(centre, radius, 1, roles.text.opacity(0.25).cgColor, 3))
+            put(.ring(centre, radius, max(media.progress ?? 0, 0.02), roles.text.cgColor, 3))
+            symbol("xmark", side * 0.3, roles.text, centredIn: circle)
+            regions.append((circle, .stop(item: item)))
+        case .remote where media.error == nil:
+            symbol("arrow.down", side * 0.38, roles.text, centredIn: circle)
+            if let bytes = Self.bytes(media.bytes), !small, m.kind == .image || m.kind == .album { pill(bytes, in: r) }
+        case .local:
+            break
+        default:
+            symbol(media.state == .waitingForPhone ? "iphone" : media.state == .gone ? "exclamationmark" : "arrow.clockwise",
+                   side * 0.38, roles.text, centredIn: circle)
+            if let words = Self.comingWords(media, short: small) { band(words, in: r) }
+        }
+    }
+
+    /// Why a file isn't here and what can be done, as its card says it: jawd's words, then the act.
+    static func comingWords(_ media: Media, short: Bool = false) -> (why: String?, act: String?)? {
+        switch media.state {
+        case .local, .downloading: return nil
+        case .remote where media.error == nil: return nil
+        case .remote: return (short ? nil : media.error, "Try again")
+        case .waitingForPhone: return ("Waiting for your phone", nil)
+        case .expired: return (short ? nil : media.error ?? "WhatsApp no longer has this file", "Ask the phone again")
+        case .gone: return (short ? nil : media.error ?? "your phone no longer has this file", "Ask the phone again")
+        }
+    }
+
+    /// A band of words across a picture's foot, on a scrim: why, quiet, then what can be done, in the
+    /// accent.
+    mutating func band(_ words: (why: String?, act: String?), in r: CGRect) {
+        let lh = lineHeight(fonts.small)
+        let band = CGRect(x: r.minX, y: r.maxY - lh - 10, width: r.width, height: lh + 10)
+        put(.fill(band, roles.ground.opacity(0.78).cgColor, 0))
+        let said = whyAndAct(words, colour: roles.text, most: band.width - 16)
+        let w = width(of: said)
+        put(.line(said, CGPoint(x: (band.midX - w / 2).rounded(), y: band.minY + 5 + ascent(fonts.small))))
+    }
+
+    /// Why, cut short at its end to leave room, then what can be done, always whole, in the accent.
+    func whyAndAct(_ words: (why: String?, act: String?), colour: RGBA, most: CGFloat) -> CTLine {
+        let act = words.act.map { NSAttributedString(string: $0, attributes: [.ctFont: fonts.small, .ctColour: roles.accent.cgColor]) }
+        let dot = NSAttributedString(string: " · ", attributes: [.ctFont: fonts.small, .ctColour: roles.secondary.cgColor])
+        let room = most - (act.map { width(of: CTLineCreateWithAttributedString($0)) + width(of: CTLineCreateWithAttributedString(dot)) } ?? 0)
+        let why = words.why.map { Self.fitted($0, room) { width(of: line($0, fonts.small, colour)) } } ?? ""
+        let out = NSMutableAttributedString(string: why, attributes: [.ctFont: fonts.small, .ctColour: colour.cgColor])
+        if let act {
+            if !why.isEmpty { out.append(dot) }
+            out.append(act)
+        }
+        return CTLineCreateWithAttributedString(out)
+    }
+
+    /// `s` as it fits in `room`: whole, or cut at its end with an ellipsis, or nothing.
+    static func fitted(_ s: String, _ room: CGFloat, measure: (String) -> CGFloat) -> String {
+        guard measure(s) > room else { return s }
+        var chars = Array(s)
+        while !chars.isEmpty, measure(String(chars) + "…") > room {
+            chars.removeLast()
+        }
+        let cut = String(chars).trimmingCharacters(in: .whitespaces)
+        return cut.count < 4 ? "" : cut + "…"
     }
 
     /// A sticker or a video message on its own, as WhatsApp draws them: no bubble, the time under
@@ -415,10 +501,34 @@ extension MessageLayout.Builder {
             : mime.hasPrefix("audio") ? "music.note" : mime.hasPrefix("video") ? "film" : "doc.text"
         symbol(symbolName, 15, roles.accent, centredIn: icon)
         let x = icon.maxX + 10
-        text(name, fonts.name, roles.text, x: x, top: r.minY + 4, most: r.maxX - x)
+        let state = m.media?.state ?? .local
+        let action = CGRect(x: r.maxX - 28, y: r.midY - 14, width: 28, height: 28)
+        let right = state == .local ? r.maxX : action.minX - 8
+        text(name, fonts.name, roles.text, x: x, top: r.minY + 4, most: right - x)
         let pages = m.media?.pages.map { "\($0) page\($0 == 1 ? "" : "s")" }
         let detail = ([ext.isEmpty ? nil : ext, Self.bytes(m.media?.bytes), pages] as [String?]).compactMap(\.self).joined(separator: " · ")
-        text(detail.isEmpty ? "a file" : detail, fonts.small, roles.secondary, x: x, top: r.minY + 6 + lineHeight(fonts.name), most: r.maxX - x)
+        let second = r.minY + 6 + lineHeight(fonts.name)
+        if let media = m.media, let words = Self.comingWords(media) {
+            parts.append(.line(whyAndAct(words, colour: roles.secondary, most: right - x), CGPoint(x: x, y: second + ascent(fonts.small))))
+        } else {
+            text(detail.isEmpty ? "a file" : detail, fonts.small, roles.secondary, x: x, top: second, most: right - x)
+        }
+        if state != .local {
+            parts.append(.fill(action, roles.accent.opacity(0.15).cgColor, 14))
+            switch state {
+            case .downloading:
+                let centre = CGPoint(x: action.midX, y: action.midY)
+                parts.append(.ring(centre, 11, 1, roles.accent.opacity(0.25).cgColor, 2.5))
+                parts.append(.ring(centre, 11, max(m.media?.progress ?? 0, 0.02), roles.accent.cgColor, 2.5))
+                symbol("xmark", 9, roles.accent, centredIn: action)
+                regions.append((action, .stop(item: nil)))
+            case .remote where m.media?.error == nil:
+                symbol("arrow.down", 11, roles.accent, centredIn: action)
+            default:
+                symbol(state == .waitingForPhone ? "iphone" : state == .gone ? "exclamationmark" : "arrow.clockwise", 11, roles.accent, centredIn: action)
+            }
+        }
+        regions.append((r, .media(item: nil)))
     }
 
     mutating func place(_ r: CGRect) {
@@ -503,9 +613,10 @@ extension MessageLayout.Builder {
                 let more = line("+\(items.count - 3)", fonts.emoji, roles.text)
                 let w = width(of: more)
                 put(.line(more, CGPoint(x: (tile.midX - w / 2).rounded(), y: (tile.midY + ascent(fonts.emoji) / 2 - 4).rounded())))
-            } else if item.kind == "video", !source.isEmpty {
+            } else if item.kind == "video", !source.isEmpty, (item.media?.state ?? .local) == .local {
                 play(in: tile, size: 34)
             }
+            if !(i == 3 && items.count > 4) { coming(tile, item.media, item: i, small: true) }
             drawingOver = false
             regions.append((tile, .media(item: i)))
         }

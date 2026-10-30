@@ -132,3 +132,83 @@ func album(_ n: Int) -> MessageRow {
         }
     }
 }
+
+/// A sample of `Samples.downloadStates` by its id.
+func state(_ id: String) -> MessageRow {
+    Samples.downloadStates.first { $0.id == id }!
+}
+
+func rings(_ l: Laid) -> [CGFloat] {
+    (l.parts + l.over).compactMap { if case let .ring(_, _, share, _, _) = $0 { share } else { nil } }
+}
+
+func stops(_ l: Laid) -> [Region] {
+    l.regions.map(\.1).filter { if case .stop = $0 { true } else { false } }
+}
+
+@Test func `every state says what it is and offers what can be done, as the protocol has them`() {
+    #expect(Samples.downloadStates.count == 15)
+    // Remote, coming, failed, waiting, expired, gone: each drawn from its thumbnail, or its well.
+    let remote = laid(state("D1")), coming = laid(state("D2")), failed = laid(state("D3"))
+    #expect(remote.pictures.count == 1 && rings(remote).isEmpty && stops(remote).isEmpty)
+    #expect(rings(coming) == [1, 0.4] && stops(coming) == [.stop(item: nil)], "a track and its share, and × to stop it")
+    #expect(coming.regions.first?.1 == .stop(item: nil), "the ring is found before the picture under it")
+    #expect(MessageLayout.Builder.comingWords(state("D3").media!)! == ("the download failed: the network connection was lost", "Try again"))
+    #expect(MessageLayout.Builder.comingWords(state("D4").media!)! == ("Waiting for your phone", nil))
+    #expect(MessageLayout.Builder.comingWords(state("D5").media!)!.act == "Ask the phone again")
+    #expect(MessageLayout.Builder.comingWords(state("D6").media!)! == ("your phone no longer has this file", "Ask the phone again"))
+    #expect(MessageLayout.Builder.comingWords(state("D5").media!, short: true)! == (nil, "Ask the phone again"), "a tile says what's done, not why")
+    #expect(MessageLayout.Builder.comingWords(state("D2").media!) == nil && MessageLayout.Builder.comingWords(state("D1").media!) == nil)
+    var sameFailed = state("D1"), sameComing = state("D1")
+    sameFailed.media?.error = "the download failed"
+    sameComing.media?.state = .downloading
+    #expect(laid(sameFailed).height == remote.height && laid(sameComing).height == remote.height, "a state changes no height")
+    #expect(failed.pictures.count == 1)
+    #expect(laid(state("D6")).pictures.isEmpty, "gone with no thumbnail: its well")
+    for id in ["D1", "D3", "D4", "D5", "D6"] {
+        #expect(laid(state(id)).regions.contains { $0.1 == .media(item: nil) }, "\(id): a click asks for it")
+    }
+}
+
+@Test func `a video shows ↓ in its ▶'s place until it's here, and a sticker and an album's tiles their own states`() {
+    let remote = laid(state("D7")), coming = laid(state("D8"))
+    #expect(rings(remote).isEmpty && rings(coming) == [1, 0.7])
+    let sticker = laid(state("D9"))
+    #expect(rings(sticker) == [1, 0.2] && sticker.body == sticker.pictures.first?.rect, "on its own, coming")
+    let album = laid(state("D10"))
+    #expect(album.pictures.count == 4)
+    #expect(rings(album) == [1, 0.5] && stops(album) == [.stop(item: 1)], "the second tile coming, stopped by itself")
+    #expect(album.regions.filter { if case .media = $0.1 { true } else { false } }.map(\.1) == (0 ..< 4).map { .media(item: $0) })
+}
+
+@Test func `a document says its state at its right, and why it isn't here in its second line`() {
+    let here = laid(state("D15")), remote = laid(state("D11")), coming = laid(state("D12")), expired = laid(state("D13"))
+    #expect(here.height == remote.height && remote.height == expired.height)
+    #expect(rings(coming) == [1, 0.3] && stops(coming) == [.stop(item: nil)])
+    #expect(rings(here).isEmpty && stops(here).isEmpty && stops(remote).isEmpty)
+    for l in [here, remote, coming, expired] {
+        #expect(l.regions.contains { $0.1 == .media(item: nil) }, "the whole card looks or asks")
+    }
+}
+
+@Test func `a progress push lays the message out again, and its ring follows it`() {
+    var row = state("D2")
+    let layouts = Layouts()
+    let context = MessageContext(group: false, firstOfRun: true, showTime: true, day: nil)
+    let s = spec(.bubbles, dark: true)
+    let before = layouts.laid(row, width: 640, spec: s, context: context)
+    row.v += 1
+    row.media?.progress = 0.8
+    let after = layouts.laid(row, width: 640, spec: s, context: context)
+    #expect(before !== after && rings(after) == [1, 0.8])
+}
+
+@Test func `each download state draws as its references, in both looks, dark and light`() throws {
+    for look in Look.allCases {
+        for dark in [true, false] {
+            let name = "download-states-\(look.rawValue)-\(dark ? "dark" : "light")"
+            let image = try #require(render(Samples.downloadStates, spec(look, dark: dark), group: false, typing: false))
+            try compare(image, name)
+        }
+    }
+}

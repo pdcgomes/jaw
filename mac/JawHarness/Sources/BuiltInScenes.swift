@@ -11,6 +11,7 @@ enum BuiltInScenes {
         catalog.register(.linkPreviews)
         catalog.register(.polls)
         catalog.register(.pictures)
+        catalog.register(.downloadStates)
         catalog.register(.palette)
         catalog.register(.pollForm)
         catalog.register(.states)

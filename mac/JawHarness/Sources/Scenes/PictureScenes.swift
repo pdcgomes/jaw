@@ -13,6 +13,16 @@ extension HarnessScene {
     }
 }
 
+extension HarnessScene {
+    static var downloadStates: HarnessScene {
+        HarnessScene(
+            id: "download-states", title: "Download states", symbol: "arrow.down.circle",
+            synopsis: "A photo, a video, a sticker, an album's tiles and a document in each state jawd gives a file, each saying what it is and what can be done",
+            section: .conversation, covers: [ConversationController.self, MessagePictures.self], axes: [.look], width: 680,
+        ) { DownloadStatesScene(conditions: $0) }
+    }
+}
+
 /// A conversation of `rows` from `Samples.pictures`, its pictures decoded as it draws them, as tall as
 /// its messages are at a pane 640 points wide, so the oldest of them is at its top.
 struct PictureConversation: View {
@@ -61,6 +71,28 @@ private struct PicturesScene: View {
             roles: conditions.roles,
         ) {
             PictureConversation(conditions: conditions, rows: Array(rows.dropFirst(8)))
+        }
+    }
+}
+
+private struct DownloadStatesScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        let rows = Samples.downloadStates
+        SpecimenGroup(
+            title: "Pictures, from their thumbnails",
+            note: "Each from its blurred thumbnail: remote with ↓ and its size; coming, a ring filled to 40% with × to stop it; failed, with jawd's words and Try again; waiting for the phone; expired with Ask the phone again; gone with no thumbnail, its well and the same. The video remote with ↓ in ▶'s place and its length, then coming at 70%; the sticker coming; the album's tiles here, coming, remote and expired, each saying only what can be done. No words run past their picture.",
+            roles: conditions.roles,
+        ) {
+            PictureConversation(conditions: conditions, rows: Array(rows.prefix(10)))
+        }
+        SpecimenGroup(
+            title: "A document in each",
+            note: "Remote with ↓ at its right; coming with its ring and ×; expired, jawd's words in its second line and Ask the phone again; waiting for the phone; and here, its type, size and pages with nothing at its right.",
+            roles: conditions.roles,
+        ) {
+            PictureConversation(conditions: conditions, rows: Array(rows.dropFirst(10)))
         }
     }
 }

@@ -239,6 +239,46 @@ public enum Samples {
         return (try? JSONDecoder().decode([MessageRow].self, from: Data("[\(json.joined(separator: ","))]".utf8))) ?? []
     }
 
+    /// A file in each state jawd gives one, as each is drawn: a photo remote, coming, failed, waiting
+    /// for the phone, expired and gone; a video remote and coming; a sticker coming; an album whose
+    /// tiles are each in a state of their own; and a document in each.
+    public static var downloadStates: [MessageRow] {
+        let at = now - 300_000
+        func coming(_ picture: String, _ fields: String, bytes: Int = 3_480_211) -> String {
+            let (w, h) = SamplePictures.size(picture)
+            return #"{"w":\#(w),"h":\#(h),"bytes":\#(bytes),"mime":"image/jpeg","thumbnail":"\#(SamplePictures.thumbnail(picture))",\#(fields)}"#
+        }
+        func document(_ fields: String) -> String {
+            #"{"name":"Sintra topo.pdf","mime":"application/pdf","bytes":2400000,"pages":12,\#(fields)}"#
+        }
+        let failed = #""state":"remote","error":"the download failed: the network connection was lost""#
+        let expired = #""state":"expired","error":"WhatsApp's server no longer has it; ask for it to have your phone send it again""#
+        let gone = #""state":"gone","error":"your phone no longer has this file""#
+        let album = #"{"items":[{"id":"t0","kind":"image","media":\#(here("lake"))},{"id":"t1","kind":"image","media":\#(coming("wall", #""state":"downloading","progress":0.5"#))},{"id":"t2","kind":"video","media":\#(coming("poster", #""state":"remote""#, bytes: 48_000_000))},{"id":"t3","kind":"image","media":\#(coming("rope", expired))}]}"#
+        let rows: [(String, String, String)] = [
+            ("D1", "image", #""media":\#(coming("sunset", #""state":"remote""#))"#),
+            ("D2", "image", #""media":\#(coming("lake", #""state":"downloading","progress":0.4"#))"#),
+            ("D3", "image", #""media":\#(coming("ridge", failed))"#),
+            ("D4", "image", #""media":\#(coming("rope", #""state":"waiting_for_phone""#))"#),
+            ("D5", "image", #""media":\#(coming("wall", expired))"#),
+            ("D6", "image", #""media":{"w":4032,"h":3024,\#(gone)}"#),
+            ("D7", "video", #""media":\#(coming("poster", #""state":"remote","seconds":184"#, bytes: 48_000_000))"#),
+            ("D8", "video", #""media":\#(coming("poster", #""state":"downloading","progress":0.7,"seconds":42"#, bytes: 12_500_000))"#),
+            ("D9", "sticker", #""media":\#(coming("smile", #""state":"downloading","progress":0.2"#, bytes: 24000))"#),
+            ("D10", "album", #""album":\#(album)"#),
+            ("D11", "document", #""media":\#(document(#""state":"remote""#))"#),
+            ("D12", "document", #""media":\#(document(#""state":"downloading","progress":0.3"#))"#),
+            ("D13", "document", #""media":\#(document(expired))"#),
+            ("D14", "document", #""media":\#(document(#""state":"waiting_for_phone""#))"#),
+            ("D15", "document", #""media":\#(document(#""state":"local","path":"media/files/topo.pdf""#))"#),
+        ]
+        let json = rows.enumerated().map { i, r in
+            let spans = r.1 == "document" ? #"[{"t":"text","s":"Sintra topo.pdf"}]"# : "[]"
+            return #"{"id":"\#(r.0)","v":1,"sort":"\#(at + Int64(i) * 1000)~\#(String(format: "%06d", 400 + i))","chat":"\#(direct.id)","at":\#(at + Int64(i) * 1000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"\#(r.1)","spans":\#(spans),\#(r.2)}"#
+        }
+        return (try? JSONDecoder().decode([MessageRow].self, from: Data("[\(json.joined(separator: ","))]".utf8))) ?? []
+    }
+
     /// The window update a watch of those messages returns.
     public static var update: Update<MessageRow> {
         update(of: messages)
