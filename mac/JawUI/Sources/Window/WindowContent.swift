@@ -25,18 +25,22 @@ public final class WindowContent: NSViewController {
     public static let listFold: CGFloat = 740
 
     /// The panes as the window shows them: the layout's grid, each slot's view (none yet for a chat the
-    /// list doesn't hold), the slot with the keys, the focused chat's box under them, and how the panes
-    /// say which has the keys.
+    /// list doesn't hold), what a slot says whose chat won't have one, by that chat, the slot with the
+    /// keys, the focused chat's box under them, and how the panes say which has the keys.
     public struct Panes {
         public var grid: PaneGrid
         public var views: [Int: NSView]
+        public var unopened: [String: String]
         public var focused: Int?
         public var box: NSView?
         public var look: PaneLook
 
-        public init(grid: PaneGrid, views: [Int: NSView], focused: Int?, box: NSView?, look: PaneLook) {
+        public init(grid: PaneGrid, views: [Int: NSView], unopened: [String: String] = [:], focused: Int?, box: NSView?,
+                    look: PaneLook)
+        {
             self.grid = grid
             self.views = views
+            self.unopened = unopened
             self.focused = focused
             self.box = box
             self.look = look
@@ -176,6 +180,7 @@ public final class WindowContent: NSViewController {
 
     /// Lays the panes out in the panes' place, with the focused chat's box under them.
     public func show(_ panes: Panes, roles: Roles) {
-        detail.show(panes: panes.grid, views: panes.views, focused: panes.focused, box: panes.box, roles: roles, look: panes.look)
+        detail.show(panes: panes.grid, views: panes.views, unopened: panes.unopened, focused: panes.focused, box: panes.box,
+                    roles: roles, look: panes.look)
     }
 }

@@ -4,7 +4,8 @@ import JawThemes
 /// The panes drawn: each slot of the grid in its place, set by hand in `layout()` so the panes
 /// follow a live resize in the same frame, with a hairline gutter between them that's dragged as a
 /// whole line. The focused pane has the accent's outline when there's more than one; an empty pane
-/// waits for a chat. Slots keep their views from one change to the next, so nothing is rebuilt.
+/// waits for a chat, or says why its chat has none. Slots keep their views from one change to the
+/// next, so nothing is rebuilt.
 @MainActor
 public final class GridView: NSView {
     public private(set) var grid: PaneGrid?
@@ -53,6 +54,8 @@ public final class GridView: NSView {
     }
     /// How near a gutter the pointer takes it, either side.
     static let grip: CGFloat = 4
+    /// What a slot says whose chat jawd has none of.
+    public static let gone = "this chat isn't here any more"
 
     override public var isFlipped: Bool {
         true
@@ -73,9 +76,11 @@ public final class GridView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// Shows `grid`, each slot holding its chat's view, or the empty pane, the focused one as
-    /// `look` says.
-    public func show(_ grid: PaneGrid, views: [Int: NSView], focused: Int?, roles: Roles, look: PaneLook = PaneLook()) {
+    /// Shows `grid`, each slot holding its chat's view, or the empty pane, which says what `unopened`
+    /// says for its chat when it says anything there, the focused one as `look` says.
+    public func show(_ grid: PaneGrid, views: [Int: NSView], unopened: [String: String] = [:], focused: Int?, roles: Roles,
+                     look: PaneLook = PaneLook())
+    {
         self.grid = grid
         self.focused = focused
         self.roles = roles
@@ -91,6 +96,7 @@ public final class GridView: NSView {
                 frames[slot.id] = f
                 return f
             }()
+            frame.empty.says = slot.chat.flatMap { unopened[$0] }
             frame.show(views[slot.id], roles: roles, focused: slot.id == focused, many: many, look: look)
         }
         for (id, frame) in frames where grid.slot(id) == nil {
@@ -286,14 +292,26 @@ final class SlotFrame: NSView {
     }
 }
 
-/// A pane with no chat: it says how to give it one, and clicking it gives it the keys.
+/// A pane with no chat's view: it says how to give it a chat, or why its chat has none, and clicking
+/// it gives it the keys.
 @MainActor
 final class EmptyPane: NSView {
+    static let waitingWords = "⌘K or drag a chat here"
     let well = Surface(.well, radius: Radius.field)
-    let prompt = Labels.make("⌘K or drag a chat here", .callout)
+    let prompt = Labels.make(EmptyPane.waitingWords, .callout)
     var picked: (() -> Void)?
     var roles: Roles? {
         didSet { colour() }
+    }
+
+    /// Why its chat has no view, said in place of how to give it one: that the chat is gone, or
+    /// jawd's words for refusing it; nil while it waits.
+    var says: String? {
+        didSet {
+            guard says != oldValue else { return }
+            prompt.stringValue = says ?? Self.waitingWords
+            setAccessibilityLabel(says.map { "An empty pane, \($0): \(Self.waitingWords)" } ?? "An empty pane: \(Self.waitingWords)")
+        }
     }
 
     override init(frame: NSRect) {
@@ -303,6 +321,7 @@ final class EmptyPane: NSView {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+        prompt.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         NSLayoutConstraint.activate([
             well.topAnchor.constraint(equalTo: topAnchor, constant: Space.l),
             well.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l),
@@ -310,9 +329,11 @@ final class EmptyPane: NSView {
             well.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.l),
             prompt.centerXAnchor.constraint(equalTo: well.centerXAnchor),
             prompt.centerYAnchor.constraint(equalTo: well.centerYAnchor),
+            prompt.leadingAnchor.constraint(greaterThanOrEqualTo: well.leadingAnchor, constant: Space.m),
+            prompt.trailingAnchor.constraint(lessThanOrEqualTo: well.trailingAnchor, constant: -Space.m),
         ])
         setAccessibilityRole(.group)
-        setAccessibilityLabel("An empty pane: ⌘K or drag a chat here")
+        setAccessibilityLabel("An empty pane: \(Self.waitingWords)")
     }
 
     @available(*, unavailable)

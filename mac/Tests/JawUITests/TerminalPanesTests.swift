@@ -71,3 +71,35 @@ struct Answered<R: Decodable>: Decodable {
     #expect(TerminalPanes.Refusal.most(13).said == "the terminal has 13 panes, and Jaw shows 12 at most")
     #expect(TerminalPanes.Refusal.unreadable.said == "the terminal's panes don't make a layout this Jaw can show")
 }
+
+@MainActor
+@Test func `a slot whose chat won't have a pane says why, that it's gone or jawd's words, and one waiting says how to give it one`() throws {
+    let (two, second) = try split(.single("ana"), 1, .across, "old")
+    let (grid, third) = try split(two, second, .down, "busy")
+    let refused = "a connection can watch at most 32 windows at once, so one has to be unwatched first"
+    let unopened = ["old": GridView.gone, "busy": refused]
+    let roles = Catalog.jaw.roles(dark: true)
+    let view = GridView(frame: NSRect(x: 0, y: 0, width: 1000, height: 600))
+    view.show(grid, views: [:], unopened: unopened, focused: 1, roles: roles)
+    #expect(view.frames[second]?.empty.prompt.stringValue == "this chat isn't here any more")
+    #expect(view.frames[second]?.empty.accessibilityLabel() == "An empty pane, this chat isn't here any more: ⌘K or drag a chat here")
+    #expect(view.frames[third]?.empty.prompt.stringValue == refused, "jawd's words for the window it refused")
+    #expect(view.frames[1]?.empty.prompt.stringValue == "⌘K or drag a chat here", "ana's pane only waits for its row")
+    view.show(grid.with(chat: "mum", in: second), views: [:], unopened: unopened, focused: second, roles: roles)
+    #expect(view.frames[second]?.empty.prompt.stringValue == "⌘K or drag a chat here", "another chat put in its place says nothing of the one before")
+}
+
+@MainActor
+@Test func `the words for a slot whose chat won't have a pane travel in the window's panes, and are drawn again when they change`() {
+    let grid = PaneGrid(cols: [0, 0.5, 1], rows: [0, 1], slots: [
+        .init(id: 1, c0: 0, c1: 1, r0: 0, r1: 1, chat: "ana"),
+        .init(id: 2, c0: 1, c1: 2, r0: 0, r1: 1, chat: "old"),
+    ])
+    let pane = NSView()
+    let c = content(width: 1180)
+    c.show(WindowContent.Panes(grid: grid, views: [1: pane], unopened: ["old": GridView.gone], focused: 1, box: nil, look: PaneLook()),
+           roles: Catalog.jaw.dark)
+    #expect(c.detail.panes.frames[2]?.empty.prompt.stringValue == "this chat isn't here any more")
+    c.show(WindowContent.Panes(grid: grid, views: [1: pane], focused: 1, box: nil, look: PaneLook()), roles: Catalog.jaw.dark)
+    #expect(c.detail.panes.frames[2]?.empty.prompt.stringValue == "⌘K or drag a chat here", "the same panes with no words for it")
+}
