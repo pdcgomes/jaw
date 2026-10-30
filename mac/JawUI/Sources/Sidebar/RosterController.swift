@@ -6,13 +6,17 @@ import JawThemes
 public protocol RosterHost: AnyObject {
     /// The roster scrolled near its end: its window should hold more people.
     func roster(_ roster: RosterController, move place: Place)
+    /// Someone double-clicked, or Return on them: their chat opened, or one started with them.
+    func roster(_ roster: RosterController, open person: RosterRow)
+    /// Someone's menu, made as it opens.
+    func roster(_ roster: RosterController, menuItemsFor person: RosterRow) -> [NSMenuItem]
 }
 
 /// The picked folder's people, under the folder tree, as `RosterLines` lays them out: each with their
 /// avatar, their name and how they are, faint where jawd isn't following them now; 200 at a time from
 /// the top, more as it scrolls. Watching them is what tells jawd whose presence to follow.
 @MainActor
-public final class RosterController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+public final class RosterController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     public weak var host: RosterHost?
     public private(set) var people: People<RosterRow>
     /// The tree, which groups the people under All and names the folder.
@@ -36,7 +40,7 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     public var now: @MainActor () -> Int64 = { Format.now() }
     var open: Set<String> = []
     var lines: [RosterLine] = []
-    let table = NSTableView()
+    let table = RosterTable()
     let scroll = NSScrollView()
     var avatars = AvatarCache()
     /// Once a minute while it's on screen, how long ago people were seen is said again.
@@ -67,6 +71,13 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         table.delegate = self
         table.target = self
         table.action = #selector(clicked)
+        table.roster = self
+        table.doubleAction = #selector(doubled)
+        table.setDraggingSourceOperationMask(.move, forLocal: true)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+        table.menu = menu
         table.setAccessibilityLabel("People")
         Scrolling.style(scroll)
         scroll.documentView = table
@@ -158,6 +169,54 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         if after > people.place.after { host?.roster(self, move: .top(after)) }
     }
 
+    /// Someone on row `i`, when it's someone's row.
+    func person(at i: Int) -> RosterRow? {
+        guard i >= 0, i < lines.count, case let .person(p, _) = lines[i] else { return nil }
+        return p
+    }
+
+    @objc func doubled() {
+        if let p = person(at: table.clickedRow) { host?.roster(self, open: p) }
+    }
+
+    /// Return on someone selected opens their chat, as a double click does.
+    func openSelected() {
+        if let p = person(at: table.selectedRow) { host?.roster(self, open: p) }
+    }
+
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for item in menuItems(forRow: table.clickedRow) {
+            menu.addItem(item)
+        }
+    }
+
+    /// The menu of the person on row `i`; none on a title, a heading or a fold.
+    public func menuItems(forRow i: Int) -> [NSMenuItem] {
+        person(at: i).map { host?.roster(self, menuItemsFor: $0) ?? [] } ?? []
+    }
+
+    /// Someone's menu for VoiceOver's Show Menu, which makes no click for the table's menu to be filled for.
+    func menu(for cell: NSView) -> NSMenu? {
+        let items = menuItems(forRow: table.row(for: cell))
+        guard !items.isEmpty else { return nil }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for item in items {
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    /// Someone dragged onto a folder of yours, which files them there.
+    public func tableView(_: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        guard let p = person(at: row) else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(p.id, forType: .jawPerson)
+        item.setString(p.name, forType: .string)
+        return item
+    }
+
     // MARK: The table
 
     public func numberOfRows(in _: NSTableView) -> Int {
@@ -185,6 +244,7 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         case let .person(p, _):
             let cell = (tableView.makeView(withIdentifier: PersonCell.id, owner: self) as? PersonCell) ?? PersonCell()
             cell.show(p, said: how(p), avatar: avatars.image(p.avatar, root: root), roles: roles)
+            cell.menuFor = { [weak self] cell in self?.menu(for: cell) }
             return cell
         case let .offline(_, count, open):
             let cell = (tableView.makeView(withIdentifier: GroupCell.id, owner: self) as? GroupCell) ?? GroupCell()
@@ -203,6 +263,9 @@ final class PersonCell: NSTableCellView {
     let avatar = AvatarView()
     let name = Labels.make("", .callout)
     let state = Labels.make("", .caption)
+    /// Their menu, from the roster.
+    var menuFor: ((PersonCell) -> NSMenu?)?
+    var popUp = MenuPopUp()
 
     init() {
         super.init(frame: .zero)
@@ -228,6 +291,11 @@ final class PersonCell: NSTableCellView {
     @available(*, unavailable)
     required init?(coder _: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// VoiceOver's Show Menu: their menu under their row.
+    override func accessibilityPerformShowMenu() -> Bool {
+        popUp.show(menuFor?(self), at: NSPoint(x: bounds.minX, y: bounds.minY), in: self)
     }
 
     func show(_ p: RosterRow, said: RosterLines.Said, avatar image: NSImage?, roles: Roles?) {
@@ -278,5 +346,20 @@ final class GroupCell: NSTableCellView {
         guard let roles else { return }
         Labels.style(title, .secondary, roles: roles)
         Labels.style(count, .tertiary, roles: roles)
+    }
+}
+
+/// The roster's table: Return opens the selected person's chat.
+final class RosterTable: NSTableView {
+    weak var roster: RosterController?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+           let roster
+        {
+            roster.openSelected()
+            return
+        }
+        super.keyDown(with: event)
     }
 }

@@ -168,10 +168,11 @@ extension AppModel: SidebarHost {
     }
 
     /// A filing jawd has done: a pane's chat the list doesn't hold gets no push to say where it's filed
-    /// now, so its row takes what jawd's answer did.
+    /// now, so its row takes what jawd's answer did; someone filed from the roster files their chat.
     func filed(_ filing: Filing) {
+        let person = filing.item.hasPrefix("person:") ? window?.sidebar.roster.people.get(filing.item)?.chat : nil
         for (id, c) in panes where window?.chatList.row(id) == nil {
-            if let row = FolderMenu.filed(filing, c.chat) { c.update(chat: row) }
+            if let row = FolderMenu.filed(filing, c.chat, chat: person) { c.update(chat: row) }
         }
     }
 }
@@ -187,6 +188,28 @@ extension AppModel: RosterHost {
 
     func roster(_: RosterController, move place: Place) {
         if let w = rosterWindow { jawd.move(w, place) }
+    }
+
+    func roster(_: RosterController, open person: RosterRow) {
+        openPerson(person)
+    }
+
+    func roster(_: RosterController, menuItemsFor person: RosterRow) -> [NSMenuItem] {
+        let bound = [
+            Command(RosterMenu.open, "Open Chat", place: nil, palette: false) { [weak self] in self?.openPerson(person) },
+            Command(RosterMenu.inNewPane, "Open in New Pane", place: nil, palette: false) { [weak self] in
+                self?.openPerson(person, inNewPane: true)
+            },
+        ] + folderCommands(for: Filed(person))
+        return Menus.items(RosterMenu.entries(person, tree: tree, list: folder)) { id in bound.first { $0.id == id } }
+    }
+
+    /// Someone's chat, opened, or started with them when they have none yet, as `chat.start` with the
+    /// person does.
+    func openPerson(_ person: RosterRow, inNewPane: Bool = false) {
+        if let chat = person.chat { return openChat(chat, name: person.name, inNewPane: inNewPane) }
+        startInNewPane = inNewPane
+        jawd.startChat(person: person.id)
     }
 
     /// Who in the roster is typing or recording in their one-to-one chat, from who jawd says is typing

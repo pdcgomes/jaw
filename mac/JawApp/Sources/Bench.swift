@@ -267,9 +267,11 @@ enum Bench {
             return words(model.window?.sidebar.menuItems(forRow: i) ?? [])
         case ("sidebar", _) where parts.count == 1:
             return words(model.window?.sidebar.menuItems(forRow: -1) ?? [])
+        case let ("roster", i?):
+            return words(model.window?.sidebar.roster.menuItems(forRow: i) ?? [])
         default:
             return "unknown step: menu:\(what) (the menu steps are menu:list:<row>, menu:header, menu:message:<row>, menu:bar:<menu>, "
-                + "menu:folder:<row> and menu:sidebar)"
+                + "menu:folder:<row>, menu:sidebar and menu:roster:<row>)"
         }
     }
 

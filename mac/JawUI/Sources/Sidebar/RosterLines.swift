@@ -68,3 +68,17 @@ public enum RosterLines {
         }
     }
 }
+
+/// Someone's menu in the roster.
+public enum RosterMenu {
+    public static let open = "person.open"
+    public static let inNewPane = "person.pane"
+
+    /// Open Chat, or Start Chat when they have none yet, and Open in New Pane; then the folder items,
+    /// and Favourite for their chat when they have one.
+    public static func entries(_ person: RosterRow, tree: FolderTree, list: String) -> [MenuEntry] {
+        let opening: [MenuEntry] = [.command(open, title: person.chat == nil ? "Start Chat" : "Open Chat"), .command(inNewPane)]
+        let folders = ChatMenu.with(FolderMenu.entries(Filed(person), tree: tree, list: list), FolderMenu.favourites(person.chat, tree: tree))
+        return ChatMenu.with(opening, folders)
+    }
+}

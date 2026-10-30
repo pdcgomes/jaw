@@ -33,6 +33,18 @@ final class RosterStub: RosterHost {
     func roster(_: RosterController, move place: Place) {
         moved.append(place)
     }
+
+    var opened: [String] = []
+    var asked: [String] = []
+
+    func roster(_: RosterController, open person: RosterRow) {
+        opened.append(person.id)
+    }
+
+    func roster(_: RosterController, menuItemsFor person: RosterRow) -> [NSMenuItem] {
+        asked.append(person.id)
+        return [NSMenuItem(title: person.chat == nil ? "Start Chat" : "Open Chat", action: nil, keyEquivalent: "")]
+    }
 }
 
 @MainActor
@@ -122,4 +134,39 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     big.apply(held)
     big.grow(visibleTo: big.said.count)
     #expect(full.moved == [.top(1000)], "nothing more once it's there")
+}
+
+@Test func `someone's menu opens or starts their chat, opens it in a new pane, and files them, with their chat's slot when they have one`() {
+    let ana = Samples.people[0], marta = Samples.people[1]
+    #expect(RosterMenu.entries(ana, tree: Samples.tree, list: "all").map(head)
+        == ["Open Chat", "person.pane", "—", "Add to Folder", "—", "Favourite"])
+    #expect(RosterMenu.entries(marta, tree: Samples.tree, list: "all").map(head) == ["Start Chat", "person.pane", "—", "Add to Folder"])
+    #expect(RosterMenu.entries(ana, tree: Samples.tree, list: "folder:1").map(head)
+        == ["Open Chat", "person.pane", "—", "Add to Folder", "Move to", "unfile", "—", "Favourite"])
+    #expect(RosterMenu.entries(ana, tree: FolderTree(), list: "all").map(head) == ["Open Chat", "person.pane"])
+}
+
+@MainActor
+@Test func `Return or a double click opens someone's chat, a right click asks for their menu, and they drag as themselves`() throws {
+    let host = RosterStub()
+    let r = roster(host)
+    r.table.selectRowIndexes([2], byExtendingSelection: false)
+    r.openSelected()
+    #expect(host.opened == ["person:1"], "Ana Ribeiro, on the roster's third line")
+    #expect(r.menuItems(forRow: 2).map(\.title) == ["Open Chat"] && r.menuItems(forRow: 1).isEmpty, "a heading has no menu")
+    #expect(host.asked == ["person:1"])
+    let item = try #require(r.tableView(r.table, pasteboardWriterForRow: 2) as? NSPasteboardItem)
+    #expect(item.string(forType: .jawPerson) == "person:1" && item.string(forType: .string) == "Ana Ribeiro")
+    #expect(r.tableView(r.table, pasteboardWriterForRow: 1) == nil)
+}
+
+@MainActor
+@Test func `VoiceOver's Show Menu on someone's row opens their menu under the row`() throws {
+    let host = RosterStub()
+    let r = roster(host)
+    let cell = try #require(r.table.view(atColumn: 0, row: 2, makeIfNecessary: true) as? PersonCell)
+    var popped: [(NSMenu, NSPoint)] = []
+    cell.popUp.run = { menu, point, _ in popped.append((menu, point)) }
+    #expect(cell.accessibilityPerformShowMenu())
+    #expect(popped.first?.0.items.map(\.title) == ["Open Chat"] && popped.first?.1 == NSPoint(x: cell.bounds.minX, y: cell.bounds.minY))
 }

@@ -33,6 +33,8 @@ final class AppModel {
     /// A chat a favourite or the roster opens once jawd finds its row.
     var opening: Opening?
     var rosterWindow: WindowID?
+    /// Whether the chat started with someone from the roster opens in a pane of its own.
+    var startInNewPane = false
     var folder = "all"
     /// Who's typing in the chats jawd's windows show, as it last said.
     var typing: Typists = [:]
@@ -242,8 +244,14 @@ final class AppModel {
         case let .members(chat, members):
             panes[chat]?.members = members
         case let .chatStarted(row):
-            open(row, opened: true)
+            if startInNewPane {
+                startInNewPane = false
+                openInNewPane(row)
+            } else {
+                open(row, opened: true)
+            }
         case let .notStarted(why):
+            startInNewPane = false
             say("no chat started: \(why)", warn: true)
         case let .status(status):
             window?.showStatus(status)
