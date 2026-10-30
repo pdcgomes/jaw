@@ -2085,16 +2085,19 @@ SELECT count(*) FROM pending WHERE kind = ?1
     SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
 
 -- src/store/write/events.rs
-INSERT INTO quarantine (at, source, ref, error, raw) SELECT ?1, 'answer', chat || ' ' || target || ' ' || coalesce(sender, '') || ' ' || coalesce(effect ->> '$.id', n), 'more answers waited for events jaw has not seen than it keeps in pending, so this one waits here for its event', jsonb_object('chat', chat, 'target', target, 'kind', kind, 'at', at, 'sender', sender, 'mine', mine, 'effect', effect, 'raw', hex(raw)) FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = ?3 ORDER BY n LIMIT ?2) ON CONFLICT (source, ref) DO NOTHING
-    SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
-    LIST SUBQUERY 1
-      SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
+SELECT n, chat, target, sender, effect, raw, json_object('chat', chat, 'target', target, 'kind', kind, 'at', at, 'sender', sender, 'mine', mine, 'effect', effect, 'raw', hex(raw)) FROM pending WHERE kind = ?1 ORDER BY n LIMIT ?2
+    SEARCH pending USING INDEX pending_by_kind (kind=?)
 
 -- src/store/write/events.rs
-DELETE FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = ?2 ORDER BY n LIMIT ?1)
+INSERT INTO quarantine (at, source, ref, error, raw) VALUES (?1, ?2, ?3, ?4, jsonb(?5)) ON CONFLICT (source, ref) DO NOTHING
+
+-- src/store/write/events.rs
+SELECT json(raw) FROM quarantine WHERE source = ?1 AND ref = ?2
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
+
+-- src/store/write/events.rs
+DELETE FROM pending WHERE n = ?1
     SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
-    LIST SUBQUERY 1
-      SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
 
 -- src/store/write/events.rs
 INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) SELECT raw ->> '$.chat', raw ->> '$.target', raw ->> '$.kind', raw ->> '$.at', unhex(raw ->> '$.raw'), raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect' FROM quarantine WHERE source = 'answer' AND ref >= ?1 AND ref < ?2

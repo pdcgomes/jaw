@@ -9,6 +9,7 @@
 use anyhow::Result;
 use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
@@ -37,17 +38,21 @@ const JIDS_OF: &str =
 const JIDS_OF_N: &str =
     "SELECT j.jid FROM person_jids s JOIN person_jids j ON j.person = s.person WHERE s.n = ?1 ORDER BY j.n";
 const WAITING: &str = "SELECT count(*) FROM pending WHERE kind = ?1";
-// An answer set aside is named by its event, then its answerer and its own ID, so one arriving
-// again is the same row, and kept whole, its pending row as JSONB, to wait there for its event.
-const SET_ASIDE: &str = "INSERT INTO quarantine (at, source, ref, error, raw)
-    SELECT ?1, 'answer', chat || ' ' || target || ' ' || coalesce(sender, '') || ' ' || coalesce(effect ->> '$.id', n),
-        'more answers waited for events jaw has not seen than it keeps in pending, so this one waits here for its event',
-        jsonb_object('chat', chat, 'target', target, 'kind', kind, 'at', at, 'sender', sender, 'mine', mine,
+/// The ?2 oldest of what waits in form ?1, each with what names it, and whole, as JSON.
+const OLDEST: &str = "SELECT n, chat, target, sender, effect, raw,
+        json_object('chat', chat, 'target', target, 'kind', kind, 'at', at, 'sender', sender, 'mine', mine,
             'effect', effect, 'raw', hex(raw))
-    FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = ?3 ORDER BY n LIMIT ?2)
+    FROM pending WHERE kind = ?1 ORDER BY n LIMIT ?2";
+// What waits, set aside under source ?2 as name ?3, kept whole, its pending row as JSONB, to wait
+// there for its event; a name held already is left as it is.
+const SET_ASIDE: &str = "INSERT INTO quarantine (at, source, ref, error, raw) VALUES (?1, ?2, ?3, ?4, jsonb(?5))
     ON CONFLICT (source, ref) DO NOTHING";
-const DROP_SET_ASIDE: &str =
-    "DELETE FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = ?2 ORDER BY n LIMIT ?1)";
+/// What's set aside under source ?1 as name ?2, as JSON.
+const HELD: &str = "SELECT json(raw) FROM quarantine WHERE source = ?1 AND ref = ?2";
+const SET_ASIDE_DONE: &str = "DELETE FROM pending WHERE n = ?1";
+/// Why an answer waits in quarantine.
+const ANSWER_ASIDE: &str =
+    "more answers waited for events jaw has not seen than it keeps in pending, so this one waits here for its event";
 const BACK: &str = "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect)
     SELECT raw ->> '$.chat', raw ->> '$.target', raw ->> '$.kind', raw ->> '$.at', unhex(raw ->> '$.raw'),
         raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect'
@@ -234,11 +239,70 @@ pub(super) fn set_aside_moved(db: &Connection, keep: &str, gone: &str) -> Result
 pub(super) fn bounded(db: &Connection, kind: &str) -> Result<()> {
     let waiting: i64 = db.prepare_cached(WAITING)?.query_row([kind], |r| r.get(0))?;
     if waiting > ANSWERS_WAITING {
-        let over = waiting - ANSWERS_WAITING;
-        db.prepare_cached(SET_ASIDE)?.execute(params![now_ms(), over, kind])?;
-        db.prepare_cached(DROP_SET_ASIDE)?.execute(params![over, kind])?;
+        set_aside(db, kind, waiting - ANSWERS_WAITING, ("answer", ANSWER_ASIDE))?;
     }
     Ok(())
+}
+
+/// A row of `pending` to set aside: its n, chat, target, sender, effect and raw protobuf, and all
+/// of it as JSON.
+type Aside = (i64, String, String, Option<String>, String, Vec<u8>, String);
+
+/// Sets the `over` oldest of what waits in `kind`'s form aside in quarantine, under `source` and
+/// saying `why`, each named by its event, then who sent it and its own ID, its message's, which an
+/// opened answer keeps in what it does and what's sealed in its raw protobuf, or else by what it
+/// holds, hashed: so the same one set aside again is the same row, and two are never one. A name
+/// another row holds already takes what this one holds, hashed, after it. Each leaves `pending`
+/// only once it's kept there, or a copy of it the same in every field is, so nothing goes that
+/// isn't kept: a name pending's n gave would be given again once pending emptied.
+fn set_aside(db: &Connection, kind: &str, over: i64, (source, why): (&str, &str)) -> Result<()> {
+    let oldest: Vec<Aside> = db
+        .prepare_cached(OLDEST)?
+        .query_map(params![kind, over], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (n, chat, target, sender, effect, raw, whole) in oldest {
+        let hashed = format!("#{}", digest(&whole));
+        let own = serde_json::from_str::<serde_json::Value>(&effect)
+            .ok()
+            .and_then(|effect| effect["id"].as_str().map(str::to_string))
+            .filter(|id| !id.is_empty())
+            .or_else(|| kinds::own_id(&raw));
+        let named = format!("{chat} {target} {} {}", sender.unwrap_or_default(), own.as_deref().unwrap_or(&hashed));
+        let mut names = vec![named.clone()];
+        if own.is_some() {
+            names.push(format!("{named} {hashed}"));
+        }
+        let mut kept = false;
+        for name in &names {
+            if db.prepare_cached(SET_ASIDE)?.execute(params![now_ms(), source, name, why, whole])? > 0 {
+                kept = true;
+                break;
+            }
+            let held: Option<String> =
+                db.prepare_cached(HELD)?.query_row(params![source, name], |r| r.get(0)).optional()?;
+            if held.is_some_and(|held| same_json(&held, &whole)) {
+                kept = true;
+                break;
+            }
+        }
+        if kept {
+            db.prepare_cached(SET_ASIDE_DONE)?.execute([n])?;
+        }
+    }
+    Ok(())
+}
+
+/// The first eight bytes of `text`'s SHA-256, in hex.
+fn digest(text: &str) -> String {
+    Sha256::digest(text.as_bytes())[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether two JSON texts say the same.
+fn same_json(a: &str, b: &str) -> bool {
+    matches!((serde_json::from_str::<serde_json::Value>(a), serde_json::from_str::<serde_json::Value>(b)),
+        (Ok(a), Ok(b)) if a == b)
 }
 
 #[cfg(test)]

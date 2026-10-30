@@ -241,7 +241,7 @@ pub(super) fn kept_already(db: &Connection, chat: &str, amend: &Amend, raw: &[u8
 }
 
 /// The ID of the message a raw protobuf is, if it reads.
-fn own_id(raw: &[u8]) -> Option<String> {
+pub(super) fn own_id(raw: &[u8]) -> Option<String> {
     let plain = unpack(raw).ok()?;
     WebMessageInfo::decode(plain.as_slice()).ok()?.key.id.filter(|id| !id.is_empty())
 }

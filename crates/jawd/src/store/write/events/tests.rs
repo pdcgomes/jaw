@@ -477,6 +477,84 @@ async fn past_their_bound_the_oldest_answer_waiting_is_set_aside_whole_and_count
     assert_eq!(kept, format!("{GROUP} e3 {RUI} h1"), "the oldest set aside, by its event, its answerer and its ID");
 }
 
+/// What's set aside for event `id`, by name.
+async fn set_aside_for(store: &Store, id: &'static str) -> Vec<String> {
+    query(store, move |db| {
+        Ok(db
+            .prepare("SELECT ref FROM quarantine WHERE source = 'answer' AND raw ->> '$.target' = ?1 ORDER BY ref")?
+            .query_map([id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_set_aside_once_pending_has_given_its_n_again_is_kept_beside_the_one_set_aside_with_it_before() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    let waiting_as = |home: &std::path::Path| -> i64 {
+        let raw = Connection::open(home.join("jaw.db")).unwrap();
+        raw.query_row("SELECT n FROM pending WHERE target = 'e1'", [], |r| r.get(0)).unwrap()
+    };
+    // Rui's sealed answer to e1, which jaw hasn't seen, waits, and past the bound it's set aside.
+    apply(&store, answer("e1", RUI, "r1", AT + 10, Going)).await;
+    let first = waiting_as(home.path());
+    fill_pending(home.path());
+    apply(&store, answer("e2", ANA, "a2", AT + 20, Maybe)).await;
+    assert_eq!(set_aside_for(&store, "e1").await.len(), 1, "his first is set aside");
+    // What waits goes as its events come, so pending gives its n's again from the first; Rui's newer
+    // answer waits as his first did, and is set aside past the bound in turn.
+    let raw = Connection::open(home.path().join("jaw.db")).unwrap();
+    raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    raw.execute("DELETE FROM pending", []).unwrap();
+    drop(raw);
+    apply(&store, answer("e1", RUI, "r2", AT + 40, NotGoing)).await;
+    assert_eq!(waiting_as(home.path()), first, "it waits under the n the first had");
+    fill_pending(home.path());
+    apply(&store, answer("e3", ANA, "a3", AT + 50, Maybe)).await;
+    assert_eq!(
+        set_aside_for(&store, "e1").await,
+        [format!("{GROUP} e1 {RUI} r1"), format!("{GROUP} e1 {RUI} r2")],
+        "both kept, each by its own ID, neither in place of the other"
+    );
+    assert_eq!(store.count("pending WHERE target = 'e1'").unwrap(), 0);
+    apply(&store, event("e1")).await;
+    assert_eq!(counts(&store, "e1").await, (0, 0, 1, Value::Null), "both come back with it, and his newest counts");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_set_aside_under_a_name_another_holds_is_named_apart_and_the_same_one_again_is_kept_once() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    let drained = || {
+        let raw = Connection::open(home.path().join("jaw.db")).unwrap();
+        raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+        raw.execute("DELETE FROM pending", []).unwrap();
+    };
+    let past_the_bound = |by: &'static str| {
+        fill_pending(home.path());
+        apply(&store, answer("e9", ANA, by, AT + 90, Maybe))
+    };
+    apply(&store, answer("e1", RUI, "r1", AT + 10, Going)).await;
+    past_the_bound("a1").await;
+    drained();
+    // Another answer of his under the same ID, as a phone that gave it again would send.
+    apply(&store, answer("e1", RUI, "r1", AT + 30, Maybe)).await;
+    past_the_bound("a2").await;
+    let aside = set_aside_for(&store, "e1").await;
+    assert_eq!(aside.len(), 2, "kept apart: {aside:?}");
+    assert_eq!(aside[0], format!("{GROUP} e1 {RUI} r1"));
+    assert!(aside[1].starts_with(&format!("{GROUP} e1 {RUI} r1 #")), "named by what it holds after: {aside:?}");
+    // The same one again is the row already kept, and leaves pending all the same.
+    drained();
+    apply(&store, answer("e1", RUI, "r1", AT + 30, Maybe)).await;
+    past_the_bound("a3").await;
+    assert_eq!(set_aside_for(&store, "e1").await, aside, "kept once");
+    assert_eq!(store.count("pending WHERE target = 'e1'").unwrap(), 0, "and gone from pending");
+    apply(&store, event("e1")).await;
+    assert_eq!(counts(&store, "e1").await, (0, 1, 0, Value::Null), "his newest counts once both come back");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn one_persons_answers_from_his_number_and_his_lid_count_once_and_their_join_gives_the_event_a_new_version() {
     let home = tempfile::tempdir().unwrap();
