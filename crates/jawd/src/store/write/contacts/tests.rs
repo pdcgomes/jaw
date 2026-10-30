@@ -17,6 +17,9 @@ const RUI: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Rui Costa\r\nTEL;waid=351913
 pub(super) const PANICS: &str = "3EB0PANICS";
 /// The ID of a card whose conversion fails once it has written, as `backfilled` does for it in tests.
 pub(super) const FAILS: &str = "3EB0FAILS";
+/// The ID of a card whose reading fills the disk once it has written, the first time only.
+pub(super) const FILLS: &str = "3EB0FILLS";
+pub(super) static FILLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 async fn query<T: Send + 'static>(store: &Store, query: impl FnOnce(&Connection) -> Result<T> + Send + 'static) -> T {
     store.reads().query(Priority::Interactive, query).await.unwrap()
@@ -340,4 +343,29 @@ async fn a_card_whose_conversion_fails_or_panics_is_kept_in_quarantine_and_the_r
         [(format!("{ANA} {FAILS}"), raws[3].clone()), (format!("{ANA} {PANICS}"), raws[1].clone())],
         "each kept in quarantine with its raw protobuf"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disk_filling_as_a_card_is_read_again_fails_its_step_which_is_tried_again_and_reads_it() {
+    let home = tempfile::tempdir().unwrap();
+    let nameless = |id: &'static str| Earlier {
+        id,
+        kind: "contact",
+        text: None,
+        summary: "Contact",
+        detail: json!({ "contact": { "name": null, "vcard": RUI } }),
+        raw: one(id, card(None, RUI)),
+        deleted: false,
+    };
+    earlier(home.path(), &[nameless("c1"), nameless(FILLS)]);
+    let store = Store::open(home.path()).unwrap();
+    while store.backfill_left(CONTACTS).unwrap() > 0 {
+        backfill(&store).await;
+    }
+    assert!(FILLED.load(std::sync::atomic::Ordering::Relaxed), "the disk filled once");
+    let names: Vec<(String, Option<String>)> =
+        shown(&store).await.into_iter().map(|(id, text, ..)| (id, text)).collect();
+    let rui = Some("Rui Costa".to_string());
+    assert_eq!(names, [("c1".into(), rui.clone()), (FILLS.into(), rui)], "both read again, that one once it could be");
+    assert_eq!(store.count("quarantine").unwrap(), 0, "and nothing kept in quarantine for it");
 }
