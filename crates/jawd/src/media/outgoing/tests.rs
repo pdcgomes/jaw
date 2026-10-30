@@ -150,6 +150,20 @@ impl Rig {
         self.store.reads().query(Priority::Interactive, query).await.unwrap()
     }
 
+    /// Waits until the cleaner has made two whole passes from now, so one of them began after now,
+    /// and has done what it found to do.
+    async fn until_the_cleaner_has_passed(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let before = self.media.inner.tidied.load(SeqCst);
+        let passed = tokio::time::timeout(Duration::from_secs(60), async {
+            while self.media.inner.tidied.load(SeqCst) < before + 2 {
+                self.media.inner.clean.notify_one();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        assert!(passed.await.is_ok(), "the cleaner never finished two passes");
+    }
+
     /// The files in one of jaw's folders, by name.
     fn files(&self, folder: &str) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(self.home.join(folder))
@@ -837,16 +851,24 @@ async fn a_failed_send_deleted_for_you_takes_its_rows_and_jaws_copy_of_your_file
 async fn a_copy_on_its_way_stays_in_a_full_cache_even_once_its_message_is_deleted_for_you() {
     let home = tempfile::tempdir().unwrap();
     let picked = tempfile::tempdir().unwrap();
-    let wait = Duration::from_secs(2);
+    let wait = Duration::from_secs(600);
     let rig =
         Rig::with(home.path(), world(), Config { cache_bytes: 1, retry_first: wait, retry_most: wait, ..quick() })
             .await;
-    // Its first upload fails, so it waits to be uploaded again with no job holding its file.
+    // Its first upload fails, so it waits to be uploaded again, until it's told to be, with no job
+    // holding its file.
     rig.world.fail_uploads(1);
     let path = yours(picked.path(), "a.jpg", &Picture::lake(640, 480));
     let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
     let id = answer["messages"][0].as_str().unwrap().to_string();
-    rig.until(&id, "its copy made", |row| row["media"]["state"] == "local").await;
+    // Made, with the previews made ahead for a copy of yours, whose job holds its file while it
+    // draws them, and the cleaner can't drop a file a job holds.
+    rig.until(&id, "its copy made, with its previews", |row| {
+        row["media"]["state"] == "local"
+            && row["media"]["previews"]["256"].is_string()
+            && row["media"]["previews"]["768"].is_string()
+    })
+    .await;
     let failed_once = tokio::time::timeout(Duration::from_secs(10), async {
         while rig.world.uploads().is_empty() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -865,12 +887,10 @@ async fn a_copy_on_its_way_stays_in_a_full_cache_even_once_its_message_is_delete
         })
         .await;
     let file = home.path().join(path);
-    for _ in 0..5 {
-        rig.media.inner.clean.notify_one();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    rig.until_the_cleaner_has_passed().await;
     assert_eq!(rig.world.uploads().len(), 1, "still waiting to be uploaded again");
     assert!(file.exists(), "the cache is over its size, and the copy on its way stays: {:?}", rig.media.status());
+    rig.media.inner.sending.retry_now();
     let went = tokio::time::timeout(Duration::from_secs(30), async {
         while rig.sent(&id).is_empty() {
             tokio::time::sleep(Duration::from_millis(20)).await;
