@@ -92,7 +92,7 @@ enum Bench {
             NSApp.activate()
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
-                || key.hasPrefix("menu:")
+                || key.hasPrefix("menu:") || key == "terminal-panes"
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -107,6 +107,7 @@ enum Bench {
             if key.hasPrefix("save:") { model.saveLayoutAs(String(key.dropFirst(5))) }
             if key == "revert" { model.revertLayout() }
             if key == "settings" { model.window?.showSettings() }
+            if key == "terminal-panes" { model.openTerminalPanes() }
             if key.hasPrefix("size:") {
                 let wh = key.dropFirst(5).split(separator: "x").compactMap { Double($0) }
                 if wh.count == 2 { model.window?.window?.setContentSize(NSSize(width: wh[0], height: wh[1])) }

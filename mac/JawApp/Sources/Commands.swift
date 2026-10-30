@@ -160,6 +160,9 @@ extension AppModel {
                     enabled: { book()?.current != nil }) { [weak self] in self?.window?.askLayoutRename() })
         add(Command("layout.delete", "Delete Layout…", phrase: "Delete this layout", detail: "its panes stay on screen", place: .layouts,
                     group: 2, enabled: { book()?.current != nil }) { [weak self] in self?.window?.askLayoutDelete() })
+        add(Command("layout.terminal", "Open the Terminal's Panes", phrase: "Open the terminal's panes",
+                    detail: "as the terminal left them, in place of the unsaved panes", symbol: "terminal", place: .layouts, group: 3)
+            { [weak self] in self?.openTerminalPanes() })
 
         // View
         add(Command("look.bubbles", "Bubbles", phrase: "Bubbles", detail: "how messages look", place: .view, submenu: "Message Style",

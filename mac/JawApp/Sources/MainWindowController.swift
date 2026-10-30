@@ -119,8 +119,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         for slot in grid.slots {
             if let chat = slot.chat, let c = model.panes[chat] { views[slot.id] = c.view }
         }
-        return WindowContent.Panes(grid: grid, views: views, focused: model.focusedSlot, box: model.conversation?.composer.view,
-                                   look: model.preferences.paneLook(model.roles))
+        return WindowContent.Panes(grid: grid, views: views, unopened: model.unopened, focused: model.focusedSlot,
+                                   box: model.conversation?.composer.view, look: model.preferences.paneLook(model.roles))
     }
 
     /// Lays the panes out as the model's layout has them, the focused one outlined.

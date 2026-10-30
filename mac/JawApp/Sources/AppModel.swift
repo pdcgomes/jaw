@@ -35,6 +35,9 @@ final class AppModel {
     var keepKept = false
     var focusedSlot: Int?
     var restored = false
+    /// What a slot of the layout on screen says whose chat won't have a pane, by that chat: that it's
+    /// gone, or jawd's words for refusing to look it up.
+    var unopened: [String: String] = [:]
     let glance = Glance()
     var focusMode = false
     /// Everything the app does, made once; the menus, the palette and the keys sheet read it.
@@ -194,7 +197,11 @@ final class AppModel {
             window?.showStatus(status)
         case let .windowFailed(_, why):
             say("a window couldn't be watched: \(why)", warn: true)
-        case .push, .chats, .layout, .looked:
+        case let .layout(kept) where kept.interface == TerminalPanes.interface:
+            terminalPanes(kept)
+        case let .looked(chat, found):
+            lookedUp(chat, found)
+        case .push, .chats, .layout:
             break
         }
     }
@@ -533,18 +540,68 @@ final class AppModel {
         window?.layoutsChanged()
     }
 
+    /// Asks jawd for the terminal's panes, which open as the unsaved panes once it answers.
+    func openTerminalPanes() {
+        jawd.layout(of: TerminalPanes.interface, what: "opening the terminal's panes")
+    }
+
+    /// The terminal's panes as jawd keeps them for it, read as a grid in place of what the unsaved
+    /// panes held, its pane with the keys taking them; the layout on screen is left as switching
+    /// leaves it, and what can't open is said.
+    func terminalPanes(_ kept: KeptLayout) {
+        switch TerminalPanes.read(kept) {
+        case let .failure(refusal):
+            say(refusal.said, warn: refusal != .nothing)
+        case let .success(terminal):
+            book.focus = focusedSlot
+            conversation?.leave()
+            book.switchTo(nil)
+            book.update(terminal.grid)
+            reconcile(focus: terminal.focus)
+            say(terminal.said)
+        }
+    }
+
+    /// A chat the chat list didn't hold, as jawd found it: its pane made where the layout on screen
+    /// shows it, taking the keys if its slot has them, or its slot saying why it won't have one.
+    func lookedUp(_ chat: String, _ found: Looked) {
+        guard let slot = grid?.slot(showing: chat), panes[chat] == nil else { return }
+        switch found {
+        case let .row(row):
+            _ = makePane(row, place: ConversationController.place(for: row))
+            if focusedSlot == slot.id {
+                focus(slot: slot.id, force: true)
+                return
+            }
+        case .gone:
+            unopened[chat] = GridView.gone
+        case let .refused(why):
+            unopened[chat] = why
+            say("a pane's chat couldn't be looked up: \(why)", warn: true)
+        }
+        window?.showPanes()
+    }
+
     /// The panes for the layout on screen: windows let go for chats it doesn't show, opened for
-    /// the ones it does; a chat the list doesn't hold yet keeps its place, its pane waiting.
+    /// the ones it does; a chat the list doesn't hold is looked up, the focused slot's first, its
+    /// pane made once jawd finds it (`lookedUp`), and a slot whose chat won't have one says why.
     func reconcile(focus at: Int?) {
         let shown = Set(grid?.chats ?? [])
         for chat in panes.keys where !shown.contains(chat) {
             closePane(chat)
         }
-        for slot in grid?.slots ?? [] {
-            if let id = slot.chat, panes[id] == nil, let row = window?.chatList.row(id) {
+        let reading = grid?.reading ?? []
+        var outside: [String] = []
+        for slot in reading.filter({ $0.id == at }) + reading.filter({ $0.id != at }) {
+            guard let id = slot.chat, panes[id] == nil, !outside.contains(id) else { continue }
+            if let row = window?.chatList.row(id) {
                 _ = makePane(row, place: ConversationController.place(for: row))
+            } else {
+                outside.append(id)
             }
         }
+        unopened = [:]
+        jawd.lookUp(outside)
         focusedSlot = nil
         if let grid {
             focus(slot: at.flatMap { grid.slot($0)?.id } ?? grid.reading.first!.id, force: true)

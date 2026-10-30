@@ -156,7 +156,8 @@ public final class Jawd {
     }
 
     /// Asks for the panes jawd keeps for `interface`, by the name it gives in hello. They come as
-    /// `.layout`; what stops them is said as `what` not being done.
+    /// `.layout`; a jawd that doesn't serve `layout.get` is said as `what` coming with the next step,
+    /// and anything else that stops them, a malformed tree included, is said in its own words.
     public func layout(of interface: String, what: String) {
         ask("layout.get", LayoutGet(interface: interface), .layout(what), expect: .layout)
     }
