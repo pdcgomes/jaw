@@ -115,6 +115,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                          linkStart: { [weak model] phone in model?.jawd.linkStart(phone: phone) },
                          linkCancel: { [weak model] in model?.jawd.linkCancel() },
                      ))
+        model.chatMenuFoldersChanged()
     }
 
     /// The panes as the model's layout has them, the focused one outlined, or nil with no layout.

@@ -15,7 +15,7 @@ final class ListHost: ChatListHost {
 
     func chatList(_: ChatListController, move _: Place) {}
 
-    /// None for a community's row, as the app's host has none.
+    /// None for a community's row, as the app's host has none before jawd serves folders; after, it has the folder items alone.
     func chatList(_: ChatListController, menuItemsFor chat: ChatRow) -> [NSMenuItem] {
         asked.append(chat.id)
         guard chat.hasChatActions else { return [] }

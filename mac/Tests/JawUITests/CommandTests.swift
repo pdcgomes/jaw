@@ -158,3 +158,9 @@ func returnKey(_ flags: NSEvent.ModifierFlags) throws -> NSEvent {
     #expect(reply.menuItem().keyEquivalent.isEmpty)
     #expect(reply.keyText == "r" && reply.paletteAction.key == "r")
 }
+
+@MainActor
+@Test func `a command's indent is its menu item's, for a tree of folders`() {
+    #expect(Command("file:folder:2", "Cousins", place: nil, indent: 1) {}.menuItem().indentationLevel == 1)
+    #expect(Command("x", "X", place: nil) {}.menuItem().indentationLevel == 0)
+}

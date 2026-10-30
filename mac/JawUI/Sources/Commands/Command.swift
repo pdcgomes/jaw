@@ -41,6 +41,8 @@ public final class Command {
     public let group: Int
     /// In the palette as well as the menus.
     public let inPalette: Bool
+    /// How far its menu item is indented, for a tree of folders.
+    public let indent: Int
     /// A standard action sent along the responder chain (copy:, undo:, performClose:) instead of `run`.
     public let send: Selector?
     public let enabled: @MainActor @Sendable () -> Bool
@@ -57,12 +59,13 @@ public final class Command {
     public convenience init(_ id: String, _ title: String, phrase: String? = nil, detail: String = "",
                 says: (@MainActor @Sendable () -> (String, String))? = nil, titled: (@MainActor @Sendable () -> String)? = nil,
                 symbol: String? = nil, key: Shortcut? = nil, also: [Shortcut] = [], hint: String? = nil, place: MenuPlace?,
-                submenu: String? = nil, group: Int = 0, palette: Bool = true,
+                submenu: String? = nil, group: Int = 0, palette: Bool = true, indent: Int = 0,
                 enabled: @escaping @MainActor @Sendable () -> Bool = { true }, on: (@MainActor @Sendable () -> Bool)? = nil,
                 run: @escaping @MainActor @Sendable () -> Void)
     {
         self.init(id, title, phrase: phrase, detail: detail, says: says, titled: titled, symbol: symbol, key: key, also: also, hint: hint,
-                  place: place, submenu: submenu, group: group, palette: palette, send: nil, enabled: enabled, on: on, fill: nil, run: run)
+                  place: place, submenu: submenu, group: group, palette: palette, indent: indent, send: nil, enabled: enabled, on: on,
+                  fill: nil, run: run)
     }
 
     /// A submenu whose items are made as it opens, greyed while it can't be used; it isn't in the
@@ -71,19 +74,19 @@ public final class Command {
                             enabled: @escaping @MainActor @Sendable () -> Bool, fill: @escaping @MainActor @Sendable () -> [NSMenuItem])
     {
         self.init(id, title, phrase: nil, detail: "", says: nil, titled: nil, symbol: nil, key: nil, also: [], hint: nil, place: place,
-                  submenu: nil, group: group, palette: false, send: nil, enabled: enabled, on: nil, fill: fill, run: {})
+                  submenu: nil, group: group, palette: false, indent: 0, send: nil, enabled: enabled, on: nil, fill: fill, run: {})
     }
 
     /// A standard action, sent along the responder chain to whatever takes it: copy:, undo:,
     /// performClose:.
     public convenience init(_ id: String, _ title: String, key: Shortcut? = nil, place: MenuPlace, group: Int = 0, send: Selector) {
         self.init(id, title, phrase: nil, detail: "", says: nil, titled: nil, symbol: nil, key: key, also: [], hint: nil, place: place,
-                  submenu: nil, group: group, palette: false, send: send, enabled: { true }, on: nil, fill: nil, run: {})
+                  submenu: nil, group: group, palette: false, indent: 0, send: send, enabled: { true }, on: nil, fill: nil, run: {})
     }
 
     init(_ id: String, _ title: String, phrase: String?, detail: String, says: (@MainActor @Sendable () -> (String, String))?,
          titled: (@MainActor @Sendable () -> String)?, symbol: String?, key: Shortcut?, also: [Shortcut], hint: String?,
-         place: MenuPlace?, submenu: String?, group: Int, palette: Bool, send: Selector?,
+         place: MenuPlace?, submenu: String?, group: Int, palette: Bool, indent: Int, send: Selector?,
          enabled: @escaping @MainActor @Sendable () -> Bool, on: (@MainActor @Sendable () -> Bool)?,
          fill: (@MainActor @Sendable () -> [NSMenuItem])?, run: @escaping @MainActor @Sendable () -> Void)
     {
@@ -99,6 +102,7 @@ public final class Command {
         self.submenu = submenu
         self.group = group
         inPalette = palette && send == nil
+        self.indent = indent
         self.send = send
         self.enabled = enabled
         self.on = on
@@ -121,6 +125,7 @@ public final class Command {
         item.action = send ?? #selector(CommandTarget.runCommand(_:))
         item.keyEquivalentModifierMask = shortcut?.modifiers ?? []
         item.target = send == nil ? CommandTarget.shared : nil
+        item.indentationLevel = indent
         item.representedObject = CommandBox(self, ticks: title == nil)
         if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: self.title) }
         return item

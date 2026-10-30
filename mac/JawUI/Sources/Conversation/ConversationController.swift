@@ -99,6 +99,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     public var paneMenu: (() -> NSMenu?)?
     /// What a message's menu ends with: the pane's splits.
     public var messageMenuTail: (() -> [NSMenuItem])?
+    /// The chat's Add to Folder, for m, made as it opens.
+    public var folderMenu: (() -> NSMenu?)?
 
     /// Where the window's buttons are, in the window's coordinates as `convert(_:to: nil)` gives them,
     /// or nil when there are none: a header under them starts after them. By default it's the zoom
@@ -837,6 +839,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         case "+", "=": host?.conversation(self, reactTo: m)
         case "y": copy(m)
         case "i": host?.conversation(self, info: m.id)
+        case "m": fileChat()
         case "1", "2", "3", "4", "5", "6":
             toggle(Self.quick[Int(chars)! - 1], on: m)
         case "f": forward(m)
@@ -959,11 +962,17 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         case "f": forward(m)
         case "y": copy(m)
         case "i": host?.conversation(self, info: m.id)
+        case "m": fileChat()
         case "\n": open(m)
         case " ": media(.look, m, item: nil)
         case "s": media(.save, m, item: nil)
         default: break
         }
+    }
+
+    /// m: the chat's Add to Folder under the pane's header, as the terminal's m files the open chat.
+    func fileChat() {
+        _ = header.popUp.show(folderMenu?(), at: NSPoint(x: header.avatar.frame.minX, y: header.bounds.minY), in: header)
     }
 
     func reply(to m: MessageRow) {

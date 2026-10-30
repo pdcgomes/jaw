@@ -28,6 +28,8 @@ final class AppModel {
     var me: Set<String> = []
     var listWindow: WindowID?
     var foldersWindow: WindowID?
+    /// The key the menu bar's folder items were last made from.
+    var folderItemsMade: [String] = []
     var folder = "all"
     /// Who's typing in the chats jawd's windows show, as it last said.
     var typing: Typists = [:]
@@ -266,7 +268,9 @@ final class AppModel {
             say("not downloaded: \(why)", warn: true)
         case let .saved(ticket, message, path, why):
             savedAnswer(ticket, message, path, why)
-        case .push, .chats, .layout, .folders, .roster, .named, .notNamed, .filed:
+        case let .filed(filing):
+            filed(filing)
+        case .push, .chats, .layout, .folders, .roster, .named, .notNamed:
             break
         }
     }
@@ -376,6 +380,10 @@ final class AppModel {
         c.messageMenuTail = { [weak self] in
             guard let self else { return [] }
             return Menus.items(ChatMenu.splits) { id in command(id) }
+        }
+        c.folderMenu = { [weak self, weak c] in
+            guard let self, let c else { return nil }
+            return addToFolderMenu(for: c.chat)
         }
         _ = c.view
         panes[chat.id] = c

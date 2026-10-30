@@ -67,8 +67,8 @@ extension AppModel {
         let inNewPane = Command(ChatMenu.openInNewPane, "Open in New Pane", place: nil, palette: false) { [weak self] in
             self?.openInNewPane(chat)
         }
-        let bound = chatCommands(for: { chat }) + [inNewPane]
-        return Menus.items(ChatMenu.list(chat)) { id in bound.first { $0.id == id } }
+        let bound = chatCommands(for: { chat }) + [inNewPane] + folderCommands(for: Filed(chat))
+        return Menus.items(ChatMenu.list(chat, tree: tree, in: folder)) { id in bound.first { $0.id == id } }
     }
 
     /// A pane's menu: on its header, on the transcript's blank space under, between and beside the
@@ -77,8 +77,8 @@ extension AppModel {
     /// actions act on its chat.
     func paneMenu(for c: ConversationController) -> NSMenu {
         let chat = c.chat
-        let bound = chatCommands(for: { chat })
-        return Menus.menu(ChatMenu.pane(chat)) { id in
+        let bound = chatCommands(for: { chat }) + folderCommands(for: Filed(chat))
+        return Menus.menu(ChatMenu.pane(chat, tree: tree, in: folder)) { id in
             bound.first { $0.id == id } ?? command(id)
         }
     }

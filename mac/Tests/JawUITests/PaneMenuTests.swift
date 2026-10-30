@@ -237,3 +237,25 @@ func rightClick(_ window: NSWindow, at point: NSPoint) throws -> NSMenu? {
     #expect(c.menu(forRow: c.rows.count) == nil)
     #expect(host.focused == 0, "making a menu moves no focus")
 }
+
+@MainActor
+@Test func `m with a message selected opens its chat's Add to Folder under the header, and is taken with no menu to show`() async throws {
+    let host = PaneHost()
+    let (c, window) = await shown(Samples.messages, host)
+    defer { window.close() }
+    let text = try #require(Samples.messages.first { $0.kind == .text && !$0.deleted })
+    c.select(text.id)
+    let menu = NSMenu()
+    menu.addItem(withTitle: "Family", action: nil, keyEquivalent: "")
+    c.folderMenu = { menu }
+    var popped: [(NSMenu, NSPoint)] = []
+    c.header.popUp.run = { m, point, _ in popped.append((m, point)) }
+    let m = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                          context: nil, characters: "m", charactersIgnoringModifiers: "m", isARepeat: false, keyCode: 46))
+    #expect(c.selectionKey(m))
+    #expect(popped.first?.0 === menu)
+    #expect(popped.first?.1 == NSPoint(x: c.header.avatar.frame.minX, y: c.header.bounds.minY))
+    c.folderMenu = { nil }
+    #expect(c.selectionKey(m), "m is taken, though there's no menu: the app says why")
+    #expect(popped.count == 1)
+}

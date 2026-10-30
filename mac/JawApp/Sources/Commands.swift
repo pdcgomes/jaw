@@ -113,7 +113,7 @@ extension AppModel {
             ("reply", "Reply", "Reply to this message", "r"), ("react", "React…", "React to this message", "+"),
             ("edit", "Edit", "Edit this message", "e"), ("delete", "Delete…", "Delete this message", "d"),
             ("forward", "Forward…", "Forward this message", "f"), ("info", "Info", "This message's info", "i"),
-            ("copy.text", "Copy Text", "Copy this message", "y"),
+            ("copy.text", "Copy Text", "Copy this message", "y"), ("file", "Add to Folder…", "Add this chat to a folder", "m"),
         ] {
             add(Command("message.\(id)", title, phrase: phrase, detail: "the selected message", hint: key, place: .message,
                         enabled: { selected().map { Self.can(id, $0) } ?? false }) { [weak self] in self?.conversation?.act(Character(key)) })

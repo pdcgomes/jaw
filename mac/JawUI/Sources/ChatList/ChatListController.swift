@@ -252,7 +252,7 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
     }
 
     /// The menu of the chat on `cell`'s row, for VoiceOver's Show Menu, which makes no click for
-    /// the table's menu to be filled for; none on a community's row.
+    /// the table's menu to be filled for; none when the host has none.
     func menu(for cell: ChatCell) -> NSMenu? {
         let items = menuItems(forRow: table.row(for: cell))
         guard !items.isEmpty else { return nil }
@@ -389,7 +389,7 @@ final class ChatCell: NSView {
     }
 
     /// VoiceOver's Show Menu, which makes no click for the table's menu to be filled for: the chat's
-    /// menu under its row, none on a community's.
+    /// menu under its row, none when the host has none.
     override func accessibilityPerformShowMenu() -> Bool {
         popUp.show(menuFor?(self), at: NSPoint(x: bounds.minX, y: bounds.maxY), in: self)
     }

@@ -84,3 +84,33 @@ public extension ChatRow {
         unread > 0 || markedUnread
     }
 }
+
+/// A chat's menus with their folder items, from the tree as they open.
+public extension ChatMenu {
+    /// A chat's folder items, one list for the chat list's menu, the pane's and the menu bar's Chat
+    /// menu: Add to Folder, and Move to and Remove from while the list shows one of your folders that
+    /// holds it.
+    static func folderItems(_ chat: ChatRow, tree: FolderTree, in folder: String) -> [MenuEntry] {
+        FolderMenu.entries(Filed(chat), tree: tree, list: folder)
+    }
+
+    /// The chat list's menu: a chat's actions, then its folder items; a community's row has the folder
+    /// items alone, and its groups the whole menu.
+    static func list(_ chat: ChatRow, tree: FolderTree, in folder: String) -> [MenuEntry] {
+        with(list(chat), folderItems(chat, tree: tree, in: folder))
+    }
+
+    /// The pane's menu: its chat's folder items after its actions, before the menu's last part,
+    /// Search This Chat and This Chat's Library.
+    static func pane(_ chat: ChatRow, tree: FolderTree, in folder: String) -> [MenuEntry] {
+        var out = pane(chat)
+        let folders = folderItems(chat, tree: tree, in: folder)
+        if !folders.isEmpty, let last = out.lastIndex(of: .separator) { out.insert(contentsOf: [.separator] + folders, at: last) }
+        return out
+    }
+
+    /// `entries`, then `more` after a separator; either alone when the other is empty.
+    static func with(_ entries: [MenuEntry], _ more: [MenuEntry]) -> [MenuEntry] {
+        entries.isEmpty ? more : more.isEmpty ? entries : entries + [.separator] + more
+    }
+}

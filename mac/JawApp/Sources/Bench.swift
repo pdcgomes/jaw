@@ -153,7 +153,7 @@ enum Bench {
                 }
             }
             let codes: [String: UInt16] = ["d": 2, "w": 13, "k": 40, "f": 3, "j": 38, "s": 1, "e": 14, "l": 37, "1": 18, "2": 19, "3": 20,
-                                           "left": 123, "right": 124, "down": 125, "up": 126, "return": 36, "tab": 48, "space": 49]
+                                           "left": 123, "right": 124, "down": 125, "up": 126, "return": 36, "tab": 48, "space": 49, "m": 46, "n": 45]
             let arrows: [String: Int] = ["left": NSLeftArrowFunctionKey, "right": NSRightArrowFunctionKey, "up": NSUpArrowFunctionKey,
                                          "down": NSDownArrowFunctionKey]
             if arrows[char] != nil { mods.insert([.numericPad, .function]) }
