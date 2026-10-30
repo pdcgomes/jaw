@@ -271,27 +271,39 @@ func receiptType(name string) (types.ReceiptType, error) {
 	return "", fmt.Errorf("%q isn't a receipt jawd sends", name)
 }
 
-// disappearing sets a chat's disappearing timer, as a message in a one-to-one chat and as the
-// group's setting in a group; whatsmeow refuses other chats.
+// disappearing sets a chat's disappearing timer: in a one-to-one chat as the setting message, sent
+// with the ID jawd made for it and answered as a send is; in a group as the group's setting; other
+// chats have none.
 func (e *Engine) disappearing(c *enginepb.Disappearing) *enginepb.Reply {
 	chat, err := chatJID(c.Chat)
 	if err != nil {
 		return failure(err.Error(), false)
 	}
 	switch chat.Server {
-	case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer:
-	default:
-		return failure(fmt.Sprintf("a %s chat has no disappearing timer to set", chat.Server), false)
+	case types.DefaultUserServer, types.HiddenUserServer:
+		// The message whatsmeow's SetDisappearingTimer sends, with jawd's ID rather than one of
+		// whatsmeow's, so the line jawd shows for it is the message itself.
+		if c.Id == "" {
+			return failure("a timer set in a one-to-one chat needs the ID jawd made for its message", false)
+		}
+		at := time.Now()
+		if c.AtMs > 0 {
+			at = time.UnixMilli(c.AtMs)
+		}
+		setting := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
+			Type:                      waE2E.ProtocolMessage_EPHEMERAL_SETTING.Enum(),
+			EphemeralExpiration:       proto.Uint32(c.Seconds),
+			EphemeralSettingTimestamp: proto.Int64(at.Unix()),
+		}}
+		return e.sendWithID(chat, c.Id, setting)
+	case types.GroupServer:
+		timer := time.Duration(c.Seconds) * time.Second
+		if err := e.cli().SetDisappearingTimer(e.ctx, chat, timer, time.Time{}); err != nil {
+			return failure(fmt.Sprintf("can't set the disappearing timer in %s: %v", c.Chat, err), retryable(err))
+		}
+		return done()
 	}
-	var at time.Time
-	if c.AtMs > 0 {
-		at = time.UnixMilli(c.AtMs)
-	}
-	timer := time.Duration(c.Seconds) * time.Second
-	if err := e.cli().SetDisappearingTimer(e.ctx, chat, timer, at); err != nil {
-		return failure(fmt.Sprintf("can't set the disappearing timer in %s: %v", c.Chat, err), retryable(err))
-	}
-	return done()
+	return failure(fmt.Sprintf("a %s chat has no disappearing timer to set", chat.Server), false)
 }
 
 func (e *Engine) chatPresence(c *enginepb.ChatPresence) *enginepb.Reply {

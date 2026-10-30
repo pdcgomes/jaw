@@ -37,7 +37,7 @@ func TestSendingCommandsWithoutASessionSaySoAndAreNotToBeTriedAsTheyAre(t *testi
 			Chat: "120363000000000002@g.us", Id: "3EB0BB", PollId: "3EB0AA", PollSender: "351910000002@s.whatsapp.net",
 		}}},
 		{Kind: &enginepb.Command_MarkRead{MarkRead: &enginepb.MarkRead{Chat: "351910000002@s.whatsapp.net", Ids: []string{"m1"}, Type: "played"}}},
-		{Kind: &enginepb.Command_Disappearing{Disappearing: &enginepb.Disappearing{Chat: "351910000002@s.whatsapp.net", Seconds: 604800}}},
+		{Kind: &enginepb.Command_Disappearing{Disappearing: &enginepb.Disappearing{Chat: "351910000002@s.whatsapp.net", Seconds: 604800, Id: "3EB0CC"}}},
 		{Kind: &enginepb.Command_Disappearing{Disappearing: &enginepb.Disappearing{Chat: "120363000000000002@g.us"}}},
 	} {
 		command(t, jawd, uint64(n+1), cmd)
@@ -400,9 +400,19 @@ func TestADisappearingTimerForAChatWithoutOneIsRefusedForGoodBeforeItGoes(t *tes
 		"a channel":        "120363000000000003@newsletter",
 		"not a JID at all": "@@",
 	} {
-		failure := e.disappearing(&enginepb.Disappearing{Chat: chat, Seconds: 86400}).GetFailure()
+		failure := e.disappearing(&enginepb.Disappearing{Chat: chat, Seconds: 86400, Id: "3EB0CC"}).GetFailure()
 		if failure == nil || failure.Retry {
 			t.Errorf("%s: %v", name, failure)
+		}
+	}
+}
+
+func TestAOneToOneTimerWithoutTheIDJawdMadeForItsMessageIsRefusedForGoodBeforeItGoes(t *testing.T) {
+	e := newEngine(context.Background(), nil, NewLogger("test", "error"))
+	for _, chat := range []string{"351910000002@s.whatsapp.net", "100000000002@lid"} {
+		failure := e.disappearing(&enginepb.Disappearing{Chat: chat, Seconds: 86400}).GetFailure()
+		if failure == nil || failure.Retry || !strings.Contains(failure.Message, "ID") {
+			t.Errorf("%s: %v", chat, failure)
 		}
 	}
 }

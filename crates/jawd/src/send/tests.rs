@@ -1307,6 +1307,196 @@ async fn a_disappearing_chats_messages_carry_its_timer() {
     assert!(row.expires_at.is_some_and(|at| at > row.at));
 }
 
+/// Chat `chat`'s timer and when it was set.
+async fn timer_of(running: &Running, chat: &'static str) -> (i64, Option<i64>) {
+    running
+        .query(move |db| {
+            Ok(db.query_row("SELECT ephemeral, ephemeral_at FROM chats WHERE id = ?1", [chat], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?)
+        })
+        .await
+}
+
+/// Chat `chat`'s lines, by ID, with what each says and whether it's yours.
+async fn lines_of(running: &Running, chat: &'static str) -> Vec<(String, String, bool)> {
+    running
+        .query(move |db| {
+            Ok(db
+                .prepare(
+                    "SELECT m.id, m.summary, m.mine FROM messages m JOIN chats c ON c.n = m.chat
+                    WHERE c.id = ?1 AND m.kind = 'system' ORDER BY m.at",
+                )?
+                .query_map([chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await
+}
+
+/// The timers the engine was asked to set, in order.
+fn timers_asked(running: &Running) -> Vec<pb::Disappearing> {
+    asked(running, |kind| match kind {
+        pb::command::Kind::Disappearing(set) => Some(set),
+        _ => None,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timer_set_from_jaw_shows_at_once_goes_after_the_chats_earlier_sends_and_asked_again_sends_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA, CLIMBING]).await;
+    running.members(CLIMBING, &[RUI]).await;
+    running.world.gate(true);
+    let first = running.send(ANA, "before the timer").await;
+    let before = now_ms();
+    assert_eq!(running.call("chat.disappearing", json!({ "chat": ANA, "seconds": 604_800 })).await.unwrap(), json!({}));
+    let (seconds, set_at) = timer_of(&running, ANA).await;
+    assert_eq!(seconds, 604_800, "the chat shows it before WhatsApp has it");
+    let set_at = set_at.unwrap();
+    assert!(set_at % 1000 == 0 && set_at >= before / 1000 * 1000, "set when asked, in whole seconds: {set_at}");
+    let lines = lines_of(&running, ANA).await;
+    let [(line, said, true)] = lines.as_slice() else { panic!("one line, yours: {lines:?}") };
+    assert_eq!(said, "Disappearing messages turned on: 7 days");
+    assert!(line.starts_with("3EB0") && line.len() == 22, "the line is the setting message, with jawd's ID: {line}");
+    assert!(timers_asked(&running).is_empty(), "it waits for the chat's earlier send");
+    running.world.gate(false);
+    running.until_status(ANA, &first, "sent").await;
+    running
+        .until("the timer gone from the outbox", |db| {
+            Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'ephemeral'", [], |r| r.get::<_, i64>(0))? == 0)
+        })
+        .await;
+    let kinds: Vec<&'static str> = running
+        .world
+        .asked()
+        .into_iter()
+        .filter_map(|kind| match kind {
+            pb::command::Kind::Send(_) => Some("send"),
+            pb::command::Kind::Disappearing(_) => Some("timer"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, ["send", "timer"], "in the order they were asked");
+    let set = &timers_asked(&running)[0];
+    assert_eq!((set.chat.as_str(), set.seconds, set.at_ms, set.id.as_str()), (ANA, 604_800, set_at, line.as_str()));
+    let after = running.send(ANA, "after the timer").await;
+    running.until_status(ANA, &after, "sent").await;
+    let row = running.query(move |db| Ok(read::message(db, ANA, &after)?.unwrap().0)).await;
+    assert!(row.expires_at.is_some_and(|at| at >= row.at + 604_800_000 - 60_000), "{row:?}");
+    // The same timer again: done, and nothing more.
+    assert_eq!(running.call("chat.disappearing", json!({ "chat": ANA, "seconds": 604_800 })).await.unwrap(), json!({}));
+    assert_eq!((timers_asked(&running).len(), lines_of(&running, ANA).await.len()), (1, 1));
+    // A group's line comes as WhatsApp tells its members, once.
+    running.call("chat.disappearing", json!({ "chat": CLIMBING, "seconds": 86_400 })).await.unwrap();
+    assert_eq!(timer_of(&running, CLIMBING).await.0, 86_400);
+    running
+        .until("the group's line", |db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = ?1 AND m.kind = 'system'",
+                [CLIMBING],
+                |r| r.get::<_, i64>(0),
+            )? == 1)
+        })
+        .await;
+    let lines = lines_of(&running, CLIMBING).await;
+    assert!(lines[0].0.starts_with("jaw-timer-") && lines[0].2, "named by its time, and yours: {lines:?}");
+    assert_eq!(timers_asked(&running).last().unwrap().id, format!("jaw-timer-{}", timers_asked(&running)[1].at_ms));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timer_whatsapp_refuses_goes_back_with_its_line_unless_set_again_since_and_every_interface_is_told() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA, CLIMBING]).await;
+    running.members(CLIMBING, &[RUI]).await;
+    let mut pushes = running.pushes.subscribe();
+    let was = Chat { id: ANA.into(), ephemeral: Some(86_400), ephemeral_at: Some(1_000), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(was)]).await.unwrap();
+    for chat in [ANA, CLIMBING] {
+        let before = timer_of(&running, chat).await;
+        running.world.refuse_next(1);
+        running.call("chat.disappearing", json!({ "chat": chat, "seconds": 7_776_000 })).await.unwrap();
+        running
+            .until(
+                "the refusal",
+                |db| Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0),
+            )
+            .await;
+        assert_eq!(timer_of(&running, chat).await, before, "{chat}'s timer is as it was");
+        assert!(lines_of(&running, chat).await.is_empty(), "and its line went: {chat}");
+        let notice = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let push = pushes.recv().await.unwrap();
+                if push.method == "notice" {
+                    return push.params["text"].as_str().unwrap().to_string();
+                }
+            }
+        })
+        .await
+        .expect("the refusal is said");
+        assert!(notice.starts_with("WhatsApp refused the disappearing timer you set"), "{notice}");
+    }
+    // Set again from the phone while jaw's waits for WhatsApp: the refusal leaves the phone's.
+    running.connection(jaw_proto::ConnectionState::Offline);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let asked_before = timers_asked(&running).len();
+    running.call("chat.disappearing", json!({ "chat": ANA, "seconds": 604_800 })).await.unwrap();
+    let ours = timer_of(&running, ANA).await.1.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(timers_asked(&running).len(), asked_before, "it waits for WhatsApp");
+    let phone = Chat { id: ANA.into(), ephemeral: Some(0), ephemeral_at: Some(ours + 5_000), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(phone)]).await.unwrap();
+    running.world.refuse_next(1);
+    running.connection(jaw_proto::ConnectionState::Online);
+    running
+        .until("the second refusal", |db| {
+            Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0)
+        })
+        .await;
+    assert_eq!(timer_of(&running, ANA).await, (0, Some(ours + 5_000)), "the newer setting stays");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timer_set_from_jaw_is_newer_than_the_chats_whatever_clock_set_that() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.chats(&[ANA]).await;
+    // A phone whose clock is a minute ahead of the Mac's set the chat's.
+    let ahead = now_ms() + 60_123;
+    let phone = Chat { id: ANA.into(), ephemeral: Some(86_400), ephemeral_at: Some(ahead), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(phone)]).await.unwrap();
+    running.call("chat.disappearing", json!({ "chat": ANA, "seconds": 0 })).await.unwrap();
+    assert_eq!(timer_of(&running, ANA).await, (0, Some(ahead / 1000 * 1000 + 1000)));
+    running
+        .until("the timer gone", |db| Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0))
+        .await;
+    assert_eq!(timers_asked(&running)[0].at_ms, ahead / 1000 * 1000 + 1000);
+    assert_eq!(lines_of(&running, ANA).await[0].1, "Disappearing messages turned off");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chat_disappearing_refuses_what_has_no_timer_to_set_and_timers_the_phones_dont_offer() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::on(home.path(), Arc::default(), false).await;
+    let broadcast = "1234567890@broadcast";
+    let channel = "120363000000000009@newsletter";
+    running.chats(&[ANA, broadcast, channel]).await;
+    let community = Chat { id: "120363000000000010@g.us".into(), kind: Some("community"), ..Chat::default() };
+    let announcements = Chat { id: "120363000000000011@g.us".into(), kind: Some("announcement"), ..Chat::default() };
+    running.store.apply(Lane::Live, vec![Change::Chat(community), Change::Chat(announcements)]).await.unwrap();
+    let refused =
+        |chat: &str, seconds: u32| running.call("chat.disappearing", json!({ "chat": chat, "seconds": seconds }));
+    let error = refused(ANA, 3_600).await.unwrap_err();
+    assert_eq!(error.code, code::INVALID_PARAMS);
+    assert_eq!(error.data, Some(json!({ "param": "seconds", "allowed": [0, 86_400, 604_800, 7_776_000] })));
+    assert_eq!(refused("351919999999@s.whatsapp.net", 86_400).await.unwrap_err().code, code::NOT_FOUND);
+    for chat in [broadcast, channel, "120363000000000010@g.us", "120363000000000011@g.us"] {
+        assert_eq!(refused(chat, 86_400).await.unwrap_err().code, code::NOT_ALLOWED, "{chat}");
+    }
+    assert_eq!(running.store.count("outbox").unwrap(), 0, "nothing was queued");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn reading_moves_the_read_position_and_marks_read_once_a_spell_however_fast_it_is_read() {
     let home = tempfile::tempdir().unwrap();

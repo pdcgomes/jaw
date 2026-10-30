@@ -464,12 +464,15 @@ message MarkRead {
 }
 
 // Sets a chat's disappearing timer, `seconds` of 0 turning it off: in a one-to-one chat as the
-// setting message the phones send, timed `at_ms`; in a group as the group's setting, which WhatsApp
-// then tells its members, this account among them, as a GroupChange. Done once WhatsApp has it.
+// setting message the phones send, timed `at_ms`, with the ID jawd made for it as for any message
+// it sends, so its line is that message and a copy history brings finds it, answered as Sent; in a
+// group as the group's setting, which WhatsApp then tells its members, this account among them, as
+// a GroupChange, answered as Done.
 message Disappearing {
   string chat = 1;
   uint32 seconds = 2;
   int64 at_ms = 3;
+  string id = 4;
 }
 
 // Typing, recording or stopped, in one chat. Done once it's sent.

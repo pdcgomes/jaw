@@ -434,6 +434,7 @@ pub(super) fn refused(inner: &Inner, kind: &str, why: &str) {
         "revoke" => "deleting your message for everyone",
         "vote" => "your vote",
         "played" => "telling its sender you opened their view-once message",
+        "ephemeral" => "the disappearing timer you set, so the chat's is as it was",
         _ => return,
     };
     super::notice(inner, format!("WhatsApp refused {what}: {why}"), Tone::Warning);

@@ -10,11 +10,12 @@
 //! name their people as WhatsApp writes them (`quote`); reactions, edits and deletions go as
 //! messages of their own through the outbox (`actions`); `forward` sends messages again as new
 //! ones of yours (`forward`); `message.info` gives each recipient's receipts, and `chat.info` a
-//! chat's members (`info`); and what you set on a chat, or a star, goes to your other devices by
-//! app state through the outbox (`chat_actions`). Polls (`poll`), places (`places`), events
-//! (`events`) and contact cards (`contact`) go as text does. Text with a URL goes with its page's
-//! preview when the page answers in time (`link`), and the next message to its chat waits for it,
-//! so none overtakes another.
+//! chat's members (`info`); what you set on a chat, or a star, goes to your other devices by app
+//! state through the outbox (`chat_actions`); and `chat.disappearing` sets a chat's disappearing
+//! timer through the outbox (`timer`). Polls (`poll`), places (`places`), events (`events`) and
+//! contact cards (`contact`) go as text does. Text with a URL goes with its page's preview when
+//! the page answers in time (`link`), and the next message to its chat waits for it, so none
+//! overtakes another.
 
 mod actions;
 pub mod bench;
@@ -35,6 +36,7 @@ mod quote;
 mod reads;
 mod regroup;
 mod start;
+mod timer;
 mod typing;
 mod voice;
 
@@ -47,7 +49,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jaw_proto::disappearing::ViewOnce;
+use jaw_proto::disappearing::{ChatDisappearing, ViewOnce};
 use jaw_proto::media::SendMedia;
 use jaw_proto::send::{
     ChatArchive, ChatInfo, ChatMarkUnread, ChatMute, ChatPin, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo,
@@ -312,7 +314,8 @@ impl Sending {
     }
 
     /// Answers one of the sending methods: `send.text`, `send.retry`, `chat.start`, `draft.set`,
-    /// `read`, `typing`, `chat.info`, the actions on a message and the chat actions.
+    /// `read`, `typing`, `chat.info`, `chat.disappearing`, the actions on a message and the chat
+    /// actions.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         let inner = &self.inner;
         match method {
@@ -329,6 +332,7 @@ impl Sending {
             "read" => reads::read(inner, params_of::<Read>(method, params)?).await,
             "typing" => typing::typing(inner, params_of::<Typing>(method, params)?),
             "chat.info" => result(info::chat_info(inner, params_of::<ChatInfo>(method, params)?).await?),
+            "chat.disappearing" => timer::set(inner, params_of::<ChatDisappearing>(method, params)?).await,
             "react" => actions::react(inner, params_of::<React>(method, params)?).await,
             "edit" => actions::edit(inner, params_of::<Edit>(method, params)?).await,
             "delete" => actions::delete(inner, params_of::<Delete>(method, params)?).await,
@@ -358,6 +362,7 @@ impl Sending {
         "read",
         "typing",
         "chat.info",
+        "chat.disappearing",
         "react",
         "edit",
         "delete",

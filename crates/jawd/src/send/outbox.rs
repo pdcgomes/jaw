@@ -476,11 +476,12 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
         }
     }
     // App state and a played receipt are the same however often they're sent, and no receipt ever
-    // says either arrived.
+    // says either arrived; a timer is too, its setting message going with the same ID each time.
     let app_state = row.kind == "app_state";
     let resumed = resumed && !waited.load(Ordering::Relaxed);
     let played = row.kind == "played";
-    let may_have_gone = (resumed || row.attempts > 0) && !app_state && !played;
+    let timer = row.kind == "ephemeral";
+    let may_have_gone = (resumed || row.attempts > 0) && !app_state && !played && !timer;
     let (command, patch) = if app_state {
         match pb::AppStatePatch::decode(row.raw.as_slice()) {
             Ok(patch) => (pb::command::Kind::AppStatePatch(patch.clone()), Some(patch)),
@@ -495,6 +496,15 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
             Ok(receipt) => (pb::command::Kind::MarkRead(receipt), None),
             Err(e) => {
                 let error = format!("its receipt doesn't decode: {e}");
+                settle(&inner, vec![Change::Outbox(Step::Failed { outbox, error, next_at: None })]).await;
+                return Next::Done;
+            }
+        }
+    } else if timer {
+        match pb::Disappearing::decode(row.raw.as_slice()) {
+            Ok(set) => (pb::command::Kind::Disappearing(set), None),
+            Err(e) => {
+                let error = format!("its timer doesn't decode: {e}");
                 settle(&inner, vec![Change::Outbox(Step::Failed { outbox, error, next_at: None })]).await;
                 return Next::Done;
             }
@@ -542,7 +552,7 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
             settle(&inner, sent_changes(&row, &sent)).await;
             return Next::Done;
         }
-        Ok(pb::reply::Kind::Done(_)) if app_state || played => {
+        Ok(pb::reply::Kind::Done(_)) if app_state || played || timer => {
             settle(&inner, vec![Change::Outbox(Step::Sent { outbox })]).await;
             return Next::Done;
         }

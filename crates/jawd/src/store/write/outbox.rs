@@ -27,8 +27,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::chat_actions::{self, Undo};
 use super::{
-    Amendment, CHAT, Doing, MESSAGE, Message, Sent, Stamps, advanced, apply_amendment, chat_jid, delete_row, located,
-    now_ms, upsert_message,
+    Amendment, CHAT, Change, Chat, Doing, MESSAGE, Message, Sent, Stamps, advanced, apply_amendment, chat_jid,
+    delete_row, located, now_ms, upsert_message,
 };
 
 /// The most messages one read receipt names; more go in more receipts, oldest first.
@@ -123,6 +123,20 @@ pub enum Step {
     /// the row goes into quarantine with `error` and its patch, never dropped, and `undo` puts back
     /// what it set, while it's the latest of its setting's waits.
     Refused { outbox: i64, error: String, undo: Option<Undo> },
+    /// Chat `chat`'s disappearing timer set from jaw to `seconds`, at `at`: the chat shows it at
+    /// once, with `line` in a one-to-one chat, whose ID names the outbox row, and the engine's
+    /// Disappearing, `raw`, sets it on WhatsApp after the chat's earlier sends. The row keeps the
+    /// timer it replaced, which comes back if WhatsApp refuses it. What it came to is put in
+    /// `written`.
+    Disappearing {
+        chat: String,
+        seconds: u32,
+        at: i64,
+        id: String,
+        raw: Vec<u8>,
+        line: Option<Box<Message>>,
+        written: Written,
+    },
 }
 
 /// A message `send.media` sends: its row, pending, its kind, and the WAWebProtobufsE2E.Message it
@@ -514,6 +528,9 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
             ("send media", ids.join(" "), None)
         }
         Step::Unsent { outbox, .. } => ("outbox", outbox.to_string(), None),
+        Step::Disappearing { chat, seconds, at, raw, .. } => {
+            ("disappearing", format!("{chat} {seconds} {at}"), Some(raw.as_slice()))
+        }
     }
 }
 
@@ -546,6 +563,9 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
             delete_for_me(db, stamps, Forgetting { chat, target, id, raw }, key, written)
         }
         Step::Forward { sending, key, written } => forward(db, stamps, sending, key, written),
+        Step::Disappearing { chat, seconds, at, id, raw, line, written } => {
+            disappearing(db, stamps, Timer { chat, seconds: *seconds, at: *at, id, raw }, line.as_deref(), written)
+        }
         Step::Withdrawn { outbox } => withdrawn(db, stamps, *outbox),
         Step::Attach { sending, key, written } => attach(db, stamps, sending, key, written),
         Step::Unsent { outbox, error } => unsent(db, stamps, *outbox, error),
@@ -611,6 +631,91 @@ fn keyed_before(db: &Connection, key: &Option<String>, written: &Written) -> Res
     let Some((message, id, chat, chat_n, outbox)) = keyed else { return Ok(false) };
     written.put(Enqueued::Queued { message, id, chat, chat_n, outbox });
     Ok(true)
+}
+
+/// What a timer set from jaw is: its chat, as the interface named it, the timer, when it was set,
+/// the ID of its outbox row, which in a one-to-one chat is its line's and its setting message's,
+/// and the engine's command.
+struct Timer<'a> {
+    chat: &'a str,
+    seconds: u32,
+    at: i64,
+    id: &'a str,
+    raw: &'a [u8],
+}
+
+const TIMER_CHAT: &str = "SELECT n, ephemeral, ephemeral_at FROM chats WHERE id = ?1";
+const TIMER_SET: &str = "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at, effect)
+    VALUES (?1, ?2, 'ephemeral', ?3, ?4, ?4, ?5) RETURNING n";
+const TIMER_SET_WAS: &str = "SELECT jid, id, effect FROM outbox WHERE n = ?1 AND kind = 'ephemeral'";
+const TIMER_BACK: &str =
+    "UPDATE chats SET ephemeral = ?2, ephemeral_at = ?3, v = ?5 WHERE n = ?1 AND ephemeral_at IS ?4";
+
+/// A chat's timer set from jaw: the chat shows it, with its line in a one-to-one chat, and its
+/// outbox row keeps the timer it replaced, for a refusal to put back. A chat whose timer was set
+/// later than this, as a phone's clock ahead of the Mac's can make it, is left as it is, with
+/// nothing queued and nothing put in `written`.
+fn disappearing(
+    db: &Connection,
+    stamps: &mut Stamps,
+    timer: Timer,
+    line: Option<&Message>,
+    written: &Written,
+) -> Result<bool> {
+    let chat = chat_jid(db, timer.chat)?;
+    let found: Option<(i64, i64, Option<i64>)> =
+        db.prepare_cached(TIMER_CHAT)?.query_row([&chat], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+    let Some((n, was, was_at)) = found else {
+        written.put(Enqueued::Gone);
+        return Ok(false);
+    };
+    if was_at.is_some_and(|was_at| was_at > timer.at) || full(db, written)? {
+        return Ok(false);
+    }
+    let effect =
+        serde_json::json!({ "was": was, "was_at": was_at, "at": timer.at, "line": line.is_some() }).to_string();
+    let outbox: i64 =
+        db.prepare_cached(TIMER_SET)?.query_row(params![chat, timer.id, timer.raw, timer.at, effect], |r| r.get(0))?;
+    let set =
+        Chat { id: chat.clone(), ephemeral: Some(timer.seconds), ephemeral_at: Some(timer.at), ..Chat::default() };
+    super::apply(db, stamps, &Change::Chat(set))?;
+    if let Some(line) = line {
+        // Set from the chat's info rather than in it, it reads none of the chat, as a forward doesn't.
+        let line = Message { chat: chat.clone(), sent: Sent::Forwarded, ..line.clone() };
+        super::apply(db, stamps, &Change::Message(line))?;
+    }
+    written.put(Enqueued::Queued {
+        message: None,
+        id: timer.id.to_string(),
+        chat,
+        chat_n: Some(n),
+        outbox: Some(outbox),
+    });
+    Ok(true)
+}
+
+/// A timer set from jaw that WhatsApp refused goes back to the one it replaced, unless the chat's
+/// has been set again since, and the line it left in a one-to-one chat goes.
+fn timer_refused(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<()> {
+    let row: Option<(String, String, Option<String>)> =
+        db.prepare_cached(TIMER_SET_WAS)?.query_row([outbox], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+    let Some((jid, id, Some(effect))) = row else { return Ok(()) };
+    let effect: serde_json::Value = serde_json::from_str(&effect)?;
+    let chat = chat_jid(db, &jid)?;
+    let Some(n) = db.prepare_cached(TIMER_CHAT)?.query_row([&chat], |r| r.get::<_, i64>(0)).optional()? else {
+        return Ok(());
+    };
+    let seq = stamps.seq(CHAT, Some(n));
+    let (was, was_at, at) = (effect["was"].as_i64().unwrap_or(0), effect["was_at"].as_i64(), effect["at"].as_i64());
+    if db.prepare_cached(TIMER_BACK)?.execute(params![n, was, was_at, at, seq])? > 0 {
+        stamps.record(db, CHAT, n, Some(n), seq)?;
+    }
+    if effect["line"].as_bool().unwrap_or(false)
+        && let Some((chat, line)) = located(db, stamps, &chat, &id)?
+    {
+        delete_row(db, stamps, chat, line)?;
+    }
+    Ok(())
 }
 
 /// Whether the outbox is full, saying so in `written`.
@@ -1151,6 +1256,7 @@ fn failed(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str, next_a
         db.prepare_cached(RELEASED)?.execute([outbox])?;
         return acted(db, stamps, outbox, action, false);
     }
+    timer_refused(db, stamps, outbox)?;
     match row {
         Some((n, chat, status)) => failed_message(db, stamps, chat, n, status.as_deref()),
         None => dropped(db, outbox),

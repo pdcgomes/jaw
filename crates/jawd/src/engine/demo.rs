@@ -1462,22 +1462,40 @@ impl Sender {
                 self.world.ask(kind);
                 done
             }
-            // A group's timer comes back as WhatsApp tells its members of it, this account among them.
+            // A one-to-one chat's timer goes as the setting message, with jawd's ID, as jaw-engine
+            // sends it; a group's comes back as WhatsApp tells its members of it, this account among
+            // them. Either is refused when the world refuses the next send.
             pb::command::Kind::Disappearing(set) => {
                 self.world.ask(pb::command::Kind::Disappearing(set.clone()));
-                if set.chat.ends_with("@g.us") {
-                    let change = pb::GroupChange {
-                        jid: set.chat,
-                        sender: ME.into(),
-                        timestamp_ms: now_ms(),
-                        ephemeral_seconds: Some(set.seconds),
+                if !set.chat.ends_with("@g.us") {
+                    let setting = e2e::Message {
+                        protocol_message: Some(Box::new(e2e::ProtocolMessage {
+                            r#type: Some(e2e::protocol_message::Type::EphemeralSetting as i32),
+                            ephemeral_expiration: Some(set.seconds),
+                            ephemeral_setting_timestamp: Some(set.at_ms / 1000),
+                            ..Default::default()
+                        })),
                         ..Default::default()
                     };
-                    let sender = self.clone();
-                    tokio::spawn(async move {
-                        sender.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::GroupChange(change)) }).await
-                    });
+                    return self.sent(pb::Send { chat: set.chat, id: set.id, raw: setting.encode_to_vec() }).await;
                 }
+                let mut refusing = self.world.refusing.lock().expect("the demo world");
+                if *refusing > 0 {
+                    *refusing -= 1;
+                    return Err(EngineError::Failed { message: "server returned error 403".into(), retry: false });
+                }
+                drop(refusing);
+                let change = pb::GroupChange {
+                    jid: set.chat,
+                    sender: ME.into(),
+                    timestamp_ms: now_ms(),
+                    ephemeral_seconds: Some(set.seconds),
+                    ..Default::default()
+                };
+                let sender = self.clone();
+                tokio::spawn(async move {
+                    sender.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::GroupChange(change)) }).await
+                });
                 done
             }
             pb::command::Kind::SubscribePresence(asked) => {

@@ -3933,13 +3933,16 @@ func (x *MarkRead) GetType() string {
 }
 
 // Sets a chat's disappearing timer, `seconds` of 0 turning it off: in a one-to-one chat as the
-// setting message the phones send, timed `at_ms`; in a group as the group's setting, which WhatsApp
-// then tells its members, this account among them, as a GroupChange. Done once WhatsApp has it.
+// setting message the phones send, timed `at_ms`, with the ID jawd made for it as for any message
+// it sends, so its line is that message and a copy history brings finds it, answered as Sent; in a
+// group as the group's setting, which WhatsApp then tells its members, this account among them, as
+// a GroupChange, answered as Done.
 type Disappearing struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Chat          string                 `protobuf:"bytes,1,opt,name=chat,proto3" json:"chat,omitempty"`
 	Seconds       uint32                 `protobuf:"varint,2,opt,name=seconds,proto3" json:"seconds,omitempty"`
 	AtMs          int64                  `protobuf:"varint,3,opt,name=at_ms,json=atMs,proto3" json:"at_ms,omitempty"`
+	Id            string                 `protobuf:"bytes,4,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3993,6 +3996,13 @@ func (x *Disappearing) GetAtMs() int64 {
 		return x.AtMs
 	}
 	return 0
+}
+
+func (x *Disappearing) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
 }
 
 // Typing, recording or stopped, in one chat. Done once it's sent.
@@ -6573,11 +6583,12 @@ const file_engine_proto_rawDesc = "" +
 	"\x06sender\x18\x02 \x01(\tR\x06sender\x12\x10\n" +
 	"\x03ids\x18\x03 \x03(\tR\x03ids\x12\x13\n" +
 	"\x05at_ms\x18\x04 \x01(\x03R\x04atMs\x12\x12\n" +
-	"\x04type\x18\x05 \x01(\tR\x04type\"Q\n" +
+	"\x04type\x18\x05 \x01(\tR\x04type\"a\n" +
 	"\fDisappearing\x12\x12\n" +
 	"\x04chat\x18\x01 \x01(\tR\x04chat\x12\x18\n" +
 	"\aseconds\x18\x02 \x01(\rR\aseconds\x12\x13\n" +
-	"\x05at_ms\x18\x03 \x01(\x03R\x04atMs\"\xa2\x01\n" +
+	"\x05at_ms\x18\x03 \x01(\x03R\x04atMs\x12\x0e\n" +
+	"\x02id\x18\x04 \x01(\tR\x02id\"\xa2\x01\n" +
 	"\fChatPresence\x12\x12\n" +
 	"\x04chat\x18\x01 \x01(\tR\x04chat\x124\n" +
 	"\x05state\x18\x02 \x01(\x0e2\x1e.jaw.engine.ChatPresence.StateR\x05state\"H\n" +
