@@ -415,6 +415,9 @@ fn body(m: &Message, shape: Shape, room: usize, ctx: &Ctx) -> Vec<(String, Style
         let said = if m.mine && !shape.irc { "⊘ You deleted this message" } else { "⊘ This message was deleted" };
         return vec![(said.into(), dim)];
     }
+    if m.view_once {
+        return once(m, ctx);
+    }
     let mut out = vec![];
     if m.kind == Kind::Contact
         && let Some(contact) = &m.contact
@@ -483,30 +486,63 @@ fn body(m: &Message, shape: Shape, room: usize, ctx: &Ctx) -> Vec<(String, Style
             out.push(("\n".into(), plain));
         }
     }
-    for span in &m.spans {
-        let style = match span.t {
-            SpanKind::Bold => plain.add_modifier(Modifier::BOLD),
-            SpanKind::Italic => plain.add_modifier(Modifier::ITALIC),
-            SpanKind::Strike => plain.add_modifier(Modifier::CROSSED_OUT),
-            SpanKind::Mono => Style::new().fg(t.text).bg(t.surface),
-            SpanKind::Quote => Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
-            SpanKind::Link => Style::new().fg(t.link).add_modifier(Modifier::UNDERLINED),
-            SpanKind::Mention if span.person.as_ref().is_some_and(|p| ctx.me.contains(p)) => {
-                Style::new().fg(t.mention).add_modifier(Modifier::BOLD)
-            }
-            SpanKind::Mention => plain.add_modifier(Modifier::BOLD),
-            SpanKind::Text | SpanKind::List | SpanKind::Other => plain,
-        };
-        out.push((span.s.clone(), style));
+    out.extend(styled(&m.spans, t, ctx.me));
+    out
+}
+
+/// jawd's spans as styled segments, a mention of you, one of `me`, standing out.
+pub fn styled(spans: &[crate::data::Span], t: &Theme, me: &[String]) -> Vec<(String, Style)> {
+    let plain = Style::new().fg(t.fg);
+    spans
+        .iter()
+        .map(|span| {
+            let style = match span.t {
+                SpanKind::Bold => plain.add_modifier(Modifier::BOLD),
+                SpanKind::Italic => plain.add_modifier(Modifier::ITALIC),
+                SpanKind::Strike => plain.add_modifier(Modifier::CROSSED_OUT),
+                SpanKind::Mono => Style::new().fg(t.text).bg(t.surface),
+                SpanKind::Quote => Style::new().fg(t.muted).add_modifier(Modifier::ITALIC),
+                SpanKind::Link => Style::new().fg(t.link).add_modifier(Modifier::UNDERLINED),
+                SpanKind::Mention if span.person.as_ref().is_some_and(|p| me.contains(p)) => {
+                    Style::new().fg(t.mention).add_modifier(Modifier::BOLD)
+                }
+                SpanKind::Mention => plain.add_modifier(Modifier::BOLD),
+                SpanKind::Text | SpanKind::List | SpanKind::Other => plain,
+            };
+            (span.s.clone(), style)
+        })
+        .collect()
+}
+
+/// The mark of a message to open once, and what it is, as jawd sums it up: someone else's opens
+/// with ⏎, and yours says once they've opened it, as on the phones.
+fn once(m: &Message, ctx: &Ctx) -> Vec<(String, Style)> {
+    let t = ctx.theme;
+    let what = m.summary.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| {
+        match m.kind {
+            Kind::Image => "View once photo",
+            Kind::Video | Kind::Gif | Kind::VideoNote => "View once video",
+            Kind::Voice | Kind::Audio => "View once voice message",
+            _ => "View once message",
+        }
+        .to_string()
+    });
+    let mark = Style::new().fg(t.brand).add_modifier(Modifier::BOLD);
+    let mut out = vec![("① ".to_string(), mark), (what, Style::new().fg(t.muted))];
+    match (m.mine, m.status) {
+        (false, _) => out.push((" · ⏎ opens it once".into(), Style::new().fg(t.comment))),
+        (true, Some(Tick::Played)) => out.push((" · opened".into(), Style::new().fg(t.comment))),
+        (true, _) => {}
     }
     out
 }
 
 /// A message's own lines, its quote, its text, edited, its reactions and whether it's sent, and,
-/// for a photo, a sticker, a video or an album, the pictures over them.
+/// for a photo, a sticker, a video or an album, the pictures over them. A view-once message shows
+/// no picture of itself.
 pub fn laid(m: &Message, shape: Shape, ctx: &Ctx) -> Laidout {
     let mut out = Laidout { lines: text(m, shape, ctx), pictures: vec![] };
-    if !ctx.pictures || !shape.pictured || m.deleted {
+    if !ctx.pictures || !shape.pictured || m.deleted || m.view_once {
         return out;
     }
     let w = shape.width;
@@ -606,7 +642,10 @@ fn text(m: &Message, shape: Shape, ctx: &Ctx) -> Vec<Line<'static>> {
                 tail.push(Span::raw(" ".repeat(TICKS)));
             }
             if shape.time {
-                tail.push(Span::styled(format!("  {}", fmt::clock(m.at, ctx.tz)), Style::new().fg(t.comment)));
+                // One that disappears has its mark in the gap before its time, which keeps its width.
+                let clock = fmt::clock(m.at, ctx.tz);
+                let time = if m.expires_at.is_some() { format!(" ⏱{clock}") } else { format!("  {clock}") };
+                tail.push(Span::styled(time, Style::new().fg(t.comment)));
             }
             let tail_w: usize = tail.iter().map(|s| s.width()).sum();
             let tail_w = if m.mine && !shape.time { tail_w + TIME } else { tail_w };
@@ -676,6 +715,8 @@ mod tests {
             edited: false,
             deleted: false,
             starred: false,
+            expires_at: None,
+            view_once: false,
             summary: None,
             system: None,
             media: None,

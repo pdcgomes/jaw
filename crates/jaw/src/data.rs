@@ -76,6 +76,9 @@ pub struct Chat {
     /// Its Alt slot, 1 to 9.
     #[serde(default)]
     pub favourite: Option<u8>,
+    /// Its disappearing-message timer in seconds, 0 when it's off.
+    #[serde(default)]
+    pub ephemeral: u32,
 }
 
 impl Chat {
@@ -289,6 +292,12 @@ pub struct Message {
     pub deleted: bool,
     #[serde(default)]
     pub starred: bool,
+    /// When it disappears, in milliseconds since the epoch.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    /// A photo, video or voice message to open once, which shows nothing of itself until then.
+    #[serde(default)]
+    pub view_once: bool,
     /// One line for a kind the interface doesn't draw yet, such as "▣ photo".
     #[serde(default)]
     pub summary: Option<String>,
@@ -980,6 +989,22 @@ pub struct Member {
     pub admin: bool,
 }
 
+/// `view_once.open`'s answer: the file to show once, with its caption and its previews, and when
+/// jawd erases it whatever happens.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Opened {
+    pub message: String,
+    #[serde(default)]
+    pub kind: Kind,
+    pub path: String,
+    #[serde(default)]
+    pub spans: Vec<Span>,
+    #[serde(default)]
+    pub media: Option<Box<Media>>,
+    #[serde(default)]
+    pub until: i64,
+}
+
 /// `message.info`'s answer: when it was sent, and how far it has got with each recipient.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct MessageInfo {
@@ -1238,6 +1263,12 @@ pub enum Update {
         message: String,
         info: Result<MessageInfo, String>,
     },
+    /// `view_once.open`'s answer, the message's file to show once, or why it can't be.
+    Opened {
+        chat: String,
+        message: String,
+        opened: Result<Box<Opened>, String>,
+    },
     /// The panes' layout jawd keeps for jaw, as `ask_layout` asked for it.
     Layout(Box<Saved>),
     /// The layout jawd keeps for jaw now, as it answered `keep_layout`, or as another jaw kept it.
@@ -1422,6 +1453,12 @@ pub trait Jawd {
     fn save(&mut self, chat: &str, message: &str, to: &str);
     /// Mutes a chat until then, `i64::MAX` for ever, or unmutes it with `None`.
     fn mute(&mut self, chat: &str, until: Option<i64>);
+    /// Sets a chat's disappearing timer, 0 turning it off.
+    fn disappearing(&mut self, chat: &str, seconds: u32);
+    /// Opens someone else's view-once message in `chat`; its file comes as `Update::Opened`.
+    fn view_once_open(&mut self, chat: &str, message: &str);
+    /// Says the view-once message opened is shown no more, so jawd erases it.
+    fn view_once_close(&mut self, chat: &str, message: &str);
     fn archive(&mut self, chat: &str, archived: bool);
     fn pin(&mut self, chat: &str, pinned: bool);
     fn mark_unread(&mut self, chat: &str, unread: bool);

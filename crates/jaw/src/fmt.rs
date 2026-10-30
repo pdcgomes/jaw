@@ -141,6 +141,16 @@ pub fn length(seconds: f64) -> String {
     }
 }
 
+/// A disappearing-message timer as the phones name it: 24 hours, 7 days, 90 days.
+pub fn timer(seconds: u32) -> String {
+    let (n, unit) = match seconds {
+        s if s > 86_400 && s.is_multiple_of(86_400) => (s / 86_400, "day"),
+        s if s >= 3_600 && s.is_multiple_of(3_600) => (s / 3_600, "hour"),
+        s => (s.div_ceil(60).max(1), "minute"),
+    };
+    if n == 1 { format!("1 {unit}") } else { format!("{n} {unit}s") }
+}
+
 /// A playing speed as its button says it: 1, 1.5, 2.
 pub fn speed(speed: f64) -> String {
     let tenths = (speed * 10.0).round() as u32;

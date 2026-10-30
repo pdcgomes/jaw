@@ -9,6 +9,7 @@ mod draw;
 mod focus_mode;
 mod keys;
 mod library;
+mod once;
 mod palette;
 mod panes;
 mod quick_look;
@@ -289,6 +290,8 @@ pub struct View {
     /// The voice message playing or paused, or the recording being listened to, as jawd last
     /// said or a key just asked.
     pub playing: Option<crate::data::Playback>,
+    /// A view-once message open, or being opened.
+    once: Option<once::Once>,
     /// What a key last asked to play, and when, so pushes about the one before don't undo it.
     voice_asked: Option<(Option<String>, i64)>,
     /// The speed voice messages play at.
@@ -425,6 +428,7 @@ impl View {
             votes: HashMap::new(),
             info: None,
             playing: None,
+            once: None,
             voice_asked: None,
             speed: 1.0,
             recorder: None,
@@ -528,10 +532,12 @@ impl View {
         self.first_frame_due().is_some_and(|due| Instant::now() < due)
     }
 
-    /// Whether something on screen counts seconds: a QR code's or a retry's.
+    /// Whether something on screen counts seconds: a QR code's, a retry's, or how long a view-once
+    /// message open has left.
     fn counting(&self) -> bool {
         matches!(self.reach, Reach::Unreachable { .. })
             || (self.linking() && matches!(self.link, Some(LinkStep::Qr { .. })))
+            || self.once.is_some()
     }
 
     fn narrow(&self) -> bool {
@@ -727,6 +733,7 @@ impl View {
                 self.say(why);
             }
             Update::Info { message, info } => self.on_info(message, info),
+            Update::Opened { chat, message, opened } => self.on_opened(chat, message, opened),
             Update::Layout(saved) => self.layout_came(*saved),
             Update::LayoutKept(saved) => self.layout_kept_now(*saved),
             Update::Starting { failed } => self.reach = Reach::Starting { failed },
@@ -1126,6 +1133,7 @@ impl View {
             self.chomp_until = None;
             self.dirty = true;
         }
+        self.once_due(now);
         if self.images.next_wake().is_some_and(|t| t <= Instant::now()) {
             self.dirty = true;
         }
@@ -1146,6 +1154,7 @@ impl View {
         soon(self.read_due);
         soon(self.layout_due());
         soon(self.notice.as_ref().map(|(_, t)| *t));
+        soon(self.once_wake());
         if self.chomp_until.is_some() {
             soon(Some(now + 100));
         }
@@ -1263,6 +1272,8 @@ impl View {
     }
 }
 
+#[cfg(test)]
+mod once_tests;
 #[cfg(test)]
 mod panes_tests;
 #[cfg(test)]

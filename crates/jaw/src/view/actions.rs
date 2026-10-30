@@ -456,12 +456,18 @@ impl View {
                     Span::styled(format!("{said:<13}"), Style::new().fg(t.muted)),
                     Span::styled(sent, Style::new().fg(t.fg)),
                 ]));
+                if let Some(at) = m.and_then(|m| m.expires_at) {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{:<13}", "disappears"), Style::new().fg(t.muted)),
+                        Span::styled(fmt::full(at, self.tz), Style::new().fg(t.fg)),
+                    ]));
+                }
                 if !mine {
                     lines.push(Line::default());
                     let said = "Receipts are only for your own messages.";
                     lines.push(Line::from(Span::styled(said, Style::new().fg(t.comment))));
                 } else {
-                    let played = m.is_some_and(|m| m.kind == Kind::Voice);
+                    let played = m.is_some_and(|m| m.kind == Kind::Voice || m.view_once);
                     lines.push(Line::default());
                     let mut head = format!("{:<20}{:<13}{:<13}", "", "delivered", "read");
                     if played {

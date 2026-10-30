@@ -43,6 +43,9 @@ pub struct Flood {
     /// Whether the library's grid of photos across all chats is open, the flood's photos
     /// coming into it.
     pub library: bool,
+    /// Whether a fourth of the open chat's messages disappear a second after they come, erased
+    /// from its window as jawd erases them, the chat's timer on.
+    pub disappearing: bool,
 }
 
 /// What the keys do while the flood goes on.
@@ -114,6 +117,8 @@ pub struct Report {
     pub written: u64,
     /// Where the voice message playing had got by the end, as its pushes said.
     pub voice_at: Option<f64>,
+    /// How many of the flood's messages disappeared, when they did.
+    pub erased: Option<u64>,
     /// After the warm-up: how long it lasted, the frames drawn, and how often the process woke.
     pub measured: f64,
     pub frames_measured: u64,
@@ -194,6 +199,9 @@ impl Report {
         }
         if let Some(at) = self.voice_at {
             lines.push(format!("voice      playing, at {}", crate::fmt::length(at)));
+        }
+        if let Some(n) = self.erased {
+            lines.push(format!("erased     {n} of the open chat's messages disappeared as they came due"));
         }
         lines.join("\n")
     }
@@ -305,6 +313,7 @@ pub fn flood(f: &Flood) -> Result<Report> {
     let (start, age) = (Instant::now(), jaw_client::usage::age());
     let (tx, rx) = std::sync::mpsc::channel();
     let length = f.warm.as_secs_f64() + f.seconds;
+    let mut erasing = None;
     let (mut view, flooding, feeding) = if let (true, Some(socket)) = (f.jawd, &f.socket) {
         (View::new(Box::new(crate::wire::Wire::connect(socket.clone(), tx.clone()))), None, None)
     } else if f.jawd {
@@ -316,6 +325,10 @@ pub fn flood(f: &Flood) -> Result<Report> {
         if f.voice {
             demo.keep_voice_time();
             demo.play_newest_voice("ana");
+        }
+        if f.disappearing {
+            demo.disappear();
+            erasing = Some(demo.clone());
         }
         let flooding = demo.flood(f.rate, length);
         (View::new(Box::new(demo)), Some(flooding), None)
@@ -421,6 +434,7 @@ pub fn flood(f: &Flood) -> Result<Report> {
         peak_bytes: peak_bytes(),
         written,
         voice_at: view.playing.as_ref().map(|p| p.at),
+        erased: erasing.map(|demo| demo.erased()),
     })
 }
 
@@ -460,6 +474,7 @@ mod tests {
             pictures: Protocol::Blocks,
             voice: false,
             library: false,
+            disappearing: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
@@ -486,6 +501,7 @@ mod tests {
             pictures: Protocol::Kitty,
             voice: false,
             library: false,
+            disappearing: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
@@ -511,6 +527,7 @@ mod tests {
             pictures: Protocol::Blocks,
             voice: true,
             library: false,
+            disappearing: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
@@ -537,9 +554,37 @@ mod tests {
             pictures: Protocol::Blocks,
             voice: false,
             library: true,
+            disappearing: false,
         })
         .unwrap();
         eprintln!("{}", report.describe());
+        assert!(report.keys.len() >= 200, "{}", report.describe());
+        assert!(report.presses >= MIN_PRESSES, "{}", report.describe());
+        assert!(report.at_best() <= KEYPRESS, "{}", report.describe());
+    }
+
+    #[test]
+    fn with_messages_disappearing_a_keypress_is_drawn_within_16_ms_while_2000_messages_a_second_arrive() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let report = flood(&Flood {
+            width: 140,
+            height: 40,
+            rate: 2_000,
+            seconds: 4.0,
+            every: Duration::from_millis(12),
+            warm: Duration::from_secs(1),
+            keys: Keys::Typing,
+            jawd: false,
+            socket: None,
+            until_first: false,
+            pictures: Protocol::Blocks,
+            voice: false,
+            library: false,
+            disappearing: true,
+        })
+        .unwrap();
+        eprintln!("{}", report.describe());
+        assert!(report.erased.is_some_and(|n| n >= 500), "they went as they came due: {}", report.describe());
         assert!(report.keys.len() >= 200, "{}", report.describe());
         assert!(report.presses >= MIN_PRESSES, "{}", report.describe());
         assert!(report.at_best() <= KEYPRESS, "{}", report.describe());
@@ -562,6 +607,7 @@ mod tests {
             pictures: Protocol::Blocks,
             voice: false,
             library: false,
+            disappearing: false,
         };
         let report = super::flood(&flood).unwrap();
         eprintln!("{}", report.describe());
@@ -587,6 +633,7 @@ mod tests {
             pictures: Protocol::Blocks,
             voice: false,
             library: false,
+            disappearing: false,
         })
         .unwrap();
         assert!(report.keys.is_empty());
@@ -611,6 +658,7 @@ mod tests {
             pictures: Protocol::Blocks,
             voice: false,
             library: false,
+            disappearing: false,
         })
         .unwrap();
         assert!(report.opens.len() >= 5, "{}", report.describe());

@@ -80,6 +80,8 @@ fn message(id: &str, v: u64, sort: &str) -> Message {
         edited: false,
         deleted: false,
         starred: false,
+        expires_at: None,
+        view_once: false,
         summary: None,
         system: None,
         media: None,

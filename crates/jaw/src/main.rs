@@ -125,6 +125,9 @@ enum Command {
         /// Shows the library's grid of photos across all chats, the flood's photos coming into it
         #[arg(long)]
         library: bool,
+        /// Has a fourth of the open chat's messages disappear a second after they come
+        #[arg(long)]
+        disappearing: bool,
     },
     /// Starts jawd at login, as a LaunchAgent on macOS or a systemd user unit on Linux
     #[command(subcommand)]
@@ -204,6 +207,7 @@ fn main() -> Result<()> {
             graphics,
             voice,
             library,
+            disappearing,
         }) => {
             let flood = bench::Flood {
                 width,
@@ -219,6 +223,7 @@ fn main() -> Result<()> {
                 pictures: graphics,
                 voice,
                 library,
+                disappearing,
             };
             let report = bench::flood(&flood)?;
             println!("{}", report.describe());

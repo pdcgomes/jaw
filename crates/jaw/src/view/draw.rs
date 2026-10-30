@@ -56,7 +56,7 @@ fn fill(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Li
 /// A line drawn into the buffer as `set_line` would, but leaving cells that only a plain space
 /// would cover as the panel filled them, which spares a frame most of its width, and honouring a
 /// centred line's alignment.
-fn put(buf: &mut Buffer, x: u16, y: u16, line: &Line, width: u16) {
+pub(super) fn put(buf: &mut Buffer, x: u16, y: u16, line: &Line, width: u16) {
     let end = x + width;
     let mut at = x;
     if line.alignment == Some(ratatui::layout::Alignment::Center) {
@@ -150,6 +150,9 @@ impl View {
         }
         if self.quick_look.is_some() {
             self.draw_quick_look(f);
+        }
+        if self.once.is_some() {
+            self.draw_once(f);
         }
         match self.overlay {
             Some(Overlay::Keys) => self.draw_keys(f),
@@ -294,6 +297,9 @@ impl View {
     pub(super) fn hints(&self) -> Vec<(&'static str, &'static str, bool)> {
         if self.overlay.is_some() {
             return vec![("any key", "closes", true)];
+        }
+        if self.once.is_some() {
+            return self.once_hints();
         }
         if self.quick_look.is_some() {
             return self.quick_look_hints();
@@ -596,6 +602,9 @@ impl View {
         let t = &self.theme;
         let Some(chat) = self.open.as_deref().and_then(|id| self.chat_known(id)) else { return Line::default() };
         let mut more = vec![];
+        if chat.ephemeral > 0 {
+            more.push(Span::styled(format!("· ⏱ {} ", fmt::timer(chat.ephemeral)), Style::new().fg(t.comment)));
+        }
         if let Some(who) = self.who_types(chat) {
             more.push(Span::styled(format!("· {who} "), Style::new().fg(t.online)));
         } else if let Some((said, style)) = self.presence_said(&chat.id) {
@@ -1008,7 +1017,10 @@ impl View {
             let look = crate::graphics::Look {
                 bg: if b.detail.is_some() { t.selection } else { t.bg },
                 truecolor: t.truecolor,
-                over: self.overlay.is_some() || self.palette.is_some() || self.quick_look.is_some(),
+                over: self.overlay.is_some()
+                    || self.palette.is_some()
+                    || self.quick_look.is_some()
+                    || self.once.is_some(),
             };
             for p in &b.lines.pictures {
                 let sources: Vec<std::path::PathBuf> = p.sources.iter().map(|s| self.images.path(s)).collect();

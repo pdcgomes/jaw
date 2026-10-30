@@ -243,6 +243,11 @@ fn answer(line: &str, kept: &Mutex<Kept>) -> Option<Vec<Value>> {
             }
             json!({ "path": path.display().to_string() })
         }
+        "view_once.open" if params["message"] == "3EB0GONE" => {
+            return error(code::NOT_FOUND, "jawd has no message 3EB0GONE; one opened once is gone", Value::Null);
+        }
+        "view_once.open" => fixture("view_once.open.result")["result"].clone(),
+        "view_once.close" | "chat.disappearing" => json!({}),
         "message.info" => json!({
             "message": params["message"],
             "sent": 1_792_145_077_000_i64,
@@ -803,6 +808,45 @@ fn an_answer_to_a_settings_change_that_cant_be_read_says_so() {
     drive(&mut wire, &rx, &mut said, |s| s.iter().any(answers_settings));
     let answered: Vec<&Update> = said.iter().filter(|u| answers_settings(u)).collect();
     assert_eq!(answered, [&Update::SettingsUnconfirmed("jaw couldn't read jawd's answer".into())], "{said:?}");
+}
+
+/// `view_once.open` names the message and its chat, and its answer comes as the file to show, its
+/// caption and when it goes, or as why it can't be; `view_once.close` and `chat.disappearing` are
+/// asked as the protocol has them.
+#[test]
+fn a_view_once_message_is_opened_and_closed_and_a_timer_set_as_the_protocol_asks() {
+    let jawd = scripted();
+    let (tx, rx) = channel();
+    let mut wire = Wire::connect(jawd.socket.clone(), tx);
+    let mut said = vec![];
+    drive(&mut wire, &rx, &mut said, |s| s.iter().any(|u| matches!(u, Update::Hello { .. })));
+    let opened = |s: &[Update]| s.iter().filter(|u| matches!(u, Update::Opened { .. })).count();
+    wire.view_once_open(ANA, "3EB0B7C6D5E4F3A2");
+    drive(&mut wire, &rx, &mut said, |s| opened(s) == 1);
+    wire.view_once_open(ANA, "3EB0GONE");
+    drive(&mut wire, &rx, &mut said, |s| opened(s) == 2);
+    let answers: Vec<&Update> = said.iter().filter(|u| matches!(u, Update::Opened { .. })).collect();
+    let Update::Opened { chat, message, opened: Ok(file) } = answers[0] else { panic!("{answers:?}") };
+    assert_eq!((chat.as_str(), message.as_str(), file.kind), (ANA, "3EB0B7C6D5E4F3A2", crate::data::Kind::Image));
+    assert!(file.path.starts_with("media/files/5f2c") && file.until == 1_792_145_160_000, "{file:?}");
+    assert_eq!(file.spans.iter().map(|s| s.s.as_str()).collect::<String>(), "guess where");
+    let media = file.media.as_deref().unwrap();
+    assert!(
+        (media.w, media.h) == (3024, 4032) && media.previews.large.as_deref().is_some_and(|p| p.ends_with(".768.jpg"))
+    );
+    let Update::Opened { message, opened: Err(why), .. } = answers[1] else { panic!("{answers:?}") };
+    assert_eq!((message.as_str(), why.as_str()), ("3EB0GONE", "jawd has no message 3EB0GONE; one opened once is gone"));
+    wire.view_once_close(ANA, "3EB0B7C6D5E4F3A2");
+    wire.disappearing(ANA, 604_800);
+    let asked = || jawd.asked("view_once.close").len() + jawd.asked("chat.disappearing").len();
+    drive(&mut wire, &rx, &mut said, |_| asked() == 2);
+    assert_eq!(
+        jawd.asked("view_once.open"),
+        [json!({ "message": "3EB0B7C6D5E4F3A2", "chat": ANA }), json!({ "message": "3EB0GONE", "chat": ANA })]
+    );
+    assert_eq!(jawd.asked("view_once.close"), [json!({ "message": "3EB0B7C6D5E4F3A2", "chat": ANA })]);
+    assert_eq!(jawd.asked("chat.disappearing"), [json!({ "chat": ANA, "seconds": 604_800 })]);
+    assert!(!said.iter().any(|u| matches!(u, Update::Notice(_))), "done says nothing: {said:?}");
 }
 
 /// A settings change whose answer the connection lost may have been kept: it's said as not

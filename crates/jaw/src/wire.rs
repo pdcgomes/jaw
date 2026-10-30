@@ -8,8 +8,8 @@
 //! drafts and read positions jawd hadn't answered for.
 
 use crate::data::{
-    Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, OtherJawd, Place, Presence, PresenceState,
-    Typing, Update,
+    Chat, Counts, Found, FoundKind, Jawd, LibraryAsk, Message, MessageInfo, Opened, OtherJawd, Place, Presence,
+    PresenceState, Typing, Update,
 };
 use crate::run::Event;
 use jaw_client::{Client, Config, Event as From, Failure, WindowId};
@@ -87,6 +87,8 @@ enum Asked {
     Info(String),
     /// A message's file being saved, which jawd answers once it's copied, with where.
     Save,
+    /// A view-once message being opened, its chat and ID, for the view waiting for its file.
+    Opened(String, String),
     /// A chat's members, for completing `@` names; refused, the interface uses who it's seen.
     Members(String),
     /// The folder tree's window.
@@ -437,6 +439,9 @@ impl Wire {
                 Failure::Jawd(e) if e.code == code::UNKNOWN_METHOD => why_not(failure, "saving files"),
                 other => format!("not saved: {other}"),
             })),
+            Asked::Opened(chat, message) => {
+                Some(Update::Opened { chat, message, opened: Err(why_not(failure, "opening it")) })
+            }
             Asked::Members(chat) => Some(Update::Members { chat, members: vec![] }),
             Asked::Folders | Asked::Roster(_) => None,
             Asked::Library(_) => Some(Update::LibraryRefused(why_not(failure, "the library"))),
@@ -541,6 +546,10 @@ impl Wire {
                             Ok(saved) => Update::Saved(saved.path),
                             Err(_) => Update::Notice("jawd saved it, but jaw couldn't read where".into()),
                         })
+                    }
+                    (Asked::Opened(chat, message), Ok(result)) => {
+                        let opened = serde_json::from_value::<Opened>(result).map(Box::new).map_err(|e| e.to_string());
+                        out.push(Update::Opened { chat, message, opened });
                     }
                     (Asked::Members(chat), Ok(result)) => {
                         let members = serde_json::from_value(result["members"].clone()).unwrap_or_default();
@@ -964,6 +973,21 @@ impl Jawd for Wire {
 
     fn mute(&mut self, chat: &str, until: Option<i64>) {
         self.ask("chat.mute", json!({ "chat": chat, "until": until }), Asked::Did("muting"));
+    }
+
+    fn disappearing(&mut self, chat: &str, seconds: u32) {
+        let params = json!({ "chat": chat, "seconds": seconds });
+        self.ask("chat.disappearing", params, Asked::Did("setting the disappearing timer"));
+    }
+
+    fn view_once_open(&mut self, chat: &str, message: &str) {
+        let params = json!({ "message": message, "chat": chat });
+        self.ask("view_once.open", params, Asked::Opened(chat.to_string(), message.to_string()));
+    }
+
+    fn view_once_close(&mut self, chat: &str, message: &str) {
+        let params = json!({ "message": message, "chat": chat });
+        self.ask("view_once.close", params, Asked::Did("closing it"));
     }
 
     fn archive(&mut self, chat: &str, archived: bool) {

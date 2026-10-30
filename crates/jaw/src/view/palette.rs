@@ -64,6 +64,9 @@ pub enum Does {
     Later(&'static str),
     /// How long to mute for, once Mute asks.
     MuteFor(String, i64, &'static str),
+    /// A chat's disappearing timer asks which, with its ID, name and timer now; then sets it.
+    Disappearing(String, String, u32),
+    DisappearingFor(String, u32),
     /// A chat with a number typed into the palette.
     StartPhone(String),
     /// A key's action on the selected message, from the palette.
@@ -241,6 +244,8 @@ pub struct Palette {
     pub scope: Option<(String, String)>,
     /// Mute asks how long: the chat and its name.
     pub muting: Option<(String, String)>,
+    /// The disappearing timer asks which: the chat, its name and its timer now.
+    pub timing: Option<(String, String, u32)>,
     /// Which Alt slot asks for a folder or a chat: its ID and name.
     pub favouring: Option<(String, String)>,
     pub mode: Mode,
@@ -267,6 +272,7 @@ impl Palette {
             narrow: Narrow::All,
             scope: None,
             muting: None,
+            timing: None,
             favouring: None,
             mode: Mode::Find,
             reactions: vec![],
@@ -519,6 +525,10 @@ impl View {
             self.say("a deleted message can't be forwarded");
             return;
         }
+        if m.view_once {
+            self.say("a view-once message can't be forwarded, as on your phone");
+            return;
+        }
         let mut p = Palette::new();
         p.narrow = Narrow::Kind(FoundKind::Chat);
         p.mode = Mode::Forward { messages: vec![m.id.clone()], picked: vec![] };
@@ -725,6 +735,14 @@ impl View {
                     Does::Mute(id.clone(), name.clone()),
                 )
             });
+            if matches!(c.kind, ChatKind::Direct | ChatKind::Group) {
+                let now = if c.ephemeral == 0 { "off".to_string() } else { fmt::timer(c.ephemeral) };
+                all.push(Action::new(
+                    "Disappearing messages",
+                    format!("{name} · {now} · ⏎ asks which"),
+                    Does::Disappearing(id.clone(), name.clone(), c.ephemeral),
+                ));
+            }
             let (verb, archived) = if c.archived { ("Unarchive", false) } else { ("Archive", true) };
             all.push(Action::new(format!("{verb} this chat"), name.clone(), Does::Archive(id.clone(), archived)));
             let (verb, pinned) = if c.pinned { ("Unpin", false) } else { ("Pin", true) };
@@ -893,6 +911,14 @@ impl View {
             }
             if self.favourite_of(id).is_some() {
                 items.push(Item::Action(Action::new("Off its alt key", "", Does::FavouriteTo(id.clone(), None))));
+            }
+            return items;
+        }
+        if let Some((id, name, now)) = &p.timing {
+            let mut items = vec![Item::Heading("disappearing messages", name.clone())];
+            for (label, seconds) in [("Off", 0), ("24 hours", 86_400), ("7 days", 604_800), ("90 days", 7_776_000)] {
+                let detail = if seconds == *now { "now" } else { "" };
+                items.push(Item::Action(Action::new(label, detail, Does::DisappearingFor(id.clone(), seconds))));
             }
             return items;
         }
@@ -1081,6 +1107,7 @@ impl View {
         let q = &mut p.query;
         match k.code {
             KeyCode::Esc if p.muting.is_some() => p.muting = None,
+            KeyCode::Esc if p.timing.is_some() => p.timing = None,
             KeyCode::Esc => self.palette = None,
             KeyCode::Char('k') if ctrl => self.palette = None,
             KeyCode::Enter => self.palette_act(),
@@ -1326,6 +1353,21 @@ impl View {
                     p.favouring = Some((id, name));
                     p.selected = 0;
                 }
+            }
+            Does::Disappearing(id, name, now) => {
+                if let Some(p) = self.palette.as_mut() {
+                    p.timing = Some((id, name, now));
+                    p.selected = 0;
+                }
+            }
+            Does::DisappearingFor(id, seconds) => {
+                close(self);
+                self.jawd.disappearing(&id, seconds);
+                self.say(if seconds == 0 {
+                    "disappearing messages off".to_string()
+                } else {
+                    format!("new messages disappear after {}", fmt::timer(seconds))
+                });
             }
             Does::FavouriteTo(id, slot) => {
                 close(self);
@@ -1663,6 +1705,8 @@ impl View {
         if text.is_empty() {
             let hint = if p.muting.is_some() {
                 "for how long?"
+            } else if p.timing.is_some() {
+                "after how long?"
             } else if let Mode::Name { .. } = p.mode {
                 "the folder's name"
             } else if let Mode::File { .. } | Mode::Move { .. } | Mode::Card { .. } | Mode::Vote { .. } = p.mode {
@@ -1715,7 +1759,7 @@ impl View {
                 spans.push(Span::styled(format!(" {name} "), Style::new().fg(t.fg).bg(t.selection)));
             }
             buf.set_line(inner.x, inner.y + 1, &Line::from(fit_spans(spans, iw)), inner.width);
-        } else if p.muting.is_none() && p.mode == Mode::Find {
+        } else if p.muting.is_none() && p.timing.is_none() && p.mode == Mode::Find {
             let mut spans = vec![];
             for (i, (n, label)) in strip.iter().enumerate() {
                 if i > 0 {

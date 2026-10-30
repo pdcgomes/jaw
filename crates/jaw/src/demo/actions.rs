@@ -6,7 +6,8 @@
 
 use super::{Account, Later, ME, markup};
 use crate::data::{
-    ChatKind, Contact, Kind, Member, Message, MessageInfo, Quote, Reaction, Recipient, Span, SpanKind, Tick, Update,
+    ChatKind, Contact, Kind, Member, Message, MessageInfo, Opened, Quote, Reaction, Recipient, Span, SpanKind, Tick,
+    Update,
 };
 use crate::fmt::MINUTE;
 use jaw_client::Update as Window;
@@ -394,6 +395,26 @@ impl Account {
         }
         self.threads[t].messages[i].starred = starred;
         self.changed(t, i);
+    }
+
+    /// Opens a view-once photo of the made-up account's: the lake, with a caption, to show once.
+    pub(super) fn on_view_once_open(&mut self, chat: &str, message: &str) {
+        let opened = match self.locate(message).map(|(t, i)| &self.threads[t].messages[i]) {
+            Some(m) if m.view_once && !m.mine => {
+                let media = super::pictures::media("lake");
+                Ok(Box::new(Opened {
+                    message: message.to_string(),
+                    kind: m.kind,
+                    path: media.previews.large.clone().unwrap_or_default(),
+                    spans: vec![Span { t: SpanKind::Text, s: "a vista daqui".into(), person: None, url: None }],
+                    media: Some(Box::new(media)),
+                    until: self.now() + MINUTE,
+                }))
+            }
+            Some(_) => Err("that message isn't one to open once".to_string()),
+            None => Err("it's gone: a view-once message opens once".to_string()),
+        };
+        self.send(Update::Opened { chat: chat.to_string(), message: message.to_string(), opened });
     }
 
     pub(super) fn on_message_info(&mut self, message: &str) {

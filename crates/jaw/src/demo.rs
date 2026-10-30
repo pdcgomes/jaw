@@ -159,6 +159,11 @@ pub struct Account {
     settings: Settings,
     /// Who's typing in each chat, as jawd would say it.
     typing: Typists,
+    /// Whether the flood's messages into the open chat disappear, a fourth of them a second after
+    /// they come; those still to go, soonest first, with their times; and how many have gone.
+    disappearing: bool,
+    expiring: std::collections::VecDeque<(i64, String)>,
+    erased: u64,
 }
 
 struct Shared {
@@ -234,6 +239,9 @@ impl Demo {
             keeps: 0,
             settings: Settings::default(),
             typing,
+            disappearing: false,
+            expiring: std::collections::VecDeque::new(),
+            erased: 0,
         };
         let demo = Demo {
             shared: Arc::new(Shared {
@@ -320,6 +328,17 @@ impl Demo {
 
     fn wake(&self) {
         self.shared.wake.notify_all();
+    }
+
+    /// Has the flood's messages into the open chat disappear, a fourth of them a second after they
+    /// come, erased as jawd erases them, the chat's timer on.
+    pub fn disappear(&self) {
+        self.lock().disappearing = true;
+    }
+
+    /// How many of the flood's messages have disappeared.
+    pub fn erased(&self) -> u64 {
+        self.lock().erased
     }
 
     /// Sends `rate` messages a second for `seconds`, half into the open chat and half across the
@@ -570,6 +589,8 @@ impl Account {
             edited: false,
             deleted: false,
             starred: false,
+            expires_at: None,
+            view_once: false,
             summary: None,
             system: None,
             media: None,
@@ -676,6 +697,12 @@ impl Account {
         if self.threads.is_empty() {
             return;
         }
+        let now = self.now();
+        while let Some((_, id)) = self.expiring.front().filter(|(at, _)| *at <= now).cloned() {
+            self.expiring.pop_front();
+            self.on_delete(&id, false);
+            self.erased += 1;
+        }
         *rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let open = self.open.as_ref().and_then(|o| self.index.get(&o.chat).copied());
         let t = match open {
@@ -697,6 +724,13 @@ impl Account {
             m.kind = Kind::Image;
             m.summary = Some("▣ photo".into());
             m.media = Some(Box::new(pictures::media(HISTORY_PHOTOS[(n / 8) as usize % HISTORY_PHOTOS.len()])));
+        }
+        if self.disappearing && Some(t) == open {
+            self.threads[t].chat.ephemeral = 86_400;
+            if n % 8 == 4 {
+                m.expires_at = Some(at + 1_000);
+                self.expiring.push_back((at + 1_000, m.id.clone()));
+            }
         }
         self.arrive(t, m);
     }
@@ -1123,6 +1157,21 @@ impl Jawd for Demo {
         self.change(chat, move |c| c.muted_until = until);
     }
 
+    fn disappearing(&mut self, chat: &str, seconds: u32) {
+        self.change(chat, move |c| c.ephemeral = seconds);
+    }
+
+    fn view_once_open(&mut self, chat: &str, message: &str) {
+        let (chat, message) = (chat.to_string(), message.to_string());
+        self.defer(move |a| a.on_view_once_open(&chat, &message));
+    }
+
+    /// Erased once it's shown, as jawd erases it.
+    fn view_once_close(&mut self, _chat: &str, message: &str) {
+        let message = message.to_string();
+        self.defer(move |a| a.on_delete(&message, false));
+    }
+
     fn archive(&mut self, chat: &str, archived: bool) {
         self.change(chat, move |c| c.archived = archived);
     }
@@ -1255,6 +1304,7 @@ impl Writing {
             children_unread: None,
             children_mentions: None,
             favourite: None,
+            ephemeral: 0,
         };
         Writing { thread: Thread { chat, messages: vec![] }, now, seq: 0 }
     }
@@ -1282,6 +1332,8 @@ impl Writing {
             edited: false,
             deleted: false,
             starred: false,
+            expires_at: None,
+            view_once: false,
             summary: None,
             system: None,
             media: None,
@@ -1504,8 +1556,21 @@ fn made_up(now: i64) -> Vec<Thread> {
     w.thread.messages = sorted;
     threads.push(w.done(0, 0));
 
+    // Disappearing messages, seven days on, a photo of hers to open once and one of yours she has.
     let mut w = Writing::new("sofia", "Sofia Martins", ChatKind::Direct, now);
-    voice::voiced(w.other(4.0 * 24.0 * h, Some(&sofia), Kind::Voice, "▶ voice message 0:42", ""), 42.0, 4, false);
+    w.thread.chat.ephemeral = 7 * 24 * 3_600;
+    let once = w.other(4.0 * 24.0 * h + 5.0, Some(&sofia), Kind::Image, "View once photo", "");
+    once.view_once = true;
+    once.expires_at = Some(once.at + 7 * DAY);
+    let yours = w.mine(4.0 * 24.0 * h + 3.0, "");
+    yours.kind = Kind::Image;
+    yours.summary = Some("View once photo".into());
+    yours.view_once = true;
+    yours.status = Some(Tick::Played);
+    yours.expires_at = Some(yours.at + 7 * DAY);
+    let voiced = w.other(4.0 * 24.0 * h, Some(&sofia), Kind::Voice, "▶ voice message 0:42", "");
+    voiced.expires_at = Some(voiced.at + 7 * DAY);
+    voice::voiced(voiced, 42.0, 4, false);
     threads.push(w.done(0, 0));
 
     let mut w = Writing::new("avo", "Avó Lurdes", ChatKind::Direct, now);

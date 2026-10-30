@@ -96,6 +96,10 @@ impl View {
             }
             return;
         }
+        if self.once.is_some() {
+            self.on_once_key(k);
+            return;
+        }
         if self.palette.is_some() {
             self.on_palette_key(k);
             return;
@@ -311,6 +315,9 @@ impl View {
             }
             Some(at)
         };
+        if m.view_once && k.code == KeyCode::Enter && !ctrl && !alt {
+            return self.open_once(&m);
+        }
         if m.kind == Kind::Voice && !ctrl && !alt {
             match k.code {
                 KeyCode::Enter => return self.toggle_voice(&m),
@@ -487,6 +494,9 @@ impl View {
     }
 
     fn on_paste(&mut self, s: &str) {
+        if self.once.is_some() {
+            return;
+        }
         if self.palette.is_some() {
             self.palette_paste(s);
             return;
@@ -549,6 +559,12 @@ impl View {
         if self.quick_look.is_some() {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 self.close_quick_look();
+            }
+            return;
+        }
+        if self.once.is_some() {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.close_once();
             }
             return;
         }

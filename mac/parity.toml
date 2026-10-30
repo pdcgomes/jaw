@@ -17,6 +17,9 @@
 "voice.cancel" = "2.7"
 "star" = "3.2"
 "settings.set" = "3.5"
+"chat.disappearing" = "3.11"
+"view_once.open" = "3.11"
+"view_once.close" = "3.11"
 
 [pushes]
 "layout" = "1.1"
