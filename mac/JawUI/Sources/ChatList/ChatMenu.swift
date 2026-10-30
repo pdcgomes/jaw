@@ -88,10 +88,10 @@ public extension ChatRow {
 /// A chat's menus with their folder items, from the tree as they open.
 public extension ChatMenu {
     /// A chat's folder items, one list for the chat list's menu, the pane's and the menu bar's Chat
-    /// menu: Add to Folder, and Move to and Remove from while the list shows one of your folders that
-    /// holds it.
+    /// menu: Add to Folder, Move to and Remove from while the list shows one of your folders that
+    /// holds it, and Favourite.
     static func folderItems(_ chat: ChatRow, tree: FolderTree, in folder: String) -> [MenuEntry] {
-        FolderMenu.entries(Filed(chat), tree: tree, list: folder)
+        with(FolderMenu.entries(Filed(chat), tree: tree, list: folder), FolderMenu.favourites(chat.id, tree: tree))
     }
 
     /// The chat list's menu: a chat's actions, then its folder items; a community's row has the folder

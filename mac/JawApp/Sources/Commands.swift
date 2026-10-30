@@ -298,7 +298,18 @@ extension AppModel {
 
     /// The commands now, the layouts' among them.
     var allCommands: [Command] {
-        layoutCommands() + commands
+        layoutCommands() + favouriteCommands() + commands
+    }
+
+    /// ⌘1 to ⌘9 in the Find menu's Favourites, each titled by what's on its slot; made again when the
+    /// slots change.
+    func favouriteCommands() -> [Command] {
+        (1 ... 9).map { slot in
+            let name = tree.slotName(slot)
+            return Command("favourite.\(slot)", name ?? "Empty", phrase: name.map { "Go to \($0)" }, detail: "a favourite",
+                           key: Shortcut("\(slot)"), place: .find, submenu: "Favourites", group: 2, palette: name != nil)
+            { [weak self] in self?.goToFavourite(slot) }
+        }
     }
 
     /// The chats with unread messages that aren't muted, in the list's order.

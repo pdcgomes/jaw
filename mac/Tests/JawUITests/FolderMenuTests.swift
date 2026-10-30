@@ -103,23 +103,24 @@ func ana(in folders: [String]) -> ChatRow {
 
 @Test func `a community's row has the folder items alone, and a chat's menus have them after its actions`() {
     let community = ChatRow(id: "c@g.us", v: 1, sort: "1", kind: .community, name: "Bairro Alto", folders: ["folder:1"])
-    #expect(ChatMenu.list(community, tree: Samples.tree, in: "folder:1").map(head) == ["Add to Folder", "Move to", "unfile"])
+    #expect(ChatMenu.list(community, tree: Samples.tree, in: "folder:1").map(head) == ["Add to Folder", "Move to", "unfile", "—", "Favourite"])
     let chat = ana(in: ["folder:1"])
     #expect(ChatMenu.list(chat, tree: Samples.tree, in: "folder:1").map(head)
-        == ["chat.open.pane", "—", "Unpin", "Mute", "Archive", "Mark as Unread", "—", "Add to Folder", "Move to", "unfile"])
+        == ["chat.open.pane", "—", "Unpin", "Mute", "Archive", "Mark as Unread", "—", "Add to Folder", "Move to", "unfile", "—", "Favourite"])
     #expect(ChatMenu.pane(chat, tree: Samples.tree, in: "all").map(head)
         == ["split.across", "split.down", "pane.close", "Swap", "—", "Unpin", "Mute", "Archive", "Mark as Unread", "—", "Add to Folder", "—",
-            "search.chat", "chat.library"])
+            "Favourite", "—", "search.chat", "chat.library"])
 }
 
 @Test func `a chat's folder items are one list, which the chat list's menu, the pane's and the menu bar's Chat menu all have`() {
     let chat = ana(in: ["folder:1"])
     let items = ChatMenu.folderItems(chat, tree: Samples.tree, in: "folder:1")
-    #expect(items.map(head) == ["Add to Folder", "Move to", "unfile"])
+    #expect(items.map(head) == ["Add to Folder", "Move to", "unfile", "—", "Favourite"])
     #expect(Array(ChatMenu.list(chat, tree: Samples.tree, in: "folder:1").suffix(items.count)) == items)
     #expect(Array(ChatMenu.pane(chat, tree: Samples.tree, in: "folder:1").dropLast(3).suffix(items.count)) == items,
             "before Search This Chat and This Chat's Library")
-    #expect(ChatMenu.folderItems(chat, tree: Samples.tree, in: "all").map(head) == ["Add to Folder"])
+    #expect(ChatMenu.folderItems(chat, tree: Samples.tree, in: "all").map(head) == ["Add to Folder", "—", "Favourite"],
+            "the menu bar's Chat menu has Favourite as the right-click menus do")
 }
 
 @Test func `what's said once jawd has filed a chat, taken it out or moved it, and when a move leaves it in both folders`() {
@@ -156,11 +157,14 @@ func ana(in folders: [String]) -> ChatRow {
 @Test func `a folder of yours has New Folder Inside, Rename, Move to and Delete, and the others New Folder alone`() {
     let tree = Samples.tree
     let family = folderMenu(FolderMenu.folderEntries("folder:1", tree: tree), FolderMenu.folderCommands("folder:1", tree: tree) { _ in })
-    #expect(shows(family) == ["New Folder Inside…", "Rename", "Move to ▸ [The Top], —, Climbing, Friends, Work, · Clients", "Delete…"])
-    #expect(family.items.last?.keyEquivalent == "\u{8}" && family.items.last?.keyEquivalentModifierMask == .command, "⌘⌫ shown")
-    for id in ["all", "smart:1", nil] as [String?] {
-        #expect(shows(folderMenu(FolderMenu.folderEntries(id, tree: tree), FolderMenu.folderCommands(id, tree: tree) { _ in })) == ["New Folder…"])
+    #expect(Array(shows(family).prefix(5)) == ["New Folder Inside…", "Rename", "Move to ▸ [The Top], —, Climbing, Friends, Work, · Clients", "Delete…", "—"])
+    #expect(shows(family).last?.hasPrefix("Favourite ▸ ✓ ⌘1  Family, ⌘2  Ana Ribeiro") == true)
+    #expect(family.items[3].keyEquivalent == "\u{8}" && family.items[3].keyEquivalentModifierMask == .command, "⌘⌫ shown")
+    for id in ["all", "smart:1"] {
+        let menu = shows(folderMenu(FolderMenu.folderEntries(id, tree: tree), FolderMenu.folderCommands(id, tree: tree) { _ in }))
+        #expect(menu.first == "New Folder…" && menu.last?.hasPrefix("Favourite ▸") == true, "\(id)")
     }
+    #expect(shows(folderMenu(FolderMenu.folderEntries(nil, tree: tree), FolderMenu.folderCommands(nil, tree: tree) { _ in })) == ["New Folder…"])
     #expect(FolderMenu.folderEntries("folder:1", tree: FolderTree()).isEmpty && FolderMenu.folderEntries(nil, tree: FolderTree()).isEmpty)
 }
 
@@ -195,4 +199,43 @@ func ana(in folders: [String]) -> ChatRow {
     #expect(alert.messageText == "Delete Family?")
     #expect(alert.informativeText == "Its chats stay wherever else they're filed, and its subfolders take its place.")
     #expect(alert.buttons.map(\.title) == ["Delete", "Cancel"] && alert.buttons.first?.hasDestructiveAction == true)
+}
+
+@MainActor
+@Test func `Favourite lists the nine slots saying what's on each, ticked where the chat is, and picking one puts it there`() {
+    let acts = Acts()
+    let menu = folderMenu(FolderMenu.favourites(Samples.direct.id, tree: Samples.tree),
+                          FolderMenu.favouriteCommands(Samples.direct.id, name: "this chat", tree: Samples.tree) { acts.done.append($0) })
+    #expect(shows(menu) == ["Favourite ▸ ⌘1  Family, ✓ ⌘2  Ana Ribeiro, ⌘3  Climbing, ⌘4  empty, ⌘5  empty, ⌘6  empty, ⌘7  empty, ⌘8  empty, "
+            + "⌘9  empty, —, Remove from Favourites"])
+    let slots = menu.items.first?.submenu
+    run(slots?.items[3])
+    run(slots?.items.last)
+    #expect(acts.done == [.favourite(slot: 4, target: Samples.direct.id), .favourite(slot: 2, target: nil)])
+}
+
+@MainActor
+@Test func `a chat on no slot has no Remove from Favourites, nothing a slot holds has no Favourite, and a folder's puts the folder there`() {
+    let tree = Samples.tree
+    #expect(!FolderMenu.favouriteCommands(Samples.group.id, name: "this chat", tree: tree) { _ in }.contains { $0.id == "favourite.off" })
+    #expect(FolderMenu.favourites(nil, tree: tree).isEmpty && FolderMenu.favourites(Samples.direct.id, tree: FolderTree()).isEmpty)
+    let acts = Acts()
+    let friends = folderMenu(FolderMenu.favourites("folder:4", tree: tree),
+                             FolderMenu.favouriteCommands("folder:4", name: "Friends", tree: tree) { acts.done.append($0) })
+    run(friends.items.first?.submenu?.items[0])
+    #expect(acts.done == [.favourite(slot: 1, target: "folder:4")])
+}
+
+@MainActor
+@Test func `the palette puts a chat on a slot by name, saying what's there now, and takes it off its own`() {
+    let commands = FolderMenu.favouriteCommands(Samples.direct.id, name: "this chat", tree: Samples.tree) { _ in }
+    let listed = commands.filter(\.inPalette).map { "\($0.phrase): \($0.paletteAction.detail)" }
+    #expect(listed.first == "Put this chat on ⌘1: Family now" && listed[2] == "Put this chat on ⌘4: nothing on it")
+    #expect(!listed.contains { $0.hasPrefix("Put this chat on ⌘2") }, "not the slot it's on")
+    #expect(listed.last == "Take this chat off ⌘2: ")
+}
+
+@Test func `what's said once a slot is set or emptied`() {
+    #expect(FolderMenu.said(.favourite(slot: 3, target: "folder:4"), name: "Friends", tree: Samples.tree) == "⌘3 goes to Friends")
+    #expect(FolderMenu.said(.favourite(slot: 2, target: nil), name: "Ana Ribeiro", tree: Samples.tree) == "⌘2 is free")
 }

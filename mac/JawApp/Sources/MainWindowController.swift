@@ -336,6 +336,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
 extension MainWindowController {
     /// The layouts changed, or the one on screen did: the Layouts menu and the toolbar's say so.
+    /// The slots changed, or a folder on one was renamed: the Find menu's Favourites say what's on each now.
+    func favouritesChanged() {
+        let find = model.allCommands.filter { $0.place == .find }
+        NSApp.mainMenu?.item(withTitle: MenuPlace.find.rawValue)?.submenu = Menus.menu(find, title: MenuPlace.find.rawValue)
+    }
+
     func layoutsChanged() {
         let commands = model.allCommands.filter { $0.place == .layouts }
         if let item = NSApp.mainMenu?.item(withTitle: MenuPlace.layouts.rawValue) {

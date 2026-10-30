@@ -30,6 +30,8 @@ final class AppModel {
     var foldersWindow: WindowID?
     /// The key the menu bar's folder items were last made from.
     var folderItemsMade: [String] = []
+    /// A chat a favourite or the roster opens once jawd finds its row.
+    var opening: Opening?
     var folder = "all"
     /// Who's typing in the chats jawd's windows show, as it last said.
     var typing: Typists = [:]
@@ -242,7 +244,10 @@ final class AppModel {
         case let .status(status):
             window?.showStatus(status)
         case let .folders(w, u) where w == foldersWindow:
+            let slots = (1 ... 9).map { tree.slotName($0) }
             window?.sidebar.apply(u)
+            // A folder on a slot renamed changes what the slot says, though the push has no slots.
+            if (1 ... 9).map({ tree.slotName($0) }) != slots { window?.favouritesChanged() }
             let showing = tree.showing(folder)
             if showing != folder {
                 pick(folder: showing)
@@ -664,11 +669,16 @@ final class AppModel {
     /// A chat the chat list didn't hold, as jawd found it: its pane made where the layout on screen
     /// shows it, taking the keys if its slot has them, or its slot saying why it won't have one.
     func lookedUp(_ chat: String, _ found: Looked) {
-        guard let slot = grid?.slot(showing: chat), panes[chat] == nil else { return }
+        let wanted = opening?.chat == chat ? opening : nil
+        if wanted != nil { opening = nil }
+        guard let slot = grid?.slot(showing: chat), panes[chat] == nil else {
+            if let wanted { opened(wanted, found) }
+            return
+        }
         switch found {
         case let .row(row):
             _ = makePane(row, place: ConversationController.place(for: row))
-            if focusedSlot == slot.id {
+            if focusedSlot == slot.id || wanted != nil {
                 focus(slot: slot.id, force: true)
                 return
             }

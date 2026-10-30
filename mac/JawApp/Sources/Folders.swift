@@ -23,7 +23,8 @@ extension AppModel: SidebarHost {
     }
 
     func sidebar(_: SidebarController, menuFor folder: String?) -> [NSMenuItem] {
-        let bound = FolderMenu.folderCommands(folder, tree: tree) { [weak self] act in self?.folderAct(act, name: "") }
+        let name = folder.map { tree.label($0) } ?? ""
+        let bound = FolderMenu.folderCommands(folder, tree: tree) { [weak self] act in self?.folderAct(act, name: name) }
         return Menus.items(FolderMenu.folderEntries(folder, tree: tree)) { id in bound.first { $0.id == id } }
     }
 
@@ -56,6 +57,7 @@ extension AppModel: SidebarHost {
     var folderItemsKey: [String] {
         guard let chat = conversation?.chat, tree.served else { return [] }
         return [chat.id, folder, chat.folders.joined(separator: ",")] + tree.yours.map { "\($0.depth) \($0.row.id) \($0.row.name)" }
+            + (1 ... 9).map { "\($0) \(tree.favourite($0)?.target ?? "") \(tree.slotName($0) ?? "")" }
     }
 
     /// The menu bar's Chat menu ends with the focused chat's folder items, made again only when what
@@ -104,6 +106,49 @@ extension AppModel: SidebarHost {
             jawd.folderMove(id, parent: to, position: position, said: said)
         case let .delete(id):
             window?.askFolderDelete(id)
+        case let .favourite(slot, target):
+            jawd.favouriteSet(slot: slot, target: target, said: said)
+        }
+    }
+
+    /// ⌘1 to ⌘9: the slot's folder, picked, or its chat, opened in the focused pane.
+    func goToFavourite(_ slot: Int) {
+        guard tree.served else { return say("favourites come with jawd's M6") }
+        guard let f = tree.favourite(slot) else {
+            return say("nothing is on ⌘\(slot); a chat's or a folder's Favourite menu puts one there")
+        }
+        if let folder = f.folder {
+            pick(folder: folder)
+        } else if let chat = f.chat {
+            openChat(chat, name: f.name ?? chat)
+        }
+    }
+
+    /// A chat to open that the app may hold no row for, as a favourite's or someone's in the roster:
+    /// at once when the list or a pane has its row, or else once jawd finds it, in All and then
+    /// Archived, the panes still waiting for theirs looked up after it.
+    func openChat(_ id: String, name: String, inNewPane: Bool = false) {
+        if let row = window?.chatList.row(id) ?? panes[id]?.chat {
+            return inNewPane ? openInNewPane(row) : open(row, opened: true)
+        }
+        opening = Opening(chat: id, name: name, inNewPane: inNewPane)
+        let waiting = (grid?.reading ?? []).compactMap(\.chat).filter { panes[$0] == nil && unopened[$0] == nil && $0 != id }
+        jawd.lookUp([id] + waiting)
+    }
+
+    /// A chat being opened once jawd finds it.
+    struct Opening {
+        var chat: String
+        var name: String
+        var inNewPane: Bool
+    }
+
+    /// A chat being opened, as jawd found it: opened, or why it won't be.
+    func opened(_ wanted: Opening, _ found: Looked) {
+        switch found {
+        case let .row(row): wanted.inNewPane ? openInNewPane(row) : open(row, opened: true)
+        case .gone: say("\(wanted.name) isn't among your chats now", warn: true)
+        case let .refused(why): say("\(wanted.name) couldn't be opened: \(why)", warn: true)
         }
     }
 

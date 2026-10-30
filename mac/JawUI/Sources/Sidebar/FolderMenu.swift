@@ -42,6 +42,8 @@ public enum FolderAct: Sendable, Equatable {
     case moveFolder(String, to: String?, position: Int?)
     /// A folder of yours deleted, after asking.
     case delete(String)
+    /// A folder or a chat put on a slot, or the slot emptied with nil.
+    case favourite(slot: Int, target: String?)
 }
 
 /// The folder items of a chat's menus and of someone's in the roster: entries worked out from the tree
@@ -101,7 +103,7 @@ public enum FolderMenu {
         out.append(Command("file.new", "New Folder…", phrase: "Add this chat to a new folder", place: nil) {
             act(.newFolder(parent: nil, filing: item))
         })
-        return out
+        return out + favouriteCommands(item.chat, name: "this chat", tree: tree, act: act)
     }
 
     /// What the status line says once jawd has done it, as the terminal says it.
@@ -112,6 +114,7 @@ public enum FolderMenu {
         case let .move(_, from, to): "\(name) moved from \(tree.label(from)) to \(tree.label(to))"
         case let .moveFolder(folder, to, _): "\(tree.label(folder)) moved to \(to.map { tree.label($0) } ?? "the top")"
         case let .delete(folder): "\(tree.label(folder)) deleted; its chats stay wherever else they're filed"
+        case let .favourite(slot, target): target == nil ? "⌘\(slot) is free" : "⌘\(slot) goes to \(name)"
         case .newFolder, .rename: nil
         }
     }
@@ -121,11 +124,13 @@ public enum FolderMenu {
     /// built-in or smart folder, and on the sidebar's space, New Folder…. None before jawd serves folders.
     public static func folderEntries(_ folder: String?, tree: FolderTree) -> [MenuEntry] {
         guard tree.served else { return [] }
-        guard let folder, tree.row(folder)?.isYours == true else { return [.command("folder.new.top")] }
+        guard let folder else { return [.command("folder.new.top")] }
+        guard tree.row(folder)?.isYours == true else { return ChatMenu.with([.command("folder.new.top")], favourites(folder, tree: tree)) }
         let under = tree.subtree(folder)
         let targets = tree.yours.filter { !under.contains($0.row.id) }.map { MenuEntry.command("folder.to:\($0.row.id)") }
-        return [.command("folder.new.inside"), .command("folder.rename"), .submenu("Move to", [.command("folder.to.top"), .separator] + targets),
-                .command("folder.delete")]
+        return ChatMenu.with([.command("folder.new.inside"), .command("folder.rename"),
+                              .submenu("Move to", [.command("folder.to.top"), .separator] + targets), .command("folder.delete")],
+                             favourites(folder, tree: tree))
     }
 
     /// The commands those entries name, bound to `folder`.
@@ -134,7 +139,10 @@ public enum FolderMenu {
                                       act: @escaping @MainActor @Sendable (FolderAct) -> Void) -> [Command]
     {
         var out = [Command("folder.new.top", "New Folder…", place: nil, palette: false) { act(.newFolder(parent: nil, filing: nil)) }]
-        guard let folder, let row = tree.row(folder), row.isYours else { return out }
+        guard let folder else { return out }
+        guard let row = tree.row(folder), row.isYours else {
+            return out + favouriteCommands(folder, name: tree.label(folder), tree: tree, act: act)
+        }
         let label = tree.label(folder), under = tree.subtree(folder)
         out.append(Command("folder.new.inside", "New Folder Inside…", phrase: "New folder in \(label)", detail: "nested in it", place: nil) {
             act(.newFolder(parent: folder, filing: nil))
@@ -152,6 +160,36 @@ public enum FolderMenu {
         }
         out.append(Command("folder.delete", "Delete…", phrase: "Delete the folder \(label)", detail: "its chats stay wherever else they're filed",
                            key: Shortcut("⌫"), place: nil) { act(.delete(folder)) })
+        return out + favouriteCommands(folder, name: label, tree: tree, act: act)
+    }
+
+    /// Favourite ▸: the nine slots, each saying what's on it, ticked on the one holding `target`, and
+    /// Remove from Favourites when one does. None for nothing a slot can hold, nor before jawd serves
+    /// folders.
+    public static func favourites(_ target: String?, tree: FolderTree) -> [MenuEntry] {
+        guard tree.served, target != nil else { return [] }
+        return [.submenu("Favourite", (1 ... 9).map { .command("favourite.slot:\($0)") } + [.separator, .command("favourite.off")])]
+    }
+
+    /// The commands those entries name: a slot puts `target` there, which takes it off its old slot and
+    /// puts out what the slot held, as `favourite.set` does; Remove from Favourites empties its slot.
+    /// `name` is what the palette calls it: "this chat", or a folder's name.
+    @MainActor
+    public static func favouriteCommands(_ target: String?, name: String, tree: FolderTree,
+                                         act: @escaping @MainActor @Sendable (FolderAct) -> Void) -> [Command]
+    {
+        guard let target else { return [] }
+        let held = tree.slot(of: target)
+        var out = (1 ... 9).map { slot in
+            Command("favourite.slot:\(slot)", "⌘\(slot)  \(tree.slotName(slot) ?? "empty")", phrase: "Put \(name) on ⌘\(slot)",
+                    detail: tree.slotName(slot).map { "\($0) now" } ?? "nothing on it", place: nil, palette: held != slot,
+                    on: { held == slot }) { act(.favourite(slot: slot, target: target)) }
+        }
+        if let held {
+            out.append(Command("favourite.off", "Remove from Favourites", phrase: "Take \(name) off ⌘\(held)", place: nil) {
+                act(.favourite(slot: held, target: nil))
+            })
+        }
         return out
     }
 
