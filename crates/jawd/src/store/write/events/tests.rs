@@ -760,6 +760,13 @@ async fn an_events_copy_in_a_chat_merged_folds_in_its_answers_each_answerers_new
 /// `count` answers to Ana's event `event`, going, each sealed for real by an answerer of its own and
 /// waiting in `pending` as a live one does, written beside the writer as `fill_sealed` writes its.
 fn waiting_for(home: &std::path::Path, event: &str, count: usize) {
+    waiting_in(home, GROUP, event, ANA, count, 0, AT + 1_000);
+}
+
+/// As `waiting_for`, in chat `chat`, sealed for Ana as `author`, the JID WhatsApp took the event's
+/// author as, by answerers numbered from `from`, the first answering at `at` and each the next
+/// millisecond.
+fn waiting_in(home: &std::path::Path, chat: &str, event: &str, author: &str, count: usize, from: usize, at: i64) {
     let mut raw = Connection::open(home.join("jaw.db")).unwrap();
     raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
     let tx = raw.transaction().unwrap();
@@ -770,12 +777,13 @@ fn waiting_for(home: &std::path::Path, event: &str, count: usize) {
                 VALUES (?1, ?2, 'rsvp', ?3, ?4, ?5, 0, json_object('do', 'keep', 'kind', 'rsvp'))",
             )
             .unwrap();
-        for i in 0..count {
+        for i in from..from + count {
             let who = format!("3519300{i:05}@s.whatsapp.net");
-            let at = AT + 1_000 + i as i64;
-            let info = answer_info(event, (ANA, &who), &who, &format!("{event}-{i}"), at, Going);
+            let at = at + (i - from) as i64;
+            let mut info = answer_info(event, (author, &who), &who, &format!("{event}-{i}"), at, Going);
+            info.key.remote_jid = Some(chat.into());
             let sealed = Packed::new(&info.encode_to_vec()).0;
-            insert.execute(rusqlite::params![GROUP, event, at / 1000 * 1000, sealed, who]).unwrap();
+            insert.execute(rusqlite::params![chat, event, at / 1000 * 1000, sealed, who]).unwrap();
         }
     }
     tx.commit().unwrap();
@@ -821,6 +829,21 @@ async fn an_event_arriving_with_more_waiting_than_its_transaction_takes_has_the_
     assert_eq!(store.count("quarantine WHERE source = 'answer'").unwrap(), 0);
     assert_eq!(store.count("openings").unwrap(), 0, "and nothing is left to take");
     assert_eq!(apply(&store, vec![Change::Opening]).await.changed, 0, "a step then does nothing");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn steps_go_on_from_where_the_last_got_to_past_more_than_a_step_takes_of_what_doesnt_open() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    // 150 answers to e1 sealed for Ana's LID, which jaw doesn't know is hers, wait ahead of ten
+    // sealed for her number: more that stays sealed than a step takes, before what opens.
+    waiting_in(home.path(), GROUP, "e1", ANA_LID, 150, 0, AT + 1_000);
+    waiting_in(home.path(), GROUP, "e1", ANA, 10, 500, AT + 2_000);
+    apply(&store, event("e1")).await;
+    taken(&store).await;
+    assert_eq!(counts(&store, "e1").await, (10, 0, 0, Value::Null), "what opens counts");
+    assert_eq!(store.count("pending WHERE target = 'e1'").unwrap(), 150, "what doesn't is kept");
+    assert_eq!(store.count("unopened").unwrap(), 1, "and noted, to be tried again");
 }
 
 #[tokio::test(flavor = "multi_thread")]
