@@ -3211,6 +3211,10 @@ UPDATE send_keys SET message = ?1 WHERE message = ?2
     SEARCH send_keys USING INDEX send_keys_by_message (message=?)
 
 -- src/store/write/outbox.rs
+UPDATE outgoing SET message = ?1 WHERE message = ?2
+    SEARCH outgoing USING COVERING INDEX outgoing_by_message (message=?)
+
+-- src/store/write/outbox.rs
 INSERT INTO outgoing (outbox, message, variant, kind, source, bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (outbox) DO NOTHING
 
 -- src/store/write/outbox.rs

@@ -318,6 +318,7 @@ const OWED_MESSAGES: &str = "SELECT m.id, j.jid, m.at, m.n FROM messages m LEFT 
 const STATUS_OF: &str = "SELECT status FROM messages WHERE n = ?1";
 const FOLD_OUTBOX: &str = "UPDATE OR IGNORE outbox SET message = ?1 WHERE message = ?2";
 const FOLD_KEYS: &str = "UPDATE send_keys SET message = ?1 WHERE message = ?2";
+const FOLD_COPIES: &str = "UPDATE outgoing SET message = ?1 WHERE message = ?2";
 /// A copy to make of a file you picked, beside the outbox row that sends it.
 const COPY: &str =
     "INSERT INTO outgoing (outbox, message, variant, kind, source, bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -1532,9 +1533,10 @@ pub fn owed(db: &Connection, chat: i64) -> Result<Owing> {
 
 /// Two copies of a message, one in each of two chats being merged, become `kept`, before `gone` is
 /// deleted: a send waiting for either goes on as the kept one's, its own if it has one, unless the
-/// kept one has already reached the server; an action on either is done to the kept one; and an
-/// interface's key for either names the kept one. Nothing of `gone`'s is left in the outbox, where
-/// its deletion would leave it a second send, or an action done to nothing.
+/// kept one has already reached the server; an action on either is done to the kept one; a copy of
+/// either's file on its way is the kept one's, so it still fills in what its message says of it;
+/// and an interface's key for either names the kept one. Nothing of `gone`'s is left in the outbox,
+/// where its deletion would leave it a second send, or an action done to nothing.
 pub(super) fn folded(db: &Connection, kept: i64, gone: i64) -> Result<()> {
     let status: Option<String> = db.prepare_cached(STATUS_OF)?.query_row([kept], |r| r.get(0))?;
     if matches!(status.as_deref(), Some("sent" | "delivered" | "read" | "played")) {
@@ -1544,6 +1546,7 @@ pub(super) fn folded(db: &Connection, kept: i64, gone: i64) -> Result<()> {
     }
     db.prepare_cached(DEQUEUE)?.execute([gone])?;
     db.prepare_cached(FOLD_TARGETS)?.execute([kept, gone])?;
+    db.prepare_cached(FOLD_COPIES)?.execute([kept, gone])?;
     db.prepare_cached(FOLD_KEYS)?.execute([kept, gone])?;
     Ok(())
 }
@@ -1659,6 +1662,7 @@ mod tests {
                 "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN outbox\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("fold targets", FOLD_TARGETS, "SEARCH outbox USING COVERING INDEX outbox_by_target (target=?)"),
+            ("fold copies", FOLD_COPIES, "SEARCH outgoing USING COVERING INDEX outgoing_by_message (message=?)"),
             ("bumped", BUMPED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
             ("owing", OWING, "SCAN chats"),
             (
@@ -3449,5 +3453,71 @@ mod tests {
             on(&store, |db| Ok(db.query_row("SELECT deleted FROM messages WHERE id = 'p1'", [], |r| r.get(0))?)).await;
         assert_eq!(deleted, 1, "the message kept is the one deleted for everyone");
         assert_eq!(hd_left(&store).await, 0, "and its HD copy, folded into it, is left neither to go nor to retry");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fold_carries_an_hd_copy_on_its_way_to_the_kept_message() {
+        use crate::store::{Change, Lane, Person, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        // Under her LID, a photo of yours that went, its HD copy still on its way; under her number, a
+        // copy of that message, as history brings one.
+        apply(vec![
+            Change::Message(from_ana(ANA_LID, "l1", 1_000)),
+            Change::Message(Message { chat: ANA_LID.into(), live: false, status: Some("sent"), ..mine("sd", 4_000) }),
+            Change::Message(Message { chat: ANA.into(), live: false, status: Some("delivered"), ..mine("sd", 4_000) }),
+        ])
+        .await
+        .unwrap();
+        let side = Connection::open(home.path().join("jaw.db")).unwrap();
+        side.busy_timeout(Duration::from_secs(10)).unwrap();
+        let sd: i64 = side
+            .query_row(
+                "SELECT m.n FROM messages m JOIN chats c ON c.n = m.chat WHERE c.id = ?1 AND m.id = 'sd'",
+                [ANA_LID],
+                |r| r.get(0),
+            )
+            .unwrap();
+        side.execute(
+            "INSERT INTO outbox (target, jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'hd1', 'hd', x'01', 0, 0)",
+            params![sd, ANA_LID],
+        )
+        .unwrap();
+        let hd = side.last_insert_rowid();
+        side.execute(
+            "INSERT INTO outgoing (outbox, message, variant, kind, bytes, state, sha256)
+             VALUES (?1, ?2, 'hd', 'image', 10, 'uploading', zeroblob(32))",
+            params![hd, sd],
+        )
+        .unwrap();
+        drop(side);
+        apply(vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })])
+            .await
+            .unwrap();
+        loop {
+            let merging =
+                on(&store, |db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get(0))?)).await;
+            if merging == 0 {
+                break;
+            }
+            store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+        }
+        let after = store
+            .reads()
+            .query(crate::work::Priority::Interactive, |db| {
+                Ok(db.query_row(
+                    "SELECT o.target, g.message, (SELECT m.n FROM messages m JOIN chats c ON c.n = m.chat
+                        WHERE c.id = ?1 AND m.id = 'sd')
+                    FROM outbox o JOIN outgoing g ON g.outbox = o.n WHERE o.kind = 'hd'",
+                    [ANA],
+                    |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        eprintln!("AUDIT-D: the HD row's target, its copy's message and the kept message after the merge: {after:?}");
+        assert_eq!(after.0, after.2, "the HD row follows its message");
+        assert_eq!(after.1, after.2, "the HD copy's row lost its message in the fold");
     }
 }
