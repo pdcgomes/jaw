@@ -185,6 +185,31 @@ public final class Jawd {
         ask("chat.start", ChatStart(phone: phone, person: nil), .startChat, expect: .chat)
     }
 
+    // MARK: - Media
+
+    /// Asks for a message's file now (`media.fetch`), ahead of what downloads by itself; its progress
+    /// and its file come as upserts to the message. One jawd turns down is said, as the message it
+    /// was for, so what waited to open it stops waiting.
+    public func fetch(chat: String, message: String, variant: Variant? = nil) {
+        ask("media.fetch", MediaFetch(message: message, chat: chat, variant: variant), .fetch(message))
+    }
+
+    /// Saves a message's file to `to`, a folder or a file's path (`media.save`), downloading it first
+    /// if it isn't here yet. jawd answers once the copy is whole and synced, which can take minutes,
+    /// as `.saved` with the ticket this returns.
+    @discardableResult
+    public func save(chat: String, message: String, to: String, variant: Variant? = nil) -> String {
+        let ticket = Self.key()
+        ask("media.save", MediaSave(message: message, to: to, chat: chat, variant: variant), .save(ticket, message),
+            expect: .saved)
+        return ticket
+    }
+
+    /// Stops a message's download and anything waiting to be done for it (`media.cancel`).
+    public func cancel(chat: String, message: String) {
+        ask("media.cancel", MediaCancel(message: message, chat: chat), .did("stopping the download"))
+    }
+
     /// Asks `find` for the palette, which keeps only the answer to the latest one, numbered `id`.
     public func find(id: UInt64, query: String, kinds: [FindKind] = [], chat: String? = nil, limit: UInt32? = nil) {
         switch client.find(Find(query: query, kinds: kinds, chat: chat, limit: limit)) {
@@ -339,6 +364,8 @@ public final class Jawd {
             out.append(.status(status))
         case let (.layout, .layout(kept)):
             out.append(.layout(kept))
+        case let (.save(ticket, message), .saved(saved)):
+            out.append(.saved(ticket: ticket, message: message, path: saved.path, why: nil))
         default:
             break
         }
@@ -420,6 +447,9 @@ public final class Jawd {
         case status
         /// Panes asked for, named as opening them is said: "opening the terminal's panes".
         case layout(String)
+        /// `media.fetch` for a message, and `media.save` under its ticket.
+        case fetch(String)
+        case save(String, String)
         case quiet
     }
 
@@ -534,6 +564,10 @@ public final class Jawd {
             return [.members(chat: chat, [])]
         case let .layout(what):
             return [.notice(Self.whyNot(failure, what), .warning)]
+        case let .fetch(message):
+            return [.notFetched(message: message, why: Self.whyNot(failure, "downloading"))]
+        case let .save(ticket, message):
+            return [.saved(ticket: ticket, message: message, path: nil, why: Self.whyNot(failure, "saving"))]
         case .status, .quiet:
             return []
         }
@@ -602,5 +636,9 @@ public enum JawUpdate: Sendable {
     case layout(KeptLayout)
     /// A chat looked up outside the caller's windows, and what was found of it.
     case looked(chat: String, Looked)
+    /// jawd couldn't take `media.fetch` for a message, and why, in its words.
+    case notFetched(message: String, why: String)
+    /// `media.save`'s answer under its ticket: where the copy is, or why there's none.
+    case saved(ticket: String, message: String, path: String?, why: String?)
     case push(method: String, params: JSONValue)
 }

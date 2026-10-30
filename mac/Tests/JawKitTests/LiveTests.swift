@@ -158,6 +158,46 @@ struct LiveTests {
         #expect(held.jawd.client.stats.connects == 2)
     }
 
+    @Test func `the demo's photo comes here with its previews, and is fetched, saved and cancelled as jawd answers`() async throws {
+        let demo = try DemoJawd()
+        defer { demo.stop() }
+        let held = Held(demo.socket)
+        defer { held.jawd.close() }
+        let ana = "351912345678@s.whatsapp.net", lake = "3EB0DEMO00000008"
+        #expect(await held.until { $0.chats.list.contains { $0.id == ana } }, "Ana's chat comes")
+        held.watch(ana)
+        let photo = { (h: Held) in h.messages?.get(lake)?.media }
+        #expect(await held.until(seconds: 30) { h in
+            photo(h).map { $0.isHere && $0.preview(256) != nil && $0.preview(768) != nil && $0.thumbnail != nil } ?? false
+        }, "the lake, here with both previews and its thumbnail: \(String(describing: photo(held)))")
+        let media = try #require(photo(held))
+        #expect(media.w == 1600 && media.h == 1200 && media.state == .local)
+        for path in [media.path, media.preview(256), media.preview(768), media.thumbnail].compactMap(\.self) {
+            #expect(FileManager.default.fileExists(atPath: demo.home + "/" + path), "\(path) is under jawd's root")
+        }
+
+        held.jawd.fetch(chat: ana, message: lake)
+        let folder = demo.home + "-saved"
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: folder) }
+        let ticket = held.jawd.save(chat: ana, message: lake, to: folder)
+        let saved = { (h: Held) in
+            h.updates.lazy.compactMap { u -> (String?, String?)? in
+                if case let .saved(t, _, path, why) = u, t == ticket { (path, why) } else { nil }
+            }.first
+        }
+        #expect(await held.until { saved($0) != nil }, "the save is answered")
+        let path = try #require(saved(held)?.0, "saved: \(String(describing: saved(held)))")
+        #expect(path == folder + "/" + lake + ".jpg", "named by its ID, as a photo has no name")
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == Data(contentsOf: URL(fileURLWithPath: demo.home + "/" + media.path!)),
+                "the copy is the cache's file, whole")
+        held.jawd.cancel(chat: ana, message: lake)
+        _ = await held.until(seconds: 1) { _ in false }
+        #expect(!held.updates.contains { if case .notFetched = $0 { true } else { false } }, "the fetch was taken")
+        #expect(!held.updates.contains { if case let .notice(text, _) = $0 { text.contains("download") } else { false } },
+                "and the cancel")
+    }
+
     @Test func `find answers from a real jawd's index`() async throws {
         let demo = try DemoJawd()
         defer { demo.stop() }

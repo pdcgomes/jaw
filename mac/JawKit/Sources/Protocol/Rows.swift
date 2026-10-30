@@ -372,8 +372,10 @@ public struct Reaction: Decodable, Sendable, Hashable {
     }
 }
 
-/// A media message's file, as far as Mac-M1 draws it: its size and name for its line.
+/// A media message's file: its size, length and name, where it is, and jawd's previews of it. Paths
+/// are relative to hello's `root`.
 public struct Media: Decodable, Sendable, Hashable {
+    /// The original's size in pixels, whose shape the picture keeps.
     public var w: Int?
     public var h: Int?
     public var seconds: Double?
@@ -382,8 +384,79 @@ public struct Media: Decodable, Sendable, Hashable {
     public var mime: String?
     /// A document's pages.
     public var pages: Int?
-    /// jawd's previews by their size ("256", "768"), paths under its root, once it downloads media.
+    /// Whether the photo came with an HD copy.
+    public var hd: Bool
+    /// jawd's previews by their size ("256", "768"), each at most that many pixels on its long side,
+    /// a sticker's with its transparency; absent until both are made.
     public var previews: [String: String]?
+    /// The tiny copy that came in the message, drawn at 256 pixels on its long side, there before
+    /// any preview.
+    public var thumbnail: String?
+    /// The file, once it's here, and the HD copy's.
+    public var path: String?
+    public var hdPath: String?
+    public var state: MediaState
+    /// How much has come, 0 to 1, while it's downloading.
+    public var progress: Double?
+    /// Why the file isn't here, in words to show.
+    public var error: String?
+
+    /// Whether the file is here to look at, open or drag out.
+    public var isHere: Bool {
+        state == .local && path != nil
+    }
+
+    /// The preview of `size` pixels, 256 or 768, once jawd has made it.
+    public func preview(_ size: Int) -> String? {
+        previews?[String(size)]
+    }
+
+    public init(w: Int? = nil, h: Int? = nil, seconds: Double? = nil, bytes: Int64? = nil, name: String? = nil,
+                mime: String? = nil, pages: Int? = nil, hd: Bool = false, previews: [String: String]? = nil,
+                thumbnail: String? = nil, path: String? = nil, hdPath: String? = nil, state: MediaState? = nil,
+                progress: Double? = nil, error: String? = nil)
+    {
+        self.w = w
+        self.h = h
+        self.seconds = seconds
+        self.bytes = bytes
+        self.name = name
+        self.mime = mime
+        self.pages = pages
+        self.hd = hd
+        self.previews = previews
+        self.thumbnail = thumbnail
+        self.path = path
+        self.hdPath = hdPath
+        self.state = state ?? (path == nil ? .remote : .local)
+        self.progress = progress
+        self.error = error
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        w = try? c.decodeIfPresent(Int.self, forKey: .w)
+        h = try? c.decodeIfPresent(Int.self, forKey: .h)
+        seconds = try? c.decodeIfPresent(Double.self, forKey: .seconds)
+        bytes = try? c.decodeIfPresent(Int64.self, forKey: .bytes)
+        name = try? c.decodeIfPresent(String.self, forKey: .name)
+        mime = try? c.decodeIfPresent(String.self, forKey: .mime)
+        pages = try? c.decodeIfPresent(Int.self, forKey: .pages)
+        hd = (try? c.decodeIfPresent(Bool.self, forKey: .hd)) ?? false
+        previews = try? c.decodeIfPresent([String: String].self, forKey: .previews)
+        thumbnail = try? c.decodeIfPresent(String.self, forKey: .thumbnail)
+        path = try? c.decodeIfPresent(String.self, forKey: .path)
+        hdPath = try? c.decodeIfPresent(String.self, forKey: .hdPath)
+        // A row from before media in has no state: its file is here once it has a path.
+        state = (try? c.decodeIfPresent(MediaState.self, forKey: .state)) ?? (path == nil ? .remote : .local)
+        progress = try? c.decodeIfPresent(Double.self, forKey: .progress)
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
+    }
+
+    enum Keys: String, CodingKey {
+        case w, h, seconds, bytes, name, mime, pages, hd, previews, thumbnail, path, state, progress, error
+        case hdPath = "hd_path"
+    }
 }
 
 /// Where a location message points.
@@ -419,12 +492,46 @@ public struct Voice: Decodable, Sendable, Hashable {
     public var played: Bool?
 }
 
+/// An album: its photos and videos in the order sent, each with its file, as the protocol has it;
+/// or, as media in's jawd sends one, how many of each, each item a message of its own after it.
 public struct Album: Decodable, Sendable, Hashable {
     public var items: [Item]
+    public var photos: Int?
+    public var videos: Int?
+
+    /// How many photos and videos it has.
+    public var count: Int {
+        items.isEmpty ? (photos ?? 0) + (videos ?? 0) : items.count
+    }
 
     public struct Item: Decodable, Sendable, Hashable {
         public var id: String
+        /// `image` or `video`.
         public var kind: String
+        public var media: Media?
+
+        public init(id: String, kind: String, media: Media? = nil) {
+            self.id = id
+            self.kind = kind
+            self.media = media
+        }
+    }
+
+    public init(items: [Item], photos: Int? = nil, videos: Int? = nil) {
+        self.items = items
+        self.photos = photos
+        self.videos = videos
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        items = (try? c.decodeIfPresent([Item].self, forKey: .items)) ?? []
+        photos = try? c.decodeIfPresent(Int.self, forKey: .photos)
+        videos = try? c.decodeIfPresent(Int.self, forKey: .videos)
+    }
+
+    enum Keys: String, CodingKey {
+        case items, photos, videos
     }
 }
 

@@ -43,6 +43,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         case "chat.info": .reply(.chatInfo)
         case "status": .reply(.status)
         case "layout.get": .reply(.layout)
+        case "media.save": .reply(.saved)
         default: .reply(.json)
         }
         let value = try incoming(name, want)

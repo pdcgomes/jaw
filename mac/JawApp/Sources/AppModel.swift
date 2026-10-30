@@ -222,6 +222,10 @@ final class AppModel {
             terminalPanes(kept)
         case let .looked(chat, found):
             lookedUp(chat, found)
+        case let .notFetched(_, why):
+            say("not downloaded: \(why)", warn: true)
+        case let .saved(_, _, path, why):
+            if let path { say("saved as \(path)") } else { say("not saved: \(why ?? "")", warn: true) }
         case .push, .chats, .layout:
             break
         }
