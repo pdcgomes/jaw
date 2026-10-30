@@ -50,6 +50,21 @@ pub struct SendPoll {
     pub key: Option<String>,
 }
 
+/// `send.location`'s params: a pin, at `lat` and `lon` in degrees, and the place's `name` and
+/// `address` when it's one; answered as `send.text` is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SendLocation {
+    pub chat: String,
+    pub lat: f64,
+    pub lon: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
 /// `poll.vote`'s params: your vote in poll `message`, the options chosen by name, none to take your
 /// vote back; `chat` and `key` as the actions on a message have them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -235,12 +235,12 @@ const SEEDS: &[(&str, &[(&str, &str)])] = &[
             ("w", "640"),
             ("h", "480"),
             ("name", "'foto.jpg'"),
-            ("sha256", "x'01'"),
+            ("sha256", "x'0101010101010101010101010101010101010101010101010101010101010101'"),
             ("thumb", "x'02'"),
             ("path", "'media/m2.jpg'"),
             ("preview_small", "'media/m2.small.jpg'"),
             ("preview_large", "'media/m2.large.jpg'"),
-            ("state", "'here'"),
+            ("state", "'expired'"),
             ("progress", "0.5"),
         ],
     ),
@@ -373,6 +373,23 @@ const SEEDS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     ("poll_voters", &[("message", "2"), ("voter", "3"), ("at", "1790000000980"), ("id", "'v1'")]),
+    (
+        "media_files",
+        &[
+            ("sha256", "x'0101010101010101010101010101010101010101010101010101010101010101'"),
+            ("path", "'media/files/01.jpg'"),
+            ("bytes", "48000"),
+            ("small", "'media/files/01.small.jpg'"),
+            ("large", "'media/files/01.large.jpg'"),
+            ("previews_bytes", "9000"),
+            ("thumbnail", "'media/files/01.thumb.jpg'"),
+            ("thumbnail_bytes", "800"),
+            ("used_at", "1790000001010"),
+            ("made", "4"),
+        ],
+    ),
+    ("media_made", &[("id", "1"), ("made", "5"), ("settled", "3")]),
+    ("media_drop", &[("sha256", "x'0202020202020202020202020202020202020202020202020202020202020202'")]),
 ];
 
 /// Columns of jaw's own or raw a migration dropped by decision, by its number: the table, the
@@ -467,7 +484,13 @@ fn seed(db: &Connection, version: usize) {
         let row: Vec<&(&str, &str)> = row.iter().filter(|(column, _)| has.iter().any(|c| c == column)).collect();
         let names: Vec<String> = row.iter().map(|(column, _)| format!("\"{column}\"")).collect();
         let values: Vec<&str> = row.iter().map(|(_, value)| *value).collect();
-        let sql = format!("INSERT INTO \"{table}\" ({}) VALUES ({})", names.join(", "), values.join(", "));
+        let set: Vec<String> = names.iter().map(|name| format!("{name} = excluded.{name}")).collect();
+        let sql = format!(
+            "INSERT INTO \"{table}\" ({}) VALUES ({}) ON CONFLICT DO UPDATE SET {}",
+            names.join(", "),
+            values.join(", "),
+            set.join(", ")
+        );
         db.execute(&sql, []).unwrap_or_else(|e| {
             panic!("a row of {table} at version {version} wasn't written, so give SEEDS what it needs: {e}\n{sql}")
         });

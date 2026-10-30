@@ -62,24 +62,51 @@ const KEPT_ALIKE: &str = "SELECT raw FROM pending WHERE chat = ?1 AND target = ?
 /// and one whose conversion fails, or panics, is kept in quarantine with its raw protobuf while the
 /// step goes on, so no message holds up the rest.
 pub(super) fn backfilled(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
+    guarded(db, stamps, KINDS, n, converted_again)
+}
+
+/// Takes message `n` as `take` does, in a savepoint of its own: one whose taking fails, or panics,
+/// is kept in quarantine under `source` with its raw protobuf, what it wrote undone, while the step
+/// goes on, so no message holds up the rest; one failing for a reason that passes fails the step.
+pub(super) fn guarded(
+    db: &Connection,
+    stamps: &mut Stamps,
+    source: &str,
+    n: i64,
+    take: fn(&Connection, &mut Stamps, i64) -> Result<bool>,
+) -> Result<bool> {
     let mark = stamps.mark();
-    db.execute_batch("SAVEPOINT kinds_message")?;
-    match converted_again(db, stamps, n) {
+    db.execute_batch("SAVEPOINT backfill_message")?;
+    match take(db, stamps, n) {
         Ok(changed) => {
-            db.execute_batch("RELEASE kinds_message")?;
+            db.execute_batch("RELEASE backfill_message")?;
             Ok(changed)
         }
         Err(e) if transient(&e) => Err(e),
         Err(e) => {
-            db.execute_batch("ROLLBACK TO kinds_message; RELEASE kinds_message")?;
+            db.execute_batch("ROLLBACK TO backfill_message; RELEASE backfill_message")?;
             stamps.undo(mark);
             let (chat, id, raw): (String, String, Option<Vec<u8>>) =
                 db.prepare_cached(NAMED)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             eprintln!("jawd: kept message {id} in {chat} in quarantine, as converting it again failed: {e:#}");
-            record_quarantine(db, KINDS, &format!("{chat} {id}"), &format!("{e:#}"), raw.as_deref())?;
+            record_quarantine(db, source, &format!("{chat} {id}"), &format!("{e:#}"), raw.as_deref())?;
             Ok(false)
         }
     }
+}
+
+/// What `info` converts to now, for the account `me`; one whose conversion panics is an error, as
+/// the writer catches nothing, and every commit and ack waits on it.
+pub(super) fn converted(info: &WebMessageInfo, me: &Me) -> Result<Vec<Change>> {
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        assert_ne!(info.key.id.as_deref(), Some(tests::PANICS), "a conversion that panics, as a test asks");
+        convert::message(info, me, false)
+    }))
+    .map_err(|panic| {
+        let why = panic.downcast_ref::<&str>().copied().or(panic.downcast_ref::<String>().map(String::as_str));
+        anyhow!("converting it panicked: {}", why.unwrap_or("for no reason it gave"))
+    })
 }
 
 fn converted_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
@@ -89,17 +116,7 @@ fn converted_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool>
     let Some(info) = unpack(&raw).ok().and_then(|plain| WebMessageInfo::decode(plain.as_slice()).ok()) else {
         return Ok(false);
     };
-    let me = account(db)?;
-    // The writer catches nothing, and every commit and ack waits on it.
-    let changes = catch_unwind(AssertUnwindSafe(|| {
-        #[cfg(test)]
-        assert_ne!(id, tests::PANICS, "a conversion that panics, as a test asks");
-        convert::message(&info, &me, false)
-    }))
-    .map_err(|panic| {
-        let why = panic.downcast_ref::<&str>().copied().or(panic.downcast_ref::<String>().map(String::as_str));
-        anyhow!("converting it panicked: {}", why.unwrap_or("for no reason it gave"))
-    })?;
+    let changes = converted(&info, &account(db)?)?;
     // What it shows, and whether that's an edit standing in for its message.
     let shown = changes.iter().find_map(|change| match change {
         Change::Message(message) if message.id == id => Some((message, false)),
@@ -230,4 +247,4 @@ fn own_id(raw: &[u8]) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

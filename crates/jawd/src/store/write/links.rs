@@ -15,8 +15,10 @@ use super::{CHAT, MESSAGE, Stamps, chat_jid, located, now_ms};
 pub const LINKS: &str = "links";
 /// The backfill that gives the polls jaw.db held before votes were kept their options.
 pub const POLLS: &str = "polls";
+/// The backfill that reads the locations jaw.db held again, so each is found by its address too.
+pub const PLACES: &str = "places";
 /// The backfills this jawd knows, which a migration may leave rows for.
-pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS, COPIES];
+pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS, COPIES, PLACES];
 /// How many messages one step of a backfill looks at: most are none of its business, and a look at
 /// one that isn't is a read of its row.
 const STEP: i64 = 64;
@@ -28,6 +30,9 @@ const NEXT_LINKED: &str = "SELECT n, instr(spans, '\"t\":\"link\"') > 0 OR instr
 /// The next messages, each with whether it's a poll still there.
 const NEXT_POLLS: &str =
     "SELECT n, kind = 'poll' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
+/// The next messages, each with whether it's a location still there.
+const NEXT_PLACES: &str =
+    "SELECT n, kind = 'location' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
 const LINKED: &str = "SELECT 1 FROM links WHERE message = ?1";
 const LINK: &str = "INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description)
     SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links
@@ -66,6 +71,7 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
         POLLS => (NEXT_POLLS, super::polls::backfilled, None, STEP),
         KINDS => (kinds::NEXT_UNSHOWN, kinds::backfilled, Some(kinds::CONVERTING), STEP),
         COPIES => (copies::NEXT_COPYLESS, copies::backfilled, Some(copies::COPYING), copies::STEP),
+        PLACES => (NEXT_PLACES, super::again::places, Some(kinds::CONVERTING), STEP),
         other => bail!("jawd doesn't know the backfill {other}"),
     };
     let rows: Vec<(i64, Option<bool>)> = db

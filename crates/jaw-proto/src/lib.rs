@@ -542,6 +542,10 @@ pub struct Stored {
     /// yet, kept for a later jawd with what they change.
     #[serde(default)]
     pub encrypted_kept: u64,
+    /// Messages jaw.db held before a location was found by its address too that are still to be
+    /// looked at for locations to read again.
+    #[serde(default)]
+    pub places_backfill: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

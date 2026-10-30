@@ -402,7 +402,11 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         mine: envelope.from.mine,
         kind: body.kind,
         status,
-        spans: body.text.as_deref().and_then(|_| spans::json(&body.spans)),
+        spans: if body.shown {
+            body.text.as_deref().and_then(|_| spans::json(&body.spans))
+        } else {
+            Some(spans::kept(&body.spans))
+        },
         text: body.text,
         summary: body.summary,
         reply: context.reply,

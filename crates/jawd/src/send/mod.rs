@@ -10,8 +10,9 @@
 //! name their people as WhatsApp writes them (`quote`); reactions, edits and deletions go as
 //! messages of their own through the outbox (`actions`); `forward` sends messages again as new
 //! ones of yours (`forward`); `message.info` gives each recipient's receipts, and `chat.info` a
-//! chat's members (`info`). Text with a URL goes with its page's preview when the page answers in
-//! time (`link`), and the next message to its chat waits for it, so none overtakes another.
+//! chat's members (`info`). Polls (`poll`) and places (`places`) go as text does. Text with a URL
+//! goes with its page's preview when the page answers in time (`link`), and the next message to
+//! its chat waits for it, so none overtakes another.
 
 mod actions;
 pub mod bench;
@@ -19,6 +20,7 @@ mod forward;
 mod info;
 pub mod link;
 mod outbox;
+mod places;
 mod poll;
 mod presence;
 mod quote;
@@ -35,8 +37,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jaw_proto::send::{
-    ChatInfo, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, PollVote, React, Read, SendPoll, SendRetry,
-    SendText, Typing,
+    ChatInfo, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, PollVote, React, Read, SendLocation, SendPoll,
+    SendRetry, SendText, Typing,
 };
 use jaw_proto::{Error, Push, code};
 use rusqlite::Connection;
@@ -222,6 +224,7 @@ impl Sending {
         match method {
             "send.text" => result(outbox::send_text(inner, params_of::<SendText>(method, params)?).await?),
             "send.poll" => result(poll::send_poll(inner, params_of::<SendPoll>(method, params)?).await?),
+            "send.location" => result(places::send_location(inner, params_of::<SendLocation>(method, params)?).await?),
             "poll.vote" => poll::vote(inner, params_of::<PollVote>(method, params)?).await,
             "send.retry" => outbox::retry(inner, params_of::<SendRetry>(method, params)?).await,
             "chat.start" => result(start::start(inner, params_of::<ChatStart>(method, params)?).await?),
@@ -242,6 +245,7 @@ impl Sending {
     pub const METHODS: &[&str] = &[
         "send.text",
         "send.poll",
+        "send.location",
         "poll.vote",
         "send.retry",
         "chat.start",

@@ -476,6 +476,14 @@ impl DemoEngine {
                 &["Ramen"],
             ),
             vote(climbing, rui, "3EB0DEMO00000007", now - 270_000, ("3EB0DEMO00000005", rui), &["Tasca do Chico"]),
+            location(
+                ana,
+                ana,
+                "3EB0DEMO0000000C",
+                now - 900_000,
+                (38.716_25, -9.131_97),
+                ("Miradouro da Graça", "Calçada da Graça, 1100-265 Lisboa"),
+            ),
             // You and the two whose phones answer what you send there, so a mention of one lands;
             // told once the messages are in, so storing them holds none of the messages back, and
             // last, so an interface that sees the group named has the whole script.
@@ -622,6 +630,26 @@ pub fn poll(chat: &str, sender: &str, id: &str, at_ms: i64, question: &str, opti
     let raw = e2e::Message {
         poll_creation_message_v3: Some(Box::new(creation)),
         message_context_info: Some(e2e::MessageContextInfo { message_secret: Some(vec![7; 32]), ..Default::default() }),
+        ..Default::default()
+    };
+    let mut event = text(chat, sender, id, at_ms, "");
+    if let Some(pb::event::Kind::Message(message)) = &mut event.kind {
+        message.raw = raw.encode_to_vec();
+    }
+    event
+}
+
+/// A pin from `sender` in `chat` at `(lat, lon)`, with the place's name and address, as the phones
+/// send one.
+pub fn location(chat: &str, sender: &str, id: &str, at_ms: i64, at: (f64, f64), place: (&str, &str)) -> pb::Event {
+    let raw = e2e::Message {
+        location_message: Some(Box::new(e2e::LocationMessage {
+            degrees_latitude: Some(at.0),
+            degrees_longitude: Some(at.1),
+            name: Some(place.0.into()),
+            address: Some(place.1.into()),
+            ..Default::default()
+        })),
         ..Default::default()
     };
     let mut event = text(chat, sender, id, at_ms, "");

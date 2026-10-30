@@ -1261,6 +1261,7 @@ async fn each_sending_call_that_keeps_something_is_one_synced_commit() {
     let synced = || running.store.storage().synced_commits;
     let calls = [
         ("send.text", json!({ "chat": ANA, "text": "one" })),
+        ("send.location", json!({ "chat": ANA, "lat": 38.7, "lon": -9.1 })),
         ("draft.set", json!({ "chat": ANA, "text": "two" })),
         ("read", json!({ "chat": ANA, "up_to": "m1" })),
         ("chat.start", json!({ "person": format!("person:{rui}") })),
@@ -1270,7 +1271,8 @@ async fn each_sending_call_that_keeps_something_is_one_synced_commit() {
         running.call(method, params).await.unwrap();
         assert_eq!(synced() - before, 1, "{method}");
     }
-    let id = running.query(|db| Ok(db.query_row("SELECT o.id FROM outbox o", [], |r| r.get::<_, String>(0))?)).await;
+    let id =
+        running.query(|db| Ok(db.query_row("SELECT id FROM outbox WHERE n = 1", [], |r| r.get::<_, String>(0))?)).await;
     running
         .store
         .apply(Lane::Live, vec![Change::Outbox(Step::Failed { outbox: 1, error: "no".into(), next_at: None })])

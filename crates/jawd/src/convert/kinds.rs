@@ -24,11 +24,22 @@ pub struct Body {
     pub detail: Option<String>,
     /// A poll's options, by name, in their order.
     pub poll: Vec<String>,
+    /// Whether its text is what it shows, as its spans when it has none of its own; a location's is
+    /// only what search finds it by, and its fields say what it shows.
+    pub shown: bool,
 }
 
 impl Body {
     fn new(kind: &'static str, summary: impl Into<String>) -> Body {
-        Body { kind, text: None, spans: Vec::new(), summary: summary.into(), detail: None, poll: Vec::new() }
+        Body {
+            kind,
+            text: None,
+            spans: Vec::new(),
+            summary: summary.into(),
+            detail: None,
+            poll: Vec::new(),
+            shown: true,
+        }
     }
 
     /// A body whose text is `text`, parsed, and whose summary is its first line, or `fallback`
@@ -371,16 +382,26 @@ fn place(lat: Option<f64>, lon: Option<f64>) -> Value {
     json!({ "lat": lat, "lon": lon })
 }
 
+/// A string a message gives, unless it's only spaces.
+fn said(s: &Option<String>) -> Option<String> {
+    s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// A pin, and the place's name and address when it's one: found by both, and shown as its fields.
 fn location(x: &e2e::LocationMessage) -> Body {
-    let name = x.name.as_deref().or(x.address.as_deref()).filter(|n| !n.is_empty());
-    let summary = name.map_or("Location".to_string(), |name| format!("Location: {name}"));
+    let (name, address) = (said(&x.name), said(&x.address));
+    let called = name.as_deref().or(address.as_deref());
+    let summary = called.map_or("Location".to_string(), |called| format!("Location: {called}"));
     let mut body = Body::new("location", spans::one_line(&summary, SUMMARY));
-    body.text = name.map(str::to_string);
+    let words: Vec<&str> =
+        [name.as_deref(), address.as_deref().filter(|a| Some(*a) != name.as_deref())].into_iter().flatten().collect();
+    body.text = (!words.is_empty()).then(|| words.join("\n"));
+    body.shown = false;
     let mut where_ = place(x.degrees_latitude, x.degrees_longitude);
     if let Value::Object(map) = &mut where_ {
-        map.insert("name".into(), json!(x.name));
-        map.insert("address".into(), json!(x.address));
-        map.insert("url".into(), json!(x.url));
+        map.insert("name".into(), json!(name));
+        map.insert("address".into(), json!(address));
+        map.insert("url".into(), json!(said(&x.url)));
     }
     body.detail(json!({ "location": where_ }))
 }

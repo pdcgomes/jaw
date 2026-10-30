@@ -10,7 +10,7 @@ use jaw_proto::layout::{Book, LayoutGet, LayoutSet, Saved};
 use jaw_proto::media::{MediaCancel, MediaFetch, MediaSave, Saved as MediaSaved};
 use jaw_proto::send::{
     ChatInfo, ChatInfoResult, ChatStart, ChatStarted, Delete, DraftSet, Edit, Forward, Forwarded, Info, MessageInfo,
-    PollVote, React, Read, SendPoll, SendRetry, SendText, Sent, Typing,
+    PollVote, React, Read, SendLocation, SendPoll, SendRetry, SendText, Sent, Typing,
 };
 use jaw_proto::settings::{Messages, Settings, SettingsKept, SettingsSet};
 use jaw_proto::sync::{HistoryMore, Notice};
@@ -103,6 +103,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "focus" => params::<Focus>(&name, &request.params),
                     "send.text" => params::<SendText>(&name, &request.params),
                     "send.poll" => params::<SendPoll>(&name, &request.params),
+                    "send.location" => params::<SendLocation>(&name, &request.params),
                     "poll.vote" => params::<PollVote>(&name, &request.params),
                     "send.retry" => params::<SendRetry>(&name, &request.params),
                     "chat.start" => params::<ChatStart>(&name, &request.params),
@@ -152,7 +153,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
                     "media.save" => params::<MediaSaved>(&name, result),
-                    "send.text" | "send.poll" => params::<Sent>(&name, result),
+                    "send.text" | "send.poll" | "send.location" => params::<Sent>(&name, result),
                     "chat.start" => params::<ChatStarted>(&name, result),
                     "forward" => params::<Forwarded>(&name, result),
                     "message.info" => params::<Info>(&name, result),

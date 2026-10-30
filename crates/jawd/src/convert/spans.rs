@@ -94,6 +94,12 @@ pub fn json(spans: &[Span]) -> Option<String> {
     }
 }
 
+/// Spans as a message keeps them when its text isn't what it shows: always, none too, so what it
+/// shows never falls back to its text.
+pub fn kept(spans: &[Span]) -> String {
+    serde_json::to_string(spans).expect("spans serialize")
+}
+
 /// The text the spans show, on one line, at most `most` characters, for a summary.
 pub fn line(spans: &[Span], most: usize) -> String {
     let mut text = String::new();

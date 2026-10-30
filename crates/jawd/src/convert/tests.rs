@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use serde_json::json;
 use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::web_message_info::StubType;
 
@@ -264,6 +265,51 @@ fn stickers_locations_and_contacts_have_a_line_each() {
         ..Default::default()
     });
     assert_eq!((m.kind, m.summary.as_str(), m.text.as_deref()), ("contact", "2 contacts", Some("Rui, Sofia")));
+}
+
+fn detail_of(m: &Message) -> serde_json::Value {
+    serde_json::from_str(m.detail.as_deref().expect("a detail")).unwrap()
+}
+
+#[test]
+fn a_location_is_found_by_its_name_and_its_address_and_shows_as_its_fields() {
+    let place = |name: Option<&str>, address: Option<&str>| {
+        row(e2e::Message {
+            location_message: Some(Box::new(e2e::LocationMessage {
+                degrees_latitude: Some(38.7118),
+                degrees_longitude: Some(-9.1301),
+                name: name.map(str::to_string),
+                address: address.map(str::to_string),
+                url: Some(" https://maps.example/santa-luzia ".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    };
+    let m = place(Some("Miradouro de Santa Luzia"), Some("Largo de Santa Luzia, Lisboa"));
+    assert_eq!(m.summary, "Location: Miradouro de Santa Luzia");
+    assert_eq!(m.text.as_deref(), Some("Miradouro de Santa Luzia\nLargo de Santa Luzia, Lisboa"), "both found");
+    assert_eq!(m.spans.as_deref(), Some("[]"), "its text isn't what it shows");
+    assert_eq!(
+        detail_of(&m)["location"],
+        json!({
+            "lat": 38.7118,
+            "lon": -9.1301,
+            "name": "Miradouro de Santa Luzia",
+            "address": "Largo de Santa Luzia, Lisboa",
+            "url": "https://maps.example/santa-luzia",
+        })
+    );
+    let m = place(None, Some("Largo de Santa Luzia"));
+    assert_eq!(
+        (m.summary.as_str(), m.text.as_deref()),
+        ("Location: Largo de Santa Luzia", Some("Largo de Santa Luzia"))
+    );
+    let m = place(Some("Casa"), Some("Casa"));
+    assert_eq!(m.text.as_deref(), Some("Casa"), "a name that's its address once");
+    let m = place(Some("  "), None);
+    assert_eq!((m.summary.as_str(), m.text.as_deref(), m.spans.as_deref()), ("Location", None, Some("[]")));
+    assert_eq!(detail_of(&m)["location"]["name"], json!(null));
 }
 
 #[test]

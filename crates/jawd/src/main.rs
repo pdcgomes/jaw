@@ -1013,6 +1013,63 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_demo_engines_account_shows_a_place_and_takes_yours_through_the_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let options = Options { no_notify: true, ..Options::default() };
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options).await.unwrap();
+        tokio::spawn(sock::serve(started.state.clone(), listener));
+        let path = socket.clone();
+        let places = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&path, "test", "0").unwrap();
+            let ana = "351912345678@s.whatsapp.net";
+            let watched =
+                connection.call("messages.watch", serde_json::json!({ "chat": ana, "around": "newest", "before": 20 }));
+            let found = |rows: &serde_json::Value, pick: &dyn Fn(&serde_json::Value) -> bool| {
+                rows.as_array().and_then(|rows| rows.iter().find(|row| pick(row)).cloned())
+            };
+            let mut rows = watched.unwrap()["rows"].clone();
+            let theirs = loop {
+                if let Some(row) = found(&rows, &|row| row["id"] == "3EB0DEMO0000000C") {
+                    break row;
+                }
+                rows = connection.push().unwrap().params["upsert"].clone();
+            };
+            let pin =
+                serde_json::json!({ "chat": ana, "lat": 38.7139, "lon": -9.1334, "name": "Castelo", "key": "k1" });
+            let sent = connection.call("send.location", pin).unwrap();
+            let id = sent["message"].as_str().unwrap().to_string();
+            let yours = loop {
+                rows = connection.push().unwrap().params["upsert"].clone();
+                if let Some(row) = found(&rows, &|row| row["id"] == id.as_str() && row["status"] != "pending") {
+                    break row;
+                }
+            };
+            (theirs, yours, connection)
+        });
+        let (theirs, yours, mut connection) =
+            tokio::time::timeout(Duration::from_secs(20), places).await.expect("the places showed").unwrap();
+        assert_eq!((&theirs["kind"], &theirs["spans"]), (&"location".into(), &serde_json::json!([])));
+        assert_eq!(
+            theirs["location"],
+            serde_json::json!({
+                "lat": 38.71625, "lon": -9.13197, "name": "Miradouro da Graça",
+                "address": "Calçada da Graça, 1100-265 Lisboa", "url": null,
+            }),
+            "Ana's pin, with its place"
+        );
+        assert_eq!((&yours["kind"], yours["mine"].as_bool()), (&"location".into(), Some(true)));
+        assert_eq!(yours["location"]["name"], "Castelo", "yours, gone through the engine");
+        let stored = tokio::task::spawn_blocking(move || connection.call("status", serde_json::Value::Null).unwrap())
+            .await
+            .unwrap()["stored"]
+            .clone();
+        assert_eq!(stored["places_backfill"], 0, "a new jaw.db has no places to read again");
+        stop(started, &socket).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn jawd_stops_well_within_its_bound_while_messages_pour_into_a_watched_chat() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());

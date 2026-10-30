@@ -1142,6 +1142,14 @@ pub(super) const MIGRATIONS: &[&str] = &[
     INSERT INTO backfills (name, after, upto) SELECT 'copies', 0, seq FROM sqlite_sequence
         WHERE name = 'messages' AND seq > 0;
     ",
+    // 21, a schema step: places read fully. A location is found by its name and its address both;
+    // the ones jaw.db already holds are read again from their raw protobufs by a backfill. It adds
+    // one row, so it costs the same however many messages there are.
+    "
+    -- The locations among the messages jaw.db already holds.
+    INSERT INTO backfills (name, after, upto) SELECT 'places', 0, seq FROM sqlite_sequence
+        WHERE name = 'messages' AND seq > 0;
+    ",
 ];
 
 /// Migration 19's text, named so the tests that check and measure it find it whatever number it

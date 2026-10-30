@@ -101,7 +101,7 @@ fn answer_edit(id: &str, target: &str, at: i64, said: &str) -> WebMessageInfo {
 
 const TUESDAY: &str = "It ships on _Tuesday_ now";
 /// The ID of a message whose conversion panics, as `backfilled` does for it in tests.
-pub(super) const PANICS: &str = "3EB0PANICS";
+pub(in crate::store::write) const PANICS: &str = "3EB0PANICS";
 /// The ID of a message whose conversion fails once it has written, as `backfilled` does for it in
 /// tests.
 pub(super) const FAILS: &str = "3EB0FAILS";

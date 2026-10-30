@@ -2014,6 +2014,18 @@ SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_
 SELECT count(*) FROM sqlite_schema
     SCAN sqlite_master
 
+-- src/store/write/again.rs
+SELECT chat, kind, raw, text, spans, summary, detail FROM messages WHERE n = ?1 AND NOT deleted AND edited_at IS NULL
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/again.rs
+UPDATE messages SET text = ?2, spans = ?3, summary = ?4, detail = ?5, v = ?6 WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/again.rs
+UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
 -- src/store/write/copies.rs
 SELECT n, NOT deleted AND instr(detail, '"media":') > 0 AND NOT EXISTS (SELECT 1 FROM media WHERE message = messages.n AND variant = 'sd') FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
@@ -2316,6 +2328,10 @@ SELECT n, instr(spans, '"t":"link"') > 0 OR instr(detail, '"link":') > 0 FROM me
 
 -- src/store/write/links.rs
 SELECT n, kind = 'poll' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
+
+-- src/store/write/links.rs
+SELECT n, kind = 'location' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
 
 -- src/store/write/links.rs
