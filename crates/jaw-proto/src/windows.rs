@@ -238,6 +238,9 @@ pub struct ChatRow {
     pub draft: Option<String>,
     /// For a group in a community, the community's `id`.
     pub community: Option<String>,
+    /// Its disappearing-message timer in seconds, 0 when it's off.
+    #[serde(default)]
+    pub ephemeral: u32,
     /// For a community, the unread messages of the groups under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub children_unread: Option<u64>,

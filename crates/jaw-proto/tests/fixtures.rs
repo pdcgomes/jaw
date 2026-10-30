@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use jaw_proto::disappearing::{ChatDisappearing, Opened, ViewOnce};
 use jaw_proto::find::{ChatOpened, Find, Found, Kind};
 use jaw_proto::layout::{Book, LayoutGet, LayoutSet, Saved};
 use jaw_proto::library::{LibraryPush, LibraryShown, LibraryWatch, LibraryWatched};
@@ -132,6 +133,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "chat.mute" => params::<ChatMute>(&name, &request.params),
                     "chat.mark_unread" => params::<ChatMarkUnread>(&name, &request.params),
                     "star" => params::<Star>(&name, &request.params),
+                    "chat.disappearing" => params::<ChatDisappearing>(&name, &request.params),
+                    "view_once.open" | "view_once.close" => params::<ViewOnce>(&name, &request.params),
                     "layout.get" => params::<LayoutGet>(&name, &request.params),
                     "layout.set" if book => params::<LayoutSet<Book>>(&name, &request.params),
                     "layout.set" => params::<LayoutSet>(&name, &request.params),
@@ -171,7 +174,8 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "chat.opened" | "unwatch" | "history.more" | "focus" | "send.retry" | "draft.set" | "read"
                     | "typing" | "react" | "edit" | "delete" | "poll.vote" | "folder.add" | "favourite.set"
                     | "media.fetch" | "media.cancel" | "library.shown" | "chat.pin" | "chat.archive" | "chat.mute"
-                    | "chat.mark_unread" | "star" | "voice.play" | "voice.record" => {
+                    | "chat.mark_unread" | "star" | "voice.play" | "voice.record" | "chat.disappearing"
+                    | "view_once.close" => {
                         assert_eq!(result, &serde_json::json!({}), "{name} has a result")
                     }
                     "media.save" => params::<MediaSaved>(&name, result),
@@ -184,6 +188,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "forward" => params::<Forwarded>(&name, result),
                     "message.info" => params::<Info>(&name, result),
                     "chat.info" => params::<ChatInfoResult>(&name, result),
+                    "view_once.open" => params::<Opened>(&name, result),
                     "layout.get" | "layout.set" if book => params::<Saved<Book>>(&name, result),
                     "layout.get" | "layout.set" => params::<Saved>(&name, result),
                     "chats.watch" => params::<ChatsWatched>(&name, result),

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod disappearing;
 pub mod find;
 pub mod layout;
 pub mod library;
@@ -302,6 +303,9 @@ pub struct Status {
     /// What plays and records, the recordings folder, and the audio thread's counts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<voice::VoiceStatus>,
+    /// The messages with a time to go, and the view-once messages open now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disappearing: Option<disappearing::DisappearingStatus>,
 }
 
 /// Others' typing since jawd started: the chats with someone typing now; the changes WhatsApp sent,

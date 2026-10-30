@@ -329,6 +329,7 @@ impl State {
             folders: self.following.as_ref().map(|(_, checks)| checks.status()),
             media: self.media.as_ref().map(Media::status),
             voice: self.voice.as_ref().map(Voice::status),
+            disappearing: None,
         }
     }
 

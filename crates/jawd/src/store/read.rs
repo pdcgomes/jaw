@@ -154,6 +154,8 @@ pub struct ChatRow {
     pub children_unread: Option<i64>,
     /// For a community, how many of its groups' unread messages mention you.
     pub children_mentions: Option<i64>,
+    /// Its disappearing-message timer in seconds, 0 when it's off.
+    pub ephemeral: i64,
 }
 
 /// A chat's newest message, for its line in the chat list.
@@ -280,7 +282,8 @@ pub(super) const CHAT_SELECT: &str = "
             UNION ALL SELECT folder FROM folder_items WHERE person = c.person)),
         (SELECT slot FROM favourites WHERE chat = c.n),
         iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL),
-        iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL)";
+        iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL),
+        c.ephemeral";
 
 /// The rest of what chat_row reads, after the FROM that names chat `c`.
 pub(super) const CHAT_JOINS: &str = "
@@ -359,6 +362,7 @@ pub(super) fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
         favourite: r.get(33)?,
         children_unread: r.get(34)?,
         children_mentions: r.get(35)?,
+        ephemeral: r.get(36)?,
     })
 }
 
