@@ -1399,6 +1399,14 @@ pub(super) const MIGRATIONS: &[&str] = &[
             WHERE new.shelf IS NOT NULL AND new.text IS NOT NULL;
     END;
     ",
+    // 26, a schema step: the contact cards jaw.db holds are read again from their raw protobufs by a
+    // backfill, now that a message of several cards shows them as one card's does, `contact`'s name
+    // and vCard, and a card its message gives no name takes the one its vCard gives. It leaves one
+    // row in `backfills`, jaw's own, so it costs the same however many messages there are.
+    "
+    INSERT INTO backfills (name, after, upto) SELECT 'contacts', 0, seq FROM sqlite_sequence
+        WHERE name = 'messages' AND seq > 0;
+    ",
 ];
 
 /// Migration 19's text, named so the tests that check and measure it find it whatever number it

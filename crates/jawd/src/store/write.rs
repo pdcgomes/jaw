@@ -4,6 +4,7 @@
 //! only the rows whose `v` is past S.
 
 mod again;
+pub mod contacts;
 pub mod copies;
 mod events;
 pub mod folders;

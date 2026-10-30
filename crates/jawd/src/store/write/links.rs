@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::contacts::{self, CONTACTS};
 use super::copies::{self, COPIES};
 use super::kinds::{self, KINDS};
 use super::{CHAT, MESSAGE, Stamps, chat_jid, located, now_ms};
@@ -21,7 +22,7 @@ pub const PLACES: &str = "places";
 /// the answers and edits an earlier jawd kept sealed for them.
 pub const EVENTS: &str = "events";
 /// The backfills this jawd knows, which a migration may leave rows for.
-pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS, COPIES, PLACES, EVENTS];
+pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS, COPIES, PLACES, EVENTS, CONTACTS];
 /// How many messages one step of a backfill looks at: most are none of its business, and a look at
 /// one that isn't is a read of its row.
 const STEP: i64 = 64;
@@ -80,6 +81,7 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
         COPIES => (copies::NEXT_COPYLESS, copies::backfilled, Some(copies::COPYING), copies::STEP),
         PLACES => (NEXT_PLACES, super::again::places, Some(kinds::CONVERTING), STEP),
         EVENTS => (NEXT_EVENTS, super::again::events, Some(kinds::CONVERTING), STEP),
+        CONTACTS => (contacts::NEXT_CARDS, contacts::backfilled, Some(kinds::CONVERTING), STEP),
         other => bail!("jawd doesn't know the backfill {other}"),
     };
     let rows: Vec<(i64, Option<bool>)> = db

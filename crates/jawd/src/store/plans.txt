@@ -2246,6 +2246,10 @@ INSERT INTO backfills (name, after, upto) SELECT 'kinds', 0, seq FROM sqlite_seq
     SCAN sqlite_sequence
 
 -- src/store/schema.rs
+INSERT INTO backfills (name, after, upto) SELECT 'contacts', 0, seq FROM sqlite_sequence WHERE name = 'messages' AND seq > 0;
+    SCAN sqlite_sequence
+
+-- src/store/schema.rs
 SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name
     SCAN sqlite_schema
     USE TEMP B-TREE FOR ORDER BY
@@ -2274,6 +2278,27 @@ SELECT m.chat, c.id, m.id FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n
 -- src/store/write/again.rs
 SELECT count(*) FROM pending WHERE chat = ?1 AND target = ?2
     SEARCH pending USING COVERING INDEX pending_by_target_at (chat=? AND target=?)
+
+-- src/store/write/contacts.rs
+SELECT n, kind = 'contact' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
+
+-- src/store/write/contacts.rs
+SELECT m.chat, c.id, m.id, m.raw FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/contacts.rs
+SELECT value FROM sync_state WHERE key = 'me'
+    SEARCH sync_state USING PRIMARY KEY (key=?)
+
+-- src/store/write/contacts.rs
+UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), detail = ?5, v = ?6 WHERE n = ?1 AND kind = 'contact' AND NOT deleted AND (text IS NOT ?2 OR spans IS NOT ?3 OR summary IS NOT iif(?4 IS ?2, NULL, ?4) OR detail IS NOT ?5)
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/contacts.rs
+UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/copies.rs
 SELECT n, NOT deleted AND instr(detail, '"media":') > 0 AND NOT EXISTS (SELECT 1 FROM media WHERE message = messages.n AND variant = 'sd') FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3

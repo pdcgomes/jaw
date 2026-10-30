@@ -540,6 +540,9 @@ pub struct Stored {
     /// a file, to give each the copy of it its raw protobuf describes.
     #[serde(default)]
     pub copies_backfill: u64,
+    /// Messages jaw.db held before contact cards were read again, still to be looked at for theirs.
+    #[serde(default)]
+    pub contacts_backfill: u64,
     /// Edits and answers to events encrypted with their message's secret, which jawd can't read
     /// yet, kept for a later jawd with what they change.
     #[serde(default)]
