@@ -975,6 +975,192 @@ async fn an_event_deleted_for_everyone_stays_deleted_through_a_fold_with_its_cop
     assert!(found.is_empty(), "and search finds nothing of it: {found:?}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fold_keeps_the_kept_copys_newer_answer_from_the_same_jid_and_its_newer_edit_whole() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    apply(&store, in_chat(ANA, event_from("e1", ANA))).await;
+    apply(&store, in_chat(ANA_LID, event_from("e1", ANA))).await;
+    // Your newer answer in her number's chat, which is kept, your older in her LID's, folded in.
+    apply(&store, in_chat(ANA, answer_info("e1", (ANA, ME), ME, "m2", AT + 20, NotGoing))).await;
+    apply(&store, in_chat(ANA_LID, answer_info("e1", (ANA_LID, ME), ME, "m1", AT + 10, Going))).await;
+    // Her newer edit of the kept copy, and an older one of the copy that goes.
+    apply(&store, in_chat(ANA, edit_info("e1", (ANA, ANA), "x2", AT + 120_000, "Kept edit", false))).await;
+    apply(&store, in_chat(ANA_LID, edit_info("e1", (ANA_LID, ANA_LID), "x1", AT + 60_000, "Gone edit", true))).await;
+    apply(&store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
+    merged(&store).await;
+    let row = query(&store, |db| Ok(read::message(db, ANA, "e1")?.expect("the event").0)).await;
+    let detail: Value = serde_json::from_str(row.detail.as_ref().unwrap().get()).unwrap();
+    let event = &detail["event"];
+    assert_eq!(event["mine"], "not_going", "your newer answer, from the kept copy: {event}");
+    assert_eq!(
+        (&event["name"], &event["cancelled"]),
+        (&Value::from("Kept edit"), &Value::from(false)),
+        "the kept copy's newer edit, whole"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn your_answer_of_none_is_no_answer_of_yours() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    apply(&store, event("e1")).await;
+    apply(&store, sealed_answer("e1", (ANA, ME), ME, "m1", AT + 10, Going)).await;
+    apply(&store, sealed_answer("e1", (ANA, ME), ME, "m2", AT + 20, EventResponseType::Unknown)).await;
+    assert_eq!(counts(&store, "e1").await, (0, 0, 0, Value::Null), "your newest says none, so yours is none");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_from_a_jid_found_as_yours_though_the_accounts_list_lacks_it_is_yours() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(&store, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await;
+    apply(&store, event("e1")).await;
+    apply(&store, sealed_answer("e1", (ANA, ME), ME, "m1", AT + 10, Going)).await;
+    // History brings your newer answer from your LID, which the account's list doesn't have.
+    let mut info = event_from("e1", ANA);
+    info.event_responses = vec![EventResponse {
+        event_response_message_key: Some(MessageKey {
+            remote_jid: Some(GROUP.into()),
+            from_me: Some(false),
+            id: Some("m2".into()),
+            participant: Some(ME_LID.into()),
+        }),
+        timestamp_ms: Some(AT + 20),
+        event_response_message: Some(e2e::EventResponseMessage {
+            response: Some(NotGoing as i32),
+            timestamp_ms: Some(AT + 20),
+            ..Default::default()
+        }),
+        unread: None,
+    }];
+    apply(&store, convert::message(&info, &Me::new([ME.to_string()]), false)).await;
+    apply(&store, vec![Change::Person(Person { jids: vec![ME.into(), ME_LID.into()], ..Person::default() })]).await;
+    assert_eq!(
+        counts(&store, "e1").await,
+        (0, 0, 1, Value::from("not_going")),
+        "once your LID is found as you, its answer is yours, and the newer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_its_backfill_reads_again_as_its_chats_last_gives_the_chat_a_new_version() {
+    let home = tempfile::tempdir().unwrap();
+    before_answers(home.path());
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.execute("UPDATE chats SET last_message = 2, last_at = ?1 WHERE n = 1", [AT + 2]).unwrap();
+    drop(db);
+    let store = Store::open(home.path()).unwrap();
+    let chat_v =
+        || query(&store, |db| Ok(db.query_row("SELECT v FROM chats WHERE n = 1", [], |r| r.get::<_, i64>(0))?));
+    let before = chat_v().await;
+    backfilled(&store).await;
+    assert!(chat_v().await > before, "e2, the chat's last, was read again, and the chat list shows it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_that_counts_an_events_answers_again_gives_the_chat_it_last_shows_a_new_version_too() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    apply(&store, event("e1")).await;
+    apply(&store, answer("e1", RUI, "r1", AT + 10, Going)).await;
+    apply(&store, answer("e1", RUI_LID, "r2", AT + 20, NotGoing)).await;
+    let chat_v =
+        || query(&store, |db| Ok(db.query_row("SELECT v FROM chats WHERE id = ?1", [GROUP], |r| r.get::<_, i64>(0))?));
+    let before = chat_v().await;
+    apply(&store, vec![Change::Person(Person { jids: vec![RUI.into(), RUI_LID.into()], ..Person::default() })]).await;
+    assert_eq!(counts(&store, "e1").await, (0, 0, 1, Value::Null), "his newest alone, once he's one person");
+    assert!(chat_v().await > before, "and the chat whose last it is shows it with a new version");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_answer_set_aside_under_both_of_a_persons_chats_keeps_a_row_of_each_through_their_merge() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    let text = |chat: &str, id: &str| {
+        live(WebMessageInfo {
+            key: direct(chat, id),
+            message: Some(e2e::Message { conversation: Some("olá".into()), ..Default::default() }),
+            message_timestamp: Some((AT / 1000) as u64),
+            ..Default::default()
+        })
+    };
+    apply(&store, [text(ANA, "t1"), text(ANA_LID, "t2")].concat()).await;
+    // History brings Ana's event in each of her chats with her answer on it, opened, without the
+    // event itself, so the answer waits under each.
+    let answered = |chat: &str| {
+        let mut info = event_from("e1", ANA);
+        info.key = direct(chat, "e1");
+        info.event_responses = vec![EventResponse {
+            event_response_message_key: Some(MessageKey { participant: Some(ANA.into()), ..direct(chat, "h1") }),
+            timestamp_ms: Some(AT + 10),
+            event_response_message: Some(e2e::EventResponseMessage {
+                response: Some(Going as i32),
+                timestamp_ms: Some(AT + 10),
+                ..Default::default()
+            }),
+            unread: None,
+        }];
+        convert::message(&info, &Me::new([ME.to_string()]), false)
+            .into_iter()
+            .filter(|change| matches!(change, Change::Amend(_)))
+            .collect::<Vec<_>>()
+    };
+    apply(&store, answered(ANA_LID)).await;
+    apply(&store, answered(ANA)).await;
+    // Past the bound, both are set aside.
+    let raw = Connection::open(home.path().join("jaw.db")).unwrap();
+    raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    raw.execute(
+        "WITH RECURSIVE k(i) AS (SELECT 3 UNION ALL SELECT i + 1 FROM k WHERE i < ?1)
+        INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect)
+        SELECT ?2, 'y' || i, 'answer', ?3, x'', ?4, 0,
+            json_object('do', 'answer', 'answer', 'going', 'guests', 0, 'id', 'h' || i)
+        FROM k",
+        rusqlite::params![ANSWERS_WAITING, GROUP, AT, RUI],
+    )
+    .unwrap();
+    drop(raw);
+    for k in 0..2 {
+        let mut info = event_from(&format!("z{k}"), ANA);
+        info.event_responses = vec![EventResponse {
+            event_response_message_key: Some(key(&format!("zr{k}"), RUI)),
+            timestamp_ms: Some(AT),
+            event_response_message: Some(e2e::EventResponseMessage {
+                response: Some(Going as i32),
+                ..Default::default()
+            }),
+            unread: None,
+        }];
+        let amends = convert::message(&info, &Me::new([ME.to_string()]), false)
+            .into_iter()
+            .filter(|change| matches!(change, Change::Amend(_)))
+            .collect::<Vec<_>>();
+        apply(&store, amends).await;
+    }
+    assert_eq!(store.count("quarantine WHERE source = 'answer'").unwrap(), 2, "both copies set aside");
+    let joined =
+        apply(&store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })])
+            .await;
+    assert_eq!(
+        joined.quarantined, 0,
+        "the join goes in, the one renamed onto a name taken keeping its own row: {joined:?}"
+    );
+    merged(&store).await;
+    assert_eq!(
+        store.count(&format!("chats WHERE id = '{ANA_LID}'")).unwrap(),
+        0,
+        "her LID's chat merged into her number's"
+    );
+    assert_eq!(store.count("quarantine WHERE source = 'answer'").unwrap(), 2, "both still set aside, one each");
+    let mut theirs = event_from("e1", ANA);
+    theirs.key = direct(ANA, "e1");
+    apply(&store, live(theirs)).await;
+    let row = query(&store, |db| Ok(read::message(db, ANA, "e1")?.expect("the event").0)).await;
+    let detail: Value = serde_json::from_str(row.detail.as_ref().unwrap().get()).unwrap();
+    assert_eq!(detail["event"]["going"], 1, "they come back with their event, and count once");
+}
+
 /// A jaw.db at the version before events' answers were kept, its feed at seq 1,000, as main's jawd
 /// left it: Ana's events e1 and e2 in the group, converted as it converted them (a call link as
 /// `link`, no place, nothing counted), e3 deleted for everyone, and what it kept sealed for e1,
