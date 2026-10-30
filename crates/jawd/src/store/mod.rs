@@ -78,11 +78,40 @@ pub fn migrate_for_tests(db: &mut Connection) -> Result<()> {
     schema::migrate(db)
 }
 
-/// How long a test takes a backfill's or a merge's steps until they're done before it fails: a step
-/// that fails each time is rolled back and kept in quarantine, so it never moves on, and the test
-/// would otherwise take it again for good.
+/// The steps a test takes of a backfill, or of the merges, until they're done: at most one more than
+/// the rows they have left to look at or to move, since a step that doesn't fail takes one at least,
+/// or ends what it's for. A busy machine, which takes longer over each, never fails the test, and a
+/// step that fails each time, rolled back and kept in quarantine and so never moving on, fails it
+/// once they've all gone, where the test would otherwise take it again for good.
 #[cfg(test)]
-pub const STEPS_WITHIN: Duration = Duration::from_secs(60);
+pub struct Steps {
+    most: u64,
+    taken: u64,
+}
+
+#[cfg(test)]
+impl Steps {
+    /// One more step, failing with `never` once as many have gone as can be needed.
+    pub fn take(&mut self, never: &str) {
+        assert!(self.taken < self.most, "{never}: {} steps, and still not done", self.taken);
+        self.taken += 1;
+    }
+}
+
+#[cfg(test)]
+impl Store {
+    /// The steps backfill `name` can need from here.
+    pub fn backfill_steps(&self, name: &str) -> Steps {
+        Steps { most: self.backfill_left(name).unwrap() + 1, taken: 0 }
+    }
+
+    /// The steps the merges waiting can need from here: each moves a message of a chat being merged
+    /// away, or ends its merge.
+    pub fn merge_steps(&self) -> Steps {
+        let moving = self.count("messages WHERE chat IN (SELECT gone FROM chat_merges)").unwrap();
+        Steps { most: moving + self.count("chat_merges").unwrap() + 1, taken: 0 }
+    }
+}
 
 /// How a batch of changes went into the database.
 #[derive(Clone, Debug, Default)]

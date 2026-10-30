@@ -9,7 +9,7 @@ use super::*;
 use crate::convert::Me;
 use crate::convert::secret::Between;
 use crate::store::write::{Packed, links};
-use crate::store::{Applied, Change, Lane, Person, STEPS_WITHIN, Store, read, schema};
+use crate::store::{Applied, Change, Lane, Person, Store, read, schema};
 use crate::work::Priority;
 
 const GROUP: &str = "120363000000000001@g.us";
@@ -36,11 +36,11 @@ async fn apply(store: &Store, changes: Vec<Change>) -> Applied {
 }
 
 /// Takes the events backfill's steps until it's done, failing at once should a step fail, which is
-/// rolled back and so never moves on, and once STEPS_WITHIN has gone by.
+/// rolled back and so never moves on, and once it has taken more than it can need.
 async fn backfilled(store: &Store) {
-    let deadline = std::time::Instant::now() + STEPS_WITHIN;
+    let mut steps = store.backfill_steps(links::EVENTS);
     while store.backfill_left(links::EVENTS).unwrap() > 0 {
-        assert!(std::time::Instant::now() < deadline, "the backfill never ended");
+        steps.take("the backfill never ended");
         let applied = apply(store, vec![Change::Backfill(links::EVENTS)]).await;
         assert_eq!(applied.quarantined, 0, "a step failed: {applied:?}");
     }
@@ -48,9 +48,9 @@ async fn backfilled(store: &Store) {
 
 /// Takes the merges' steps until none is left, failing as `backfilled` does.
 async fn merged(store: &Store) {
-    let deadline = std::time::Instant::now() + STEPS_WITHIN;
+    let mut steps = store.merge_steps();
     while store.count("chat_merges").unwrap() > 0 {
-        assert!(std::time::Instant::now() < deadline, "the merge never finished");
+        steps.take("the merge never finished");
         let applied = apply(store, vec![Change::MergeStep(None)]).await;
         assert_eq!(applied.quarantined, 0, "a step failed: {applied:?}");
     }
@@ -730,9 +730,9 @@ async fn a_step_reading_64_events_in_a_row_again_ends_once_it_has_for_a_while_an
     };
     // Steps until the first three rows are behind them, however few events each reads again on a
     // busy machine, then one whose 64 rows are all events.
-    let (deadline, mut began) = (std::time::Instant::now() + STEPS_WITHIN, 0);
+    let (mut steps, mut began) = (store.backfill_steps(links::EVENTS), 0);
     while began < 10 {
-        assert!(std::time::Instant::now() < deadline, "the backfill never reached the events in a row");
+        steps.take("the backfill never reached the events in a row");
         apply(&store, vec![Change::Backfill(links::EVENTS)]).await;
         began = after().await;
     }

@@ -7,7 +7,7 @@ use super::*;
 use crate::convert::Me;
 use crate::store::read::{self, Around};
 use crate::store::write::{Packed, links};
-use crate::store::{Applied, Lane, STEPS_WITHIN, Store, schema};
+use crate::store::{Applied, Lane, Store, schema};
 use crate::work::Priority;
 
 const ANA: &str = "351910000002@s.whatsapp.net";
@@ -161,11 +161,11 @@ async fn step(store: &Store) -> Applied {
 }
 
 /// Takes the backfill's steps until it's done, failing at once should a step fail, which is rolled
-/// back and so never moves on, and once STEPS_WITHIN has gone by.
+/// back and so never moves on, and once it has taken more than it can need.
 async fn backfilled(store: &Store) {
-    let deadline = std::time::Instant::now() + STEPS_WITHIN;
+    let mut steps = store.backfill_steps(links::PLACES);
     while backfill_left(store).await.is_some() {
-        assert!(std::time::Instant::now() < deadline, "the backfill never ended");
+        steps.take("the backfill never ended");
         let applied = step(store).await;
         assert_eq!(applied.quarantined, 0, "a step failed: {applied:?}");
     }

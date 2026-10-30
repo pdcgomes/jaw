@@ -6,9 +6,7 @@ use wa_proto::wa_web_protobufs_e2e as e2e;
 use super::*;
 use crate::store::links::POLLS;
 use crate::store::read::Around;
-use crate::store::{
-    Amend, Amendment, Applied, Change, Lane, Message, Packed, Person, STEPS_WITHIN, Store, read, schema,
-};
+use crate::store::{Amend, Amendment, Applied, Change, Lane, Message, Packed, Person, Store, read, schema};
 use crate::work::{Priority, Report};
 
 const GROUP: &str = "120363000000000001@g.us";
@@ -369,11 +367,11 @@ fn joined(jids: &[&str]) -> Change {
     Change::Person(Person { jids: jids.iter().map(|jid| jid.to_string()).collect(), ..Person::default() })
 }
 
-/// Takes the merges' steps until none is left, failing should that take longer than STEPS_WITHIN.
+/// Takes the merges' steps until none is left, failing should they take more than they can need.
 async fn merged(store: &Store) {
-    let deadline = std::time::Instant::now() + STEPS_WITHIN;
+    let mut steps = store.merge_steps();
     while count(store, "chat_merges").await > 0 {
-        assert!(std::time::Instant::now() < deadline, "the merge never finished");
+        steps.take("the merge never finished");
         apply(store, vec![Change::MergeStep(None)]).await;
     }
 }
