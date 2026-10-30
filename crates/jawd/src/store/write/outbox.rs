@@ -3302,21 +3302,30 @@ mod tests {
         assert_eq!(at(), (None, None), "once it's at the position, WhatsApp knows as much as jaw");
     }
 
-    /// A photo of yours `send.media` writes in HD as message `id` in `chat`, with its HD copy's own
-    /// message `hd`, each with its copy to make from jaw's copy of the file.
-    fn attaching(chat: &str, id: &str, hd: &str, at: i64) -> crate::store::Change {
+    /// A photo of yours `send.media` writes as message `id` in `chat`, in HD with its HD copy's own
+    /// message when there's `hd`, each with its copy to make from jaw's copy of the file; and where
+    /// it says what it came to.
+    fn attached(chat: &str, id: &str, hd: Option<&str>, at: i64) -> (crate::store::Change, Written) {
         let message = Message { chat: chat.into(), kind: "image", ..mine(id, at) };
-        crate::store::Change::Outbox(Step::Attach {
+        let written = Written::default();
+        let step = Step::Attach {
             sending: vec![Attached {
                 message,
                 kind: "image",
                 raw: vec![1],
                 file: Some(Kept { path: format!("media/outgoing/{id}.jpg"), bytes: 10 }),
-                hd: Some((hd.into(), vec![2])),
+                hd: hd.map(|hd| (hd.into(), vec![2])),
             }],
             key: None,
-            written: Written::default(),
-        })
+            written: written.clone(),
+        };
+        (crate::store::Change::Outbox(step), written)
+    }
+
+    /// A photo of yours `send.media` writes in HD as message `id` in `chat`, with its HD copy's own
+    /// message `hd`.
+    fn attaching(chat: &str, id: &str, hd: &str, at: i64) -> crate::store::Change {
+        attached(chat, id, Some(hd), at).0
     }
 
     /// Outbox row `id`'s n.
@@ -3556,5 +3565,37 @@ mod tests {
         eprintln!("AUDIT-D: the HD row's target, its copy's message and the kept message after the merge: {after:?}");
         assert_eq!(after.0, after.2, "the HD row follows its message");
         assert_eq!(after.1, after.2, "the HD copy's row lost its message in the fold");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_media_counts_its_hd_copies_toward_the_outboxs_thousand() {
+        use crate::store::{Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        // 999 of yours waiting, as messages deleted for you still go.
+        {
+            let mut db = Connection::open(home.path().join("jaw.db")).unwrap();
+            db.busy_timeout(Duration::from_secs(10)).unwrap();
+            let tx = db.transaction().unwrap();
+            for n in 0..999 {
+                tx.execute(
+                    "INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'text', x'01', 0, 0)",
+                    params![ANA, format!("w{n}")],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let counted = || on(&store, |db| Ok(waiting(db)?.0 as i64));
+        // A photo in HD needs two places, its message's and its HD copy's.
+        let (photo, written) = attached(ANA, "p1", Some("h1"), 1_000);
+        store.apply(Lane::Live, vec![photo]).await.unwrap();
+        assert_eq!(written.take(), Some(Enqueued::Full { waiting: 999, failed: 0 }));
+        assert_eq!(counted().await, 999, "nothing of it was written");
+        // In SD it needs one, and takes the last.
+        let (photo, written) = attached(ANA, "p2", None, 2_000);
+        store.apply(Lane::Live, vec![photo]).await.unwrap();
+        assert!(matches!(written.take(), Some(Enqueued::Many(_))));
+        assert_eq!(counted().await, 1_000);
     }
 }
