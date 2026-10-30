@@ -1497,6 +1497,40 @@ async fn send_retry_refuses_the_failed_hd_copy_of_a_message_deleted_for_everyone
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_hd_copy_whose_messages_row_has_gone_fails_rather_than_going() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
+    // Its message's row removed by something other than a deletion for you, which takes its HD
+    // copies itself, written from outside: the HD copy has nothing left to go after.
+    let db = Connection::open(rig.home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.pragma_update(None, "foreign_keys", true).unwrap();
+    db.execute("DELETE FROM messages WHERE id = ?1", [&id]).unwrap();
+    let orphaned: i64 = rig
+        .query(|db| {
+            Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd' AND target IS NULL", [], |r| r.get(0))?)
+        })
+        .await;
+    assert_eq!(orphaned, 1);
+    rig.world.gate_uploads(false);
+    let gone = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let hd: i64 = rig
+                .query(|db| Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?))
+                .await;
+            if hd == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    gone.await.expect("its row went once its copy was uploaded");
+    assert_eq!(kinds_sent(&rig), [(id, "message")], "an HD copy whose message's row had gone was sent");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_failed_hd_copy_whose_sent_message_is_deleted_for_you_leaves_nothing() {
     let home = tempfile::tempdir().unwrap();
     let picked = tempfile::tempdir().unwrap();
