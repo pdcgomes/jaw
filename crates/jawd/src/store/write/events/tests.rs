@@ -409,18 +409,24 @@ async fn an_event_deleted_for_everyone_counts_no_answer_and_takes_no_edit() {
     assert_eq!(answered, [("r1".to_string(), "going".to_string())], "only the answer from before it went");
 }
 
-/// Fills `pending` with sealed answers up to their bound, for events jaw hasn't seen, after `from`.
-fn fill_pending(home: &std::path::Path) {
+/// Fills `pending` with what's kept sealed as `kind`, up to one short of its bound, for events jaw
+/// hasn't seen.
+fn fill_sealed(home: &std::path::Path, kind: &str) {
     let raw = Connection::open(home.join("jaw.db")).unwrap();
     raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
     raw.execute(
         "WITH RECURSIVE k(i) AS (SELECT 2 UNION ALL SELECT i + 1 FROM k WHERE i < ?1)
         INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect)
-        SELECT ?2, 'x' || i, 'rsvp', ?3, x'00', ?4, 0, json_object('do', 'keep', 'kind', 'rsvp')
+        SELECT ?2, 'x' || i, ?5, ?3, x'00', ?4, 0, json_object('do', 'keep', 'kind', ?5)
         FROM k",
-        rusqlite::params![ANSWERS_WAITING, GROUP, AT, RUI],
+        rusqlite::params![ANSWERS_WAITING, GROUP, AT, RUI, kind],
     )
     .unwrap();
+}
+
+/// Fills `pending` with sealed answers, as `fill_sealed` does.
+fn fill_pending(home: &std::path::Path) {
+    fill_sealed(home, "rsvp");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -475,6 +481,71 @@ async fn past_their_bound_the_oldest_answer_waiting_is_set_aside_whole_and_count
     })
     .await;
     assert_eq!(kept, format!("{GROUP} e3 {RUI} h1"), "the oldest set aside, by its event, its answerer and its ID");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn past_their_bound_the_oldest_edit_waiting_is_set_aside_whole_and_opens_once_its_event_comes() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    // Ana's edit comes before her event, and waits, sealed, and then as many as fill the bound.
+    apply(&store, edit("e1", ANA, "x1", AT + 60_000, "Sintra, later", true)).await;
+    fill_sealed(home.path(), "secret");
+    let bound = ANSWERS_WAITING as u64;
+    assert_eq!(store.count("pending WHERE kind = 'secret'").unwrap(), bound);
+    apply(&store, edit("e2", RUI, "x2", AT + 60_000, "Rui's now", false)).await;
+    assert_eq!(store.count("pending WHERE kind = 'secret'").unwrap(), bound, "pending stays within its bound");
+    let kept: Vec<String> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT ref FROM quarantine WHERE source = 'edit'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    assert_eq!(kept, [format!("{GROUP} e1 {ANA} x1")], "the oldest set aside, by its event, its editor and its ID");
+    apply(&store, event("e1")).await;
+    let (shows, _, edited) = shown(&store, "e1").await;
+    assert_eq!(
+        (&shows["name"], &shows["cancelled"], edited),
+        (&Value::from("Sintra, later"), &Value::from(true), true),
+        "it comes back with its event, and opens"
+    );
+    assert_eq!(store.count("quarantine WHERE source = 'edit'").unwrap(), 0, "as jawd status counts them");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_set_aside_in_a_chat_merged_since_comes_back_with_its_event() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    let text = |chat: &str, id: &str| {
+        live(WebMessageInfo {
+            key: direct(chat, id),
+            message: Some(e2e::Message { conversation: Some("olá".into()), ..Default::default() }),
+            message_timestamp: Some((AT / 1000) as u64),
+            ..Default::default()
+        })
+    };
+    apply(&store, [text(ANA, "t1"), text(ANA_LID, "t2")].concat()).await;
+    apply(&store, in_chat(ANA_LID, edit_info("e1", (ANA_LID, ANA_LID), "x1", AT + 60_000, "Sintra, later", false)))
+        .await;
+    fill_sealed(home.path(), "secret");
+    apply(&store, edit("e9", RUI, "x9", AT + 60_000, "Rui's now", false)).await;
+    assert_eq!(store.count("quarantine WHERE source = 'edit'").unwrap(), 1, "hers is set aside");
+    apply(&store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
+    merged(&store).await;
+    let kept: String = query(&store, |db| {
+        Ok(db.query_row("SELECT ref FROM quarantine WHERE source = 'edit'", [], |r| r.get::<_, String>(0))?)
+    })
+    .await;
+    assert_eq!(kept, format!("{ANA} e1 {ANA_LID} x1"), "it waits in the chat kept");
+    apply(&store, in_chat(ANA, event_from("e1", ANA))).await;
+    let row = query(&store, |db| Ok(read::message(db, ANA, "e1")?.expect("the event").0)).await;
+    let detail: Value = serde_json::from_str(row.detail.as_ref().unwrap().get()).unwrap();
+    assert_eq!(
+        (&detail["event"]["name"], row.edited),
+        (&Value::from("Sintra, later"), true),
+        "and opens with it there"
+    );
+    assert_eq!(store.count("quarantine WHERE source = 'edit'").unwrap(), 0);
 }
 
 /// What's set aside for event `id`, by name.

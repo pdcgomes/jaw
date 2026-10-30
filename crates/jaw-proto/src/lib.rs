@@ -556,6 +556,10 @@ pub struct Stored {
     pub answers_waiting: u64,
     #[serde(default)]
     pub answers_set_aside: u64,
+    /// Edits of events jawd hasn't seen, sealed with their secret, set aside past the 10,000 that
+    /// wait among `encrypted_kept`.
+    #[serde(default)]
+    pub edits_set_aside: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

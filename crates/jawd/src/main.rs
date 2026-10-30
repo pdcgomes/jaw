@@ -1128,6 +1128,7 @@ mod tests {
             .unwrap()["stored"]
             .clone();
         assert_eq!((&stored["events_backfill"], &stored["answers_waiting"]), (&0.into(), &0.into()));
+        assert_eq!((&stored["answers_set_aside"], &stored["edits_set_aside"]), (&0.into(), &0.into()));
         stop(started, &socket).await;
     }
 

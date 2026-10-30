@@ -16,12 +16,13 @@ use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 use super::{Amendment, CHAT, MESSAGE, Stamps, kinds, now_ms, unpack};
 use crate::convert::{self, secret, user_jid};
 
-/// The most answers of each form, opened and sealed, kept waiting in `pending` for events jaw hasn't
-/// seen; past it the oldest are set aside in quarantine, whole, and put back when their event
-/// comes, so none is lost and `pending` stays bounded.
+/// The most answers of each form, opened and sealed, and the most sealed edits, kept waiting in
+/// `pending` for events jaw hasn't seen; past it the oldest are set aside in quarantine, whole, and
+/// put back when their event comes, so none is lost and `pending` stays bounded.
 pub const ANSWERS_WAITING: i64 = 10_000;
-/// The forms an answer waits in: opened, as history brings it, and sealed, as it comes live.
-pub const WAITING_KINDS: [&str; 2] = ["answer", "rsvp"];
+/// The forms what's done to an event waits in: an answer opened, as history brings it, an answer
+/// sealed, as it comes live, and an edit, sealed.
+pub const WAITING_KINDS: [&str; 3] = ["answer", "rsvp", "secret"];
 
 const LATEST: &str = "SELECT at, id FROM event_answers WHERE message = ?1 AND who = ?2";
 const ANSWERED: &str =
@@ -50,21 +51,25 @@ const SET_ASIDE: &str = "INSERT INTO quarantine (at, source, ref, error, raw) VA
 /// What's set aside under source ?1 as name ?2, as JSON.
 const HELD: &str = "SELECT json(raw) FROM quarantine WHERE source = ?1 AND ref = ?2";
 const SET_ASIDE_DONE: &str = "DELETE FROM pending WHERE n = ?1";
-/// Why an answer waits in quarantine.
+/// Why an answer, or an edit, waits in quarantine.
 const ANSWER_ASIDE: &str =
     "more answers waited for events jaw has not seen than it keeps in pending, so this one waits here for its event";
+const EDIT_ASIDE: &str =
+    "more edits waited for events jaw has not seen than it keeps in pending, so this one waits here for its event";
+// What's set aside for events, answers and edits, named from ?1 to ?2, back in pending.
 const BACK: &str = "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect)
     SELECT raw ->> '$.chat', raw ->> '$.target', raw ->> '$.kind', raw ->> '$.at', unhex(raw ->> '$.raw'),
         raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect'
-    FROM quarantine WHERE source = 'answer' AND ref >= ?1 AND ref < ?2";
-const BACK_DONE: &str = "DELETE FROM quarantine WHERE source = 'answer' AND ref >= ?1 AND ref < ?2";
-// The answers set aside for chat ?3, named from ?1 to ?2, named and kept for chat ?4 instead; one
-// whose new name an answer set aside for ?4 has already keeps its own row, its n after the name.
+    FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2";
+const BACK_DONE: &str = "DELETE FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2";
+// The answers and edits set aside for chat ?3, named from ?1 to ?2, named and kept for chat ?4
+// instead; one whose new name one set aside for ?4 has already keeps its own row, its n after the
+// name.
 const SET_ASIDE_MOVED: &str = "UPDATE quarantine SET
         ref = ?4 || substr(ref, length(?3) + 1) || iif(EXISTS (SELECT 1 FROM quarantine q
-            WHERE q.source = 'answer' AND q.ref = ?4 || substr(quarantine.ref, length(?3) + 1)), ' ' || n, ''),
+            WHERE q.source = quarantine.source AND q.ref = ?4 || substr(quarantine.ref, length(?3) + 1)), ' ' || n, ''),
         raw = jsonb_set(raw, '$.chat', ?4)
-    WHERE source = 'answer' AND ref >= ?1 AND ref < ?2
+    WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2
     RETURNING raw ->> '$.target'";
 // The events people ?1 and ?2 have both answered, by any of their JIDs, with their chats.
 const ANSWERED_BY_BOTH: &str = "SELECT g.message, m.chat FROM person_jids gj
@@ -213,8 +218,8 @@ pub(super) fn joining(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64
     Ok(())
 }
 
-/// Puts the answers set aside for event `id` in `chat`, which has just come or moved there with a
-/// merge, back in `pending`, to be applied with the rest waiting for it.
+/// Puts the answers and edits set aside for event `id` in `chat`, which has just come or moved there
+/// with a merge, back in `pending`, to be applied with the rest waiting for it.
 pub(super) fn set_aside_back(db: &Connection, chat: &str, id: &str) -> Result<()> {
     let (from, to) = (format!("{chat} {id} "), format!("{chat} {id}!"));
     if db.prepare_cached(BACK)?.execute([&from, &to])? > 0 {
@@ -223,9 +228,9 @@ pub(super) fn set_aside_back(db: &Connection, chat: &str, id: &str) -> Result<()
     Ok(())
 }
 
-/// Has the answers set aside for events in chat `gone` wait for them in chat `keep` instead, as
-/// what waits in `pending` does once what's addressed to `gone` goes to `keep`, so they come back
-/// with their event there. Says the events they're for, by ID.
+/// Has the answers and edits set aside for events in chat `gone` wait for them in chat `keep`
+/// instead, as what waits in `pending` does once what's addressed to `gone` goes to `keep`, so they
+/// come back with their event there. Says the events they're for, by ID.
 pub(super) fn set_aside_moved(db: &Connection, keep: &str, gone: &str) -> Result<Vec<String>> {
     let (from, to) = (format!("{gone} "), format!("{gone}!"));
     Ok(db
@@ -234,12 +239,13 @@ pub(super) fn set_aside_moved(db: &Connection, keep: &str, gone: &str) -> Result
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// Keeps the answers waiting in `kind`'s form for events within ANSWERS_WAITING, setting the
-/// oldest past it aside.
+/// Keeps what waits in `kind`'s form, one of WAITING_KINDS, within ANSWERS_WAITING, setting the
+/// oldest past it aside: answers as `answer`, edits as `edit`.
 pub(super) fn bounded(db: &Connection, kind: &str) -> Result<()> {
     let waiting: i64 = db.prepare_cached(WAITING)?.query_row([kind], |r| r.get(0))?;
     if waiting > ANSWERS_WAITING {
-        set_aside(db, kind, waiting - ANSWERS_WAITING, ("answer", ANSWER_ASIDE))?;
+        let aside = if kind == "secret" { ("edit", EDIT_ASIDE) } else { ("answer", ANSWER_ASIDE) };
+        set_aside(db, kind, waiting - ANSWERS_WAITING, aside)?;
     }
     Ok(())
 }

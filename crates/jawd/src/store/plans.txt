@@ -2100,15 +2100,15 @@ DELETE FROM pending WHERE n = ?1
     SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/events.rs
-INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) SELECT raw ->> '$.chat', raw ->> '$.target', raw ->> '$.kind', raw ->> '$.at', unhex(raw ->> '$.raw'), raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect' FROM quarantine WHERE source = 'answer' AND ref >= ?1 AND ref < ?2
+INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) SELECT raw ->> '$.chat', raw ->> '$.target', raw ->> '$.kind', raw ->> '$.at', unhex(raw ->> '$.raw'), raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect' FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2
     SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
 
 -- src/store/write/events.rs
-DELETE FROM quarantine WHERE source = 'answer' AND ref >= ?1 AND ref < ?2
+DELETE FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2
     SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
 
 -- src/store/write/events.rs
-UPDATE quarantine SET ref = ?4 || substr(ref, length(?3) + 1) || iif(EXISTS (SELECT 1 FROM quarantine q WHERE q.source = 'answer' AND q.ref = ?4 || substr(quarantine.ref, length(?3) + 1)), ' ' || n, ''), raw = jsonb_set(raw, '$.chat', ?4) WHERE source = 'answer' AND ref >= ?1 AND ref < ?2 RETURNING raw ->> '$.target'
+UPDATE quarantine SET ref = ?4 || substr(ref, length(?3) + 1) || iif(EXISTS (SELECT 1 FROM quarantine q WHERE q.source = quarantine.source AND q.ref = ?4 || substr(quarantine.ref, length(?3) + 1)), ' ' || n, ''), raw = jsonb_set(raw, '$.chat', ?4) WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2 RETURNING raw ->> '$.target'
     SEARCH quarantine USING COVERING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
     CORRELATED SCALAR SUBQUERY 1
       SEARCH q USING COVERING INDEX quarantine_by_ref (source=? AND ref=?)

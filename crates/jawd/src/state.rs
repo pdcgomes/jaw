@@ -284,6 +284,7 @@ impl State {
                     events_backfill: store.backfill_left(links::EVENTS).ok()?,
                     answers_waiting: store.count("pending WHERE kind = 'answer'").ok()?,
                     answers_set_aside: store.count("quarantine WHERE source = 'answer'").ok()?,
+                    edits_set_aside: store.count("quarantine WHERE source = 'edit'").ok()?,
                 })
             }),
             interfaces: Some(Interfaces {
