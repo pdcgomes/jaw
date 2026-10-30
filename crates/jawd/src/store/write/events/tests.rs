@@ -627,6 +627,31 @@ async fn an_answer_set_aside_under_a_name_another_holds_is_named_apart_and_the_s
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_answer_whose_two_names_others_hold_stays_in_pending_rather_than_go_where_nothing_keeps_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    apply(&store, answer("e1", RUI, "r1", AT + 10, Going)).await;
+    // Rows that aren't his hold both names his answer would be set aside under, its own by its ID
+    // and the one after it by what it holds, as only a hash's collision could make them.
+    let raw = Connection::open(home.path().join("jaw.db")).unwrap();
+    raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let whole: String = raw.query_row(OLDEST, rusqlite::params!["rsvp", 1], |r| r.get(6)).unwrap();
+    let named = format!("{GROUP} e1 {RUI} r1");
+    for name in [named.clone(), format!("{named} #{}", digest(&whole))] {
+        raw.execute(
+            "INSERT INTO quarantine (at, source, ref, error, raw) VALUES (0, 'answer', ?1, 'held by another', jsonb('{}'))",
+            [name],
+        )
+        .unwrap();
+    }
+    drop(raw);
+    fill_pending(home.path());
+    apply(&store, answer("e2", ANA, "a2", AT + 20, Maybe)).await;
+    assert_eq!(store.count("pending WHERE target = 'e1'").unwrap(), 1, "past the bound, it stays in pending");
+    assert_eq!(store.count("quarantine WHERE source = 'answer'").unwrap(), 2, "where nothing else keeps it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn one_persons_answers_from_his_number_and_his_lid_count_once_and_their_join_gives_the_event_a_new_version() {
     let home = tempfile::tempdir().unwrap();
     let store = opened(home.path()).await;
