@@ -419,10 +419,11 @@ fn live_location(x: &e2e::LiveLocationMessage) -> Body {
     body.detail(json!({ "location": place(x.degrees_latitude, x.degrees_longitude) }))
 }
 
-/// The name a contact card goes by: the one its message gives it, or failing that its vCard's own.
+/// The name a contact card goes by: the one its message gives it, or failing that its vCard's own,
+/// read no further than the end of its first card.
 fn card_name(x: &e2e::ContactMessage) -> Option<String> {
     let given = x.display_name.as_deref().map(str::trim).filter(|name| !name.is_empty());
-    given.map(str::to_string).or_else(|| vcard::read(x.vcard.as_deref()?).into_iter().next()?.name)
+    given.map(str::to_string).or_else(|| vcard::first(x.vcard.as_deref()?)?.name)
 }
 
 /// A contact card: its name and its vCard as it came, found by its name.

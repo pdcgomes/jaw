@@ -219,6 +219,82 @@ async fn cards_an_earlier_jawd_left_are_read_again_into_one_cards_name_and_vcard
     assert_eq!(shown(&store).await, after);
 }
 
+/// A card of about `size` bytes its message gives no name, as a hostile or broken phone might
+/// write one: a note whose parameter's quote is left open, going on in folded lines that each end
+/// in `=`, and only then the card's name.
+fn hostile(size: usize) -> String {
+    folded(size, "NOTE;X-OPEN=\"", "x=")
+}
+
+/// The same card as a phone folds one: its note's lines as many and as long, none ending in `=`.
+fn folded_as_phones_fold(size: usize) -> String {
+    folded(size, "NOTE:", "xy")
+}
+
+fn folded(size: usize, note: &str, line: &str) -> String {
+    let mut vcard = format!("BEGIN:VCARD\r\nVERSION:3.0\r\n{note}");
+    while vcard.len() < size {
+        vcard.push_str("\r\n ");
+        vcard.push_str(line);
+    }
+    vcard + "\r\nFN:Marta Lopes\r\nEND:VCARD\r\n"
+}
+
+/// How long the fastest of three backfill steps took, each reading `vcard` again from a jaw.db an
+/// earlier jawd left it in unnamed, set back as it was between them.
+async fn fastest_step(vcard: &str) -> std::time::Duration {
+    let home = tempfile::tempdir().unwrap();
+    let unnamed = json!({ "contact": { "name": null, "vcard": vcard } });
+    let raw = one("card", card(None, vcard));
+    let row = Earlier {
+        id: "card",
+        kind: "contact",
+        text: None,
+        summary: "Contact",
+        detail: unnamed.clone(),
+        raw,
+        deleted: false,
+    };
+    earlier(home.path(), &[row]);
+    let store = Store::open(home.path()).unwrap();
+    let mut steps = Vec::new();
+    for _ in 0..3 {
+        let applied = backfill(&store).await;
+        assert_eq!((applied.changed, applied.transactions, applied.quarantined), (1, 1, 0), "{applied:?}");
+        steps.push(applied.took);
+        let name = query(&store, |db| {
+            Ok(db.query_row("SELECT text FROM messages WHERE id = 'card'", [], |r| r.get::<_, Option<String>>(0))?)
+        })
+        .await;
+        assert_eq!(name.as_deref(), Some("Marta Lopes"), "named as its vCard names it, once the rest is read");
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let unread = "UPDATE messages SET text = NULL, summary = 'Contact', detail = ?1 WHERE id = 'card'";
+        db.execute(unread, [unnamed.to_string()]).unwrap();
+        db.execute("INSERT INTO backfills (name, after, upto) VALUES ('contacts', 0, 1)", []).unwrap();
+    }
+    steps.into_iter().min().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hostile_card_is_read_again_in_a_step_inside_the_writers_budget_and_no_slower_than_a_plain_one() {
+    // A background transaction's budget is 3 ms, commit included; a debug build's conversion,
+    // unoptimised, is given a hundred times that.
+    let budget = std::time::Duration::from_millis(if cfg!(debug_assertions) { 300 } else { 3 });
+    let small = fastest_step(&hostile(64 * 1024)).await;
+    assert!(small < budget, "a step over a hostile card of 64 KiB took {small:?}");
+    // At 256 KiB, the most send.contact takes, writing the row takes a few milliseconds under load
+    // whatever the card, its vCard's line breaks escaped in its JSON, so a hostile card is held to
+    // what the same card folded as phones fold it takes.
+    let plain = fastest_step(&folded_as_phones_fold(256 * 1024)).await;
+    let left_open = fastest_step(&hostile(256 * 1024)).await;
+    assert!(left_open < plain * 2, "a step over a hostile card of 256 KiB took {left_open:?}, a plain one {plain:?}");
+    // A card named by its vCard is named by the first card in it, and what comes after isn't read.
+    let marta = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Marta Lopes\r\nEND:VCARD\r\n";
+    let first = fastest_step(&format!("{marta}{}", "A:\r\n".repeat(64 * 1024))).await;
+    assert!(first < plain * 2, "a step over a card and 256 KiB after it took {first:?}, a plain card {plain:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_card_whose_conversion_fails_or_panics_is_kept_in_quarantine_and_the_rest_are_read_again() {
     let home = tempfile::tempdir().unwrap();

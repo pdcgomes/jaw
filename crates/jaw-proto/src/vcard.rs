@@ -2,7 +2,10 @@
 //! its cards one after another, as several contacts export to one file, and each of
 //! `send.contact`'s cards is one. `read` gives each card's name and numbers, as an interface shows
 //! them, and `write` makes a card for someone from their name and numbers. A card is what someone
-//! else's phone wrote, so only what's shown is read, and only so much of it.
+//! else's phone wrote, so only what's shown is read, and only so much of it, in one pass whose cost
+//! grows with the card's length and no faster, however its lines are folded.
+
+use std::borrow::Cow;
 
 /// The most cards read from one vCard, and numbers from one card.
 const CARDS_MOST: usize = 256;
@@ -10,6 +13,9 @@ const NUMBERS_MOST: usize = 16;
 /// The longest name and number kept, in characters.
 const NAME_MOST: usize = 256;
 const NUMBER_MOST: usize = 64;
+/// How far into a line its colon is looked for, in bytes. The colon ends its property's name and
+/// parameters, and a line without one that soon is no property, however long it goes on.
+const HEAD_MOST: usize = 1024;
 
 /// A card as an interface shows it: the name it gives, and its numbers in the order they come.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -36,43 +42,53 @@ impl Phone {
 /// The cards `text` holds, each from BEGIN:VCARD to END:VCARD, in order. What's outside them is
 /// left out, and a card the text ends inside still counts.
 pub fn read(text: &str) -> Vec<Card> {
+    cards(text, CARDS_MOST)
+}
+
+/// The first card `text` holds, as `read` gives it, read no further than its end.
+pub fn first(text: &str) -> Option<Card> {
+    cards(text, 1).pop()
+}
+
+/// The first `most` cards `text` holds, read no further than the last one's end.
+fn cards(text: &str, most: usize) -> Vec<Card> {
     let mut cards = Vec::new();
     let mut open: Option<Reading> = None;
     for line in lines(text) {
         let Some(property) = Property::of(&line) else { continue };
-        if property.marks("BEGIN") {
-            if let Some(card) = open.take() {
-                cards.push(card.card());
-            }
-            if cards.len() >= CARDS_MOST {
+        let begins = property.marks("BEGIN");
+        if begins || property.marks("END") {
+            cards.extend(open.take().map(Reading::card));
+            if cards.len() >= most {
                 return cards;
             }
-            open = Some(Reading::default());
-        } else if property.marks("END") {
-            if let Some(card) = open.take() {
-                cards.push(card.card());
-            }
+            open = begins.then(Reading::default);
         } else if let Some(card) = open.as_mut() {
             card.take(&property);
         }
     }
-    if let Some(card) = open.filter(|_| cards.len() < CARDS_MOST) {
-        cards.push(card.card());
-    }
+    cards.extend(open.map(Reading::card));
     cards
 }
 
 /// Whether `text` is one card and nothing else: BEGIN:VCARD first, END:VCARD last, and no other
-/// card's beginning or end between them, whitespace around it apart.
+/// card's beginning or end between them, whitespace around it apart. It reads no further than the
+/// line that says it isn't.
 pub fn is_one(text: &str) -> bool {
-    let lines: Vec<String> = lines(text).into_iter().filter(|line| !line.trim().is_empty()).collect();
-    let marks = |line: &String, what: &str| Property::of(line).is_some_and(|p| p.marks(what));
-    let (begins, ends) =
-        (lines.iter().filter(|l| marks(l, "BEGIN")).count(), lines.iter().filter(|l| marks(l, "END")).count());
-    lines.first().is_some_and(|l| marks(l, "BEGIN"))
-        && lines.last().is_some_and(|l| marks(l, "END"))
-        && begins == 1
-        && ends == 1
+    let mut lines = lines(text).filter(|line| !line.trim().is_empty());
+    let marks = |line: &str, what: &str| Property::of(line).is_some_and(|p| p.marks(what));
+    if !lines.next().is_some_and(|line| marks(&line, "BEGIN")) {
+        return false;
+    }
+    while let Some(line) = lines.next() {
+        if marks(&line, "END") {
+            return lines.next().is_none();
+        }
+        if marks(&line, "BEGIN") {
+            return false;
+        }
+    }
+    false
 }
 
 /// A vCard 3.0 for `name`, whose numbers are `numbers`, each in international form with or without
@@ -91,114 +107,193 @@ pub fn write(name: &str, numbers: &[&str]) -> String {
     card
 }
 
-/// A card being read: its formatted name, its structured one, and its numbers so far.
+/// A card being read: its formatted name and its structured one as written, the last of each it
+/// gives, read once it ends; and its numbers so far.
 #[derive(Default)]
 struct Reading {
-    formatted: Option<String>,
-    structured: Option<String>,
+    formatted: Written,
+    structured: Written,
     phones: Vec<Phone>,
+}
+
+/// A property's value as written, and whether it's quoted-printable, kept until the card ends in a
+/// buffer the next such property's value takes over.
+#[derive(Default)]
+struct Written {
+    value: Option<String>,
+    quoted_printable: bool,
+}
+
+impl Written {
+    /// Keeps `property`'s value in place of the last one's.
+    fn keep(&mut self, property: &Property) {
+        let value = self.value.get_or_insert_default();
+        value.clear();
+        value.push_str(property.value);
+        self.quoted_printable = property.quoted_printable();
+    }
+
+    /// Its value with any quoted-printable encoding undone, vCard's escapes still in it.
+    fn text(&self) -> Option<Cow<'_, str>> {
+        let value = self.value.as_deref()?;
+        Some(if self.quoted_printable { Cow::Owned(quoted_printable(value)) } else { Cow::Borrowed(value) })
+    }
 }
 
 impl Reading {
     fn take(&mut self, property: &Property) {
-        match property.name.as_str() {
-            "FN" => self.formatted = said(&unescaped(&property.text())),
-            "N" => self.structured = structured(&property.text()),
-            "TEL" if self.phones.len() < NUMBERS_MOST => {
-                let written = unescaped(&property.text());
-                let written = written.trim();
-                let written =
-                    written.get(..4).filter(|s| s.eq_ignore_ascii_case("tel:")).map_or(written, |_| &written[4..]);
-                let number: String = written.trim().chars().take(NUMBER_MOST).collect();
-                if number.is_empty() {
-                    return;
-                }
-                let whatsapp = property
-                    .param("WAID")
-                    .filter(|digits| (6..=20).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit()))
-                    .map(|digits| format!("+{digits}"));
-                self.phones.push(Phone { number, whatsapp });
+        if property.is("FN") {
+            self.formatted.keep(property);
+        } else if property.is("N") {
+            self.structured.keep(property);
+        } else if property.is("TEL") && self.phones.len() < NUMBERS_MOST {
+            let written = unescaped(&property.text());
+            let written = written.trim();
+            let written =
+                written.get(..4).filter(|s| s.eq_ignore_ascii_case("tel:")).map_or(written, |_| &written[4..]);
+            let number: String = written.trim().chars().take(NUMBER_MOST).collect();
+            if number.is_empty() {
+                return;
             }
-            _ => {}
+            let whatsapp = property
+                .param("WAID")
+                .filter(|digits| (6..=20).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit()))
+                .map(|digits| format!("+{digits}"));
+            self.phones.push(Phone { number, whatsapp });
         }
     }
 
     /// The card read: named by its formatted name, or failing that its structured one.
     fn card(self) -> Card {
-        let name = self.formatted.or(self.structured).map(|name| name.chars().take(NAME_MOST).collect());
-        Card { name, phones: self.phones }
+        let formatted = self.formatted.text().and_then(|text| said(&unescaped(&text)));
+        let name = formatted.or_else(|| structured(&self.structured.text()?));
+        Card { name: name.map(|name| name.chars().take(NAME_MOST).collect()), phones: self.phones }
     }
 }
 
-/// A line's property: its name in capitals without its group (`item1.TEL` is `TEL`), its
-/// parameters, each a name in capitals and a value (a bare one, as vCard 2.1 writes `CELL`, has
-/// no name), and its value as written.
-struct Property {
-    name: String,
-    params: Vec<(String, String)>,
-    value: String,
+/// A line's property, read from the line where it is: its name without its group (`item1.TEL` is
+/// `TEL`), in any case; its head, the name and its parameters; and its value as written.
+struct Property<'a> {
+    name: &'a str,
+    head: &'a str,
+    value: &'a str,
 }
 
-impl Property {
-    fn of(line: &str) -> Option<Property> {
-        let mut quoted = false;
-        let (colon, _) = line.char_indices().find(|&(_, c)| {
-            quoted ^= c == '"';
-            c == ':' && !quoted
-        })?;
-        let (head, value) = (&line[..colon], &line[colon + 1..]);
-        let mut parts = head.split(';');
-        let name = parts.next()?.rsplit('.').next()?.trim().trim_start_matches('\u{feff}').to_ascii_uppercase();
-        let params = parts
-            .map(|param| match param.split_once('=') {
-                Some((key, value)) => (key.trim().to_ascii_uppercase(), value.trim().trim_matches('"').to_string()),
-                None => (String::new(), param.trim().to_string()),
-            })
-            .collect();
-        Some(Property { name, params, value: value.to_string() })
+impl<'a> Property<'a> {
+    fn of(line: &'a str) -> Option<Property<'a>> {
+        let mut head = Head::UNREAD;
+        head.read(line).map(|colon| Property::ended(line, colon))
+    }
+
+    /// `line`'s property, its head ended by the colon at `colon`.
+    fn ended(line: &'a str, colon: usize) -> Property<'a> {
+        let head = &line[..colon];
+        let name = head.split_once(';').map_or(head, |(name, _)| name);
+        let name = name.rsplit_once('.').map_or(name, |(_, name)| name).trim().trim_start_matches('\u{feff}');
+        Property { name, head, value: &line[colon + 1..] }
+    }
+
+    /// Whether it's a `name`, in any case.
+    fn is(&self, name: &str) -> bool {
+        self.name.eq_ignore_ascii_case(name)
     }
 
     /// Whether it begins or ends a card, as `what` says.
     fn marks(&self, what: &str) -> bool {
-        self.name == what && self.value.trim().eq_ignore_ascii_case("VCARD")
+        self.is(what) && self.value.trim().eq_ignore_ascii_case("VCARD")
     }
 
-    fn param(&self, key: &str) -> Option<&str> {
-        self.params.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str())
+    /// Its parameters, each a name and a value; a bare one, as vCard 2.1 writes `CELL`, has no name.
+    fn params(&self) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.head.split(';').skip(1).map(|param| match param.split_once('=') {
+            Some((key, value)) => (key.trim(), value.trim().trim_matches('"')),
+            None => ("", param.trim()),
+        })
+    }
+
+    fn param(&self, key: &str) -> Option<&'a str> {
+        self.params().find(|(name, _)| name.eq_ignore_ascii_case(key)).map(|(_, value)| value)
     }
 
     fn quoted_printable(&self) -> bool {
-        self.params.iter().any(|(name, value)| {
-            (name == "ENCODING" || name.is_empty()) && value.eq_ignore_ascii_case("QUOTED-PRINTABLE")
+        self.params().any(|(name, value)| {
+            (name.is_empty() || name.eq_ignore_ascii_case("ENCODING")) && value.eq_ignore_ascii_case("QUOTED-PRINTABLE")
         })
     }
 
     /// Its value with any quoted-printable encoding undone, vCard's escapes still in it.
-    fn text(&self) -> String {
-        if self.quoted_printable() { quoted_printable(&self.value) } else { self.value.clone() }
+    fn text(&self) -> Cow<'a, str> {
+        if self.quoted_printable() { Cow::Owned(quoted_printable(self.value)) } else { Cow::Borrowed(self.value) }
+    }
+}
+
+/// How far a line's head, its property's name and parameters, has been read. It ends at the line's
+/// first colon outside quotes, which is looked for in what the line has gained since the last look,
+/// and only as far as HEAD_MOST bytes in.
+#[derive(Clone, Copy)]
+enum Head {
+    /// Read as far as `at`, inside a quote or not.
+    Reading { at: usize, quoted: bool },
+    /// Ended by a colon.
+    Ended,
+    /// No colon came in its first HEAD_MOST bytes, so the line is no property.
+    Endless,
+}
+
+impl Head {
+    const UNREAD: Head = Head::Reading { at: 0, quoted: false };
+
+    /// Reads on in `line`, which goes on from what was read before, and gives where its colon is if
+    /// this read found it.
+    fn read(&mut self, line: &str) -> Option<usize> {
+        let Head::Reading { at, mut quoted } = *self else { return None };
+        let end = line.len().min(HEAD_MOST);
+        let from = at.min(end);
+        let colon = line.as_bytes()[from..end].iter().position(|&byte| {
+            quoted ^= byte == b'"';
+            byte == b':' && !quoted
+        });
+        *self = match colon {
+            Some(_) => Head::Ended,
+            None if end == HEAD_MOST => Head::Endless,
+            None => Head::Reading { at: end, quoted },
+        };
+        colon.map(|colon| from + colon)
     }
 }
 
 /// `text`'s lines, each folded one joined again: a line beginning with a space or a tab goes on
 /// from the one before, and so does the line after one of quoted-printable text ending in `=`.
-fn lines(text: &str) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut soft = false;
-    for line in text.trim_start_matches('\u{feff}').split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        match lines.last_mut() {
-            Some(last) if soft => {
-                last.pop();
-                last.push_str(line);
+/// Each comes as it's asked for and costs what its length does, however many lines it was folded
+/// into: its head is read once, and of each line it goes on with, only its own end is looked at.
+fn lines(text: &str) -> impl Iterator<Item = Cow<'_, str>> {
+    let mut physical =
+        text.trim_start_matches('\u{feff}').split('\n').map(|line| line.strip_suffix('\r').unwrap_or(line)).peekable();
+    std::iter::from_fn(move || {
+        let mut piece = physical.next()?;
+        let mut line = Cow::Borrowed(piece);
+        let (mut head, mut quoted_printable) = (Head::UNREAD, false);
+        loop {
+            if let Some(colon) = head.read(&line) {
+                quoted_printable = Property::ended(&line, colon).quoted_printable();
             }
-            Some(last) if line.starts_with([' ', '\t']) => last.push_str(&line[1..]),
-            _ => lines.push(line.to_string()),
+            let soft = quoted_printable && piece.ends_with('=');
+            match physical.peek().copied() {
+                Some(next) if soft => {
+                    let joined = line.to_mut();
+                    joined.pop();
+                    joined.push_str(next);
+                    piece = next;
+                }
+                Some(next) if next.starts_with([' ', '\t']) => {
+                    piece = &next[1..];
+                    line.to_mut().push_str(piece);
+                }
+                _ => return Some(line),
+            }
+            physical.next();
         }
-        soft = lines
-            .last()
-            .is_some_and(|last| last.ends_with('=') && Property::of(last).is_some_and(|p| p.quoted_printable()));
-    }
-    lines
+    })
 }
 
 /// Quoted-printable text decoded: each `=` and two hex digits a byte, read as UTF-8.
@@ -391,5 +486,119 @@ mod tests {
             card.phones,
             [phone("+351912345678", Some("+351912345678")), phone("+351913333333", Some("+351913333333"))]
         );
+    }
+
+    #[test]
+    fn a_line_whose_colon_comes_a_kib_in_or_later_is_no_property_and_only_its_own_end_breaks_it_softly() {
+        let padded = |pad: usize| {
+            let pad = "a".repeat(pad);
+            format!("BEGIN:VCARD\nTEL;X-PAD={pad};waid=351912345678:+351 912 345 678\nFN:Ana\nEND:VCARD")
+        };
+        assert_eq!(one(&padded(HEAD_MOST - 100)).phones, [phone("+351 912 345 678", Some("+351912345678"))]);
+        let card = one(&padded(HEAD_MOST));
+        assert_eq!((card.name.as_deref(), card.phones), (Some("Ana"), vec![]), "the line skipped, the rest read");
+        let open = open_quoted(64 * 1024).replace("END:VCARD", "FN:Ana\r\nEND:VCARD");
+        assert_eq!(one(&open).name.as_deref(), Some("Ana"), "a quote left open ends with its line");
+        let after = "BEGIN:VCARD\r\nNOTE;ENCODING=QUOTED-PRINTABLE:a==\r\n\r\nFN:Rui\r\nEND:VCARD\r\n";
+        assert_eq!(one(after).name.as_deref(), Some("Rui"), "the = an empty line goes on from isn't its own");
+    }
+
+    /// The fastest of three runs of `run` on `card`.
+    fn fastest(card: &str, run: impl Fn(&str)) -> std::time::Duration {
+        let timed = || {
+            let began = std::time::Instant::now();
+            run(card);
+            began.elapsed()
+        };
+        (0..3).map(|_| timed()).min().expect("three runs")
+    }
+
+    #[test]
+    fn a_card_takes_as_long_as_its_length_however_its_lines_are_folded_and_the_first_no_longer_than_its_own() {
+        // Each line read once, these take about 8 ms per 256 KiB in a debug build. A reader that
+        // looks at the whole of a line again for each line folded into it took 179 ms and 1.8 s
+        // broken softly and 45 s at 256 KiB left open (60 ms, 720 ms, 2.5 s and 42 s in release).
+        for size in [256 * 1024, 1024 * 1024] {
+            let most = std::time::Duration::from_millis(50) * (size / (256 * 1024)) as u32;
+            for (shape, card) in [("broken softly", soft_broken(size)), ("left open", open_quoted(size))] {
+                let reading = fastest(&card, |card| assert_eq!(read(card).len(), 1));
+                let checking = fastest(&card, |card| assert!(is_one(card)));
+                for (what, took) in [("read", reading), ("is_one", checking)] {
+                    assert!(took < most, "{what} took {took:?} on a card {shape} of {} KiB", size / 1024);
+                }
+            }
+        }
+        let first_of_many = "BEGIN:VCARD\r\nFN:Ana\r\nEND:VCARD\r\n".to_string() + &open_quoted(4 * 1024 * 1024);
+        let took = fastest(&first_of_many, |text| assert_eq!(first(text).and_then(|c| c.name).as_deref(), Some("Ana")));
+        assert!(took < std::time::Duration::from_millis(5), "the first card of many read in {took:?}");
+    }
+
+    /// A nameless card of about `size` bytes whose note is quoted-printable broken softly after
+    /// each character, its lines `x=`.
+    fn soft_broken(size: usize) -> String {
+        let mut card = "BEGIN:VCARD\r\nVERSION:2.1\r\nNOTE;ENCODING=QUOTED-PRINTABLE:".to_string();
+        while card.len() < size {
+            card.push_str("x=\r\n");
+        }
+        card + "x\r\nEND:VCARD\r\n"
+    }
+
+    /// A nameless card of about `size` bytes whose note leaves a parameter's quote open and goes on
+    /// in folded lines, each ending in `=`.
+    fn open_quoted(size: usize) -> String {
+        let mut card = "BEGIN:VCARD\r\nVERSION:3.0\r\nNOTE;X-OPEN=\"".to_string();
+        while card.len() < size {
+            card.push_str("\r\n x=");
+        }
+        card + "\r\nEND:VCARD\r\n"
+    }
+
+    /// A card of about `size` bytes with a photo, its base64 folded at 75 columns.
+    fn with_photo(size: usize) -> String {
+        let mut card = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Marta Lopes\r\nPHOTO;ENCODING=b;TYPE=JPEG:".to_string();
+        while card.len() < size {
+            card.push_str(&"A".repeat(75));
+            card.push_str("\r\n ");
+        }
+        card + "A==\r\nEND:VCARD\r\n"
+    }
+
+    /// About `size` bytes of `piece` again and again inside one card.
+    fn repeated(piece: &str, size: usize) -> String {
+        "BEGIN:VCARD\r\n".to_string() + &piece.repeat(size / piece.len()) + "END:VCARD\r\n"
+    }
+
+    /// Measures what `read` and `is_one` cost on cards of each shape:
+    /// `cargo test --release -p jaw-proto measure_what_cards_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: cargo test --release -p jaw-proto measure_what_cards_cost -- --ignored --nocapture"]
+    fn measure_what_cards_cost() {
+        for size in [256 * 1024, 1024 * 1024] {
+            let folded = format!("BEGIN:VCARD\r\nNOTE:{}\r\nEND:VCARD\r\n", "\r\n x".repeat(size / 4));
+            let shapes = [
+                ("a photo, folded at 75 columns", with_photo(size)),
+                ("quoted-printable broken softly, x= lines", soft_broken(size)),
+                ("a quote left open, folded lines ending in =", open_quoted(size)),
+                ("a note folded after each character", folded),
+                ("blank lines", repeated("\n", size)),
+                ("lines of a property each, A:", repeated("A:\r\n", size)),
+                ("formatted names, FN:a", repeated("FN:a\r\n", size)),
+                ("numbers, TEL:1", repeated("TEL:1\r\n", size)),
+                ("cards, one after another", "BEGIN:VCARD\r\nEND:VCARD\r\n".repeat(size / 24)),
+            ];
+            for (what, card) in shapes {
+                let began = std::time::Instant::now();
+                let cards = read(&card);
+                let reading = began.elapsed();
+                let began = std::time::Instant::now();
+                let one = is_one(&card);
+                let checking = began.elapsed();
+                println!(
+                    "{what:<45} {:>5} KiB: read {reading:>10.2?} ({} cards), is_one {checking:>10.2?} ({one})",
+                    card.len() / 1024,
+                    cards.len()
+                );
+            }
+        }
     }
 }
