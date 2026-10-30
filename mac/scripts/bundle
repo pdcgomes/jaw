@@ -5,9 +5,12 @@
 # Info.plist, which its own build embeds, so macOS asks for the microphone in jaw's words, and
 # jaw-engine by make engine, which stamps it with the version jaw and jawd say; the app is built in
 # Release on the build Mac (here when it doesn't answer) and comes back to mac/build/release/Jaw.app. The three
-# helpers go into Contents/Helpers, jawd's LaunchAgent into Contents/Library/LaunchAgents, and
-# everything is signed from the inside out with the hardened runtime: with JAW_SIGN_IDENTITY, else
-# the team's Developer ID Application identity by its SHA-1, else ad hoc, which runs here only.
+# helpers go into Contents/Helpers, jawd's LaunchAgent into Contents/Library/LaunchAgents, and what
+# mac/scripts/built-from says into its Info.plist (JawBuiltFrom and JawBuiltAt), since only a Jaw from
+# origin/main or a release's tag on it starts its jawd on an account's folder; everything is signed
+# from the inside out with the hardened runtime: with JAW_SIGN_IDENTITY, else the team's Developer ID
+# Application identity by its SHA-1, else ad hoc, which doesn't open: under the hardened runtime,
+# library validation refuses an app signed ad hoc its own frameworks.
 set -eu
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$repo"
@@ -40,12 +43,17 @@ cp mac/JawApp/Helpers/dev.badcoffee.jaw.jawd.plist "$app/Contents/Library/Launch
 jawd_version="$("$app/Contents/Helpers/jawd" --version | awk '{print $2}')"
 /usr/libexec/PlistBuddy -c "Add :JawdVersion string $jawd_version" "$app/Contents/Info.plist" 2>/dev/null ||
     /usr/libexec/PlistBuddy -c "Set :JawdVersion $jawd_version" "$app/Contents/Info.plist"
+built="$(mac/scripts/built-from)"
+from="$(echo "$built" | sed -n 1p)"
+at="$(echo "$built" | sed -n 2p)"
+plutil -replace JawBuiltFrom -string "$from" "$app/Contents/Info.plist"
+plutil -replace JawBuiltAt -string "$at" "$app/Contents/Info.plist"
 
 identity="${JAW_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null |
     awk -v team="($team)\"" '/"Developer ID Application:/ && index($0, team) { print $2; exit }')}"
 if [ -z "$identity" ]; then
     identity="-"
-    echo "==> no Developer ID Application identity for team $team: signing ad hoc, for this Mac only"
+    echo "==> no Developer ID Application identity for team $team: signing ad hoc, so the app won't open under the hardened runtime"
 fi
 flags="--force --options runtime --timestamp"
 [ "$identity" = "-" ] && flags="--force --options runtime"
@@ -58,4 +66,4 @@ for framework in "$app"/Contents/Frameworks/*.framework; do
 done
 codesign $flags --sign "$identity" --preserve-metadata=entitlements,requirements,flags "$app"
 codesign --verify --deep --strict "$app"
-echo "==> $app ($(du -sh "$app" | cut -f1)), jawd $jawd_version"
+echo "==> $app ($(du -sh "$app" | cut -f1)), jawd $jawd_version, built from $at"

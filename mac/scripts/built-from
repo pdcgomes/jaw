@@ -1,0 +1,31 @@
+#!/bin/sh
+# What a Jaw built from a checkout is built from, as `make mac` records it in the bundle's Info.plist
+# (JawBuiltFrom and JawBuiltAt): on two lines, main, release, branch or changed, then the commit, tag
+# or branch, for what the app says. Only a Jaw from origin/main or a release's tag on it starts a jawd
+# on an account's folder, since a branch's jawd could move jaw.db to a version main's can't open. A
+# tag counts only on origin/main, since every worktree shares the tags; "changed" is a tree with
+# uncommitted changes to what jawd and jaw-engine are built from, which the app's own sources, the
+# docs and the READMEs aren't; and a tree outside git says branch. It only reads: git takes none of
+# its optional locks.
+#
+#   mac/scripts/built-from [<checkout>]        # this script's own checkout by default
+set -eu
+export GIT_OPTIONAL_LOCKS=0
+cd "${1:-$(dirname "$0")/../..}"
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    printf 'branch\na tree outside git, which says nothing of where it came from\n'
+    exit 0
+fi
+commit=$(git rev-parse --short HEAD)
+branch=$(git rev-parse --abbrev-ref HEAD)
+place="$branch at $commit"
+[ "$branch" = HEAD ] && place=$commit
+if [ -n "$(git status --porcelain -- Cargo.toml Cargo.lock crates engine proto protocol)" ]; then
+    printf 'changed\n%s, with uncommitted changes to what jawd is built from\n' "$place"
+elif ! git merge-base --is-ancestor HEAD origin/main 2> /dev/null; then
+    printf 'branch\n%s, not on origin/main\n' "$place"
+elif tag=$(git describe --tags --exact-match --match 'v[0-9]*' HEAD 2> /dev/null); then
+    printf 'release\n%s\n' "$tag"
+else
+    printf 'main\n%s on main\n' "$commit"
+fi
