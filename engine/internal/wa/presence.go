@@ -35,7 +35,12 @@ func typing(v *events.ChatPresence) *enginepb.Typing {
 			state = enginepb.ChatPresence_RECORDING
 		}
 	}
-	return &enginepb.Typing{Chat: v.Chat.String(), Sender: v.Sender.ToNonAD().String(), State: state}
+	return &enginepb.Typing{
+		Chat:      v.Chat.String(),
+		Sender:    v.Sender.ToNonAD().String(),
+		State:     state,
+		SenderAlt: jid(v.SenderAlt.ToNonAD()),
+	}
 }
 
 func (e *Engine) subscribePresence(c *enginepb.SubscribePresence) *enginepb.Reply {

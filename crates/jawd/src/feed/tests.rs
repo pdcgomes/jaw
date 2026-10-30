@@ -4780,7 +4780,7 @@ impl Watcher {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_watch_says_whos_typing_in_its_chats_and_a_typing_push_follows_each_change_there_and_nowhere_else() {
     let (bed, typing, _hearing) = typing_bed(NEVER).await;
-    typing.heard(OPEN, OPEN, Composing);
+    typing.heard(OPEN, OPEN, "", Composing);
     typed(&typing, OPEN, &["Ana"]).await;
     let mut watcher = bed.watcher(64);
     let list = watcher.watch("chats.watch", json!({"around": "top", "after": 3})).await;
@@ -4792,9 +4792,9 @@ async fn a_watch_says_whos_typing_in_its_chats_and_a_typing_push_follows_each_ch
 
     // Rui records in the group, which both windows show; someone types in a chat neither shows,
     // whose typing is never pushed (`Watcher::take` checks); and Ana stops.
-    typing.heard(GROUP, &person(9), Recording);
-    typing.heard(&person(5), &person(5), Composing);
-    typing.heard(OPEN, OPEN, Paused);
+    typing.heard(GROUP, &person(9), "", Recording);
+    typing.heard(&person(5), &person(5), "", Composing);
+    typing.heard(OPEN, OPEN, "", Paused);
     watcher.until_typing(&[(GROUP, &["Rui"])]).await;
     assert_eq!(watcher.typing[GROUP][0]["state"], "recording");
     let sent: Vec<&str> = watcher.told.iter().map(|(chat, _)| chat.as_str()).collect();
@@ -4804,7 +4804,7 @@ async fn a_watch_says_whos_typing_in_its_chats_and_a_typing_push_follows_each_ch
 
     // With the conversation unwatched, the list still shows the group, so it's still told.
     watcher.call("unwatch", json!({"watch": conversation})).await.unwrap();
-    typing.heard(GROUP, &person(10), Composing);
+    typing.heard(GROUP, &person(10), "", Composing);
     watcher.until_typing(&[(GROUP, &["Rui", "Zé"])]).await;
 
     // Moved down the list, the window's answer says who's typing in the chats it shows now.
@@ -4819,8 +4819,8 @@ async fn a_watch_says_whos_typing_in_its_chats_and_a_typing_push_follows_each_ch
 async fn watching_again_from_since_says_whos_typing_now_as_a_fresh_watch_does_whatever_changed_meanwhile() {
     let (bed, typing, _hearing) = typing_bed(NEVER).await;
     let socket = serve(&bed);
-    typing.heard(OPEN, OPEN, Composing);
-    typing.heard(GROUP, &person(9), Composing);
+    typing.heard(OPEN, OPEN, "", Composing);
+    typing.heard(GROUP, &person(9), "", Composing);
     typed(&typing, OPEN, &["Ana"]).await;
     typed(&typing, GROUP, &["Rui"]).await;
     let list = json!({"around": "top", "after": 3});
@@ -4845,9 +4845,9 @@ async fn watching_again_from_since_says_whos_typing_now_as_a_fresh_watch_does_wh
     // starts typing in a chat whose row doesn't change, and Ana stops.
     typing.message(GROUP, &person(9), "");
     bed.apply(vec![Change::Message(text(GROUP, "later", 20_000, Some(&person(9)), "a caminho"))]).await;
-    typing.heard(GROUP, &person(10), Recording);
-    typing.heard(&person(1), &person(1), Composing);
-    typing.heard(OPEN, OPEN, Paused);
+    typing.heard(GROUP, &person(10), "", Recording);
+    typing.heard(&person(1), &person(1), "", Composing);
+    typing.heard(OPEN, OPEN, "", Paused);
     typed(&typing, GROUP, &["Zé"]).await;
     typed(&typing, &person(1), &["+351910000001"]).await;
     typed(&typing, OPEN, &[]).await;
@@ -4885,8 +4885,8 @@ async fn a_chat_that_comes_into_a_window_is_told_whos_typing_there_just_after_th
     let (bed, typing, _hearing) = typing_bed(NEVER).await;
     let mut watcher = bed.watcher(64);
     let list = watcher.watch("chats.watch", json!({"around": "top", "after": 3})).await;
-    typing.heard(&person(5), &person(5), Composing);
-    typing.heard(&person(1), &person(1), Composing);
+    typing.heard(&person(5), &person(5), "", Composing);
+    typing.heard(&person(1), &person(1), "", Composing);
     watcher.until_typing(&[(&person(1), &["+351910000001"])]).await;
 
     // Pinned, the fifth chat comes to the top, and the window lets go of the third.
@@ -4905,11 +4905,11 @@ async fn a_chat_that_comes_into_a_window_is_told_whos_typing_there_just_after_th
     );
     // The chat that left is forgotten, by the interface as by jawd: nothing more comes for it while
     // it's out, as it stops and then records,
-    typing.heard(&person(1), &person(1), Paused);
-    typing.heard(OPEN, OPEN, Composing);
+    typing.heard(&person(1), &person(1), "", Paused);
+    typing.heard(OPEN, OPEN, "", Composing);
     watcher.until_typing(&[(&person(5), &["+351910000005"]), (OPEN, &["Ana"])]).await;
     typed(&typing, &person(1), &[]).await;
-    typing.heard(&person(1), &person(1), Recording);
+    typing.heard(&person(1), &person(1), "", Recording);
     typed(&typing, &person(1), &["+351910000001"]).await;
     watcher.run_for(ms(100)).await;
     assert_eq!(watcher.told.iter().filter(|(chat, _)| chat == &person(1)).count(), 1, "{:?}", watcher.told);
@@ -4928,18 +4928,18 @@ async fn a_connection_that_falls_behind_the_typing_told_looks_again_at_every_cha
     let (bed, typing, _hearing) = typing_bed_of(typing, brisk()).await;
     let mut watcher = bed.watcher(64);
     watcher.watch("chats.watch", json!({"around": "top", "after": 3})).await;
-    typing.heard(OPEN, OPEN, Composing);
+    typing.heard(OPEN, OPEN, "", Composing);
     watcher.until_typing(&[(OPEN, &["Ana"])]).await;
 
     // While the connection takes nothing, Ana stops, and six rounds more are told, each in a chat
     // its window doesn't show, so the round that told hers is gone by the time it looks.
-    typing.heard(OPEN, OPEN, Paused);
+    typing.heard(OPEN, OPEN, "", Paused);
     typed(&typing, OPEN, &[]).await;
     let unshown = [person(2), person(3), person(4), person(5)];
     for (n, chat) in unshown.iter().chain(&unshown[..2]).enumerate() {
         let name = format!("+{}", chat.trim_end_matches("@s.whatsapp.net"));
         let (state, now) = if n < 4 { (Composing, vec![name.as_str()]) } else { (Paused, vec![]) };
-        typing.heard(chat, chat, state);
+        typing.heard(chat, chat, "", state);
         typed(&typing, chat, &now).await;
     }
 
@@ -4962,8 +4962,8 @@ async fn a_connection_whose_interface_reads_nothing_holds_one_typing_for_each_ch
     watcher.watch("messages.watch", json!({"chat": GROUP, "around": "newest", "before": 5})).await;
     // A hundred changes in each of two chats it shows, while its interface reads nothing.
     for n in 0..100 {
-        typing.heard(GROUP, &person(9 + n % 2), if n % 3 == 0 { Recording } else { Composing });
-        typing.heard(OPEN, OPEN, if n % 2 == 0 { Composing } else { Paused });
+        typing.heard(GROUP, &person(9 + n % 2), "", if n % 3 == 0 { Recording } else { Composing });
+        typing.heard(OPEN, OPEN, "", if n % 2 == 0 { Composing } else { Paused });
         let until = Instant::now() + ms(4);
         while let Ok(ready) = tokio::time::timeout_at(until.into(), watcher.client.ready()).await {
             watcher.client.handle(ready).await;
@@ -5061,17 +5061,17 @@ async fn typing_writes_nothing_to_jaw_db_and_moves_no_seq_while_interfaces_are_t
 
     // Ana types and stops, Rui records and Zé types in the group, a message of Rui's ends his,
     // Zé's fades, and Ana's ends as you go away, each once the interface has been told the last.
-    typing.heard(OPEN, OPEN, Composing);
+    typing.heard(OPEN, OPEN, "", Composing);
     pushed_typing(&mut lines, OPEN, &["Ana"]).await;
-    typing.heard(OPEN, OPEN, Paused);
+    typing.heard(OPEN, OPEN, "", Paused);
     pushed_typing(&mut lines, OPEN, &[]).await;
-    typing.heard(GROUP, &person(9), Recording);
-    typing.heard(GROUP, &person(10), Composing);
+    typing.heard(GROUP, &person(9), "", Recording);
+    typing.heard(GROUP, &person(10), "", Composing);
     pushed_typing(&mut lines, GROUP, &["Rui", "Zé"]).await;
     typing.message(GROUP, &person(9), "");
     pushed_typing(&mut lines, GROUP, &["Zé"]).await;
     pushed_typing(&mut lines, GROUP, &[]).await;
-    typing.heard(OPEN, OPEN, Recording);
+    typing.heard(OPEN, OPEN, "", Recording);
     pushed_typing(&mut lines, OPEN, &["Ana"]).await;
     hearing.send_replace(false);
     pushed_typing(&mut lines, OPEN, &[]).await;
@@ -5104,8 +5104,8 @@ async fn the_tree_and_a_roster_are_told_no_typing_while_a_folders_chat_list_besi
     let (bed, typing, _hearing) = typing_bed(NEVER).await;
     let quiet = tree_and_roster_answers(&bed).await;
     let committed = *bed.store.committed().borrow();
-    typing.heard(OPEN, OPEN, Composing);
-    typing.heard(GROUP, &person(9), Recording);
+    typing.heard(OPEN, OPEN, "", Composing);
+    typing.heard(GROUP, &person(9), "", Recording);
     typed(&typing, OPEN, &["Ana"]).await;
     typed(&typing, GROUP, &["Rui"]).await;
 
@@ -5128,11 +5128,11 @@ async fn the_tree_and_a_roster_are_told_no_typing_while_a_folders_chat_list_besi
     let mut watcher = bed.watcher(64);
     watcher.watch("folders.watch", json!({})).await;
     watcher.watch("roster.watch", json!({"folder": "all", "around": "top", "after": 20})).await;
-    typing.heard(GROUP, &person(10), Composing);
-    typing.heard(OPEN, OPEN, Paused);
+    typing.heard(GROUP, &person(10), "", Composing);
+    typing.heard(OPEN, OPEN, "", Paused);
     typed(&typing, GROUP, &["Rui", "Zé"]).await;
     typed(&typing, OPEN, &[]).await;
-    typing.heard(OPEN, OPEN, Recording);
+    typing.heard(OPEN, OPEN, "", Recording);
     typed(&typing, OPEN, &["Ana"]).await;
     let renamed = Change::Person(named(OPEN, "Ana Ribeiro"));
     let written = Change::Message(Message { live: true, ..text(OPEN, "t-roster", 20_000, Some(OPEN), "olá") });
@@ -5157,7 +5157,7 @@ async fn the_tree_and_a_roster_are_told_no_typing_while_a_folders_chat_list_besi
     let groups = json!({"folder": "groups", "around": "top", "after": 3});
     let groups = watcher.call("chats.watch", groups).await.unwrap();
     assert_eq!(answered_typing(&groups), want(&[(GROUP, &["Rui", "Zé"])]), "{groups}");
-    typing.heard(GROUP, &person(9), Paused);
+    typing.heard(GROUP, &person(9), "", Paused);
     watcher.until_typing(&[(GROUP, &["Zé"])]).await;
     let told: Vec<&str> = watcher.told.iter().map(|(chat, _)| chat.as_str()).collect();
     assert_eq!(told, [GROUP], "only the group's chat list is told, once");
@@ -5236,8 +5236,8 @@ async fn library_windows_are_told_no_typing_while_a_conversation_beside_them_is(
     bed.store.indexed().await.unwrap();
     let quiet = library_answers(&bed).await;
     let committed = *bed.store.committed().borrow();
-    typing.heard(OPEN, OPEN, Composing);
-    typing.heard(GROUP, &person(9), Recording);
+    typing.heard(OPEN, OPEN, "", Composing);
+    typing.heard(GROUP, &person(9), "", Recording);
     typed(&typing, OPEN, &["Ana"]).await;
     typed(&typing, GROUP, &["Rui"]).await;
 
@@ -5264,11 +5264,11 @@ async fn library_windows_are_told_no_typing_while_a_conversation_beside_them_is(
     let mut watcher = bed.watcher(64);
     let ana = watcher.watch("library.watch", ana_photos()).await;
     let every = watcher.watch("library.watch", every_photo()).await;
-    typing.heard(GROUP, &person(10), Composing);
-    typing.heard(OPEN, OPEN, Paused);
+    typing.heard(GROUP, &person(10), "", Composing);
+    typing.heard(OPEN, OPEN, "", Paused);
     typed(&typing, GROUP, &["Rui", "Zé"]).await;
     typed(&typing, OPEN, &[]).await;
-    typing.heard(OPEN, OPEN, Recording);
+    typing.heard(OPEN, OPEN, "", Recording);
     typed(&typing, OPEN, &["Ana"]).await;
     let taken = Change::Message(Message { live: true, ..photo(OPEN, "p-ana-2", 20_000, OPEN) });
     bed.apply(vec![taken]).await;
@@ -5292,7 +5292,7 @@ async fn library_windows_are_told_no_typing_while_a_conversation_beside_them_is(
     let conversation = json!({"chat": OPEN, "around": "newest", "before": 5});
     let conversation = watcher.call("messages.watch", conversation).await.unwrap();
     assert_eq!(answered_typing(&conversation), want(&[(OPEN, &["Ana"])]), "{conversation}");
-    typing.heard(OPEN, OPEN, Paused);
+    typing.heard(OPEN, OPEN, "", Paused);
     typed(&typing, OPEN, &[]).await;
     watcher.watch("library.watch", json!({"kind": "photo", "chat": OPEN, "around": "top", "after": 5})).await;
     watcher.until_typing(&[]).await;
@@ -5300,4 +5300,63 @@ async fn library_windows_are_told_no_typing_while_a_conversation_beside_them_is(
     assert_eq!(told, [OPEN], "only the conversation is told, once");
     assert_eq!(*bed.store.committed().borrow(), seq, "typing wrote nothing past the photo and its words");
     assert!(committed < seq);
+}
+
+/// A chat whose conversation is unwatched leaves every window, so jawd forgets who's typing there,
+/// as its interface does, and tells it again once the chat comes into a chat list (round one's T2).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_whose_conversation_is_unwatched_is_forgotten_and_told_again_once_it_comes_into_a_chat_list() {
+    let (bed, typing, _hearing) = typing_bed(NEVER).await;
+    let mut watcher = bed.watcher(64);
+    watcher.watch("chats.watch", json!({"around": "top", "after": 3})).await;
+    let conversation =
+        watcher.watch("messages.watch", json!({"chat": person(5), "around": "newest", "before": 5})).await;
+    typing.heard(&person(5), &person(5), "", Composing);
+    watcher.until_typing(&[(&person(5), &["+351910000005"])]).await;
+
+    // Its conversation is closed, so no window shows it: jawd forgets, as its interface does.
+    watcher.call("unwatch", json!({"watch": conversation})).await.unwrap();
+    watcher.run_for(ms(100)).await;
+    assert_eq!(watcher.typing_names(), want(&[]));
+    // Pinned, it comes into the chat list with its typing as it was, and is told who's typing there.
+    let seq = bed.apply(vec![Change::Chat(Chat { id: person(5), pinned: Some(1), ..Chat::default() })]).await;
+    watcher.settle(seq).await;
+    watcher.until_typing(&[(&person(5), &["+351910000005"])]).await;
+}
+
+/// A connection told to watch again for falling behind forgets who's typing in the chats its
+/// windows showed, and tells a chat again once it's back in a window (round one's T2).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_told_to_watch_again_forgets_whos_typing_and_tells_a_chat_once_it_comes_back() {
+    let (bed, typing, _hearing) = typing_bed(NEVER).await;
+    let mut watcher = bed.watcher(2);
+    let list = watcher.watch("chats.watch", json!({"around": "top", "after": 3})).await;
+    let conversation =
+        watcher.watch("messages.watch", json!({"chat": person(5), "around": "newest", "before": 5})).await;
+    typing.heard(&person(5), &person(5), "", Composing);
+    watcher.until_typing(&[(&person(5), &["+351910000005"])]).await;
+
+    // Its interface stops reading while Ana writes, a message every 60 ms, until its queue has been
+    // full for `behind`.
+    for n in 0..6i64 {
+        bed.apply(vec![Change::Message(text(OPEN, &format!("x{n}"), 20_000 + n, Some(OPEN), "olá"))]).await;
+        let until = Instant::now() + ms(60);
+        while let Ok(ready) = tokio::time::timeout_at(until.into(), watcher.client.ready()).await {
+            watcher.client.handle(ready).await;
+        }
+    }
+    let until = Instant::now() + ms(600);
+    while let Ok(ready) = tokio::time::timeout_at(until.into(), watcher.client.ready()).await {
+        watcher.client.handle(ready).await;
+    }
+    // Reading again, it's told to watch both again, and watches the chat list only.
+    watcher.drain();
+    watcher.run_for(ms(500)).await;
+    assert!(watcher.resynced.contains(&list) && watcher.resynced.contains(&conversation), "{:?}", watcher.resynced);
+    assert_eq!(watcher.typing_names(), want(&[]));
+    watcher.watch("chats.watch", json!({"around": "top", "after": 3})).await;
+    // Pinned, the chat comes in with its typing as it was, and is told who's typing there.
+    let seq = bed.apply(vec![Change::Chat(Chat { id: person(5), pinned: Some(1), ..Chat::default() })]).await;
+    watcher.settle(seq).await;
+    watcher.until_typing(&[(&person(5), &["+351910000005"])]).await;
 }

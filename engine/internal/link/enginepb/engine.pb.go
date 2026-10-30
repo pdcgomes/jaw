@@ -2524,10 +2524,13 @@ func (x *PresenceUpdate) GetLastSeenMs() int64 {
 
 // Someone typing or recording in a chat, or stopping, as WhatsApp tells it.
 type Typing struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Chat          string                 `protobuf:"bytes,1,opt,name=chat,proto3" json:"chat,omitempty"`
-	Sender        string                 `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
-	State         ChatPresence_State     `protobuf:"varint,3,opt,name=state,proto3,enum=jaw.engine.ChatPresence_State" json:"state,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Chat   string                 `protobuf:"bytes,1,opt,name=chat,proto3" json:"chat,omitempty"`
+	Sender string                 `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
+	State  ChatPresence_State     `protobuf:"varint,3,opt,name=state,proto3,enum=jaw.engine.ChatPresence_State" json:"state,omitempty"`
+	// The sender's other JID, phone number or LID, as WhatsApp gives it with a chat state as it does
+	// with a message; empty when it gives none.
+	SenderAlt     string `protobuf:"bytes,4,opt,name=sender_alt,json=senderAlt,proto3" json:"sender_alt,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2581,6 +2584,13 @@ func (x *Typing) GetState() ChatPresence_State {
 		return x.State
 	}
 	return ChatPresence_STATE_UNSPECIFIED
+}
+
+func (x *Typing) GetSenderAlt() string {
+	if x != nil {
+		return x.SenderAlt
+	}
+	return ""
 }
 
 // How far a MediaDownload has got: `bytes` of the `size` its message gave. Sent without a seq, at
@@ -6077,11 +6087,13 @@ const file_engine_proto_rawDesc = "" +
 	"\x03jid\x18\x01 \x01(\tR\x03jid\x12 \n" +
 	"\vunavailable\x18\x02 \x01(\bR\vunavailable\x12 \n" +
 	"\flast_seen_ms\x18\x03 \x01(\x03R\n" +
-	"lastSeenMs\"j\n" +
+	"lastSeenMs\"\x89\x01\n" +
 	"\x06Typing\x12\x12\n" +
 	"\x04chat\x18\x01 \x01(\tR\x04chat\x12\x16\n" +
 	"\x06sender\x18\x02 \x01(\tR\x06sender\x124\n" +
-	"\x05state\x18\x03 \x01(\x0e2\x1e.jaw.engine.ChatPresence.StateR\x05state\"I\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x1e.jaw.engine.ChatPresence.StateR\x05state\x12\x1d\n" +
+	"\n" +
+	"sender_alt\x18\x04 \x01(\tR\tsenderAlt\"I\n" +
 	"\rMediaProgress\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05bytes\x18\x02 \x01(\x04R\x05bytes\x12\x12\n" +

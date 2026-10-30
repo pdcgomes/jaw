@@ -43,6 +43,23 @@ func TestTypingAndRecordingAreToldApartAndStoppingIsPaused(t *testing.T) {
 	}
 }
 
+func TestTypingSaysWhoByEitherJIDWithoutTheirDevice(t *testing.T) {
+	group := types.NewJID("120363012345678901", types.GroupServer)
+	lid := types.NewJID("100000000002", types.HiddenUserServer)
+	lid.Device = 7
+	phone := types.NewJID("351910000002", types.DefaultUserServer)
+	phone.Device = 7
+	source := types.MessageSource{Chat: group, Sender: lid, SenderAlt: phone, IsGroup: true}
+	got := typing(&events.ChatPresence{MessageSource: source, State: types.ChatPresenceComposing})
+	if got.Sender != "100000000002@lid" || got.SenderAlt != "351910000002@s.whatsapp.net" {
+		t.Fatalf("typing by her LID with her number beside it gave %v", got)
+	}
+	alone := typing(&events.ChatPresence{MessageSource: types.MessageSource{Chat: group, Sender: lid, IsGroup: true}})
+	if alone.SenderAlt != "" {
+		t.Fatalf("typing with no other JID gave %q beside it", alone.SenderAlt)
+	}
+}
+
 func TestFollowingPresenceAndAskingAboutPeopleWithoutASessionSaySo(t *testing.T) {
 	_, jawd, _, closeLink := engineWithoutSession(t, link.Protocol)
 	defer closeLink()

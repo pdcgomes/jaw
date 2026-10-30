@@ -55,17 +55,12 @@ const FORGET_EVERY: Duration = Duration::from_secs(1);
 
 /// What waits in the intake, in the order it came.
 enum Came {
-    Said {
-        chat: String,
-        sender: String,
-        state: Said,
-    },
+    /// `senders` typing, recording or stopping in `chat`: whom it came from, and the other JID
+    /// WhatsApp gave them by, empty when it gave none.
+    Said { chat: String, senders: [String; 2], state: Said },
     /// A message in `chat` (without a device) from `senders`: whom it came from, and the other JID
     /// WhatsApp gave them by, empty when it gave none.
-    Message {
-        chat: String,
-        senders: [String; 2],
-    },
+    Message { chat: String, senders: [String; 2] },
 }
 
 #[derive(Default)]
@@ -135,10 +130,10 @@ impl Typing {
         Typing { inner: Arc::new(inner) }
     }
 
-    /// The engine's word that `sender` is typing (`Composing`) or recording in `chat`, or has
-    /// stopped (`Paused`), as WhatsApp's chat presence says it. It never waits: while the intake is
-    /// full it's dropped, and counted.
-    pub fn heard(&self, chat: &str, sender: &str, state: Said) {
+    /// The engine's word that `sender`, known also as `alt` (empty when WhatsApp didn't say), is
+    /// typing (`Composing`) or recording in `chat`, or has stopped (`Paused`), as WhatsApp's chat
+    /// presence says it. It never waits: while the intake is full it's dropped, and counted.
+    pub fn heard(&self, chat: &str, sender: &str, alt: &str, state: Said) {
         let inner = &self.inner;
         Inner::count(&inner.heard);
         let mut intake = inner.intake.lock().expect("typing's intake");
@@ -146,8 +141,12 @@ impl Typing {
             Inner::count(&inner.dropped);
             return;
         }
-        intake.watching.insert(convert::user_jid(chat));
-        intake.came.push_back(Came::Said { chat: chat.into(), sender: sender.into(), state });
+        let jid = convert::user_jid(chat);
+        if convert::is_person(&jid) && !alt.is_empty() {
+            intake.watching.insert(convert::user_jid(alt));
+        }
+        intake.watching.insert(jid);
+        intake.came.push_back(Came::Said { chat: chat.into(), senders: [sender.into(), alt.into()], state });
         drop(intake);
         inner.woken.notify_one();
     }
@@ -162,7 +161,10 @@ impl Typing {
             return;
         }
         let chat = convert::user_jid(chat);
-        if !intake.watching.contains(&chat) {
+        // A one-to-one chat's other JID is its person's other, which their typing may have named
+        // it by before the task has looked who it is.
+        let other = (convert::is_person(&chat) && !alt.is_empty()).then(|| convert::user_jid(alt));
+        if !intake.watching.contains(&chat) && other.is_none_or(|other| !intake.watching.contains(&other)) {
             return;
         }
         if intake.came.len() >= INTAKE_MOST {
@@ -304,22 +306,39 @@ fn typist_state(state: Said) -> Option<TypistState> {
     }
 }
 
+/// The JIDs WhatsApp gave someone by, without devices, those it gave.
+fn jids(senders: &[String; 2]) -> Vec<String> {
+    senders.iter().filter(|jid| !jid.is_empty()).map(|jid| convert::user_jid(jid)).collect()
+}
+
+/// Whether it's you, on one of your other devices.
+fn mine(me: &convert::Me, senders: &[String; 2]) -> bool {
+    senders.iter().any(|jid| !jid.is_empty() && me.is(jid))
+}
+
 impl Typists {
-    /// Reads, in one go, the chats and people the typing in `came` names that aren't known yet. A
-    /// read that fails leaves them out until they're said again.
+    /// Reads, in one go, the chats and people the typing in `came` names that aren't known yet: a
+    /// one-to-one chat by its other JID too, the sender's other. A read that fails leaves them out
+    /// until they're said again.
     async fn name(&mut self, store: &Store, me: &convert::Me, came: &VecDeque<Came>) {
         let (mut chats, mut people) = (HashSet::new(), HashSet::new());
         for came in came {
-            let Came::Said { chat, sender, state } = came else { continue };
-            if typist_state(*state).is_none() || me.is(sender) {
+            let Came::Said { chat, senders, state } = came else { continue };
+            if typist_state(*state).is_none() || mine(me, senders) {
                 continue;
             }
-            let (chat, sender) = (convert::user_jid(chat), convert::user_jid(sender));
-            if !self.chat_ids.contains_key(&chat) {
-                chats.insert(chat);
+            let chat = convert::user_jid(chat);
+            let senders = jids(senders);
+            let person = convert::is_person(&chat);
+            for jid in std::iter::once(&chat).chain(senders.iter().filter(|_| person)) {
+                if !self.chat_ids.contains_key(jid) {
+                    chats.insert(jid.clone());
+                }
             }
-            if !self.people.contains_key(&sender) {
-                people.insert(sender);
+            for sender in senders {
+                if !self.people.contains_key(&sender) {
+                    people.insert(sender);
+                }
             }
         }
         if chats.is_empty() && people.is_empty() {
@@ -351,30 +370,39 @@ impl Typists {
         }
     }
 
-    /// The chat WhatsApp names by `jid`, without a device, if someone types there or did lately.
-    fn chat(&mut self, jid: &str) -> Option<&mut Chat> {
-        let id = match self.chat_ids.get(jid) {
-            Some(Some(id)) => id.clone(),
-            _ => self.chats.iter().find(|(_, chat)| chat.jids.contains(jid)).map(|(id, _)| id.clone())?,
+    /// The chat WhatsApp names by `jid`, without a device, if someone types there or did lately; a
+    /// one-to-one chat also by `others`, the JIDs WhatsApp gave its person by.
+    fn chat(&mut self, jid: &str, others: &[String]) -> Option<&mut Chat> {
+        let by = |jid: &str| match self.chat_ids.get(jid) {
+            Some(Some(id)) => Some(id.clone()),
+            _ => self.chats.iter().find(|(_, chat)| chat.jids.contains(jid)).map(|(id, _)| id.clone()),
         };
+        let id = by(jid).or_else(|| others.iter().filter(|_| convert::is_person(jid)).find_map(|other| by(other)))?;
         self.chats.get_mut(&id)
     }
 
-    /// `sender` typing, recording or stopping in `chat`, as WhatsApp said it `now`.
-    fn said(&mut self, chat: &str, sender: &str, state: Said, now: Instant, inner: &Inner) {
-        let (chat, sender) = (convert::user_jid(chat), convert::user_jid(sender));
+    /// `senders` typing, recording or stopping in `chat`, as WhatsApp said it `now`: whom it came
+    /// from, and their other JID, empty when WhatsApp gave none.
+    fn said(&mut self, chat: &str, senders: &[String; 2], state: Said, now: Instant, inner: &Inner) {
+        let (chat, senders) = (convert::user_jid(chat), jids(senders));
+        let who = senders.iter().find_map(|jid| self.people.get(jid).cloned().flatten());
         let Some(state) = typist_state(state) else {
             // A pause ends their typing there, whichever of their JIDs it comes by.
-            let person = self.people.get(&sender).cloned().flatten().map(|who| who.n);
-            let ends = |typer: &Typer| person == Some(typer.who.n) || typer.who.jids.contains(&sender);
-            self.moved |= self.chat(&chat).is_some_and(|chat| chat.end(inner, ends));
+            let person = who.map(|who| who.n);
+            let ends =
+                |typer: &Typer| person == Some(typer.who.n) || typer.who.jids.iter().any(|jid| senders.contains(jid));
+            self.moved |= self.chat(&chat, &senders).is_some_and(|chat| chat.end(inner, ends));
             return;
         };
-        let Some(Some(id)) = self.chat_ids.get(&chat).cloned() else { return };
-        let Some(Some(who)) = self.people.get(&sender).cloned() else { return };
+        // A one-to-one chat jaw doesn't know by this JID may be the one it has by their other.
+        let person = convert::is_person(&chat);
+        let found = std::iter::once(&chat).chain(senders.iter().filter(|_| person));
+        let Some(id) = found.into_iter().find_map(|jid| self.chat_ids.get(jid).cloned().flatten()) else { return };
+        let Some(who) = who else { return };
         let typists = self.chats.entry(id.clone()).or_default();
         if convert::is_person(&id) {
             typists.jids.extend(who.jids.iter().cloned());
+            typists.jids.extend(senders.iter().filter(|_| person).cloned());
         }
         typists.jids.insert(chat);
         typists.jids.insert(id);
@@ -395,15 +423,15 @@ impl Typists {
     }
 
     /// A message from `senders` in `chat` ends their typing there, by the JIDs it names them by or
-    /// the person they were read as.
+    /// the person they were read as; in a one-to-one chat named by a JID its typing didn't come by,
+    /// the chat is found by the other.
     fn messaged(&mut self, chat: &str, senders: &[String; 2], inner: &Inner) {
-        let senders: Vec<String> =
-            senders.iter().filter(|jid| !jid.is_empty()).map(|jid| convert::user_jid(jid)).collect();
+        let senders = jids(senders);
         let people: Vec<i64> =
             senders.iter().filter_map(|jid| self.people.get(jid).cloned().flatten()).map(|who| who.n).collect();
         let ends =
             |typer: &Typer| people.contains(&typer.who.n) || typer.who.jids.iter().any(|jid| senders.contains(jid));
-        self.moved |= self.chat(chat).is_some_and(|chat| chat.end(inner, ends));
+        self.moved |= self.chat(chat, &senders).is_some_and(|chat| chat.end(inner, ends));
     }
 
     /// Everyone's typing ends, as when WhatsApp hears you're away or can't be reached.
@@ -526,8 +554,8 @@ async fn run(inner: Arc<Inner>, store: Store, me: watch::Receiver<convert::Me>, 
             let now = Instant::now();
             for came in &came {
                 match came {
-                    Came::Said { sender, .. } if me.is(sender) => {}
-                    Came::Said { chat, sender, state } => typists.said(chat, sender, *state, now, &inner),
+                    Came::Said { senders, .. } if mine(&me, senders) => {}
+                    Came::Said { chat, senders, state } => typists.said(chat, senders, *state, now, &inner),
                     Came::Message { chat, senders } => typists.messaged(chat, senders, &inner),
                 }
             }
@@ -553,9 +581,12 @@ async fn run(inner: Arc<Inner>, store: Store, me: watch::Receiver<convert::Me>, 
             let waiting: Vec<String> = intake
                 .came
                 .iter()
-                .filter_map(|came| match came {
-                    Came::Said { chat, .. } => Some(convert::user_jid(chat)),
-                    Came::Message { .. } => None,
+                .flat_map(|came| match came {
+                    Came::Said { chat, senders, .. } if convert::is_person(chat) => {
+                        std::iter::once(convert::user_jid(chat)).chain(jids(senders)).collect()
+                    }
+                    Came::Said { chat, .. } => vec![convert::user_jid(chat)],
+                    Came::Message { .. } => Vec::new(),
                 })
                 .collect();
             intake.watching = typists.watched();
@@ -679,8 +710,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn typing_is_told_with_whoever_types_named_as_their_messages_are_and_by_person() {
         let mut bed = Bed::new(Timing { fade: LONG, pace: ms(20) }).await;
-        bed.typing.heard(GROUP, ANA_LID, Composing);
-        bed.typing.heard(GROUP, "351913333333:12@s.whatsapp.net", Recording);
+        bed.typing.heard(GROUP, ANA_LID, "", Composing);
+        bed.typing.heard(GROUP, "351913333333:12@s.whatsapp.net", "", Recording);
         bed.until(GROUP, &[("Ana Ribeiro", TYPING), ("Rui", RECORDING)]).await;
         let who = bed.seen.now(GROUP).unwrap();
         let ana: i64 = bed
@@ -693,7 +724,7 @@ mod tests {
             .unwrap();
         assert_eq!(who[0].id, format!("person:{ana}"), "whichever JID she types by, she's her person");
         // A LID's chat is the one with the same person under their number.
-        bed.typing.heard(ANA_LID, ANA_LID, Composing);
+        bed.typing.heard(ANA_LID, ANA_LID, "", Composing);
         bed.until(ANA, &[("Ana Ribeiro", TYPING)]).await;
     }
 
@@ -701,11 +732,11 @@ mod tests {
     async fn typing_fades_once_it_has_gone_unsaid_for_its_fade_and_saying_it_again_keeps_it() {
         let fade = ms(2_000);
         let mut bed = Bed::new(Timing { fade, pace: ms(20) }).await;
-        bed.typing.heard(ANA, ANA, Composing);
+        bed.typing.heard(ANA, ANA, "", Composing);
         bed.until(ANA, &[("Ana Ribeiro", TYPING)]).await;
         tokio::time::sleep(ms(500)).await;
         let said = Instant::now();
-        bed.typing.heard(ANA, ANA, Composing);
+        bed.typing.heard(ANA, ANA, "", Composing);
         let faded = bed.until_within(ANA, &[], fade + WAIT).await;
         assert!(faded >= said + fade, "it faded {:?} after it was last said, sooner than {fade:?}", faded - said);
     }
@@ -713,19 +744,19 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_pause_ends_their_typing_at_once_and_only_theirs() {
         let mut bed = Bed::new(Timing { fade: LONG, pace: ms(20) }).await;
-        bed.typing.heard(GROUP, RUI, Composing);
-        bed.typing.heard(GROUP, ZE, Recording);
+        bed.typing.heard(GROUP, RUI, "", Composing);
+        bed.typing.heard(GROUP, ZE, "", Recording);
         bed.until(GROUP, &[("Rui", TYPING), ("Zé", RECORDING)]).await;
-        bed.typing.heard(GROUP, RUI, Paused);
+        bed.typing.heard(GROUP, RUI, "", Paused);
         bed.until(GROUP, &[("Zé", RECORDING)]).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_from_them_ends_their_typing_in_that_chat_alone_whichever_jid_it_names_them_by() {
         let mut bed = Bed::new(Timing { fade: LONG, pace: ms(20) }).await;
-        bed.typing.heard(ANA, ANA, Composing);
-        bed.typing.heard(GROUP, ANA, Composing);
-        bed.typing.heard(GROUP, RUI, Recording);
+        bed.typing.heard(ANA, ANA, "", Composing);
+        bed.typing.heard(GROUP, ANA, "", Composing);
+        bed.typing.heard(GROUP, RUI, "", Recording);
         bed.until(ANA, &[("Ana Ribeiro", TYPING)]).await;
         bed.until(GROUP, &[("Ana Ribeiro", TYPING), ("Rui", RECORDING)]).await;
         // Hers in the group ends her typing there, and nobody else's, nor hers in her own chat.
@@ -744,22 +775,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn everyones_typing_ends_while_whatsapp_hears_youre_away_and_what_comes_meanwhile_isnt_taken() {
         let mut bed = Bed::new(Timing { fade: LONG, pace: ms(20) }).await;
-        bed.typing.heard(ANA, ANA, Composing);
-        bed.typing.heard(GROUP, RUI, Recording);
+        bed.typing.heard(ANA, ANA, "", Composing);
+        bed.typing.heard(GROUP, RUI, "", Recording);
         bed.until(ANA, &[("Ana Ribeiro", TYPING)]).await;
         bed.until(GROUP, &[("Rui", RECORDING)]).await;
         bed.hearing.send_replace(false);
         bed.until(ANA, &[]).await;
         bed.until(GROUP, &[]).await;
         // Said while you're away, as WhatsApp wouldn't, it's let go of once it's taken.
-        bed.typing.heard(ANA, ANA, Composing);
+        bed.typing.heard(ANA, ANA, "", Composing);
         let end = Instant::now() + WAIT;
         while bed.typing.stats().waiting > 0 {
             assert!(Instant::now() < end, "the typing said while away was never taken");
             tokio::time::sleep(ms(5)).await;
         }
         bed.hearing.send_replace(true);
-        bed.typing.heard(GROUP, ZE, Composing);
+        bed.typing.heard(GROUP, ZE, "", Composing);
         bed.until(GROUP, &[("Zé", TYPING)]).await;
         assert_eq!(bed.told(ANA), [], "what was said while away doesn't come back");
         // And so does all of it once nothing says whether WhatsApp hears you.
@@ -770,12 +801,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn your_own_devices_typing_and_typing_jaw_cant_place_arent_shown() {
         let mut bed = Bed::new(Timing { fade: LONG, pace: ms(20) }).await;
-        bed.typing.heard(ANA, ME, Composing);
-        bed.typing.heard(GROUP, "351910000001:4@s.whatsapp.net", Recording);
+        bed.typing.heard(ANA, ME, "", Composing);
+        bed.typing.heard(GROUP, "351910000001:4@s.whatsapp.net", "", Recording);
         // Someone jaw has no person for, and a chat it doesn't have.
-        bed.typing.heard(GROUP, "351919999999@s.whatsapp.net", Composing);
-        bed.typing.heard("120363000000000009@g.us", RUI, Composing);
-        bed.typing.heard(GROUP, RUI, Composing);
+        bed.typing.heard(GROUP, "351919999999@s.whatsapp.net", "", Composing);
+        bed.typing.heard("120363000000000009@g.us", RUI, "", Composing);
+        bed.typing.heard(GROUP, RUI, "", Composing);
         bed.until(GROUP, &[("Rui", TYPING)]).await;
         assert_eq!(bed.told(ANA), []);
         assert_eq!(bed.typing.stats().chats, 1, "{:?}", bed.typing.stats());
@@ -786,7 +817,7 @@ mod tests {
         let pace = ms(1_000);
         let mut bed = Bed::new(Timing { fade: LONG, pace }).await;
         let first = Instant::now();
-        bed.typing.heard(GROUP, RUI, Composing);
+        bed.typing.heard(GROUP, RUI, "", Composing);
         let told = bed.until(GROUP, &[("Rui", TYPING)]).await;
         assert!(told - first < pace / 2, "the first change after a quiet spell waited {:?}", told - first);
         // A burst in which each change differs from the one before, one every 20 ms for 3 s, in
@@ -802,7 +833,7 @@ mod tests {
                     2 => (ZE, Paused),
                     _ => (RUI, Composing),
                 };
-                typing.heard(GROUP, who, state);
+                typing.heard(GROUP, who, "", state);
                 n += 1;
                 tokio::time::sleep(ms(20)).await;
             }
@@ -830,17 +861,88 @@ mod tests {
         assert!(stats.merged >= changes - most, "{changes} changes, {tells} told, {stats:?}");
     }
 
+    /// The pace holds across a chat that empties between changes: when it was last told is kept for
+    /// a pace after nobody types there (round one's T3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_chat_whose_typing_stops_and_starts_again_is_still_told_at_most_once_a_pace() {
+        let pace = ms(500);
+        let mut bed = Bed::new(Timing { fade: LONG, pace }).await;
+        // Rui types and stops every 20 ms for 3 s, so nobody types there between his changes.
+        let typing = bed.typing.clone();
+        let burst = tokio::spawn(async move {
+            let began = Instant::now();
+            let mut n = 0u64;
+            while began.elapsed() < ms(3_000) {
+                typing.heard(GROUP, RUI, "", if n.is_multiple_of(2) { Composing } else { Paused });
+                n += 1;
+                tokio::time::sleep(ms(20)).await;
+            }
+            began
+        });
+        let (mut tells, mut last) = (0u64, Instant::now());
+        loop {
+            match tokio::time::timeout(pace * 3 / 2, bed.seen.changed()).await {
+                Ok(Ok(chats)) if chats.iter().all(|chat| &**chat == GROUP) => {
+                    (tells, last) = (tells + 1, Instant::now())
+                }
+                Ok(other) => panic!("{other:?}"),
+                Err(_) if burst.is_finished() => break,
+                Err(_) => {}
+            }
+        }
+        let began = burst.await.unwrap();
+        let lasted = last.saturating_duration_since(began);
+        let most = (lasted.as_millis() / pace.as_millis()) as u64 + 2;
+        assert!(tells <= most, "{tells} changes told in {lasted:?}, at most {most} at one a {pace:?}");
+    }
+
+    /// A message in her chat by her LID, with her number beside it, just after she types by her
+    /// number, ends her typing though the task hasn't yet looked who types there (round one's O1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_by_her_lid_just_after_she_types_by_number_ends_it() {
+        let mut bed = Bed::new(Timing { fade: LONG, pace: ms(20) }).await;
+        bed.typing.heard(ANA, ANA, "", Composing);
+        bed.typing.message(ANA_LID, ANA_LID, ANA);
+        // Once Rui's typing, said after both, is told, both have been taken: she's left typing only
+        // if her message didn't end it.
+        bed.typing.heard(GROUP, RUI, "", Composing);
+        bed.until(GROUP, &[("Rui", TYPING)]).await;
+        let end = Instant::now() + ms(2_000);
+        while !bed.told(ANA).is_empty() {
+            assert!(Instant::now() < end, "her message by her LID didn't end her typing: {:?}", bed.told(ANA));
+            tokio::time::sleep(ms(10)).await;
+        }
+    }
+
+    /// Typing by a JID jaw has no person for is theirs by the other JID WhatsApp gives beside it, in
+    /// a group and in their own chat named by it, and a pause by it ends it (round one's O4).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn typing_by_a_jid_jaw_doesnt_know_is_theirs_by_the_one_beside_it() {
+        const RUI_LID: &str = "100000000003@lid";
+        let mut bed = Bed::new(Timing { fade: LONG, pace: ms(20) }).await;
+        bed.typing.heard(GROUP, "100000000003:2@lid", RUI, Recording);
+        bed.typing.heard(RUI_LID, RUI_LID, RUI, Composing);
+        bed.until(GROUP, &[("Rui", RECORDING)]).await;
+        // Rui has no chat of his own here, so his typing there places nothing.
+        assert_eq!(bed.typing.stats().chats, 1, "{:?}", bed.typing.stats());
+        bed.typing.heard(ANA_LID, "100000000777@lid", ANA, Composing);
+        bed.until(ANA, &[("Ana Ribeiro", TYPING)]).await;
+        bed.typing.heard(GROUP, RUI_LID, RUI, Paused);
+        bed.until(GROUP, &[]).await;
+        assert_eq!(bed.told(ANA), [("Ana Ribeiro".to_string(), TYPING)]);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn what_comes_while_the_intake_is_full_is_dropped_and_counted_and_a_message_dropped_ends_everyones_typing() {
         let mut bed = Bed::idle(Timing { fade: LONG, pace: ms(20) }).await;
-        bed.typing.heard(GROUP, RUI, Composing);
+        bed.typing.heard(GROUP, RUI, "", Composing);
         for n in 1..INTAKE_MOST {
-            bed.typing.heard(GROUP, ZE, if n % 2 == 0 { Composing } else { Recording });
+            bed.typing.heard(GROUP, ZE, "", if n % 2 == 0 { Composing } else { Recording });
         }
         let full = bed.typing.stats();
         assert_eq!((full.waiting, full.waiting_most, full.dropped), (INTAKE_MOST as u64, INTAKE_MOST as u64, 0));
         // Zé stopping comes too fast, and so does a message of Rui's, which would have ended his.
-        bed.typing.heard(GROUP, ZE, Paused);
+        bed.typing.heard(GROUP, ZE, "", Paused);
         bed.typing.message(GROUP, RUI, "");
         let stats = bed.typing.stats();
         assert_eq!((stats.heard, stats.dropped, stats.waiting), (INTAKE_MOST as u64 + 1, 1, INTAKE_MOST as u64));
@@ -852,7 +954,7 @@ mod tests {
         }
         // Once what was held is taken, nobody is left typing there, as nobody can say whose
         // typing the message ended. Ana's typing, taken after it, says it has been.
-        bed.typing.heard(ANA, ANA, Composing);
+        bed.typing.heard(ANA, ANA, "", Composing);
         bed.until(ANA, &[("Ana Ribeiro", TYPING)]).await;
         assert_eq!(bed.told(GROUP), []);
     }

@@ -667,6 +667,18 @@ async fn typing_and_recording_heard_from_whatsapp_write_nothing_to_jaw_db() {
     let (_focus, focused) = watch::channel(true);
     let looking = crate::presence::Looking { focused, pushes: pushes.subscribe(), online: Box::new(|| true) };
     following.start(store.clone(), None, feed, looking, crate::presence::Limits::default());
+    // Typing's task runs as jawd's does, WhatsApp heard, so it names whoever types as it would.
+    let typing = crate::feed::Typing::new(crate::feed::typing::Timing {
+        fade: Duration::from_secs(300),
+        pace: Duration::from_millis(20),
+    });
+    let hearing = watch::channel(true).0;
+    typing.start(
+        store.clone(),
+        watch::channel(convert::Me::new(["351910000001@s.whatsapp.net".into()])).1,
+        hearing.subscribe(),
+    );
+    let seen = typing.watching();
     let (events, incoming) = mpsc::channel(64);
     let running = tokio::spawn(run(
         incoming,
@@ -676,7 +688,7 @@ async fn typing_and_recording_heard_from_whatsapp_write_nothing_to_jaw_db() {
         None,
         home.path().to_path_buf(),
         following.clone(),
-        crate::feed::Typing::default(),
+        typing.clone(),
     ));
     // What jaw.db holds once what the writer does after the messages, indexing their words, is done.
     let mut before = every_row(home.path(), rui);
@@ -690,17 +702,25 @@ async fn typing_and_recording_heard_from_whatsapp_write_nothing_to_jaw_db() {
     }
     let last: i64 = scalar(home.path(), "SELECT coalesce(max(seq), 0) FROM events");
 
-    // Ana types, records and stops, in her one-to-one chat and in a group; then Rui comes online,
-    // whose presence goes the way hers would have, so once it's written they've all been taken.
+    // Ana types and records in her one-to-one chat and in a group, which is told, and stops; then
+    // Rui comes online, whose presence goes the way hers would have, so once it's written they've
+    // all been taken.
     let send = |kind| crate::engine::Incoming { event: pb::Event { seq: 0, kind: Some(kind) }, ack: None };
+    let said = |chat: &str, state: pb::chat_presence::State| {
+        let typing =
+            pb::Typing { chat: chat.into(), sender: ANA.into(), state: state as i32, sender_alt: String::new() };
+        send(pb::event::Kind::Typing(typing))
+    };
     for chat in [ANA, GROUP] {
-        for state in
-            [pb::chat_presence::State::Composing, pb::chat_presence::State::Recording, pb::chat_presence::State::Paused]
-        {
-            let typing = pb::Typing { chat: chat.into(), sender: ANA.into(), state: state as i32 };
-            events.send(send(pb::event::Kind::Typing(typing))).await.unwrap();
-        }
+        events.send(said(chat, pb::chat_presence::State::Composing)).await.unwrap();
+        events.send(said(chat, pb::chat_presence::State::Recording)).await.unwrap();
     }
+    typed(&seen, &[(ANA, 1), (GROUP, 1)], "her recording, heard through the engine's events").await;
+    for chat in [ANA, GROUP] {
+        events.send(said(chat, pb::chat_presence::State::Paused)).await.unwrap();
+    }
+    typed(&seen, &[(ANA, 0), (GROUP, 0)], "her stopping").await;
+    assert_eq!(typing.stats().heard, 6, "{:?}", typing.stats());
     let online = pb::PresenceUpdate { jid: RUI.into(), unavailable: false, last_seen_ms: 0 };
     events.send(send(pb::event::Kind::Presence(online))).await.unwrap();
     until("Rui's presence written", || {
@@ -2980,8 +3000,8 @@ async fn a_message_from_someone_ends_their_typing_in_its_chat_as_sync_takes_it_f
         Default::default(),
         typing.clone(),
     ));
-    typing.heard(ANA, ANA, pb::chat_presence::State::Composing);
-    typing.heard(GROUP, ANA, pb::chat_presence::State::Composing);
+    typing.heard(ANA, ANA, "", pb::chat_presence::State::Composing);
+    typing.heard(GROUP, ANA, "", pb::chat_presence::State::Composing);
     typed(&seen, &[(ANA, 1), (GROUP, 1)], "her typing").await;
 
     // One of yours in her chat ends nothing; hers in the group, by her LID, ends hers there only.
@@ -2997,6 +3017,89 @@ async fn a_message_from_someone_ends_their_typing_in_its_chat_as_sync_takes_it_f
     events.send(send(crate::engine::demo::text(ANA, ANA, "m3", AT + 2, "cheguei"))).await.unwrap();
     typed(&seen, &[(ANA, 0)], "her typing's end in her chat").await;
     running.abort();
+}
+
+/// Typing as the engine hands it to sync's loop, with the other JID WhatsApp gave the sender by.
+fn chat_state(chat: &str, sender: &str, alt: &str, state: pb::chat_presence::State) -> crate::engine::Incoming {
+    let typing = pb::Typing { chat: chat.into(), sender: sender.into(), state: state as i32, sender_alt: alt.into() };
+    crate::engine::Incoming { event: pb::Event { seq: 0, kind: Some(pb::event::Kind::Typing(typing)) }, ack: None }
+}
+
+/// A started `Typing` that WhatsApp is heard by, with sync's loop taking the engine's events, on a
+/// jaw.db that knows Ana by her number in her chat and in a group, but not by her LID.
+async fn typing_through_sync(
+    home: &Path,
+) -> (crate::feed::Typing, crate::feed::typing::Watching, watch::Sender<bool>, mpsc::Sender<crate::engine::Incoming>) {
+    let store = Store::open(home).unwrap();
+    let ana = crate::store::Person { jids: vec![ANA.into()], name: Some("Ana".into()), ..Default::default() };
+    let changes = vec![
+        Change::Person(ana),
+        Change::Chat(crate::store::Chat { id: ANA.into(), ..Default::default() }),
+        Change::Chat(crate::store::Chat { id: GROUP.into(), kind: Some("group"), ..Default::default() }),
+    ];
+    store.apply(Lane::Live, changes).await.unwrap();
+    let timing = crate::feed::typing::Timing { fade: Duration::from_secs(300), pace: Duration::from_millis(20) };
+    let typing = crate::feed::Typing::new(timing);
+    let hearing = watch::channel(true).0;
+    typing.start(
+        store.clone(),
+        watch::channel(convert::Me::new(["351910000001@s.whatsapp.net".into()])).1,
+        hearing.subscribe(),
+    );
+    let seen = typing.watching();
+    let (events, incoming) = mpsc::channel(64);
+    let running = run(
+        incoming,
+        store,
+        Arc::default(),
+        broadcast::channel(16).0,
+        None,
+        home.into(),
+        Default::default(),
+        typing.clone(),
+    );
+    tokio::spawn(running);
+    (typing, seen, hearing, events)
+}
+
+/// A message by a LID jaw doesn't know someone by, with the number they typed by beside it, ends
+/// their typing in its chat: sync hands WhatsApp's other JID on with the message (round one's T1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_by_a_lid_jaw_doesnt_know_with_the_number_beside_it_ends_their_typing_through_sync() {
+    let home = tempfile::tempdir().unwrap();
+    let (_typing, seen, _hearing, events) = typing_through_sync(home.path()).await;
+    events.send(chat_state(GROUP, ANA, "", pb::chat_presence::State::Composing)).await.unwrap();
+    typed(&seen, &[(GROUP, 1)], "her typing").await;
+    let mut by_lid = crate::engine::demo::text(GROUP, "100000000009@lid", "m1", AT, "olá");
+    if let Some(pb::event::Kind::Message(message)) = &mut by_lid.kind {
+        message.info.as_mut().unwrap().sender_alt = ANA.into();
+    }
+    events.send(crate::engine::Incoming { event: by_lid, ack: None }).await.unwrap();
+    typed(&seen, &[(GROUP, 0)], "her typing's end by a LID jaw doesn't know her by").await;
+}
+
+/// Typing comes through sync's loop as the engine says it, by a JID jaw doesn't know with the one
+/// it knows beside it, as whatsmeow gives a chat state's sender: in a group, and in her own chat
+/// named by that LID; a pause by either ends it, and so does her message by the number in the
+/// group, in order with the typing before it.
+#[tokio::test(flavor = "multi_thread")]
+async fn typing_by_a_lid_jaw_doesnt_know_is_hers_by_the_number_beside_it_through_syncs_loop() {
+    const LID: &str = "100000000009@lid";
+    let home = tempfile::tempdir().unwrap();
+    let (typing, seen, _hearing, events) = typing_through_sync(home.path()).await;
+    events.send(chat_state(GROUP, "100000000009:4@lid", ANA, pb::chat_presence::State::Composing)).await.unwrap();
+    events.send(chat_state(LID, LID, ANA, pb::chat_presence::State::Recording)).await.unwrap();
+    typed(&seen, &[(GROUP, 1), (ANA, 1)], "her typing by a LID, as hers").await;
+    let ana = seen.now(ANA).unwrap();
+    assert_eq!((ana[0].name.as_str(), ana[0].state), ("Ana", jaw_proto::windows::TypistState::Recording));
+    events.send(chat_state(LID, LID, ANA, pb::chat_presence::State::Paused)).await.unwrap();
+    typed(&seen, &[(ANA, 0)], "her pause in her chat by the LID").await;
+    events
+        .send(crate::engine::Incoming { event: crate::engine::demo::text(GROUP, ANA, "m1", AT, "olá"), ack: None })
+        .await
+        .unwrap();
+    typed(&seen, &[(GROUP, 0)], "her typing's end by her message in the group").await;
+    assert_eq!(typing.stats().heard, 3);
 }
 
 /// Waits until connections are told `chats` each have so many typing, saying `what` if they never are.

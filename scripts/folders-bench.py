@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import random
+import re
 import socket
 import sqlite3
 import subprocess
@@ -29,6 +30,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# The protocol jawd speaks, as jaw-proto says it, so the bench's hello never falls behind it.
+PROTOCOL = int(re.search(r"pub const PROTOCOL: u32 = (\d+);", (ROOT / "crates/jaw-proto/src/lib.rs").read_text()).group(1))
 
 
 def load() -> str:
@@ -67,7 +70,7 @@ class Client:
         self.pushes = {}
         self.lock = threading.Lock()
         threading.Thread(target=self.read, daemon=True).start()
-        self.call("hello", {"protocol": 2, "client": "folders-bench", "version": "0", "focus": True})
+        self.call("hello", {"protocol": PROTOCOL, "client": "folders-bench", "version": "0", "focus": True})
 
     def read(self):
         for line in self.file:

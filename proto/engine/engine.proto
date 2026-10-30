@@ -282,6 +282,9 @@ message Typing {
   string chat = 1;
   string sender = 2;
   ChatPresence.State state = 3;
+  // The sender's other JID, phone number or LID, as WhatsApp gives it with a chat state as it does
+  // with a message; empty when it gives none.
+  string sender_alt = 4;
 }
 
 // How far a MediaDownload has got: `bytes` of the `size` its message gave. Sent without a seq, at

@@ -569,9 +569,6 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
     let live: sync::Shared = Arc::new(std::sync::Mutex::new(starting));
     let feed = feed::Feed::start(store.clone(), feed::catching_up(live.clone()), feed::Timing::default());
     let typing = feed.typing().clone();
-    if let Ok(engine) = &engine {
-        engine.hear_typing(&typing);
-    }
     let (events, incoming) = mpsc::channel(1024);
     let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
     let (pushes, _) = tokio::sync::broadcast::channel(256);

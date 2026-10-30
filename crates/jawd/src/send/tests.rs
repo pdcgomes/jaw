@@ -41,6 +41,8 @@ struct Running {
     supervisor: Option<Supervisor>,
     attention: Arc<crate::attention::Attention>,
     live: crate::sync::Shared,
+    /// Who's typing, as sync takes it from the engine and WhatsApp is heard by `sending`.
+    typing: crate::feed::Typing,
 }
 
 impl Running {
@@ -80,6 +82,7 @@ impl Running {
         let connect = connect && engine.is_some();
         let supervisor = engine.map(|engine| Supervisor::spawn(engine, events, Backoff::default()));
         let mut connected = pushes.subscribe();
+        let typing = crate::feed::Typing::default();
         let sync = crate::sync::run(
             incoming,
             store.clone(),
@@ -88,7 +91,7 @@ impl Running {
             supervisor.clone(),
             home.into(),
             Default::default(),
-            crate::feed::Typing::default(),
+            typing.clone(),
         );
         tokio::spawn(sync);
         let attention = Arc::new(crate::attention::Attention::default());
@@ -103,6 +106,8 @@ impl Running {
         )
         .await
         .unwrap();
+        let me = live.lock().expect("live state").me();
+        typing.start(store.clone(), me, sending.hearing());
         if connect {
             let online = async {
                 while let Ok(push) = connected.recv().await {
@@ -113,7 +118,7 @@ impl Running {
             };
             tokio::time::timeout(Duration::from_secs(10), online).await.expect("the demo engine never connected");
         }
-        Running { store, sending, world, pushes, supervisor, attention, live }
+        Running { store, sending, world, pushes, supervisor, attention, live, typing }
     }
 
     async fn new(home: &Path) -> Running {
@@ -918,6 +923,70 @@ async fn a_message_sent_after_a_keepalive_timeout_waits_uncounted_and_goes_once_
     running.until_status(ANA, &refused, "failed").await;
     assert_eq!(attempts(&running).await, [(refused, "failed".to_string(), 1)], "its one try counted");
     assert_eq!(running.world.sends().len(), 2);
+}
+
+/// Waits until `seen` says `chat` has so many typing, for 15 s at most.
+async fn typists(seen: &crate::feed::typing::Watching, chat: &str, n: usize, what: &str) {
+    let end = std::time::Instant::now() + Duration::from_secs(15);
+    while seen.now(chat).map_or(0, |who| who.len()) != n {
+        assert!(std::time::Instant::now() < end, "{what} never came");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Typing from WhatsApp, as the engine hands it to sync's loop, ends at a keepalive timeout's
+/// connecting, isn't taken while the pings fail though it still arrives, and once they get through
+/// again WhatsApp is told you're online once more, once, after which it's heard again.
+#[tokio::test(flavor = "multi_thread")]
+async fn typing_ends_at_a_keepalive_timeout_and_comes_back_once_youre_told_online_again_after_the_restore() {
+    use crate::engine::failing::{Failing, Failure};
+    use crate::engine::pb::chat_presence::State::{Composing, Recording};
+    let home = tempfile::tempdir().unwrap();
+    let world: Arc<World> = Arc::default();
+    let failing =
+        Arc::new(Failing::new(DemoEngine::sharing(vec![demo::connected()], world.clone()), Failure::Keepalive));
+    let engine: Arc<dyn crate::engine::Engine> = failing.clone();
+    let running = Running::running(home.path(), world.clone(), Some(engine), true, quick()).await;
+    let ana = Person { jids: vec![ANA.into()], name: Some("Ana".into()), ..Person::default() };
+    running
+        .store
+        .apply(Lane::Live, vec![Change::Person(ana), Change::Chat(Chat { id: ANA.into(), ..Chat::default() })])
+        .await
+        .unwrap();
+    let (seen, mut hearing) = (running.typing.watching(), running.sending.hearing());
+    async fn heard(hearing: &mut watch::Receiver<bool>, now: bool) {
+        let waited = tokio::time::timeout(Duration::from_secs(15), hearing.wait_for(|heard| *heard == now)).await;
+        assert!(waited.is_ok_and(|heard| heard.is_ok()), "never heard {now}");
+    }
+    let terminal = running.attention.viewer();
+    terminal.focus(true);
+    heard(&mut hearing, true).await;
+    world.typing(ANA, ANA, Composing).await;
+    typists(&seen, ANA, 1, "her typing, through the engine's link").await;
+
+    let mut told = running.pushes.subscribe();
+    failing.turn(true).await;
+    until_said(&mut told, "connecting").await;
+    typists(&seen, ANA, 0, "her typing's end at the timeout").await;
+    // What she says while the pings fail still arrives, and isn't taken.
+    world.typing(ANA, ANA, Recording).await;
+    let end = std::time::Instant::now() + Duration::from_secs(15);
+    while running.typing.stats().heard < 2 || running.typing.stats().waiting > 0 {
+        assert!(std::time::Instant::now() < end, "what she said meanwhile never came: {:?}", running.typing.stats());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(seen.now(ANA), None, "nothing said during the timeout shows");
+
+    let before = running.online().len();
+    failing.turn(false).await;
+    until_said(&mut told, "online").await;
+    heard(&mut hearing, true).await;
+    world.typing(ANA, ANA, Composing).await;
+    typists(&seen, ANA, 1, "her typing once you're told online again").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(running.online()[before..], [true], "told you're online once after the restore");
+    drop(terminal);
 }
 
 /// Notifications, as a test sees them.

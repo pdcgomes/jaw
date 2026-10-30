@@ -290,8 +290,9 @@ async fn stored_me(live: &Shared, what: &str) -> convert::Me {
     me.clone()
 }
 
-/// Handles the engine's events until it stops sending them. A message from someone ends their
-/// typing in its chat, which `typing` keeps in memory, never in jaw.db.
+/// Handles the engine's events until it stops sending them. Who's typing, and a message from
+/// someone ending their typing in its chat, go to `typing`, which keeps it in memory, never in
+/// jaw.db.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut incoming: mpsc::Receiver<Incoming>,
@@ -391,9 +392,11 @@ pub async fn run(
             }
             // Fire and forget: what's around now, written as it comes and gone by the next start.
             Some(pb::event::Kind::Presence(presence)) => following.heard(presence),
-            // Who's typing is never written to jaw.db: the presence and typing step (presence-typing)
-            // keeps it in jawd's memory and pushes it as `typing`. Until it lands, it goes no further.
-            Some(pb::event::Kind::Typing(_)) => {}
+            // Who's typing is never written to jaw.db: `typing` takes it without waiting, keeps it in
+            // jawd's memory and pushes it as `typing`.
+            Some(pb::event::Kind::Typing(said)) => {
+                typing.heard(&said.chat, &said.sender, &said.sender_alt, said.state());
+            }
             Some(pb::event::Kind::MediaRetried(answer)) => kept("media_retry", answer.encode_to_vec(), ack),
             // Progress is said again a moment later, so one that finds no room is let go.
             Some(pb::event::Kind::MediaProgress(progress)) => {

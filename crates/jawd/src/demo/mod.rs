@@ -485,7 +485,8 @@ impl Demo {
     }
 
     /// `chats` chats near the top of the list, busy groups first, whose people type, record and
-    /// stop for as long as the demo runs, each chat a few times a second.
+    /// stop for as long as the demo runs, each chat a few times a second, sent over the engine's
+    /// link as jaw-engine sends WhatsApp's chat presence, in order with the messages a flood sends.
     fn keep_typing(&self, chats: u32) -> Option<tokio::task::JoinHandle<()>> {
         if chats == 0 {
             return None;
@@ -510,7 +511,7 @@ impl Demo {
                     2 => Said::Recording,
                     _ => Said::Paused,
                 };
-                world.typing(account.chat(c), &account.typist(c, rng.next()), state);
+                world.typing(account.chat(c), &account.typist(c, rng.next()), state).await;
             }
         }))
     }

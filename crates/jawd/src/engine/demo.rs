@@ -9,7 +9,7 @@
 //! `Account`, it answers for its contacts and groups, and writes each history blob its phone offers
 //! to the spool as jaw-engine does; events can also be delivered from outside its script, several
 //! waiting for their acks at once. Its people type and record as WhatsApp's chat presence says it,
-//! told to jawd's `Typing` directly until the link carries it.
+//! sent over the link as the `Typing` event jaw-engine sends, in order with the rest.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -159,8 +159,6 @@ pub struct World {
     /// What a test does as the phone is asked, before it answers.
     #[cfg(test)]
     when_asked: Mutex<Option<WhenAsked>>,
-    /// Where its people's typing goes, once jawd has said.
-    typing: Mutex<Option<crate::feed::Typing>>,
 }
 
 /// What a test does as the made-up phone is asked to send a file again.
@@ -183,12 +181,12 @@ pub enum Phone {
 
 impl World {
     /// Says `sender` is typing (`Composing`) or recording in `chat`, or has stopped, as WhatsApp
-    /// says it, which jawd takes only while WhatsApp would say it: while it's been told you're
-    /// online. Nothing happens before jawd has said where typing goes.
-    pub fn typing(&self, chat: &str, sender: &str, state: pb::chat_presence::State) {
-        let typing = self.typing.lock().expect("the demo world").clone();
-        if let Some(typing) = typing {
-            typing.heard(chat, sender, state);
+    /// says it, through the engine running now, which jawd takes only while WhatsApp would say it:
+    /// while it's been told you're online. Nothing goes while no engine runs.
+    pub async fn typing(&self, chat: &str, sender: &str, state: pb::chat_presence::State) {
+        let events = self.link.lock().expect("the demo world").as_ref().and_then(|link| link.events.upgrade());
+        if let Some(events) = events {
+            let _ = events.send(Incoming { event: typing(chat, sender, state), ack: None }).await;
         }
     }
 
@@ -950,6 +948,14 @@ fn presence(jid: &str, around: bool) -> pb::Event {
     pb::Event { seq: 0, kind: Some(pb::event::Kind::Presence(update)) }
 }
 
+/// `sender` typing, recording or stopping in `chat`, as jaw-engine hands on WhatsApp's chat
+/// presence.
+pub fn typing(chat: &str, sender: &str, state: Said) -> pb::Event {
+    let typing =
+        pb::Typing { chat: chat.into(), sender: sender.into(), state: state as i32, sender_alt: String::new() };
+    pb::Event { seq: 0, kind: Some(pb::event::Kind::Typing(typing)) }
+}
+
 /// How often one of the people followed comes or goes.
 const COMINGS: Duration = Duration::from_secs(5);
 
@@ -963,15 +969,12 @@ async fn comings_and_goings(sender: Sender) {
         let Some(jid) = subscribed.get(turn as usize % subscribed.len().max(1)).cloned() else { continue };
         let now = !around.get(&jid).copied().unwrap_or(seed(&jid).is_multiple_of(3));
         around.insert(jid.clone(), now);
-        if now && turn % 3 == 0 && jid.ends_with("@s.whatsapp.net") {
-            let typing = pb::Typing {
-                chat: jid.clone(),
-                sender: jid.clone(),
-                state: pb::chat_presence::State::Composing as i32,
-            };
-            if !sender.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::Typing(typing)) }).await {
-                return;
-            }
+        if now
+            && turn % 3 == 0
+            && jid.ends_with("@s.whatsapp.net")
+            && !sender.send(typing(&jid, &jid, Said::Composing)).await
+        {
+            return;
         }
         if !sender.send(presence(&jid, now)).await {
             return;
@@ -989,14 +992,18 @@ const TYPING_AGAIN: Duration = Duration::from_secs(4);
 async fn typing_while_running(sender: Sender) {
     let (ana, climbing) = ("351912345678@s.whatsapp.net", "120363012345678901@g.us");
     for turn in 0u64.. {
+        let other = if turn % 2 == 0 { Said::Composing } else { Said::Paused };
+        let said = [
+            typing(ana, ana, Said::Composing),
+            typing(climbing, MEMBERS[0], Said::Recording),
+            typing(climbing, MEMBERS[1], other),
+        ];
         // Until this engine is stopped, or jawd has gone.
-        if sender.events.is_closed() || sender.weak.upgrade().is_none() {
-            return;
+        for event in said {
+            if sender.weak.upgrade().is_none() || !sender.send(event).await {
+                return;
+            }
         }
-        let world = &sender.world;
-        world.typing(ana, ana, Said::Composing);
-        world.typing(climbing, MEMBERS[0], Said::Recording);
-        world.typing(climbing, MEMBERS[1], if turn % 2 == 0 { Said::Composing } else { Said::Paused });
         tokio::time::sleep(TYPING_AGAIN).await;
     }
 }
@@ -1050,10 +1057,6 @@ pub(super) fn write_whole(path: &Path, data: &[u8]) -> std::io::Result<()> {
 impl Engine for DemoEngine {
     fn kind(&self) -> &'static str {
         "demo"
-    }
-
-    fn hear_typing(&self, typing: &crate::feed::Typing) {
-        *self.world.typing.lock().expect("the demo world") = Some(typing.clone());
     }
 
     fn start(&self, events: mpsc::Sender<Incoming>) -> BoxFuture<'_, Result<Instance>> {

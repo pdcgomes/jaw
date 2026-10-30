@@ -121,14 +121,14 @@ mod tests {
     #[test]
     fn hello_and_status_with_no_settings_leave_them_out_rather_than_sending_them_empty() {
         let hello: crate::Welcome = serde_json::from_value(serde_json::json!({
-            "protocol": 1, "jawd": "0.1.0", "root": "/r", "seq": 1,
+            "protocol": crate::PROTOCOL, "jawd": "0.1.0", "root": "/r", "seq": 1,
             "account": {"state": "unlinked"}, "connection": {"state": "offline"}
         }))
         .unwrap();
         assert_eq!(hello.settings, None);
         assert_eq!(serde_json::to_value(&hello).unwrap().get("settings"), None);
         let status: crate::Status = serde_json::from_value(serde_json::json!({
-            "jawd": "0.1.0", "protocol": 1, "root": "/r", "account": {"state": "unlinked"},
+            "jawd": "0.1.0", "protocol": crate::PROTOCOL, "root": "/r", "account": {"state": "unlinked"},
             "connection": {"state": "offline"}, "engine": {"kind": "go", "state": "running"}
         }))
         .unwrap();
