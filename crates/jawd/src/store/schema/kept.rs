@@ -89,6 +89,10 @@ const CLASSES: &[(&str, Class, &[&str])] = &[
     ("folder_chats", Derived, &[]),
     ("folder_people", Derived, &[]),
     ("folder_counts", Derived, &[]),
+    ("media_files", Own, &[]),
+    ("media_made", Own, &[]),
+    ("media_cache", Derived, &[]),
+    ("media_drop", Own, &[]),
 ];
 
 /// The rows the test writes, in an order that keeps every foreign key, each column's value as SQL.
@@ -386,6 +390,21 @@ fn dropped() -> Vec<(usize, &'static str, &'static str, Option<&'static str>)> {
         // Nothing ever wrote it: a folder's chats sort by their newest message, its people as
         // rosters do.
         (folders, "folder_items", "position", None),
+        (20, "media", "path", None),
+        (20, "media", "preview_small", None),
+        (20, "media", "preview_large", None),
+    ]
+}
+
+/// Columns of jaw's own a migration kept but reset by decision, by its number: the table, the
+/// column, and the SQL each value becomes, of the value it had as `old`. Its rows are checked
+/// against what the decision says, not left out.
+fn reset() -> Vec<(usize, &'static str, &'static str, &'static str)> {
+    vec![
+        // Media in: a state from before it means nothing now but expired and gone, and no
+        // download runs across an upgrade.
+        (20, "media", "state", "iif(old IN ('expired', 'gone'), old, 'remote')"),
+        (20, "media", "progress", "NULL"),
     ]
 }
 
@@ -524,6 +543,7 @@ fn run(db: &mut Connection, n: usize) {
 #[test]
 fn no_migration_drops_a_table_or_column_of_jaws_own_or_raw_or_changes_a_row_of_it() {
     let dropped = dropped();
+    let reset = reset();
     for n in 2..=MIGRATIONS.len() {
         let mut db = Connection::open_in_memory().unwrap();
         for migration in &MIGRATIONS[..n - 1] {
@@ -581,9 +601,22 @@ fn no_migration_drops_a_table_or_column_of_jaws_own_or_raw_or_changes_a_row_of_i
                     ),
                 }
             }
+            let resets: Vec<Option<&str>> = to
+                .iter()
+                .map(|column| reset.iter().find(|(m, t, c, _)| *m == n && *t == table && c == column).map(|r| r.3))
+                .collect();
             let mut there = rows(&db, &table, &to);
             for row in found {
-                let row: Vec<Value> = from.iter().map(|&at| row[at].clone()).collect();
+                let row: Vec<Value> = from
+                    .iter()
+                    .zip(&resets)
+                    .map(|(&at, reset)| match reset {
+                        Some(becomes) => db
+                            .query_row(&format!("SELECT {becomes} FROM (SELECT ?1 AS old)"), [&row[at]], |r| r.get(0))
+                            .unwrap(),
+                        None => row[at].clone(),
+                    })
+                    .collect();
                 match there.iter().position(|kept| *kept == row) {
                     Some(at) => {
                         there.swap_remove(at);
