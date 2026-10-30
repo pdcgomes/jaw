@@ -4990,6 +4990,24 @@ async fn a_connection_whose_interface_reads_nothing_holds_one_typing_for_each_ch
     assert!(stats.merged >= 100, "{stats:?}");
 }
 
+/// Waits until the interface whose lines come on `lines` is pushed `names` typing in `chat`,
+/// passing over what comes first, for `TYPED` at most.
+async fn pushed_typing(lines: &mut mpsc::UnboundedReceiver<Value>, chat: &str, names: &[&str]) {
+    let end = Instant::now() + TYPED;
+    let mut came = Vec::new();
+    loop {
+        let Ok(Some(line)) = tokio::time::timeout_at(end.into(), lines.recv()).await else {
+            panic!("the interface was never pushed {names:?} typing in {chat}, only {came:?}");
+        };
+        let who: Vec<&str> =
+            line["params"]["who"].as_array().into_iter().flatten().filter_map(|who| who["name"].as_str()).collect();
+        if line["method"] == "typing" && line["params"]["chat"] == chat && who == names {
+            return;
+        }
+        came.push(line);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn typing_writes_nothing_to_jaw_db_and_moves_no_seq_while_interfaces_are_told_it() {
     let (bed, typing, hearing) = typing_bed(ms(400)).await;
@@ -5011,33 +5029,128 @@ async fn typing_writes_nothing_to_jaw_db_and_moves_no_seq_while_interfaces_are_t
     let version = |db: &rusqlite::Connection| db.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0)).unwrap();
     let (version_before, wal_before) = (version(&side), wal());
 
-    // An interface watches its chat list and the group while Ana types and stops, Rui records and
-    // Zé types there, a message of Rui's ends his, Zé's fades, and Ana's ends as you go away.
+    // An interface watches its chat list and the group, then hands on each line jawd sends it.
+    let (watched, answered) = tokio::sync::oneshot::channel();
+    let (came, mut lines) = mpsc::unbounded_channel();
     let watching = tokio::task::spawn_blocking(move || {
         let (mut line, _) = Line::open(&socket, None);
         line.call("chats.watch", json!({"around": "top", "after": 3}));
         line.call("messages.watch", json!({"chat": GROUP, "around": "newest", "before": 5}));
-        line.came(ms(3_000))
+        let _ = watched.send(line.stream.try_clone().unwrap());
+        for push in std::mem::take(&mut line.pushes) {
+            let _ = came.send(push);
+        }
+        line.stream.set_read_timeout(Some(TYPED)).unwrap();
+        let mut text = String::new();
+        while line.reader.read_line(&mut text).is_ok_and(|n| n > 0) {
+            let _ = came.send(serde_json::from_str::<Value>(&text).unwrap());
+            text.clear();
+        }
     });
-    tokio::time::sleep(ms(300)).await;
+    let stream = tokio::time::timeout(TYPED, answered).await.expect("its watches were answered").unwrap();
+
+    // Ana types and stops, Rui records and Zé types in the group, a message of Rui's ends his,
+    // Zé's fades, and Ana's ends as you go away, each once the interface has been told the last.
     typing.heard(OPEN, OPEN, Composing);
+    pushed_typing(&mut lines, OPEN, &["Ana"]).await;
     typing.heard(OPEN, OPEN, Paused);
+    pushed_typing(&mut lines, OPEN, &[]).await;
     typing.heard(GROUP, &person(9), Recording);
     typing.heard(GROUP, &person(10), Composing);
-    typed(&typing, GROUP, &["Rui", "Zé"]).await;
+    pushed_typing(&mut lines, GROUP, &["Rui", "Zé"]).await;
     typing.message(GROUP, &person(9), "");
-    typed(&typing, GROUP, &["Zé"]).await;
-    typed(&typing, GROUP, &[]).await;
+    pushed_typing(&mut lines, GROUP, &["Zé"]).await;
+    pushed_typing(&mut lines, GROUP, &[]).await;
     typing.heard(OPEN, OPEN, Recording);
-    typed(&typing, OPEN, &["Ana"]).await;
+    pushed_typing(&mut lines, OPEN, &["Ana"]).await;
     hearing.send_replace(false);
-    typed(&typing, OPEN, &[]).await;
-    let came = watching.await.unwrap();
-    let pushed = came.iter().filter(|line| line["method"] == "typing").count();
-    assert!(pushed >= 4, "the interface was told: {came:?}");
+    pushed_typing(&mut lines, OPEN, &[]).await;
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    watching.await.unwrap();
 
     assert_eq!(writes(&bed), before, "the writer's transactions, synced commits and the feed's seq");
     assert_eq!(version(&side), version_before, "nothing committed to jaw.db");
     assert_eq!(wal(), wal_before, "nothing written to its WAL");
     assert_eq!(typing.stats().chats, 0);
+}
+
+/// The tree's and the roster's answers on a fresh connection, their watch ids left out.
+async fn tree_and_roster_answers(bed: &Bed) -> (Value, Value) {
+    let mut watcher = bed.watcher(64);
+    let mut tree = watcher.call("folders.watch", json!({})).await.unwrap();
+    let roster = json!({"folder": "all", "around": "top", "after": 20});
+    let mut roster = watcher.call("roster.watch", roster).await.unwrap();
+    for answer in [&mut tree, &mut roster] {
+        answer.as_object_mut().unwrap().remove("watch");
+    }
+    (tree, roster)
+}
+
+/// The folder tree and a roster show folders and people, not chats, so typing reaches neither:
+/// they answer and push as they do with nobody typing, while a folder's chat list beside them is
+/// told who's typing in its chats, and nothing is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tree_and_a_roster_are_told_no_typing_while_a_folders_chat_list_beside_them_is() {
+    let (bed, typing, _hearing) = typing_bed(NEVER).await;
+    let quiet = tree_and_roster_answers(&bed).await;
+    let committed = *bed.store.committed().borrow();
+    typing.heard(OPEN, OPEN, Composing);
+    typing.heard(GROUP, &person(9), Recording);
+    typed(&typing, OPEN, &["Ana"]).await;
+    typed(&typing, GROUP, &["Rui"]).await;
+
+    // Ana types in her chat, whose person the roster shows, and Rui records in the group: the
+    // tree and the roster answer as they did with nobody typing, with no typing of their own.
+    let typed_in = tree_and_roster_answers(&bed).await;
+    assert_eq!(typed_in, quiet, "the tree's and the roster's answers with someone typing");
+    let keys = |answer: &Value| {
+        let mut keys: Vec<String> = answer.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(keys(&typed_in.0), ["favourites", "rows", "seq"], "{}", typed_in.0);
+    assert_eq!(keys(&typed_in.1), ["rows", "seq", "total"], "{}", typed_in.1);
+    let ana = typed_in.1["rows"].as_array().unwrap().iter().find(|row| row["chat"] == OPEN);
+    assert!(ana.is_some(), "the roster shows Ana, whose chat she types in: {}", typed_in.1);
+
+    // A connection watching only them is told none of the typing that follows, and their pushes
+    // say what they say with nobody typing.
+    let mut watcher = bed.watcher(64);
+    watcher.watch("folders.watch", json!({})).await;
+    watcher.watch("roster.watch", json!({"folder": "all", "around": "top", "after": 20})).await;
+    typing.heard(GROUP, &person(10), Composing);
+    typing.heard(OPEN, OPEN, Paused);
+    typed(&typing, GROUP, &["Rui", "Zé"]).await;
+    typed(&typing, OPEN, &[]).await;
+    typing.heard(OPEN, OPEN, Recording);
+    typed(&typing, OPEN, &["Ana"]).await;
+    let renamed = Change::Person(named(OPEN, "Ana Ribeiro"));
+    let written = Change::Message(Message { live: true, ..text(OPEN, "t-roster", 20_000, Some(OPEN), "olá") });
+    let seq = bed.apply(vec![renamed, written]).await;
+    watcher.settle(seq).await;
+    watcher.run_for(ms(300)).await;
+    assert!(watcher.told.is_empty(), "typing told to the tree and a roster: {:?}", watcher.told);
+    let methods: Vec<&str> = watcher.pushes.iter().map(|(method, _)| method.as_str()).collect();
+    assert!(methods.contains(&"folders") && methods.contains(&"roster"), "{:?}", watcher.pushes);
+    for (method, params) in &watcher.pushes {
+        let keys = keys(params);
+        let theirs: &[&str] = match method.as_str() {
+            "folders" => &["favourites", "remove", "seq", "upsert", "watch"],
+            "roster" => &["remove", "seq", "total", "upsert", "watch"],
+            other => panic!("a {other} push to the tree and a roster"),
+        };
+        assert!(keys.iter().all(|key| theirs.contains(&key.as_str())), "a {method} push: {params}");
+    }
+
+    // A chat list of the groups folder beside them is told who's typing in its chats: by its
+    // answer, then by a push as it changes.
+    let groups = json!({"folder": "groups", "around": "top", "after": 3});
+    let groups = watcher.call("chats.watch", groups).await.unwrap();
+    assert_eq!(answered_typing(&groups), want(&[(GROUP, &["Rui", "Zé"])]), "{groups}");
+    typing.heard(GROUP, &person(9), Paused);
+    watcher.until_typing(&[(GROUP, &["Zé"])]).await;
+    let told: Vec<&str> = watcher.told.iter().map(|(chat, _)| chat.as_str()).collect();
+    assert_eq!(told, [GROUP], "only the group's chat list is told, once");
+    assert_eq!(*bed.store.committed().borrow(), seq, "typing wrote nothing past the two changes");
+    assert!(committed < seq);
 }
