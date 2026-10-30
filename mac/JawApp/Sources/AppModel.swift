@@ -181,8 +181,12 @@ final class AppModel {
         case let .unsent(chat, key, text, why):
             sending[key] = nil
             if let c = panes[chat] { c.unsent(text: text, why: why) } else { say("not sent: \(why)", warn: true) }
-        case let .pollUnsent(_, _, poll, why):
-            say("the poll \"\(poll.question)\" wasn't sent: \(why)", warn: true)
+        case let .pollUnsent(chat, _, poll, why):
+            if let c = panes[chat], window?.pollSheet == nil {
+                window?.showPollForm(PollForm(chat: c.chat.name, returned: poll, said: why), chat: chat)
+            } else {
+                say("the poll \"\(poll.question)\" wasn't sent: \(why)", warn: true)
+            }
         case .unsure:
             say("asking jawd again once it's back")
         case let .acted(_, said):
@@ -711,6 +715,17 @@ final class AppModel {
     func toggleFocusMode() {
         focusMode.toggle()
         window?.focusMode(focusMode)
+    }
+
+    /// The poll form for the focused pane's chat: the + menu's Poll…, and New poll in the palette.
+    func composePoll() {
+        guard let c = conversation else { return say("open a chat to make a poll in it") }
+        window?.showPollForm(PollForm(chat: c.chat.name), chat: c.chat.id)
+    }
+
+    /// Sends a poll as its form has it, with a key made for it; jawd's row brings it into the chat.
+    func sendPoll(chat: String, _ poll: (question: String, options: [String], max: Int)) {
+        jawd.sendPoll(chat: chat, question: poll.question, options: poll.options, max: poll.max, key: Jawd.key())
     }
 }
 

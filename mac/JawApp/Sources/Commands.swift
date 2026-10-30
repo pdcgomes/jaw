@@ -73,21 +73,24 @@ extension AppModel {
         for c in chatCommands(for: chat) {
             add(c)
         }
-        // The box's + menu: attachments, and what's composed.
-        for (id, title, phrase, detail, symbol, key, later) in [
-            ("attach.photos", "Photos & Videos…", "Send photos or videos", "from Finder or Photos", "photo.on.rectangle", Shortcut("o") as Shortcut?,
+        // The box's + menu: attachments, and what's composed; those still to come say what they wait on.
+        let plus: [(String, String, String, String, String, Shortcut?, String?)] = [
+            ("attach.photos", "Photos & Videos…", "Send photos or videos", "from Finder or Photos", "photo.on.rectangle", Shortcut("o"),
              "sending photos and videos comes with jawd's M4"),
             ("attach.document", "Document…", "Send a document", "any file", "doc", Shortcut("o", [.command, .shift]),
              "sending documents comes with jawd's M4"),
             ("attach.camera", "Camera…", "Take a photo with the iPhone", "Continuity Camera", "camera", nil, "the camera comes with jawd's M4"),
             ("attach.contact", "Contact…", "Send a contact", "from Contacts", "person.crop.circle", nil, "sending contacts comes with jawd's send.contact"),
-            ("compose.poll", "Poll…", "New poll", "a question and its options", "chart.bar.xaxis", nil, "polls come with jawd's send.poll"),
+            ("compose.poll", "Poll…", "New poll", "a question and its options", "chart.bar.xaxis", nil, nil),
             ("compose.event", "Event…", "New event", "a time, a place, a call link", "calendar", nil, "events come with jawd's send.event"),
             ("attach.location", "Location…", "Send a place", "a search, or where you are", "mappin.and.ellipse", nil,
              "sending places comes with jawd's send.location"),
-        ] {
+        ]
+        for (id, title, phrase, detail, symbol, key, later) in plus {
             add(Command(id, title, phrase: phrase, detail: detail, symbol: symbol, key: key, place: .chat, group: 2, enabled: isChat)
-                { [weak self] in self?.say(later) })
+                { [weak self] in
+                    if let later { self?.say(later) } else { self?.composePoll() }
+                })
         }
         add(Command("box.emoji", "Emoji…", phrase: "Emoji", detail: "find one by name", symbol: "face.smiling",
                     key: Shortcut("e", [.control, .command]), place: .chat, group: 3, enabled: isChat)

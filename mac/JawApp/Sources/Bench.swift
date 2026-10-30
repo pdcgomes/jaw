@@ -92,7 +92,7 @@ enum Bench {
             NSApp.activate()
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
-                || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:")
+                || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll")
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -109,6 +109,16 @@ enum Bench {
             if key == "settings" { model.window?.showSettings() }
             if key == "terminal-panes" { model.openTerminalPanes() }
             if key.hasPrefix("vote:"), let c = model.conversation, let poll = c.newestPoll { c.vote(String(key.dropFirst(5)), in: poll.id) }
+            if key.hasPrefix("poll"), let c = model.conversation {
+                let form = pollForm(key, chat: c.chat.name)
+                if key.hasPrefix("poll-form") {
+                    model.window?.showPollForm(form, chat: c.chat.id)
+                } else if let poll = form.poll {
+                    model.sendPoll(chat: c.chat.id, poll)
+                } else {
+                    FileHandle.standardError.write(Data("\(key): not sent: \(form.problem ?? "")\n".utf8))
+                }
+            }
             if key.hasPrefix("size:") {
                 let wh = key.dropFirst(5).split(separator: "x").compactMap { Double($0) }
                 if wh.count == 2 { model.window?.window?.setContentSize(NSSize(width: wh[0], height: wh[1])) }
@@ -137,10 +147,10 @@ enum Bench {
             {
                 NSApp.sendEvent(event)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + (key.hasPrefix("vote:") ? 0.8 : 0.3)) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (key.hasPrefix("vote:") || key.hasPrefix("poll:") ? 0.8 : 0.3)) {
                 if key.hasPrefix("menu:") {
                     FileHandle.standardError.write(Data("\(key): \(menuSaid(String(key.dropFirst(5)), model: model))\n".utf8))
-                } else if key.hasPrefix("vote:") {
+                } else if key.hasPrefix("vote:") || key.hasPrefix("poll:") {
                     FileHandle.standardError.write(Data("\(key): \(pollSaid(model.conversation?.newestPoll))\(model.notice.map { " · said \"\($0.0)\"" } ?? "")\n".utf8))
                 } else {
                     let palette = (model.window?.palette.isVisible ?? false) ? " · palette at \(model.window?.palette.model.index ?? -1) of \(model.window?.palette.model.items.count ?? 0)" : ""
@@ -183,6 +193,16 @@ enum Bench {
         }
     }
 
+    /// The poll a `poll:` or `poll-form:` step writes, as `poll:Jantar?|Sábado|Domingo|several` has it:
+    /// its question, its options, and whether it allows several answers.
+    static func pollForm(_ key: String, chat: String) -> PollForm {
+        let written = key.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
+        var parts = written.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        let several = parts.count > 1 && parts.last == "several"
+        if several { parts.removeLast() }
+        return PollForm(chat: chat, question: parts.first ?? "", options: Array(parts.dropFirst()), several: several)
+    }
+
     /// A poll as its row is, for the snapshot's log: its question, each option's tally with yours
     /// ticked, how many voted, and its state when it's yours.
     static func pollSaid(_ m: MessageRow?) -> String {
@@ -206,7 +226,8 @@ enum Bench {
     static func draw(to path: String, model: AppModel) {
         // The window's frame view, so the toolbar is drawn too.
         let glance = model.glance.isOpen ? model.glance.panel.contentView : EmojiPicker.shared.panel.isVisible ? EmojiPicker.shared.panel.contentView : nil
-        guard let view = glance ?? model.window?.editorSheet?.contentView ?? model.window?.settings?.contentView ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
+        guard let view = glance ?? model.window?.editorSheet?.contentView ?? model.window?.pollSheet?.contentView ?? model.window?.settings?.contentView
+            ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
         let rect = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }
         view.cacheDisplay(in: rect, to: rep)

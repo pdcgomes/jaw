@@ -266,6 +266,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         w.makeKeyAndOrderFront(nil)
     }
 
+    var pollSheet: NSWindow?
+
+    /// The poll form, in a sheet over the window: Send closes it and sends the poll to `chat`.
+    func showPollForm(_ form: PollForm, chat: String) {
+        guard let window, pollSheet == nil else { return }
+        let end: @MainActor () -> Void = { [weak self] in
+            guard let self, let sheet = pollSheet else { return }
+            window.endSheet(sheet)
+            pollSheet = nil
+        }
+        let view = PollFormView(model: form, roles: model.roles, send: { [weak model] in
+            guard let poll = form.poll else { return }
+            end()
+            model?.sendPoll(chat: chat, poll)
+        }, cancel: end)
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
+        pollSheet = sheet
+        window.beginSheet(sheet)
+    }
+
     /// Settings, in a sheet over the window: modal to it, centred, Done or Esc to close.
     func showSettings() {
         guard let window, settings == nil else { return }
