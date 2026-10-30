@@ -95,6 +95,30 @@ final class Held {
     }
 }
 
+/// Keeps `params` as the terminal's panes, as jaw does: a connection that says hello as jaw, then
+/// layout.set. Says whether jawd kept them.
+func keepTerminalPanes(_ socket: String, _ params: JSONValue) async -> Bool {
+    let terminal = Client(config: .init(socket: socket, client: "jaw", version: "0"), wake: { _ in })
+    terminal.start()
+    defer { terminal.close() }
+    var asked: UInt64?
+    let end = Date().addingTimeInterval(10)
+    while Date() < end {
+        for event in terminal.drain().events {
+            switch event {
+            case .connected where asked == nil:
+                if case let .success(id) = terminal.request("layout.set", params) { asked = id }
+            case let .reply(id, .success(.json(answer))) where id == asked:
+                return answer["kept"]?.bool == true
+            default:
+                break
+            }
+        }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return false
+}
+
 @MainActor
 @Suite(.serialized, .enabled(if: builtJawd != nil, "cargo build -p jawd builds the jawd this runs"))
 struct LiveTests {
@@ -155,5 +179,33 @@ struct LiveTests {
             }
         }
         #expect(found, "find for \(name.prefix(3)): \(answers)")
+    }
+
+    @Test func `the terminal's panes come from a real jawd as it keeps them, and a chat is looked up by its JID`() async throws {
+        let demo = try DemoJawd()
+        defer { demo.stop() }
+        let held = Held(demo.socket)
+        defer { held.jawd.close() }
+        let ana = "351912345678@s.whatsapp.net", climbing = "120363012345678901@g.us", unknown = "351919999999@s.whatsapp.net"
+        #expect(await held.until { h in [ana, climbing].allSatisfy { id in h.chats.list.contains { $0.id == id } } }, "the demo's chats come")
+        let params = try JSONValue.parse(Data("""
+        {"v":1,"layout":{"format":1,"focused":2,"tree":{"split":{"how":"across","first":600,"a":{"chat":"\(ana)"},\
+        "b":{"split":{"how":"down","first":500,"a":{"chat":"\(climbing)"},"b":{"chat":"\(unknown)"}}}}}}}
+        """.utf8))
+        #expect(await keepTerminalPanes(demo.socket, params), "the terminal keeps its panes, as jaw does")
+
+        held.jawd.layout(of: "jaw", what: "opening the terminal's panes")
+        #expect(await held.until { h in h.updates.contains { if case .layout = $0 { true } else { false } } })
+        let kept = held.updates.compactMap { if case let .layout(k) = $0 { k } else { nil } }.first
+        #expect(kept?.interface == "jaw" && kept?.v == 1)
+        #expect(kept?.layout == SplitLayout(focused: 1, tree: .split(.across, first: 600, .chat(ana), .chat(climbing))),
+                "the pane of a chat jawd has none of is left out, its split closed, and the keys go to the pane before it")
+        #expect(kept?.dropped == [unknown])
+
+        held.jawd.lookUp([climbing, unknown])
+        #expect(await held.until { h in h.updates.count { if case .looked = $0 { true } else { false } } == 2 })
+        let found = held.updates.compactMap { if case let .looked(chat, f) = $0 { (chat, f) } else { nil } }
+        if case let .row(row)? = found.first?.1 { #expect(row.id == climbing) } else { Issue.record("the group wasn't found: \(found)") }
+        #expect(found.last?.0 == unknown && found.last?.1 == .gone, "jawd has no chat by that JID")
     }
 }

@@ -180,6 +180,65 @@ public final class Jawd {
     /// What was said without asking jawd, waiting for the next drain.
     var pending: [JawUpdate] = []
 
+    // MARK: - Chats no window holds
+
+    /// Where a lookup looks, in turn: the chats not archived, then the archived ones, the two lists
+    /// jawd serves.
+    static let lookIn = ["all", "archived"]
+
+    /// The chats still to look up, in turn.
+    var toLookUp: [String] = []
+    /// The chat being looked up, and its window of one row.
+    var lookup: Lookup?
+
+    /// Looks up the row of each of `chats`, which none of the caller's windows holds: a window of
+    /// that one row around it in `all`, then in `archived` when `all` doesn't hold it, let go as soon
+    /// as jawd answers, one chat at a time, so a lookup holds one of jawd's 32 windows at most. Each
+    /// comes as `.looked`. The chats asked for before and not yet looked up are forgotten; the one
+    /// being looked up still answers.
+    public func lookUp(_ chats: [String]) {
+        toLookUp = chats.filter { $0 != lookup?.chat }
+        lookNext()
+    }
+
+    func lookNext() {
+        guard lookup == nil, !toLookUp.isEmpty else { return }
+        look(toLookUp.removeFirst(), in: Self.lookIn[0])
+    }
+
+    func look(_ chat: String, in folder: String) {
+        lookup = Lookup(window: client.watchChats(folder, .around(chat, before: 0, after: 0)), chat: chat, folder: folder)
+    }
+
+    /// What a lookup's window answered: the chat's row, or that the list doesn't hold it, when the
+    /// next list is looked in, and after the last, that it's gone. Its window is let go either way.
+    func looked(_ update: Update<ChatRow>, _ out: inout [JawUpdate]) {
+        guard let lookup else { return }
+        let row = update.upsert.first { $0.id == lookup.chat }
+        guard row != nil || update.moved != nil else { return }
+        client.unwatch(lookup.window)
+        self.lookup = nil
+        if let row {
+            out.append(.looked(chat: lookup.chat, .row(row)))
+        } else if let next = Self.lookIn.drop(while: { $0 != lookup.folder }).dropFirst().first {
+            look(lookup.chat, in: next)
+            return
+        } else {
+            out.append(.looked(chat: lookup.chat, .gone))
+        }
+        lookNext()
+    }
+
+    /// A lookup's window that jawd refused: a chat it has no row for is gone, and any other refusal,
+    /// such as every window being taken, is said in jawd's words.
+    func lookFailed(_ failure: Failure, _ out: inout [JawUpdate]) {
+        guard let lookup else { return }
+        client.unwatch(lookup.window)
+        self.lookup = nil
+        out.append(.looked(chat: lookup.chat, failure.code == ErrorCode.notFound ? .gone : .refused(failure.description)))
+        lookNext()
+    }
+
     // MARK: - Draining
 
     /// Everything since the last drain, as the app takes it.
@@ -191,7 +250,7 @@ public final class Jawd {
             take(event, &out)
         }
         for (window, update) in frame.chats.sorted(by: { $0.key < $1.key }) {
-            out.append(.chats(window, update))
+            if window == lookup?.window { looked(update, &out) } else { out.append(.chats(window, update)) }
         }
         for (window, update) in frame.messages.sorted(by: { $0.key < $1.key }) {
             out.append(.messages(window, update))
@@ -228,7 +287,7 @@ public final class Jawd {
             case let .failure(failure): out.append(.findFailed(id: view, cancelled: false, why: failure.description))
             }
         case let .window(window, failure):
-            out.append(.windowFailed(window, failure.description))
+            if window == lookup?.window { lookFailed(failure, &out) } else { out.append(.windowFailed(window, failure.description)) }
         case let .connection(c):
             out.append(.connection(c))
         case let .link(step):
@@ -271,6 +330,13 @@ public final class Jawd {
         let params: SendText
         /// When it was first asked for, by the wall clock, which goes on while the Mac sleeps.
         let first: Date
+    }
+
+    /// A chat being looked up: its window of one row, and the list it's looked for in.
+    struct Lookup {
+        let window: WindowID
+        let chat: String
+        let folder: String
     }
 
     enum ActParams {
@@ -446,6 +512,16 @@ public final class Jawd {
     }
 }
 
+/// What a lookup found of a chat no window of the caller's holds.
+public enum Looked: Sendable, Hashable {
+    /// Its row, from `all` or from `archived`.
+    case row(ChatRow)
+    /// In neither list, as for a chat jawd has no row for.
+    case gone
+    /// jawd refused its window, in jawd's words.
+    case refused(String)
+}
+
 /// What the app hears from jawd, drained once a frame.
 public enum JawUpdate: Sendable {
     /// jawd answered hello: the folder its paths are relative to, and the IDs you go by, so a
@@ -475,5 +551,7 @@ public enum JawUpdate: Sendable {
     case status(Status)
     /// The panes jawd keeps for an interface, as `layout.get` answered.
     case layout(KeptLayout)
+    /// A chat looked up outside the caller's windows, and what was found of it.
+    case looked(chat: String, Looked)
     case push(method: String, params: JSONValue)
 }

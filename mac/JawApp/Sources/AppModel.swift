@@ -194,7 +194,7 @@ final class AppModel {
             window?.showStatus(status)
         case let .windowFailed(_, why):
             say("a window couldn't be watched: \(why)", warn: true)
-        case .push, .chats, .layout:
+        case .push, .chats, .layout, .looked:
             break
         }
     }
