@@ -30,7 +30,7 @@ What the designs leave open, each with its options and the lean built; none bloc
 10. **A poll jawd turns down.** A: the sheet opens again with the poll as it was and jawd's words at its foot, as the box gets its text back (lean); B: said in the status line only. Task 5.
 11. **The box's preview while a link is typed.** The protocol has no request for a preview before sending: jawd fetches the page as `send.text` sends it. A: propose `link.preview` (P11) and show nothing in the box until jawd serves it (lean); B: show only that a preview will go, with an × sending `preview: false`. Task 7.
 12. **The tallies' growth.** The design's animations table has bars growing to new widths in 200 ms. A: with Mac-M5's animations, every animation at once with its Reduce Motion form (lean); B: here. The tallies change as rows come either way.
-13. **A link found in the palette.** A: Enter opens it in the browser and ⌘↩ goes to its message, as the library's rows will (lean); B: Enter goes to the message. Task 6.
+13. **A link found in the palette.** A: Enter opens it in the browser and ⌘↩ goes to its message, as the library's rows will (lean); B: Enter goes to the message. Task 6. *Amended while it was built:* the palette already has ⌘G (and ⌃G) for going to a message found, as the terminal's library has Ctrl-G, so ⌘G goes to a link's message too, and ⌘↩ on a link does what Enter does, as the palette's ⌘↩ does on anything but a chat.
 
 ## Global Constraints
 
@@ -183,7 +183,7 @@ Changed:
 - `@Observable public final class PollForm`: `chat` (the name it's to), `question`, `options` (two empty to start), `several`, `said` (jawd's words after a refusal), `focus: Field?` (`question`, `option(Int)`); `problem: String?`, the first thing in the way, in jaw's words ("a question", "two options at least", "Pizza is there twice", "12 options at most", "a question of 255 characters at most", "options of 100 characters at most"), counted and trimmed as jawd counts and trims them; `poll: (question: String, options: [String], max: Int)?` once it's ready, empty options left out, `max` every option with `several`; `returned(in:) -> Returned` (`.moved`, `.added`, `.send`, `.notReady`), `add()`, `remove(at:)`; `init(chat:question:options:several:said:)`, so a refused poll opens again as it was.
 - `public struct PollFormView: View`: a sheet with the chat's name, the question, the options with a × each past the second and Add Option, "Allow several answers", the problem or jawd's words, Cancel and Send; Tab moves, Return as `returned(in:)` says, ⌘↩ sends, Esc cancels.
 - `compose.poll` (the + menu's Poll…, and New poll in the palette) opens it for the focused pane's chat; Send closes it and asks `jawd.sendPoll` with a key made for it; `.pollUnsent` opens it again with the poll and jawd's words, or says them when its chat has no pane.
-- The snapshot's `poll:<question>|<option>|<option>[|several]` step sends as Send does, and its picture shows the sheet while it's open (`poll-form`).
+- The snapshot's `poll:<question>|<option>|<option>[|several]` step sends as Send does, and `poll-form`, filled in from the same after a colon, opens the sheet, which the picture then shows. The keys go through the build Mac's shell, so a run with `|` in them is quoted: `--keys "'opt+down,poll:Jantar?|Sábado|Domingo'"`.
 
 **Tests:**
 - `a poll is ready with a question and two options, trimmed as jawd trims them`, `an option named twice, too many or too long says so`, `several answers take every option`, `Return goes on, adds an option, and sends from an empty one`, `a poll jawd turned down opens again as it was, with jawd's words`.
@@ -205,11 +205,11 @@ Changed:
 
 **Interfaces:**
 - `public struct FoundLink: Decodable, Sendable, Hashable` (`id`, `message`, `chat`, `chatName`, `from: Sender?`, `mine`, `at`, `link`: `url`, `host`, `title`, `description`), as the protocol's Finding has a link's row; `Found.Row.link(FoundLink)`.
-- The palette lists links under their heading with jawd's marked text, and who, where and when beside; `Pick.link(FoundLink, toMessage: Bool)`: Enter opens the link, ⌘↩ goes to its message.
+- The palette lists links under their heading with jawd's marked text, and who, where and when beside; `Pick.link(FoundLink)`, Enter, opens the link, and `Pick.linkMessage(FoundLink)`, ⌘G through `PaletteModel.goToLink()`, goes to its message (amended: question 13).
 
 **Tests:**
-- `a link find found decodes with its message, chat and host` (from a row written as the protocol's Finding has it, since `find.result.json` has no link).
-- `the palette lists a found link, Enter opens it and ⌘↩ goes to its message`.
+- `a link find found decodes with its message, its chat and its host` (from a row written as the protocol's Finding has it, since `find.result.json` has no link).
+- `the palette lists the links found, Enter opens one, and ⌘G goes to its message`.
 
 **Done when** JawKit and JawUITests pass, and the palette scene's band of links has been looked at.
 
