@@ -2136,7 +2136,7 @@ DELETE FROM unopened WHERE message = ?1
     SEARCH unopened USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/events.rs
-SELECT u.message FROM unopened u JOIN messages m ON m.n = u.message JOIN chats c ON c.n = m.chat WHERE m.sender IN (SELECT n FROM person_jids WHERE person = ?1) OR EXISTS (SELECT 1 FROM pending p WHERE p.chat = c.id AND p.target = m.id AND p.kind IN ('rsvp', 'secret') AND p.sender IN (SELECT jid FROM person_jids WHERE person = ?1))
+SELECT u.message FROM unopened u JOIN messages m ON m.n = u.message JOIN chats c ON c.n = m.chat WHERE m.sender IN (SELECT n FROM person_jids WHERE person = ?1) OR EXISTS (SELECT 1 FROM pending p WHERE p.chat = c.id AND p.target = m.id AND p.kind IN ('rsvp', 'secret') AND p.sender IN (SELECT jid FROM person_jids WHERE person = ?1)) OR EXISTS (SELECT 1 FROM person_jids j JOIN quarantine q ON q.source IN ('answer', 'edit') AND q.ref >= c.id || ' ' || m.id || ' ' || j.jid || ' ' AND q.ref < c.id || ' ' || m.id || ' ' || j.jid || '!' WHERE j.person = ?1)
     SCAN u
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
@@ -2148,6 +2148,9 @@ SELECT u.message FROM unopened u JOIN messages m ON m.n = u.message JOIN chats c
       LIST SUBQUERY 2
         SEARCH person_jids USING INDEX person_jids_by_person (person=?)
         CREATE BLOOM FILTER
+    CORRELATED SCALAR SUBQUERY 4
+      SEARCH j USING INDEX person_jids_by_person (person=?)
+      SEARCH q USING COVERING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
 
 -- src/store/write/events.rs
 SELECT o.message, o.at, o.n, m.chat, c.id, m.id FROM openings o JOIN messages m ON m.n = o.message JOIN chats c ON c.n = m.chat ORDER BY o.message LIMIT 1

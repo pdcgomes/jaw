@@ -846,6 +846,28 @@ async fn what_was_sealed_between_jids_jaw_learns_are_its_people_only_afterwards_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_answer_kept_sealed_and_then_set_aside_past_the_bound_opens_once_jaw_learns_its_answerers_jid() {
+    const BEA: &str = "351910000004@s.whatsapp.net";
+    const BEA_LID: &str = "100000000004@lid";
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    // Bea's answer to Ana's event comes by her number sealed for her LID, which jaw doesn't know is
+    // hers, so it's kept; then pending passes its bound and sets it aside, the oldest waiting.
+    apply(&store, event("e1")).await;
+    apply(&store, sealed_answer("e1", (ANA, BEA_LID), BEA, "b1", AT + 30, Maybe)).await;
+    assert_eq!(store.count("unopened").unwrap(), 1, "it's kept sealed");
+    fill_pending(home.path());
+    apply(&store, answer("e9", RUI, "r9", AT + 50, Going)).await;
+    assert_eq!(set_aside_for(&store, "e1").await, [format!("{GROUP} e1 {BEA} b1")], "and set aside");
+    // Jaw learns her LID is hers: it's tried again where it's set aside, as it would be in pending.
+    apply(&store, vec![Change::Person(Person { jids: vec![BEA.into(), BEA_LID.into()], ..Person::default() })]).await;
+    taken(&store).await;
+    assert_eq!(counts(&store, "e1").await, (0, 1, 0, Value::Null), "it opens and counts");
+    assert!(set_aside_for(&store, "e1").await.is_empty());
+    assert_eq!(store.count("unopened").unwrap(), 0, "and nothing kept for its event stays sealed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn what_waits_for_an_event_and_fails_to_be_taken_is_kept_in_quarantine_and_holds_up_nothing_after_it() {
     let home = tempfile::tempdir().unwrap();
     let store = opened(home.path()).await;

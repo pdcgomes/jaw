@@ -93,12 +93,17 @@ const STILL_SEALED: &str =
     "SELECT EXISTS (SELECT 1 FROM pending WHERE chat = ?1 AND target = ?2 AND kind IN ('rsvp', 'secret'))";
 const OPEN_NOW: &str = "DELETE FROM unopened WHERE message = ?1";
 // The events with something kept sealed for them that didn't open, which person ?1 sent, or which
-// something kept sealed came for from one of their JIDs.
+// something kept sealed came for from one of their JIDs, waiting in pending or set aside past its
+// bound, where it's named by its chat, its event and its sender first.
 const SEALED_BETWEEN: &str = "SELECT u.message FROM unopened u
     JOIN messages m ON m.n = u.message JOIN chats c ON c.n = m.chat
     WHERE m.sender IN (SELECT n FROM person_jids WHERE person = ?1)
         OR EXISTS (SELECT 1 FROM pending p WHERE p.chat = c.id AND p.target = m.id AND p.kind IN ('rsvp', 'secret')
-            AND p.sender IN (SELECT jid FROM person_jids WHERE person = ?1))";
+            AND p.sender IN (SELECT jid FROM person_jids WHERE person = ?1))
+        OR EXISTS (SELECT 1 FROM person_jids j JOIN quarantine q ON q.source IN ('answer', 'edit')
+                AND q.ref >= c.id || ' ' || m.id || ' ' || j.jid || ' '
+                AND q.ref < c.id || ' ' || m.id || ' ' || j.jid || '!'
+            WHERE j.person = ?1)";
 /// The first event with what waits for it still to be taken, where its step goes on from, and the
 /// chat it's in.
 const FIRST_OPENING: &str = "SELECT o.message, o.at, o.n, m.chat, c.id, m.id FROM openings o
@@ -309,9 +314,9 @@ pub(super) fn unopened(db: &Connection, n: i64) -> Result<()> {
 
 /// Has what's kept sealed for events tried again from the first, in steps, where it may be sealed
 /// between JIDs of `person`'s, who has just been found to be known by another: the events they
-/// sent, and those something kept sealed came for from one of their JIDs. An answer to an event
-/// or an edit of it is sealed between the JIDs its author and its sender went by, which jaw may
-/// learn are theirs only afterwards.
+/// sent, and those something kept sealed came for from one of their JIDs, whether it waits in
+/// pending or was set aside since. An answer to an event or an edit of it is sealed between the
+/// JIDs its author and its sender went by, which jaw may learn are theirs only afterwards.
 pub(super) fn known_again(db: &Connection, stamps: &mut Stamps, person: i64) -> Result<()> {
     let events: Vec<i64> =
         db.prepare_cached(SEALED_BETWEEN)?.query_map([person], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
