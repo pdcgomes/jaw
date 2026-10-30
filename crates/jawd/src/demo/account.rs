@@ -28,6 +28,13 @@ pub const RECENT: usize = 20;
 const UNREAD_CHATS: usize = 30;
 /// What names a demo history blob, with its number after.
 const BLOB: &str = "/demo/history/";
+/// The account's communities: each its JID, its name, and its groups among the account's chats by
+/// number, its announcement group first. Only the group list names a community itself, so the
+/// history brings its groups first, each naming it, and they come under it once the list does.
+pub const COMMUNITIES: &[(&str, &str, &[usize])] = &[
+    ("120363900000000001@g.us", "Bairro de Alvalade", &[7, 12, 17]),
+    ("120363900000000002@g.us", "Escalada Lisboa", &[22, 27]),
+];
 const YEAR_MS: i64 = 365 * DAY_MS;
 
 /// How big the account is.
@@ -73,6 +80,9 @@ struct Spec {
     unread: u32,
     /// For a group, its members but you, by person.
     members: Vec<usize>,
+    /// For a group in a community, the community's place in COMMUNITIES, and whether it's the
+    /// community's announcement group.
+    community: Option<(usize, bool)>,
 }
 
 impl Spec {
@@ -228,8 +238,16 @@ impl Account {
                 };
                 members.sort_unstable();
                 members.dedup();
+                let community = COMMUNITIES
+                    .iter()
+                    .enumerate()
+                    .find_map(|(k, (_, _, groups))| groups.iter().position(|&g| g == n).map(|at| (k, at == 0)));
+                let name = match community {
+                    Some((k, true)) => COMMUNITIES[k].1.to_string(),
+                    _ => format!("{} {}", GROUPS[n % GROUPS.len()], n / GROUPS.len()),
+                };
                 let spec = Spec {
-                    name: group.then(|| format!("{} {}", GROUPS[n % GROUPS.len()], n / GROUPS.len())),
+                    name: group.then_some(name),
                     id,
                     size,
                     first,
@@ -237,6 +255,7 @@ impl Account {
                     ends,
                     unread: if n < UNREAD_CHATS && n % 3 != 1 { 1 + rng.below(8) as u32 } else { 0 },
                     members,
+                    community: community.filter(|_| group),
                 };
                 first += size as u64;
                 spec
@@ -392,7 +411,13 @@ impl Account {
             };
             let spec = &self.chats[c];
             let place = *placed.entry(c).or_insert_with(|| {
-                let head = Conversation { id: spec.id.clone(), name: spec.name.clone(), ..Default::default() };
+                let head = Conversation {
+                    id: spec.id.clone(),
+                    name: spec.name.clone(),
+                    parent_group_id: spec.community.map(|(k, _)| COMMUNITIES[k].0.to_string()),
+                    is_default_subgroup: spec.community.map(|(_, announcement)| announcement),
+                    ..Default::default()
+                };
                 conversations.push((head, Vec::new()));
                 conversations.len() - 1
             });
@@ -539,32 +564,36 @@ impl demo::Account for Account {
     }
 
     fn groups(&self) -> pb::GroupList {
-        let groups = self
-            .chats
+        let groups = self.chats.iter().filter(|spec| spec.group()).map(|spec| {
+            let mut participants: Vec<pb::Participant> = spec
+                .members
+                .iter()
+                .map(|&m| pb::Participant { jid: lid(m), phone: phone(m), lid: lid(m), ..Default::default() })
+                .collect();
+            participants.push(pb::Participant { jid: ME.into(), phone: ME.into(), admin: true, ..Default::default() });
+            pb::GroupInfo {
+                jid: spec.id.clone(),
+                name: spec.name.clone().unwrap_or_default(),
+                created_ms: spec.begins,
+                participants,
+                linked_parent: spec.community.map(|(k, _)| COMMUNITIES[k].0.to_string()).unwrap_or_default(),
+                is_default_sub: spec.community.is_some_and(|(_, announcement)| announcement),
+                announce: spec.community.is_some_and(|(_, announcement)| announcement),
+                ..Default::default()
+            }
+        });
+        // A community whose groups the account has, after them.
+        let communities = COMMUNITIES
             .iter()
-            .filter(|spec| spec.group())
-            .map(|spec| {
-                let mut participants: Vec<pb::Participant> = spec
-                    .members
-                    .iter()
-                    .map(|&m| pb::Participant { jid: lid(m), phone: phone(m), lid: lid(m), ..Default::default() })
-                    .collect();
-                participants.push(pb::Participant {
-                    jid: ME.into(),
-                    phone: ME.into(),
-                    admin: true,
-                    ..Default::default()
-                });
-                pb::GroupInfo {
-                    jid: spec.id.clone(),
-                    name: spec.name.clone().unwrap_or_default(),
-                    created_ms: spec.begins,
-                    participants,
-                    ..Default::default()
-                }
-            })
-            .collect();
-        pb::GroupList { groups }
+            .enumerate()
+            .filter(|(k, _)| self.chats.iter().any(|spec| spec.community.is_some_and(|(of, _)| of == *k)))
+            .map(|(_, (jid, name, _))| pb::GroupInfo {
+                jid: jid.to_string(),
+                name: name.to_string(),
+                is_parent: true,
+                ..Default::default()
+            });
+        pb::GroupList { groups: groups.chain(communities).collect() }
     }
 
     fn members(&self, group: &str) -> Vec<String> {

@@ -5,7 +5,7 @@
 //! read transaction, with the feed's seq it's as of, so what an interface is sent always matches a
 //! fresh query.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -16,6 +16,7 @@ use serde_json::{Map, Value};
 
 use super::hashed;
 use super::library::{self, LibrarySpec};
+use crate::store::lists::communities::{self, Gathering};
 use crate::store::lists::{self, List, PersonCursor};
 use crate::store::read::{self, Around, ChatCursor, MessageCursor};
 
@@ -37,6 +38,8 @@ pub(super) struct ChatSpec {
     pub anchor: Option<ChatAnchor>,
     pub before: usize,
     pub after: usize,
+    /// The communities whose groups it brings, sorted; every community's when None.
+    pub open: Option<Vec<String>>,
 }
 
 /// The chat a window follows as its place changes, and the place it was last seen at, which the
@@ -146,29 +149,26 @@ pub(super) fn query(db: &Connection, mut spec: Spec, only: Option<Vec<i64>>) -> 
     };
     match &mut spec {
         Spec::Chats(spec) => {
-            snapshot.total = lists::chat_count(&db, &spec.list, now)?;
-            let rows = match (&mut spec.anchor, only) {
-                (_, Some(only)) => {
-                    let rows = read::chats_by_n(&db, &only)?;
-                    let held = lists::held(&db, &spec.list, &rows, now)?;
-                    rows.into_iter().filter(|row| held.contains(&row.n)).collect()
-                }
-                (None, None) => lists::chats(&db, &spec.list, None, spec.after, now)?,
+            snapshot.total = lists::row_count(&db, &spec.list, now)?;
+            let mut gathering = Gathering::new(spec.open.as_deref());
+            let entries = match (&mut spec.anchor, only) {
+                (_, Some(only)) => communities::among(&db, &spec.list, read::chats_by_n(&db, &only)?, now, gathering)?,
+                (None, None) => communities::below(&db, &spec.list, None, spec.after, now, &mut gathering)?,
                 (Some(anchor), None) => {
                     if let Some((_, cursor, _)) = read::chat_place(&db, &anchor.id)? {
-                        anchor.cursor = cursor;
+                        anchor.cursor = communities::place(&db, &spec.list, &anchor.id, cursor, now, &mut gathering)?;
                     }
-                    let mut rows = lists::chats_above(&db, &spec.list, &anchor.cursor, spec.before, now)?;
-                    let mut from = lists::chats_from(&db, &spec.list, &anchor.cursor, spec.after + 1, now)?;
-                    if from.first().is_none_or(|row| row.cursor() != anchor.cursor) {
+                    let list = &spec.list;
+                    let mut entries = communities::above(&db, list, &anchor.cursor, spec.before, now, &mut gathering)?;
+                    let mut from = communities::from(&db, list, &anchor.cursor, spec.after + 1, now, &mut gathering)?;
+                    if from.first().is_none_or(|entry| entry.place != anchor.cursor) {
                         from.truncate(spec.after);
                     }
-                    rows.append(&mut from);
-                    rows
+                    entries.append(&mut from);
+                    entries
                 }
             };
-            let rows = with_groups(&db, &spec.list, rows, now)?;
-            snapshot.rows = Rows::Chats(gathered(rows.into_iter().map(|row| (row.n, chat_row(row))).collect()));
+            snapshot.rows = Rows::Chats(chat_rows(entries));
         }
         Spec::Messages(spec) => {
             snapshot.chat = read::chat_n(&db, &spec.chat)?;
@@ -273,41 +273,41 @@ fn mentioned(spans: &Value) -> impl Iterator<Item = &str> {
         .filter_map(|span| span["person"].as_str())
 }
 
-/// `rows` with the groups `list` holds of each community among them, which come with it.
-fn with_groups(db: &Connection, list: &List, mut rows: Vec<read::ChatRow>, now: i64) -> Result<Vec<read::ChatRow>> {
-    let communities: Vec<String> =
-        rows.iter().filter(|row| row.kind == "community").map(|row| row.id.clone()).collect();
-    if communities.is_empty() {
-        return Ok(rows);
-    }
-    let mut present: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
-    for community in communities {
-        for group in lists::community_groups(db, list, &community, now)? {
-            if present.insert(group.id.clone()) {
-                rows.push(group);
-            }
+/// A chat list's rows on the wire: each chat, and each community with the groups of it the list
+/// holds when the window has it open, which keep their own sorts, so a row's sort changes only
+/// with it and a window watched again from since is exact; interfaces show them under it. A
+/// community's sort is its place, just above the newest of what it brings, and its row sums up
+/// those groups, open or not: their unread messages and mentions, and their newest message.
+fn chat_rows(entries: Vec<communities::Entry>) -> Vec<(i64, proto::ChatRow)> {
+    let mut rows = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if !entry.is_community() {
+            rows.push((entry.row.n, chat_row(entry.row)));
+            continue;
         }
-    }
-    Ok(rows)
-}
-
-/// A community's groups sorted right after it, its announcement group first and the rest as they
-/// sort themselves, when it's in the window; a community's own sort ends past any of theirs.
-fn gathered(mut rows: Vec<(i64, proto::ChatRow)>) -> Vec<(i64, proto::ChatRow)> {
-    let communities: HashMap<String, String> = rows
-        .iter()
-        .filter(|(_, row)| row.kind == "community")
-        .map(|(_, row)| (row.id.clone(), row.sort.clone()))
-        .collect();
-    for (n, row) in &mut rows {
-        if row.kind == "community" {
-            row.sort.push_str("~~");
-        } else if let Some(sort) = row.community.as_ref().and_then(|community| communities.get(community)) {
-            row.sort =
-                if row.kind == "announcement" { format!("{sort}~2~{n:012}") } else { format!("{sort}~1~{}", row.sort) };
+        let n = entry.row.n;
+        let mut community = chat_row(entry.row);
+        community.sort = format!("{}~~", entry.place.wire());
+        community.children_unread = Some(entry.unread.max(0) as u64);
+        community.children_mentions = Some(entry.mentions.max(0) as u64);
+        if let Some(newest) = &entry.last {
+            community.last = Some(last(newest));
         }
+        rows.push((n, community));
+        rows.extend(entry.groups.into_iter().map(|group| (group.n, chat_row(group))));
     }
     rows
+}
+
+fn last(last: &read::Last) -> proto::Last {
+    proto::Last {
+        from: last.from.clone(),
+        mine: last.mine,
+        summary: last.summary.clone(),
+        kind: last.kind.clone(),
+        status: last.status.clone(),
+        at: last.at,
+    }
 }
 
 /// A chat's sort on the wire: the store's, then its n, so no two chats share one.
@@ -319,14 +319,7 @@ pub(crate) fn chat_row(row: read::ChatRow) -> proto::ChatRow {
         kind: row.kind,
         name: row.name,
         avatar: row.avatar,
-        last: row.last.map(|last| proto::Last {
-            from: last.from,
-            mine: last.mine,
-            summary: last.summary,
-            kind: last.kind,
-            status: last.status,
-            at: last.at,
-        }),
+        last: row.last.as_ref().map(last),
         unread: row.unread.max(0) as u64,
         mentions: row.mentions.max(0) as u64,
         pinned: row.pinned,
@@ -336,7 +329,7 @@ pub(crate) fn chat_row(row: read::ChatRow) -> proto::ChatRow {
         draft: row.draft,
         community: row.community,
         children_unread: row.children_unread.map(|n| n.max(0) as u64),
-        children_mentions: None,
+        children_mentions: row.children_mentions.map(|n| n.max(0) as u64),
         folders: row.folders.into_iter().map(|n| format!("folder:{n}")).collect(),
         favourite: row.favourite.map(|slot| slot.clamp(1, 9) as u8),
     }

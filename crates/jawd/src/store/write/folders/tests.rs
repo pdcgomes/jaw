@@ -511,9 +511,17 @@ async fn a_community_sorts_by_its_newest_group_and_counts_their_unread() {
         ],
     )
     .await;
-    let all = listed(&store, List::All).await;
-    let at = |id: &str| all.iter().position(|listed| listed == id).unwrap();
-    assert!(at(community) < at(news) && at(community) < at(ANA), "it sorts by its newest group's message: {all:?}");
+    // A list's rows, as a window reads them: the community where its newest group is, with its groups.
+    let all: Vec<(String, Vec<String>)> = query(&store, |db| {
+        let rows = lists::communities::below(db, &List::All, None, 100, AT, &mut Default::default())?;
+        Ok(rows.into_iter().map(|row| (row.row.id, row.groups.into_iter().map(|g| g.id).collect())).collect())
+    })
+    .await;
+    assert_eq!(
+        all,
+        [(community.to_string(), vec![party.to_string(), news.to_string()]), (ANA.to_string(), vec![])],
+        "it sits where its newest group's message is, with its groups"
+    );
     let k = chat_n(&store, community).await;
     let row = query(&store, move |db| read::chat(db, k)).await.unwrap();
     assert_eq!(row.children_unread, Some(2));

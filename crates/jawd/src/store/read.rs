@@ -152,10 +152,12 @@ pub struct ChatRow {
     pub favourite: Option<i64>,
     /// For a community, its groups' unread messages.
     pub children_unread: Option<i64>,
+    /// For a community, how many of its groups' unread messages mention you.
+    pub children_mentions: Option<i64>,
 }
 
 /// A chat's newest message, for its line in the chat list.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Last {
     pub from: Option<String>,
     pub mine: bool,
@@ -175,6 +177,13 @@ pub struct ChatCursor {
 impl ChatRow {
     pub fn cursor(&self) -> ChatCursor {
         ChatCursor { sort: self.sort.clone(), n: self.n }
+    }
+}
+
+impl ChatCursor {
+    /// The place on the wire, as a chat's own sort is: the store's sort, then the chat's n.
+    pub fn wire(&self) -> String {
+        format!("{}~{:012}", self.sort, self.n)
     }
 }
 
@@ -252,7 +261,8 @@ pub(crate) fn shown(
 }
 
 /// What chat_row reads of chat `c`, before the FROM that names it. A community shows the newest of
-/// its groups' messages, which it sorts by.
+/// its groups' messages and sums up their unread messages and mentions; a window sums up only the
+/// groups it holds under it (lists::communities).
 pub(super) const CHAT_SELECT: &str = "
     SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until,
         c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name,
@@ -269,7 +279,8 @@ pub(super) const CHAT_SELECT: &str = "
         (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n
             UNION ALL SELECT folder FROM folder_items WHERE person = c.person)),
         (SELECT slot FROM favourites WHERE chat = c.n),
-        iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL)";
+        iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL),
+        iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL)";
 
 /// The rest of what chat_row reads, after the FROM that names chat `c`.
 pub(super) const CHAT_JOINS: &str = "
@@ -338,6 +349,7 @@ pub(super) fn chat_row(r: &Row) -> rusqlite::Result<ChatRow> {
         folders,
         favourite: r.get(33)?,
         children_unread: r.get(34)?,
+        children_mentions: r.get(35)?,
     })
 }
 

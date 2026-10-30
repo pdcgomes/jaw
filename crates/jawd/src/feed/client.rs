@@ -64,6 +64,8 @@ use crate::work::Priority;
 const MOST_ROWS: u32 = 1_000;
 /// The most windows a connection can watch at once.
 pub(super) const MOST_WINDOWS: usize = 32;
+/// The most communities a chat list can have open.
+const MOST_OPEN: usize = 1_000;
 /// The most bytes the reads kept for windows to share can hold: about 30 windows of 1,000 short
 /// messages, at half a kilobyte a row, or a couple of hundred of the size jaw shows.
 const KEPT_MOST: u64 = 16 << 20;
@@ -1196,7 +1198,7 @@ impl Client {
                 let list = list(&watch.folder)?;
                 self.room_for_another()?;
                 self.folder_there(&list, &watch.folder).await?;
-                let spec = self.chat_spec(list, watch.around, watch.before, watch.after).await?;
+                let spec = self.chat_spec(list, watch.around, watch.before, watch.after, watch.open).await?;
                 self.watch(Spec::Chats(spec), watch.since, watch.have).await
             }
             "folders.watch" => {
@@ -1245,8 +1247,8 @@ impl Client {
                 let moving: WatchMove = params_of(method, params)?;
                 let spec = match self.windows.get(&moving.watch).map(|window| &window.spec) {
                     Some(Spec::Chats(chats)) => {
-                        let list = chats.list.clone();
-                        Spec::Chats(self.chat_spec(list, moving.around, moving.before, moving.after).await?)
+                        let (list, open) = (chats.list.clone(), moving.open.or_else(|| chats.open.clone()));
+                        Spec::Chats(self.chat_spec(list, moving.around, moving.before, moving.after, open).await?)
                     }
                     Some(Spec::Roster(roster)) => {
                         let (list, offline) = (roster.list.clone(), roster.offline);
@@ -1307,7 +1309,14 @@ impl Client {
         Err(Error::new(code::NOT_FOUND, format!("jawd has no folder {folder}")))
     }
 
-    async fn chat_spec(&self, list: List, around: Around, before: u32, after: u32) -> Result<ChatSpec, Error> {
+    async fn chat_spec(
+        &self,
+        list: List,
+        around: Around,
+        before: u32,
+        after: u32,
+        open: Option<Vec<String>>,
+    ) -> Result<ChatSpec, Error> {
         let (before, after) = sides(before, after)?;
         let anchor = match around {
             Around::Top => None,
@@ -1322,7 +1331,15 @@ impl Client {
                 return Err(Error::new(code::INVALID_PARAMS, "a chat list is anchored at top or on a chat's id"));
             }
         };
-        Ok(ChatSpec { list, anchor, before, after })
+        if open.as_ref().is_some_and(|open| open.len() > MOST_OPEN) {
+            return Err(Error::new(code::INVALID_PARAMS, format!("a chat list opens at most {MOST_OPEN} communities")));
+        }
+        let open = open.map(|mut open| {
+            open.sort();
+            open.dedup();
+            open
+        });
+        Ok(ChatSpec { list, anchor, before, after, open })
     }
 
     async fn roster_spec(

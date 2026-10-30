@@ -17,6 +17,8 @@ use crate::store::read::{self, Around};
 use crate::store::{Amend, Amendment, Change, Chat, Lane, Message, Person, Read, Store};
 use crate::work::Report;
 
+mod communities;
+
 pub(super) fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
@@ -4492,7 +4494,7 @@ mod folders {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_communitys_groups_come_with_it_sorted_under_it_its_announcement_group_first() {
+    async fn a_communitys_groups_come_with_it_each_with_its_own_sort_however_far_down_that_is() {
         let bed = Bed::new(brisk());
         let community = "120363000000000010@g.us";
         let (news, party) = ("120363000000000011@g.us", "120363000000000012@g.us");
@@ -4533,12 +4535,12 @@ mod folders {
         let list = watcher.watch("chats.watch", json!({"folder": "all", "around": "top", "after": 3})).await;
         watcher.settle(seq).await;
         let ids = watcher.windows[&list].ids();
-        assert_eq!(
-            &ids[..3],
-            [community, news, party],
-            "the community, then its announcement group, then its others: {ids:?}"
-        );
-        assert_eq!(watcher.windows[&list].rows[community]["children_unread"], json!(2));
+        assert_eq!(ids.len(), 5, "the community with its two groups, and two chats: {ids:?}");
+        assert_eq!(&ids[..2], [community, party], "the community just above its newest group: {ids:?}");
+        assert_eq!(ids.last().map(String::as_str), Some(news), "its announcement group, by its own sort: {ids:?}");
+        let rows = &watcher.windows[&list].rows;
+        assert_eq!(rows[news]["community"], json!(community));
+        assert_eq!(rows[community]["children_unread"], json!(2));
     }
 
     #[tokio::test(flavor = "multi_thread")]

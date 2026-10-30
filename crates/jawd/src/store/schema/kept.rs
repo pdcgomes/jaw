@@ -49,7 +49,24 @@ const CLASSES: &[(&str, Class, &[&str])] = &[
     ("chats", Fetched, &["draft", "frecency", "opened_at", "read_n", "told_at", "told_n"]),
     // Derived from raw but for what amendments did to it, which keeps no raw (migration 6).
     ("messages", Own, &[]),
-    ("media", Fetched, &["path", "preview_small", "preview_large", "state", "progress"]),
+    (
+        "media",
+        Fetched,
+        &[
+            "path",
+            "preview_small",
+            "preview_large",
+            "state",
+            "progress",
+            "error",
+            "wanted",
+            "asked",
+            "arrived",
+            "retried_at",
+            "cancelled",
+            "direct_path",
+        ],
+    ),
     ("reactions", Own, &[]),
     ("receipts", Own, &[]),
     ("poll_options", Fetched, &[]),
@@ -252,8 +269,15 @@ const SEEDS: &[(&str, &[(&str, &str)])] = &[
             ("path", "'media/m2.jpg'"),
             ("preview_small", "'media/m2.small.jpg'"),
             ("preview_large", "'media/m2.large.jpg'"),
-            ("state", "'expired'"),
+            ("state", "'downloading'"),
             ("progress", "0.5"),
+            ("error", "'the phone has no file'"),
+            ("wanted", "1790000000700"),
+            ("asked", "1"),
+            ("arrived", "1"),
+            ("retried_at", "1790000000800"),
+            ("cancelled", "1"),
+            ("direct_path", "'/v/t62.7118-24/m2'"),
         ],
     ),
     ("reactions", &[("message", "2"), ("sender", "3"), ("emoji", "'👍'"), ("at", "1790000000250"), ("mine", "1")]),
@@ -514,6 +538,9 @@ fn kept(db: &Connection, table: &str, class: Class, own: &[&str]) -> Vec<String>
     }
 }
 
+/// The tables whose one row the migration that makes them writes, which a seed's row stands in for.
+const MADE_WITH_THEIR_ROW: &[&str] = &["media_made"];
+
 /// Writes each seed row whose table there is, with the columns it has at this version.
 fn seed(db: &Connection, version: usize) {
     for (table, row) in SEEDS {
@@ -524,13 +551,8 @@ fn seed(db: &Connection, version: usize) {
         let row: Vec<&(&str, &str)> = row.iter().filter(|(column, _)| has.iter().any(|c| c == column)).collect();
         let names: Vec<String> = row.iter().map(|(column, _)| format!("\"{column}\"")).collect();
         let values: Vec<&str> = row.iter().map(|(_, value)| *value).collect();
-        let set: Vec<String> = names.iter().map(|name| format!("{name} = excluded.{name}")).collect();
-        let sql = format!(
-            "INSERT INTO \"{table}\" ({}) VALUES ({}) ON CONFLICT DO UPDATE SET {}",
-            names.join(", "),
-            values.join(", "),
-            set.join(", ")
-        );
+        let insert = if MADE_WITH_THEIR_ROW.contains(table) { "INSERT OR REPLACE" } else { "INSERT" };
+        let sql = format!("{insert} INTO \"{table}\" ({}) VALUES ({})", names.join(", "), values.join(", "));
         db.execute(&sql, []).unwrap_or_else(|e| {
             panic!("a row of {table} at version {version} wasn't written, so give SEEDS what it needs: {e}\n{sql}")
         });

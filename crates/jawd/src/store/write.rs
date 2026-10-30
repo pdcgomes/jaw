@@ -929,8 +929,8 @@ pub(super) fn settle(db: &Connection, stamps: &mut Stamps) -> Result<()> {
     communities_follow(db, stamps)
 }
 
-/// A community shows the newest of its groups' messages and their unread total, and sorts by the
-/// newest (chats_community_followed), so it changes with each of its groups the transaction
+/// A community's row sums up its groups, their unread messages, mentions and newest message, and
+/// sits where the newest of them does, so it changes with each of its groups the transaction
 /// changed.
 fn communities_follow(db: &Connection, stamps: &mut Stamps) -> Result<()> {
     let groups: Vec<i64> = stamps.order.iter().filter(|(kind, _)| *kind == CHAT).map(|(_, n)| *n).collect();

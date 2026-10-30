@@ -147,6 +147,11 @@ const ALLOWED: &[(&str, &str)] = &[
         "one message's links, each place counting the distinct URLs its spans mark before it, a handful",
     ),
     (
+        "FROM chats k INDEXED BY chats_known_communities",
+        "the communities jaw has, tens at most, each its groups looked up by community: counted for a chat list's \
+        total as its window is read",
+    ),
+    (
         "coalesce(sum(bytes), 0) FROM thumbnails",
         "once at start, and for jawd status; the thumbnails are as many as fit in 256 MB, tens of thousands at most",
     ),
@@ -190,7 +195,10 @@ fn sources() -> Vec<PathBuf> {
         for path in entries {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             if path.is_dir() {
-                walk(&path, out);
+                // A module's tests may be a folder of them.
+                if name != "tests" {
+                    walk(&path, out);
+                }
             } else if name.ends_with(".rs")
                 && !matches!(name.as_str(), "tests.rs" | "rules.rs" | "plans.rs" | "bench.rs" | "kept.rs")
             {

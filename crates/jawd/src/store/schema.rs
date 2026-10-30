@@ -1479,7 +1479,43 @@ pub(super) const MIGRATIONS: &[&str] = &[
         INSERT OR IGNORE INTO media_drop (sha256) VALUES (new.sha256);
     END;
     ",
+    // 28, a schema step: communities gathered under themselves in every chat list. A community's
+    // place in a list is that of the newest of what it brings there, itself or a group of it,
+    // worked out as the list is read, so its own last_at follows only its own messages again and
+    // the trigger that raised it to its groups' newest goes: it kept a community at the place of a
+    // group that had left it, and left one learned after its groups at its own place until one of
+    // them had a message. It reads only chats, which hold a row for each conversation, and each
+    // community's newest message by the keyset index, so it costs the same however many messages
+    // there are: 33 to 36 ms beside a million messages, 3,000 chats and six communities of ten
+    // groups, its fingerprint and commit included, at a load of about 60
+    // (`measure_the_communities_migration`). It drops no table, and nothing refers to what it
+    // changes, so it needs neither a data step's backup nor its check of every foreign key.
+    COMMUNITIES_GATHERED,
 ];
+
+/// Migration 28's text, named so the tests that check and measure it find it whatever number it
+/// takes when it merges.
+const COMMUNITIES_GATHERED: &str = "
+    DROP TRIGGER chats_community_followed;
+    -- Class: derived, as chats' other indexes. The communities jaw has, tens at most, for counting
+    -- those a chat list holds only for their groups; written only as a chat becomes a community.
+    CREATE INDEX chats_known_communities ON chats (n) WHERE kind = 'community';
+    -- A community sorts by its own messages; where it sits in a list is the newest of what it brings.
+    UPDATE chats SET last_at = coalesce((SELECT max(m.at) FROM messages m WHERE m.chat = chats.n), 0)
+        WHERE kind = 'community';
+    -- A community's row and its groups' sit and count otherwise in a window now, so each takes a
+    -- new version with its event, as the writer gives a row it changes, and an interface watching
+    -- again from before the upgrade is sent it. Both statements number the same rows alike, after
+    -- the feed's last seq.
+    UPDATE chats SET v = bumped.seq FROM (
+        SELECT n, (SELECT coalesce(max(seq), 0) FROM events) + row_number() OVER (ORDER BY n) AS seq FROM chats
+        WHERE kind = 'community' OR community IS NOT NULL) AS bumped
+    WHERE chats.n = bumped.n;
+    INSERT INTO events (seq, at, type, key, chat)
+        SELECT (SELECT coalesce(max(seq), 0) FROM events) + row_number() OVER (ORDER BY n),
+            CAST(unixepoch('subsec') * 1000 AS INTEGER), 'chat', n, n FROM chats
+        WHERE kind = 'community' OR community IS NOT NULL;
+";
 
 /// Migration 19's text, named so the tests that check and measure it find it whatever number it
 /// takes when it merges.
@@ -2839,7 +2875,7 @@ mod tests {
 
     #[test]
     fn the_folders_migration_gives_the_chat_rows_it_changes_new_versions_with_their_events() {
-        let mut db = at(None, number(FOLDERS_AND_THE_ROSTER) - 1);
+        let db = at(None, number(FOLDERS_AND_THE_ROSTER) - 1);
         db.execute_batch(
             "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 1);
             INSERT INTO chats (n, id, kind, person, community, last_at, v) VALUES
@@ -2851,7 +2887,9 @@ mod tests {
             INSERT INTO events (seq, at, type, key, chat) VALUES (8, 0, 'chat', 5, 5);",
         )
         .unwrap();
-        migrate(&mut db).unwrap();
+        // Migration 19 alone, as the Runner runs it: the migrations after it give versions of their own.
+        db.pragma_update(None, "foreign_keys", false).unwrap();
+        Runner::default().execute(&db, FOLDERS_AND_THE_ROSTER).unwrap();
         // An interface holding every row as of seq 8 is sent again those with a version past it.
         let versions: Vec<(i64, i64)> = db
             .prepare("SELECT n, v FROM chats ORDER BY n")
@@ -2874,6 +2912,123 @@ mod tests {
             .unwrap();
         let chat = |seq: i64, n: i64| (seq, "chat".to_string(), n, n);
         assert_eq!(events, [chat(9, 1), chat(10, 2), chat(11, 4)], "each new version is its event's seq");
+    }
+
+    /// A community whose newest group left it, one jaw learned after its groups, and one with a
+    /// message of its own, as migration 19's trigger left them.
+    fn communities_before_they_were_gathered() -> Connection {
+        let db = at(None, number(COMMUNITIES_GATHERED) - 1);
+        db.execute_batch(
+            "INSERT INTO chats (n, id, kind, community, last_at, last_message, v) VALUES
+                (1, 'bairro@g.us', 'community', NULL, 50, NULL, 5), (2, 'festa@g.us', 'group', 'bairro@g.us', 20, NULL, 6),
+                (3, 'escalada@g.us', 'group', NULL, 50, NULL, 7),
+                (4, 'vela@g.us', 'community', NULL, 0, NULL, 8), (5, 'regata@g.us', 'group', 'vela@g.us', 40, NULL, 9),
+                (6, 'xadrez@g.us', 'community', NULL, 60, 1, 10), (7, 'ana@s.whatsapp.net', 'direct', NULL, 70, NULL, 11);
+            INSERT INTO messages (n, chat, id, at, t, kind, summary, v) VALUES
+                (1, 6, 'x1', 30, 30, 'system', 'Community created: Xadrez', 10);
+            INSERT INTO events (seq, at, type, key, chat) VALUES (11, 0, 'chat', 7, 7);",
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn the_communities_migration_sorts_each_community_by_its_own_messages_and_lets_the_trigger_go() {
+        let db = communities_before_they_were_gathered();
+        db.execute_batch(COMMUNITIES_GATHERED).unwrap();
+        let last_at =
+            |n: i64| db.query_row("SELECT last_at FROM chats WHERE n = ?1", [n], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(
+            (last_at(1), last_at(4), last_at(6)),
+            (0, 0, 30),
+            "Bairro no longer at the time of Escalada, which left it, and Xadrez at its own message's"
+        );
+        assert_eq!((last_at(2), last_at(5), last_at(7)), (20, 40, 70), "the other chats as they were");
+        db.execute("UPDATE chats SET last_at = 90 WHERE n = 2", []).unwrap();
+        assert_eq!(last_at(1), 0, "a group's message no longer moves its community's own last_at");
+        let index: i64 = db
+            .query_row("SELECT count(*) FROM sqlite_schema WHERE name = 'chats_known_communities'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn the_communities_migration_gives_communities_and_their_groups_new_versions_with_their_events() {
+        let db = communities_before_they_were_gathered();
+        db.execute_batch(COMMUNITIES_GATHERED).unwrap();
+        let versions: Vec<(i64, i64)> = db
+            .prepare("SELECT n, v FROM chats ORDER BY n")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            versions,
+            [(1, 12), (2, 13), (3, 7), (4, 14), (5, 15), (6, 16), (7, 11)],
+            "each community and each group naming one, after the feed's last seq; Escalada and Ana's chat as they were"
+        );
+        let events: Vec<(i64, i64)> = db
+            .prepare("SELECT seq, key FROM events WHERE seq > 11 AND type = 'chat' AND chat = key ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(events, [(12, 1), (13, 2), (14, 4), (15, 5), (16, 6)], "each new version is its event's seq");
+    }
+
+    /// Migration 28 beside a million messages, 3,000 chats and six communities of ten groups each,
+    /// in its transaction, as jawd runs it with the schema steps before it:
+    /// `JAW_MEASURE_MESSAGES=1000000 cargo test --release -p jawd measure_the_communities_migration -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, a minute long at a million messages"]
+    fn measure_the_communities_migration() {
+        let messages: i64 = std::env::var("JAW_MEASURE_MESSAGES").ok().and_then(|n| n.parse().ok()).unwrap_or(200_000);
+        let migration = number(COMMUNITIES_GATHERED);
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("jaw.db");
+        let mut db = at(Some(&path), migration - 1);
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        db.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        db.pragma_update(None, "cache_size", -32 * 1024).unwrap();
+        db.execute_batch(&format!(
+            "BEGIN;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000)
+            INSERT INTO people (n, name, last_seen, v) SELECT x, 'Person ' || x, 1790000000000 + x, 1 FROM c;
+            INSERT INTO person_jids (n, jid, person) SELECT n, printf('3519%08d@s.whatsapp.net', n), n FROM people;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000)
+            INSERT INTO chats (n, id, kind, person, community, unread, mentions, last_at, v)
+            SELECT x, iif(x <= 2400, printf('3519%08d@s.whatsapp.net', x), printf('120363%012d@g.us', x)),
+                iif(x <= 2400, 'direct', 'group'), iif(x <= 2400, x, NULL),
+                iif(x > 2940, printf('120363%012d@g.us', 2401 + x % 6), NULL),
+                x % 7, iif(x % 13 = 0, 1, 0), 1790000000000 + x * 1000, 1 FROM c;
+            UPDATE chats SET kind = 'community', community = NULL WHERE n BETWEEN 2401 AND 2406;
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {messages})
+            INSERT INTO messages (n, chat, id, at, t, sender, kind, summary, raw, v)
+            SELECT x, 1 + x % 3000, printf('3EB0%016d', x), 1790000000000 + x * 1000, (1790000000000 + x * 1000) << 20,
+                1 + x % 5000, 'text', 'mensagem ' || x, randomblob(300), x
+            FROM c;
+            COMMIT;
+            PRAGMA wal_checkpoint(TRUNCATE);"
+        ))
+        .unwrap();
+        let began = std::time::Instant::now();
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        Runner::default().execute(&tx, COMMUNITIES_GATHERED).unwrap();
+        tx.pragma_update(None, "user_version", migration as i64).unwrap();
+        assert_eq!(fingerprint(&tx).unwrap(), expected(migration).unwrap());
+        tx.commit().unwrap();
+        let took = began.elapsed();
+        let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        eprintln!(
+            "{messages} messages in 3,000 chats, {} of them communities and {} their groups: migration {migration} \
+             took {:.1} ms, its fingerprint and commit included",
+            count("SELECT count(*) FROM chats WHERE kind = 'community'"),
+            count("SELECT count(*) FROM chats WHERE community IS NOT NULL"),
+            took.as_secs_f64() * 1000.0,
+        );
+        assert!(super::super::lists::drift(&db).unwrap().is_empty(), "it leaves what folders count as it was");
     }
 
     #[test]

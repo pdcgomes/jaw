@@ -6,6 +6,8 @@
 //! partial index its rule's most selective field has, if it has one, with the rest of its rule
 //! checked row by row. Rosters are read the same way, on people_roster or folder_people_by_sort.
 
+pub mod communities;
+
 use std::collections::HashSet;
 
 use anyhow::{Result, bail};
@@ -349,11 +351,6 @@ pub fn chats_above(db: &Connection, list: &List, cursor: &ChatCursor, limit: usi
     Ok(rows)
 }
 
-/// Up to `limit` chats of `list` from `cursor` down, the chat at it first if it's in the list.
-pub fn chats_from(db: &Connection, list: &List, cursor: &ChatCursor, limit: usize, now: i64) -> Result<Vec<ChatRow>> {
-    chats(db, list, Some(&ChatCursor { sort: cursor.sort.clone(), n: cursor.n.saturating_add(1) }), limit, now)
-}
-
 /// A smart folder's chats counted, up to SMART_COUNTED, with their unread messages and mentions.
 fn smart_counts(db: &Connection, rule: &Rule, now: i64) -> Result<(i64, i64, i64)> {
     let sql = match rule.drive() {
@@ -400,6 +397,51 @@ pub fn chat_count(db: &Connection, list: &List, now: i64) -> Result<u64> {
             .optional()?,
     };
     Ok(count.unwrap_or(0).max(0) as u64)
+}
+
+/// How many rows `list` has: its chats, and each community it holds only for its groups.
+pub fn row_count(db: &Connection, list: &List, now: i64) -> Result<u64> {
+    Ok(chat_count(db, list, now)? + brought(db, list, now)?)
+}
+
+/// How many communities `list` holds only for their groups, the rows it has besides its chats:
+/// counted from the communities jaw has, tens at most, each looking up its groups.
+fn brought(db: &Connection, list: &List, now: i64) -> Result<u64> {
+    const KEPT: &str = "SELECT count(*) FROM chats k INDEXED BY chats_known_communities
+        WHERE k.kind = 'community' AND k.archived <> ?1
+        AND EXISTS (SELECT 1 FROM chats c WHERE c.community = k.id AND c.archived = ?1)";
+    const UNREAD: &str = "SELECT count(*) FROM chats k INDEXED BY chats_known_communities
+        WHERE k.kind = 'community' AND NOT (k.archived = 0 AND (k.unread > 0 OR k.marked_unread <> 0))
+        AND EXISTS (SELECT 1 FROM chats c WHERE c.community = k.id AND c.archived = 0
+            AND (c.unread > 0 OR c.marked_unread <> 0))";
+    const GROUPS: &str = "SELECT count(*) FROM chats k INDEXED BY chats_known_communities
+        WHERE k.kind = 'community'
+        AND EXISTS (SELECT 1 FROM chats c WHERE c.community = k.id AND c.archived = 0
+            AND c.kind IN ('group', 'announcement'))";
+    const FILED: &str = "SELECT count(*) FROM chats k INDEXED BY chats_known_communities
+        WHERE k.kind = 'community' AND NOT EXISTS (SELECT 1 FROM folder_chats f WHERE f.folder = ?1 AND f.chat = k.n)
+        AND EXISTS (SELECT 1 FROM chats c JOIN folder_chats f ON f.folder = ?1 AND f.chat = c.n WHERE c.community = k.id)";
+    let count: i64 = match list {
+        List::All | List::Archived | List::Communities => {
+            db.prepare_cached(KEPT)?.query_row([*list == List::Archived], |r| r.get(0))?
+        }
+        List::Unread => db.prepare_cached(UNREAD)?.query_row([], |r| r.get(0))?,
+        List::Groups => db.prepare_cached(GROUPS)?.query_row([], |r| r.get(0))?,
+        List::Folder(folder) => db.prepare_cached(FILED)?.query_row([folder], |r| r.get(0))?,
+        List::Smart(folder) => {
+            let Some(rule) = rule_of(db, *folder)? else { return Ok(0) };
+            let sql = format!(
+                "SELECT count(*) FROM chats k INDEXED BY chats_known_communities
+                WHERE k.kind = 'community' AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.n = k.n AND c.archived = 0 {RULED})
+                AND EXISTS (SELECT 1 FROM chats c WHERE c.community = k.id AND c.archived = 0 {RULED})"
+            );
+            use rusqlite::types::Value as V;
+            let mut bound = vec![V::Null, V::Null, V::Null, V::Null];
+            bound.extend(rule.bound(now));
+            db.prepare_cached(&sql)?.query_row(rusqlite::params_from_iter(bound), |r| r.get(0))?
+        }
+    };
+    Ok(count.max(0) as u64)
 }
 
 /// The groups of community `community` (a JID) that `list` holds, which come with it in a window.
@@ -453,6 +495,80 @@ pub fn community_groups(db: &Connection, list: &List, community: &str, now: i64)
             let mut bound = vec![V::Null, V::Text(community.to_string()), V::Integer(GROUPS_MOST), V::Null];
             bound.extend(rule.bound(now));
             rows(db, &sql, rusqlite::params_from_iter(bound))
+        }
+    }
+}
+
+/// What a window needs of a group of a community it shows as its one row: where the group sorts,
+/// its unread messages and mentions, and when its newest message came.
+#[derive(Debug)]
+pub struct Member {
+    pub n: i64,
+    pub cursor: ChatCursor,
+    pub unread: i64,
+    pub mentions: i64,
+    pub last_at: i64,
+}
+
+/// What community_members reads of a group `c`.
+const MEMBER: &str = "SELECT c.n, c.sort, c.unread, c.mentions, c.last_at";
+
+fn members(db: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Member>> {
+    Ok(db
+        .prepare_cached(sql)?
+        .query_map(params, |r| {
+            Ok(Member {
+                n: r.get(0)?,
+                cursor: ChatCursor { sort: r.get(1)?, n: r.get(0)? },
+                unread: r.get(2)?,
+                mentions: r.get(3)?,
+                last_at: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// What a window needs of the groups of community `community` that `list` holds, for one it shows
+/// as its one row: as community_groups finds them, without what their own rows would show.
+pub fn community_members(db: &Connection, list: &List, community: &str, now: i64) -> Result<Vec<Member>> {
+    match list {
+        List::All | List::Archived => {
+            let sql = format!("{MEMBER} FROM chats c WHERE c.community = ?2 AND c.archived = ?1 LIMIT ?3");
+            members(db, &sql, params![*list == List::Archived, community, GROUPS_MOST])
+        }
+        List::Unread => {
+            let sql = format!(
+                "{MEMBER} FROM chats c
+                WHERE c.community = ?1 AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) LIMIT ?2"
+            );
+            members(db, &sql, params![community, GROUPS_MOST])
+        }
+        List::Groups => {
+            let sql = format!(
+                "{MEMBER} FROM chats c
+                WHERE c.community = ?1 AND c.archived = 0 AND c.kind IN ('group', 'announcement') LIMIT ?2"
+            );
+            members(db, &sql, params![community, GROUPS_MOST])
+        }
+        List::Communities => {
+            let sql = format!("{MEMBER} FROM chats c WHERE c.community = ?1 AND c.archived = 0 LIMIT ?2");
+            members(db, &sql, params![community, GROUPS_MOST])
+        }
+        List::Folder(folder) => {
+            let sql = format!(
+                "{MEMBER} FROM chats c
+                WHERE c.community = ?2 AND EXISTS (SELECT 1 FROM folder_chats f WHERE f.folder = ?1 AND f.chat = c.n)
+                LIMIT ?3"
+            );
+            members(db, &sql, params![folder, community, GROUPS_MOST])
+        }
+        List::Smart(folder) => {
+            let Some(rule) = rule_of(db, *folder)? else { return Ok(Vec::new()) };
+            let sql = format!("{MEMBER} FROM chats c WHERE c.community = ?2 AND c.archived = 0 {RULED} LIMIT ?3");
+            use rusqlite::types::Value as V;
+            let mut bound = vec![V::Null, V::Text(community.to_string()), V::Integer(GROUPS_MOST), V::Null];
+            bound.extend(rule.bound(now));
+            members(db, &sql, rusqlite::params_from_iter(bound))
         }
     }
 }

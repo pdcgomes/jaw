@@ -535,6 +535,44 @@ SELECT m.n, m.id, m.chat, c.id, m.v, m.at, m.t, m.mine, m.text, l.place, l.url, 
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
 
+-- src/store/lists/communities.rs
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.id = ?1 AND c.kind = 'community'
+    SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 11
+      SEARCH g USING INDEX chats_by_community (community=?)
+    SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    CORRELATED SCALAR SUBQUERY 2
+      CO-ROUTINE (subquery-1)
+        SEARCH g USING PRIMARY KEY (chat=?)
+        SEARCH gj USING INTEGER PRIMARY KEY (rowid=?)
+        SEARCH gp USING INTEGER PRIMARY KEY (rowid=?)
+      SCAN (subquery-1)
+    CORRELATED SCALAR SUBQUERY 4
+      CO-ROUTINE (subquery-3)
+        SEARCH outbox USING INDEX outbox_by_target (target=?)
+      SCAN (subquery-3)
+    CORRELATED SCALAR SUBQUERY 7
+      CO-ROUTINE (subquery-6)
+        COMPOUND QUERY
+          LEFT-MOST SUBQUERY
+            SEARCH folder_items USING INDEX folder_items_by_chat (chat=?)
+          UNION ALL
+            SEARCH folder_items USING INDEX folder_items_by_person (person=?)
+      SCAN (subquery-6)
+    CORRELATED SCALAR SUBQUERY 8
+      SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 9
+      SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
+
+-- src/store/lists/communities.rs
+SELECT kind, community FROM chats WHERE id = ?1
+    SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
+
 -- src/store/lists.rs
 SELECT rule FROM folders WHERE n = ?1 AND rule IS NOT NULL
     SEARCH folders USING INTEGER PRIMARY KEY (rowid=?)
@@ -544,11 +582,11 @@ SELECT 1 FROM folders WHERE n = ?1 AND builtin IS NULL AND rule IS NULL
     SEARCH folders USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
     SEARCH c USING INDEX chats_by_sort (archived=? AND sort<?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -574,13 +612,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_unread LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) AND (c.sort, c.n) < (?1, ?2) ORDER BY c.sort DESC, c.n DESC LIMIT ?3
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_unread LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) AND (c.sort, c.n) < (?1, ?2) ORDER BY c.sort DESC, c.n DESC LIMIT ?3
     SEARCH c USING INDEX chats_unread (sort<?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -606,13 +646,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_groups LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND c.kind IN ('group', 'announcement') AND (c.sort, c.n) < (?1, ?2) ORDER BY c.sort DESC, c.n DESC LIMIT ?3
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_groups LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND c.kind IN ('group', 'announcement') AND (c.sort, c.n) < (?1, ?2) ORDER BY c.sort DESC, c.n DESC LIMIT ?3
     SEARCH c USING INDEX chats_groups (sort<?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -638,13 +680,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_communities LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.kind = 'community' OR c.community IS NOT NULL) AND (c.sort, c.n) < (?1, ?2) ORDER BY c.sort DESC, c.n DESC LIMIT ?3
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_communities LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.kind = 'community' OR c.community IS NOT NULL) AND (c.sort, c.n) < (?1, ?2) ORDER BY c.sort DESC, c.n DESC LIMIT ?3
     SEARCH c USING INDEX chats_communities (sort<?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -670,14 +714,16 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM folder_chats fc CROSS JOIN chats c ON c.n = fc.chat LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE fc.folder = ?1 AND (fc.sort, fc.chat) < (?2, ?3) ORDER BY fc.sort DESC, fc.chat DESC LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM folder_chats fc CROSS JOIN chats c ON c.n = fc.chat LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE fc.folder = ?1 AND (fc.sort, fc.chat) < (?2, ?3) ORDER BY fc.sort DESC, fc.chat DESC LIMIT ?4
     SEARCH fc USING COVERING INDEX folder_chats_by_sort (folder=? AND (sort,chat)<(?,?))
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -703,20 +749,22 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.sort, c.n) < (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.sort, c.n) < (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
     SEARCH c USING INDEX chats_by_sort (archived=? AND sort<?)
-    CORRELATED SCALAR SUBQUERY 11
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 12
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 13
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 14
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -742,20 +790,22 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_unread LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) AND (c.sort, c.n) < (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_unread LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) AND (c.sort, c.n) < (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
     SEARCH c USING INDEX chats_unread (sort<?)
-    CORRELATED SCALAR SUBQUERY 11
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 12
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 13
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 14
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -781,20 +831,22 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_mentioned LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND c.mentions > 0 AND (c.sort, c.n) < (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_mentioned LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND c.mentions > 0 AND (c.sort, c.n) < (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
     SEARCH c USING INDEX chats_mentioned (sort<?)
-    CORRELATED SCALAR SUBQUERY 11
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 12
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 13
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 14
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -820,13 +872,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) > (?2, ?3) ORDER BY c.sort, c.n LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) > (?2, ?3) ORDER BY c.sort, c.n LIMIT ?4
     SEARCH c USING INDEX chats_by_sort (archived=? AND sort>?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -852,13 +906,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_unread LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) AND (c.sort, c.n) > (?1, ?2) ORDER BY c.sort, c.n LIMIT ?3
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_unread LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) AND (c.sort, c.n) > (?1, ?2) ORDER BY c.sort, c.n LIMIT ?3
     SEARCH c USING INDEX chats_unread (sort>?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -884,13 +940,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_groups LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND c.kind IN ('group', 'announcement') AND (c.sort, c.n) > (?1, ?2) ORDER BY c.sort, c.n LIMIT ?3
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_groups LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND c.kind IN ('group', 'announcement') AND (c.sort, c.n) > (?1, ?2) ORDER BY c.sort, c.n LIMIT ?3
     SEARCH c USING INDEX chats_groups (sort>?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -916,13 +974,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_communities LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.kind = 'community' OR c.community IS NOT NULL) AND (c.sort, c.n) > (?1, ?2) ORDER BY c.sort, c.n LIMIT ?3
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_communities LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.kind = 'community' OR c.community IS NOT NULL) AND (c.sort, c.n) > (?1, ?2) ORDER BY c.sort, c.n LIMIT ?3
     SEARCH c USING INDEX chats_communities (sort>?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -948,14 +1008,16 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM folder_chats fc CROSS JOIN chats c ON c.n = fc.chat LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE fc.folder = ?1 AND (fc.sort, fc.chat) > (?2, ?3) ORDER BY fc.sort, fc.chat LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM folder_chats fc CROSS JOIN chats c ON c.n = fc.chat LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE fc.folder = ?1 AND (fc.sort, fc.chat) > (?2, ?3) ORDER BY fc.sort, fc.chat LIMIT ?4
     SEARCH fc USING COVERING INDEX folder_chats_by_sort (folder=? AND (sort,chat)>(?,?))
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -981,20 +1043,22 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.sort, c.n) > (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort, c.n LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.sort, c.n) > (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort, c.n LIMIT ?4
     SEARCH c USING INDEX chats_by_sort (archived=? AND sort>?)
-    CORRELATED SCALAR SUBQUERY 11
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 12
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 13
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 14
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1020,20 +1084,22 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_unread LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) AND (c.sort, c.n) > (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort, c.n LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_unread LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) AND (c.sort, c.n) > (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort, c.n LIMIT ?4
     SEARCH c USING INDEX chats_unread (sort>?)
-    CORRELATED SCALAR SUBQUERY 11
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 12
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 13
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 14
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1058,21 +1124,23 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
     CORRELATED SCALAR SUBQUERY 8
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
+      SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
       SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_mentioned LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND c.mentions > 0 AND (c.sort, c.n) > (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort, c.n LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c INDEXED BY chats_mentioned LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = 0 AND c.mentions > 0 AND (c.sort, c.n) > (?2, ?3) AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.sort, c.n LIMIT ?4
     SEARCH c USING INDEX chats_mentioned (sort>?)
-    CORRELATED SCALAR SUBQUERY 11
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 12
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 13
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 14
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1097,6 +1165,8 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
     CORRELATED SCALAR SUBQUERY 8
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
+      SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
       SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
@@ -1148,11 +1218,56 @@ SELECT k.chats FROM folders f JOIN folder_counts k ON k.folder = f.n WHERE f.bui
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?2 AND c.archived = ?1 ORDER BY c.last_at DESC LIMIT ?3
+SELECT count(*) FROM chats k INDEXED BY chats_known_communities WHERE k.kind = 'community' AND k.archived <> ?1 AND EXISTS (SELECT 1 FROM chats c WHERE c.community = k.id AND c.archived = ?1)
+    SCAN k USING INDEX chats_known_communities
+    SEARCH c EXISTS USING INDEX chats_by_community (community=?)
+
+-- src/store/lists.rs
+SELECT count(*) FROM chats k INDEXED BY chats_known_communities WHERE k.kind = 'community' AND NOT (k.archived = 0 AND (k.unread > 0 OR k.marked_unread <> 0)) AND EXISTS (SELECT 1 FROM chats c WHERE c.community = k.id AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0))
+    SCAN k USING INDEX chats_known_communities
+    SEARCH c EXISTS USING INDEX chats_by_community (community=?)
+
+-- src/store/lists.rs
+SELECT count(*) FROM chats k INDEXED BY chats_known_communities WHERE k.kind = 'community' AND EXISTS (SELECT 1 FROM chats c WHERE c.community = k.id AND c.archived = 0 AND c.kind IN ('group', 'announcement'))
+    SCAN k USING INDEX chats_known_communities
+    SEARCH c EXISTS USING INDEX chats_by_community (community=?)
+
+-- src/store/lists.rs
+SELECT count(*) FROM chats k INDEXED BY chats_known_communities WHERE k.kind = 'community' AND NOT EXISTS (SELECT 1 FROM folder_chats f WHERE f.folder = ?1 AND f.chat = k.n) AND EXISTS (SELECT 1 FROM chats c JOIN folder_chats f ON f.folder = ?1 AND f.chat = c.n WHERE c.community = k.id)
+    SCAN k USING INDEX chats_known_communities
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH f USING PRIMARY KEY (folder=? AND chat=?)
+    CORRELATED SCALAR SUBQUERY 2
+      SEARCH c USING COVERING INDEX chats_by_community (community=?)
+      SEARCH f USING COVERING INDEX folder_chats_by_chat (chat=? AND folder=?)
+
+-- src/store/lists.rs
+SELECT count(*) FROM chats k INDEXED BY chats_known_communities WHERE k.kind = 'community' AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.n = k.n AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n))) AND EXISTS (SELECT 1 FROM chats c WHERE c.community = k.id AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)))
+    SCAN k USING INDEX chats_known_communities
+    CORRELATED SCALAR SUBQUERY 4
+      SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+      CORRELATED SCALAR SUBQUERY 1
+        SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
+      CORRELATED SCALAR SUBQUERY 2
+        SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      CORRELATED SCALAR SUBQUERY 3
+        SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
+        SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
+    SEARCH c EXISTS USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 5
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 6
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 7
+      SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
+
+-- src/store/lists.rs
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?2 AND c.archived = ?1 ORDER BY c.last_at DESC LIMIT ?3
     SEARCH c USING INDEX chats_by_community (community=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1178,13 +1293,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?1 AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) ORDER BY c.last_at DESC LIMIT ?2
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?1 AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) ORDER BY c.last_at DESC LIMIT ?2
     SEARCH c USING INDEX chats_by_community (community=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1210,13 +1327,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?1 AND c.archived = 0 AND c.kind IN ('group', 'announcement') ORDER BY c.last_at DESC LIMIT ?2
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?1 AND c.archived = 0 AND c.kind IN ('group', 'announcement') ORDER BY c.last_at DESC LIMIT ?2
     SEARCH c USING INDEX chats_by_community (community=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1242,13 +1361,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?1 AND c.archived = 0 ORDER BY c.last_at DESC LIMIT ?2
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?1 AND c.archived = 0 ORDER BY c.last_at DESC LIMIT ?2
     SEARCH c USING INDEX chats_by_community (community=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1274,13 +1395,15 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?2 AND EXISTS (SELECT 1 FROM folder_chats f WHERE f.folder = ?1 AND f.chat = c.n) ORDER BY c.last_at DESC LIMIT ?3
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?2 AND EXISTS (SELECT 1 FROM folder_chats f WHERE f.folder = ?1 AND f.chat = c.n) ORDER BY c.last_at DESC LIMIT ?3
     SEARCH c USING INDEX chats_by_community (community=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1307,20 +1430,22 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
       SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
+      SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?2 AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.last_at DESC LIMIT ?3
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.community = ?2 AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) ORDER BY c.last_at DESC LIMIT ?3
     SEARCH c USING INDEX chats_by_community (community=?)
-    CORRELATED SCALAR SUBQUERY 11
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 12
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 13
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 14
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1345,6 +1470,8 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
     CORRELATED SCALAR SUBQUERY 8
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
+      SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
       SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
@@ -1770,11 +1897,11 @@ INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)
 INSERT INTO library_fts (library_fts, rank) VALUES ('merge', ?1)
 
 -- src/store/read.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
     SEARCH c USING INDEX chats_by_sort (archived=? AND sort<?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1799,14 +1926,16 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
     CORRELATED SCALAR SUBQUERY 8
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
+      SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
       SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/read.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.n = ?1
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.n = ?1
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1831,6 +1960,8 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
     CORRELATED SCALAR SUBQUERY 8
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
+      SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
       SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/read.rs
@@ -2140,13 +2271,13 @@ SELECT n, sort, archived FROM chats WHERE id = ?1
     SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
 
 -- src/store/read.rs
-SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.n IN (SELECT value FROM json_each(?1))
+SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL) FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.n IN (SELECT value FROM json_each(?1))
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
-    LIST SUBQUERY 11
+    LIST SUBQUERY 12
       SCAN json_each VIRTUAL TABLE INDEX 1:
     SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
-    CORRELATED SCALAR SUBQUERY 10
+    CORRELATED SCALAR SUBQUERY 11
       SEARCH g USING INDEX chats_by_community (community=?)
     SEARCH mj USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
     SEARCH mp USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -2171,6 +2302,8 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
     CORRELATED SCALAR SUBQUERY 8
       SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
     CORRELATED SCALAR SUBQUERY 9
+      SEARCH g USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 10
       SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/read.rs
@@ -4228,10 +4361,6 @@ SELECT j.jid FROM person_jids j WHERE j.jid LIKE '%@lid' AND NOT EXISTS ( SELECT
     SCAN j
     CORRELATED SCALAR SUBQUERY 1
       SEARCH k USING INDEX person_jids_by_person (person=?)
-
--- trigger chats_community_followed
-UPDATE chats SET last_at = ? WHERE id = ? AND last_at < ?
-    SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
 
 -- trigger chats_counted
 UPDATE people SET direct_chats = direct_chats + 1 WHERE n = ?
