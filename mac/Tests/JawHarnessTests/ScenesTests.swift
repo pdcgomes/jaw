@@ -11,6 +11,7 @@ import Testing
 @MainActor @Test func `the protocol's fixtures are in the harness and decode as jawd sends them`() {
     #expect(Fixtures.found.results.map(\.kind) == [.chat, .person, .folder, .message])
     #expect(Fixtures.members.map(\.name) == ["Ana Ribeiro", "Rui Costa", "Inês Gomes"])
+    #expect(Fixtures.tree.rows.map(\.id) == ["all", "unread", "folder:9", "folder:10", "smart:7"] && Fixtures.tree.favourites.count == 3)
 }
 
 @MainActor @Test func `a fixture that isn't in the bundle, or doesn't decode as what's asked, says which file it was reading`() {

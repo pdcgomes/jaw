@@ -13,6 +13,7 @@ import QuartzCore
 /// - `open`: opening each of the first 20 chats, from the open to its messages drawn, p50 and p99.
 /// - `memory`: `phys_footprint` once the chat list and a chat are drawn and the app is quiet.
 /// - `idle`: wake-ups over a quiet minute, once the window has settled.
+/// - `pick`: picking each folder of the tree, from the pick to its chats drawn, p50 and p99.
 /// - `pictures` and `library`: a fling through a chat of pictures, and through the library's grid.
 @MainActor
 enum Bench {
@@ -33,6 +34,10 @@ enum Bench {
         case "open":
             model.firstRows = {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { opens(model, Array(model.window?.chatList.all.prefix(20) ?? []), []) }
+            }
+        case "pick":
+            model.firstRows = {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { picks(model, model.tree.order, []) }
             }
         case "memory":
             model.firstRows = {
@@ -447,6 +452,26 @@ enum Bench {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { opens(model, Array(chats.dropFirst()), times + [took]) }
             }
         }
+    }
+
+    static func picks(_ model: AppModel, _ folders: [String], _ times: [Double]) {
+        guard let folder = folders.first else {
+            let sorted = times.sorted()
+            func p(_ q: Double) -> Double {
+                sorted.isEmpty ? 0 : sorted[min(Int(Double(sorted.count) * q), sorted.count - 1)]
+            }
+            finish(["picks": Double(times.count), "pick_p50_ms": p(0.5), "pick_p99_ms": p(0.99)])
+            return
+        }
+        let start = Date()
+        model.window?.chatList.drawn = {
+            model.window?.chatList.drawn = nil
+            nextFrame {
+                let took = ms(Date().timeIntervalSince(start))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { picks(model, Array(folders.dropFirst()), times + [took]) }
+            }
+        }
+        model.pick(folder: folder)
     }
 
     /// A run that hasn't finished by then says so and quits, stopping the jawd it started.

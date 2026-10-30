@@ -11,7 +11,7 @@ import Testing
 /// or its old one went; a name's answer, with the folder made or without one gone at once, and its
 /// refusal; and, once jawd has done each, what's said and what a filing did to the item's folders.
 
-/// A script that answers as jawd's folders branch does: the tree, a roster and a made folder from its
+/// A script that answers as jawd's folders do: the tree, a roster and a made folder from the protocol's
 /// fixtures, a roster's move as its watch, and every other request done.
 func foldering(_ method: String, _ params: JSONValue, _ id: UInt64) -> [String] {
     switch method {

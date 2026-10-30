@@ -1,1 +1,0 @@
-{"method":"roster","params":{"watch":"w6","seq":81242,"upsert":[{"id":"person:5","v":81242,"sort":"0~sofia\u0001000000000005","name":"Sofia","phone":"+351913550005","about":null,"avatar":null,"presence":{"state":"online","known":true},"chat":"351913550005@s.whatsapp.net","folders":["folder:10"]}]}}

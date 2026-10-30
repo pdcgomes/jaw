@@ -9,6 +9,10 @@ enum Fixtures {
     /// `find`'s answer in `protocol/fixtures/find.result.json`: a chat, a person, a folder and a message.
     static let found: Found = result("find.result")
 
+    /// `folders.watch`'s answer in `protocol/fixtures/folders.watch.result.json`: the built-in folders
+    /// All and Unread, Family with Cousins in it, Mentions me, and three slots.
+    static let tree: FoldersWatched = result("folders.watch.result")
+
     /// The members of `Samples.group`, for `@` in its box.
     static let members: [ChatInfo.Member] = decode("""
     [{"person":"person:4","name":"Ana Ribeiro","admin":false},

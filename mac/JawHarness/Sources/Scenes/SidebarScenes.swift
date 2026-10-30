@@ -66,6 +66,22 @@ private struct SidebarScene: View {
                 }
                 .frame(width: 220, height: 300)
             }
+            SpecimenGroup(
+                title: "From jawd's fixture",
+                note: "protocol/fixtures/folders.watch.result.json as jawd sends it: All with an @ and 12, Unread with ⌘2, an @ and 12, Family with ⌘1, an @ and 3, open to Cousins with 1, and Mentions me with an @ and 1. The roster, drawn in a scene of its own, is hidden here, so the tree has the whole height.",
+                roles: roles,
+            ) {
+                ControllerSpecimen {
+                    let s = SidebarController()
+                    s.roles = roles
+                    _ = s.view
+                    s.apply(Update(seq: Fixtures.tree.seq, upsert: Fixtures.tree.rows, favourites: Fixtures.tree.favourites))
+                    s.roster.view.isHidden = true
+                    s.expand("folder:9")
+                    return s
+                }
+                .frame(width: 220, height: 260)
+            }
         }
     }
 }

@@ -9,21 +9,13 @@ let fixtures = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     .appending(path: "protocol/fixtures")
 
-/// Fixtures copied from a jawd branch whose protocol isn't on main yet, as the parity plan builds the
-/// Mac ahead of jawd: the `folders` branch's twelve, until it lands. A copy is read only while
-/// protocol/fixtures has no file of its name.
-let ahead = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "Ahead")
-
 func fixture(_ name: String) throws -> Data {
-    let landed = fixtures.appending(path: name)
-    return try Data(contentsOf: FileManager.default.fileExists(atPath: landed.path) ? landed : ahead.appending(path: name))
+    try Data(contentsOf: fixtures.appending(path: name))
 }
 
-/// Every fixture's name: protocol/fixtures', and the copies' still to land.
+/// Every fixture's name.
 func fixtureNames() throws -> [String] {
-    let landed = try FileManager.default.contentsOfDirectory(atPath: fixtures.path)
-    let copies = (try? FileManager.default.contentsOfDirectory(atPath: ahead.path)) ?? []
-    return Set(landed + copies).filter { $0.hasSuffix(".json") }.sorted()
+    try FileManager.default.contentsOfDirectory(atPath: fixtures.path).filter { $0.hasSuffix(".json") }.sorted()
 }
 
 /// A fixture's `result`, or its push's `params`, read as one type.
@@ -320,17 +312,7 @@ func pushed(_ line: String) -> Incoming {
     try same("status.request.json", written(id: 2, "status", NoParams?.none))
 }
 
-@Test func `a fixture copied ahead of jawd is byte for byte the one that lands`() throws {
-    let copies = ((try? FileManager.default.contentsOfDirectory(atPath: ahead.path)) ?? []).filter { $0.hasSuffix(".json") }
-    for name in copies {
-        let landed = fixtures.appending(path: name)
-        guard FileManager.default.fileExists(atPath: landed.path) else { continue }
-        #expect(try Data(contentsOf: landed) == Data(contentsOf: ahead.appending(path: name)),
-                "\(name) changed on its way to main: copy it again, or delete the copies once they've all landed")
-    }
-}
-
-@Test func `the tree, its slots and the roster read as the folders branch's fixtures have them`() throws {
+@Test func `the tree, its slots and the roster read as the protocol's fixtures have them`() throws {
     let tree = try JSONDecoder().decode(Answer<FoldersWatched>.self, from: fixture("folders.watch.result.json")).result
     #expect(tree.watch == "w5" && tree.seq == 81240 && tree.remove.isEmpty && tree.unread == 0)
     #expect(tree.rows.map(\.id) == ["all", "unread", "folder:9", "folder:10", "smart:7"])
@@ -383,7 +365,7 @@ func pushed(_ line: String) -> Incoming {
 }
 
 @Test func `a chat row says the folders it sits in and its slot, as the protocol's text has them`() throws {
-    // No fixture on the folders branch shows them, so this is the protocol's chat row with them added.
+    // No fixture shows them, so this is the protocol's chat row with them added.
     let row = try JSONDecoder().decode(ChatRow.self, from: Data(#"""
     {"id":"351912345678@s.whatsapp.net","v":42,"sort":"1~1792145060000~000000000017","kind":"direct","name":"Ana Ribeiro",
      "unread":2,"mentions":0,"pinned":true,"muted_until":null,"archived":false,"marked_unread":false,"draft":null,

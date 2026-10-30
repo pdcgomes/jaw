@@ -50,6 +50,9 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
 
     let emptyLabel = Labels.make("", .callout, .secondary)
 
+    /// Called each time an update has been applied, for the bench.
+    public var drawn: (() -> Void)?
+
     public init(folder: String, roles: Roles) {
         chats = Chats(folder: folder, place: .top(Self.rows))
         self.roles = roles
@@ -137,6 +140,7 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
     public func apply(_ update: Update<ChatRow>) {
         chats.apply(update)
         rebuild()
+        drawn?()
     }
 
     func rebuild() {

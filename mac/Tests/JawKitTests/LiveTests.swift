@@ -332,4 +332,113 @@ struct LiveTests {
         #expect(heard(ana, .typing), "Ana typing in her chat: \(said.suffix(3))")
         #expect(heard(climbing, .recording), "someone recording in Lisbon Climbing: \(said.suffix(3))")
     }
+
+    @Test func `folders on a real jawd: made, a name refused, filed, moved, on a slot, deleted from another interface, and after jawd is killed its list failing once and the tree a fresh watch's`() async throws {
+        let demo = try DemoJawd()
+        defer { demo.stop() }
+        let jawd = Jawd(socket: demo.socket, client: "jaw-mac-live", version: "0", focus: false) { _ in }
+        jawd.start()
+        defer { jawd.close() }
+        let tree = jawd.watchFolders()
+        let list = jawd.watchChats("all", .top(10))
+        var rows: [String: FolderRow] = [:]
+        var slots: [Favourite] = []
+        var chat: String?
+        func take(_ all: [JawUpdate]) {
+            for update in all {
+                switch update {
+                case let .folders(w, u) where w == tree:
+                    for id in u.remove {
+                        rows[id] = nil
+                    }
+                    for row in u.upsert {
+                        rows[row.id] = row
+                    }
+                    if let f = u.favourites { slots = f }
+                case let .chats(w, u) where w == list:
+                    chat = chat ?? u.upsert.first { $0.kind == .direct }?.id
+                default:
+                    break
+                }
+            }
+        }
+        func named(_ all: [JawUpdate]) -> String? {
+            all.compactMap { if case let .named(row) = $0 { row?.id } else { nil } }.first
+        }
+        #expect(await eventually(seconds: 20) {
+            take(jawd.drain())
+            return !rows.isEmpty && chat != nil
+        }, "the tree and a one-to-one chat come, as the demo's history is stored")
+        #expect(Set(["all", "unread", "groups", "communities", "archived"]).isSubset(of: Set(rows.keys)))
+        #expect(rows.values.count(where: \.isSmart) == 3, "the three smart folders jaw starts with")
+        let id = try #require(chat)
+
+        jawd.folderCreate(name: "Family", parent: nil)
+        let made = await drain(jawd, seconds: 20) { named($0) != nil }
+        take(made)
+        let family = try #require(named(made))
+        jawd.folderCreate(name: "Family", parent: nil)
+        let refused = await drain(jawd, seconds: 20) { $0.contains { if case .notNamed = $0 { true } else { false } } }
+        #expect(refused.contains { if case let .notNamed(why) = $0 { why.contains("Family") } else { false } }, "a sibling's name, in jawd's words")
+        jawd.folderCreate(name: "Work", parent: nil)
+        let work = try #require(named(await drain(jawd, seconds: 20) { named($0) != nil }))
+
+        jawd.folderAdd(family, item: id, said: "filed")
+        take(await drain(jawd, seconds: 20) { notices($0).contains("filed") })
+        #expect(await eventually(seconds: 20) {
+            take(jawd.drain())
+            return rows[family]?.count == 1
+        }, "Family counts the chat once the tree's push comes")
+        jawd.moveItem(id, from: family, to: work, said: "moved", both: "in both")
+        take(await drain(jawd, seconds: 20) { notices($0).contains("moved") })
+        #expect(await eventually(seconds: 20) {
+            take(jawd.drain())
+            return rows[family]?.count == 0 && rows[work]?.count == 1
+        }, "in the other folder and out of the first")
+        jawd.favouriteSet(slot: 1, target: work, said: "on")
+        take(await drain(jawd, seconds: 20) { notices($0).contains("on") })
+        #expect(await eventually(seconds: 20) {
+            take(jawd.drain())
+            return slots == [Favourite(slot: 1, folder: work)]
+        })
+
+        let inFamily = jawd.watchChats(family, .top(10))
+        take(await drain(jawd, seconds: 20) { all in all.contains { if case let .chats(w, _) = $0 { w == inFamily } else { false } } })
+        let other = Jawd(socket: demo.socket, client: "jaw-mac-live-other", version: "0", focus: false) { _ in }
+        other.start()
+        defer { other.close() }
+        _ = await drain(other, seconds: 20) { helloed($0) == 1 }
+        other.folderDelete(family, said: "deleted")
+        _ = await drain(other, seconds: 20) { notices($0).contains("deleted") }
+        #expect(await eventually(seconds: 20) {
+            take(jawd.drain())
+            return rows[family] == nil
+        }, "deleted from another interface, it leaves the tree, which FolderTree.showing reads to take the app's list back to All")
+
+        demo.kill()
+        try demo.start()
+        let back = await drain(jawd, seconds: 30) { all in
+            helloed(all) == 1 && all.contains { if case .folders = $0 { true } else { false } }
+                && all.contains { if case let .windowFailed(w, _) = $0 { w == inFamily } else { false } }
+        }
+        take(back)
+        #expect(back.contains { if case let .windowFailed(w, f) = $0 { w == inFamily && f.code == ErrorCode.notFound } else { false } },
+                "its list, watched again, fails once rather than being asked for ever, and the app takes the list back to All")
+        let fresh = Jawd(socket: demo.socket, client: "jaw-mac-live-fresh", version: "0", focus: false) { _ in }
+        fresh.start()
+        defer { fresh.close() }
+        let watched = fresh.watchFolders()
+        var freshRows: [String: FolderRow] = [:]
+        var freshSlots: [Favourite] = []
+        for case let .folders(w, u) in await drain(fresh, seconds: 20, until: { all in all.contains { if case .folders = $0 { true } else { false } } })
+            where w == watched
+        {
+            for row in u.upsert {
+                freshRows[row.id] = row
+            }
+            freshSlots = u.favourites ?? []
+        }
+        take(jawd.drain())
+        #expect(rows == freshRows && slots == freshSlots, "the tree after jawd was killed is a fresh watch's")
+    }
 }
