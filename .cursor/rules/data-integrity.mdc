@@ -10,7 +10,8 @@ Nothing is ever lost and the data is never inconsistent (the design's seventh pr
 ## What counts as the data layer
 
 Any change that touches, or changes the behaviour of:
-- `crates/jawd/src/store/`, `crates/jawd/src/sync*`, `crates/jawd/src/feed/`, `crates/jawd/src/find*`, `crates/jawd/src/send*`, `crates/jawd/src/engine/` (acks to the engine)
+- `crates/jawd/src/store/`, `crates/jawd/src/sync*`, `crates/jawd/src/convert/` (every row derived from raw, and the amendments the store merges), `crates/jawd/src/feed/`, `crates/jawd/src/find*`, `crates/jawd/src/send*`, `crates/jawd/src/engine/` (acks to the engine)
+- `crates/jaw-proto/src/vcard.rs` (the name a contact card's row keeps when its message gives none)
 - `engine/internal/wa/` and `proto/engine/` (session.db, acks, the spool)
 - any SQL, migration, index, trigger, PRAGMA, transaction boundary, ack or file written for the data, wherever it is
 

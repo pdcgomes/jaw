@@ -15,6 +15,8 @@ import sys
 DATA_PATHS = (
     "crates/jawd/src/store/",
     "crates/jawd/src/sync",
+    "crates/jawd/src/convert/",
+    "crates/jaw-proto/src/vcard.rs",
     "crates/jawd/src/feed/",
     "crates/jawd/src/find",
     "crates/jawd/src/send",
