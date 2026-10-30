@@ -107,6 +107,7 @@ impl Part {
                     file
                 }
             };
+            fault("copy")?;
             file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
             Ok(file)
         })();
@@ -165,6 +166,7 @@ impl Part {
         if synced {
             sync_file(file, &self.part)?;
         }
+        fault("link").map_err(Error::io(&self.part))?;
         match std::fs::hard_link(&self.part, &self.to) {
             Ok(()) => record(|| format!("link {} {}", self.part.display(), self.to.display())),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -174,6 +176,7 @@ impl Part {
         }
         let placed = std::fs::remove_file(&self.part)
             .map_err(Error::io(&self.part))
+            .and_then(|()| fault("placed").map_err(Error::io(&self.to)))
             .and_then(|()| if synced { sync_folder(self.to.parent().unwrap_or(Path::new(""))) } else { Ok(()) });
         if let Err(e) = placed {
             let _ = std::fs::remove_file(&self.to);
@@ -360,6 +363,30 @@ fn record(event: impl FnOnce() -> String) {
 fn record(_: impl FnOnce() -> String) {}
 
 #[cfg(test)]
+thread_local! {
+    /// The step of a file put in place on this thread that fails next, for the tests of what a
+    /// failure leaves.
+    static FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// Fails at `step` once, if a test asked for it on this thread.
+#[cfg(test)]
+fn fault(step: &str) -> std::io::Result<()> {
+    match FAULT.with(|fault| fault.get()) {
+        Some(at) if at == step => {
+            FAULT.with(|fault| fault.set(None));
+            Err(std::io::Error::other(format!("a fault the test made at {step}")))
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(not(test))]
+fn fault(_: &str) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -544,6 +571,25 @@ mod tests {
         assert!(matches!(gone, Err(Error::Io { .. })), "{gone:?}");
         assert!(keep(folder.path(), &folder.path().join("c")).is_err(), "a folder isn't a file to send");
         assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 2, "nothing more was left");
+    }
+
+    #[test]
+    fn a_keep_that_fails_once_its_partial_file_is_there_leaves_nothing() {
+        let folder = tempfile::tempdir().unwrap();
+        let yours = folder.path().join("yours.jpg");
+        std::fs::write(&yours, b"the photo you picked").unwrap();
+        // Once the partial file is a copy of yours, then once it's synced, then once it has its name.
+        for step in ["copy", "link", "placed"] {
+            FAULT.with(|fault| fault.set(Some(step)));
+            let failed = keep(&yours, &folder.path().join(format!("kept-at-{step}.jpg")));
+            assert!(failed.is_err(), "a fault at {step} came");
+            let left: Vec<String> = std::fs::read_dir(folder.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(left, ["yours.jpg"], "a keep that failed at {step} left {left:?}");
+        }
+        assert!(keep(&yours, &folder.path().join("kept.jpg")).is_ok(), "and one with no fault keeps it");
     }
 
     #[test]
