@@ -1496,6 +1496,87 @@ async fn send_retry_refuses_the_failed_hd_copy_of_a_message_deleted_for_everyone
     assert_eq!(kinds_sent(&rig), [(id, "message")]);
 }
 
+/// Files of yours that jaw keeps for copies still to make, `bytes` of them, as a copy written from
+/// outside names one, refused so nothing makes it.
+fn kept_already(rig: &Rig, bytes: u64) {
+    let db = Connection::open(rig.home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute(
+        "INSERT INTO outbox (jid, id, kind, raw, state, error, next_at, created_at)
+         VALUES (?1, '3EB0KEPT', 'video', x'01', 'failed', 'by the test', 0, 0)",
+        [ANA],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO outgoing (outbox, variant, kind, source, bytes, state, error)
+         VALUES (last_insert_rowid(), 'sd', 'video', 'media/outgoing/3EB0KEPT.mp4', ?1, 'failed', 'by the test')",
+        [bytes as i64],
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_past_the_bound_on_files_kept_is_refused_before_any_of_them_is_kept() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let path = yours(picked.path(), "a.jpg", &Picture::lake(640, 480));
+    kept_already(&rig, crate::store::outgoing::KEPT_MOST - std::fs::metadata(&path).unwrap().len() + 1);
+    // Held once its files are kept, so one kept before it's refused never answers.
+    let _held = rig.sending.pause_next_media();
+    let asked = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] }));
+    let refused = tokio::time::timeout(Duration::from_secs(10), asked)
+        .await
+        .expect("its file was kept before the bound was looked at")
+        .unwrap_err();
+    assert_eq!((refused.code, refused.data.unwrap()["limit"].clone()), (jaw_proto::code::LIMIT, json!("media")));
+    assert!(rig.files(OUTGOING).is_empty(), "{:?}", rig.files(OUTGOING));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_sends_at_once_cant_both_pass_the_bound_on_files_kept() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    // Nothing made meanwhile, so a file kept stays counted until the test ends.
+    rig.media.hold_making(true);
+    let (first, second) = (
+        yours(picked.path(), "a.jpg", &Picture::lake(640, 480)),
+        yours(picked.path(), "b.jpg", &Picture::lake(700, 480)),
+    );
+    let sizes = [&first, &second].map(|path| std::fs::metadata(path).unwrap().len());
+    // Either fits on its own; both don't.
+    kept_already(&rig, crate::store::outgoing::KEPT_MOST - sizes[0].max(sizes[1]) - sizes[0].min(sizes[1]) / 2);
+    let (stopped, go) = rig.sending.pause_next_media();
+    let sending = rig.sending.clone();
+    let asked = json!({ "chat": ANA, "files": [{ "path": first }] });
+    let first = tokio::spawn(async move { sending.call("send.media", asked).await });
+    stopped.notified().await;
+    rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": second }] })).await.unwrap();
+    go.notify_one();
+    let refused = first.await.unwrap().unwrap_err();
+    assert_eq!(refused.data.unwrap()["limit"], "media", "both passed the look before either was written");
+    let messages: i64 = rig.query(|db| Ok(db.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?)).await;
+    assert_eq!(messages, 1, "only the second's was written");
+    assert_eq!(rig.files(OUTGOING).len(), 1, "and the first's file isn't kept: {:?}", rig.files(OUTGOING));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_kept_by_copying_it_is_kept_only_with_room_for_it_on_the_disk() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(1_000));
+    let config = Config { free: Some(free.clone()), keeps_copied: Some(true), ..quick() };
+    let rig = Rig::with(home.path(), world(), config).await;
+    let path = yours(picked.path(), "a.jpg", &Picture::lake(640, 480));
+    let refused = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap_err();
+    assert_eq!((refused.code, refused.data.unwrap()["limit"].clone()), (jaw_proto::code::LIMIT, json!("disk")));
+    assert!(rig.files(OUTGOING).is_empty(), "{:?}", rig.files(OUTGOING));
+    free.store(u64::MAX / 2, std::sync::atomic::Ordering::Relaxed);
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+    rig.until(answer["messages"][0].as_str().unwrap(), "sent once there's room", sent).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_hd_copy_whose_messages_row_has_gone_fails_rather_than_going() {
     let home = tempfile::tempdir().unwrap();

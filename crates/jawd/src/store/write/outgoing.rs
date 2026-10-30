@@ -16,6 +16,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::media::{Keys, MediaCopy};
 use super::{MESSAGE, Packed, Stamps};
 
+/// The most bytes of files you picked that jaw keeps waiting for their copies to be made; past it,
+/// `send.media` is refused until some have been.
+pub const KEPT_MOST: u64 = 8_000_000_000;
+
 /// A step for the writer.
 #[derive(Clone, Debug)]
 pub enum Step {

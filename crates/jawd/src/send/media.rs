@@ -25,7 +25,7 @@ use super::quote::{self, Quote};
 use super::{Inner, durably, internal, no_chat, now_ms, query};
 use crate::convert;
 use crate::feed;
-use crate::media::outgoing::{KEPT_MOST, KeptFile, refusal};
+use crate::media::outgoing::{KeptFile, making, refusal};
 use crate::store::outbox::{Attached, Enqueued, Kept, Step, Written, forwarded_by_key};
 use crate::store::{Change, outgoing, read};
 
@@ -174,21 +174,10 @@ pub(super) async fn send_media(inner: &Arc<Inner>, send: SendMedia) -> Result<Se
         .map_err(|e| internal("make a message ID", e.into()))?;
     let keeping: Vec<(String, PathBuf)> =
         ids.iter().zip(&paths).map(|(id, path)| (format!("{id}.{}", extension(path)), path.clone())).collect();
-    let kept = media.keep(keeping).await.map_err(|(i, why)| refusal(i, &send.files[i].path, why))?;
-    let incoming: u64 = kept.iter().map(|k| k.bytes).sum();
-    if composed.kept_bytes + incoming > KEPT_MOST {
-        media.unkeep(&kept);
-        let mut error = Error::new(
-            code::LIMIT,
-            format!(
-                "jaw is still making {} MB of files to send; it takes more once some have gone",
-                composed.kept_bytes / 1_000_000
-            ),
-        );
-        error.data =
-            Some(serde_json::json!({ "limit": "media", "waiting_bytes": composed.kept_bytes, "most": KEPT_MOST }));
-        return Err(error);
-    }
+    let kept =
+        media.keep(keeping, composed.kept_bytes).await.map_err(|(i, why)| refusal(i, &send.files[i].path, why))?;
+    #[cfg(test)]
+    super::paused(&inner.attaching).await;
     let hd = send.quality == Some(Variant::Hd);
     let all = kept.clone();
     let mut planned = Vec::with_capacity(kept.len());
@@ -220,6 +209,10 @@ pub(super) async fn send_media(inner: &Arc<Inner>, send: SendMedia) -> Result<Se
                 Some(Enqueued::Full { waiting, failed }) => {
                     media.unkeep(&all_kept);
                     return Err(super::actions::full(waiting, failed));
+                }
+                Some(Enqueued::Making { waiting }) => {
+                    media.unkeep(&all_kept);
+                    return Err(making(waiting));
                 }
                 _ => {
                     media.unkeep(&all_kept);

@@ -196,7 +196,7 @@ async fn from_engine(inner: &Inner, copy: &Wanted, path: &Path, priority: Priori
 
 impl Inner {
     /// The free space on the disk jaw's folder is on, or the space a test says, if it can be read.
-    fn free_space(&self) -> Option<u64> {
+    pub(super) fn free_space(&self) -> Option<u64> {
         match &self.config.free {
             Some(free) => Some(free.load(std::sync::atomic::Ordering::Relaxed)),
             None => free_space(&self.home),

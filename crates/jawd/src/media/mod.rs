@@ -77,6 +77,9 @@ pub struct Config {
     pub keep_free: u64,
     /// A copy of a file to send is made only while the disk has twice its size and this much free.
     pub send_keep_free: u64,
+    /// Whether keeping a file you picked copies it, as a test says; otherwise one on the volume
+    /// jaw's folder is on is cloned there, and one on another copied.
+    pub keeps_copied: Option<bool>,
     /// How long a download that couldn't be done waits before it's tried again, at first and at most.
     pub retry_first: Duration,
     pub retry_most: Duration,
@@ -114,6 +117,7 @@ impl Default for Config {
             downloads: 6,
             keep_free: mb(512),
             send_keep_free: mb(64),
+            keeps_copied: None,
             retry_first: Duration::from_secs(2),
             retry_most: Duration::from_secs(300),
             free: None,
@@ -302,12 +306,13 @@ impl Media {
 
     /// Keeps a copy of each of `files`, a name for it and the file you picked, in jaw's folder, and
     /// says what each is, as `send.media` does before anything names them; or which can't be, and
-    /// why.
+    /// why, as when with the `waiting` bytes kept already they'd pass the bound.
     pub async fn keep(
         &self,
         files: Vec<(String, PathBuf)>,
+        waiting: u64,
     ) -> Result<Vec<outgoing::KeptFile>, (usize, outgoing::Refused)> {
-        outgoing::keep(&self.inner, files).await
+        outgoing::keep(&self.inner, files, waiting).await
     }
 
     /// Removes the copies `keep` kept, when nothing came to name them.

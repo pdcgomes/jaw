@@ -143,6 +143,9 @@ struct Inner {
     /// does.
     #[cfg(test)]
     acting: Pause,
+    /// Stops the next `send.media` between keeping its files and writing them, as `pausing` does.
+    #[cfg(test)]
+    attaching: Pause,
 }
 
 /// Where a test stops jawd the next time it gets there, with what it notifies as it stops and
@@ -199,6 +202,8 @@ impl Sending {
             pausing: Pause::default(),
             #[cfg(test)]
             acting: Pause::default(),
+            #[cfg(test)]
+            attaching: Pause::default(),
         });
         typing::start(&inner);
         regroup::start(&inner);
@@ -229,6 +234,15 @@ impl Sending {
     fn pause_next_action(&self) -> (Arc<Notify>, Arc<Notify>) {
         let pause = (Arc::default(), Arc::default());
         *self.inner.acting.lock().expect("the test's pause") = Some(pause.clone());
+        pause
+    }
+
+    /// Stops the next `send.media` once it has kept its files, before it writes them, as
+    /// `pause_next_action` does.
+    #[cfg(test)]
+    pub(crate) fn pause_next_media(&self) -> (Arc<Notify>, Arc<Notify>) {
+        let pause = (Arc::default(), Arc::default());
+        *self.inner.attaching.lock().expect("the test's pause") = Some(pause.clone());
         pause
     }
 

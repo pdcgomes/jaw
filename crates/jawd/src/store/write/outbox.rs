@@ -172,6 +172,9 @@ pub enum Enqueued {
     Queued { message: Option<i64>, id: String, chat: String, chat_n: Option<i64>, outbox: Option<i64> },
     /// The outbox holds as many as it may, so nothing was written.
     Full { waiting: u64, failed: u64 },
+    /// The files jaw keeps for copies still to make, `waiting` bytes of them, would pass
+    /// `outgoing::KEPT_MOST` with those of a `send.media`, so nothing was written.
+    Making { waiting: u64 },
     /// The message an action names has gone, so nothing was written.
     Gone,
     /// The message a reaction, an edit or a vote names is deleted for everyone, or being, so
@@ -859,7 +862,9 @@ fn forward(
 /// with its outbox row, in order, and for each file the copies to make of it: its SD copy, beside
 /// its message's outbox row, and its HD copy, beside an outbox row of its own that goes once that
 /// message has, as WhatsApp's dual upload sends it. The HD copy's ID gets a tombstone, as an
-/// action's does, so receipts for it never wait in `pending` for a message that won't come.
+/// action's does, so receipts for it never wait in `pending` for a message that won't come. The
+/// files kept for copies still to make are bounded here as well as before they're kept, since two
+/// requests at once both pass a look on a reader.
 fn attach(
     db: &Connection,
     stamps: &mut Stamps,
@@ -877,6 +882,12 @@ fn attach(
     let (waiting, failed) = waiting(db)?;
     if waiting + rows as u64 > OUTBOX_MOST {
         written.put(Enqueued::Full { waiting, failed });
+        return Ok(false);
+    }
+    let bytes: u64 = sending.iter().filter_map(|a| a.file.as_ref()).map(|file| file.bytes).sum();
+    let (_, kept) = super::outgoing::kept(db)?;
+    if kept.saturating_add(bytes) > super::outgoing::KEPT_MOST {
+        written.put(Enqueued::Making { waiting: kept });
         return Ok(false);
     }
     let now = now_ms();

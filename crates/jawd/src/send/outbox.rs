@@ -331,7 +331,7 @@ pub(super) async fn enqueued(inner: &Arc<Inner>, written: Written) -> Result<Sen
             error.data = Some(serde_json::json!({ "limit": "outbox", "waiting": waiting, "failed": failed }));
             Err(error)
         }
-        Some(Enqueued::Gone | Enqueued::Deleted | Enqueued::Many(_)) | None => {
+        Some(Enqueued::Gone | Enqueued::Deleted | Enqueued::Many(_) | Enqueued::Making { .. }) | None => {
             Err(Error::new(code::INTERNAL, "jawd kept nothing of the message, so it isn't sent"))
         }
     }

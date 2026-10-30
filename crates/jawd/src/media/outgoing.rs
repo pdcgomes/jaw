@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::Read as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ use crate::engine::{EngineError, pb};
 use crate::send::compose::{self, Made, Up};
 use crate::store::media::{Keys, MediaCopy};
 use crate::store::outbox::Step as OutboxStep;
-use crate::store::outgoing::{self, Copy, DroppedPaths, Prepared as Placed, Shown, Step, Uploaded};
+use crate::store::outgoing::{self, Copy, DroppedPaths, KEPT_MOST, Prepared as Placed, Shown, Step, Uploaded};
 use crate::store::{Change, Lane as WriteLane, Packed, unpack};
 use crate::work::{Pool, Priority};
 
@@ -54,9 +55,6 @@ pub(super) const UPLOADS: &str = "media/uploads";
 
 /// The largest file jaw sends, as WhatsApp allows.
 pub const FILE_MOST: u64 = 2_000_000_000;
-/// The most bytes of files you picked that jaw keeps waiting for their copies to be made; past it,
-/// `send.media` is refused until some have been.
-pub const KEPT_MOST: u64 = 8_000_000_000;
 /// The most copies taken to do at once; the lanes bound the work itself.
 const AT_ONCE: usize = 64;
 /// The most often a job's progress is pushed.
@@ -184,22 +182,26 @@ pub enum Refused {
     TooLarge(u64),
     /// The disk is full.
     NoSpace(String),
+    /// The files jaw keeps for copies still to make, these bytes of them, would pass KEPT_MOST with
+    /// these.
+    Making(u64),
 }
 
 /// Keeps a copy of each of `files` in jaw's folder, under the name given (the message's ID and an
 /// extension), cloned where the disk can, synced before anything names it, and says what each is.
-/// The copies already kept go again if one fails, since no row names them.
-pub(super) async fn keep(inner: &Arc<Inner>, files: Vec<(String, PathBuf)>) -> Result<Vec<KeptFile>, (usize, Refused)> {
+/// Before any is kept, their sizes are added to the `waiting` bytes kept already, against
+/// KEPT_MOST, and those it copies rather than clones against the free space. The copies already
+/// kept go again if one fails, since no row names them.
+pub(super) async fn keep(
+    inner: &Arc<Inner>,
+    files: Vec<(String, PathBuf)>,
+    waiting: u64,
+) -> Result<Vec<KeptFile>, (usize, Refused)> {
     let (home, pipeline) = (inner.home.clone(), inner.pipeline.clone());
+    let (free, floor, copying) = (inner.free_space(), inner.config.send_keep_free, inner.config.keeps_copied);
     tokio::task::spawn_blocking(move || {
-        let mut kept: Vec<KeptFile> = Vec::with_capacity(files.len());
-        let undo = |kept: &[KeptFile]| {
-            for file in kept {
-                let _ = std::fs::remove_file(home.join(&file.path));
-            }
-        };
-        for (i, (name, source)) in files.iter().enumerate() {
-            let refused = |why: Refused| (i, why);
+        let mut sizes = Vec::with_capacity(files.len());
+        for (i, (_, source)) in files.iter().enumerate() {
             let checked = std::fs::metadata(source)
                 .map_err(|e| Refused::Unreadable(format!("jawd can't read {}: {e}", source.display())))
                 .and_then(|m| {
@@ -208,13 +210,43 @@ pub(super) async fn keep(inner: &Arc<Inner>, files: Vec<(String, PathBuf)>) -> R
                     } else if m.len() > FILE_MOST {
                         Err(Refused::TooLarge(m.len()))
                     } else {
-                        Ok(())
+                        Ok((m.len(), m.dev()))
                     }
                 });
-            if let Err(why) = checked {
-                undo(&kept);
-                return Err(refused(why));
+            sizes.push(checked.map_err(|why| (i, why))?);
+        }
+        if waiting.saturating_add(sizes.iter().map(|(bytes, _)| bytes).sum()) > KEPT_MOST {
+            return Err((0, Refused::Making(waiting)));
+        }
+        // One on jaw's own volume is cloned there, as APFS does, and takes no room; one on another
+        // is copied.
+        let here = std::fs::metadata(&home).map(|m| m.dev()).ok();
+        let mut copied = 0u64;
+        for (i, (bytes, dev)) in sizes.iter().enumerate() {
+            if !copying.unwrap_or(here != Some(*dev)) {
+                continue;
             }
+            copied += bytes;
+            if let Some(free) = free.filter(|&free| free < copied.saturating_add(floor)) {
+                return Err((
+                    i,
+                    Refused::NoSpace(format!(
+                        "the disk has {} MB free, and keeping a copy of {} needs about {} MB",
+                        free / 1_000_000,
+                        files[i].1.display(),
+                        copied.saturating_add(floor) / 1_000_000
+                    )),
+                ));
+            }
+        }
+        let mut kept: Vec<KeptFile> = Vec::with_capacity(files.len());
+        let undo = |kept: &[KeptFile]| {
+            for file in kept {
+                let _ = std::fs::remove_file(home.join(&file.path));
+            }
+        };
+        for (i, (name, source)) in files.iter().enumerate() {
+            let refused = |why: Refused| (i, why);
             let relative = format!("{OUTGOING}/{name}");
             let to = home.join(&relative);
             let bytes = match jaw_media::keep(source, &to) {
@@ -929,8 +961,20 @@ pub fn refusal(index: usize, path: &str, why: Refused) -> jaw_proto::Error {
             serde_json::json!({ "limit": "file", "most": FILE_MOST, "file": index }),
         ),
         Refused::NoSpace(why) => (code::LIMIT, why, serde_json::json!({ "limit": "disk", "file": index })),
+        Refused::Making(waiting) => return making(waiting),
     };
     let mut error = jaw_proto::Error::new(code, message);
     error.data = Some(data);
+    error
+}
+
+/// The error `send.media` answers when the files jaw keeps for copies still to make, `waiting`
+/// bytes of them, would pass KEPT_MOST with those it was asked to send.
+pub fn making(waiting: u64) -> jaw_proto::Error {
+    let mut error = jaw_proto::Error::new(
+        code::LIMIT,
+        format!("jaw is still making {} MB of files to send; it takes more once some have gone", waiting / 1_000_000),
+    );
+    error.data = Some(serde_json::json!({ "limit": "media", "waiting_bytes": waiting, "most": KEPT_MOST }));
     error
 }

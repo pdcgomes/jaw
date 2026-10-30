@@ -194,7 +194,7 @@ pub(super) async fn enqueue(inner: &Arc<Inner>, step: Step, written: Written, wh
             code::NOT_ALLOWED,
             "it's deleted for everyone, or being deleted, so it can't be reacted to, edited or voted in",
         )),
-        Some(Enqueued::Many(_)) | None => {
+        Some(Enqueued::Many(_) | Enqueued::Making { .. }) | None => {
             Err(Error::new(code::INTERNAL, format!("jawd kept nothing, so it couldn't {what}")))
         }
     }
