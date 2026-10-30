@@ -14,6 +14,20 @@ extension AppModel: SidebarHost {
         pick(folder: folder)
     }
 
+    func sidebar(_: SidebarController, name: String, as naming: SidebarController.Naming) {
+        if let folder = naming.renaming {
+            jawd.folderRename(folder, name: name)
+        } else {
+            jawd.folderCreate(name: name, parent: naming.parent)
+        }
+    }
+
+    /// ⇧⌘N: a new folder, in the folder picked when it's yours, or at the top, named in place.
+    func newFolder() {
+        guard tree.served else { return say("folders come with jawd's M6") }
+        folderAct(.newFolder(parent: tree.row(folder)?.isYours == true ? folder : nil, filing: nil), name: "")
+    }
+
     /// A chat's or someone's folder items' commands, bound to it.
     func folderCommands(for item: Filed) -> [Command] {
         FolderMenu.commands(item, tree: tree, list: folder) { [weak self] act in self?.folderAct(act, name: item.name) }
@@ -71,6 +85,12 @@ extension AppModel: SidebarHost {
         case let .remove(item, from): jawd.folderRemove(from, item: item, said: said)
         case let .move(item, from, to):
             jawd.moveItem(item, from: from, to: to, said: said, both: FolderMenu.inBoth(name, from: from, to: to, tree: tree))
+        case let .newFolder(parent, filing):
+            window?.showSidebar()
+            window?.sidebar.beginNaming(parent: parent, filing: filing)
+        case let .rename(id):
+            window?.showSidebar()
+            window?.sidebar.beginRenaming(id)
         }
     }
 

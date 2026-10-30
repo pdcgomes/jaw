@@ -6,6 +6,8 @@ import JawThemes
 public protocol SidebarHost: AnyObject {
     /// A folder picked in the sidebar: the chat list becomes its window.
     func sidebar(_ sidebar: SidebarController, pick folder: String)
+    /// Return in the name field: make the folder, or rename it, with `name`.
+    func sidebar(_ sidebar: SidebarController, name: String, as naming: SidebarController.Naming)
 }
 
 /// The sidebar: the folder tree, as jawd's M6 serves it, on the sidebar's glass. The built-in folders
@@ -22,8 +24,10 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
     public var roles: Roles? {
         didSet {
             guard isViewLoaded else { return }
-            outline.reloadData()
-            restoreOpen()
+            keepingNaming {
+                outline.reloadData()
+                restoreOpen()
+            }
         }
     }
 
@@ -38,13 +42,18 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         }
     }
 
-    let outline = NSOutlineView()
+    let outline = FolderOutline()
     let scroll = NSScrollView()
     /// One object for each row's id for as long as the sidebar lives: the outline knows its rows by
     /// identity, so what's open stays open as the tree is laid out again.
     var items: [String: Item] = [:]
     /// What's open: the headings until they're closed by hand, and your folders left open.
     var open: Set<String> = [SidebarController.foldersHeading, SidebarController.smartHeading]
+    /// A folder being named in place, while its field is open.
+    public internal(set) var naming: Naming?
+    /// While the field is drawn again, its editing ending isn't the field given up.
+    var keepingField = false
+    static let namingRow = "naming"
 
     final class Item: NSObject {
         let id: String
@@ -67,6 +76,7 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         outline.floatsGroupRows = false
         outline.dataSource = self
         outline.delegate = self
+        outline.sidebar = self
         outline.setAccessibilityLabel("Folders")
         Scrolling.style(scroll)
         scroll.documentView = outline
@@ -80,17 +90,23 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
 
     /// jawd's tree, changed. A row whose counts alone changed is drawn again where it is; a change to
     /// the tree's shape lays it out again, keeping what's open, so a flood of messages costs the
-    /// sidebar a few rows' drawing.
+    /// sidebar a few rows' drawing. A name being typed keeps its field, its text and its caret, until
+    /// the folder it names, or the one a new folder is being made in, is gone.
     public func apply(_ update: Update<FolderRow>) {
         let before = tree
         tree.apply(update)
+        if let n = naming, let gone = n.renaming ?? n.parent, tree.row(gone) == nil { naming = nil }
         guard isViewLoaded else { return }
         if before.shape != tree.shape || before.served != tree.served {
-            outline.reloadData()
-            restoreOpen()
+            keepingNaming {
+                outline.reloadData()
+                restoreOpen()
+            }
             return
         }
-        for id in tree.rows.keys where before.row(id) != tree.row(id) || before.badges(id) != tree.badges(id) {
+        // Drawing a row again replaces its cell, which would end the editing in it, so the folder being
+        // renamed keeps its counts until its field closes.
+        for id in tree.rows.keys where id != naming?.renaming && (before.row(id) != tree.row(id) || before.badges(id) != tree.badges(id)) {
             if let item = items[id] { outline.reloadItem(item) }
         }
     }
@@ -143,6 +159,10 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
             guard let id = (outline.item(atRow: row) as? Item)?.id else { return nil }
             if id == Self.foldersHeading { return "Folders:" }
             if id == Self.smartHeading { return "Smart Folders:" }
+            if id == Self.namingRow || id == naming?.renaming, let naming {
+                let indent = String(repeating: "  ", count: max(outline.level(forRow: row) - 1, 0))
+                return indent + "[\(naming.text)]" + (naming.refused.map { " · \($0)" } ?? "")
+            }
             guard let folder = tree.row(id) else { return nil }
             let b = tree.badges(id)
             var line = String(repeating: "  ", count: max(outline.level(forRow: row) - 1, 0)) + folder.name
@@ -185,16 +205,20 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
     }
 
     /// The ids under `parent`: the built-in folders and the headings at the top, your folders under
-    /// Folders and under each other, the smart ones under Smart Folders.
+    /// Folders and under each other, the smart ones under Smart Folders; and a new folder's field last
+    /// where it will go, Folders shown for one at the top before you have any.
     func children(_ parent: String?) -> [String] {
-        switch parent {
+        let new = naming.map { $0.renaming == nil } ?? false
+        var out: [String] = switch parent {
         case nil:
-            tree.builtIn.map(\.id) + (tree.children(of: nil).isEmpty ? [] : [Self.foldersHeading])
+            tree.builtIn.map(\.id) + (tree.children(of: nil).isEmpty && !(new && naming?.parent == nil) ? [] : [Self.foldersHeading])
                 + (tree.smart.isEmpty ? [] : [Self.smartHeading])
         case .some(Self.foldersHeading): tree.children(of: nil).map(\.id)
         case .some(Self.smartHeading): tree.smart.map(\.id)
         case let .some(id): tree.children(of: id).map(\.id)
         }
+        if new, let parent, parent == (naming?.parent ?? Self.foldersHeading) { out.append(Self.namingRow) }
+        return out
     }
 
     public func outlineView(_: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
@@ -214,11 +238,27 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
     }
 
     public func outlineView(_: NSOutlineView, shouldSelectItem item: Any) -> Bool {
-        !Self.isHeading((item as? Item)?.id)
+        let id = (item as? Item)?.id
+        return !Self.isHeading(id) && id != Self.namingRow
+    }
+
+    /// A heading's height: AppKit's own for a source list's group rows, which a delegate that gives
+    /// rows their heights has to give too.
+    static let headingHeight: CGFloat = 19
+
+    public func outlineView(_: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        let id = (item as? Item)?.id
+        if Self.isHeading(id) { return Self.headingHeight }
+        return (id == Self.namingRow || id == naming?.renaming) && naming?.refused != nil ? NamingCell.refusedHeight : outline.rowHeight
     }
 
     public func outlineView(_ outlineView: NSOutlineView, viewFor _: NSTableColumn?, item: Any) -> NSView? {
         guard let id = (item as? Item)?.id else { return nil }
+        if id == Self.namingRow || id == naming?.renaming, let naming {
+            let cell = (outlineView.makeView(withIdentifier: NamingCell.id, owner: self) as? NamingCell) ?? NamingCell()
+            cell.show(naming, delegate: self, roles: roles)
+            return cell
+        }
         if Self.isHeading(id) {
             let cell = (outlineView.makeView(withIdentifier: HeadingCell.id, owner: self) as? HeadingCell) ?? HeadingCell()
             cell.show(id == Self.foldersHeading ? "Folders" : "Smart Folders", roles: roles)
@@ -255,5 +295,24 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         guard let id = (note.userInfo?["NSObject"] as? Item)?.id, Self.isHeading(id) || tree.row(id)?.isYours == true else { return }
         let changed = now ? open.insert(id).inserted : open.remove(id) != nil
         if changed, let keepsOpen { UserDefaults.standard.set(open.sorted(), forKey: keepsOpen) }
+    }
+}
+
+/// The tree's outline: Return on a folder of yours renames it, as Finder's does, and Esc drops a name
+/// left in the tree without the keys, as one jawd turned down after a click away.
+final class FolderOutline: NSOutlineView {
+    weak var sidebar: SidebarController?
+
+    override func keyDown(with event: NSEvent) {
+        let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
+        if event.keyCode == 53, plain, let sidebar, sidebar.naming?.asked == false {
+            sidebar.cancelNaming()
+            return
+        }
+        if event.keyCode == 36 || event.keyCode == 76, plain, let sidebar, sidebar.naming == nil, sidebar.tree.row(sidebar.picked)?.isYours == true {
+            sidebar.beginRenaming(sidebar.picked)
+            return
+        }
+        super.keyDown(with: event)
     }
 }

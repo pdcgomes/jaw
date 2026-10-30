@@ -33,14 +33,18 @@ public enum FolderAct: Sendable, Equatable {
     case remove(item: String, from: String)
     /// Files an item in `to`, then, once jawd has it there, takes it out of `from`.
     case move(item: String, from: String, to: String)
+    /// A new folder, in `parent` or at the top, named in place, and what to file in it once it's made.
+    case newFolder(parent: String?, filing: Filed?)
+    /// A folder of yours, its name opened in place.
+    case rename(String)
 }
 
 /// The folder items of a chat's menus and of someone's in the roster: entries worked out from the tree
 /// and the item's row as a menu opens, and the commands they name, bound to the item.
 public enum FolderMenu {
-    /// Add to Folder's entries: your folders as a tree.
+    /// Add to Folder's entries: your folders as a tree, then New Folder… after a separator.
     public static func addTo(_ tree: FolderTree) -> [MenuEntry] {
-        tree.yours.map { MenuEntry.command("file:\($0.row.id)") }
+        tree.yours.map { MenuEntry.command("file:\($0.row.id)") } + [.separator, .command("file.new")]
     }
 
     /// A chat's or someone's folder items: Add to Folder ▸; and while the list shows one of your
@@ -89,6 +93,9 @@ public enum FolderMenu {
                 act(.remove(item: item.id, from: list))
             })
         }
+        out.append(Command("file.new", "New Folder…", phrase: "Add this chat to a new folder", place: nil) {
+            act(.newFolder(parent: nil, filing: item))
+        })
         return out
     }
 
@@ -98,6 +105,7 @@ public enum FolderMenu {
         case let .add(_, to): "\(name) filed in \(tree.label(to))"
         case let .remove(_, from): "\(name) taken out of \(tree.label(from))"
         case let .move(_, from, to): "\(name) moved from \(tree.label(from)) to \(tree.label(to))"
+        case .newFolder, .rename: nil
         }
     }
 

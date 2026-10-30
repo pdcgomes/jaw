@@ -270,7 +270,13 @@ final class AppModel {
             savedAnswer(ticket, message, path, why)
         case let .filed(filing):
             filed(filing)
-        case .push, .chats, .layout, .folders, .roster, .named, .notNamed:
+        case let .named(row):
+            let filing = window?.sidebar.naming?.filing
+            window?.sidebar.named(row)
+            if let row, let filing { folderAct(.add(item: filing.id, to: row.id), name: filing.name) }
+        case let .notNamed(why):
+            window?.sidebar.notNamed(why)
+        case .push, .chats, .layout, .folders, .roster:
             break
         }
     }

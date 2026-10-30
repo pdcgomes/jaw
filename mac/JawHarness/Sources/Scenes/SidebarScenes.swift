@@ -48,6 +48,22 @@ private struct SidebarScene: View {
                 }
                 .frame(width: 220, height: 440)
             }
+            SpecimenGroup(
+                title: "Naming in place",
+                note: "A new folder's field open under Family, after Cousins, holding \"Cousins\", with jawd's refusal under it in the secondary colour: \"a folder there is called Cousins already\". The row is taller to hold it, and nothing under it is covered.",
+                roles: roles,
+            ) {
+                ControllerSpecimen {
+                    let s = SidebarController()
+                    s.roles = roles
+                    _ = s.view
+                    s.apply(Samples.folderUpdate)
+                    s.beginNaming(parent: "folder:1", text: "Cousins")
+                    s.notNamed("a folder there is called Cousins already")
+                    return s
+                }
+                .frame(width: 220, height: 300)
+            }
         }
     }
 }

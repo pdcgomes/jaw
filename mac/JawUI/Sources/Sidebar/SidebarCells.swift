@@ -110,6 +110,68 @@ final class FolderCell: NSTableCellView {
     }
 }
 
+/// A folder's name being typed in place, and under it jawd's refusal of the name last asked for.
+final class NamingCell: NSTableCellView {
+    static let id = NSUserInterfaceItemIdentifier("naming")
+    let symbol = NSImageView()
+    let field = NSTextField()
+    let refused = Labels.make("", .caption)
+
+    /// The row's height with jawd's refusal under the field, room for two lines of it.
+    static let refusedHeight: CGFloat = {
+        let field = NSTextField()
+        field.font = TextStyle.body.nsFont
+        let caption = TextStyle.caption.nsFont
+        return ceil(field.intrinsicContentSize.height) + 2 * ceil(caption.ascender - caption.descender + caption.leading) + 3 * Space.xxs
+    }()
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.id
+        symbol.image = FolderCell.image(FolderCell.yoursSymbol)
+        symbol.imageAlignment = .alignCenter
+        symbol.imageScaling = .scaleProportionallyDown
+        field.font = TextStyle.body.nsFont
+        field.placeholderString = "Folder name"
+        field.lineBreakMode = .byTruncatingTail
+        refused.maximumNumberOfLines = 2
+        refused.lineBreakMode = .byWordWrapping
+        let column = NSStackView(views: [field, refused])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = Space.xxs
+        let row = NSStackView(views: [symbol, column])
+        row.spacing = Space.s
+        row.alignment = .top
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            symbol.widthAnchor.constraint(equalToConstant: FolderCell.symbolWidth),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.xs),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: Space.xxs),
+            field.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func show(_ naming: SidebarController.Naming, delegate: NSTextFieldDelegate, roles: Roles?) {
+        // Set only when it differs, so a refusal drawn under a field being typed in leaves its caret be.
+        if field.stringValue != naming.text { field.stringValue = naming.text }
+        field.delegate = delegate
+        field.setAccessibilityLabel(naming.renaming == nil ? "The new folder's name" : "The folder's new name")
+        refused.stringValue = naming.refused ?? ""
+        refused.isHidden = naming.refused == nil
+        guard let roles else { return }
+        Labels.style(refused, .secondary, roles: roles)
+        symbol.contentTintColor = Tone.secondary.color(roles).nsColor
+    }
+}
+
 /// A folder's row, which tells its cell whether it's selected.
 final class FolderRowView: NSTableRowView {
     static let id = NSUserInterfaceItemIdentifier("folder.row")

@@ -156,6 +156,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         content.toggleSidebar()
     }
 
+    /// The sidebar unfolded, as naming in place needs it.
+    func showSidebar() {
+        content.showSidebar()
+    }
+
     /// Focus mode: the sidebar and the chat list fold away for the focused pane, and come back.
     func focusMode(_ on: Bool) {
         content.focusMode(on)

@@ -29,10 +29,21 @@ extension AppModel {
         // File
         add(Command("chat.new", "New Chat", phrase: "Start a chat", detail: "with anyone, or a number", symbol: "square.and.pencil",
                     key: Shortcut("n"), place: .file) { [weak self] in self?.window?.showPalette(nil) })
+        add(Command("folder.new", "New Folder", phrase: "New folder", detail: "in the folder picked, or at the top", symbol: "folder.badge.plus",
+                    key: Shortcut("n", [.command, .shift]), place: .file) { [weak self] in self?.newFolder() })
         add(Command("pane.close", "Close Pane", phrase: "Close this pane", detail: "its chat off the screen", symbol: "xmark.rectangle",
                     key: Shortcut("w"), place: .file, group: 1, enabled: many) { [weak self] in self?.closeFocusedPane() })
         add(Command("window.close", "Close Window", key: Shortcut("w", [.command, .shift]), place: .file, group: 1,
                     send: #selector(NSWindow.performClose(_:))))
+        add(Command("folder.rename", "Rename Folder", phrase: "Rename this folder", detail: "the folder picked", hint: "↩", place: .file,
+                    group: 2, palette: false, enabled: { [weak self] in
+                        guard let self else { return false }
+                        return tree.row(folder)?.isYours == true
+                    })
+        { [weak self] in
+            guard let self else { return }
+            folderAct(.rename(folder), name: "")
+        })
 
         // Edit
         for (id, title, key, mods, action) in [

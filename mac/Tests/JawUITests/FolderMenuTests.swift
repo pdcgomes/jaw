@@ -59,7 +59,7 @@ func ana(in folders: [String]) -> ChatRow {
     let item = Filed(ana(in: ["folder:1"]))
     let menu = folderMenu(FolderMenu.entries(item, tree: Samples.tree, list: "all"),
                           FolderMenu.commands(item, tree: Samples.tree, list: "all") { acts.done.append($0) })
-    #expect(shows(menu) == ["Add to Folder ▸ ✓ Family, · Cousins, Climbing, Friends, Work, · Clients"])
+    #expect(shows(menu) == ["Add to Folder ▸ ✓ Family, · Cousins, Climbing, Friends, Work, · Clients, —, New Folder…"])
     let add = menu.items.first?.submenu
     run(add?.items[0])
     run(add?.items[2])
@@ -140,4 +140,14 @@ func ana(in folders: [String]) -> ChatRow {
     #expect(FolderMenu.filed(.added(item: "person:1", to: "folder:3"), chat) == nil, "someone's, unless this is their chat")
     #expect(FolderMenu.filed(.added(item: "person:1", to: "folder:3"), chat, chat: chat.id)?.folders == ["folder:1", "folder:3"],
             "filing someone files their one-to-one chat")
+}
+
+@MainActor
+@Test func `New Folder… ends Add to Folder, making a folder at the top to file the chat in`() {
+    let acts = Acts()
+    let item = Filed(ana(in: []))
+    let menu = folderMenu(FolderMenu.entries(item, tree: Samples.tree, list: "all"),
+                          FolderMenu.commands(item, tree: Samples.tree, list: "all") { acts.done.append($0) })
+    run(menu.items.first?.submenu?.items.last)
+    #expect(acts.done == [.newFolder(parent: nil, filing: item)])
 }

@@ -100,7 +100,7 @@ enum Bench {
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
                 || key.hasPrefix("menu-key:") || key == "promise" || key == "window"
-                || key == "sidebar" || key.hasPrefix("folder:") || key == "tree:samples" || key == "show:sidebar"
+                || key == "sidebar" || key.hasPrefix("folder:") || key == "tree:samples" || key == "show:sidebar" || key.hasPrefix("type:")
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key == "promise" { keepPromise(model) }
@@ -121,6 +121,7 @@ enum Bench {
             if key.hasPrefix("folder:"), let i = Int(key.dropFirst(7)), !(model.window?.sidebar.pick(row: i) ?? false) {
                 FileHandle.standardError.write(Data("\(key): no folder at row \(i)\n".utf8))
             }
+            if key.hasPrefix("type:") { (NSApp.keyWindow ?? model.window?.window)?.firstResponder?.insertText(String(key.dropFirst(5))) }
             if key.hasPrefix("save:") { model.saveLayoutAs(String(key.dropFirst(5))) }
             if key == "revert" { model.revertLayout() }
             if key == "settings" { model.window?.showSettings() }
@@ -153,12 +154,12 @@ enum Bench {
                 }
             }
             let codes: [String: UInt16] = ["d": 2, "w": 13, "k": 40, "f": 3, "j": 38, "s": 1, "e": 14, "l": 37, "1": 18, "2": 19, "3": 20,
-                                           "left": 123, "right": 124, "down": 125, "up": 126, "return": 36, "tab": 48, "space": 49, "m": 46, "n": 45]
+                                           "left": 123, "right": 124, "down": 125, "up": 126, "return": 36, "tab": 48, "space": 49, "m": 46, "n": 45, "esc": 53]
             let arrows: [String: Int] = ["left": NSLeftArrowFunctionKey, "right": NSRightArrowFunctionKey, "up": NSUpArrowFunctionKey,
                                          "down": NSDownArrowFunctionKey]
             if arrows[char] != nil { mods.insert([.numericPad, .function]) }
             let typed = arrows[char].map { String(UnicodeScalar($0)!) }
-                ?? (char == "return" ? "\r" : char == "tab" ? "\t" : char == "space" ? " " : mods.contains(.shift) ? char.uppercased() : char)
+                ?? (char == "return" ? "\r" : char == "tab" ? "\t" : char == "space" ? " " : char == "esc" ? "\u{1b}" : mods.contains(.shift) ? char.uppercased() : char)
             if !step, let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
                                             windowNumber: (NSApp.keyWindow ?? model.window?.window)?.windowNumber ?? 0, context: nil,
                                             characters: typed, charactersIgnoringModifiers: typed, isARepeat: false, keyCode: codes[char] ?? 0)

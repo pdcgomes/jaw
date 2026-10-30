@@ -14,6 +14,12 @@ final class SideHost: SidebarHost {
     func sidebar(_: SidebarController, pick folder: String) {
         picked.append(folder)
     }
+
+    var named: [(String, SidebarController.Naming)] = []
+
+    func sidebar(_: SidebarController, name: String, as naming: SidebarController.Naming) {
+        named.append((name, naming))
+    }
 }
 
 @MainActor
@@ -249,4 +255,51 @@ func `the picked folder's row reads on the selection under it, with the keys and
     #expect(family.isAccessibilityElement() && family.accessibilityLabel() == "Family, 3 unread, mentions you, favourite 1")
     let parts = NSAccessibility.unignoredChildren(from: family.accessibilityChildren() ?? [])
     #expect(parts.isEmpty, "nothing in it read again: \(parts)")
+}
+
+/// A source list of a row, a group row and a row, as AppKit lays one out with nothing saying how tall
+/// its rows are but `rowHeight`.
+@MainActor
+final class PlainSourceList: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
+    let items = ["a", "heading", "b"].map { NSString(string: $0) }
+
+    func outlineView(_: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        item == nil ? items.count : 0
+    }
+
+    func outlineView(_: NSOutlineView, child index: Int, ofItem _: Any?) -> Any {
+        items[index]
+    }
+
+    func outlineView(_: NSOutlineView, isItemExpandable _: Any) -> Bool {
+        false
+    }
+
+    func outlineView(_: NSOutlineView, isGroupItem item: Any) -> Bool {
+        (item as? NSString) == "heading"
+    }
+
+    func outlineView(_: NSOutlineView, viewFor _: NSTableColumn?, item _: Any) -> NSView? {
+        NSTableCellView()
+    }
+}
+
+@MainActor
+@Test func `a heading is as tall as AppKit draws a source list's group row, and a folder's row as tall as its others`() {
+    let plain = NSOutlineView()
+    let column = NSTableColumn(identifier: .init("c"))
+    plain.addTableColumn(column)
+    plain.outlineTableColumn = column
+    plain.style = .sourceList
+    plain.rowHeight = 28
+    let source = PlainSourceList()
+    plain.dataSource = source
+    plain.delegate = source
+    plain.reloadData()
+    let s = sidebar()
+    s.apply(Samples.folderUpdate)
+    #expect(s.said[5] == "Folders:")
+    #expect(s.outline.rect(ofRow: 5).height == plain.rect(ofRow: 1).height, "a heading")
+    #expect(s.outline.rect(ofRow: 6).height == plain.rect(ofRow: 0).height, "a folder")
+    withExtendedLifetime(source) {}
 }
