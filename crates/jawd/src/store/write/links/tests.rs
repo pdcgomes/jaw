@@ -1,9 +1,13 @@
+use prost::Message as _;
 use rusqlite::Connection;
 use serde_json::json;
+use wa_proto::wa_common::MessageKey;
+use wa_proto::wa_web_protobufs_e2e as e2e;
+use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
 use super::*;
 use crate::store::read::{self, Around};
-use crate::store::{Amend, Amendment, Applied, Change, Lane, Message, Person, Store, schema};
+use crate::store::{Amend, Amendment, Applied, Change, Lane, Message, Packed, Person, Store, schema};
 use crate::work::{Priority, Report};
 
 const ANA: &str = "351910000002@s.whatsapp.net";
@@ -318,6 +322,89 @@ async fn a_backfill_step_that_fails_is_kept_in_quarantine_and_leaves_the_backfil
     store.apply(Lane::Background, vec![Change::Backfill(LINKS); 300 / STEP as usize + 1]).await.unwrap();
     assert_eq!(backfill_left(&store).await, None);
     assert_eq!(links(&store).await.len(), 100 + 1, "the links backfill goes on regardless");
+}
+
+/// A jaw.db at version 13, from before the first migration that leaves a backfill, holding a card
+/// of Ana's that her message gives no name, as an earlier jawd kept it.
+fn before_backfills(home: &std::path::Path) {
+    let db = Connection::open(home.join("jaw.db")).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    for migration in &schema::MIGRATIONS[..13] {
+        db.execute_batch(migration).unwrap();
+    }
+    db.pragma_update(None, "user_version", 13).unwrap();
+    db.execute_batch(&format!(
+        "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 1);
+        INSERT INTO person_jids (n, jid, person) VALUES (1, '{ANA}', 1);
+        INSERT INTO chats (n, id, kind, person, v) VALUES (1, '{ANA}', 'direct', 1, 1);"
+    ))
+    .unwrap();
+    let vcard = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Marta Lopes\r\nTEL;waid=351213456789:+351213456789\r\nEND:VCARD";
+    let card = e2e::ContactMessage { vcard: Some(vcard.into()), ..Default::default() };
+    let info = WebMessageInfo {
+        key: MessageKey {
+            remote_jid: Some(ANA.into()),
+            from_me: Some(false),
+            id: Some("card".into()),
+            participant: None,
+        },
+        message: Some(e2e::Message { contact_message: Some(Box::new(card)), ..Default::default() }),
+        message_timestamp: Some((AT / 1000) as u64),
+        ..Default::default()
+    };
+    let detail = json!({ "contact": { "name": null, "vcard": vcard } }).to_string();
+    db.execute(
+        "INSERT INTO messages (n, chat, id, at, t, sender, kind, summary, detail, raw, v)
+        VALUES (1, 1, 'card', ?1, 1, 1, 'contact', 'Contact', ?2, ?3, 1)",
+        rusqlite::params![AT, detail, Packed::new(&info.encode_to_vec()).0],
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_backfill_the_migrations_leave_is_done_as_jawd_runs_until_none_is_left() {
+    let home = tempfile::tempdir().unwrap();
+    before_backfills(home.path());
+    let store = Store::open(home.path()).unwrap();
+    let left = || {
+        query(&store, |db| {
+            let mut names = db.prepare("SELECT name FROM backfills ORDER BY name")?;
+            Ok(names.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    };
+    let migrations_left = left().await;
+    assert!(migrations_left.iter().any(|name| name == CONTACTS), "the cards among them: {migrations_left:?}");
+    // jawd's sync as it starts without an engine, which does the backfills left one after another.
+    let live: crate::sync::Shared = std::sync::Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, false)));
+    let (pushes, _) = tokio::sync::broadcast::channel(16);
+    let (_engine, incoming) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(crate::sync::run(
+        incoming,
+        store.clone(),
+        live,
+        pushes,
+        None,
+        home.path().into(),
+        Default::default(),
+        crate::feed::Typing::default(),
+    ));
+    let began = std::time::Instant::now();
+    loop {
+        let left = left().await;
+        if left.is_empty() {
+            break;
+        }
+        assert!(began.elapsed() < std::time::Duration::from_secs(30), "{left:?} of {migrations_left:?} never done");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    for name in BACKFILLS {
+        assert_eq!(store.backfill_left(name).unwrap(), 0, "{name} done, as jawd status says");
+    }
+    let text = query(&store, |db| {
+        Ok(db.query_row("SELECT text FROM messages WHERE id = 'card'", [], |r| r.get::<_, Option<String>>(0))?)
+    })
+    .await;
+    assert_eq!(text.as_deref(), Some("Marta Lopes"), "the card read again, named as its vCard names it");
 }
 
 #[tokio::test(flavor = "multi_thread")]
