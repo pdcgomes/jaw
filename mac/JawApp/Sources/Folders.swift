@@ -111,6 +111,13 @@ extension AppModel: SidebarHost {
         }
     }
 
+    /// The folder actions the palette lists, for the focused chat and the folder picked.
+    func folderPaletteCommands() -> [Command] {
+        FolderMenu.paletteCommands(conversation.map { Filed($0.chat) }, folder: folder, tree: tree) { [weak self] act, name in
+            self?.folderAct(act, name: name)
+        }
+    }
+
     /// ⌘1 to ⌘9: the slot's folder, picked, or its chat, opened in the focused pane.
     func goToFavourite(_ slot: Int) {
         guard tree.served else { return say("favourites come with jawd's M6") }

@@ -106,6 +106,23 @@ public enum FolderMenu {
         return out + favouriteCommands(item.chat, name: "this chat", tree: tree, act: act)
     }
 
+    /// The folder actions the palette lists by name, made as it opens: for the focused chat, filing it,
+    /// moving it while the list shows one of your folders, a new folder for it and its slot; for the
+    /// folder picked, a folder inside it, renaming, moving and deleting it, and its slot. Only those the
+    /// palette lists and that can be done now; none before jawd serves folders. `act` is told what to
+    /// do and the name of what it's done to, for what's said.
+    @MainActor
+    public static func paletteCommands(_ chat: Filed?, folder: String, tree: FolderTree,
+                                       act: @escaping @MainActor @Sendable (FolderAct, String) -> Void) -> [Command]
+    {
+        guard tree.served else { return [] }
+        var out: [Command] = []
+        if let chat { out += commands(chat, tree: tree, list: folder) { act($0, chat.name) } }
+        let name = tree.label(folder)
+        out += folderCommands(folder, tree: tree) { act($0, name) }
+        return out.filter { $0.inPalette && $0.enabled() }
+    }
+
     /// What the status line says once jawd has done it, as the terminal says it.
     public static func said(_ act: FolderAct, name: String, tree: FolderTree) -> String? {
         switch act {

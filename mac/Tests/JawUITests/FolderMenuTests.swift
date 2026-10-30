@@ -45,6 +45,7 @@ func head(_ entry: MenuEntry) -> String {
 @MainActor
 final class Acts {
     var done: [FolderAct] = []
+    var names: [String] = []
 }
 
 func ana(in folders: [String]) -> ChatRow {

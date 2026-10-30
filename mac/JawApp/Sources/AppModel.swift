@@ -800,7 +800,7 @@ final class AppModel {
 
     /// Every action the palette offers now: the commands that can run, by the palette's phrases.
     func actions() -> [PaletteAction] {
-        allCommands.filter { $0.inPalette && $0.enabled() }.map(\.paletteAction)
+        (allCommands + folderPaletteCommands()).filter { $0.inPalette && $0.enabled() }.map(\.paletteAction)
     }
 
     /// The next chat with unread messages after the focused one.
