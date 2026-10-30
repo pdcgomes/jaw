@@ -76,7 +76,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         return
     }
     #expect(chats.total == 312 && chats.rows.map(\.kind) == [.direct, .group])
-    #expect(chats.rows[1].typing == ["person:7"] && chats.rows[1].draft == "see you" && chats.rows[1].mentions == 1)
+    #expect(chats.rows[1].typing.isEmpty && chats.rows[1].draft == "see you" && chats.rows[1].mentions == 1)
 
     guard case let .found(_, found) = try incoming("find.result.json", .find) else {
         Issue.record("not find's answer")

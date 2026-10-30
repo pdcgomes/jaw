@@ -1,7 +1,7 @@
 import Foundation
 
 /// The protocol version this client speaks; jawd refuses any other with error 6.
-public let protocolVersion = 1
+public let protocolVersion = 2
 
 /// jawd's answer to a request it didn't do, with a sentence an interface can show as it is.
 public struct JawError: Error, Sendable, Hashable, Codable {

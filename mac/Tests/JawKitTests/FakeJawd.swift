@@ -49,7 +49,7 @@ final class FakeJawd: Sendable {
     /// The answer `hello` gets.
     static func welcome(_ id: UInt64, seq: Int = 100) -> String {
         """
-        {"id":\(id),"result":{"protocol":1,"jawd":"0.1.0","root":"/tmp","seq":\(seq),"account":{"state":"linked",\
+        {"id":\(id),"result":{"protocol":2,"jawd":"0.1.0","root":"/tmp","seq":\(seq),"account":{"state":"linked",\
         "me":{"id":"person:1","name":"Pedro","phone":"+351 912 000 000"}},"connection":{"state":"online"}}}
         """
     }
