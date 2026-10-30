@@ -16,11 +16,13 @@
 
 mod actions;
 pub mod bench;
+pub(crate) mod compose;
 mod contact;
 mod events;
 mod forward;
 mod info;
 pub mod link;
+mod media;
 mod outbox;
 mod places;
 mod poll;
@@ -38,6 +40,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use jaw_proto::media::SendMedia;
 use jaw_proto::send::{
     ChatInfo, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo, PollVote, React, Read, SendContact, SendEvent,
     SendLocation, SendPoll, SendRetry, SendText, Typing,
@@ -51,9 +54,17 @@ use tokio::sync::{Mutex, Notify, OwnedMutexGuard, broadcast, watch};
 
 use crate::engine::supervisor::Supervisor;
 use crate::engine::{EngineError, pb};
+use crate::media::Media;
 use crate::store::{Applied, Change, Chat, Store, read};
 use crate::sync::Shared;
 use crate::work::{Priority, Report, Serial};
+
+/// What sending makes messages with: the link previews text goes with, and media, which keeps,
+/// makes and uploads the files `send.media` sends, where jawd keeps media.
+pub struct Makers {
+    pub previews: link::Previews,
+    pub media: Option<Media>,
+}
 
 /// How long sending waits for things, which tests shorten.
 #[derive(Clone, Copy, Debug)]
@@ -120,6 +131,10 @@ struct Inner {
     typing: typing::Typists,
     /// What every interface is told, for saying WhatsApp refused an action.
     pushes: broadcast::Sender<Push>,
+    /// Media, which keeps, makes and uploads the files `send.media` sends, and what moves on each
+    /// time one of their copies changes, which a message with a file waits for.
+    media: Option<Media>,
+    copies: watch::Receiver<u64>,
     /// Stops the next attempt that withdraws an action, between reading its row and withdrawing it:
     /// it notifies the first when it stops, and goes on once the second is notified.
     #[cfg(test)]
@@ -149,7 +164,7 @@ impl Sending {
     /// Starts sending: what the outbox held is queued again in each chat's order, read receipts still
     /// owed are sent, and presence follows `focused`, whether any interface is in front, and the
     /// connection, which `live` says now and `pushes` as it changes. Text goes with the link
-    /// previews `previews` makes.
+    /// previews `makers` makes, and a file with the copies its media makes and uploads.
     pub async fn start(
         store: Store,
         engine: Option<Supervisor>,
@@ -157,10 +172,12 @@ impl Sending {
         pushes: &broadcast::Sender<Push>,
         focused: watch::Receiver<bool>,
         timing: Timing,
-        previews: link::Previews,
+        makers: Makers,
     ) -> anyhow::Result<Sending> {
+        let Makers { previews, media } = makers;
         let (notices, pushes) = (pushes.clone(), pushes.subscribe());
         let online = presence::connected(&live.lock().expect("live state").connection);
+        let copies = media.as_ref().map_or_else(|| watch::channel(0).1, Media::copies_changed);
         let inner = Arc::new(Inner {
             store,
             engine,
@@ -176,6 +193,8 @@ impl Sending {
             reads: reads::Reads::default(),
             typing: typing::Typists::new(),
             pushes: notices,
+            media,
+            copies,
             #[cfg(test)]
             pausing: Pause::default(),
             #[cfg(test)]
@@ -230,6 +249,7 @@ impl Sending {
             "send.event" => result(events::send_event(inner, params_of::<SendEvent>(method, params)?).await?),
             "send.contact" => result(contact::send_contact(inner, params_of::<SendContact>(method, params)?).await?),
             "poll.vote" => poll::vote(inner, params_of::<PollVote>(method, params)?).await,
+            "send.media" => result(media::send_media(inner, params_of::<SendMedia>(method, params)?).await?),
             "send.retry" => outbox::retry(inner, params_of::<SendRetry>(method, params)?).await,
             "chat.start" => result(start::start(inner, params_of::<ChatStart>(method, params)?).await?),
             "draft.set" => draft(inner, params_of::<DraftSet>(method, params)?).await,
@@ -253,6 +273,7 @@ impl Sending {
         "send.event",
         "send.contact",
         "poll.vote",
+        "send.media",
         "send.retry",
         "chat.start",
         "draft.set",

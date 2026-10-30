@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, mpsc};
 use super::*;
 use crate::engine::demo::{self, DemoEngine, Replies, World};
 use crate::engine::supervisor::{Backoff, Supervisor};
-use crate::send::{Sending, Timing, link};
+use crate::send::{Makers, Sending, Timing, link};
 use crate::store::{Chat, Lane, Message, Store, read};
 use crate::work::Priority;
 
@@ -50,7 +50,7 @@ async fn sending(home: &Path) -> (Store, Sending, Arc<World>) {
         &pushes,
         attention.focus(),
         timing,
-        link::Previews::off(),
+        Makers { previews: link::Previews::off(), media: None },
     )
     .await
     .unwrap();

@@ -103,6 +103,8 @@ const CLASSES: &[(&str, Class, &[&str])] = &[
     ("library_fts_docsize", Derived, &[]),
     ("library_fts_config", Derived, &[]),
     ("library_links", Derived, &[]),
+    ("outgoing", Own, &[]),
+    ("outgoing_drop", Own, &[]),
 ];
 
 /// The rows the test writes, in an order that keeps every foreign key, each column's value as SQL.
@@ -413,6 +415,21 @@ const SEEDS: &[(&str, &[(&str, &str)])] = &[
     ),
     ("media_made", &[("id", "1"), ("made", "5"), ("settled", "3")]),
     ("media_drop", &[("sha256", "x'0202020202020202020202020202020202020202020202020202020202020202'")]),
+    (
+        "outgoing",
+        &[
+            ("outbox", "1"),
+            ("message", "1"),
+            ("variant", "'hd'"),
+            ("kind", "'image'"),
+            ("source", "'media/outgoing/m1.jpg'"),
+            ("bytes", "48000"),
+            ("state", "'uploading'"),
+            ("sha256", "x'0404040404040404040404040404040404040404040404040404040404040404'"),
+            ("error", "'tried once'"),
+        ],
+    ),
+    ("outgoing_drop", &[("path", "'media/outgoing/m0.jpg'")]),
 ];
 
 /// Columns of jaw's own or raw a migration dropped by decision, by its number: the table, the

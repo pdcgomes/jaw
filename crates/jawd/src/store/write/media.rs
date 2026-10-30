@@ -294,9 +294,14 @@ const USED: &str = "UPDATE media_files SET used_at = ?2 WHERE sha256 = ?1 AND us
 const FORGET_PREVIEWS: &str = "UPDATE media_files SET small = NULL, large = NULL, previews_bytes = NULL WHERE sha256 = ?1 AND ?2 IN (small, large)";
 const FORGET_THUMBNAIL: &str =
     "UPDATE media_files SET thumbnail = NULL, thumbnail_bytes = NULL WHERE sha256 = ?1 AND thumbnail = ?2";
-const NAMED: &str = "SELECT EXISTS (SELECT 1 FROM media WHERE sha256 = ?1)";
+/// Whether a copy of a message, or a copy of yours on its way, names file ?1.
+const NAMED: &str =
+    "SELECT EXISTS (SELECT 1 FROM media WHERE sha256 = ?1) OR EXISTS (SELECT 1 FROM outgoing WHERE sha256 = ?1)";
+/// Whether file ?1 stays in the cache past its size: a starred message's, one waiting to be sent, or
+/// a copy of yours on its way.
 const KEPT: &str = "SELECT EXISTS (SELECT 1 FROM media md JOIN messages m ON m.n = md.message
-    WHERE md.sha256 = ?1 AND (m.starred OR EXISTS (SELECT 1 FROM outbox o WHERE o.message = m.n)))";
+    WHERE md.sha256 = ?1 AND (m.starred OR EXISTS (SELECT 1 FROM outbox o WHERE o.message = m.n)))
+    OR EXISTS (SELECT 1 FROM outgoing WHERE sha256 = ?1)";
 const FILE_PATHS: &str = "SELECT path, small, large, thumbnail, stored FROM media_files WHERE sha256 = ?1";
 const DROP_FILE: &str = "DELETE FROM media_files WHERE sha256 = ?1";
 const DROPPED: &str = "DELETE FROM media_drop WHERE sha256 = ?1";

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use rusqlite::OptionalExtension;
 use tokio::sync::Notify;
 
+use super::outgoing::{OUTGOING, UPLOADS};
 use super::{FILES, Inner, PREVIEWS};
 use crate::store::media::{Dropped, Step, from_hex};
 use crate::store::{Change, Store};
@@ -117,7 +118,7 @@ pub(super) fn prepare_syncing(home: &Path, sync: &dyn Fn(&Path) -> std::io::Resu
     // found made is synced in jaw's folder once the cache's folders are made in it.
     let found = home.join("media").is_dir();
     let mut made = false;
-    for folder in ["media", FILES, PREVIEWS] {
+    for folder in ["media", FILES, PREVIEWS, OUTGOING, UPLOADS] {
         let path = home.join(folder);
         if path.is_dir() {
             continue;
@@ -135,7 +136,7 @@ pub(super) fn prepare_syncing(home: &Path, sync: &dyn Fn(&Path) -> std::io::Resu
         sync(home)?;
     }
     let mut removed = 0;
-    for folder in [FILES, PREVIEWS] {
+    for folder in [FILES, PREVIEWS, OUTGOING, UPLOADS] {
         removed += jaw_media::remove_partial(&home.join(folder))?;
     }
     Ok(removed)

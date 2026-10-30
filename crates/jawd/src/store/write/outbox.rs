@@ -109,6 +109,33 @@ pub enum Step {
     /// Action `outbox`, still to send, isn't sent, its message having been deleted for everyone
     /// since (`Outboxed::withdrawn`): its row goes, as a refused one's does.
     Withdrawn { outbox: i64 },
+    /// The messages `send.media` sends, in order, each a message of yours with its outbox row, and
+    /// for each file the copies to make of it; all in one transaction or none, the interface's `key`
+    /// naming them all. What they came to is put in `written`.
+    Attach { sending: Vec<Attached>, key: Option<String>, written: Written },
+    /// The copy outbox row `outbox` sends couldn't be made or uploaded, as `error` says, or was
+    /// cancelled: the row has failed, until `send.retry`, and its message shows so.
+    Unsent { outbox: i64, error: String },
+}
+
+/// A message `send.media` sends: its row, pending, its kind, and the WAWebProtobufsE2E.Message it
+/// goes as, which its copy fills in as it's made and uploaded; for a file, jaw's own copy of the
+/// file picked, which its copies are made from; and when an HD copy goes too, the ID and
+/// WAWebProtobufsE2E.Message of the message of its own it goes as, once this one has gone.
+#[derive(Clone, Debug)]
+pub struct Attached {
+    pub message: Message,
+    pub kind: &'static str,
+    pub raw: Vec<u8>,
+    pub file: Option<Kept>,
+    pub hd: Option<(String, Vec<u8>)>,
+}
+
+/// jaw's own copy of a file you picked, relative to jaw's folder, and its size.
+#[derive(Clone, Debug)]
+pub struct Kept {
+    pub path: String,
+    pub bytes: u64,
 }
 
 /// The outbox kind of an action with `effect`. An action's row, unlike a message's, is never left
@@ -215,12 +242,15 @@ const UNCONFIRMED_ROWS: &str = "SELECT n, next_at FROM outbox WHERE state = 'unc
 /// What counts toward OUTBOX_MOST: every row but the actions kept for a late receipt.
 const WAITING: &str = "SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox
     WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote'))";
-/// An outbox row as the sender takes it, with, for an action, the state of its message's own outbox
-/// row while that message is still to reach WhatsApp, and whether its message has been deleted for
-/// everyone, which the action keeps once that message is deleted for you too.
+/// An outbox row as the sender takes it, with, for an action or an HD copy, the state of its
+/// message's own outbox row while that message is still to reach WhatsApp, and whether an action's
+/// message has been deleted for everyone, which the action keeps once that message is deleted for
+/// you too; for a message with a file, how far its copy has got; and whether it's an HD copy whose
+/// message is gone.
 const OUTBOXED: &str = concat!(
     "SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind,
-        (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted)
+        (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted),
+        (SELECT g.state FROM outgoing g WHERE g.outbox = o.n), o.kind = 'hd' AND o.target IS NULL
     FROM outbox o ",
     sent_where!()
 );
@@ -288,6 +318,38 @@ const OWED_MESSAGES: &str = "SELECT m.id, j.jid, m.at, m.n FROM messages m LEFT 
 const STATUS_OF: &str = "SELECT status FROM messages WHERE n = ?1";
 const FOLD_OUTBOX: &str = "UPDATE OR IGNORE outbox SET message = ?1 WHERE message = ?2";
 const FOLD_KEYS: &str = "UPDATE send_keys SET message = ?1 WHERE message = ?2";
+/// A copy to make of a file you picked, beside the outbox row that sends it.
+const COPY: &str =
+    "INSERT INTO outgoing (outbox, message, variant, kind, source, bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+    ON CONFLICT (outbox) DO NOTHING";
+/// An HD copy's own message, sent once message ?1 has gone.
+const HD: &str = "INSERT INTO outbox (target, jid, id, kind, raw, next_at, created_at)
+    VALUES (?1, ?2, ?3, 'hd', ?4, ?5, ?5) RETURNING n";
+const COPY_FAILED: &str = "UPDATE outgoing SET state = 'failed', error = ?2
+    WHERE outbox = ?1 AND state IN ('preparing', 'uploading')";
+/// A row whose copy couldn't be made or uploaded has failed, its attempts at sending uncounted.
+const UNSENT: &str = "UPDATE outbox SET state = 'failed', error = ?2 WHERE n = ?1 AND state = 'queued'";
+const COPY_ERROR: &str = "UPDATE media SET error = ?3 WHERE message = ?1 AND variant = ?2";
+const COPY_OF: &str = "SELECT message, variant FROM outgoing WHERE outbox = ?1";
+/// A failed copy is made or uploaded again from where it got to.
+const REARMED: &str = "UPDATE outgoing SET state = iif(sha256 IS NULL, 'preparing', 'uploading'), error = NULL
+    WHERE outbox = ?1 AND state = 'failed'";
+/// The HD copies of message ?1 that failed, queued again with it.
+const HD_AGAIN: &str = "UPDATE outbox SET state = 'queued', attempts = 0, error = NULL, next_at = ?2
+    WHERE target = ?1 AND kind = 'hd' AND state = 'failed' RETURNING n";
+const IS_HD: &str = "SELECT kind = 'hd' FROM outbox WHERE n = ?1";
+/// The queued HD copies of the message outbox row ?1 sends.
+const HD_ROWS: &str = "SELECT h.n FROM outbox o JOIN outbox h ON h.target = o.message
+    WHERE o.n = ?1 AND h.kind = 'hd' AND h.state = 'queued' ORDER BY h.n";
+/// The HD copies of your message ?1 that failed, waiting for send.retry, though the message went.
+const HD_FAILED: &str =
+    "SELECT g.outbox FROM outgoing g JOIN messages m ON m.n = g.message JOIN outbox o ON o.n = g.outbox
+    WHERE g.variant = 'hd' AND m.id = ?1 AND o.state = 'failed'";
+/// The HD copies of message ?1, once it will never reach WhatsApp: its outbox row is gone, and the
+/// server never had it.
+const ORPHANED_HD: &str = "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'
+    AND NOT EXISTS (SELECT 1 FROM outbox w WHERE w.message = ?1)
+    AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.status IN ('sent', 'delivered', 'read', 'played'))";
 
 const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 const RECIPIENTS: &str = "INSERT OR IGNORE INTO recipients (message, member, chat)
@@ -388,6 +450,11 @@ pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
             let ids: Vec<String> = sending.iter().map(|f| format!("{} {}", f.message.chat, f.message.id)).collect();
             ("forward", ids.join(" "), None)
         }
+        Step::Attach { sending, .. } => {
+            let ids: Vec<String> = sending.iter().map(|a| format!("{} {}", a.message.chat, a.message.id)).collect();
+            ("send media", ids.join(" "), None)
+        }
+        Step::Unsent { outbox, .. } => ("outbox", outbox.to_string(), None),
     }
 }
 
@@ -421,6 +488,8 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
         }
         Step::Forward { sending, key, written } => forward(db, stamps, sending, key, written),
         Step::Withdrawn { outbox } => withdrawn(db, stamps, *outbox),
+        Step::Attach { sending, key, written } => attach(db, stamps, sending, key, written),
+        Step::Unsent { outbox, error } => unsent(db, stamps, *outbox, error),
     }
 }
 
@@ -766,6 +835,96 @@ fn forward(
     Ok(changed)
 }
 
+/// Writes the messages `send.media` sends, all or none, each a message of yours to send, pending,
+/// with its outbox row, in order, and for each file the copies to make of it: its SD copy, beside
+/// its message's outbox row, and its HD copy, beside an outbox row of its own that goes once that
+/// message has, as WhatsApp's dual upload sends it. The HD copy's ID gets a tombstone, as an
+/// action's does, so receipts for it never wait in `pending` for a message that won't come.
+fn attach(
+    db: &Connection,
+    stamps: &mut Stamps,
+    sending: &[Attached],
+    key: &Option<String>,
+    written: &Written,
+) -> Result<bool> {
+    if let Some(key) = key
+        && let Some(before) = forwarded_before(db, key)?
+    {
+        written.put(Enqueued::Many(before));
+        return Ok(false);
+    }
+    let rows = sending.len() + sending.iter().filter(|a| a.file.is_some() && a.hd.is_some()).count();
+    let (waiting, failed) = waiting(db)?;
+    if waiting + rows as u64 > OUTBOX_MOST {
+        written.put(Enqueued::Full { waiting, failed });
+        return Ok(false);
+    }
+    let now = now_ms();
+    let (mut all, mut changed) = (Vec::with_capacity(sending.len()), false);
+    let mut hd = Vec::new();
+    for (nth, attached) in sending.iter().enumerate() {
+        let key = key.as_deref().map(|key| forward_key(key, nth));
+        let outgoing = Outgoing { message: &attached.message, kind: attached.kind, raw: &attached.raw };
+        let (enqueued, one) = enqueue_one(db, stamps, outgoing, key.as_deref(), Sent::Here)?;
+        changed |= one;
+        if let (
+            Enqueued::Queued { message: Some(n), chat, chat_n: Some(chat_n), outbox: Some(outbox), .. },
+            Some(file),
+        ) = (&enqueued, &attached.file)
+        {
+            db.prepare_cached(COPY)?.execute(params![outbox, n, "sd", attached.kind, file.path, file.bytes as i64])?;
+            if let Some((id, raw)) = &attached.hd {
+                hd.push((*n, *chat_n, chat.clone(), id, raw, attached.kind, file));
+            }
+        }
+        all.push(enqueued);
+    }
+    for (n, chat_n, chat, id, raw, kind, file) in hd {
+        if db.prepare_cached(TOMBSTONED)?.exists(params![chat_n, id])? {
+            continue;
+        }
+        let outbox: i64 = db.prepare_cached(HD)?.query_row(params![n, chat, id, raw, now], |r| r.get(0))?;
+        db.prepare_cached(OWN_ID)?.execute(params![chat_n, id, now])?;
+        db.prepare_cached(COPY)?.execute(params![outbox, n, "hd", kind, file.path, file.bytes as i64])?;
+    }
+    written.put(Enqueued::Many(all));
+    Ok(changed)
+}
+
+/// Outbox row `outbox`'s copy couldn't be made or uploaded, or was cancelled: the row has failed,
+/// without an attempt at sending it counted, since its message never went, and its message shows
+/// failed, its media row saying why. A row whose copy is ready, or has gone, is left as it is.
+fn unsent(db: &Connection, stamps: &mut Stamps, outbox: i64, error: &str) -> Result<bool> {
+    if db.prepare_cached(COPY_FAILED)?.execute(params![outbox, error])? == 0 {
+        return Ok(false);
+    }
+    db.prepare_cached(UNSENT)?.execute(params![outbox, error])?;
+    let copy: Option<(Option<i64>, String)> =
+        db.prepare_cached(COPY_OF)?.query_row([outbox], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+    if let Some((Some(n), variant)) = &copy {
+        db.prepare_cached(COPY_ERROR)?.execute(params![n, variant, error])?;
+    }
+    match outboxed(db, outbox)? {
+        Some(Some((n, chat, status))) => {
+            shown_failed(db, stamps, chat, n, status.as_deref())?;
+            Ok(true)
+        }
+        // An HD copy's row shows nothing of its own; its message shows its media row's error.
+        _ => {
+            if let Some((Some(n), _)) = copy {
+                let chat: Option<i64> = db
+                    .prepare_cached("SELECT chat FROM messages WHERE n = ?1")?
+                    .query_row([n], |r| r.get(0))
+                    .optional()?;
+                if let Some(chat) = chat {
+                    bumped(db, stamps, chat, n)?;
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
 /// An outbox row's message: its n, its chat's n and its status.
 type Its = (i64, i64, Option<String>);
 
@@ -788,7 +947,7 @@ fn dropped(db: &Connection, outbox: i64) -> Result<bool> {
 
 /// Writes the events for message `n` in chat `chat` having changed with `seq`, and for its chat
 /// when it's the chat's newest, whose line in the chat list shows its status.
-fn touched(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, seq: i64) -> Result<()> {
+pub(super) fn touched(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, seq: i64) -> Result<()> {
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
     let seq = stamps.seq(CHAT, Some(chat));
     if db.prepare_cached(CHAT_SHOWS)?.execute([chat, n, seq])? > 0 {
@@ -921,6 +1080,7 @@ pub(super) fn prune_kept(db: &Connection) -> Result<()> {
 /// failed.
 pub(super) fn tidied(db: &Connection, n: i64) -> Result<()> {
     db.prepare_cached(UNRETRYABLE)?.execute([n])?;
+    db.prepare_cached(ORPHANED_HD)?.execute([n])?;
     Ok(())
 }
 
@@ -928,17 +1088,19 @@ pub(super) fn tidied(db: &Connection, n: i64) -> Result<()> {
 /// still queued goes all the same, as on the phone, and one waiting for a receipt ends at its time.
 /// Your actions on it keep whether it was deleted for everyone, so a reaction or an edit still to go
 /// on a message deleted for everyone isn't sent once you've deleted it for you too
-/// (`Outboxed::withdrawn`).
+/// (`Outboxed::withdrawn`). An HD copy goes only after its message, so it goes with a failed one.
 pub(super) fn deleted_for_you(db: &Connection, n: i64) -> Result<()> {
     db.prepare_cached(FORGOTTEN)?.execute([n])?;
     db.prepare_cached(KEEP_DELETED)?.execute([n])?;
+    db.prepare_cached(ORPHANED_HD)?.execute([n])?;
     Ok(())
 }
 
 /// Message `n` of yours was deleted for everyone, by jawd or by your other devices or history: if
-/// WhatsApp refused it, or has had no receipt for it, nothing of it is sent again.
+/// WhatsApp refused it, or has had no receipt for it, nothing of it is sent again, nor its HD copy.
 pub(super) fn deleted_for_everyone(db: &Connection, n: i64) -> Result<()> {
     db.prepare_cached(CANCELLED)?.execute([n])?;
+    db.prepare_cached(ORPHANED_HD)?.execute([n])?;
     Ok(())
 }
 
@@ -955,19 +1117,36 @@ fn shown_failed(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, status:
 
 /// A manual retry is the one way a status goes back: from failed, which the server never had, to
 /// pending. A message deleted for everyone, or being, isn't sent again, or its recipients would be
-/// left with it after the deletion.
+/// left with it after the deletion. A copy that failed is made or uploaded again from where it got
+/// to, and the HD copies that failed with the message are queued again with it; an HD copy's own
+/// row, its message gone already, is retried on its own.
 fn retry(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
-    let Some(Some((n, chat, _))) = outboxed(db, outbox)? else { return Ok(false) };
+    let now = now_ms();
+    let Some(row) = outboxed(db, outbox)? else { return Ok(false) };
+    let Some((n, chat, _)) = row else {
+        if !db.prepare_cached(IS_HD)?.query_row([outbox], |r| r.get::<_, bool>(0))? {
+            return Ok(false);
+        }
+        let queued = db.prepare_cached(REQUEUE)?.execute(params![outbox, now])?;
+        db.prepare_cached(REARMED)?.execute([outbox])?;
+        return Ok(queued > 0);
+    };
     if !db.prepare_cached(RETRYABLE)?.query_row([n], |r| r.get::<_, bool>(0))? {
         return Ok(false);
     }
-    let queued = db.prepare_cached(REQUEUE)?.execute(params![outbox, now_ms()])?;
+    let queued = db.prepare_cached(REQUEUE)?.execute(params![outbox, now])?;
+    db.prepare_cached(REARMED)?.execute([outbox])?;
+    let hd: Vec<i64> =
+        db.prepare_cached(HD_AGAIN)?.query_map(params![n, now], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    for row in &hd {
+        db.prepare_cached(REARMED)?.execute([row])?;
+    }
     let seq = stamps.seq(MESSAGE, Some(n));
     let pending = db.prepare_cached(PENDING_AGAIN)?.execute([n, seq])?;
     if pending > 0 {
         touched(db, stamps, chat, n, seq)?;
     }
-    Ok(queued + pending > 0)
+    Ok(queued + pending + hd.len() > 0)
 }
 
 /// The account's own JIDs as sync keeps them, as a JSON array.
@@ -1126,14 +1305,20 @@ pub struct Outboxed {
     /// The attempts that failed, each of which reached the engine.
     pub attempts: i64,
     pub status: Option<String>,
-    /// `text` for a message, or an action's: `reaction`, `edit`, `revoke` or `app_state`.
+    /// A message's kind, `text` among them; an action's, `reaction`, `edit`, `revoke` or
+    /// `app_state`; or `hd`, an HD copy's message.
     pub kind: String,
-    /// For an action on a message of yours that's still to reach WhatsApp, the state of that
-    /// message's own outbox row.
+    /// For an action on a message of yours that's still to reach WhatsApp, or its HD copy, the state
+    /// of that message's own outbox row.
     pub behind: Option<String>,
     /// For an action, whether its message has been deleted for everyone, before it was deleted for
     /// you if it has been since.
     pub target_deleted: bool,
+    /// For a message with a file, how far its copy has got: `preparing`, `uploading`, `ready` or
+    /// `failed`.
+    pub copy: Option<String>,
+    /// An HD copy whose message was deleted for you, which has nothing left to go after.
+    pub orphan: bool,
 }
 
 impl Outboxed {
@@ -1192,6 +1377,8 @@ fn outboxed_row(r: &rusqlite::Row) -> rusqlite::Result<Outboxed> {
         kind: r.get(7)?,
         behind: r.get(8)?,
         target_deleted: r.get(9)?,
+        copy: r.get(10)?,
+        orphan: r.get(11)?,
     })
 }
 
@@ -1205,6 +1392,16 @@ pub fn is_action(kind: &str) -> bool {
 pub fn retryable(db: &Connection, outbox: i64) -> Result<Option<bool>> {
     let Some(Some((n, _, _))) = outboxed(db, outbox)? else { return Ok(None) };
     Ok(Some(db.prepare_cached(RETRYABLE)?.query_row([n], |r| r.get(0))?))
+}
+
+/// The rows of the HD copies queued after the message outbox row `outbox` sends.
+pub fn hd_of(db: &Connection, outbox: i64) -> Result<Vec<i64>> {
+    Ok(db.prepare_cached(HD_ROWS)?.query_map([outbox], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The rows of the HD copies of your message `id` that failed, though the message itself went.
+pub fn hd_failed(db: &Connection, id: &str) -> Result<Vec<i64>> {
+    Ok(db.prepare_cached(HD_FAILED)?.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Outbox row `outbox`, if it's still there.
@@ -1350,7 +1547,11 @@ mod tests {
                 "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
             ),
             ("the chat shows it", CHAT_SHOWS, "SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)"),
-            ("dequeue", DEQUEUE, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
+            (
+                "dequeue",
+                DEQUEUE,
+                "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
             ("sent", SENT, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
             (
                 "expires",
@@ -1371,15 +1572,15 @@ mod tests {
             (
                 "outboxed by id",
                 &by_id,
-                "SEARCH o USING INDEX outbox_by_id (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)",
+                "SEARCH o USING INDEX outbox_by_id (id=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH g USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             (
                 "outboxed by n",
                 &by_n,
-                "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)",
+                "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH cm USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nSEARCH k USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN\nCORRELATED SCALAR SUBQUERY 1\nSEARCH w USING INDEX sqlite_autoindex_outbox_1 (message=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH g USING INTEGER PRIMARY KEY (rowid=?)",
             ),
-            ("an action", ACT, ""),
-            ("app state", APP_STATE, ""),
+            ("an action", ACT, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("app state", APP_STATE, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
             ("an action's own ID", OWN_ID, ""),
             ("tombstoned", TOMBSTONED, "SEARCH tombstones USING PRIMARY KEY (chat=? AND id=?)"),
             (
@@ -1388,8 +1589,16 @@ mod tests {
                 "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH t USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN",
             ),
             ("actions by ID", ACTIONS_BY_ID, "SEARCH outbox USING INDEX outbox_by_id (id=?)"),
-            ("cancelled", CANCELLED, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
-            ("forgotten", FORGOTTEN, "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)"),
+            (
+                "cancelled",
+                CANCELLED,
+                "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
+            (
+                "forgotten",
+                FORGOTTEN,
+                "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
             (
                 "keep deleted",
                 KEEP_DELETED,
@@ -1400,7 +1609,7 @@ mod tests {
             (
                 "unretryable",
                 UNRETRYABLE,
-                "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)\nSCALAR SUBQUERY 1\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSCALAR SUBQUERY 2\nSEARCH a USING INDEX outbox_by_target (target=?)",
+                "SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)\nSCALAR SUBQUERY 1\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSCALAR SUBQUERY 2\nSEARCH a USING INDEX outbox_by_target (target=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             (
                 "retryable",
@@ -1412,12 +1621,12 @@ mod tests {
                 SHOWN_DELETED,
                 "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY 1\nSEARCH a USING INDEX outbox_by_target (target=?)\nCORRELATED SCALAR SUBQUERY 3\nSEARCH cm USING COVERING INDEX chat_merges_by_keep (keep=?)\nSEARCH g USING INDEX messages_by_id (chat=? AND id=?)\nCORRELATED SCALAR SUBQUERY 2\nSEARCH b USING INDEX outbox_by_target (target=?)",
             ),
-            ("prune kept actions", PRUNE_KEPT, "SCAN outbox"),
+            ("prune kept actions", PRUNE_KEPT, "SCAN outbox\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
             ("kept actions", KEPT, "SCAN outbox"),
             (
                 "prune the oldest kept",
                 PRUNE_OLDEST_KEPT,
-                "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN outbox",
+                "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)\nLIST SUBQUERY 1\nSCAN outbox\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
             ),
             ("fold targets", FOLD_TARGETS, "SEARCH outbox USING COVERING INDEX outbox_by_target (target=?)"),
             ("bumped", BUMPED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
@@ -1509,6 +1718,30 @@ mod tests {
             ("regroups", REGROUPS, "SCAN regroup USING COVERING INDEX regroup_by_member"),
             ("mine in a chat", MINE_IN, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
             ("regrouped", REGROUPED, "SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("a copy to make", COPY, ""),
+            ("an HD copy's message", HD, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("a copy failed", COPY_FAILED, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("unsent", UNSENT, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("a copy's error", COPY_ERROR, "SEARCH media USING PRIMARY KEY (message=? AND variant=?)"),
+            ("a row's copy", COPY_OF, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("a copy again", REARMED, "SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)"),
+            ("HD copies again", HD_AGAIN, "SEARCH outbox USING INDEX outbox_by_target (target=?)"),
+            ("an HD copy's row", IS_HD, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
+            (
+                "a message's HD copies",
+                HD_ROWS,
+                "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH h USING INDEX outbox_by_target (target=?)",
+            ),
+            (
+                "HD copies failed",
+                HD_FAILED,
+                "SCAN g USING INDEX outgoing_by_message\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH o USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
+            (
+                "HD copies orphaned",
+                ORPHANED_HD,
+                "SEARCH outbox USING INDEX outbox_by_target (target=?)\nSCALAR SUBQUERY 1\nSEARCH w USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?)\nSCALAR SUBQUERY 2\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
         ];
         let mut wrong = Vec::new();
         for (what, sql, expected) in statements {

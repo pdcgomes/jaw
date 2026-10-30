@@ -151,6 +151,24 @@ const ALLOWED: &[(&str, &str)] = &[
         "once at start, and for jawd status; the thumbnails are as many as fit in 256 MB, tens of thousands at most",
     ),
     (
+        "FROM outgoing g JOIN outbox o ON o.n = g.outbox LEFT JOIN messages m",
+        "outgoing holds a row for each copy of a file of yours on its way, each beside an outbox row, so at most \
+        the outbox's 1,000; it stops at its limit",
+    ),
+    (
+        "SELECT g.outbox FROM outgoing g JOIN messages m ON m.n = g.message",
+        "send.retry of a message that went without its HD copy; outgoing holds at most the outbox's 1,000 rows",
+    ),
+    (
+        "SELECT path FROM outgoing_drop LIMIT",
+        "the copies of your files nothing needs, waiting to go; it stops at its limit",
+    ),
+    (
+        "FROM (SELECT source, max(bytes) AS bytes FROM outgoing WHERE source IS NOT NULL GROUP BY source)",
+        "the files of yours jaw keeps for their copies, for send.media's bound and status; outgoing holds at most \
+        the outbox's 1,000 rows",
+    ),
+    (
         "FROM media WHERE state = 'waiting_for_phone'",
         "media_waiting holds only the copies waiting for the phone's answer, a few a minute at most; it stops at its \
         limit",

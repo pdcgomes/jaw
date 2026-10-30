@@ -10,6 +10,7 @@
 //! for it, out of its chat's queue, and is queued again once it has (`release`).
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -46,6 +47,8 @@ const ATTEMPTS_MOST: i64 = 1_500;
 /// How long after a commit the held actions are looked at again, so a burst of commits is looked
 /// at once.
 const HELD_SETTLE: Duration = Duration::from_millis(50);
+/// How long a message waiting for its file looks again if nothing says its copy changed.
+const COPY_LOOK_AGAIN: Duration = Duration::from_secs(30);
 
 /// The actions waiting for their message to reach WhatsApp, by outbox row, each out of its chat's
 /// queue until `release` queues it again; and what wakes `release` to look at them.
@@ -339,7 +342,8 @@ pub(super) async fn enqueued(inner: &Arc<Inner>, written: Written) -> Result<Sen
 /// before jawd started, which may have gone already.
 pub(super) fn queue(inner: &Arc<Inner>, outbox: i64, chat: String, resumed: bool) {
     let inner = inner.clone();
-    inner.sends.clone().push_again(chat, move || attempt(inner.clone(), outbox, resumed));
+    let waited = Arc::new(AtomicBool::new(false));
+    inner.sends.clone().push_again(chat, move || attempt(inner.clone(), outbox, resumed, waited.clone()));
 }
 
 /// Queues what the outbox held when jawd stopped, oldest first, so each chat's go in order, and
@@ -394,8 +398,13 @@ fn pause(inner: &Inner, attempts: i64) -> Duration {
 
 /// Tries to send outbox row `outbox` once. It reads the row again first, so a message sent, failed
 /// or deleted meanwhile isn't sent, and nothing is tried while WhatsApp can't be reached. What it
-/// waits for before the next try, it waits for without holding a place in the sends' lane.
-async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
+/// waits for before the next try, it waits for without holding a place in the sends' lane. A message
+/// with a file waits, in its place in its chat's order, until its file is uploaded; one that waited
+/// so in this run can't have gone before it, whenever it was queued, since nothing sends it unready.
+async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<AtomicBool>) -> Next {
+    // Taken before the row is read, so a copy ready after it is a change still to see.
+    let mut copies = inner.copies.clone();
+    copies.mark_unchanged();
     let mut connected = inner.connected.subscribe();
     if !*connected.borrow_and_update() {
         return Next::After(Box::pin(async move {
@@ -423,6 +432,11 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
         }
         return Next::Done;
     }
+    if row.orphan {
+        let error = "its message was deleted before it went".to_string();
+        settle(&inner, vec![Change::Outbox(Step::Failed { outbox, error, next_at: None })]).await;
+        return Next::Done;
+    }
     if row.held() {
         inner.held.hold(outbox);
         return Next::Done;
@@ -431,8 +445,19 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool) -> Next {
         settle(&inner, vec![Change::Outbox(Step::Sent { outbox })]).await;
         return Next::Done;
     }
+    match row.copy.as_deref() {
+        None | Some("ready") => {}
+        Some("failed") => return Next::Done,
+        Some(_) => {
+            waited.store(true, Ordering::Relaxed);
+            return Next::After(Box::pin(async move {
+                let _ = tokio::time::timeout(COPY_LOOK_AGAIN, copies.changed()).await;
+            }));
+        }
+    }
     // App state is the same however often it's sent, and no receipt ever says it arrived.
     let app_state = row.kind == "app_state";
+    let resumed = resumed && !waited.load(Ordering::Relaxed);
     let may_have_gone = (resumed || row.attempts > 0) && !app_state;
     let command = if app_state {
         match pb::AppStatePatch::decode(row.raw.as_slice()) {
@@ -545,12 +570,30 @@ async fn settle(inner: &Inner, changes: Vec<Change>) -> Applied {
 /// nothing to retry, and one deleted for everyone, or being, isn't sent again.
 pub(super) async fn retry(inner: &Arc<Inner>, retry: SendRetry) -> Result<Value, Error> {
     let id = retry.message.clone();
-    let found = query(inner, move |db| {
-        let Some(row) = outbox::outboxed_by_id(db, &id)? else { return Ok(None) };
+    let (found, hd) = query(inner, move |db| {
+        let Some(row) = outbox::outboxed_by_id(db, &id)? else {
+            // The message went, and its HD copy didn't.
+            let hd = outbox::hd_failed(db, &id)?
+                .into_iter()
+                .map(|n| outbox::outboxed_by_n(db, n))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            return Ok((None, hd.into_iter().flatten().collect::<Vec<_>>()));
+        };
         let retryable = outbox::retryable(db, row.outbox)?;
-        Ok(Some((row, retryable)))
+        Ok((Some((row, retryable)), Vec::new()))
     })
     .await?;
+    if !hd.is_empty() {
+        let changes = hd.iter().map(|row| Change::Outbox(Step::Retry { outbox: row.outbox })).collect();
+        durably(inner, changes, "queue the HD copy again").await?;
+        for row in hd {
+            queue(inner, row.outbox, row.chat, false);
+        }
+        if let Some(media) = &inner.media {
+            media.send_now();
+        }
+        return Ok(Value::Object(Default::default()));
+    }
     let Some((row, retryable)) = found.filter(|(row, _)| !outbox::is_action(&row.kind)) else {
         return Err(Error::new(
             code::NOT_FOUND,
@@ -571,7 +614,16 @@ pub(super) async fn retry(inner: &Arc<Inner>, retry: SendRetry) -> Result<Value,
     let applied =
         durably(inner, vec![Change::Outbox(Step::Retry { outbox: row.outbox })], "queue the message again").await?;
     if applied.changed > 0 {
-        queue(inner, row.outbox, row.chat, false);
+        queue(inner, row.outbox, row.chat.clone(), false);
+        // Its HD copies that failed with it are queued again too, after it.
+        let n = row.outbox;
+        let again = query(inner, move |db| outbox::hd_of(db, n)).await?;
+        for hd in again {
+            queue(inner, hd, row.chat.clone(), false);
+        }
+        if let Some(media) = &inner.media {
+            media.send_now();
+        }
     }
     Ok(done)
 }

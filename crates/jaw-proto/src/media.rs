@@ -1,7 +1,10 @@
-//! Media in: `media.fetch`, `media.save` and `media.cancel`. How a message's file is, and its
-//! previews, come in the message's row as its `media` (see protocol/README.md).
+//! Media in: `media.fetch`, `media.save` and `media.cancel`; and out: `send.media`, with its `job`
+//! pushes. How a message's file is, and its previews, come in the message's row as its `media` (see
+//! protocol/README.md).
 
 use serde::{Deserialize, Serialize};
+
+use crate::windows::MessageRow;
 
 /// Which copy of a message's file: the standard one, or the HD copy WhatsApp's dual upload sent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,12 +43,86 @@ pub struct Saved {
     pub path: String,
 }
 
-/// `media.cancel`'s params: stop downloading a message's file.
+/// `media.cancel`'s params: stop downloading a message's file, or, for one of yours on its way,
+/// stop making and uploading it, which leaves it failed until `send.retry`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaCancel {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<String>,
+}
+
+/// `send.media`'s params: files to send to `chat`, a message each, in the order given; several
+/// photos and videos go as an album.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendMedia {
+    pub chat: String,
+    pub files: Vec<Attachment>,
+    /// `sd` by default; `hd` also sends an HD copy of each photo and video that has more to give.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<Variant>,
+    /// The ID of the message the first file answers, in the same chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+    /// As `send.text`'s: asking again with it within a day answers with the same messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// One file to send: a whole path or one starting `~/`, what it goes as (from what it is, when
+/// not given), and its caption.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AttachmentKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+}
+
+/// What a file goes as. A document goes as it is, whatever it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentKind {
+    Image,
+    Video,
+    Gif,
+    Audio,
+    Document,
+}
+
+/// `send.media`'s result, once every message is on disk, synced, with its outbox row: their IDs,
+/// a file's each in the order of `files`, the album's when they went as one, and their rows as
+/// `messages.watch` sends them, pending.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SentMedia {
+    pub messages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<MessageRow>,
+}
+
+/// The `job` push: how far making or moving a message's file has got.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Job {
+    /// Names the job, the same in every push about it.
+    pub id: String,
+    pub kind: JobKind,
+    /// The message whose file it is, as rows name it: an HD copy's is its SD message's.
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<Variant>,
+    /// From 0 to 1; 1 once it's done.
+    pub progress: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobKind {
+    Upload,
+    Download,
+    Transcode,
 }
 
 /// What `status` says of media: the cache and what's waiting.
@@ -102,4 +179,20 @@ pub struct MediaStatus {
     pub progress_most: u64,
     #[serde(default)]
     pub progress_passed: u64,
+    /// Copies of your files on their way to WhatsApp: being made, uploading, and failed until
+    /// `send.retry`.
+    #[serde(default)]
+    pub preparing: u64,
+    #[serde(default)]
+    pub uploading: u64,
+    #[serde(default)]
+    pub unsent: u64,
+    /// jaw's own copies of the files you picked, kept until the copies sent are made from them, and
+    /// their bytes; and those nothing needs any more, waiting to go.
+    #[serde(default)]
+    pub kept_files: u64,
+    #[serde(default)]
+    pub kept_bytes: u64,
+    #[serde(default)]
+    pub kept_unneeded: u64,
 }

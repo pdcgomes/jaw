@@ -1512,7 +1512,7 @@ async fn status_reports_the_cache_and_what_waits() {
     );
     assert_eq!(status.cache_files, 1, "its thumbnail is in the cache");
     let names: Vec<String> = rig.media.lanes().iter().map(|lane| lane.report().name).collect();
-    assert_eq!(names, ["downloads", "images"]);
+    assert_eq!(names, ["downloads", "images", "transcodes", "uploads"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -11,7 +11,7 @@ use super::*;
 use crate::engine::demo::{self, DemoEngine, Replies, World};
 use crate::engine::pb;
 use crate::engine::supervisor::{Backoff, Supervisor};
-use crate::send::{Sending, Timing, link};
+use crate::send::{Makers, Sending, Timing, link};
 use crate::store::{Chat, Lane, Store, read};
 use crate::work::Priority;
 
@@ -64,11 +64,10 @@ impl Running {
             retry_most: Duration::from_millis(20),
             ..Timing::default()
         };
-        let previews = link::Previews::off();
-        let sending =
-            Sending::start(store.clone(), Some(supervisor), live, &pushes, attention.focus(), timing, previews)
-                .await
-                .unwrap();
+        let makers = Makers { previews: link::Previews::off(), media: None };
+        let sending = Sending::start(store.clone(), Some(supervisor), live, &pushes, attention.focus(), timing, makers)
+            .await
+            .unwrap();
         if connect {
             let online = async {
                 while let Ok(push) = connected.recv().await {

@@ -102,7 +102,7 @@ impl Running {
             &pushes,
             attention.focus(),
             timing,
-            link::Previews::off(),
+            Makers { previews: link::Previews::off(), media: None },
         )
         .await
         .unwrap();

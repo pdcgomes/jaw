@@ -1173,7 +1173,7 @@ async fn serve_all_pushing(bed: &Bed) -> (std::path::PathBuf, broadcast::Sender<
         &pushes,
         attention.focus(),
         timing,
-        crate::send::link::Previews::off(),
+        crate::send::Makers { previews: crate::send::link::Previews::off(), media: None },
     )
     .await;
     let state = State::new(

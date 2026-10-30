@@ -538,6 +538,17 @@ pub fn link_thumbnail(message: &e2e::Message) -> Option<&[u8]> {
     preview.jpeg_thumbnail.as_deref().filter(|thumbnail| !thumbnail.is_empty())
 }
 
+/// What a row shows of `message`'s kind (its media, a poll, a location), as the row's `detail`.
+pub fn detail_of(message: &e2e::Message) -> Option<String> {
+    let message = unwrap(message).0;
+    kinds::body(message, &context_of(message).map(|c| c.mentioned_jid.clone()).unwrap_or_default()).detail
+}
+
+/// The file `message` carries, out of its wrappers, as a media row keeps it.
+pub fn copy_of(message: &e2e::Message) -> Option<crate::store::media::MediaCopy> {
+    kinds::copy(unwrap(message).0)
+}
+
 /// The thumbnail the message in `raw`, a WebMessageInfo, carries to draw until its file comes.
 pub fn thumbnail_in(raw: &[u8]) -> Option<Vec<u8>> {
     let info = WebMessageInfo::decode(raw).ok()?;

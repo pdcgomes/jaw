@@ -52,7 +52,13 @@ pub(super) fn key(sha256: &[u8]) -> String {
 /// The file a copy is kept as in the cache, relative to jaw's folder: its hash and an extension for
 /// what it is, so another program opening it knows it.
 pub(super) fn file_name(copy: &Wanted) -> String {
-    let by_mime = match copy.mime.as_deref().unwrap_or_default().split(';').next().unwrap_or_default().trim() {
+    cache_name(&copy.sha256, copy.mime.as_deref(), copy.name.as_deref())
+}
+
+/// The file the content `sha256` is kept as in the cache, relative to jaw's folder, with an extension
+/// from its type, or the name it came with.
+pub(super) fn cache_name(sha256: &[u8], mime: Option<&str>, name: Option<&str>) -> String {
+    let by_mime = match mime.unwrap_or_default().split(';').next().unwrap_or_default().trim() {
         "image/jpeg" => Some("jpg"),
         "image/png" => Some("png"),
         "image/webp" => Some("webp"),
@@ -67,12 +73,12 @@ pub(super) fn file_name(copy: &Wanted) -> String {
         "application/pdf" => Some("pdf"),
         _ => None,
     };
-    let by_name = copy.name.as_deref().and_then(|n| n.rsplit_once('.')).map(|(_, ext)| ext.to_ascii_lowercase());
+    let by_name = name.and_then(|n| n.rsplit_once('.')).map(|(_, ext)| ext.to_ascii_lowercase());
     let ext = by_mime
         .map(str::to_string)
         .or(by_name.filter(|e| (1..=8).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric())))
         .unwrap_or_else(|| "bin".into());
-    format!("{FILES}/{}.{ext}", to_hex(&copy.sha256))
+    format!("{FILES}/{}.{ext}", to_hex(sha256))
 }
 
 /// What the downloads lane made of a file: where it is in the cache, relative to jaw's folder, and
@@ -199,7 +205,7 @@ impl Inner {
 }
 
 /// The free space on the disk jaw's folder is on, if it can be read.
-fn free_space(folder: &Path) -> Option<u64> {
+pub(super) fn free_space(folder: &Path) -> Option<u64> {
     let name = CString::new(folder.as_os_str().as_bytes()).ok()?;
     let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: `name` is a NUL-terminated path and `stats` is a statvfs to fill in.

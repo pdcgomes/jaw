@@ -601,7 +601,7 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
         &pushes,
         attention.focus(),
         send::Timing::default(),
-        send::link::Previews::default(),
+        send::Makers { previews: send::link::Previews::default(), media: Some(media.clone()) },
     )
     .await?;
     let me = live.lock().expect("live state").me();

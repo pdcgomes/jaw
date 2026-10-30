@@ -317,7 +317,7 @@ mod sending {
     use crate::engine::demo::{self, DemoEngine, Replies, World};
     use crate::engine::pb;
     use crate::engine::supervisor::{Backoff, Supervisor};
-    use crate::send::{Sending, Timing};
+    use crate::send::{Makers, Sending, Timing};
     use crate::store::{Change, Chat, Lane, Store};
 
     const ANA: &str = "351912345678@s.whatsapp.net";
@@ -351,10 +351,17 @@ mod sending {
             retry_most: Duration::from_millis(20),
             ..Timing::default()
         };
-        let sending =
-            Sending::start(store.clone(), Some(supervisor), live, &pushes, attention.focus(), timing, previews)
-                .await
-                .unwrap();
+        let sending = Sending::start(
+            store.clone(),
+            Some(supervisor),
+            live,
+            &pushes,
+            attention.focus(),
+            timing,
+            Makers { previews, media: None },
+        )
+        .await
+        .unwrap();
         let online = async {
             while let Ok(push) = connected.recv().await {
                 if push.method == "connection" && push.params["state"] == "online" {

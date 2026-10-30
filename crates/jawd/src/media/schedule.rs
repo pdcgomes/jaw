@@ -510,6 +510,10 @@ async fn progress(inner: Arc<Inner>, mut progressing: mpsc::Receiver<pb::MediaPr
     });
     let mut written: HashMap<String, (Instant, f64)> = HashMap::new();
     while let Some(said) = progressing.recv().await {
+        if said.id.starts_with("up:") {
+            super::outgoing::upload_progress(&inner, &said);
+            continue;
+        }
         let (Some(sha256), true) = (from_hex(&said.id), said.size > 0) else { continue };
         let fraction = (said.bytes as f64 / said.size as f64).min(1.0);
         if fraction >= 1.0 {
@@ -577,6 +581,7 @@ async fn online(inner: Arc<Inner>, mut pushes: broadcast::Receiver<Push>) {
                 if online {
                     inner.schedule.later.lock().expect("schedule").clear();
                     inner.schedule.wake();
+                    inner.sending.retry_now();
                 }
             }
             Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}

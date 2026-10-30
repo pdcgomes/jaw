@@ -161,11 +161,24 @@ pub struct World {
     when_asked: Mutex<Option<WhenAsked>>,
     /// How often one of the people followed comes or goes, when not every `COMINGS`.
     comings: Mutex<Option<Duration>>,
+    /// Whether uploads wait, half sent, until it opens.
+    uploads_gated: AtomicBool,
+    uploads_opened: Notify,
+    /// How many uploads to fail next as a connection that's down does, and to refuse for good.
+    failing_uploads: Mutex<u32>,
+    refusing_uploads: Mutex<u32>,
 }
 
 /// What a test does as the made-up phone is asked to send a file again.
 #[cfg(test)]
 type WhenAsked = Box<dyn Fn(&pb::MediaRetry) + Send + Sync>;
+
+/// The most of a file the media server keeps to be downloaded again; bigger ones it only counts.
+const SERVED_MOST: usize = 32_000_000;
+
+/// What the demo's upload read of a file: its hash, the hash of it as it went, its length, and the
+/// file itself when the media server keeps it.
+type Encrypted = (Vec<u8>, Vec<u8>, u64, Option<Vec<u8>>);
 
 /// How the made-up phone answers when asked to send a file again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -360,6 +373,45 @@ impl World {
         if !gated {
             self.downloads_opened.notify_waiters();
         }
+    }
+
+    /// Holds uploads half sent while `gated`, letting them go on once it opens.
+    #[cfg(test)]
+    pub fn gate_uploads(&self, gated: bool) {
+        self.uploads_gated.store(gated, Ordering::SeqCst);
+        if !gated {
+            self.uploads_opened.notify_waiters();
+        }
+    }
+
+    /// Fails the next `n` uploads as a connection that's down does, which may pass.
+    #[cfg(test)]
+    pub fn fail_uploads(&self, n: u32) {
+        *self.failing_uploads.lock().expect("the demo world") = n;
+    }
+
+    /// Refuses the next `n` uploads for good, as a media server refuses a file it won't take.
+    #[cfg(test)]
+    pub fn refuse_uploads(&self, n: u32) {
+        *self.refusing_uploads.lock().expect("the demo world") = n;
+    }
+
+    /// The uploads it was asked for, in order.
+    #[cfg(test)]
+    pub fn uploads(&self) -> Vec<pb::MediaUpload> {
+        self.asked()
+            .into_iter()
+            .filter_map(|kind| match kind {
+                pb::command::Kind::MediaUpload(upload) => Some(upload),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The file the media server holds at `direct_path`, as it decrypts.
+    #[cfg(test)]
+    pub fn file_at(&self, direct_path: &str) -> Option<Arc<Vec<u8>>> {
+        self.files.lock().expect("the demo world").get(direct_path).cloned()
     }
 
     /// How many downloads it was asked for.
@@ -1319,6 +1371,10 @@ impl Sender {
                 self.world.ask(pb::command::Kind::MediaDownload(download.clone()));
                 self.download(download).await
             }
+            pb::command::Kind::MediaUpload(upload) => {
+                self.world.ask(pb::command::Kind::MediaUpload(upload.clone()));
+                self.upload(upload).await
+            }
             pb::command::Kind::MediaCancel(cancel) => {
                 if let Some(stop) = self.world.running.lock().expect("the demo world").get(&cancel.id) {
                     stop.notify_one();
@@ -1450,6 +1506,129 @@ impl Sender {
             Ok(Err(e)) => Err(EngineError::Failed { message: format!("can't write the file: {e}"), retry: true }),
             Err(e) => Err(EngineError::Failed { message: format!("writing stopped: {e}"), retry: true }),
         }
+    }
+
+    /// Uploads the file jawd names as jaw-engine does: read as a stream and checked against its
+    /// hash, encrypted into a partial file of its own beside the name jawd gave, which goes once it's
+    /// sent; half way, it waits while uploads are gated, and can be cancelled. The media server then
+    /// holds it, a small one to be downloaded again, under a direct path of its own.
+    async fn upload(&self, upload: pb::MediaUpload) -> Result<pb::reply::Kind, EngineError> {
+        use pb::media_uploaded::State;
+        let answer = |state: State, message: &str| {
+            Ok(pb::reply::Kind::MediaUploaded(pb::MediaUploaded {
+                state: state as i32,
+                message: message.into(),
+                ..Default::default()
+            }))
+        };
+        let world = &self.world;
+        let next = |counter: &Mutex<u32>| {
+            let mut left = counter.lock().expect("the demo world");
+            let now = *left > 0;
+            *left = left.saturating_sub(1);
+            now
+        };
+        if next(&world.refusing_uploads) {
+            return Err(EngineError::Failed {
+                message: "WhatsApp's media server refused the file with 413".into(),
+                retry: false,
+            });
+        }
+        if next(&world.failing_uploads) {
+            return Err(EngineError::Failed {
+                message: "can't upload the file: websocket not connected".into(),
+                retry: true,
+            });
+        }
+        let part = PathBuf::from(format!(
+            "{}.{}-{}.part",
+            upload.temp,
+            std::process::id(),
+            world.parts.fetch_add(1, Ordering::Relaxed)
+        ));
+        let (path, kept) = (PathBuf::from(&upload.path), part.clone());
+        let encrypted = tokio::task::spawn_blocking(move || -> std::io::Result<Encrypted> {
+            use sha2::Digest;
+            use std::io::Read;
+            let mut file = std::fs::File::open(&path)?;
+            let mut out = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&kept)?;
+            let (mut plain, mut enc) = (sha2::Sha256::new(), sha2::Sha256::new());
+            let mut served = Some(Vec::new());
+            let (mut piece, mut length) = (vec![0u8; 64 * 1024], 0u64);
+            loop {
+                let n = file.read(&mut piece)?;
+                if n == 0 {
+                    break;
+                }
+                plain.update(&piece[..n]);
+                length += n as u64;
+                served = served.filter(|s: &Vec<u8>| s.len() + n <= SERVED_MOST).map(|mut s| {
+                    s.extend_from_slice(&piece[..n]);
+                    s
+                });
+                for b in &mut piece[..n] {
+                    *b ^= 0x5a;
+                }
+                enc.update(&piece[..n]);
+                out.write_all(&piece[..n])?;
+            }
+            Ok((plain.finalize().to_vec(), enc.finalize().to_vec(), length, served))
+        })
+        .await;
+        let (sha256, enc_sha256, length, served) = match encrypted {
+            Ok(Ok(done)) => done,
+            Ok(Err(e)) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(EngineError::Failed {
+                    message: format!("can't read the file to upload: {e}"),
+                    retry: true,
+                });
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                return Err(EngineError::Failed { message: format!("uploading stopped: {e}"), retry: true });
+            }
+        };
+        if sha256 != upload.file_sha256 {
+            let _ = std::fs::remove_file(&part);
+            return answer(State::Changed, "the file isn't the one jawd named: its SHA-256 doesn't match");
+        }
+        let stop = Arc::new(Notify::new());
+        world.running.lock().expect("the demo world").insert(upload.id.clone(), stop.clone());
+        let size = length.div_ceil(16) * 16 + 10;
+        self.progress(&upload.id, size / 2, size);
+        let cancelled = loop {
+            let opened = world.uploads_opened.notified();
+            if !world.uploads_gated.load(Ordering::SeqCst) {
+                break false;
+            }
+            tokio::select! {
+                () = opened => {}
+                () = stop.notified() => break true,
+            }
+        };
+        world.running.lock().expect("the demo world").remove(&upload.id);
+        let _ = std::fs::remove_file(&part);
+        if cancelled {
+            return answer(State::Cancelled, "the upload was cancelled");
+        }
+        let hex: String = sha256.iter().map(|b| format!("{b:02x}")).collect();
+        let direct_path = format!("/v/t62.7118-24/demo/{hex}.enc?ccb=11-4&oh=demo");
+        if let Some(served) = served {
+            world.serve(&direct_path, Arc::new(served));
+        }
+        self.progress(&upload.id, size, size);
+        let media_key: Vec<u8> = <sha2::Sha256 as sha2::Digest>::digest([&sha256[..], b"key"].concat()).to_vec();
+        Ok(pb::reply::Kind::MediaUploaded(pb::MediaUploaded {
+            state: State::Uploaded as i32,
+            url: format!("https://mmg.whatsapp.net{direct_path}"),
+            direct_path,
+            media_key,
+            file_sha256: sha256,
+            file_enc_sha256: enc_sha256,
+            file_length: length,
+            message: String::new(),
+        }))
     }
 
     /// The phone, asked to send a message's file again, answers as the world says, a moment later:

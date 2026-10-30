@@ -13,6 +13,7 @@ pub mod layout;
 pub mod links;
 pub mod media;
 pub mod outbox;
+pub mod outgoing;
 pub mod polls;
 
 use std::borrow::Cow;
@@ -105,6 +106,8 @@ pub enum Change {
     Folders(folders::Step),
     /// Media: downloads, previews, the phone asked again, and the cache.
     Media(media::Step),
+    /// Media out: the copies of your files made and uploaded, and your files no copy needs.
+    Outgoing(outgoing::Step),
 }
 
 /// A merge of one chat into another, as a merge step names it.
@@ -611,6 +614,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
         Some(Change::Thumbnail { sha256, chat, id, .. }) => ("thumbnail", format!("{chat} {id} {sha256}"), None),
         Some(Change::Folders(step)) => folders::provenance(step),
         Some(Change::Media(step)) => media::provenance(step),
+        Some(Change::Outgoing(step)) => outgoing::provenance(step),
         None => ("nothing", String::new(), None),
     };
     (source, reference, raw.map(Cow::Borrowed))
@@ -754,6 +758,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         Change::Thumbnail { sha256, bytes, chat, id } => links::thumbnail(db, stamps, sha256, *bytes, chat, id),
         Change::Folders(step) => folders::apply(db, stamps, step),
         Change::Media(step) => media::apply(db, stamps, step),
+        Change::Outgoing(step) => outgoing::apply(db, stamps, step),
     }
 }
 

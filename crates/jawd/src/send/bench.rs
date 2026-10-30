@@ -66,7 +66,7 @@ pub async fn run(home: &Path, plan: Plan) -> Result<()> {
         &pushes,
         attention.focus(),
         Timing::default(),
-        super::link::Previews::off(),
+        super::Makers { previews: super::link::Previews::off(), media: None },
     )
     .await?;
 

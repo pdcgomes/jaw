@@ -1407,6 +1407,78 @@ pub(super) const MIGRATIONS: &[&str] = &[
     INSERT INTO backfills (name, after, upto) SELECT 'contacts', 0, seq FROM sqlite_sequence
         WHERE name = 'messages' AND seq > 0;
     ",
+    // 27, a schema step: media out. Two new tables, `outgoing` and `outgoing_drop`, with their
+    // triggers, and media_unnamed and media_files_unnamed made again so a file in the cache that a
+    // copy on its way names isn't dropped. No jawd before this one sent media, so both tables start
+    // empty, and replacing a trigger costs the same however big jaw.db is; nothing is copied, rebuilt
+    // or dropped but the triggers.
+    "
+    -- Class: jaw's own. Each copy of a file of yours on its way to WhatsApp, with the outbox row that
+    -- sends it: the SD copy, and the HD copy when one was asked for and the file has more to give
+    -- than SD keeps, which goes after its SD message as a message of its own that names it. A row
+    -- goes with its outbox row: once its message has gone, or nothing can send it any more.
+    CREATE TABLE outgoing (
+        outbox INTEGER PRIMARY KEY REFERENCES outbox (n) ON DELETE CASCADE,
+        -- The message the copy is of, an HD copy's being its SD message's; NULL once it's deleted for
+        -- you, which, as on the phone, doesn't stop it going.
+        message INTEGER REFERENCES messages (n) ON DELETE SET NULL,
+        variant TEXT NOT NULL CHECK (variant IN ('sd', 'hd')),
+        -- What it goes as.
+        kind TEXT NOT NULL CHECK (kind IN ('image', 'video', 'gif', 'audio', 'document')),
+        -- jaw's own copy of the file you picked, relative to jaw's folder, kept until this copy is made
+        -- from it, and that file's size.
+        source TEXT,
+        bytes INTEGER NOT NULL CHECK (bytes >= 0),
+        -- preparing: the copy is being made from `source`; uploading: it's in the cache, by `sha256`,
+        -- on its way to WhatsApp's media server; ready: its outbox row's message says where it is,
+        -- and goes; failed: it couldn't be made or uploaded, as `error` says, until send.retry.
+        state TEXT NOT NULL DEFAULT 'preparing' CHECK (state IN ('preparing', 'uploading', 'ready', 'failed')),
+        sha256 BLOB CHECK (length(sha256) = 32),
+        error TEXT,
+        CHECK (state IN ('preparing', 'failed') OR sha256 IS NOT NULL),
+        CHECK (sha256 IS NOT NULL OR source IS NOT NULL)
+    ) STRICT;
+    CREATE INDEX outgoing_by_message ON outgoing (message) WHERE message IS NOT NULL;
+    CREATE INDEX outgoing_by_source ON outgoing (source) WHERE source IS NOT NULL;
+    CREATE INDEX outgoing_by_hash ON outgoing (sha256) WHERE sha256 IS NOT NULL;
+
+    -- Class: jaw's own. Copies of files you picked that no copy on its way needs any more, each
+    -- removed once a synced commit has dropped it.
+    CREATE TABLE outgoing_drop (path TEXT PRIMARY KEY) STRICT, WITHOUT ROWID;
+    CREATE TRIGGER outgoing_gone AFTER DELETE ON outgoing
+    WHEN old.source IS NOT NULL AND NOT EXISTS (SELECT 1 FROM outgoing WHERE source = old.source) BEGIN
+        INSERT OR IGNORE INTO outgoing_drop (path) VALUES (old.source);
+    END;
+    CREATE TRIGGER outgoing_made AFTER UPDATE OF source ON outgoing
+    WHEN old.source IS NOT NULL AND new.source IS NOT old.source
+        AND NOT EXISTS (SELECT 1 FROM outgoing WHERE source = old.source) BEGIN
+        INSERT OR IGNORE INTO outgoing_drop (path) VALUES (old.source);
+    END;
+
+    -- A file in the cache goes once neither a copy of a message nor a copy on its way names it.
+    DROP TRIGGER media_unnamed;
+    CREATE TRIGGER media_unnamed AFTER DELETE ON media
+    WHEN old.sha256 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM media WHERE sha256 = old.sha256)
+        AND NOT EXISTS (SELECT 1 FROM outgoing WHERE sha256 = old.sha256) BEGIN
+        INSERT OR IGNORE INTO media_drop (sha256)
+            SELECT old.sha256 WHERE EXISTS (SELECT 1 FROM media_files WHERE sha256 = old.sha256);
+    END;
+    CREATE TRIGGER outgoing_unnamed AFTER DELETE ON outgoing
+    WHEN old.sha256 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM media WHERE sha256 = old.sha256)
+        AND NOT EXISTS (SELECT 1 FROM outgoing WHERE sha256 = old.sha256) BEGIN
+        INSERT OR IGNORE INTO media_drop (sha256)
+            SELECT old.sha256 WHERE EXISTS (SELECT 1 FROM media_files WHERE sha256 = old.sha256);
+    END;
+    CREATE TRIGGER outgoing_named AFTER UPDATE OF sha256 ON outgoing WHEN new.sha256 IS NOT NULL BEGIN
+        DELETE FROM media_drop WHERE sha256 = new.sha256;
+    END;
+    DROP TRIGGER media_files_unnamed;
+    CREATE TRIGGER media_files_unnamed AFTER INSERT ON media_files
+    WHEN NOT EXISTS (SELECT 1 FROM media WHERE sha256 = new.sha256)
+        AND NOT EXISTS (SELECT 1 FROM outgoing WHERE sha256 = new.sha256) BEGIN
+        INSERT OR IGNORE INTO media_drop (sha256) VALUES (new.sha256);
+    END;
+    ",
 ];
 
 /// Migration 19's text, named so the tests that check and measure it find it whatever number it

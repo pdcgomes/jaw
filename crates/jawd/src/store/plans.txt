@@ -83,6 +83,12 @@ SELECT settled, made FROM media_made WHERE id = 1
     SEARCH media_made USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/media/mod.rs
+SELECT count(*), coalesce(sum(bytes), 0) FROM (SELECT source, max(bytes) AS bytes FROM outgoing WHERE source IS NOT NULL GROUP BY source)
+    CO-ROUTINE (subquery-1)
+      SEARCH outgoing USING INDEX outgoing_by_source (source>?)
+    SCAN (subquery-1)
+
+-- src/media/mod.rs
 SELECT made - settled, 0 FROM media_made WHERE id = 1
     SEARCH media_made USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -2925,19 +2931,23 @@ UPDATE media_files SET thumbnail = NULL, thumbnail_bytes = NULL WHERE sha256 = ?
     SEARCH media_files USING PRIMARY KEY (sha256=?)
 
 -- src/store/write/media.rs
-SELECT EXISTS (SELECT 1 FROM media WHERE sha256 = ?1)
+SELECT EXISTS (SELECT 1 FROM media WHERE sha256 = ?1) OR EXISTS (SELECT 1 FROM outgoing WHERE sha256 = ?1)
     SCAN CONSTANT ROW
     SCALAR SUBQUERY 1
       SEARCH media USING COVERING INDEX media_by_hash (sha256=?)
+    SCALAR SUBQUERY 2
+      SEARCH outgoing USING COVERING INDEX outgoing_by_hash (sha256=?)
 
 -- src/store/write/media.rs
-SELECT EXISTS (SELECT 1 FROM media md JOIN messages m ON m.n = md.message WHERE md.sha256 = ?1 AND (m.starred OR EXISTS (SELECT 1 FROM outbox o WHERE o.message = m.n)))
+SELECT EXISTS (SELECT 1 FROM media md JOIN messages m ON m.n = md.message WHERE md.sha256 = ?1 AND (m.starred OR EXISTS (SELECT 1 FROM outbox o WHERE o.message = m.n))) OR EXISTS (SELECT 1 FROM outgoing WHERE sha256 = ?1)
     SCAN CONSTANT ROW
     SCALAR SUBQUERY 2
       SEARCH md USING COVERING INDEX media_by_hash (sha256=?)
       SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
       CORRELATED SCALAR SUBQUERY 1
         SEARCH o USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?)
+    SCALAR SUBQUERY 3
+      SEARCH outgoing USING COVERING INDEX outgoing_by_hash (sha256=?)
 
 -- src/store/write/media.rs
 SELECT path, small, large, thumbnail, stored FROM media_files WHERE sha256 = ?1
@@ -3015,6 +3025,7 @@ SELECT m.n, m.chat, m.status FROM outbox o LEFT JOIN messages m ON m.n = o.messa
 -- src/store/write/outbox.rs
 DELETE FROM outbox WHERE n = ?1
     SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
@@ -3023,6 +3034,7 @@ UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
 -- src/store/write/outbox.rs
 DELETE FROM outbox WHERE message = ?1
     SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1 AND status IS NOT ?2
@@ -3074,14 +3086,16 @@ SELECT count(*), coalesce(sum(state = 'failed'), 0) FROM outbox WHERE NOT (state
     SCAN outbox
 
 -- src/store/write/outbox.rs
-SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted) FROM outbox o
-    (a part of a statement, planned with the rest: no such column: k.id in EXPLAIN QUERY PLAN SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted) FROM outbox o at offset 40)
+SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted), (SELECT g.state FROM outgoing g WHERE g.outbox = o.n), o.kind = 'hd' AND o.target IS NULL FROM outbox o
+    (a part of a statement, planned with the rest: no such column: k.id in EXPLAIN QUERY PLAN SELECT o.n, coalesce(k.id, c.id, o.jid), o.id, o.raw, o.state, o.attempts, m.status, o.kind, (SELECT w.state FROM outbox w WHERE w.message = o.target), coalesce(t.deleted, o.target_deleted), (SELECT g.state FROM outgoing g WHERE g.outbox = o.n), o.kind = 'hd' AND o.target IS NULL FROM outbox o at offset 40)
 
 -- src/store/write/outbox.rs
 INSERT INTO outbox (target, jid, id, kind, raw, effect, next_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING n
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 INSERT INTO outbox (jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, 'app_state', ?3, ?4, ?4) RETURNING n
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 INSERT OR IGNORE INTO tombstones (chat, id, at) VALUES (?1, ?2, ?3)
@@ -3102,10 +3116,12 @@ SELECT n FROM outbox WHERE id = ?1 AND kind IN ('reaction', 'edit', 'revoke', 'v
 -- src/store/write/outbox.rs
 DELETE FROM outbox WHERE message = ?1 AND state IN ('unconfirmed', 'failed')
     SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 DELETE FROM outbox WHERE message = ?1 AND state = 'failed'
     SEARCH outbox USING INDEX sqlite_autoindex_outbox_1 (message=?)
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 UPDATE outbox SET target_deleted = 1 WHERE target = ?1 AND EXISTS (SELECT 1 FROM messages WHERE n = ?1 AND deleted)
@@ -3128,6 +3144,7 @@ DELETE FROM outbox WHERE message = ?1 AND state = 'failed' AND (EXISTS (SELECT 1
       SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
     SCALAR SUBQUERY 2
       SEARCH a USING INDEX outbox_by_target (target=?)
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 SELECT NOT m.deleted AND NOT EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.kind = 'revoke') FROM messages m WHERE m.n = ?1
@@ -3149,6 +3166,7 @@ SELECT m.deleted OR EXISTS (SELECT 1 FROM outbox a WHERE a.target = m.n AND a.ki
 -- src/store/write/outbox.rs
 DELETE FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote') AND created_at < ?1
     SCAN outbox
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 SELECT count(*) FROM outbox WHERE state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote')
@@ -3159,6 +3177,7 @@ DELETE FROM outbox WHERE n IN (SELECT n FROM outbox WHERE state = 'failed' AND k
     SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
     LIST SUBQUERY 1
       SCAN outbox
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 UPDATE outbox SET target = ?1 WHERE target = ?2
@@ -3196,6 +3215,61 @@ UPDATE OR IGNORE outbox SET message = ?1 WHERE message = ?2
 -- src/store/write/outbox.rs
 UPDATE send_keys SET message = ?1 WHERE message = ?2
     SEARCH send_keys USING INDEX send_keys_by_message (message=?)
+
+-- src/store/write/outbox.rs
+INSERT INTO outgoing (outbox, message, variant, kind, source, bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (outbox) DO NOTHING
+
+-- src/store/write/outbox.rs
+INSERT INTO outbox (target, jid, id, kind, raw, next_at, created_at) VALUES (?1, ?2, ?3, 'hd', ?4, ?5, ?5) RETURNING n
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+UPDATE outgoing SET state = 'failed', error = ?2 WHERE outbox = ?1 AND state IN ('preparing', 'uploading')
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+UPDATE outbox SET state = 'failed', error = ?2 WHERE n = ?1 AND state = 'queued'
+    SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+UPDATE media SET error = ?3 WHERE message = ?1 AND variant = ?2
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/outbox.rs
+SELECT message, variant FROM outgoing WHERE outbox = ?1
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+UPDATE outgoing SET state = iif(sha256 IS NULL, 'preparing', 'uploading'), error = NULL WHERE outbox = ?1 AND state = 'failed'
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+UPDATE outbox SET state = 'queued', attempts = 0, error = NULL, next_at = ?2 WHERE target = ?1 AND kind = 'hd' AND state = 'failed' RETURNING n
+    SEARCH outbox USING INDEX outbox_by_target (target=?)
+
+-- src/store/write/outbox.rs
+SELECT kind = 'hd' FROM outbox WHERE n = ?1
+    SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+SELECT h.n FROM outbox o JOIN outbox h ON h.target = o.message WHERE o.n = ?1 AND h.kind = 'hd' AND h.state = 'queued' ORDER BY h.n
+    SEARCH o USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH h USING INDEX outbox_by_target (target=?)
+
+-- src/store/write/outbox.rs
+SELECT g.outbox FROM outgoing g JOIN messages m ON m.n = g.message JOIN outbox o ON o.n = g.outbox WHERE g.variant = 'hd' AND m.id = ?1 AND o.state = 'failed'
+    SCAN g USING INDEX outgoing_by_message
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH o USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+DELETE FROM outbox WHERE target = ?1 AND kind = 'hd' AND NOT EXISTS (SELECT 1 FROM outbox w WHERE w.message = ?1) AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.status IN ('sent', 'delivered', 'read', 'played'))
+    SEARCH outbox USING INDEX outbox_by_target (target=?)
+    SCALAR SUBQUERY 1
+      SEARCH w USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?)
+    SCALAR SUBQUERY 2
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
 SELECT value FROM sync_state WHERE key = 'me'
@@ -3274,6 +3348,81 @@ UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1
 -- src/store/write/outbox.rs
 SELECT n FROM chats WHERE id = ?1
     SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+
+-- src/store/write/outbox.rs
+SELECT chat FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outgoing.rs
+SELECT g.outbox, g.message, g.variant, g.kind, g.source, g.state, g.sha256, o.id, o.raw, m.id, iif(g.variant = 'sd', m.raw, NULL), f.path FROM outgoing g JOIN outbox o ON o.n = g.outbox LEFT JOIN messages m ON m.n = g.message LEFT JOIN media_files f ON f.sha256 = g.sha256 WHERE g.state IN ('preparing', 'uploading') ORDER BY g.outbox LIMIT ?1
+    SCAN g
+    SEARCH o USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+
+-- src/store/write/outgoing.rs
+SELECT outbox, state FROM outgoing WHERE message = ?1
+    SEARCH outgoing USING INDEX outgoing_by_message (message=?)
+
+-- src/store/write/outgoing.rs
+SELECT m.n FROM chats c JOIN messages m ON m.chat = c.n AND m.id = ?2 WHERE c.id = ?1
+    SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH m USING COVERING INDEX messages_by_id (chat=? AND id=?)
+
+-- src/store/write/outgoing.rs
+SELECT m.n FROM chats c CROSS JOIN messages m ON m.chat = c.n AND m.id = ?1 LIMIT 2
+    SCAN c USING COVERING INDEX sqlite_autoindex_chats_1
+    SEARCH m USING COVERING INDEX messages_by_id (chat=? AND id=?)
+
+-- src/store/write/outgoing.rs
+SELECT EXISTS (SELECT 1 FROM outgoing WHERE source = ?1)
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 1
+      SEARCH outgoing USING COVERING INDEX outgoing_by_source (source=?)
+
+-- src/store/write/outgoing.rs
+SELECT path FROM outgoing_drop LIMIT ?1
+    SCAN outgoing_drop
+
+-- src/store/write/outgoing.rs
+SELECT count(*), coalesce(sum(bytes), 0) FROM (SELECT source, max(bytes) AS bytes FROM outgoing WHERE source IS NOT NULL GROUP BY source)
+    CO-ROUTINE (subquery-1)
+      SEARCH outgoing USING INDEX outgoing_by_source (source>?)
+    SCAN (subquery-1)
+
+-- src/store/write/outgoing.rs
+UPDATE outgoing SET state = 'uploading', sha256 = ?2, source = NULL, error = NULL WHERE outbox = ?1 AND state = 'preparing' RETURNING message, variant
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outgoing.rs
+INSERT INTO media_files (sha256, path, bytes, used_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (sha256) DO UPDATE SET path = coalesce(path, excluded.path), bytes = iif(path IS NULL, excluded.bytes, bytes), used_at = max(used_at, excluded.used_at)
+
+-- src/store/write/outgoing.rs
+INSERT INTO media (message, variant, keys, mime, bytes, w, h, seconds, name, sha256, thumbnail, wanted, asked) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1) ON CONFLICT (message, variant) DO UPDATE SET keys = excluded.keys, mime = excluded.mime, bytes = excluded.bytes, w = excluded.w, h = excluded.h, seconds = excluded.seconds, name = coalesce(excluded.name, name), sha256 = coalesce(sha256, excluded.sha256), thumbnail = max(thumbnail, excluded.thumbnail), wanted = coalesce(wanted, excluded.wanted), asked = 1, error = NULL
+
+-- src/store/write/outgoing.rs
+UPDATE outgoing SET state = 'ready', error = NULL WHERE outbox = ?1 AND state = 'uploading' AND sha256 = ?2 RETURNING message, variant
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outgoing.rs
+UPDATE media SET media_key = coalesce(media_key, ?3), enc_sha256 = coalesce(enc_sha256, ?4), direct_path = coalesce(direct_path, ?5) WHERE message = ?1 AND variant = ?2
+    SEARCH media USING PRIMARY KEY (message=? AND variant=?)
+
+-- src/store/write/outgoing.rs
+UPDATE outbox SET raw = ?2 WHERE n = ?1
+    SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outgoing.rs
+UPDATE messages SET raw = ?2, detail = ?3, v = ?4 WHERE n = ?1 RETURNING chat
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outgoing.rs
+DELETE FROM outgoing_drop WHERE path = ?1
+    SEARCH outgoing_drop USING PRIMARY KEY (path=?)
+
+-- src/store/write/outgoing.rs
+UPDATE messages SET v = ?2 WHERE n = ?1 RETURNING chat
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/polls.rs
 INSERT INTO poll_options (message, position, name, hash) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (message, position) DO NOTHING
@@ -3491,6 +3640,7 @@ INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM message
 -- src/store/write.rs
 DELETE FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH outgoing USING COVERING INDEX outgoing_by_message (message=?)
     SEARCH unopened USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH event_answers USING PRIMARY KEY (message=?)
@@ -3902,6 +4052,7 @@ UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, tex
 
 -- src/store/write.rs
 INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, reply, detail, forwarded, edited_at, deleted, expires_at, starred, view_once, raw, v, n, mentions_me, envelope, chat, id, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) RETURNING n
+    SEARCH outgoing USING COVERING INDEX outgoing_by_message (message=?)
     SEARCH unopened USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH event_answers USING PRIMARY KEY (message=?)
@@ -4574,6 +4725,20 @@ DELETE FROM shelves WHERE ? IS NOT NULL AND chat IN (?, 0) AND shelf = ? AND ite
 -- trigger messages_uncounted
 UPDATE shelves SET items = items - 1 WHERE ? IS NOT NULL AND chat IN (?, 0) AND shelf = ?
     SEARCH shelves USING PRIMARY KEY (chat=? AND shelf=?)
+
+-- trigger outgoing_gone
+INSERT OR IGNORE INTO outgoing_drop (path) VALUES (?)
+
+-- trigger outgoing_made
+INSERT OR IGNORE INTO outgoing_drop (path) VALUES (?)
+
+-- trigger outgoing_named
+DELETE FROM media_drop WHERE sha256 = ?
+    SEARCH media_drop USING PRIMARY KEY (sha256=?)
+
+-- trigger outgoing_unnamed
+INSERT OR IGNORE INTO media_drop (sha256) SELECT ? WHERE EXISTS (SELECT 1 FROM media_files WHERE sha256 = ?)
+    SEARCH media_files EXISTS USING PRIMARY KEY (sha256=?)
 
 -- trigger people_chatted
 UPDATE folder_people SET lone = ? = 0 WHERE person = ?

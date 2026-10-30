@@ -30,6 +30,7 @@
 mod cache;
 pub(crate) mod drive;
 mod fetch;
+pub mod outgoing;
 mod previews;
 mod save;
 mod schedule;
@@ -74,6 +75,8 @@ pub struct Config {
     pub downloads: usize,
     /// Background downloads wait while the disk has less than this free.
     pub keep_free: u64,
+    /// A copy of a file to send is made only while the disk has twice its size and this much free.
+    pub send_keep_free: u64,
     /// How long a download that couldn't be done waits before it's tried again, at first and at most.
     pub retry_first: Duration,
     pub retry_most: Duration,
@@ -110,6 +113,7 @@ impl Default for Config {
             retries_per_minute: 20,
             downloads: 6,
             keep_free: mb(512),
+            send_keep_free: mb(64),
             retry_first: Duration::from_secs(2),
             retry_most: Duration::from_secs(300),
             free: None,
@@ -142,6 +146,13 @@ struct Inner {
     config: Config,
     downloads: Arc<Pool<fetch::Download>>,
     images: Arc<Pool<previews::Drawn>>,
+    /// Media out's lanes: videos, GIFs and audio encoded by ffmpeg, one or two at a time, and what
+    /// goes as it is, and every upload.
+    transcodes: Arc<Pool<()>>,
+    uploads: Arc<Pool<()>>,
+    sending: outgoing::Sending,
+    /// What every interface is told: how far a job has got, and why a file couldn't be sent.
+    pushes: broadcast::Sender<Push>,
     claims: cache::Claims,
     schedule: schedule::Schedule,
     /// Wakes the cleaner, which drops unnamed files and keeps the cache to its size.
@@ -226,6 +237,10 @@ impl Media {
             pipeline,
             downloads: Pool::new("downloads", config.downloads, 1_000),
             images: Pool::new("images", (cores / 2).max(1), 1_000),
+            transcodes: Pool::new("transcodes", if cores >= 8 { 2 } else { 1 }, 1_000),
+            uploads: Pool::new("uploads", 3, 1_000),
+            sending: outgoing::Sending::default(),
+            pushes: pushes.clone(),
             config,
             claims: cache::Claims::default(),
             schedule: schedule::Schedule::default(),
@@ -251,10 +266,16 @@ impl Media {
         let restarted = Change::Media(Step::Restarted { at: now_ms() });
         // Live, as nothing is served until media has started, whatever background work waits.
         inner.store.apply(crate::store::Lane::Live, vec![restarted]).await?;
+        let swept = outgoing::sweep(&inner).await?;
+        if swept > 0 {
+            eprintln!("jawd: removed {swept} copies of files to send that no message names");
+        }
+        inner.stats.lock().expect("media stats").orphans_removed += swept;
         schedule::start(&inner, progressing, seeing, pushes.subscribe());
         cache::start(&inner);
         fetch::start(&inner);
         settle::start(&inner, suspects);
+        outgoing::start(&inner);
         Ok(Media { inner })
     }
 
@@ -273,9 +294,42 @@ impl Media {
         }
     }
 
-    /// The download and image lanes, for `status`.
+    /// The download, image, transcode and upload lanes, for `status`.
     pub fn lanes(&self) -> Vec<Arc<dyn Report>> {
-        vec![self.inner.downloads.clone(), self.inner.images.clone()]
+        let inner = &self.inner;
+        vec![inner.downloads.clone(), inner.images.clone(), inner.transcodes.clone(), inner.uploads.clone()]
+    }
+
+    /// Keeps a copy of each of `files`, a name for it and the file you picked, in jaw's folder, and
+    /// says what each is, as `send.media` does before anything names them; or which can't be, and
+    /// why.
+    pub async fn keep(
+        &self,
+        files: Vec<(String, PathBuf)>,
+    ) -> Result<Vec<outgoing::KeptFile>, (usize, outgoing::Refused)> {
+        outgoing::keep(&self.inner, files).await
+    }
+
+    /// Removes the copies `keep` kept, when nothing came to name them.
+    pub fn unkeep(&self, kept: &[outgoing::KeptFile]) {
+        outgoing::unkeep(&self.inner, kept);
+    }
+
+    /// Has media look at the copies to make and upload now, as when some are written.
+    pub fn send_now(&self) {
+        self.inner.sending.wake();
+    }
+
+    /// Holds the copies of files to send before they're made, while `held`.
+    #[cfg(test)]
+    pub fn hold_making(&self, held: bool) {
+        self.inner.sending.hold.store(held, std::sync::atomic::Ordering::SeqCst);
+        self.inner.sending.wake();
+    }
+
+    /// What moves on each time a copy of a file to send changes state, for whatever waits for one.
+    pub fn copies_changed(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.sending.changes()
     }
 
     /// The cache and what's waiting, for `status`.
@@ -283,6 +337,13 @@ impl Media {
         let inner = &self.inner;
         let count = |what: &str| inner.store.count(what).unwrap_or(0);
         let (cache_bytes, cache_files) = cache::size(&inner.store).unwrap_or((0, 0));
+        let (kept_files, kept_bytes) = inner
+            .store
+            .pair(
+                "SELECT count(*), coalesce(sum(bytes), 0)
+                FROM (SELECT source, max(bytes) AS bytes FROM outgoing WHERE source IS NOT NULL GROUP BY source)",
+            )
+            .unwrap_or((0, 0));
         let stats = inner.stats.lock().expect("media stats");
         MediaStatus {
             cache_bytes,
@@ -311,6 +372,12 @@ impl Media {
             progress_waiting: inner.schedule.progress_behind.load(std::sync::atomic::Ordering::Relaxed),
             progress_most: schedule::PROGRESS_BEHIND as u64,
             progress_passed: inner.schedule.progress_passed.load(std::sync::atomic::Ordering::Relaxed),
+            preparing: count("outgoing WHERE state = 'preparing'"),
+            uploading: count("outgoing WHERE state = 'uploading'"),
+            unsent: count("outgoing WHERE state = 'failed'"),
+            kept_files: kept_files.max(0) as u64,
+            kept_bytes: kept_bytes.max(0) as u64,
+            kept_unneeded: count("outgoing_drop"),
         }
     }
 
@@ -486,6 +553,18 @@ async fn fetch(inner: &Arc<Inner>, fetch: MediaFetch) -> Result<Value, Error> {
 /// `media.cancel`: nothing more is done for the message's copies, synced before it's answered; a
 /// download running is stopped and leaves nothing.
 async fn cancel(inner: &Arc<Inner>, cancel: MediaCancel) -> Result<Value, Error> {
+    let (id, chat) = (cancel.message.clone(), cancel.chat.clone());
+    let n = inner
+        .store
+        .reads()
+        .query(Priority::Interactive, move |db| crate::store::outgoing::message_n(db, &id, chat.as_deref()))
+        .await
+        .map_err(|e| internal("read jaw.db", e))?;
+    if let Some(n) = n
+        && outgoing::cancel(inner, n).await?
+    {
+        return Ok(Value::Object(Default::default()));
+    }
     let mut changes = Vec::new();
     let mut running = Vec::new();
     for variant in [Variant::Sd, Variant::Hd] {
