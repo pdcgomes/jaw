@@ -67,10 +67,21 @@ extension MessageLayout.Builder {
         !(link.title ?? "").isEmpty || !(link.description ?? "").isEmpty
     }
 
-    /// What VoiceOver says of a message's card beyond its words: a link's title and host.
+    /// What VoiceOver says of a message's card beyond its words: a link's title and host, or a poll's
+    /// options with their tallies and yours, and how many voted.
     static func spoken(_ m: MessageRow) -> String? {
-        guard !m.deleted, m.kind == .text, let link = m.link, shows(link) else { return nil }
-        return "link: " + ([link.title, link.host] as [String?]).compactMap(\.self).filter { !$0.isEmpty }.joined(separator: ", ")
+        guard !m.deleted else { return nil }
+        switch m.kind {
+        case .text:
+            guard let link = m.link, shows(link) else { return nil }
+            return "link: " + ([link.title, link.host] as [String?]).compactMap(\.self).filter { !$0.isEmpty }.joined(separator: ", ")
+        case .poll:
+            guard let poll = m.poll else { return nil }
+            let options = poll.options.map { o in "\(o.name), \(Format.num(o.votes)) vote\(o.votes == 1 ? "" : "s")\(o.mine ? ", yours" : "")" }
+            return "\(pollRule(poll).lowercased()): \(options.joined(separator: "; ")); \(pollVoted(poll))"
+        default:
+            return nil
+        }
     }
 
     /// The card's size at most `most` wide.
@@ -82,9 +93,7 @@ extension MessageLayout.Builder {
         case .voice, .audio: return CGSize(width: min(most, 260), height: 40)
         case .document, .contact: return CGSize(width: w, height: 44)
         case .location, .liveLocation: return CGSize(width: w, height: 52)
-        case .poll:
-            let options = CGFloat(max(m.poll?.options.count ?? 0, 1))
-            return CGSize(width: min(most, 300), height: lineHeight(fonts.name) + 6 + options * (lineHeight(fonts.body) + 9) + lineHeight(fonts.small) + 4)
+        case .poll: return pollSize(most: most)
         case .album:
             let n = min(m.album?.items.count ?? 1, 4)
             let side = (min(most, 260) - 4) / 2
@@ -92,6 +101,43 @@ extension MessageLayout.Builder {
         case .text: return linkSize(most: most)
         case .system, .call, .event, .invite, .unknown: return nil
         }
+    }
+
+    /// A poll's card: its question on three lines at most, what a vote may choose, each option on a
+    /// row of its own, and how many voted. Its height comes from the question and the options alone,
+    /// so tallies that change move nothing.
+    func pollSize(most: CGFloat) -> CGSize {
+        let w = min(most, 300)
+        guard let poll = m.poll else { return CGSize(width: w, height: lineHeight(fonts.name)) }
+        let question = CGFloat(max(questionLines(poll, width: w).count, 1)) * lineHeight(fonts.name)
+        let options = CGFloat(poll.options.count) * optionHeight
+        return CGSize(width: w, height: ceil(question + 2 + lineHeight(fonts.small) + 8 + options + lineHeight(fonts.small)))
+    }
+
+    /// An option's row: its name with its tick and count, its bar under it, and the space before the next.
+    var optionHeight: CGFloat {
+        lineHeight(fonts.body) + 3 + 4 + 8
+    }
+
+    func questionLines(_ poll: Poll, width: CGFloat) -> [CTLine] {
+        wrapped(poll.question, fonts.name, roles.text, width: width, most: 3)
+    }
+
+    /// What a vote in the poll may choose, under its question.
+    static func pollRule(_ poll: Poll) -> String {
+        poll.max <= 1 ? "Choose one" : poll.max >= poll.options.count ? "Choose any" : "Choose up to \(poll.max)"
+    }
+
+    /// How many voted, under the options.
+    static func pollVoted(_ poll: Poll) -> String {
+        poll.voters > 0 ? "\(Format.num(poll.voters)) voted" : "No votes yet"
+    }
+
+    /// How much of its bar an option fills: its share of those who voted, or of the most-chosen
+    /// option's votes when a jawd says no more than the tallies.
+    static func pollShare(_ option: Poll.Option, in poll: Poll) -> CGFloat {
+        let total = max(poll.voters, poll.options.map(\.votes).max() ?? 0)
+        return total > 0 ? min(CGFloat(option.votes) / CGFloat(total), 1) : 0
     }
 
     /// A link's thumbnail, square: jawd keeps one 140 pixels on its long side.
@@ -290,26 +336,33 @@ extension MessageLayout.Builder {
     mutating func poll(_ r: CGRect) {
         guard let poll = m.poll else { return }
         var top = r.minY
-        text(poll.question, fonts.name, roles.text, x: r.minX, top: top, most: r.width)
-        top += lineHeight(fonts.name) + 6
-        let most = max(poll.options.map(\.votes).max() ?? 0, 1)
+        for question in questionLines(poll, width: r.width) {
+            parts.append(.line(question, CGPoint(x: r.minX, y: top + ascent(fonts.name))))
+            top += lineHeight(fonts.name)
+        }
+        top += 2
+        text(Self.pollRule(poll), fonts.small, roles.secondary, x: r.minX, top: top, most: r.width)
+        top += lineHeight(fonts.small) + 8
+        let several = poll.max > 1
+        let x = r.minX + 24
         for option in poll.options {
-            let count = line("\(option.votes)", fonts.time, roles.secondary)
+            let tick = CGRect(x: r.minX, y: top, width: 16, height: lineHeight(fonts.body))
+            let mark = several ? (option.mine ? "checkmark.square.fill" : "square") : (option.mine ? "checkmark.circle.fill" : "circle")
+            symbol(mark, 14, option.mine ? roles.accent : roles.tertiary, centredIn: tick)
+            let count = line(Format.num(option.votes), fonts.time, roles.secondary)
             let cw = width(of: count)
-            text(option.name, fonts.body, roles.text, x: r.minX, top: top, most: r.width - cw - 8)
+            text(option.name, fonts.body, roles.text, x: x, top: top, most: r.maxX - x - cw - 8)
             parts.append(.line(count, CGPoint(x: r.maxX - cw, y: top + ascent(fonts.body))))
-            top += lineHeight(fonts.body) + 2
-            let track = CGRect(x: r.minX, y: top, width: r.width, height: 4)
+            let track = CGRect(x: x, y: top + lineHeight(fonts.body) + 3, width: r.maxX - x, height: 4)
             parts.append(.fill(track, well.cgColor, 2))
-            let share = CGFloat(option.votes) / CGFloat(most)
-            if option.votes > 0 {
+            let share = Self.pollShare(option, in: poll)
+            if share > 0 {
                 parts.append(.fill(CGRect(x: track.minX, y: track.minY, width: max(4, track.width * share), height: 4),
                                    (option.mine ? roles.accent : roles.secondary.opacity(0.6)).cgColor, 2))
             }
-            top += 7
+            top += optionHeight
         }
-        let rule = poll.max > 1 ? "choose up to \(poll.max)" : "choose one"
-        text("Poll · \(rule) · vote on your phone", fonts.small, roles.tertiary, x: r.minX, top: top + 2, most: r.width)
+        text(Self.pollVoted(poll), fonts.small, roles.tertiary, x: r.minX, top: top, most: r.width)
     }
 
     mutating func album(_ r: CGRect) {

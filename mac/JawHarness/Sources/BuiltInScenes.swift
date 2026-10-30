@@ -9,6 +9,7 @@ enum BuiltInScenes {
         catalog.register(.chatList)
         catalog.register(.conversation)
         catalog.register(.linkPreviews)
+        catalog.register(.polls)
         catalog.register(.palette)
         catalog.register(.states)
         catalog.register(.screensJawd)

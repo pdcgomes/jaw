@@ -4,12 +4,43 @@ import JawUI
 import SwiftUI
 
 extension HarnessScene {
+    static var polls: HarnessScene {
+        HarnessScene(
+            id: "polls", title: "Polls", symbol: "chart.bar.xaxis",
+            synopsis: "Polls with their options, tallies and how many voted, yours ticked, in either look",
+            section: .conversation, covers: [ConversationController.self], axes: [.look], width: 680,
+        ) { PollsScene(conditions: $0) }
+    }
+
     static var linkPreviews: HarnessScene {
         HarnessScene(
             id: "link-previews", title: "Link previews", symbol: "link",
             synopsis: "Links' previews under their text, received and sent, with their thumbnails and without, in either look",
             section: .conversation, covers: [ConversationController.self], axes: [.look], width: 680,
         ) { LinkPreviewsScene(conditions: $0) }
+    }
+}
+
+/// `Samples.polls` in Lisbon Climbing, as a pane 640 points wide shows them.
+private struct PollsScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        SpecimenGroup(
+            title: "Polls in Lisbon Climbing",
+            note: "Each poll's question, on three lines at most, then what a vote may choose (Choose one, Choose any, Choose up to 2), its options each with a tick, a circle for one choice and a square for several, filled in the accent where you chose, the count on the right and a bar for the option's share of those who voted, and how many voted at the foot: Inês's with your Saturday, Rui's of any with Quickdraws' bar full, Ana's with no votes yet and no bars, yours still on its way with its clock, and Rui's of up to two with its long question wrapped and its long options cut with an ellipsis.",
+            roles: conditions.roles,
+        ) {
+            ControllerSpecimen {
+                let c = ConversationController(chat: Samples.group,
+                                               spec: LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.pictures),
+                                               layouts: Layouts(), place: .newest(100))
+                _ = c.view
+                Pictures.apply(Samples.update(of: Samples.polls), to: c)
+                return c
+            }
+            .frame(width: 640, height: 1220)
+        }
     }
 }
 

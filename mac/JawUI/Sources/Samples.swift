@@ -95,7 +95,7 @@ public enum Samples {
           {"id":"K3","v":1,"sort":"\(at + 2000)~000103","chat":"g","at":\(at + 2000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"location",
            "location":{"lat":38.7876,"lon":-9.3906,"name":"Cabo da Roca","address":"Colares, Sintra"}},
           {"id":"K4","v":1,"sort":"\(at + 3000)~000104","chat":"g","at":\(at + 3000),"from":{"id":"person:9","name":"Inês","colour":0},"kind":"poll",
-           "poll":{"question":"Which day?","max":1,"options":[{"name":"Saturday","votes":3,"mine":true},{"name":"Sunday","votes":1}]}},
+           "poll":{"question":"Which day?","max":1,"voters":4,"options":[{"name":"Saturday","votes":3,"mine":true},{"name":"Sunday","votes":1}]}},
           {"id":"K5","v":1,"sort":"\(at + 4000)~000105","chat":"g","at":\(at + 4000),"from":{"id":"person:7","name":"Rui","colour":2},"kind":"contact",
            "contact":{"name":"Climbing shop"}},
           {"id":"K6","v":1,"sort":"\(at + 5000)~000106","chat":"g","at":\(at + 5000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"text",
@@ -135,6 +135,38 @@ public enum Samples {
            "link":{"url":"https://youtu.be/sintra-boulders","title":"Sintra bouldering, part 2"}},
           {"id":"L5","v":1,"sort":"\(at + 240000)~000205","chat":"\(group.id)","at":\(at + 240000),"mine":true,"status":"delivered","kind":"text",
            "spans":[{"t":"text","s":"and the topo "},{"t":"link","s":"https://climb.pt/topo.pdf","url":"https://climb.pt/topo.pdf"}]}
+        ]
+        """
+        return (try? JSONDecoder().decode([MessageRow].self, from: Data(rows.utf8))) ?? []
+    }
+
+    /// Polls as jawd sends them, in the group: Inês's of one choice with your vote, Rui's of any number
+    /// with none of yours, Ana's that nobody has voted in, yours still on its way, and Rui's of up to
+    /// two with a long question and long options, two of them yours.
+    public static var polls: [MessageRow] {
+        let at = now - 900_000
+        func option(_ name: String, _ votes: Int, mine: Bool = false) -> String {
+            #"{"name":"\#(name)","votes":\#(votes),"mine":\#(mine)}"#
+        }
+        let rows = """
+        [
+          {"id":"P1","v":1,"sort":"\(at)~000301","chat":"\(group.id)","at":\(at),"from":{"id":"person:9","name":"Inês","colour":0},"kind":"poll",
+           "spans":[{"t":"text","s":"Which day?"}],
+           "poll":{"question":"Which day?","max":1,"voters":4,"options":[\(option("Saturday", 3, mine: true)),\(option("Sunday", 1))]}},
+          {"id":"P2","v":1,"sort":"\(at + 60000)~000302","chat":"\(group.id)","at":\(at + 60000),"from":{"id":"person:7","name":"Rui","colour":2},
+           "kind":"poll","spans":[{"t":"text","s":"What do we bring?"}],
+           "poll":{"question":"What do we bring?","max":3,"voters":3,"options":[\(option("Rope", 2)),\(option("Quickdraws", 3)),\(option("Crash pads", 1))]}},
+          {"id":"P3","v":1,"sort":"\(at + 120000)~000303","chat":"\(group.id)","at":\(at + 120000),"from":{"id":"person:4","name":"Ana","colour":4},
+           "kind":"poll","spans":[{"t":"text","s":"Dinner after?"}],
+           "poll":{"question":"Dinner after?","max":1,"voters":0,"options":[\(option("Ramen", 0)),\(option("Tasca do Chico", 0)),\(option("Pizza", 0))]}},
+          {"id":"P4","v":1,"sort":"\(at + 180000)~000304","chat":"\(group.id)","at":\(at + 180000),"mine":true,"status":"pending","kind":"poll",
+           "spans":[{"t":"text","s":"Leave at 8 or at 9?"}],
+           "poll":{"question":"Leave at 8 or at 9?","max":1,"voters":0,"options":[\(option("At 8", 0)),\(option("At 9", 0))]}},
+          {"id":"P5","v":1,"sort":"\(at + 240000)~000305","chat":"\(group.id)","at":\(at + 240000),"from":{"id":"person:7","name":"Rui","colour":2},
+           "kind":"poll","spans":[{"t":"text","s":"If the rock is dry by Saturday morning, where do we start before the sun gets onto the walls?"}],
+           "poll":{"question":"If the rock is dry by Saturday morning, where do we start before the sun gets onto the walls?","max":2,"voters":5,
+                   "options":[\(option("Cabo da Roca, on the slabs above the lighthouse", 2, mine: true)),\(option("Peninha, if the wind has dropped", 1)),
+                              \(option("The boulders below the palace", 2, mine: true)),\(option("Anywhere with shade all day, please", 4))]}}
         ]
         """
         return (try? JSONDecoder().decode([MessageRow].self, from: Data(rows.utf8))) ?? []
