@@ -262,7 +262,7 @@ public enum MessageLayout {
     public static let fold = 40
 
     public static func lay(_ m: MessageRow, width: CGFloat, context: MessageContext, style: Style, fonts: FontSet,
-                           me: Set<String>, pictures: (any PictureSource)? = nil) -> Laid
+                           me: Set<String>, pictures: (any ThumbnailSource)? = nil) -> Laid
     {
         var b = Builder(m: m, width: max(width, 160), context: context, style: style, fonts: fonts, me: me, pictures: pictures)
         return b.build()
@@ -276,7 +276,7 @@ public enum MessageLayout {
         let fonts: FontSet
         let me: Set<String>
         /// Where the message's pictures are read from, by the paths jawd sends.
-        let pictures: (any PictureSource)?
+        let pictures: (any ThumbnailSource)?
         let metrics: Metrics
         let roles: Roles
         var parts: [Laid.Part] = []
@@ -285,7 +285,7 @@ public enum MessageLayout {
         var y: CGFloat = 0
 
         init(m: MessageRow, width: CGFloat, context: MessageContext, style: Style, fonts: FontSet, me: Set<String>,
-             pictures: (any PictureSource)? = nil)
+             pictures: (any ThumbnailSource)? = nil)
         {
             self.m = m
             self.width = width

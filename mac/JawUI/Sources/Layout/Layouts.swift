@@ -8,9 +8,9 @@ public final class LayoutSpec: Sendable, Hashable {
     public let style: Style
     public let fonts: FontSet
     public let me: Set<String>
-    public let pictures: (any PictureSource)?
+    public let pictures: (any ThumbnailSource)?
 
-    public init(style: Style, me: Set<String>, pictures: (any PictureSource)? = nil) {
+    public init(style: Style, me: Set<String>, pictures: (any ThumbnailSource)? = nil) {
         self.style = style
         fonts = FontSet(size: style.textSize, mono: style.font == .mono)
         self.me = me

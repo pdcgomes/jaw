@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 
 /// Where a message's pictures come from, by the paths jawd sends: jawd's folder in the app, and
 /// pictures drawn for the purpose in the harness and the tests.
-public protocol PictureSource: Sendable {
+public protocol ThumbnailSource: Sendable {
     /// What tells this source from another, so a layout made with one isn't taken for another's.
     var id: String { get }
     /// The picture at `path` under jawd's root, decoded so its short side is `pixels`, to fill a
@@ -20,7 +20,7 @@ public protocol PictureSource: Sendable {
 /// thumbnail decoded for its square takes 78 KB, so the 8 MB kept hold a hundred of them; past that
 /// the least recently drawn go first. A file that can't be read isn't remembered, so one jawd keeps
 /// later is read then.
-public final class FolderPictures: PictureSource {
+public final class FolderPictures: ThumbnailSource {
     public let root: String
     /// The most bytes kept decoded.
     let most: Int

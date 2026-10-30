@@ -186,7 +186,7 @@ public enum Samples {
 
     /// The samples' pictures, drawn here rather than read from jawd's folder, so the harness and the
     /// tests draw what the app would without a file: the thumbnails of the sample links.
-    public static let pictures: any PictureSource = SamplePictures()
+    public static let pictures: any ThumbnailSource = SampleThumbnails()
 
     /// The window update a watch of those messages returns.
     public static var update: Update<MessageRow> {
@@ -201,7 +201,7 @@ public enum Samples {
 
 /// Each sample link's thumbnail, 140 pixels square as jawd keeps one: a sky, a hill in front of it,
 /// and a sun for the forecast.
-struct SamplePictures: PictureSource {
+struct SampleThumbnails: ThumbnailSource {
     static let drawn: [String: (sky: UInt32, hill: UInt32, sun: Bool)] = [
         "media/links/ipma.jpg": (0x7AA2F7, 0x9ECE6A, true),
         "media/links/sintra.jpg": (0xBB9AF7, 0x414868, false),
