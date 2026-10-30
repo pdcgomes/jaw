@@ -174,6 +174,13 @@ Once `send-contact` lands, jawd serves `send.contact` (one card or several, each
 - **Needs from jawd:** `send-contact`, built and in audit.
 - **The check:** `send.contact`.
 
+### 3.10 Communities in the chat list
+
+Since `communities` lands, jawd shows a community as one row wherever its groups would show, as the protocol's "Communities in a chat list" has it: in Unread, Groups, Archived, your folders and the smart folders too, not only in All and Communities, its row summing up the groups of it the list holds (`children_unread`, and `children_mentions`, new), its `last` their newest message and its place just above the newest of them. The groups now keep their own `sort` rather than sorting right after their community, and a window brings the groups only of the communities named in its `open`, every community's when it sends none, as the Mac does now. The terminal sends `open` and shows the Communities folder with each community open.
+
+- **The Mac's:** read `children_mentions` for a community's @ badge; place a community's groups under it by `community` and its own `sort`, the announcement group first, as `rebuild()` does already, but hide a group under a row only when that row's `kind` is `community` (a group naming a chat that's only a group to jaw shows on its own); send `open` with `chats.watch` and `watch.move`, moving the window as a community opens or closes; and open every community in the Communities folder.
+- **The check:** nothing, since `open` is a parameter of requests the Mac sends already; the parity canvas carries it.
+
 ## Phase 4 · The Mac's own, after the gaps
 
 The rest of Mac-M2 (the viewer, GIFs looping while on screen, videos and video messages playing in place, a document's first page, MapKit's maps, contact cards' Message and Add to Contacts, animated stickers with P4) and Mac-M5 (Redlamp's themes, the animations, the Mimic's chomp everywhere, notifications with Reply and Mark as Read with P2, the Dock badge with P3, Settings whole with P5, accessibility, a signed and notarized build with updates). Each starts once the gaps of its area are closed, so the viewer can follow 2.3 while voice is still waiting on jawd.

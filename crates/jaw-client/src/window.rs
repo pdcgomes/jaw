@@ -48,28 +48,39 @@ pub struct Place {
     pub around: Around,
     pub before: u32,
     pub after: u32,
+    /// For a chat list, the communities whose groups it brings; every community's when None.
+    pub open: Option<Vec<String>>,
 }
 
 impl Place {
     /// The chat list from its first row.
     pub fn top(after: u32) -> Place {
-        Place { around: Around::Top, before: 0, after }
+        Place { around: Around::Top, before: 0, after, open: None }
     }
 
     /// A chat's newest messages; the window follows new ones.
     pub fn newest(before: u32) -> Place {
-        Place { around: Around::Newest, before, after: 0 }
+        Place { around: Around::Newest, before, after: 0, open: None }
     }
 
     /// A chat's first unread message, found once when the window is watched, or its newest when
     /// nothing is unread.
     pub fn unread(before: u32, after: u32) -> Place {
-        Place { around: Around::Unread, before, after }
+        Place { around: Around::Unread, before, after, open: None }
     }
 
     /// Around a row: a chat in the list, or a message in a chat.
     pub fn around(id: impl Into<String>, before: u32, after: u32) -> Place {
-        Place { around: Around::Row(id.into()), before, after }
+        Place { around: Around::Row(id.into()), before, after, open: None }
+    }
+
+    /// A chat list bringing the groups of these communities only, each other community coming as
+    /// its one row.
+    pub fn open(self, communities: impl IntoIterator<Item = String>) -> Place {
+        let mut open: Vec<String> = communities.into_iter().collect();
+        open.sort();
+        open.dedup();
+        Place { open: Some(open), ..self }
     }
 }
 

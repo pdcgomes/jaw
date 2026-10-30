@@ -580,23 +580,29 @@ impl Account {
         }
     }
 
-    /// How many chats the chat list's folder holds.
+    /// How many rows the chat list's folder has: its chats, and each community it holds only for
+    /// its groups.
     fn total(&self) -> u64 {
         let list = &self.folders.list;
-        self.threads.iter().filter(|t| self.in_folder(list, &t.chat, None)).count() as u64
+        self.threads.iter().filter(|t| self.in_list(list, &t.chat, None)).count() as u64
     }
 
-    /// A chat's row changed: into the chat list if its folder holds it, out if not, and the
-    /// folders' counts after it.
+    /// A chat's row changed: into the chat list if its folder holds it, out if not, with its
+    /// community's, which a group can bring into the list or take out of it, and the folders'
+    /// counts after it.
     fn push_chat(&mut self, t: usize) {
-        let row = self.threads[t].chat.clone();
+        let community = self.threads[t].chat.community.as_ref().and_then(|c| self.index.get(c)).copied();
         let list = self.folders.list.clone();
         let total = Some(self.total());
-        let update = if self.in_folder(&list, &row, None) {
-            Window { upsert: vec![row], total, ..Window::default() }
-        } else {
-            Window { remove: vec![row.id], total, ..Window::default() }
-        };
+        let mut update = Window { total, ..Window::default() };
+        for t in std::iter::once(t).chain(community) {
+            let row = self.threads[t].chat.clone();
+            if self.in_list(&list, &row, None) {
+                update.upsert.push(row);
+            } else {
+                update.remove.push(row.id);
+            }
+        }
         self.send(Update::Chats(update));
         self.folders_changed();
     }
@@ -1229,6 +1235,7 @@ impl Writing {
             community: None,
             folders: vec![],
             children_unread: None,
+            children_mentions: None,
             favourite: None,
         };
         Writing { thread: Thread { chat, messages: vec![] }, now, seq: 0 }
@@ -1555,8 +1562,8 @@ fn made_up(now: i64) -> Vec<Thread> {
     let mut w = Writing::new("bairro", "Bairro de Alvalade", ChatKind::Community, now);
     w.theirs(11.0 * days, &junta, "Recolha de monos na quinta-feira");
     let mut community = w.done(0, 0);
-    community.chat.unread = unread;
     community.chat.children_unread = Some(unread);
+    community.chat.children_mentions = Some(0);
     community.messages.clear();
     threads.push(community);
 

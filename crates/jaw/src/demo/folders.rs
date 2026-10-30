@@ -203,6 +203,16 @@ impl Account {
         }
     }
 
+    /// Whether `chat` is a row of `folder`'s chat list: a chat the folder holds, or a community
+    /// any of whose groups it holds, as jawd lists them.
+    pub(super) fn in_list(&self, folder: &str, chat: &Chat, held: Option<&HashSet<String>>) -> bool {
+        self.in_folder(folder, chat, held)
+            || chat.kind == ChatKind::Community
+                && self.threads.iter().any(|t| {
+                    t.chat.community.as_deref() == Some(chat.id.as_str()) && self.in_folder(folder, &t.chat, held)
+                })
+    }
+
     /// Every folder row with its counts as they are now.
     fn folder_rows(&self) -> Vec<FolderRow> {
         let mut rows = self.folders.rows.clone();
@@ -317,7 +327,7 @@ impl Account {
     pub(super) fn list_rows(&mut self, folder: &str) -> Vec<Chat> {
         self.folders.list = folder.to_string();
         let held = self.folders.held(folder);
-        self.threads.iter().map(|t| t.chat.clone()).filter(|c| self.in_folder(folder, c, Some(&held))).collect()
+        self.threads.iter().map(|t| t.chat.clone()).filter(|c| self.in_list(folder, c, Some(&held))).collect()
     }
 
     /// The folders an item is filed in directly, for its row.

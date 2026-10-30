@@ -2385,6 +2385,100 @@ fn a_community_is_one_row_that_opens_to_its_groups_announcements_first() {
     assert!(line_with(&screen, "Festa de Natal").contains("│     Festa"), "indented under it:\n{screen}");
 }
 
+#[test]
+fn the_chat_list_asks_jawd_for_the_groups_of_only_the_communities_it_has_open() {
+    let (mut v, rx) = view(140, 44);
+    let open = |v: &View| v.chats.place.open.clone();
+    assert_eq!(open(&v), Some(vec![]), "none open in All");
+    v.toggle_community("bairro");
+    run::settle(&mut v, &rx);
+    assert_eq!(open(&v), Some(vec!["bairro".to_string()]), "opening Bairro brings its groups");
+    v.toggle_community("bairro");
+    run::settle(&mut v, &rx);
+    assert_eq!(open(&v), Some(vec![]), "and closing it lets them go");
+    v.pick_folder("communities");
+    run::settle(&mut v, &rx);
+    assert_eq!(open(&v), None, "the Communities folder brings every community's groups");
+    v.pick_folder("all");
+    run::settle(&mut v, &rx);
+    v.toggle_community("bairro");
+    v.pick_folder("unread");
+    run::settle(&mut v, &rx);
+    v.apply(Update::FolderRefused { folder: "unread".into(), why: "jawd has no folder unread".into() });
+    run::settle(&mut v, &rx);
+    assert_eq!((v.folder.as_str(), open(&v)), ("all", Some(vec!["bairro".to_string()])), "a refused folder's All too");
+}
+
+#[test]
+fn the_communities_folder_shows_each_community_with_its_groups_and_landing_on_one_closes_it() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-b><down><down><down>\n");
+    assert_eq!(v.folder, "communities");
+    let screen = frame(&mut v);
+    assert!(screen.contains("▾ Bairro de Alvalade"), "open in the Communities folder:\n{screen}");
+    let (avisos, festa) = (row_of(&screen, "Avisos do Bairro").unwrap(), row_of(&screen, "Festa de Natal").unwrap());
+    assert!(avisos < festa && screen.contains("Biblioteca"), "its groups, announcements first:\n{screen}");
+    // Alt-Down to the community, which toggles it as it lands on it.
+    press(&mut v, &rx, "<esc><a-down>");
+    assert_eq!(v.selected.as_deref(), Some("bairro"));
+    let screen = frame(&mut v);
+    assert!(screen.contains("▸ Bairro de Alvalade") && !screen.contains("Festa de Natal"), "closed:\n{screen}");
+    press(&mut v, &rx, "<c-b><up><up><up>\n");
+    assert_eq!(v.folder, "all");
+    assert!(frame(&mut v).contains("▸ Bairro de Alvalade"), "closed in All until it's opened there");
+}
+
+#[test]
+fn a_communitys_row_shows_its_groups_mentions_and_reads_bold_while_they_have_unread() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-b><down><down><down>\n");
+    let mut bairro: Chat = v.chats.get("bairro").unwrap().clone();
+    bairro.v += 1;
+    bairro.children_mentions = Some(2);
+    v.apply(Update::Chats(jaw_client::Update { upsert: vec![bairro], ..Default::default() }));
+    let screen = frame(&mut v);
+    let row = screen.lines().find(|l| l.contains("Bairro de")).expect("the community's row");
+    assert!(row.contains("@2 3"), "its groups' mentions, then their unread:\n{screen}");
+    let (w, h) = v.size().unwrap();
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| v.draw(f)).unwrap();
+    let y = row_of(&screen, "Bairro de").unwrap() as u16;
+    let x = row.find("Bairro").unwrap() as u16;
+    let x = screen.lines().nth(y as usize).unwrap()[..x as usize].chars().count() as u16;
+    assert!(
+        term.backend().buffer()[(x, y)].modifier.contains(ratatui::style::Modifier::BOLD),
+        "bold for its groups' unread"
+    );
+}
+
+#[test]
+fn the_unread_folder_holds_a_community_for_its_unread_groups() {
+    let (mut v, rx) = view(140, 44);
+    press(&mut v, &rx, "<c-b><down>\n");
+    assert_eq!(v.folder, "unread");
+    let screen = frame(&mut v);
+    let row = screen.lines().find(|l| l.contains("Bairro de Alvalade")).expect("the community, for its groups");
+    assert!(row.contains("▸") && row.split("││").nth(1).unwrap_or_default().trim_end().ends_with(" 3"), "{screen}");
+    assert!(!screen.contains("Festa de Natal"), "its groups under it, closed:\n{screen}");
+}
+
+#[test]
+fn a_group_whose_community_is_no_community_row_shows_on_its_own() {
+    let (mut v, _rx) = view(140, 44);
+    let row = |id: &str, name: &str, kind: &str, community: Option<&str>, at: i64| -> Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "v": 900, "sort": format!("0~{:013}", at), "kind": kind, "name": name,
+            "last": {"from": "Rui", "summary": "vamos?", "kind": "text", "at": at}, "unread": 1, "community": community
+        }))
+        .unwrap()
+    };
+    let vela = row("vela", "Vela", "group", None, NOW - 1_000);
+    let regata = row("regata", "Regata", "group", Some("vela"), NOW - 2_000);
+    v.apply(Update::Chats(jaw_client::Update { upsert: vec![vela, regata], ..Default::default() }));
+    let screen = frame(&mut v);
+    assert!(line_with(&screen, "Regata").contains("│   Regata"), "on its own, not under Vela:\n{screen}");
+}
+
 fn library_rows(v: &View) -> Vec<crate::data::LibraryRow> {
     v.library.as_ref().map(|l| l.rows.clone()).unwrap_or_default()
 }

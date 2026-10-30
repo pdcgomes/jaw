@@ -224,7 +224,7 @@ impl View {
         self.chats = Chats::new(folder, Place::top(super::LIST_ROWS));
         self.rows_laid.clear();
         self.list_top = 0;
-        self.jawd.watch_chats(folder, Place::top(super::LIST_ROWS));
+        self.jawd.watch_chats(folder, self.list_place());
         self.roster.clear();
         self.jawd.watch_roster(folder);
         self.dirty = true;
@@ -614,17 +614,19 @@ impl View {
     }
 
     /// The chat list's rows in the order they're drawn: a community's groups hidden under it
-    /// until it's opened, then right after it.
+    /// until it's opened, then right after it; a group whose community the list hasn't a row for
+    /// on its own.
     pub(super) fn list_order(&self) -> Vec<String> {
         let rows: Vec<&crate::data::Chat> = self.chats.rows().collect();
-        let held: HashSet<&str> = rows.iter().map(|c| c.id.as_str()).collect();
+        let communities: HashSet<&str> =
+            rows.iter().filter(|c| c.kind == crate::data::ChatKind::Community).map(|c| c.id.as_str()).collect();
         let mut out = vec![];
         for c in &rows {
-            if c.community.as_deref().is_some_and(|p| held.contains(p)) {
+            if c.community.as_deref().is_some_and(|p| communities.contains(p)) {
                 continue;
             }
             out.push(c.id.clone());
-            if c.kind == crate::data::ChatKind::Community && self.communities_open.contains(&c.id) {
+            if c.kind == crate::data::ChatKind::Community && self.community_open(&c.id) {
                 let mut groups: Vec<&&crate::data::Chat> =
                     rows.iter().filter(|g| g.community.as_deref() == Some(&c.id)).collect();
                 groups.sort_by_key(|g| g.kind != crate::data::ChatKind::Announcement);
@@ -668,13 +670,42 @@ impl View {
             .map(|f| f.slot)
     }
 
+    /// The chat list's place as jawd is asked for it: from the top, bringing the groups of the
+    /// communities open in it, so it receives only what it shows; every community's in the
+    /// Communities folder, which shows each with its groups.
+    pub(super) fn list_place(&self) -> Place {
+        let top = Place::top(super::LIST_ROWS);
+        match self.folder.as_str() {
+            "communities" => top,
+            _ => top.open(self.communities_open.iter().cloned()),
+        }
+    }
+
+    /// Whether a community shows its groups under it: in the Communities folder, which lists each
+    /// community with its groups, until it's closed; elsewhere once it's opened.
+    pub(super) fn community_open(&self, id: &str) -> bool {
+        match self.folder.as_str() {
+            "communities" => !self.communities_closed.contains(id),
+            _ => self.communities_open.contains(id),
+        }
+    }
+
     /// Opens a community to show its groups, or closes it; says whether `id` was one.
     pub(super) fn toggle_community(&mut self, id: &str) -> bool {
         if self.chats.get(id).is_none_or(|c| c.kind != crate::data::ChatKind::Community) {
             return false;
         }
-        if !self.communities_open.remove(id) {
-            self.communities_open.insert(id.to_string());
+        let toggled = match self.folder.as_str() {
+            "communities" => &mut self.communities_closed,
+            _ => &mut self.communities_open,
+        };
+        if !toggled.remove(id) {
+            toggled.insert(id.to_string());
+        }
+        // Its groups come once jawd's asked for them, and go once it's closed.
+        if self.folder != "communities" {
+            let folder = self.folder.clone();
+            self.jawd.watch_chats(&folder, self.list_place());
         }
         self.selected = Some(id.to_string());
         self.dirty = true;

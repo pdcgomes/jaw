@@ -639,7 +639,10 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
     pub fn move_window(&self, window: WindowId, place: Place) {
         let mut state = self.shared.lock();
         let Some(w) = state.windows.get_mut(&window) else { return };
-        w.place = place;
+        // A chat list's move without open keeps the window's, as jawd does, so watching it again
+        // after a reconnect brings the same groups.
+        let open = place.open.clone().or_else(|| w.place.open.take());
+        w.place = Place { open, ..place };
         if w.asking.is_none() && state.live {
             self.shared.ask(&mut state, window, false);
         }
@@ -839,10 +842,11 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         let id = state.id();
         let w = state.windows.get_mut(&window)?;
         let place = w.place.clone();
-        let Place { around, before, after } = place.clone();
+        let Place { around, before, after, open } = place.clone();
         let line = match &w.watch {
             Some(watch) if !again => {
-                let moving = WatchMove { watch: watch.clone(), around, before, after, open: None };
+                let open = if w.kind == Kind::Chats { open } else { None };
+                let moving = WatchMove { watch: watch.clone(), around, before, after, open };
                 encode(id, "watch.move", value(&moving))
             }
             _ => {
@@ -852,8 +856,7 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                     // A chat list held while catching up sends rows with an old sort and their v
                     // unchanged, so a chat list comes whole, its have saying which rows left.
                     Kind::Chats => {
-                        let watch =
-                            ChatsWatch { folder: w.of.clone(), around, before, after, since: None, have, open: None };
+                        let watch = ChatsWatch { folder: w.of.clone(), around, before, after, since: None, have, open };
                         encode(id, "chats.watch", value(&watch))
                     }
                     Kind::Messages => {

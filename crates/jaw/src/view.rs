@@ -254,6 +254,8 @@ pub struct View {
     sidebar: sidebar::Sidebar,
     /// Communities opened in the chat list to show their groups.
     communities_open: HashSet<String>,
+    /// Communities closed in the Communities folder, which shows each with its groups.
+    communities_closed: HashSet<String>,
     /// Messages and actions whose answer a dropped connection lost, by chat and key, until jawd
     /// answers for them again.
     unsure: Vec<(String, String)>,
@@ -399,6 +401,7 @@ impl View {
             favourites: vec![],
             sidebar: sidebar::Sidebar::default(),
             communities_open: HashSet::new(),
+            communities_closed: HashSet::new(),
             unsure: vec![],
             keys: HashMap::new(),
             sent: std::collections::VecDeque::new(),
@@ -704,6 +707,8 @@ impl View {
                     self.folder = "all".into();
                     self.chats = Chats::new("all", Place::top(LIST_ROWS));
                     self.rows_laid.clear();
+                    let place = self.list_place();
+                    self.jawd.watch_chats("all", place);
                     self.jawd.watch_roster("all");
                 }
                 self.say(why);
@@ -761,7 +766,8 @@ impl View {
     /// panes' layout asked for.
     fn start_watching(&mut self) {
         self.watching = true;
-        self.jawd.watch_chats(&self.folder, Place::top(LIST_ROWS));
+        let place = self.list_place();
+        self.jawd.watch_chats(&self.folder, place);
         self.jawd.watch_folders();
         self.jawd.watch_roster(&self.folder);
         self.ask_layout();

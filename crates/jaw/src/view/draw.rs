@@ -475,7 +475,7 @@ impl View {
             let y = inner.y + 2 * k as u16;
             let selected = self.selected.as_deref() == Some(id.as_str());
             let open = self.open.as_deref() == Some(id.as_str());
-            let key = (chat.v, open, w, now / fmt::MINUTE, self.communities_open.contains(id), self.typing_key(id));
+            let key = (chat.v, open, w, now / fmt::MINUTE, self.community_open(id), self.typing_key(id));
             let rows = match self.rows_laid.get(id.as_str()) {
                 Some(laid) if laid.key == key => laid.rows.clone(),
                 _ => {
@@ -506,10 +506,10 @@ impl View {
         if let Some(last) = &chat.last {
             right.push(Span::styled(fmt::when(last.at, now, self.tz), Style::new().fg(t.comment)));
         }
-        if chat.mentions > 0 {
+        if chat.shown_mentions() > 0 {
             right.push(Span::raw(" "));
             right.push(Span::styled(
-                format!("@{}", chat.mentions),
+                format!("@{}", chat.shown_mentions()),
                 Style::new().fg(t.mention).add_modifier(Modifier::BOLD),
             ));
         }
@@ -522,18 +522,21 @@ impl View {
         let right_w: usize = right.iter().map(|s| s.width()).sum();
         let typing = self.who_types(chat);
         let community = chat.kind == crate::data::ChatKind::Community;
-        let mark = match (typing.is_some(), community, self.communities_open.contains(&chat.id)) {
+        let mark = match (typing.is_some(), community, self.community_open(&chat.id)) {
             (true, _, _) => Span::styled("●", Style::new().fg(t.online)),
             (false, true, true) => Span::styled("▾", Style::new().fg(t.comment)),
             (false, true, false) => Span::styled("▸", Style::new().fg(t.comment)),
             _ => Span::raw(" "),
         };
-        let inside = chat.community.as_deref().is_some_and(|c| self.chats.get(c).is_some());
+        let inside = chat
+            .community
+            .as_deref()
+            .is_some_and(|c| self.chats.get(c).is_some_and(|c| c.kind == crate::data::ChatKind::Community));
         let lead = if inside { "   " } else { " " };
         let pin = if chat.pinned { " ▴" } else { "" };
         let name_w = w.saturating_sub(1 + lead.len() + right_w + pin.len().min(2) + 1);
         let name_style = Style::new().fg(if muted { t.muted } else { t.fg });
-        let name_style = if chat.unread > 0 { name_style.add_modifier(Modifier::BOLD) } else { name_style };
+        let name_style = if chat.shown_unread() > 0 { name_style.add_modifier(Modifier::BOLD) } else { name_style };
         let first = fill(
             vec![
                 mark,

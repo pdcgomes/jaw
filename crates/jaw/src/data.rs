@@ -67,9 +67,12 @@ pub struct Chat {
     /// The IDs of your folders it sits in directly.
     #[serde(default)]
     pub folders: Vec<String>,
-    /// For a community, its groups' unread total, which its row shows.
+    /// For a community, the unread total of the groups under it, which its row shows.
     #[serde(default)]
     pub children_unread: Option<u32>,
+    /// For a community, how many of the unread messages of the groups under it mention you.
+    #[serde(default)]
+    pub children_mentions: Option<u32>,
     /// Its Alt slot, 1 to 9.
     #[serde(default)]
     pub favourite: Option<u8>,
@@ -81,6 +84,14 @@ impl Chat {
         match self.kind {
             ChatKind::Community => self.children_unread.unwrap_or(self.unread),
             _ => self.unread,
+        }
+    }
+
+    /// The mentions its row shows: a community's are its groups'.
+    pub fn shown_mentions(&self) -> u32 {
+        match self.kind {
+            ChatKind::Community => self.children_mentions.unwrap_or(self.mentions),
+            _ => self.mentions,
         }
     }
 }

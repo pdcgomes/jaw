@@ -597,3 +597,45 @@ fn a_rosters_people_own_chats_are_shown_for_typing_from_its_answer_and_its_pushe
     });
     assert_eq!(last, Some(vec!["c".to_string()]));
 }
+
+#[test]
+fn a_chat_lists_open_goes_with_its_watch_each_move_and_a_reconnect_and_a_move_without_it_keeps_it() {
+    let fake = Fake::new();
+    let client: Client = Client::start(fake.config(), || {});
+    let mut peer = fake.accept();
+    peer.greet();
+    connected(&client);
+    let open = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    let list = client.watch_chats("all", Place::top(10).open(open(&["vela", "bairro", "vela"])));
+    let watch = peer.request();
+    assert_eq!((watch["method"].as_str(), &watch["params"]["open"]), (Some("chats.watch"), &json!(["bairro", "vela"])));
+    peer.answer(&watch, json!({"watch": "w1", "seq": 5, "total": 1, "rows": [chat("ana", 4)]}));
+    let chat_window = client.watch_messages("c", Place::newest(3));
+    let messages = peer.request();
+    peer.answer(&messages, watched("w2", 5, (1..=3).map(message).collect()));
+    client.move_window(chat_window, Place::around("m00002", 1, 1));
+    let moved = peer.request();
+    assert_eq!(moved["params"].get("open"), None, "a chat's window has none: {moved}");
+    let answer = json!({"watch": "w2", "seq": 5, "total": 3, "older": true, "newer": 1, "rows": [], "remove": []});
+    peer.answer(&moved, answer);
+
+    let moves = [
+        (Place::top(10).open(open(&["bairro"])), json!(["bairro"])),
+        (Place::top(10).open(Vec::new()), json!([])),
+        (Place::top(20), json!([])),
+    ];
+    for (place, sent) in moves {
+        let asked = place.open.clone();
+        client.move_window(list, place);
+        let moving = peer.request();
+        assert_eq!(moving["method"], "watch.move");
+        assert_eq!(moving["params"]["open"], sent, "a move asking {asked:?}");
+        peer.answer(&moving, json!({"watch": "w1", "seq": 5, "total": 1, "rows": [], "remove": []}));
+    }
+    drop(peer);
+    let mut peer = fake.accept();
+    peer.greet();
+    let watches = [peer.request(), peer.request()];
+    let again = watches.iter().find(|w| w["method"] == "chats.watch").expect("the chat list watched again");
+    assert_eq!(again["params"]["open"], json!([]), "watched again with the communities it had open: {again}");
+}
