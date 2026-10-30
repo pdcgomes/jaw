@@ -44,6 +44,10 @@ const ALLOWED: &[(&str, &str)] = &[
         "a scan down the rowid that stops at its first row: the first event with what waits for it left to take",
     ),
     (
+        "FROM unopened u JOIN messages m ON m.n = u.message",
+        "the events with something kept sealed that didn't open, a handful, as a person is known by another JID",
+    ),
+    (
         "SELECT n, id, name, person, frecency, opened_at, last_at FROM chats",
         "the palette's index is built from every chat once, at start",
     ),

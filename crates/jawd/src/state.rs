@@ -286,6 +286,7 @@ impl State {
                     answers_set_aside: store.count("quarantine WHERE source = 'answer'").ok()?,
                     edits_set_aside: store.count("quarantine WHERE source = 'edit'").ok()?,
                     events_opening: store.count("openings").ok()?,
+                    events_unopened: store.count("unopened").ok()?,
                 })
             }),
             interfaces: Some(Interfaces {

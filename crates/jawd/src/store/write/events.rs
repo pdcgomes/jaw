@@ -87,6 +87,18 @@ const TAKEN: &str = "DELETE FROM pending WHERE n = ?1";
 const OPENING: &str = "INSERT INTO openings (message, at, n) VALUES (?1, ?2, ?3)
     ON CONFLICT (message) DO UPDATE SET at = excluded.at, n = excluded.n";
 const OPENED: &str = "DELETE FROM openings WHERE message = ?1";
+/// That event ?1 has something kept sealed for it that didn't open with the JIDs jaw knew.
+const UNOPENED: &str = "INSERT INTO unopened (message) VALUES (?1) ON CONFLICT (message) DO NOTHING";
+const STILL_SEALED: &str =
+    "SELECT EXISTS (SELECT 1 FROM pending WHERE chat = ?1 AND target = ?2 AND kind IN ('rsvp', 'secret'))";
+const OPEN_NOW: &str = "DELETE FROM unopened WHERE message = ?1";
+// The events with something kept sealed for them that didn't open, which person ?1 sent, or which
+// something kept sealed came for from one of their JIDs.
+const SEALED_BETWEEN: &str = "SELECT u.message FROM unopened u
+    JOIN messages m ON m.n = u.message JOIN chats c ON c.n = m.chat
+    WHERE m.sender IN (SELECT n FROM person_jids WHERE person = ?1)
+        OR EXISTS (SELECT 1 FROM pending p WHERE p.chat = c.id AND p.target = m.id AND p.kind IN ('rsvp', 'secret')
+            AND p.sender IN (SELECT jid FROM person_jids WHERE person = ?1))";
 /// The first event with what waits for it still to be taken, where its step goes on from, and the
 /// chat it's in.
 const FIRST_OPENING: &str = "SELECT o.message, o.at, o.n, m.chat, c.id, m.id FROM openings o
@@ -285,7 +297,29 @@ enum Taken {
 /// TAKEN_AT_ONCE of it at most, from the first, leaving the rest to steps.
 pub(super) fn arrived(db: &Connection, stamps: &mut Stamps, event: Arrived) -> Result<()> {
     let (left, _) = take(db, stamps, event, FROM_START, TAKEN_AT_ONCE, false)?;
-    left_to_take(db, stamps, event.1, left)
+    left_to_take(db, stamps, event, left)
+}
+
+/// Notes that event `n` has something kept sealed for it that didn't open with the JIDs jaw knows
+/// its people by, to be tried again once one of them is known by another (`known_again`).
+pub(super) fn unopened(db: &Connection, n: i64) -> Result<()> {
+    db.prepare_cached(UNOPENED)?.execute([n])?;
+    Ok(())
+}
+
+/// Has what's kept sealed for events tried again from the first, in steps, where it may be sealed
+/// between JIDs of `person`'s, who has just been found to be known by another: the events they
+/// sent, and those something kept sealed came for from one of their JIDs. An answer to an event
+/// or an edit of it is sealed between the JIDs its author and its sender went by, which jaw may
+/// learn are theirs only afterwards.
+pub(super) fn known_again(db: &Connection, stamps: &mut Stamps, person: i64) -> Result<()> {
+    let events: Vec<i64> =
+        db.prepare_cached(SEALED_BETWEEN)?.query_map([person], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    for n in events {
+        db.prepare_cached(OPENING)?.execute(params![n, FROM_START.0, FROM_START.1])?;
+        stamps.opening();
+    }
+    Ok(())
 }
 
 /// Takes the next few of what waits for the first event with some left, from where the last step
@@ -296,14 +330,16 @@ pub(super) fn step(db: &Connection, stamps: &mut Stamps) -> Result<bool> {
         .query_row([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
         .optional()?;
     let Some((n, at, after, chat, chat_jid, id)) = first else { return Ok(false) };
-    let (left, changed) = take(db, stamps, (chat, n, &chat_jid, &id), (at, after), STEP_MOST, true)?;
-    left_to_take(db, stamps, n, left)?;
+    let event = (chat, n, chat_jid.as_str(), id.as_str());
+    let (left, changed) = take(db, stamps, event, (at, after), STEP_MOST, true)?;
+    left_to_take(db, stamps, event, left)?;
     Ok(changed)
 }
 
-/// Keeps where taking what waits for event `n` goes on from, for its next step, or that nothing is
-/// left.
-fn left_to_take(db: &Connection, stamps: &mut Stamps, n: i64, left: Left) -> Result<()> {
+/// Keeps where taking what waits for `event` goes on from, for its next step, or that nothing is
+/// left, and then whether anything kept sealed for it didn't open.
+fn left_to_take(db: &Connection, stamps: &mut Stamps, event: Arrived, left: Left) -> Result<()> {
+    let (_, n, chat_jid, id) = event;
     match left {
         Left::At((at, after)) => {
             db.prepare_cached(OPENING)?.execute(params![n, at, after])?;
@@ -311,6 +347,9 @@ fn left_to_take(db: &Connection, stamps: &mut Stamps, n: i64, left: Left) -> Res
         }
         Left::Done => {
             db.prepare_cached(OPENED)?.execute([n])?;
+            if !db.prepare_cached(STILL_SEALED)?.query_row(params![chat_jid, id], |r| r.get::<_, bool>(0))? {
+                db.prepare_cached(OPEN_NOW)?.execute([n])?;
+            }
         }
     }
     Ok(())
@@ -428,7 +467,10 @@ fn take_one(db: &Connection, stamps: &mut Stamps, event: Arrived, row: &Waiting)
                     db.prepare_cached(TAKEN)?.execute([pending])?;
                     return Ok(Taken::Applied(false));
                 }
-                Opening::Sealed => return Ok(Taken::Kept),
+                Opening::Sealed => {
+                    unopened(db, n)?;
+                    return Ok(Taken::Kept);
+                }
             }
         }
         Amendment::Keep { .. } => return Ok(Taken::Kept),

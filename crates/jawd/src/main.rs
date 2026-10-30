@@ -1130,6 +1130,7 @@ mod tests {
         assert_eq!((&stored["events_backfill"], &stored["answers_waiting"]), (&0.into(), &0.into()));
         assert_eq!((&stored["answers_set_aside"], &stored["edits_set_aside"]), (&0.into(), &0.into()));
         assert_eq!(stored["events_opening"], 0, "nothing is left to take for the demo's event");
+        assert_eq!(stored["events_unopened"], 0, "and nothing kept for it stays sealed");
         stop(started, &socket).await;
     }
 

@@ -799,6 +799,53 @@ async fn an_event_arriving_with_more_waiting_than_its_transaction_takes_has_the_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn what_was_sealed_between_jids_jaw_learns_are_its_people_only_afterwards_opens_once_it_does() {
+    const DAN: &str = "351910000005@s.whatsapp.net";
+    const BEA: &str = "351910000004@s.whatsapp.net";
+    const BEA_LID: &str = "100000000004@lid";
+    const CAL: &str = "351910000006@s.whatsapp.net";
+    const CAL_LID: &str = "100000000006@lid";
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    let joined =
+        |jids: [&str; 2]| vec![Change::Person(Person { jids: jids.map(str::to_string).to_vec(), ..Person::default() })];
+    // Ana's events, known by her number as they came. Dan's answer to e1 comes after it and Rui's to
+    // e2 before it, each sealed for her LID; Bea's to e1 is sealed for hers though it comes by her
+    // number; and Ana edits e1 by her LID. Jaw knows none of these JIDs as theirs yet.
+    apply(&store, event("e1")).await;
+    apply(&store, sealed_answer("e1", (ANA_LID, DAN), DAN, "d1", AT + 20, Going)).await;
+    apply(&store, sealed_answer("e1", (ANA, BEA_LID), BEA, "b1", AT + 30, Maybe)).await;
+    apply(&store, live(edit_info("e1", (ANA_LID, ANA_LID), "x1", AT + 60_000, "Sintra, later", false))).await;
+    apply(&store, sealed_answer("e2", (ANA_LID, RUI), RUI, "r1", AT + 10, Going)).await;
+    apply(&store, event("e2")).await;
+    assert_eq!(
+        (counts(&store, "e1").await, counts(&store, "e2").await),
+        ((0, 0, 0, Value::Null), (0, 0, 0, Value::Null)),
+        "none opens yet"
+    );
+    assert_eq!(store.count("pending WHERE kind IN ('rsvp', 'secret')").unwrap(), 4, "each kept sealed");
+    assert_eq!(store.count("unopened").unwrap(), 2, "as jawd status counts their events");
+    // Jaw learns Ana's LID is hers: what's sealed for her events by it opens.
+    apply(&store, joined([ANA, ANA_LID])).await;
+    taken(&store).await;
+    let (shows, _, edited) = shown(&store, "e1").await;
+    assert_eq!(
+        (counts(&store, "e1").await, &shows["name"], edited),
+        ((1, 0, 0, Value::Null), &"Sintra, later".into(), true)
+    );
+    assert_eq!(counts(&store, "e2").await, (1, 0, 0, Value::Null), "the one that waited for its event too");
+    // Someone else's LID changes nothing of it, and asks for no step.
+    apply(&store, joined([CAL, CAL_LID])).await;
+    assert_eq!(store.count("openings").unwrap(), 0, "nothing of theirs is kept");
+    // And Bea's, once jaw learns hers.
+    apply(&store, joined([BEA, BEA_LID])).await;
+    taken(&store).await;
+    assert_eq!(counts(&store, "e1").await, (1, 1, 0, Value::Null));
+    assert_eq!(store.count("pending").unwrap(), 0);
+    assert_eq!(store.count("unopened").unwrap(), 0, "nothing kept for it stays sealed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn what_waits_for_an_event_and_fails_to_be_taken_is_kept_in_quarantine_and_holds_up_nothing_after_it() {
     let home = tempfile::tempdir().unwrap();
     let store = opened(home.path()).await;

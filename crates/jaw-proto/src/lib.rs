@@ -564,6 +564,10 @@ pub struct Stored {
     /// time in the background, past the few the transaction that brought each took.
     #[serde(default)]
     pub events_opening: u64,
+    /// Events jawd has with answers or edits kept sealed among `encrypted_kept` that didn't open
+    /// with the JIDs it knew their people by, tried again once one of them is known by another.
+    #[serde(default)]
+    pub events_unopened: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

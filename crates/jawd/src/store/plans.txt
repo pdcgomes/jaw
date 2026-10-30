@@ -2123,6 +2123,33 @@ DELETE FROM openings WHERE message = ?1
     SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/events.rs
+INSERT INTO unopened (message) VALUES (?1) ON CONFLICT (message) DO NOTHING
+
+-- src/store/write/events.rs
+SELECT EXISTS (SELECT 1 FROM pending WHERE chat = ?1 AND target = ?2 AND kind IN ('rsvp', 'secret'))
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 1
+      SEARCH pending USING INDEX pending_by_target_at (chat=? AND target=?)
+
+-- src/store/write/events.rs
+DELETE FROM unopened WHERE message = ?1
+    SEARCH unopened USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/events.rs
+SELECT u.message FROM unopened u JOIN messages m ON m.n = u.message JOIN chats c ON c.n = m.chat WHERE m.sender IN (SELECT n FROM person_jids WHERE person = ?1) OR EXISTS (SELECT 1 FROM pending p WHERE p.chat = c.id AND p.target = m.id AND p.kind IN ('rsvp', 'secret') AND p.sender IN (SELECT jid FROM person_jids WHERE person = ?1))
+    SCAN u
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    LIST SUBQUERY 1
+      SEARCH person_jids USING COVERING INDEX person_jids_by_person (person=?)
+      CREATE BLOOM FILTER
+    CORRELATED SCALAR SUBQUERY 3
+      SEARCH p USING INDEX pending_by_target_at (chat=? AND target=?)
+      LIST SUBQUERY 2
+        SEARCH person_jids USING INDEX person_jids_by_person (person=?)
+        CREATE BLOOM FILTER
+
+-- src/store/write/events.rs
 SELECT o.message, o.at, o.n, m.chat, c.id, m.id FROM openings o JOIN messages m ON m.n = o.message JOIN chats c ON c.n = m.chat ORDER BY o.message LIMIT 1
     SCAN o
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
@@ -3197,6 +3224,7 @@ INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM message
 -- src/store/write.rs
 DELETE FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH unopened USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH event_answers USING PRIMARY KEY (message=?)
     SEARCH media USING PRIMARY KEY (message=?)
@@ -3592,6 +3620,7 @@ UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, tex
 
 -- src/store/write.rs
 INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, reply, detail, forwarded, edited_at, deleted, expires_at, starred, view_once, raw, v, n, mentions_me, envelope, chat, id, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) RETURNING n
+    SEARCH unopened USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH event_answers USING PRIMARY KEY (message=?)
     SEARCH media USING PRIMARY KEY (message=?)

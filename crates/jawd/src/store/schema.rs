@@ -1190,6 +1190,18 @@ pub(super) const MIGRATIONS: &[&str] = &[
         n INTEGER NOT NULL
     ) STRICT;
     ",
+    // 24, a schema step: what's sealed for an event between people jaw knows by other JIDs only
+    // later opens once it does. The table is new and empty, so it costs the same however many
+    // messages there are.
+    "
+    -- Class: jaw's own: each event jaw has with answers or edits kept sealed in pending that didn't
+    -- open with the JIDs jaw knew its author and their senders by when they were tried, so once one
+    -- of them is known by another JID what's kept for the event is tried again. It goes once a try
+    -- leaves nothing sealed for the event, or with its event.
+    CREATE TABLE unopened (
+        message INTEGER PRIMARY KEY REFERENCES messages (n) ON DELETE CASCADE
+    ) STRICT;
+    ",
 ];
 
 /// Migration 19's text, named so the tests that check and measure it find it whatever number it

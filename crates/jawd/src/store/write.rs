@@ -1504,6 +1504,10 @@ fn upsert_person(db: &Connection, stamps: &mut Stamps, person: &Person) -> Resul
     if joined && !known.is_empty() {
         rehome(db, stamps, keep)?;
     }
+    // What's sealed for an event between their JIDs may open now that jaw knows them.
+    if joined {
+        events::known_again(db, stamps, keep)?;
+    }
     let seq = stamps.seq(PERSON, Some(keep));
     let changed: Option<i64> = db
         .prepare_cached(
@@ -2476,7 +2480,7 @@ fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<
                 return apply_amendment(db, stamps, chat, n, doing);
             }
             events::Opening::Gone => return Ok(false),
-            events::Opening::Sealed => {}
+            events::Opening::Sealed => events::unopened(db, n)?,
         }
     }
     match found {
