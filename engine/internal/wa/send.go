@@ -38,6 +38,8 @@ func (e *Engine) sending(cmd *enginepb.Command) *enginepb.Reply {
 		return e.appStatePatch(c.AppStatePatch)
 	case *enginepb.Command_PollVote:
 		return e.pollVote(c.PollVote)
+	case *enginepb.Command_Disappearing:
+		return e.disappearing(c.Disappearing)
 	}
 	return nil
 }
@@ -241,6 +243,10 @@ func (e *Engine) markRead(c *enginepb.MarkRead) *enginepb.Reply {
 			return failure(fmt.Sprintf("%q isn't a JID: %v", c.Sender, err), false)
 		}
 	}
+	receipt, err := receiptType(c.Type)
+	if err != nil {
+		return failure(err.Error(), false)
+	}
 	if len(c.Ids) == 0 {
 		return done()
 	}
@@ -248,8 +254,42 @@ func (e *Engine) markRead(c *enginepb.MarkRead) *enginepb.Reply {
 	for i, id := range c.Ids {
 		ids[i] = types.MessageID(id)
 	}
-	if err := e.cli().MarkRead(e.ctx, ids, time.UnixMilli(c.AtMs), chat, sender); err != nil {
-		return failure(fmt.Sprintf("can't mark %d messages read in %s: %v", len(ids), c.Chat, err), true)
+	if err := e.cli().MarkRead(e.ctx, ids, time.UnixMilli(c.AtMs), chat, sender, receipt); err != nil {
+		return failure(fmt.Sprintf("can't mark %d messages %s in %s: %v", len(ids), receipt, c.Chat, err), true)
+	}
+	return done()
+}
+
+// receiptType is the receipt a MarkRead names: read, or played for a view-once message opened.
+func receiptType(name string) (types.ReceiptType, error) {
+	switch name {
+	case "", string(types.ReceiptTypeRead):
+		return types.ReceiptTypeRead, nil
+	case string(types.ReceiptTypePlayed):
+		return types.ReceiptTypePlayed, nil
+	}
+	return "", fmt.Errorf("%q isn't a receipt jawd sends", name)
+}
+
+// disappearing sets a chat's disappearing timer, as a message in a one-to-one chat and as the
+// group's setting in a group; whatsmeow refuses other chats.
+func (e *Engine) disappearing(c *enginepb.Disappearing) *enginepb.Reply {
+	chat, err := chatJID(c.Chat)
+	if err != nil {
+		return failure(err.Error(), false)
+	}
+	switch chat.Server {
+	case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer:
+	default:
+		return failure(fmt.Sprintf("a %s chat has no disappearing timer to set", chat.Server), false)
+	}
+	var at time.Time
+	if c.AtMs > 0 {
+		at = time.UnixMilli(c.AtMs)
+	}
+	timer := time.Duration(c.Seconds) * time.Second
+	if err := e.cli().SetDisappearingTimer(e.ctx, chat, timer, at); err != nil {
+		return failure(fmt.Sprintf("can't set the disappearing timer in %s: %v", c.Chat, err), retryable(err))
 	}
 	return done()
 }

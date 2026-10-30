@@ -360,6 +360,7 @@ message Command {
     MediaCancel media_cancel = 23;
     MediaRetry media_retry = 24;
     MediaUpload media_upload = 25;
+    Disappearing disappearing = 26;
   }
 }
 
@@ -457,6 +458,18 @@ message MarkRead {
   string sender = 2;
   repeated string ids = 3;
   int64 at_ms = 4;
+  // The receipt: empty for read, or `played` for a view-once message opened, which its sender's
+  // phone shows as opened and your other devices take as theirs to erase.
+  string type = 5;
+}
+
+// Sets a chat's disappearing timer, `seconds` of 0 turning it off: in a one-to-one chat as the
+// setting message the phones send, timed `at_ms`; in a group as the group's setting, which WhatsApp
+// then tells its members, this account among them, as a GroupChange. Done once WhatsApp has it.
+message Disappearing {
+  string chat = 1;
+  uint32 seconds = 2;
+  int64 at_ms = 3;
 }
 
 // Typing, recording or stopped, in one chat. Done once it's sent.

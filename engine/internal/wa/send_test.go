@@ -36,6 +36,9 @@ func TestSendingCommandsWithoutASessionSaySoAndAreNotToBeTriedAsTheyAre(t *testi
 		{Kind: &enginepb.Command_PollVote{PollVote: &enginepb.PollVote{
 			Chat: "120363000000000002@g.us", Id: "3EB0BB", PollId: "3EB0AA", PollSender: "351910000002@s.whatsapp.net",
 		}}},
+		{Kind: &enginepb.Command_MarkRead{MarkRead: &enginepb.MarkRead{Chat: "351910000002@s.whatsapp.net", Ids: []string{"m1"}, Type: "played"}}},
+		{Kind: &enginepb.Command_Disappearing{Disappearing: &enginepb.Disappearing{Chat: "351910000002@s.whatsapp.net", Seconds: 604800}}},
+		{Kind: &enginepb.Command_Disappearing{Disappearing: &enginepb.Disappearing{Chat: "120363000000000002@g.us"}}},
 	} {
 		command(t, jawd, uint64(n+1), cmd)
 		reply, err := jawd.Recv()
@@ -369,6 +372,37 @@ func TestAPatchWhoseWaitForItsEchoJawdOrTheEngineEndsIsAFailureToTryAgain(t *tes
 			}
 		case <-time.After(2 * time.Second):
 			t.Errorf("%s, and the patch still waited for its echo", what)
+		}
+	}
+}
+
+func TestAReceiptJawdDoesntSendIsRefusedForGoodAndReadAndPlayedAreTaken(t *testing.T) {
+	for name, want := range map[string]string{"": "read", "read": "read", "played": "played"} {
+		got, err := receiptType(name)
+		if err != nil || string(got) != want {
+			t.Errorf("%q gave %q, %v", name, got, err)
+		}
+	}
+	e := newEngine(context.Background(), nil, NewLogger("test", "error"))
+	for _, name := range []string{"read-self", "played-self", "delivered", "sender", "inactive"} {
+		failure := e.markRead(&enginepb.MarkRead{Chat: "351910000002@s.whatsapp.net", Ids: []string{"m1"}, Type: name}).GetFailure()
+		if failure == nil || failure.Retry {
+			t.Errorf("a %q receipt: %v", name, failure)
+		}
+	}
+}
+
+func TestADisappearingTimerForAChatWithoutOneIsRefusedForGoodBeforeItGoes(t *testing.T) {
+	e := newEngine(context.Background(), nil, NewLogger("test", "error"))
+	for name, chat := range map[string]string{
+		"a device":         "351910000002:3@s.whatsapp.net",
+		"a broadcast":      "status@broadcast",
+		"a channel":        "120363000000000003@newsletter",
+		"not a JID at all": "@@",
+	} {
+		failure := e.disappearing(&enginepb.Disappearing{Chat: chat, Seconds: 86400}).GetFailure()
+		if failure == nil || failure.Retry {
+			t.Errorf("%s: %v", name, failure)
 		}
 	}
 }

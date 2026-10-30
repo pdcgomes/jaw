@@ -182,5 +182,8 @@ fn receipts(owed: &Owed) -> Vec<pb::MarkRead> {
         }
     }
     let at_ms = now_ms();
-    by_sender.into_iter().map(|(sender, ids)| pb::MarkRead { chat: owed.jid.clone(), sender, ids, at_ms }).collect()
+    by_sender
+        .into_iter()
+        .map(|(sender, ids)| pb::MarkRead { chat: owed.jid.clone(), sender, ids, at_ms, r#type: String::new() })
+        .collect()
 }

@@ -1462,6 +1462,24 @@ impl Sender {
                 self.world.ask(kind);
                 done
             }
+            // A group's timer comes back as WhatsApp tells its members of it, this account among them.
+            pb::command::Kind::Disappearing(set) => {
+                self.world.ask(pb::command::Kind::Disappearing(set.clone()));
+                if set.chat.ends_with("@g.us") {
+                    let change = pb::GroupChange {
+                        jid: set.chat,
+                        sender: ME.into(),
+                        timestamp_ms: now_ms(),
+                        ephemeral_seconds: Some(set.seconds),
+                        ..Default::default()
+                    };
+                    let sender = self.clone();
+                    tokio::spawn(async move {
+                        sender.send(pb::Event { seq: 0, kind: Some(pb::event::Kind::GroupChange(change)) }).await
+                    });
+                }
+                done
+            }
             pb::command::Kind::SubscribePresence(asked) => {
                 self.world.ask(pb::command::Kind::SubscribePresence(asked.clone()));
                 let mut subscribed = self.world.subscribed.lock().expect("the demo world");
