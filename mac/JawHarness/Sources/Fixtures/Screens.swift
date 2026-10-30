@@ -78,7 +78,7 @@ struct Screen {
         content.view.wantsLayer = true
         content.view.layer?.backgroundColor = roles.ground.cgColor
         list.apply(Update(seq: 1, upsert: chats, total: UInt64(chats.count)))
-        let spec = LayoutSpec(style: conditions.style, me: ["person:1"])
+        let spec = LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.pictures)
         let layouts = Layouts()
         var views: [Int: NSView] = [:]
         var box: NSView?

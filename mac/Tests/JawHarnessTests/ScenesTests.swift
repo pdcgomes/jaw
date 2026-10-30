@@ -46,7 +46,7 @@ func emptyChatList(_ band: Note, width: CGFloat) -> HarnessScene {
 @Suite(.serialized) struct SceneDrawingTests {
     @Test func `every scene draws as wide as it says, says what to look for, and is named for a script`() async throws {
         #expect(HarnessCatalog.shared.scenes.map(\.id) == [
-            "roles", "mimic", "chat-list", "conversation", "palette", "states",
+            "roles", "mimic", "chat-list", "conversation", "link-previews", "palette", "states",
             "screens-jawd", "screens-connection", "screens-linking", "screens-empty",
             "screens-chat", "screens-panes", "screens-focus", "screens-folded", "screens-overlays",
         ])

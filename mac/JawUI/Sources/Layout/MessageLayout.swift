@@ -83,6 +83,8 @@ public final class Laid: @unchecked Sendable {
         case ticks(Int, CGPoint, CGColor, CGFloat)
         /// A picture, or a symbol made into one, in a rect measured from the top.
         case image(CGImage, CGRect)
+        /// A picture filling a rect from its centre, clipped to the rect's rounded corners.
+        case picture(CGImage, CGRect, CGFloat)
     }
 
     init(height: CGFloat, body: CGRect, parts: [Part], regions: [(CGRect, Region)], text: (CTFrame, CGRect)?) {
@@ -124,6 +126,18 @@ public final class Laid: @unchecked Sendable {
                 ctx.translateBy(x: rect.minX, y: rect.maxY + y)
                 ctx.scaleBy(x: 1, y: -1)
                 ctx.draw(image, in: CGRect(origin: .zero, size: rect.size))
+                ctx.restoreGState()
+            case let .picture(image, rect, radius):
+                let r = rect.offsetBy(dx: 0, dy: y)
+                ctx.saveGState()
+                ctx.addPath(CGPath(roundedRect: r, cornerWidth: min(radius, r.width / 2), cornerHeight: min(radius, r.height / 2),
+                                   transform: nil))
+                ctx.clip()
+                let filled = Fill.rect(CGSize(width: image.width, height: image.height), filling: r)
+                ctx.translateBy(x: filled.minX, y: filled.maxY)
+                ctx.scaleBy(x: 1, y: -1)
+                ctx.interpolationQuality = .high
+                ctx.draw(image, in: CGRect(origin: .zero, size: filled.size))
                 ctx.restoreGState()
             }
         }
@@ -246,9 +260,9 @@ public enum MessageLayout {
     public static let fold = 40
 
     public static func lay(_ m: MessageRow, width: CGFloat, context: MessageContext, style: Style, fonts: FontSet,
-                           me: Set<String>) -> Laid
+                           me: Set<String>, pictures: (any PictureSource)? = nil) -> Laid
     {
-        var b = Builder(m: m, width: max(width, 160), context: context, style: style, fonts: fonts, me: me)
+        var b = Builder(m: m, width: max(width, 160), context: context, style: style, fonts: fonts, me: me, pictures: pictures)
         return b.build()
     }
 
@@ -259,6 +273,8 @@ public enum MessageLayout {
         let style: Style
         let fonts: FontSet
         let me: Set<String>
+        /// Where the message's pictures are read from, by the paths jawd sends.
+        let pictures: (any PictureSource)?
         let metrics: Metrics
         let roles: Roles
         var parts: [Laid.Part] = []
@@ -266,13 +282,16 @@ public enum MessageLayout {
         var text: (CTFrame, CGRect)?
         var y: CGFloat = 0
 
-        init(m: MessageRow, width: CGFloat, context: MessageContext, style: Style, fonts: FontSet, me: Set<String>) {
+        init(m: MessageRow, width: CGFloat, context: MessageContext, style: Style, fonts: FontSet, me: Set<String>,
+             pictures: (any PictureSource)? = nil)
+        {
             self.m = m
             self.width = width
             self.context = context
             self.style = style
             self.fonts = fonts
             self.me = me
+            self.pictures = pictures
             metrics = Metrics(style)
             roles = style.roles
         }
@@ -583,8 +602,9 @@ public enum MessageLayout {
             if let forwardedLine { inner = max(inner, width(of: forwardedLine)) }
             let quoteHeight: CGFloat = m.reply == nil ? 0 : 40
             if m.reply != nil { inner = max(inner, min(most, 220)) }
+            let under = card != nil && cardUnderText
             // The time sits on the text's last line when there's room, and on a line of its own if not.
-            let footInline = hasWords && last + footWidth + 12 <= most
+            let footInline = !under && hasWords && last + footWidth + 12 <= most
             if footInline { inner = max(inner, last + footWidth + 12) } else { inner = max(inner, footWidth) }
             inner = min(inner, most)
             var h = q
@@ -592,10 +612,11 @@ public enum MessageLayout {
             if forwardedLine != nil { h += lineHeight(fonts.small) }
             h += quoteHeight > 0 ? quoteHeight + 4 : 0
             let cardTop = h
-            if let card { h += card.height + (hasWords ? 6 : 4) }
+            if let card, !under { h += card.height + (hasWords ? 6 : 4) }
             let textTop = h
             h += hasWords ? size.height : 0
             if folded { h += lineHeight(fonts.small) + 2 }
+            if let card, under { h += 6 + card.height + 2 }
             if !footInline { h += lineHeight(fonts.time) }
             h += q
             let bw = inner + 2 * p
@@ -614,7 +635,7 @@ public enum MessageLayout {
             if let reply = m.reply {
                 quote(reply, CGRect(x: x + p - 4, y: cy, width: inner + 8, height: quoteHeight))
             }
-            if let card { drawCard(CGRect(x: x + p, y: y + cardTop, width: card.width, height: card.height)) }
+            if let card, !under { drawCard(CGRect(x: x + p, y: y + cardTop, width: card.width, height: card.height)) }
             let textRect = CGRect(x: x + p, y: y + textTop, width: most, height: hasWords ? size.height : 0)
             if hasWords {
                 parts.append(.frame(frame, textRect))
@@ -622,6 +643,10 @@ public enum MessageLayout {
             }
             cy = y + textTop + (hasWords ? size.height : 0)
             if folded { cy += showMore(x: x + p, at: cy) }
+            if let card, under {
+                drawCard(CGRect(x: x + p, y: cy + 6, width: card.width, height: card.height))
+                cy += 6 + card.height + 2
+            }
             let footY = footInline ? cy - 4 - CTFontGetDescent(fonts.body) : cy + ascent(fonts.time)
             parts.append(contentsOf: footParts(foot, at: CGPoint(x: x + bw - p - footWidth, y: footY)))
             y += h
@@ -698,7 +723,8 @@ public enum MessageLayout {
                 y += lineHeight(fonts.small) + 4
             }
             let footY = y + ascent(fonts.body)
-            if let card = cardSize(most: most) {
+            let card = cardSize(most: most)
+            if let card, !cardUnderText {
                 drawCard(CGRect(x: x, y: y + 2, width: card.width, height: card.height))
                 y += card.height + 6
             }
@@ -712,6 +738,10 @@ public enum MessageLayout {
             }
             parts.append(contentsOf: footParts(foot, at: CGPoint(x: width - m - footWidth, y: footY)))
             if folded { y += showMore(x: x, at: y) }
+            if let card, cardUnderText {
+                drawCard(CGRect(x: x, y: y + 4, width: card.width, height: card.height))
+                y += 4 + card.height + 2
+            }
             reactions(x: x, alignRight: false, right: 0)
             failedLine(x: x, alignRight: false, right: 0)
             let body = CGRect(x: x - 4, y: top, width: width - x - m + 8, height: y - top)

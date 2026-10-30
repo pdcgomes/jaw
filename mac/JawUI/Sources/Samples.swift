@@ -1,5 +1,7 @@
+import CoreGraphics
 import Foundation
 import JawKit
+import JawThemes
 
 /// Made-up rows for the harness and the snapshot tests: every span, every tick, replies, reactions,
 /// edits, deletes, forwards, a failed message, system and call lines, a long message that folds,
@@ -98,7 +100,8 @@ public enum Samples {
            "contact":{"name":"Climbing shop"}},
           {"id":"K6","v":1,"sort":"\(at + 5000)~000106","chat":"g","at":\(at + 5000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"text",
            "spans":[{"t":"link","s":"climb.pt/sintra","url":"https://climb.pt/sintra"}],
-           "link":{"url":"https://climb.pt/sintra","title":"Sintra: the routes","description":"Granite slabs above the sea, from 4 to 7b"}},
+           "link":{"url":"https://climb.pt/sintra","title":"Sintra: the routes","description":"Granite slabs above the sea, from 4 to 7b",
+                   "preview":"media/links/sintra.jpg"}},
           {"id":"K7","v":1,"sort":"\(at + 6000)~000107","chat":"g","at":\(at + 6000),"mine":true,"status":"read","kind":"voice","media":{"seconds":14}},
           {"id":"K8","v":1,"sort":"\(at + 7000)~000108","chat":"g","at":\(at + 7000),"from":{"id":"person:9","name":"Inês","colour":0},"kind":"album",
            "album":{"items":[{"id":"a","kind":"image"},{"id":"b","kind":"image"},{"id":"c","kind":"video"},{"id":"d","kind":"image"},{"id":"e","kind":"image"}]}}
@@ -107,9 +110,84 @@ public enum Samples {
         return (try? JSONDecoder().decode([MessageRow].self, from: Data(rows.utf8))) ?? []
     }
 
+    /// Links' previews as jawd sends them, in the group: Ana's with its thumbnail, Rui's from history
+    /// without one, yours whose description runs past two lines, Inês's with a title alone, and yours
+    /// whose page gave no preview, its link in the text alone.
+    public static var links: [MessageRow] {
+        let at = now - 600_000
+        let rows = """
+        [
+          {"id":"L1","v":1,"sort":"\(at)~000201","chat":"\(group.id)","at":\(at),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"text",
+           "spans":[{"t":"text","s":"the forecast for Sunday "},
+                    {"t":"link","s":"https://www.ipma.pt/pt/otempo/prev.localidade.hora/","url":"https://www.ipma.pt/pt/otempo/prev.localidade.hora/"}],
+           "link":{"url":"https://www.ipma.pt/pt/otempo/prev.localidade.hora/","title":"Previsão para Sintra · IPMA",
+                   "description":"Céu pouco nublado, vento fraco. Máxima de 22 °C.","preview":"media/links/ipma.jpg"}},
+          {"id":"L2","v":1,"sort":"\(at + 60000)~000202","chat":"\(group.id)","at":\(at + 60000),"from":{"id":"person:7","name":"Rui","colour":2},
+           "kind":"text","spans":[{"t":"link","s":"climb.pt/sintra","url":"https://climb.pt/sintra"}],
+           "link":{"url":"https://climb.pt/sintra","title":"Sintra: the routes","description":"Granite slabs above the sea, from 4 to 7b"}},
+          {"id":"L3","v":1,"sort":"\(at + 120000)~000203","chat":"\(group.id)","at":\(at + 120000),"mine":true,"status":"read","kind":"text",
+           "spans":[{"t":"text","s":"booked us this "},{"t":"link","s":"https://www.casadapena.pt/rooms","url":"https://www.casadapena.pt/rooms"}],
+           "link":{"url":"https://www.casadapena.pt/rooms","title":"Casa da Pena, a guest house in Sintra",
+                   "description":"Six rooms in the old town, ten minutes on foot from the walls of the Moorish Castle, with a garden, a terrace, breakfast from eight, and the hills down to the sea from the top floor on a clear day.",
+                   "preview":"media/links/pena.jpg"}},
+          {"id":"L4","v":1,"sort":"\(at + 180000)~000204","chat":"\(group.id)","at":\(at + 180000),"from":{"id":"person:9","name":"Inês","colour":0},
+           "kind":"text","spans":[{"t":"text","s":"how it's done "},{"t":"link","s":"https://youtu.be/sintra-boulders","url":"https://youtu.be/sintra-boulders"}],
+           "link":{"url":"https://youtu.be/sintra-boulders","title":"Sintra bouldering, part 2"}},
+          {"id":"L5","v":1,"sort":"\(at + 240000)~000205","chat":"\(group.id)","at":\(at + 240000),"mine":true,"status":"delivered","kind":"text",
+           "spans":[{"t":"text","s":"and the topo "},{"t":"link","s":"https://climb.pt/topo.pdf","url":"https://climb.pt/topo.pdf"}]}
+        ]
+        """
+        return (try? JSONDecoder().decode([MessageRow].self, from: Data(rows.utf8))) ?? []
+    }
+
+    /// The samples' pictures, drawn here rather than read from jawd's folder, so the harness and the
+    /// tests draw what the app would without a file: the thumbnails of the sample links.
+    public static let pictures: any PictureSource = SamplePictures()
+
     /// The window update a watch of those messages returns.
     public static var update: Update<MessageRow> {
-        Update(seq: 200, upsert: messages, total: UInt64(messages.count), older: false, newer: 0,
-               moved: Moved(place: .newest(100), newer: 0))
+        update(of: messages)
+    }
+
+    /// The window update a watch of `rows`, opened at the newest, returns.
+    public static func update(of rows: [MessageRow]) -> Update<MessageRow> {
+        Update(seq: 200, upsert: rows, total: UInt64(rows.count), older: false, newer: 0, moved: Moved(place: .newest(100), newer: 0))
+    }
+}
+
+/// Each sample link's thumbnail, 140 pixels square as jawd keeps one: a sky, a hill in front of it,
+/// and a sun for the forecast.
+struct SamplePictures: PictureSource {
+    static let drawn: [String: (sky: UInt32, hill: UInt32, sun: Bool)] = [
+        "media/links/ipma.jpg": (0x7AA2F7, 0x9ECE6A, true),
+        "media/links/sintra.jpg": (0xBB9AF7, 0x414868, false),
+        "media/links/pena.jpg": (0xFF9E64, 0xF7768E, false),
+    ]
+
+    var id: String {
+        "samples"
+    }
+
+    func picture(_ path: String, pixels _: Int) -> CGImage? {
+        guard let drawn = Self.drawn[path] else { return nil }
+        let side = 140
+        guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.setFillColor(RGBA(drawn.sky).cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+        if drawn.sun {
+            ctx.setFillColor(RGBA(0xE0AF68).cgColor)
+            ctx.fillEllipse(in: CGRect(x: 86, y: 84, width: 32, height: 32))
+        }
+        ctx.setFillColor(RGBA(drawn.hill).cgColor)
+        ctx.move(to: CGPoint(x: 0, y: 0))
+        ctx.addLine(to: CGPoint(x: 0, y: 52))
+        ctx.addLine(to: CGPoint(x: 58, y: 92))
+        ctx.addLine(to: CGPoint(x: 140, y: 36))
+        ctx.addLine(to: CGPoint(x: 140, y: 0))
+        ctx.closePath()
+        ctx.fillPath()
+        return ctx.makeImage()
     }
 }

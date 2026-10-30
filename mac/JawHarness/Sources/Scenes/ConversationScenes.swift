@@ -25,7 +25,8 @@ private struct ConversationScene: View {
             roles: conditions.roles,
         ) {
             ControllerSpecimen {
-                let c = ConversationController(chat: Samples.group, spec: LayoutSpec(style: conditions.style, me: ["person:1"]),
+                let c = ConversationController(chat: Samples.group,
+                                               spec: LayoutSpec(style: conditions.style, me: ["person:1"], pictures: Samples.pictures),
                                                layouts: Layouts(), place: .newest(100))
                 _ = c.view
                 c.members = Fixtures.members

@@ -46,7 +46,7 @@ extension MessageLayout.Builder {
         switch m.kind {
         case .image, .video, .gif, .sticker, .videoNote, .voice, .audio, .document, .location, .liveLocation, .contact, .poll, .album:
             !m.deleted
-        case .text: !m.deleted && m.link?.title != nil
+        case .text: !m.deleted && (m.link.map(Self.shows) ?? false)
         case .system, .call, .event, .invite, .unknown: false
         }
     }
@@ -54,6 +54,23 @@ extension MessageLayout.Builder {
     /// Whether the card says all the words do, as a place, a contact or a poll does.
     var cardHasTheWords: Bool {
         [.location, .contact, .poll].contains(m.kind)
+    }
+
+    /// Whether the card comes under the words rather than over them: a link's, whose words have the
+    /// link it previews.
+    var cardUnderText: Bool {
+        m.kind == .text
+    }
+
+    /// Whether a link's preview has words for a card: a title or a description.
+    static func shows(_ link: LinkPreview) -> Bool {
+        !(link.title ?? "").isEmpty || !(link.description ?? "").isEmpty
+    }
+
+    /// What VoiceOver says of a message's card beyond its words: a link's title and host.
+    static func spoken(_ m: MessageRow) -> String? {
+        guard !m.deleted, m.kind == .text, let link = m.link, shows(link) else { return nil }
+        return "link: " + ([link.title, link.host] as [String?]).compactMap(\.self).filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
     /// The card's size at most `most` wide.
@@ -72,9 +89,55 @@ extension MessageLayout.Builder {
             let n = min(m.album?.items.count ?? 1, 4)
             let side = (min(most, 260) - 4) / 2
             return CGSize(width: min(most, 260), height: CGFloat((n + 1) / 2) * (side + 4) - 4)
-        case .text: return CGSize(width: min(most, 300), height: 8 + lineHeight(fonts.name) + lineHeight(fonts.small) * 2 + 8)
+        case .text: return linkSize(most: most)
         case .system, .call, .event, .invite, .unknown: return nil
         }
+    }
+
+    /// A link's thumbnail, square: jawd keeps one 140 pixels on its long side.
+    static let thumbnail: CGFloat = 70
+
+    /// A link's card: its thumbnail on the left when it has one, and beside it its title, two lines of
+    /// its description at most and its host. Its height comes from the row alone, so a thumbnail read
+    /// late moves nothing.
+    func linkSize(most: CGFloat) -> CGSize {
+        let w = min(most, 320)
+        let words = linkWordsHeight(width: linkTextWidth(w)) + 16
+        return CGSize(width: w, height: ceil(m.link?.preview == nil ? words : max(words, Self.thumbnail + 12)))
+    }
+
+    /// Where a link's words start in its card: after its thumbnail, or after the accent's bar.
+    var linkTextInset: CGFloat {
+        m.link?.preview == nil ? 12 : 6 + Self.thumbnail + 10
+    }
+
+    func linkTextWidth(_ cardWidth: CGFloat) -> CGFloat {
+        cardWidth - linkTextInset - 10
+    }
+
+    /// The height of a link's words `width` wide: its title, its description's lines and its host.
+    func linkWordsHeight(width: CGFloat) -> CGFloat {
+        guard let link = m.link else { return 0 }
+        let title = (link.title ?? "").isEmpty ? 0 : lineHeight(fonts.name)
+        return title + CGFloat(descriptionLines(link, width: width).count) * lineHeight(fonts.small) + lineHeight(fonts.small)
+    }
+
+    func descriptionLines(_ link: LinkPreview, width: CGFloat) -> [CTLine] {
+        guard let d = link.description, !d.isEmpty else { return [] }
+        return wrapped(d, fonts.small, roles.secondary, width: width, most: 2)
+    }
+
+    /// `s` as one line, its runs of spaces and newlines each a space, wrapped `width` wide onto `most`
+    /// lines at most, the last cut with an ellipsis when there's more.
+    func wrapped(_ s: String, _ font: CTFont, _ colour: RGBA, width: CGFloat, most: Int) -> [CTLine] {
+        let one = s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let attributed = NSAttributedString(string: one, attributes: [.ctFont: font, .ctColour: colour.cgColor])
+        let setter = CTFramesetterCreateWithAttributedString(attributed)
+        let path = CGPath(rect: CGRect(x: 0, y: 0, width: max(width, 10), height: 100_000), transform: nil)
+        let lines = CTFrameGetLines(CTFramesetterCreateFrame(setter, CFRange(location: 0, length: 0), path, nil)) as! [CTLine]
+        guard lines.count > most, most > 0 else { return lines }
+        let rest = CTLineGetStringRange(lines[most - 1]).location
+        return Array(lines.prefix(most - 1)) + [truncated((one as NSString).substring(from: rest), font, colour, width)]
     }
 
     /// A picture's frame in its shape, from its width and height.
@@ -268,14 +331,28 @@ extension MessageLayout.Builder {
     mutating func linkPreview(_ r: CGRect) {
         guard let link = m.link else { return }
         parts.append(.fill(r, well.cgColor, Radius.control))
-        parts.append(.fill(CGRect(x: r.minX, y: r.minY, width: 3, height: r.height), roles.accent.cgColor, 1.5))
-        let x = r.minX + 12, most = r.width - 20
-        var top = r.minY + 8
-        text(link.title ?? link.url, fonts.name, roles.text, x: x, top: top, most: most)
-        top += lineHeight(fonts.name)
-        if let d = link.description, !d.isEmpty { text(d, fonts.small, roles.secondary, x: x, top: top, most: most) }
-        top += lineHeight(fonts.small)
-        text(URL(string: link.url)?.host ?? link.url, fonts.small, roles.tertiary, x: x, top: top, most: most)
+        if let path = link.preview {
+            let thumb = CGRect(x: r.minX + 6, y: (r.midY - Self.thumbnail / 2).rounded(), width: Self.thumbnail, height: Self.thumbnail)
+            if let image = pictures?.picture(path, pixels: Int(Self.thumbnail * 2)) {
+                parts.append(.picture(image, thumb, Radius.small))
+            } else {
+                parts.append(.fill(thumb, well.cgColor, Radius.small))
+                symbol("link", 18, roles.secondary, centredIn: thumb)
+            }
+        } else {
+            parts.append(.fill(CGRect(x: r.minX, y: r.minY, width: 3, height: r.height), roles.accent.cgColor, 1.5))
+        }
+        let x = r.minX + linkTextInset, most = linkTextWidth(r.width)
+        var top = r.minY + ((r.height - linkWordsHeight(width: most)) / 2).rounded()
+        if let title = link.title, !title.isEmpty {
+            text(title, fonts.name, roles.text, x: x, top: top, most: most)
+            top += lineHeight(fonts.name)
+        }
+        for line in descriptionLines(link, width: most) {
+            parts.append(.line(line, CGPoint(x: x, y: top + ascent(fonts.small))))
+            top += lineHeight(fonts.small)
+        }
+        text(link.host, fonts.small, roles.tertiary, x: x, top: top, most: most)
         regions.append((r, .open(link.url)))
     }
 }

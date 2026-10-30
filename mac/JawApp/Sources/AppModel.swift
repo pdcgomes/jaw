@@ -76,13 +76,15 @@ final class AppModel {
     }
 
     var spec: LayoutSpec {
-        if let made = madeSpec, made.style == style, made.me == me { return made }
-        let spec = LayoutSpec(style: style, me: me)
+        if let made = madeSpec, made.style == style, made.me == me, made.pictures?.id == pictures?.id { return made }
+        let spec = LayoutSpec(style: style, me: me, pictures: pictures)
         madeSpec = spec
         return spec
     }
 
     var madeSpec: LayoutSpec?
+    /// The pictures in jawd's folder, whose paths jawd's rows give relative to hello's root.
+    var pictures: FolderPictures?
 
     func start() {
         if let why = agent.ensure() {
@@ -137,6 +139,10 @@ final class AppModel {
             linked = w.account.state == .linked
             self.me = Set(me)
             window?.chatList.root = w.root
+            if pictures?.root != w.root {
+                pictures = FolderPictures(root: w.root)
+                if !panes.isEmpty { restyle() }
+            }
         case let .unreachable(why, retryIn):
             if let stopped = agent.stopped {
                 reach = .starting(failed: stopped)
