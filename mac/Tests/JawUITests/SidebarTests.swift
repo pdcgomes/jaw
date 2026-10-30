@@ -185,9 +185,57 @@ func sidebar(_ host: SideHost? = nil) -> SidebarController {
     #expect(family.symbol.contentTintColor == .alternateSelectedControlTextColor)
     family.backgroundStyle = .normal
     let roles = Catalog.jaw.roles(dark: true)
-    #expect(family.name.textColor == roles.text.nsColor && family.digit.textColor == roles.tertiary.nsColor)
-    #expect(family.mention.textColor == roles.mention.nsColor && family.count.textColor == roles.secondary.nsColor)
-    #expect(family.symbol.contentTintColor == roles.secondary.nsColor)
+    #expect([family.name, family.digit, family.count].allSatisfy { $0.textColor == roles.text.nsColor }, "the selection's quiet grey under it")
+    #expect(family.mention.textColor == roles.mention.nsColor && family.symbol.contentTintColor == roles.text.nsColor)
+    let climbing = try #require(s.outline.view(atColumn: 0, row: 7, makeIfNecessary: true) as? FolderCell)
+    #expect(climbing.name.textColor == roles.text.nsColor && climbing.digit.textColor == roles.tertiary.nsColor)
+    #expect(climbing.symbol.contentTintColor == roles.secondary.nsColor)
+}
+
+/// A colour as AppKit draws it in the dark or the light look, in sRGB.
+@MainActor
+func drawn(_ colour: NSColor?, dark: Bool) -> RGBA {
+    var out = RGBA(0)
+    NSAppearance(named: dark ? .darkAqua : .aqua)?.performAsCurrentDrawingAppearance {
+        if let c = colour?.usingColorSpace(.sRGB) {
+            out = RGBA(r: c.redComponent, g: c.greenComponent, b: c.blueComponent, a: c.alphaComponent)
+        }
+    }
+    return out
+}
+
+@MainActor
+@Test(arguments: [true, false])
+func `the picked folder's row reads on the selection under it, with the keys and without, in either look`(dark: Bool) throws {
+    let s = sidebar()
+    s.roles = Catalog.jaw.roles(dark: dark)
+    let window = NSWindow(contentViewController: s)
+    defer { withExtendedLifetime(window) {} }
+    s.apply(Samples.folderUpdate)
+    s.select("folder:1")
+    s.view.layoutSubtreeIfNeeded()
+    let row = try #require(s.outline.rowView(atRow: 6, makeIfNecessary: true))
+    let family = try #require(s.outline.view(atColumn: 0, row: 6, makeIfNecessary: true) as? FolderCell)
+    #expect(row.isSelected)
+    func reads(_ ink: NSColor?, on fill: NSColor, _ least: Double, _ what: String) {
+        let ratio = drawn(ink, dark: dark).contrast(with: drawn(fill, dark: dark))
+        #expect(ratio >= least, "\(what) reads at \(ratio):1 on \(fill)")
+    }
+    // Without the keys, as while you type: the theme's colours on AppKit's quiet grey.
+    row.isEmphasized = false
+    family.backgroundStyle = .normal
+    for (what, label) in [("the name", family.name), ("the ⌘ digit", family.digit), ("the count", family.count)] {
+        reads(label.textColor, on: .unemphasizedSelectedContentBackgroundColor, 4.5, what)
+    }
+    reads(family.mention.textColor, on: .unemphasizedSelectedContentBackgroundColor, 3, "the @")
+    reads(family.symbol.contentTintColor, on: .unemphasizedSelectedContentBackgroundColor, 3, "the symbol")
+    // With the keys: the selected text's colour on the accent.
+    row.isEmphasized = true
+    family.backgroundStyle = .emphasized
+    for (what, label) in [("the name", family.name), ("the ⌘ digit", family.digit), ("the @", family.mention), ("the count", family.count)] {
+        reads(label.textColor, on: .selectedContentBackgroundColor, 4.5, what)
+    }
+    reads(family.symbol.contentTintColor, on: .selectedContentBackgroundColor, 3, "the symbol")
 }
 
 @MainActor

@@ -27,6 +27,12 @@ final class FolderCell: NSTableCellView {
         didSet { colour() }
     }
 
+    /// Whether its row is selected, which its row says, since AppKit tells a cell only of a selection
+    /// with the keys.
+    var selected = false {
+        didSet { if selected != oldValue { colour() } }
+    }
+
     init() {
         super.init(frame: .zero)
         identifier = Self.id
@@ -90,16 +96,45 @@ final class FolderCell: NSTableCellView {
             symbol.contentTintColor = .alternateSelectedControlTextColor
             return
         }
+        // The selection's grey without the keys takes the quieter tones under 3:1 in the dark look.
         Labels.style(name, .primary, roles: roles)
-        Labels.style(digit, .tertiary, roles: roles)
+        Labels.style(digit, selected ? .primary : .tertiary, roles: roles)
         mention.textColor = roles.mention.nsColor
-        Labels.style(count, .secondary, roles: roles)
-        symbol.contentTintColor = Tone.secondary.color(roles).nsColor
+        Labels.style(count, selected ? .primary : .secondary, roles: roles)
+        symbol.contentTintColor = (selected ? Tone.primary : .secondary).color(roles).nsColor
     }
 
     /// A built-in folder's symbol, a smart folder's, or a folder of yours'.
     static func symbol(for row: FolderRow) -> String {
         builtInSymbols[row.id] ?? (row.isSmart ? smartSymbol : yoursSymbol)
+    }
+}
+
+/// A folder's row, which tells its cell whether it's selected.
+final class FolderRowView: NSTableRowView {
+    static let id = NSUserInterfaceItemIdentifier("folder.row")
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        identifier = Self.id
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isSelected: Bool {
+        didSet {
+            for case let cell as FolderCell in subviews {
+                cell.selected = isSelected
+            }
+        }
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        (subview as? FolderCell)?.selected = isSelected
     }
 }
 
