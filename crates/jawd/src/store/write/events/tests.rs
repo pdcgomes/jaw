@@ -661,6 +661,51 @@ async fn an_events_copy_in_a_chat_merged_folds_in_its_answers_each_answerers_new
     );
 }
 
+/// Message `id` from the other side of one-to-one chat `chat`.
+fn direct(chat: &str, id: &str) -> MessageKey {
+    MessageKey { remote_jid: Some(chat.into()), from_me: Some(false), id: Some(id.into()), participant: None }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_deleted_for_everyone_stays_deleted_through_a_fold_with_its_copy_edited_since() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    apply(&store, in_chat(ANA, event_from("e1", ANA))).await;
+    apply(&store, in_chat(ANA_LID, event_from("e1", ANA))).await;
+    // Ana deletes it for everyone in her number's chat, which is kept, and her edit reaches her LID's.
+    let revoke = e2e::Message {
+        protocol_message: Some(Box::new(e2e::ProtocolMessage {
+            key: Some(direct(ANA, "e1")),
+            r#type: Some(e2e::protocol_message::Type::Revoke as i32),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let deleting = WebMessageInfo {
+        key: direct(ANA, "d1"),
+        message: Some(revoke),
+        message_timestamp: Some((AT / 1000) as u64 + 30),
+        ..Default::default()
+    };
+    apply(&store, live(deleting)).await;
+    apply(&store, in_chat(ANA_LID, edit_info("e1", (ANA_LID, ANA_LID), "x1", AT + 60_000, "Gone zebra", false))).await;
+    apply(&store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
+    merged(&store).await;
+    let kept: (bool, Option<String>, Option<String>, bool) = query(&store, |db| {
+        Ok(db.query_row("SELECT deleted, text, detail, raw IS NULL FROM messages WHERE id = 'e1'", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?)
+    })
+    .await;
+    assert_eq!(kept, (true, None, None, true), "still deleted, with none of its copy's words, detail or raw protobuf");
+    store.indexed().await.unwrap();
+    let found = query(&store, |db| {
+        Ok(read::search(db, "zebra", None, None, 10)?.hits.into_iter().map(|h| h.message.id).collect::<Vec<_>>())
+    })
+    .await;
+    assert!(found.is_empty(), "and search finds nothing of it: {found:?}");
+}
+
 /// A jaw.db at the version before events' answers were kept, its feed at seq 1,000, as main's jawd
 /// left it: Ana's events e1 and e2 in the group, converted as it converted them (a call link as
 /// `link`, no place, nothing counted), e3 deleted for everyone, and what it kept sealed for e1,

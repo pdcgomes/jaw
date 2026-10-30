@@ -2027,18 +2027,20 @@ fn located(db: &Connection, stamps: &mut Stamps, chat_jid: &str, id: &str) -> Re
 /// kept one, a deletion for everyone sticks, and `gone` is removed.
 fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -> Result<()> {
     let seq = stamps.seq(MESSAGE, Some(kept));
-    // An event's edit says where and when as well as what it's called.
+    // An event's edit says where and when as well as what it's called. A kept copy deleted for
+    // everyone takes none of the other's words, nor its raw protobuf, which the deletion cleared.
     db.prepare_cached(
         "UPDATE messages AS k SET
-            text = iif(g.edited_at > coalesce(k.edited_at, -1), g.text, k.text),
-            spans = iif(g.edited_at > coalesce(k.edited_at, -1), g.spans, k.spans),
-            summary = iif(g.edited_at > coalesce(k.edited_at, -1), g.summary, k.summary),
+            text = iif(NOT k.deleted AND g.edited_at > coalesce(k.edited_at, -1), g.text, k.text),
+            spans = iif(NOT k.deleted AND g.edited_at > coalesce(k.edited_at, -1), g.spans, k.spans),
+            summary = iif(NOT k.deleted AND g.edited_at > coalesce(k.edited_at, -1), g.summary, k.summary),
             detail = iif(k.kind = 'event' AND NOT k.deleted AND g.edited_at > coalesce(k.edited_at, -1), g.detail,
                 k.detail),
             edited_at = max(coalesce(k.edited_at, g.edited_at), coalesce(g.edited_at, k.edited_at)),
             status = iif(coalesce(?4 ->> g.status, -1) > coalesce(?4 ->> k.status, -1), g.status, k.status),
             starred = max(k.starred, g.starred), mentions_me = max(k.mentions_me, g.mentions_me),
-            raw = coalesce(k.raw, g.raw), envelope = coalesce(k.envelope, g.envelope), v = ?3
+            raw = iif(k.deleted, k.raw, coalesce(k.raw, g.raw)),
+            envelope = iif(k.deleted, k.envelope, coalesce(k.envelope, g.envelope)), v = ?3
         FROM (SELECT * FROM messages WHERE n = ?2) AS g WHERE k.n = ?1",
     )?
     .execute(params![kept, gone, seq, STATUS_RANKS])?;

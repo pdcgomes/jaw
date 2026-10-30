@@ -672,6 +672,40 @@ async fn a_copy_folded_into_another_is_wanted_after_any_want_a_job_took_of_eithe
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_message_deleted_for_everyone_stays_deleted_through_a_fold_with_its_copy_edited_since() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let copy = |chat: &str| Message {
+        raw: Some(Packed::new(b"what she said")),
+        envelope: Some(Packed::new(b"the engine's event")),
+        ..message(chat, "m", AT, "olá")
+    };
+    apply(&store, vec![Change::Message(copy(ANA)), Change::Message(copy(ANA_LID))]).await;
+    // Deleted for everyone in her number's chat, which is kept, and edited since in her LID's.
+    apply(&store, vec![amend(ANA, "m", AT + 10, Some(ANA), Amendment::Revoke)]).await;
+    let edit = Amendment::Edit { text: Some("olá zebra".into()), spans: None, summary: "olá zebra".into() };
+    apply(&store, vec![amend(ANA_LID, "m", AT + 20, Some(ANA_LID), edit)]).await;
+    joined(&store).await;
+    merged(&store).await;
+    let kept: (bool, Option<String>, Option<String>, Option<String>, bool, bool) = query(&store, |db| {
+        Ok(db.query_row(
+            "SELECT deleted, text, spans, summary, raw IS NULL, envelope IS NULL FROM messages WHERE id = 'm'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )?)
+    })
+    .await;
+    assert_eq!(
+        kept,
+        (true, None, None, Some("This message was deleted".into()), true, true),
+        "still deleted, with none of its copy's words or its raw protobuf"
+    );
+    store.indexed().await.unwrap();
+    let found = query(&store, |db| read::search(db, "zebra", None, None, 10)).await;
+    assert!(found.hits.is_empty(), "and search finds nothing of it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_row_kept_in_quarantine_leaves_it_once_it_converts() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
