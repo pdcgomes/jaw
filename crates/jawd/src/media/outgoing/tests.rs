@@ -1495,3 +1495,52 @@ async fn send_retry_refuses_the_failed_hd_copy_of_a_message_deleted_for_everyone
     assert_eq!(state, "failed", "nor is it queued again");
     assert_eq!(kinds_sent(&rig), [(id, "message")]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_hd_copy_whose_sent_message_is_deleted_for_you_leaves_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.world.gate_uploads(true);
+    let path = yours(picked.path(), "big.jpg", &Picture::lake(2400, 1800));
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    let both = tokio::time::timeout(Duration::from_secs(60), async {
+        while rig.world.uploads().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    both.await.expect("both copies made and on their way up");
+    let db = Connection::open(rig.home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute_batch(
+        "UPDATE outgoing SET state = 'failed', error = 'refused in the audit' WHERE variant = 'hd';
+         UPDATE outbox SET state = 'failed', error = 'refused in the audit' WHERE kind = 'hd';
+         UPDATE outgoing SET state = 'ready' WHERE variant = 'sd';",
+    )
+    .unwrap();
+    rig.media.inner.sending.changed();
+    rig.until(&id, "sent", sent).await;
+    rig.world.gate_uploads(false);
+    rig.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let left = rig
+        .query(|db| {
+            Ok((
+                db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get::<_, i64>(0))?,
+                db.query_row("SELECT count(*) FROM outgoing", [], |r| r.get::<_, i64>(0))?,
+                db.query_row(
+                    "SELECT count(*) FROM outbox WHERE NOT (state = 'failed' AND kind IN ('reaction', 'edit', 'revoke', 'vote'))",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?,
+            ))
+        })
+        .await;
+    let retried = rig.call("send.retry", json!({ "message": id })).await;
+    eprintln!(
+        "AUDIT-E: HD rows, outgoing rows and rows counted toward the outbox's bound left: {left:?}; send.retry {retried:?}"
+    );
+    assert_eq!(left, (0, 0, 0), "a failed HD copy of a message deleted for you stays, out of send.retry's reach");
+}

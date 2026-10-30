@@ -351,7 +351,7 @@ const ORPHANED_HD: &str = "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'
     AND NOT EXISTS (SELECT 1 FROM outbox w WHERE w.message = ?1)
     AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.status IN ('sent', 'delivered', 'read', 'played'))";
 /// The HD copies of message ?1, which never go once it's deleted for everyone, or being, whether or
-/// not the message itself went.
+/// not the message itself went, or once it's deleted for you.
 const HD_WITHDRAWN: &str = "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'";
 /// The HD copies of message ?1 if it's deleted for everyone, as a merge leaves them when it folds a
 /// copy of a message into one deleted already.
@@ -1109,11 +1109,13 @@ pub(super) fn tidied(db: &Connection, n: i64) -> Result<()> {
 /// still queued goes all the same, as on the phone, and one waiting for a receipt ends at its time.
 /// Your actions on it keep whether it was deleted for everyone, so a reaction or an edit still to go
 /// on a message deleted for everyone isn't sent once you've deleted it for you too
-/// (`Outboxed::withdrawn`). An HD copy goes only after its message, so it goes with a failed one.
+/// (`Outboxed::withdrawn`). An HD copy goes only after its message, which leaves nothing for it to
+/// go after, so its HD copies go, whatever their state, or a failed one would wait for a send.retry
+/// that can't find it.
 pub(super) fn deleted_for_you(db: &Connection, n: i64) -> Result<()> {
     db.prepare_cached(FORGOTTEN)?.execute([n])?;
     db.prepare_cached(KEEP_DELETED)?.execute([n])?;
-    db.prepare_cached(ORPHANED_HD)?.execute([n])?;
+    db.prepare_cached(HD_WITHDRAWN)?.execute([n])?;
     Ok(())
 }
 
