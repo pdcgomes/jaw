@@ -28,11 +28,13 @@ public enum SamplePictures {
     /// Every picture's previews and thumbnail, and the sticker's, by path.
     public static let files: [String: Data] = {
         var out: [String: Data] = [:]
+        // PNGs, whose flat colours come out as flat as they went in, so the pictures drawn from them
+        // compress as the harness's and the tests' own pictures should.
         for d in drawn {
             for long in [256, 768] {
-                out[preview(d.name, long)] = jpeg(draw(d, long: long))
+                out[preview(d.name, long)] = png(draw(d, long: long))
             }
-            out[thumbnail(d.name)] = jpeg(draw(d, long: 24, upTo: 256))
+            out[thumbnail(d.name)] = png(draw(d, long: 24, upTo: 256))
         }
         out[preview("smile", 256)] = png(sticker(256))
         out[preview("smile", 768)] = png(sticker(512))
@@ -41,11 +43,11 @@ public enum SamplePictures {
     }()
 
     public static func preview(_ name: String, _ long: Int) -> String {
-        "media/previews/\(name).\(long).\(name == "smile" ? "png" : "jpg")"
+        "media/previews/\(name).\(long).png"
     }
 
     public static func thumbnail(_ name: String) -> String {
-        "media/previews/\(name).instant.\(name == "smile" ? "png" : "jpg")"
+        "media/previews/\(name).instant.png"
     }
 
     /// The original's size of a picture drawn here.
@@ -111,10 +113,6 @@ public enum SamplePictures {
         ctx.addArc(center: CGPoint(x: s * 0.5, y: s * 0.5), radius: s * 0.22, startAngle: .pi * 1.15, endAngle: .pi * 1.85, clockwise: false)
         ctx.strokePath()
         return ctx.makeImage()!
-    }
-
-    static func jpeg(_ image: CGImage) -> Data {
-        encoded(image, UTType.jpeg, [kCGImageDestinationLossyCompressionQuality: 0.85])
     }
 
     static func png(_ image: CGImage) -> Data {
