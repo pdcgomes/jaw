@@ -461,7 +461,8 @@ struct Unsettled {
     mine: Option<(i64, i64)>,
     /// The newest of yours sent from this jawd, which reads the chat up to it, WhatsApp untold.
     here: Option<(i64, i64)>,
-    /// Whether one of yours arrived live, which unmarks the chat.
+    /// Whether one of yours arrived live, which unmarks the chat unless jaw's own change to the
+    /// mark is on its way.
     mine_live: bool,
     /// Whether one of yours from your other devices came under another of the person's JIDs than
     /// the chat's own, which says nothing of the messages that came under the chat's own.
@@ -1000,7 +1001,14 @@ fn settle_each(db: &Connection, stamps: &mut Stamps, unsettled: Vec<(i64, Unsett
         if let Some(at) = history {
             now.at = now.at.max(Some(at));
         }
-        let mut marked = was.marked && !moved.mine_live;
+        // One of yours from another device means the chat was read there, which takes its mark
+        // off, unless jaw's own change to the mark is on its way: WhatsApp takes that after it.
+        let mut marked = was.marked;
+        if marked && moved.mine_live {
+            let jid: String =
+                db.prepare_cached("SELECT id FROM chats WHERE n = ?1")?.query_row([chat], |r| r.get(0))?;
+            marked = chat_actions::marking(db, &jid)?;
+        }
         // A chat being merged is the same conversation as the one it goes into, so reading that
         // one reads this too: it counts from the later of the two positions, and stays marked
         // unread only while that one is. Its own position and how far WhatsApp was told of it

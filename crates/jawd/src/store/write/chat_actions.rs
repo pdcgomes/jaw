@@ -529,6 +529,22 @@ mod tests {
         })
     }
 
+    /// One of yours in Ana's chat, sent from another of your devices, arriving live.
+    fn mine_elsewhere(id: &str, at: i64) -> Change {
+        Change::Message(Message {
+            chat: ANA.into(),
+            id: id.into(),
+            at,
+            mine: true,
+            kind: "text",
+            status: Some("sent"),
+            text: Some(id.into()),
+            summary: id.into(),
+            live: true,
+            ..Message::default()
+        })
+    }
+
     #[test]
     fn a_pin_is_written_with_its_time_a_new_version_and_its_patch_and_asked_again_does_nothing() {
         let db = db();
@@ -764,6 +780,60 @@ mod tests {
         let receipt = Read { chat: ANA.into(), at: AT + 5_000, ids: vec!["m3".into()], ..Read::default() };
         written(&db, &[Change::Read(receipt)]);
         assert!(!chat(&db, ANA).3, "with nothing of jaw's on its way, a read on another device takes the mark off");
+    }
+
+    #[test]
+    fn one_of_yours_sent_elsewhere_while_jaws_mark_unread_waits_leaves_the_mark_so_marking_read_isnt_so_already() {
+        let db = db();
+        written(&db, &[from_ana("m1", AT), from_ana("m2", AT + 10)]);
+        let index = ["markChatAsRead", ANA];
+        let (unread_at, read_at) = (AT + 1_000, AT + 2_000);
+        assert!(matches!(acted(&db, ANA, mark_at(ANA, true, "m2", unread_at, "u1")), Acted::Queued { .. }));
+        // You answer Ana from your phone before jaw's patch reaches WhatsApp.
+        written(&db, &[mine_elsewhere("p1", AT + 500)]);
+        let (.., marked, unread, _) = chat(&db, ANA);
+        assert_eq!(
+            (marked, unread),
+            (true, 0),
+            "read up to your answer, and still marked, since WhatsApp takes jaw's mark unread after it"
+        );
+        let again = acted(&db, ANA, mark_at(ANA, false, "p1", read_at, "r1"));
+        assert!(matches!(again, Acted::Queued { .. }), "marking it read isn't so already: {again:?}");
+        arrives(&db, &index, &unread_value(unread_at), 1);
+        arrives(&db, &index, &read_value(read_at), 2);
+        assert_eq!((chat(&db, ANA).3, awaited(&db, &index)), (false, None), "the mark read's echo ends the wait");
+        arrives(&db, &index, &unread_value(AT + 4_000), 3);
+        assert!(chat(&db, ANA).3, "your phone marks it unread");
+        written(&db, &[mine_elsewhere("p2", AT + 5_000)]);
+        assert!(
+            !chat(&db, ANA).3,
+            "with nothing of jaw's on its way, one of yours from another device takes the mark off"
+        );
+    }
+
+    #[test]
+    fn a_history_blob_read_on_your_phone_converted_while_jaws_mark_unread_waits_reads_the_chat_and_leaves_the_mark() {
+        let db = db();
+        written(&db, &[from_ana("m1", AT), from_ana("m2", AT + 10)]);
+        assert!(matches!(acted(&db, ANA, mark_at(ANA, true, "m2", AT + 2_000, "u1")), Acted::Queued { .. }));
+        // The conversation as your phone had it once you had read it there, read and not marked,
+        // converted only now.
+        let read_there = Conversation {
+            id: ANA.into(),
+            conversation_timestamp: Some(((AT + 1_000) / 1_000) as u64),
+            unread_count: Some(0),
+            marked_as_unread: Some(false),
+            ..Default::default()
+        };
+        written(&db, &from_history(read_there));
+        let (.., marked, unread, _) = chat(&db, ANA);
+        assert_eq!(
+            (marked, unread),
+            (true, 0),
+            "read up to its newest, and still marked, since WhatsApp takes jaw's mark unread after the read"
+        );
+        let again = acted(&db, ANA, mark_at(ANA, false, "m2", AT + 3_000, "r1"));
+        assert!(matches!(again, Acted::Queued { .. }), "marking it read isn't so already: {again:?}");
     }
 
     #[test]
