@@ -27,6 +27,19 @@ public protocol ConversationHost: AnyObject {
     func conversation(_ c: ConversationController, vote message: String, options: [String])
     /// Whether what's on screen counts as read now: the app active and the window key.
     func conversationIsRead(_ c: ConversationController) -> Bool
+    /// A message's files: looked at, an album's from the one at `at`; opened, saved, asked for or
+    /// stopped, the one at `at`.
+    func conversation(_ c: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int)
+    /// What a file drags out as: its clone once it's here, a promise kept by saving it before.
+    func conversation(_ c: ConversationController, dragging offer: MediaOffer) -> NSPasteboardWriting?
+}
+
+public extension ConversationHost {
+    func conversation(_: ConversationController, media _: MediaOffer.Act, _: [MediaOffer], at _: Int) {}
+
+    func conversation(_: ConversationController, dragging _: MediaOffer) -> NSPasteboardWriting? {
+        nil
+    }
 }
 
 /// One chat's messages and its box. The window's rows are jawd's; this keeps where you're reading,
@@ -545,6 +558,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             v.clicked = { [weak self] view, point, clicks in self?.clicked(view, point, clicks) }
             v.menuFor = { [weak self] view in self?.menu(for: view) }
             v.hovered = { [weak self] view, inside in self?.hovered(view, inside) }
+            v.dragFor = { [weak self] view, item in self?.dragging(view, item) }
             return v
         }()
         let m = rows[row]
@@ -581,7 +595,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             // A double click's second click would take back the vote its first made.
             case let .vote(name) where clicks == 1: vote(name, in: m.id)
             case .vote: break
-            case .media, .stop: break
+            case let .media(item):
+                select(m.id)
+                media(.look, m, item: item)
+            case let .stop(item): media(.stop, m, item: item)
             }
             return
         }
@@ -683,8 +700,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         relayout()
     }
 
-    /// Enter on a message: try a failed one again, unfold a long one, open a poll's Vote menu under
-    /// it, open its first link.
+    /// Enter on a message: try a failed one again, unfold a long one, look at its file, open a poll's
+    /// Vote menu under it, open its first link.
     func open(_ m: MessageRow) {
         if m.mine, m.status == .failed {
             host?.conversation(self, retry: m.id)
@@ -692,11 +709,35 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
                   m.plain.split(separator: "\n").count > MessageLayout.fold
         {
             unfold(m.id)
+        } else if MediaOffer.of(m) != nil {
+            media(.look, m, item: nil)
         } else if let votes = voteMenu(for: m) {
             showVotes(votes, for: m)
         } else if let link = m.spans.first(where: { $0.t == .link }) {
             host?.conversation(self, open: link.url ?? link.s)
         }
+    }
+
+    /// Does `act` with a message's file, or its album's item's; an album looked at as a whole pages
+    /// through every item from the first. A message with none says so.
+    func media(_ act: MediaOffer.Act, _ m: MessageRow, item: Int?) {
+        let offers = MediaOffer.all(m)
+        guard !offers.isEmpty else {
+            return say(m.viewOnce ? "it's view-once: open it on your phone" : "there's no file in this one")
+        }
+        let at = item.flatMap { i in offers.firstIndex { $0.item == i } } ?? 0
+        host?.conversation(self, media: act, offers, at: at)
+    }
+
+    /// Does `act` with the selected message's file, for the menus and the palette.
+    public func media(_ act: MediaOffer.Act) {
+        guard let m = selectedMessage else { return }
+        media(act, m, item: nil)
+    }
+
+    func dragging(_ view: MessageView, _ item: Int?) -> NSPasteboardWriting? {
+        guard let m = message(of: view), let offer = MediaOffer.of(m, item: item) else { return nil }
+        return host?.conversation(self, dragging: offer)
     }
 
     var selectedMessage: MessageRow? {
@@ -712,11 +753,21 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         case 126: step(-1); return true
         case 125: step(1); return true
         case 53: select(nil); return true
-        case 36, 76: open(m); return true
+        case 36, 76:
+            if event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command, MediaOffer.of(m) != nil {
+                media(.open, m, item: nil)
+            } else {
+                open(m)
+            }
+            return true
+        case 49 where plain && MediaOffer.of(m) != nil:
+            media(.look, m, item: nil)
+            return true
         default: break
         }
         guard plain else { return false }
         switch chars {
+        case "s" where MediaOffer.of(m) != nil: media(.save, m, item: nil)
         case "r": reply(to: m)
         case "e": edit(m)
         case "d": deleteAsked(m)
@@ -846,6 +897,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         case "y": copy(m)
         case "i": host?.conversation(self, info: m.id)
         case "\n": open(m)
+        case " ": media(.look, m, item: nil)
+        case "s": media(.save, m, item: nil)
         default: break
         }
     }
@@ -993,6 +1046,23 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
                 item("Forward…", "f") { [weak self] in self?.forward(m) }
             }
         }
+        if let offer = MediaOffer.of(m) {
+            menu.addItem(.separator())
+            for (act, title, key) in offer.menu {
+                let i = ClosureItem(title: title) { [weak self] in self?.media(act, m, item: nil) }
+                switch key {
+                case "Space": i.keyEquivalent = " "
+                case "⌘↩":
+                    i.keyEquivalent = "\r"
+                    i.keyEquivalentModifierMask = .command
+                case let key?: i.keyEquivalent = key
+                case nil: break
+                }
+                if key != "⌘↩" { i.keyEquivalentModifierMask = [] }
+                menu.addItem(i)
+                if act == .open, let apps = openWith(offer, m) { menu.addItem(apps) }
+            }
+        }
         if Self.notEditable(m) == nil {
             item("Edit", "e") { [weak self] in self?.edit(m) }
         }
@@ -1018,6 +1088,25 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             }
         }
         return menu
+    }
+
+    /// Open With ▸, the apps that open a file that's here, its own first; nil before it's here.
+    func openWith(_ offer: MediaOffer, _ m: MessageRow) -> NSMenuItem? {
+        guard let here = offer.here, let url = pictures.url(here) else { return nil }
+        let apps = NSWorkspace.shared.urlsForApplications(toOpen: url)
+        guard !apps.isEmpty else { return nil }
+        let item = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        let first = NSWorkspace.shared.urlForApplication(toOpen: url)
+        for app in ([first].compactMap(\.self) + apps.filter { $0 != first }).prefix(12) {
+            let name = FileManager.default.displayName(atPath: app.path).replacingOccurrences(of: ".app", with: "")
+            let i = ClosureItem(title: app == first ? "\(name) (default)" : name) { [weak self] in self?.media(.openWith(app), m, item: nil) }
+            i.image = NSWorkspace.shared.icon(forFile: app.path)
+            i.image?.size = NSSize(width: 16, height: 16)
+            sub.addItem(i)
+        }
+        item.submenu = sub
+        return item
     }
 
     public var notice: ((String) -> Void)?

@@ -12,6 +12,9 @@ struct Launch {
     let bench: String?
     /// `--snapshot <path>`: draws the window into a picture once a chat is open, and quits.
     let snapshot: String?
+    /// Where Save puts a file: Downloads, or `--downloads <folder>`, so a run trying it on a made-up
+    /// account leaves nothing in yours.
+    var downloads = "~/Downloads"
 
     static let platformHome = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/jaw")
     static let demoHome = (NSTemporaryDirectory() as NSString).appendingPathComponent("jaw-mac-demo")
@@ -21,6 +24,7 @@ struct Launch {
         var demo = false
         var bench: String?
         var snapshot: String?
+        var downloads: String?
         var i = 1
         while i < arguments.count {
             switch arguments[i] {
@@ -35,6 +39,9 @@ struct Launch {
             case "--bench" where i + 1 < arguments.count:
                 bench = arguments[i + 1]
                 i += 1
+            case "--downloads" where i + 1 < arguments.count:
+                downloads = arguments[i + 1]
+                i += 1
             default:
                 break
             }
@@ -47,7 +54,9 @@ struct Launch {
             if home == nil { demo = true }
         #endif
         if demo, home == nil { home = demoHome }
-        return Launch(home: home ?? platformHome, demo: demo, bench: bench, snapshot: snapshot)
+        var launch = Launch(home: home ?? platformHome, demo: demo, bench: bench, snapshot: snapshot)
+        if let downloads { launch.downloads = downloads }
+        return launch
     }
 
     var socket: String {

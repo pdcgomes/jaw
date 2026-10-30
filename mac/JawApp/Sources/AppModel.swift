@@ -55,6 +55,13 @@ final class AppModel {
     var focused = false
     /// What the launch bench waits for: the first frame with the chat list's rows.
     var firstRows: (() -> Void)?
+    /// A file asked to be looked at or opened before it was here, to be once it is.
+    var pending: (row: String, item: Int?, act: MediaOffer.Act, offers: [MediaOffer], at: Int)?
+    /// Saves asked of jawd, by ticket: the message, whether to show the copy in the Finder once it's
+    /// made, and the drag's promise to keep.
+    var saving: [String: (message: String, reveal: Bool, done: (@Sendable ((any Error)?) -> Void)?)] = [:]
+    /// Where each message's file was saved this run, for Show in Finder.
+    var saved: [String: URL] = [:]
     /// `JAW_TRACE=1` says each update drained, on standard error.
     let trace = ProcessInfo.processInfo.environment["JAW_TRACE"] != nil
 
@@ -108,6 +115,7 @@ final class AppModel {
             }
         }
         jawd.start()
+        Opened.empty()
         listWindow = jawd.watchChats(folder, .top(ChatListController.rows))
         preferences.changed.append { [weak self] in self?.restyle() }
         glance.model = self
@@ -183,6 +191,7 @@ final class AppModel {
             }
         case let .messages(w, u):
             if let chat = paneWindows[w] { panes[chat]?.apply(u) } else { glance.apply(w, u) }
+            if pending != nil { cameFor(u.upsert) }
         case let .typing(now):
             typing = now
             ConversationController.give(now, to: panes.values)
@@ -225,10 +234,11 @@ final class AppModel {
             terminalPanes(kept)
         case let .looked(chat, found):
             lookedUp(chat, found)
-        case let .notFetched(_, why):
+        case let .notFetched(message, why):
+            if pending?.offers[pending!.at].message == message { pending = nil }
             say("not downloaded: \(why)", warn: true)
-        case let .saved(_, _, path, why):
-            if let path { say("saved as \(path)") } else { say("not saved: \(why ?? "")", warn: true) }
+        case let .saved(ticket, message, path, why):
+            savedAnswer(ticket, message, path, why)
         case .push, .chats, .layout:
             break
         }
@@ -826,6 +836,21 @@ extension AppModel: ConversationHost {
     func conversationFocused(_ c: ConversationController) {
         if focusedChat != c.chat.id { focus(c.chat.id) }
     }
+
+    func conversation(_: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int) {
+        file(act, offers, at: at)
+    }
+
+    func conversation(_: ConversationController, dragging offer: MediaOffer) -> NSPasteboardWriting? {
+        if let here = offer.here, let file = pictures.url(here), let clone = Opened.clone(of: file, named: offer.name, for: offer.message) {
+            return clone as NSURL
+        }
+        return Dragged(offer) { [weak self] url, done in
+            guard let self else { return done(NotSaved("Jaw has gone")) }
+            let ticket = jawd.save(chat: offer.chat, message: offer.message, to: url.path)
+            saving[ticket] = (offer.message, false, done)
+        }
+    }
 }
 
 extension AppModel: ChatListHost {
@@ -839,5 +864,112 @@ extension AppModel: ChatListHost {
 
     func chatList(_: ChatListController, menuItemsFor chat: ChatRow) -> [NSMenuItem] {
         chatMenuItems(for: chat)
+    }
+}
+
+/// A message's files: looked at with Quick Look, opened in their apps, saved into Downloads and asked
+/// for, each from a clone of jawd's file, never jawd's own (`Opened`).
+extension AppModel {
+    func file(_ act: MediaOffer.Act, _ offers: [MediaOffer], at: Int) {
+        let offer = offers[at]
+        switch act {
+        case .look, .open, .openWith:
+            guard offer.isHere else {
+                if offer.media.state != .downloading, offer.media.state != .waitingForPhone { jawd.fetch(chat: offer.chat, message: offer.message) }
+                pending = (rowID(offer, in: offers), offer.item, act, offers, at)
+                return say(offer.waitingWords)
+            }
+            pending = nil
+            hand(act, offers, at: at)
+        case .save, .saveHD:
+            let ticket = jawd.save(chat: offer.chat, message: offer.message, to: launch.downloads, variant: act == .saveHD ? .hd : nil)
+            saving[ticket] = (offer.message, false, nil)
+            if !offer.isHere { say("\(offer.name) is coming; it's saved once it's here") }
+        case .reveal:
+            if let url = saved[offer.message], FileManager.default.fileExists(atPath: url.path) {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } else {
+                let ticket = jawd.save(chat: offer.chat, message: offer.message, to: launch.downloads)
+                saving[ticket] = (offer.message, true, nil)
+            }
+        case .fetch:
+            jawd.fetch(chat: offer.chat, message: offer.message)
+        case .stop:
+            if pending.map({ $0.offers[$0.at].message == offer.message }) ?? false { pending = nil }
+            jawd.cancel(chat: offer.chat, message: offer.message)
+        }
+    }
+
+    /// The row an offer is of: the album's, for one of its items.
+    func rowID(_ offer: MediaOffer, in _: [MediaOffer]) -> String {
+        guard offer.item != nil else { return offer.message }
+        for c in panes.values {
+            if let row = c.window.list.first(where: { $0.album?.items.contains { $0.id == offer.message } == true }) { return row.id }
+        }
+        return offer.message
+    }
+
+    /// The files here among `offers`, cloned off the main thread, then looked at, from the one asked
+    /// for, or the one asked for opened.
+    func hand(_ act: MediaOffer.Act, _ offers: [MediaOffer], at: Int) {
+        let chosen: [(Int, MediaOffer)] = act == .look ? offers.indices.filter { offers[$0].isHere }.map { ($0, offers[$0]) } : [(at, offers[at])]
+        let files = chosen.compactMap { i, o in o.here.flatMap { pictures.url($0) }.map { (i, $0, o.name, o.message) } }
+        guard !files.isEmpty else { return say("it isn't here yet") }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var clones: [(Int, URL, String)] = []
+            var why: String?
+            for (i, file, name, message) in files {
+                do {
+                    clones.append((i, try Opened.copy(of: file, named: name, for: message), name))
+                } catch {
+                    why = error.localizedDescription
+                }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let model = AppDelegate.shared?.model else { return }
+                    guard !clones.isEmpty else { return model.say("couldn't open it: \(why ?? "no file")", warn: true) }
+                    switch act {
+                    case .look:
+                        QuickLook.shared.show(clones.map { ($0.1, $0.2) }, at: clones.firstIndex { $0.0 == at } ?? 0)
+                    case let .openWith(app):
+                        NSWorkspace.shared.open([clones[0].1], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+                    default:
+                        NSWorkspace.shared.open(clones[0].1)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rows that came while a file waited to be looked at or opened: once it's here it is, and once
+    /// it can't come it isn't, its card saying why.
+    func cameFor(_ rows: [MessageRow]) {
+        guard let p = pending, let row = rows.first(where: { $0.id == p.row }) else { return }
+        let offers = MediaOffer.all(row)
+        guard let offer = offers.first(where: { $0.message == p.offers[p.at].message }) else { return }
+        if offer.isHere {
+            pending = nil
+            hand(p.act, offers, at: offers.firstIndex(of: offer) ?? 0)
+        } else if [.expired, .gone].contains(offer.media.state) || offer.media.state == .remote && offer.media.error != nil {
+            pending = nil
+        }
+    }
+
+    /// media.save's answer: said in the status line, shown in the Finder when that was asked, or
+    /// handed to the drag's promise.
+    func savedAnswer(_ ticket: String, _ message: String, _ path: String?, _ why: String?) {
+        let asked = saving.removeValue(forKey: ticket)
+        if let done = asked?.done {
+            return done(path == nil ? NotSaved(why ?? "jawd didn't save it") : nil)
+        }
+        guard let path else { return say("not saved: \(why ?? "jawd didn't say why")", warn: true) }
+        let url = URL(fileURLWithPath: path)
+        saved[message] = url
+        let parent = url.deletingLastPathComponent().path
+        let folder = parent == FileManager.default.homeDirectoryForCurrentUser.appending(path: "Downloads").path
+            ? "Downloads" : (parent as NSString).abbreviatingWithTildeInPath
+        say("saved to \(folder) as \(url.lastPathComponent)")
+        if asked?.reveal == true { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     }
 }

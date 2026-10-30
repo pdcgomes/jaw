@@ -139,12 +139,12 @@ enum Bench {
                 }
             }
             let codes: [String: UInt16] = ["d": 2, "w": 13, "k": 40, "f": 3, "j": 38, "s": 1, "e": 14, "1": 18, "2": 19, "3": 20,
-                                           "left": 123, "right": 124, "down": 125, "up": 126, "return": 36, "tab": 48]
+                                           "left": 123, "right": 124, "down": 125, "up": 126, "return": 36, "tab": 48, "space": 49]
             let arrows: [String: Int] = ["left": NSLeftArrowFunctionKey, "right": NSRightArrowFunctionKey, "up": NSUpArrowFunctionKey,
                                          "down": NSDownArrowFunctionKey]
             if arrows[char] != nil { mods.insert([.numericPad, .function]) }
             let typed = arrows[char].map { String(UnicodeScalar($0)!) }
-                ?? (char == "return" ? "\r" : char == "tab" ? "\t" : mods.contains(.shift) ? char.uppercased() : char)
+                ?? (char == "return" ? "\r" : char == "tab" ? "\t" : char == "space" ? " " : mods.contains(.shift) ? char.uppercased() : char)
             if !step, let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
                                             windowNumber: (NSApp.keyWindow ?? model.window?.window)?.windowNumber ?? 0, context: nil,
                                             characters: typed, charactersIgnoringModifiers: typed, isARepeat: false, keyCode: codes[char] ?? 0)
@@ -169,7 +169,8 @@ enum Bench {
                     let selected = model.conversation?.selectedRow.map {
                         " · selected \($0.kind.rawValue) \"\($0.plain.prefix(24).replacingOccurrences(of: "\n", with: " "))\""
                     } ?? ""
-                    let said = palette + glance + form + selected + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
+                    let looking = QuickLook.shared.items.isEmpty ? "" : " · looking at " + QuickLook.shared.items.map { $0.previewItemTitle ?? "" }.joined(separator: ", ")
+                    let said = palette + glance + form + selected + looking + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
                     let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
                     FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
                 }

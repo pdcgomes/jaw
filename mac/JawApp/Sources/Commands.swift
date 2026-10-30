@@ -114,6 +114,15 @@ extension AppModel {
         }
         add(Command("message.retry", "Send Again", phrase: "Send it again", detail: "it wasn't sent", hint: "↩", place: .message, group: 1,
                     enabled: { selected().map { $0.mine && $0.status == .failed } ?? false }) { [weak self] in self?.conversation?.act("\n") })
+        // A message's file: the conversation takes the keys itself while a message is selected.
+        let hasFile: @MainActor @Sendable () -> Bool = { selected().map { MediaOffer.of($0) != nil } ?? false }
+        for (id, title, phrase, key, act) in [
+            ("look", "Quick Look", "Look at this file", "Space", MediaOffer.Act.look), ("open", "Open", "Open this file in its app", "⌘↩", .open),
+            ("save", "Save to Downloads", "Save this file to Downloads", "s", .save), ("reveal", "Show in Finder", "Show this file in Finder", nil, .reveal),
+        ] as [(String, String, String, String?, MediaOffer.Act)] {
+            add(Command("message.\(id)", title, phrase: phrase, detail: "the selected message's", hint: key, place: .message, group: 2,
+                        enabled: hasFile) { [weak self] in self?.conversation?.media(act) })
+        }
 
         // Panes
         add(Command("split.across", "Split Across", phrase: "Split this pane across", detail: "another chat beside it",

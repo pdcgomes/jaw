@@ -2,6 +2,7 @@ import AppKit
 import JawKit
 import JawThemes
 import JawUI
+import Quartz
 import QuartzCore
 import SwiftUI
 
@@ -361,5 +362,24 @@ extension MainWindowController {
         Prompts.deleteLayout(name).beginSheetModal(for: window) { [weak model] response in
             if response == .alertFirstButtonReturn { model?.deleteLayout(name) }
         }
+    }
+}
+
+/// Quick Look asks the key window's responder chain for whoever shows files in it: the window's
+/// controller hands it the files the conversation asked to look at.
+extension MainWindowController {
+    override func acceptsPreviewPanelControl(_: QLPreviewPanel!) -> Bool {
+        true
+    }
+
+    // The panel asks on the main thread, as AppKit's responders are asked.
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        let panel = panel!
+        MainActor.assumeIsolated { QuickLook.shared.begin(panel) }
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        let panel = panel!
+        MainActor.assumeIsolated { QuickLook.shared.end(panel) }
     }
 }

@@ -156,8 +156,45 @@ final class MessageView: NSView {
         hovered?(self, false)
     }
 
+    /// What a picture or a file drags out as, and the picture of it to drag.
+    var dragFor: ((MessageView, Int?) -> NSPasteboardWriting?)?
+    /// A press on a picture or a file, which acts when it's let go unless it's dragged first.
+    var down: (point: CGPoint, item: Int?, event: NSEvent)?
+
     override func mouseDown(with event: NSEvent) {
-        clicked?(self, convert(event.locationInWindow, from: nil), event.clickCount)
+        let point = convert(event.locationInWindow, from: nil)
+        if case let .media(item) = laid?.region(at: point) {
+            down = (point, item, event)
+            return
+        }
+        clicked?(self, point, event.clickCount)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let pressed = down else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard hypot(point.x - pressed.point.x, point.y - pressed.point.y) > 4 else { return }
+        down = nil
+        guard let writer = dragFor?(self, pressed.item) else { return }
+        let frame = laid?.regions.first { $0.1 == .media(item: pressed.item) }?.0 ?? bounds
+        let dragging = NSDraggingItem(pasteboardWriter: writer)
+        dragging.setDraggingFrame(frame, contents: snapshot(frame))
+        beginDraggingSession(with: [dragging], event: pressed.event, source: self)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let pressed = down else { return }
+        down = nil
+        clicked?(self, pressed.point, event.clickCount)
+    }
+
+    /// What's drawn in `rect`, to drag.
+    func snapshot(_ rect: CGRect) -> NSImage? {
+        guard let rep = bitmapImageRepForCachingDisplay(in: rect) else { return nil }
+        cacheDisplay(in: rect, to: rep)
+        let image = NSImage(size: rect.size)
+        image.addRepresentation(rep)
+        return image
     }
 
     /// A right click on the message itself, where a left click acts on it, or on the buttons it shows
@@ -200,9 +237,20 @@ final class MessageView: NSView {
         guard let m = message else { return nil }
         let who = m.mine ? "You" : (m.from?.name ?? "")
         let reactions = m.reactions.map { "\($0.n) \($0.emoji)" }.joined(separator: ", ")
-        return [who, MessageLayout.Builder.said(m), MessageLayout.Builder.spoken(m) ?? "", Format.clock(m.at), m.status?.rawValue ?? "", reactions]
+        let file = m.media.flatMap { media in
+            MessageLayout.Builder.comingWords(media).map { [$0.why, $0.act].compactMap(\.self).joined(separator: ", ") }
+                ?? (media.state == .downloading ? "downloading" : media.state == .remote ? "not downloaded" : nil)
+        } ?? ""
+        return [who, MessageLayout.Builder.said(m), MessageLayout.Builder.spoken(m) ?? "", file, Format.clock(m.at), m.status?.rawValue ?? "",
+                reactions]
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
+    }
+}
+
+extension MessageView: NSDraggingSource {
+    func draggingSession(_: NSDraggingSession, sourceOperationMaskFor _: NSDraggingContext) -> NSDragOperation {
+        .copy
     }
 }
 

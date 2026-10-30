@@ -22,6 +22,12 @@ public final class MessagePictures {
         set { queue.files = newValue }
     }
 
+    /// A file of jawd's by the path a row names it by, once jawd has said where its folder is.
+    public func url(_ path: String) -> URL? {
+        guard case let .folder(root) = files else { return nil }
+        return path.hasPrefix("/") ? URL(fileURLWithPath: path) : URL(fileURLWithPath: root).appending(path: path)
+    }
+
     /// What a slot can be drawn with now.
     public struct Drawable {
         public let image: CGImage
