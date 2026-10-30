@@ -184,7 +184,7 @@ public final class Jawd {
     // MARK: - Chats no window holds
 
     /// Where a lookup looks, in turn: the chats not archived, then the archived ones, the two lists
-    /// jawd serves.
+    /// that between them hold every chat jawd has.
     static let lookIn = ["all", "archived"]
 
     /// The chats still to look up, in turn.
