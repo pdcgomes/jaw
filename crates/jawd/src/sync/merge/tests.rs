@@ -1433,6 +1433,29 @@ async fn with_nothing_owed_history_by_her_number_read_as_it_comes_owes_what_came
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn history_by_her_lid_read_as_it_comes_never_cancels_the_receipts_owed_for_what_came_under_her_number() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // Her number's chat with n0 to n4, never read, her LID joined to her with no chat of its own,
+    // and s0 sent here, which reads the chat without telling WhatsApp: n0 to n4 are owed.
+    store.apply(Lane::Live, (0..5).map(|i| message(NEW, &format!("n{i}"), AT + i)).collect()).await.unwrap();
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    let sent = Message { sender: None, mine: true, status: Some("pending"), ..text(NEW, "s0", AT + 5) };
+    let written = outbox::Written::default();
+    let send = outbox::Step::Enqueue { message: Box::new(sent), kind: "text", raw: vec![1], key: None, written };
+    store.apply(Lane::Live, vec![Change::Outbox(send)]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, ids("n", 0..5));
+    // History by her LID, newer, read as it comes since nobody has said where the chat was read:
+    // the only message from her LID it reads past is its own, which still says nothing of n0 to n4.
+    let history = Message { live: false, ..text(LID, "l5", AT + 6) };
+    store.apply(Lane::Live, vec![Change::Message(history)]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 0)], "read as it comes");
+    let mut all = ids("n", 0..5);
+    all.push("l5".into());
+    assert_eq!(owed(&store, NEW).await, all, "l5 owed again, which is harmless");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_phone_read_of_a_group_owes_nothing_whoever_its_messages_came_from() {
     const GROUP: &str = "120363000000000001@g.us";
     const RUI: &str = "351920000003@s.whatsapp.net";
