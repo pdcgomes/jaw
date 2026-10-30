@@ -162,6 +162,15 @@ async fn cards_an_earlier_jawd_left_are_read_again_into_one_cards_name_and_vcard
                 deleted: false,
             },
             Earlier {
+                id: "retold",
+                kind: "contact",
+                text: Some("Marta"),
+                summary: "Contact: Marta",
+                detail: json!({ "contact": { "name": "Marta", "vcard": MARTA } }),
+                raw: from_ana("retold", e2e::Message { conversation: Some("olá".into()), ..Default::default() }),
+                deleted: false,
+            },
+            Earlier {
                 id: "both",
                 kind: "contact",
                 text: Some("Marta, Rui"),
@@ -185,7 +194,7 @@ async fn cards_an_earlier_jawd_left_are_read_again_into_one_cards_name_and_vcard
     let after = shown(&store).await;
     let was = |id: &str| before.iter().find(|row| row.0 == id).cloned().unwrap();
     let now = |id: &str| after.iter().find(|row| row.0 == id).cloned().unwrap();
-    for id in ["named", "deleted", "garbled", "words"] {
+    for id in ["named", "deleted", "garbled", "words", "retold"] {
         assert_eq!(now(id), was(id), "{id} left as it was");
     }
     let (_, text, summary, detail, v) = now("nameless");
@@ -197,7 +206,7 @@ async fn cards_an_earlier_jawd_left_are_read_again_into_one_cards_name_and_vcard
     assert_eq!(detail, json!({ "contact": { "name": "Marta, Rui", "vcard": format!("{MARTA}\r\n{RUI}") } }));
     let (event, chat_v, chat_event): (Option<i64>, i64, Option<i64>) = query(&store, |db| {
         Ok(db.query_row(
-            "SELECT (SELECT max(seq) FROM events WHERE type = 'message' AND key = 6), v,
+            "SELECT (SELECT max(seq) FROM events WHERE type = 'message' AND key = 7), v,
                 (SELECT max(seq) FROM events WHERE type = 'chat' AND key = 1)
             FROM chats WHERE n = 1",
             [],
@@ -214,7 +223,7 @@ async fn cards_an_earlier_jawd_left_are_read_again_into_one_cards_name_and_vcard
     // Read again, nothing changes twice.
     let db = Connection::open(home.path().join("jaw.db")).unwrap();
     db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
-    db.execute("INSERT INTO backfills (name, after, upto) VALUES ('contacts', 0, 6)", []).unwrap();
+    db.execute("INSERT INTO backfills (name, after, upto) VALUES ('contacts', 0, 7)", []).unwrap();
     drop(db);
     while store.backfill_left(CONTACTS).unwrap() > 0 {
         assert_eq!(backfill(&store).await.changed, 0, "a card read again changes nothing");

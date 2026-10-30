@@ -340,6 +340,17 @@ fn a_contact_row_is_its_name_and_vcard_for_one_card_or_several_each_cards_vcard_
     let m = one(e2e::ContactMessage::default());
     assert_eq!((m.summary.as_str(), m.text.as_deref()), ("Contact", None));
     assert_eq!(detail(&m), serde_json::json!({ "contact": { "name": null, "vcard": null } }));
+    let m = one(card(Some("  "), marta));
+    assert_eq!(
+        (m.summary.as_str(), m.text.as_deref()),
+        ("Contact: Dr.ª Marta Lopes", Some("Dr.ª Marta Lopes")),
+        "a name of spaces is none, so its vCard's is taken"
+    );
+    let long = "Marta ".repeat(200);
+    let m = one(card(Some(&long), marta));
+    assert!(m.summary.chars().count() <= SUMMARY && m.summary.ends_with('…'), "clipped: {}", m.summary);
+    assert!(m.summary.starts_with("Contact: Marta Marta"), "{}", m.summary);
+    assert_eq!(m.text.as_deref(), Some(long.trim()), "found by the whole name it was sent with");
 
     let several = |name: Option<&str>, cards: Vec<e2e::ContactMessage>| {
         row(e2e::Message {
@@ -357,6 +368,8 @@ fn a_contact_row_is_its_name_and_vcard_for_one_card_or_several_each_cards_vcard_
     assert_eq!(detail(&m), serde_json::json!({ "contact": { "name": "Dr.ª Marta Lopes, Rui", "vcard": both } }));
     let read: Vec<_> = jaw_proto::vcard::read(&both).into_iter().map(|c| c.name.unwrap()).collect();
     assert_eq!(read, ["Dr.ª Marta Lopes", "Rui Costa"], "each card still a card of its own");
+    let m = several(Some(" "), vec![card(None, marta), card(Some("Rui"), rui)]);
+    assert_eq!(detail(&m)["contact"]["name"], "Dr.ª Marta Lopes, Rui", "a name of spaces is none for several too");
     let m = several(Some("2 contacts"), vec![card(Some("Rui"), rui), card(Some("Marta"), marta)]);
     assert_eq!(detail(&m)["contact"]["name"], "2 contacts", "named as the message names them");
     assert_eq!(detail(&m)["contact"]["vcard"], format!("{rui}{marta}"), "no line added after one that ends in one");
