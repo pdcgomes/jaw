@@ -151,6 +151,18 @@ public struct FolderTree: Sendable, Equatable {
         return Badges(digit: slot(of: id), mention: (row?.mentions ?? 0) > 0, unread: id == "archived" ? 0 : row?.unread ?? 0)
     }
 
+    /// What the chat list says while a folder has no chats, in the terminal's words; none for All,
+    /// whose empty list the panes' place speaks for.
+    public func emptyLine(_ id: String) -> String? {
+        id == "all" || rows[id] == nil ? nil : "No chats in this folder."
+    }
+
+    /// The folder the chat list shows once the tree has changed: the one it showed, or All once that
+    /// one's gone, as when another interface deletes it.
+    public func showing(_ folder: String) -> String {
+        !served || rows[folder] != nil ? folder : "all"
+    }
+
     /// What lays the tree out: each folder's place and name. A change to anything else, such as its
     /// counts, draws its row again where it is.
     var shape: [String: Shape] {

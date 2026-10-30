@@ -8,6 +8,7 @@ enum BuiltInScenes {
         catalog.register(.mimic)
         catalog.register(.chatList)
         catalog.register(.sidebar)
+        catalog.register(.emptyFolder)
         catalog.register(.conversation)
         catalog.register(.linkPreviews)
         catalog.register(.polls)

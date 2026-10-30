@@ -43,6 +43,13 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
     var pointerInside = false
     var avatars = AvatarCache()
 
+    /// What the list says once its window has come with no chats in it: its folder's empty line.
+    public var emptyLine: String? {
+        didSet { showEmpty() }
+    }
+
+    let emptyLabel = Labels.make("", .callout, .secondary)
+
     public init(folder: String, roles: Roles) {
         chats = Chats(folder: folder, place: .top(Self.rows))
         self.roles = roles
@@ -89,11 +96,20 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         root.wantsLayer = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(scroll)
+        emptyLabel.alignment = .center
+        emptyLabel.maximumNumberOfLines = 0
+        emptyLabel.lineBreakMode = .byWordWrapping
+        emptyLabel.isHidden = true
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(emptyLabel)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            emptyLabel.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: Space.xxl),
+            emptyLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Space.xl),
+            emptyLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Space.xl),
         ])
         view = root
         applyTheme()
@@ -102,7 +118,14 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
     func applyTheme() {
         guard isViewLoaded else { return }
         view.layer?.backgroundColor = roles.surface.cgColor
+        Labels.style(emptyLabel, .secondary, roles: roles)
         table.reloadData()
+    }
+
+    func showEmpty() {
+        guard isViewLoaded else { return }
+        emptyLabel.stringValue = emptyLine ?? ""
+        emptyLabel.isHidden = !(chats.loaded && shown.isEmpty && emptyLine != nil)
     }
 
     /// A new folder's list.
@@ -133,6 +156,7 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         if let selected, let i = shown.firstIndex(where: { $0.id == selected }) {
             table.selectRowIndexes([i], byExtendingSelection: false)
         }
+        showEmpty()
     }
 
     public func row(_ id: String) -> ChatRow? {

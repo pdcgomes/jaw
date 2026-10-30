@@ -51,3 +51,39 @@ private struct SidebarScene: View {
         }
     }
 }
+
+extension HarnessScene {
+    static var emptyFolder: HarnessScene {
+        HarnessScene(
+            id: "empty-folder", title: "An empty folder", symbol: "folder",
+            synopsis: "A folder's chat list with nothing in it, saying so in the terminal's words",
+            section: .chatList, covers: [ChatListController.self], width: 640,
+        ) { EmptyFolderScene(roles: $0.roles) }
+    }
+}
+
+/// Family and Unread, each with nothing in it.
+private struct EmptyFolderScene: View {
+    let roles: Roles
+
+    var body: some View {
+        SpecimenGroup(
+            title: "Family and Unread, empty",
+            note: "\"No chats in this folder.\" in each, as the terminal says it, centred near the top of the list in the secondary colour, not cut off.",
+            roles: roles,
+        ) {
+            HStack(spacing: Space.l) {
+                ForEach(["folder:1", "unread"], id: \.self) { id in
+                    ControllerSpecimen {
+                        let list = ChatListController(folder: id, roles: roles)
+                        _ = list.view
+                        list.emptyLine = Samples.tree.emptyLine(id)
+                        list.apply(Update(seq: 1, upsert: [], total: 0))
+                        return list
+                    }
+                    .frame(width: 300, height: 180)
+                }
+            }
+        }
+    }
+}

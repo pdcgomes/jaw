@@ -81,3 +81,20 @@ import Testing
     #expect(tree.label("folder:3") == "Climbing" && tree.label("all") == "All")
     #expect(tree.label("folder:6") == "Clients", "a folder whose name no other of yours has is named alone, however deep")
 }
+
+@Test func `an empty folder says so in the terminal's words, and All says nothing, the panes' place speaking for it`() {
+    let tree = Samples.tree
+    #expect(tree.emptyLine("folder:1") == "No chats in this folder." && tree.emptyLine("unread") == "No chats in this folder.")
+    #expect(tree.emptyLine("smart:2") == "No chats in this folder.")
+    #expect(tree.emptyLine("all") == nil && tree.emptyLine("folder:99") == nil)
+}
+
+@Test func `the list keeps its folder while the tree has it, and goes back to All once the folder's gone`() {
+    var tree = FolderTree()
+    #expect(tree.showing("archived") == "archived" && tree.showing("folder:1") == "folder:1", "nothing's gone before jawd's tree")
+    tree.apply(Samples.folderUpdate)
+    #expect(tree.showing("folder:1") == "folder:1" && tree.showing("smart:2") == "smart:2")
+    tree.apply(Update(seq: 301, remove: ["folder:1"]))
+    #expect(tree.showing("folder:1") == "all", "deleted from another interface")
+    #expect(tree.showing("folder:2") == "folder:2", "a folder that was in it is still there")
+}

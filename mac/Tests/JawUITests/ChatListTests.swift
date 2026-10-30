@@ -159,3 +159,15 @@ func `an unread count sits in the middle of its badge`(scale: Int) throws {
     let (mention, at) = try badgeInk("@", scale: scale)
     #expect(abs(at.midY - mention.midY) < 0.5, "@ at \(scale)x: \(at.midY - mention.midY) pt below the middle")
 }
+
+@MainActor
+@Test func `an empty folder's list says so once its window has come, and not while it comes or once it has chats`() {
+    let list = ChatListController(folder: "folder:1", roles: Catalog.jaw.roles(dark: true))
+    _ = list.view
+    list.emptyLine = Samples.tree.emptyLine("folder:1")
+    #expect(list.emptyLabel.isHidden, "nothing said before the window comes")
+    list.apply(Update(seq: 1, upsert: [], total: 0))
+    #expect(!list.emptyLabel.isHidden && list.emptyLabel.stringValue == "No chats in this folder.")
+    list.apply(Update(seq: 2, upsert: [Samples.direct], total: 1))
+    #expect(list.emptyLabel.isHidden)
+}

@@ -241,9 +241,18 @@ final class AppModel {
             window?.showStatus(status)
         case let .folders(w, u) where w == foldersWindow:
             window?.sidebar.apply(u)
+            let showing = tree.showing(folder)
+            if showing != folder {
+                pick(folder: showing)
+            } else {
+                window?.chatList.emptyLine = tree.emptyLine(folder)
+            }
         case let .windowFailed(w, failure) where w == foldersWindow:
             // A jawd from before M6 doesn't know folders.watch: the sidebar keeps All and Archived.
             if failure.code != ErrorCode.unknownMethod { say("the folders couldn't be watched: \(failure)", warn: true) }
+        case let .windowFailed(w, failure) where w == listWindow && folder != "all":
+            say("\(failure)", warn: true)
+            pick(folder: "all")
         case let .windowFailed(w, why) where libraryWindows[w] != nil:
             if let id = libraryWindows[w] { libraries[id]?.refuse("\(why)") }
         case let .windowFailed(_, failure):
@@ -296,7 +305,7 @@ final class AppModel {
 
     /// What fills the panes' place, when it isn't chats.
     var stateView: StateView.Kind? {
-        situation.stateView(hasChats: !(window?.chatList.all.isEmpty ?? true), hasPanes: grid != nil)
+        situation.stateView(hasChats: !(window?.chatList.all.isEmpty ?? true) || folder != "all", hasPanes: grid != nil)
     }
 
     // MARK: - Panes
@@ -526,6 +535,7 @@ final class AppModel {
         folder = id
         window?.sidebar.select(id)
         if let w = listWindow { jawd.unwatch(w) }
+        window?.chatList.emptyLine = tree.emptyLine(id)
         window?.chatList.show(folder: id)
         listWindow = jawd.watchChats(id, .top(ChatListController.rows))
     }

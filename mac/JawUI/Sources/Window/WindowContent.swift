@@ -166,9 +166,11 @@ public final class WindowContent: NSViewController {
 
     /// Shows what jawd's situation says: the status line, from the situation, the chats, who's typing
     /// in them and the focused chat, the chats that need you leaving out those a pane shows; and in
-    /// the panes' place the state it calls for, linking, or `panes`.
-    public func show(_ situation: Situation, chats: [ChatRow], typing: Typists = [:], focused: ChatRow?, panes: Panes?, roles: Roles,
-                     now: Date, actions: Actions)
+    /// the panes' place the state it calls for, linking, or `panes`. `hasChats` says whether jawd has
+    /// any chats when `chats` are a folder's, whose list can be empty while All's isn't; nil when
+    /// they're All's.
+    public func show(_ situation: Situation, chats: [ChatRow], hasChats: Bool? = nil, typing: Typists = [:], focused: ChatRow?,
+                     panes: Panes?, roles: Roles, now: Date, actions: Actions)
     {
         let state = situation.stateLine
         let shown = Set(panes.map { p in p.grid.slots.filter { p.views[$0.id] != nil }.compactMap(\.chat) } ?? [])
@@ -179,7 +181,7 @@ public final class WindowContent: NSViewController {
                                 open: actions.open, glance: actions.glance)
         // Setting the root view lays the bar's hosting view out again, so one that draws the same isn't set.
         if status != bar.status.rootView { bar.status.rootView = status }
-        switch situation.stateView(hasChats: !chats.isEmpty, hasPanes: panes != nil) {
+        switch situation.stateView(hasChats: hasChats ?? !chats.isEmpty, hasPanes: panes != nil) {
         case let .linking(step, loggedOut)?:
             detail.showLinking(step: step, loggedOut: loggedOut, roles: roles, start: actions.linkStart, cancel: actions.linkCancel)
         case let kind?:
