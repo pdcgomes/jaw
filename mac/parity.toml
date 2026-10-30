@@ -6,15 +6,6 @@
 
 [requests]
 "layout.set" = "1.1"
-"folders.watch" = "2.1"
-"roster.watch" = "2.1"
-"folder.create" = "2.1"
-"folder.rename" = "2.1"
-"folder.move" = "2.1"
-"folder.delete" = "2.1"
-"folder.add" = "2.1"
-"folder.remove" = "2.1"
-"favourite.set" = "2.1"
 "send.media" = "2.5"
 "send.contact" = "3.9"
 "voice.play" = "2.6"
@@ -29,8 +20,6 @@
 
 [pushes]
 "layout" = "1.1"
-"folders" = "2.1"
-"roster" = "2.1"
 "job" = "2.5"
 "playback" = "2.6"
 "recording" = "2.7"
