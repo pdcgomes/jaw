@@ -5,6 +5,7 @@ mod attention;
 mod convert;
 mod demo;
 mod engine;
+mod expiry;
 mod feed;
 mod find;
 #[cfg(target_os = "macos")]
@@ -737,6 +738,7 @@ async fn start(home: &Path, engine: Chosen, options: &Options, supervised: &Once
     let store = store::Store::open(home)?;
     std::fs::create_dir_all(home.join("spool"))?;
     sync::running(&store).await?;
+    let expiry = expiry::start(store.clone());
     let mut starting = sync::starting(&store, engine.is_ok());
     if let Some(patience) = options.phone_patience {
         starting.phone_patience = patience;
@@ -821,6 +823,7 @@ async fn start(home: &Path, engine: Chosen, options: &Options, supervised: &Once
         .with_following(following, checks)
         .with_media(media)
         .with_voice(voice)
+        .with_expiry(expiry)
         .with_notifications(says)
         .without(&options.without);
     let state = Arc::new(state);

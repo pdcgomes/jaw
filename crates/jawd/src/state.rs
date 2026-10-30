@@ -50,6 +50,7 @@ pub struct State {
     following: Option<(crate::presence::Following, Arc<crate::organise::Checks>)>,
     media: Option<Media>,
     voice: Option<Voice>,
+    expiry: Option<Arc<crate::expiry::Expiry>>,
 }
 
 impl State {
@@ -85,7 +86,14 @@ impl State {
             following: None,
             media: None,
             voice: None,
+            expiry: None,
         })
+    }
+
+    /// Says in `status` what the timer for disappearing messages has erased and waits for.
+    pub fn with_expiry(mut self, expiry: Arc<crate::expiry::Expiry>) -> State {
+        self.expiry = Some(expiry);
+        self
     }
 
     /// Fetches, saves and keeps media through `media`.
@@ -329,7 +337,12 @@ impl State {
             folders: self.following.as_ref().map(|(_, checks)| checks.status()),
             media: self.media.as_ref().map(Media::status),
             voice: self.voice.as_ref().map(Voice::status),
-            disappearing: None,
+            disappearing: self.store.as_ref().zip(self.expiry.as_ref()).map(|(store, expiry)| {
+                let mut status = expiry.status(store);
+                status.open = self.sending.as_ref().map_or(0, crate::send::Sending::open);
+                status.open_most = crate::store::expiry::OPEN_MOST as u64;
+                status
+            }),
         }
     }
 

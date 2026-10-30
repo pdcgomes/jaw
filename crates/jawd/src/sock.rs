@@ -235,6 +235,7 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
         settings: None,
     };
     let _voice = VoiceEnded { state: state.clone(), connection: session.id };
+    let _ended = Ended { state: state.clone(), connection: session.id };
     // Pushes start once the connection has said hello.
     let mut pushes: Option<broadcast::Receiver<Push>> = None;
     // Finds and the requests on tasks of their own answer when they're done, so the next line,
@@ -299,7 +300,7 @@ async fn one(state: &Arc<State>, stream: UnixStream) -> Result<()> {
                     }
                     Taken::Apart(request) => {
                         owed.parted();
-                        apart(state.clone(), request, found.clone());
+                        apart(state.clone(), request, session.id, found.clone());
                     }
                     Taken::Lane(request) => {
                         owed.took();
@@ -425,6 +426,7 @@ fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::Unbo
                     settings_set(&state, request, &client, &answered).await;
                     continue;
                 }
+                "view_once.close" => (answer_from(&state, request, from).await, None),
                 _ => (answer(&state, request).await, None),
             };
             let gone = answered.send(reply).is_err();
@@ -440,9 +442,9 @@ fn lane(state: Arc<State>, answered: mpsc::UnboundedSender<Reply>) -> mpsc::Unbo
 }
 
 /// Answers `request` on a task of its own, its reply to `found` once it's done.
-fn apart(state: Arc<State>, request: Request, found: mpsc::UnboundedSender<Reply>) {
+fn apart(state: Arc<State>, request: Request, connection: u64, found: mpsc::UnboundedSender<Reply>) {
     let id = request.id;
-    on_own_task(id, async move { answer_apart(&state, request).await }, found);
+    on_own_task(id, async move { answer_apart(&state, request, connection).await }, found);
 }
 
 /// Runs `answering` on a task of its own and sends its reply to `found`, or an error if it panics:
@@ -573,7 +575,9 @@ enum Taken {
 /// own: `media.save` waits for its file to be downloaded, for as long as the phone is away. In
 /// tests, `test.wait` stands in for one, and `test.panic.apart` for one whose task dies.
 fn apart_method(method: &str) -> bool {
-    method == "media.save" || (cfg!(test) && (method == "test.wait" || method == "test.panic.apart"))
+    method == "media.save"
+        || method == "view_once.open"
+        || (cfg!(test) && (method == "test.wait" || method == "test.panic.apart"))
 }
 
 /// Takes one line from an interface: its windows, hello and focus are answered here, a find and
@@ -756,12 +760,41 @@ async fn answer(state: &State, request: Request) -> Reply {
     }
 }
 
+/// The answer to a request that's about the connection it came on, `connection`.
+async fn answer_from(state: &State, request: Request, connection: u64) -> Reply {
+    let id = request.id;
+    match state.sending() {
+        Some(sending) => match sending.call_from(&request.method, request.params, connection).await {
+            Ok(result) => succeeded(id, &result),
+            Err(error) => failed(id, error),
+        },
+        None => failed(id, Error::new(code::INTERNAL, "this jawd has no jaw.db open, so it keeps no messages")),
+    }
+}
+
+/// What a connection opened goes once it ends, however it ends.
+struct Ended {
+    state: Arc<State>,
+    connection: u64,
+}
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        let (Some(sending), Ok(runtime)) = (self.state.sending(), tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        let (sending, connection) = (sending.clone(), self.connection);
+        runtime.spawn(async move { sending.ended(connection).await });
+    }
+}
+
 /// The answer to a request on a task of its own: whatever can take long.
-async fn answer_apart(state: &State, request: Request) -> Reply {
+async fn answer_apart(state: &State, request: Request, connection: u64) -> Reply {
     let id = request.id;
     match request.method.as_str() {
         #[cfg(test)]
         "test.panic.apart" => panic!("the test made a long request's task panic"),
+        "view_once.open" => answer_from(state, request, connection).await,
         "media.save" => match state.media() {
             Some(media) => match media.call(&request.method, request.params).await {
                 Ok(result) => succeeded(id, &result),

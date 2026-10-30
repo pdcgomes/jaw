@@ -385,8 +385,8 @@ async fn job(inner: &Arc<Inner>, copy: Wanted) {
     }
     let priority = copy.priority();
     let key = (copy.message, copy.variant);
-    // A view-once message's file, and its thumbnail, are never kept.
-    if copy.view_once {
+    // A view-once message's file, and its thumbnail, are never kept, but for one being opened.
+    if copy.view_once && !inner.opening.lock().expect("view-once files").contains(&copy.message) {
         let _ = inner.store.apply(lane(priority), vec![settled(&copy, leave(&copy.state), None)]).await;
         return;
     }

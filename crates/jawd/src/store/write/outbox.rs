@@ -220,7 +220,8 @@ const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message 
 const DEQUEUE: &str = "DELETE FROM outbox WHERE message = ?1";
 const SENT: &str = "UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1 AND status IS NOT ?2";
 const EXPIRES: &str = "UPDATE messages SET expires_at = ?2 + c.ephemeral * 1000 FROM chats c
-    WHERE messages.n = ?1 AND c.n = messages.chat AND c.ephemeral > 0 AND messages.expires_at IS NULL";
+    WHERE messages.n = ?1 AND c.n = messages.chat AND c.ephemeral > 0 AND messages.expires_at IS NULL
+    RETURNING messages.expires_at";
 const ATTEMPTED: &str = "UPDATE outbox SET attempts = attempts + 1, error = ?2, next_at = coalesce(?3, next_at),
         state = iif(?3 IS NULL, 'failed', 'queued')
     WHERE n = ?1 AND state = 'queued'";
@@ -1094,7 +1095,7 @@ fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
         Some(None) => return dropped(db, outbox),
         Some(Some(row)) => row,
     };
-    received(db, n)?;
+    received(db, stamps, n)?;
     let status = advanced(status.as_deref(), Some("sent"));
     let seq = stamps.seq(MESSAGE, Some(n));
     if db.prepare_cached(SENT)?.execute(params![n, status, seq])? == 0 {
@@ -1107,9 +1108,11 @@ fn sent(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
 /// The server has message `n` of yours, as its answer or any receipt says, whichever comes first:
 /// nothing of it is left to send, and in a chat with disappearing messages its timer starts, since
 /// it can wait to go for longer than the timer.
-pub(super) fn received(db: &Connection, n: i64) -> Result<()> {
+pub(super) fn received(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<()> {
     if db.prepare_cached(DEQUEUE)?.execute([n])? > 0 {
-        db.prepare_cached(EXPIRES)?.execute(params![n, now_ms()])?;
+        let expires: Option<i64> =
+            db.prepare_cached(EXPIRES)?.query_row(params![n, now_ms()], |r| r.get(0)).optional()?;
+        stamps.expires(expires);
     }
     Ok(())
 }
@@ -1652,7 +1655,7 @@ pub fn owed(db: &Connection, chat: i64) -> Result<Owing> {
 pub(super) fn folded(db: &Connection, stamps: &mut Stamps, kept: i64, gone: i64) -> Result<()> {
     let status: Option<String> = db.prepare_cached(STATUS_OF)?.query_row([kept], |r| r.get(0))?;
     if matches!(status.as_deref(), Some("sent" | "delivered" | "read" | "played")) {
-        received(db, kept)?;
+        received(db, stamps, kept)?;
     } else {
         db.prepare_cached(FOLD_OUTBOX)?.execute([kept, gone])?;
     }

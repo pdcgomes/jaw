@@ -475,16 +475,27 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
             }));
         }
     }
-    // App state is the same however often it's sent, and no receipt ever says it arrived.
+    // App state and a played receipt are the same however often they're sent, and no receipt ever
+    // says either arrived.
     let app_state = row.kind == "app_state";
     let resumed = resumed && !waited.load(Ordering::Relaxed);
-    let may_have_gone = (resumed || row.attempts > 0) && !app_state;
+    let played = row.kind == "played";
+    let may_have_gone = (resumed || row.attempts > 0) && !app_state && !played;
     let (command, patch) = if app_state {
         match pb::AppStatePatch::decode(row.raw.as_slice()) {
             Ok(patch) => (pb::command::Kind::AppStatePatch(patch.clone()), Some(patch)),
             Err(e) => {
                 let error = format!("its app state doesn't decode: {e}");
                 super::chat_actions::refused(&inner, &row, None, error, GivenUp::Undecodable).await;
+                return Next::Done;
+            }
+        }
+    } else if played {
+        match pb::MarkRead::decode(row.raw.as_slice()) {
+            Ok(receipt) => (pb::command::Kind::MarkRead(receipt), None),
+            Err(e) => {
+                let error = format!("its receipt doesn't decode: {e}");
+                settle(&inner, vec![Change::Outbox(Step::Failed { outbox, error, next_at: None })]).await;
                 return Next::Done;
             }
         }
@@ -531,7 +542,7 @@ async fn attempt(inner: Arc<Inner>, outbox: i64, resumed: bool, waited: Arc<Atom
             settle(&inner, sent_changes(&row, &sent)).await;
             return Next::Done;
         }
-        Ok(pb::reply::Kind::Done(_)) if app_state => {
+        Ok(pb::reply::Kind::Done(_)) if app_state || played => {
             settle(&inner, vec![Change::Outbox(Step::Sent { outbox })]).await;
             return Next::Done;
         }

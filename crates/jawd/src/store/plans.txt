@@ -114,6 +114,11 @@ SELECT raw FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/media/save.rs
+SELECT f.path, f.small, f.large, md.state, md.error, md.wanted IS NOT NULL FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = ?1 AND md.variant = 'sd'
+    SEARCH md USING PRIMARY KEY (message=? AND variant=?)
+    SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
+
+-- src/media/save.rs
 SELECT f.path, md.state, md.error, md.wanted IS NOT NULL FROM media md LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = ?1 AND md.variant = ?2
     SEARCH md USING PRIMARY KEY (message=? AND variant=?)
     SEARCH f USING PRIMARY KEY (sha256=?) LEFT-JOIN
@@ -257,6 +262,10 @@ SELECT j.person FROM recipients s JOIN person_jids j ON j.n = s.member WHERE s.m
 SELECT person FROM chats WHERE n = ?1
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
+-- src/send/once.rs
+SELECT n FROM outbox WHERE kind = 'played' AND target = ?1
+    SEARCH outbox USING INDEX outbox_by_target (target=?)
+
 -- src/send/outbox.rs
 SELECT c.ephemeral, coalesce(m.keep, c.n), c.kind FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n WHERE c.id = ?1
     SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
@@ -275,12 +284,12 @@ SELECT name FROM poll_options WHERE message = ?1 ORDER BY position
     SEARCH poll_options USING PRIMARY KEY (message=?)
 
 -- src/send/quote.rs
-SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, ''), m.kind, m.text, m.edited_at IS NOT NULL FROM messages m LEFT JOIN person_jids j ON j.n = m.sender WHERE m.chat = ?1 AND m.id = ?2
+SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, ''), m.kind, m.text, m.edited_at IS NOT NULL, m.view_once FROM messages m LEFT JOIN person_jids j ON j.n = m.sender WHERE m.chat = ?1 AND m.id = ?2
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
 
 -- src/send/quote.rs
-SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, ''), m.kind, m.text, m.edited_at IS NOT NULL FROM chat_merges c JOIN messages m ON m.chat = c.gone AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender WHERE c.keep = ?1 LIMIT 1
+SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, ''), m.kind, m.text, m.edited_at IS NOT NULL, m.view_once FROM chat_merges c JOIN messages m ON m.chat = c.gone AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender WHERE c.keep = ?1 LIMIT 1
     SEARCH c USING COVERING INDEX chat_merges_by_keep (keep=?)
     SEARCH m USING INDEX messages_by_id (chat=? AND id=?)
     SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
@@ -1921,12 +1930,12 @@ SELECT EXISTS (SELECT 1 FROM fts_backlog)
       SCAN fts_backlog
 
 -- src/store/mod.rs
-SELECT coalesce(sum(bytes), 0) FROM thumbnails
-    SCAN thumbnails
-
--- src/store/mod.rs
 SELECT value FROM sync_state WHERE key = ?1
     SEARCH sync_state USING PRIMARY KEY (key=?)
+
+-- src/store/mod.rs
+SELECT coalesce(sum(bytes), 0) FROM thumbnails
+    SCAN thumbnails
 
 -- src/store/mod.rs
 SELECT value FROM settings WHERE domain = ?1 AND key = ?2
@@ -1952,13 +1961,17 @@ SELECT count(*), coalesce(sum(bytes), 0) FROM thumbnails
 INSERT INTO inbox (kind, at, payload) VALUES (?1, ?2, ?3)
 
 -- src/store/mod.rs
-INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)
-
--- src/store/mod.rs
 INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)
 
 -- src/store/mod.rs
+INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)
+
+-- src/store/mod.rs
 INSERT INTO library_fts (library_fts, rank) VALUES ('merge', ?1)
+
+-- src/store/mod.rs
+DELETE FROM sync_state WHERE key = ?1 AND value = ?2
+    SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/read.rs
 SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.mentions, c.pinned, c.muted_until, c.archived, c.marked_unread, c.draft, c.community, p.name, p.push_name, p.verified_name, m.n, m.at, m.mine, m.kind, m.status, coalesce(m.summary, m.text, ''), mp.name, mp.push_name, mp.verified_name, mj.jid, iif(c.name IS NULL AND c.kind <> 'direct', (SELECT group_concat(shown, ', ') FROM ( SELECT coalesce(gp.name, gp.push_name, gp.verified_name) AS shown FROM group_members g JOIN person_jids gj ON gj.n = g.member JOIN people gp ON gp.n = gj.person WHERE g.chat = c.n AND shown IS NOT NULL LIMIT 4)), NULL), m.edited_at, (SELECT json_group_array(json_object('at', created_at, 'effect', json(effect))) FROM (SELECT created_at, effect FROM outbox WHERE target = m.n AND effect IS NOT NULL AND state <> 'failed' ORDER BY n)), (SELECT json_group_array(folder) FROM (SELECT folder FROM folder_items WHERE chat = c.n UNION ALL SELECT folder FROM folder_items WHERE person = c.person)), (SELECT slot FROM favourites WHERE chat = c.n), iif(c.kind = 'community', (SELECT coalesce(sum(g.unread), 0) FROM chats g WHERE g.community = c.id), NULL), iif(c.kind = 'community', (SELECT coalesce(sum(g.mentions), 0) FROM chats g WHERE g.community = c.id), NULL), c.ephemeral FROM chats c LEFT JOIN people p ON p.n = c.person LEFT JOIN messages m ON m.n = iif(c.kind = 'community', coalesce((SELECT g.last_message FROM chats g WHERE g.community = c.id AND g.last_message IS NOT NULL ORDER BY g.last_at DESC LIMIT 1), c.last_message), c.last_message) LEFT JOIN person_jids mj ON mj.n = m.sender LEFT JOIN people mp ON mp.n = mj.person WHERE c.archived = ?1 AND (c.sort, c.n) < (?2, ?3) ORDER BY c.sort DESC, c.n DESC LIMIT ?4
@@ -2704,6 +2717,81 @@ UPDATE messages SET v = ?2 WHERE n = ?1
 UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
+-- src/store/write/expiry.rs
+SELECT n, expires_at FROM messages WHERE expires_at >= ?1 ORDER BY expires_at LIMIT ?2
+    SEARCH messages USING COVERING INDEX messages_expiring (expires_at>?)
+
+-- src/store/write/expiry.rs
+SELECT n FROM messages WHERE expires_at <= ?1 ORDER BY expires_at LIMIT ?2
+    SEARCH messages USING COVERING INDEX messages_expiring (expires_at<?)
+
+-- src/store/write/expiry.rs
+SELECT 1 FROM messages WHERE n = ?1 AND expires_at <= ?2
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+SELECT coalesce(min(expires_at), 0), 0 FROM messages WHERE expires_at IS NOT NULL
+    SEARCH messages USING COVERING INDEX messages_expiring (expires_at>?)
+
+-- src/store/write/expiry.rs
+SELECT chat FROM messages WHERE n = ?1 AND expires_at <= ?2
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+INSERT OR REPLACE INTO sync_state (key, value) VALUES ('erased.links', ?1)
+
+-- src/store/write/expiry.rs
+INSERT INTO messages_fts (messages_fts, rank) VALUES ('secure-delete', ?1)
+
+-- src/store/write/expiry.rs
+INSERT INTO links_fts (links_fts, rank) VALUES ('secure-delete', ?1)
+
+-- src/store/write/expiry.rs
+INSERT INTO opened (message, until) SELECT ?1, ?2 FROM messages WHERE n = ?1 AND view_once AND NOT mine ON CONFLICT (message) DO NOTHING
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+UPDATE messages SET expires_at = iif(expires_at < ?2, expires_at, ?2), v = ?3 WHERE n = ?1 RETURNING chat
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+INSERT INTO outbox (jid, id, kind, raw, next_at, created_at, target) VALUES (?1, ?2, 'played', ?3, ?4, ?4, ?5)
+
+-- src/store/write/expiry.rs
+SELECT m.chat FROM opened o JOIN messages m ON m.n = o.message WHERE o.message = ?1
+    SEARCH o USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+SELECT message FROM opened ORDER BY message LIMIT ?1
+    SCAN opened
+
+-- src/store/write/expiry.rs
+SELECT chat FROM messages WHERE n = ?1 AND view_once AND NOT mine
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+SELECT 1 FROM links WHERE message = ?1
+    SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
+
+-- src/store/write/expiry.rs
+SELECT count(*) FROM pending WHERE kind = 'opened'
+    SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
+
+-- src/store/write/expiry.rs
+INSERT OR IGNORE INTO quarantine (at, source, ref, error) SELECT ?1, 'opened', chat || ' ' || target, 'more receipts of view-once messages opened on your other devices waited than jaw keeps, so this one waits here' FROM pending WHERE kind = 'opened' ORDER BY n LIMIT ?2
+    SEARCH pending USING INDEX pending_by_kind (kind=?)
+
+-- src/store/write/expiry.rs
+DELETE FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = 'opened' ORDER BY n LIMIT ?1)
+    SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
+    LIST SUBQUERY 1
+      SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
+
+-- src/store/write/expiry.rs
+DELETE FROM quarantine WHERE source = 'opened' AND ref = ?1
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
+
 -- src/store/write/folders.rs
 DELETE FROM folder_chats
     SCAN folder_chats USING INDEX folder_chats_by_chat
@@ -2959,7 +3047,7 @@ SELECT value FROM sync_state WHERE key = 'me'
     SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/write/kinds.rs
-UPDATE messages SET kind = ?2, text = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), text, ?3), spans = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), spans, ?4), summary = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), summary, iif(?5 IS ?3, NULL, ?5)), reply = iif(?15, reply, ?6), detail = ?7, forwarded = iif(?15, forwarded, ?8), expires_at = iif(?15, expires_at, ?9), view_once = iif(?15, view_once, ?10), mentions_me = iif(?15, mentions_me, ?11), v = ?14 WHERE n = ?1 AND NOT deleted
+UPDATE messages SET kind = ?2, text = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), text, ?3), spans = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), spans, ?4), summary = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), summary, iif(?5 IS ?3, NULL, ?5)), reply = iif(?15, reply, ?6), detail = ?7, forwarded = iif(?15, forwarded, ?8), expires_at = iif(?15 OR ?9 IS NULL OR ?9 >= coalesce(expires_at, ?9 + 1), expires_at, ?9), view_once = iif(?15, view_once, max(view_once, ?10)), mentions_me = iif(?15, mentions_me, ?11), v = ?14 WHERE n = ?1 AND NOT deleted
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/kinds.rs
@@ -3302,7 +3390,7 @@ UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1 AND status IS NOT ?2
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
-UPDATE messages SET expires_at = ?2 + c.ephemeral * 1000 FROM chats c WHERE messages.n = ?1 AND c.n = messages.chat AND c.ephemeral > 0 AND messages.expires_at IS NULL
+UPDATE messages SET expires_at = ?2 + c.ephemeral * 1000 FROM chats c WHERE messages.n = ?1 AND c.n = messages.chat AND c.ephemeral > 0 AND messages.expires_at IS NULL RETURNING messages.expires_at
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -3943,6 +4031,7 @@ INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM message
 -- src/store/write.rs
 DELETE FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH opened USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH outgoing USING COVERING INDEX outgoing_by_message (message=?)
     SEARCH unopened USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
@@ -4046,7 +4135,7 @@ SELECT n, kind, community, avatar, person FROM chats WHERE id = ?1
     SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
 
 -- src/store/write.rs
-INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread, community, ephemeral, draft, v, avatar, avatar_id) VALUES (?1, coalesce(?2, ?13), ?3, ?4, coalesce(?5, 0), coalesce(?6, 0), coalesce(?7, 0), coalesce(?8, 0), nullif(?9, ''), coalesce(?10, 0), nullif(?11, ''), ?12, nullif(?14, ''), nullif(?15, '')) ON CONFLICT (id) DO UPDATE SET kind = coalesce(?2, kind), person = coalesce(?3, person), name = coalesce(?4, name), pinned = coalesce(?5, pinned), archived = coalesce(?6, archived), muted_until = coalesce(?7, muted_until), marked_unread = coalesce(?8, marked_unread), community = iif(?9 IS NULL, community, nullif(?9, '')), ephemeral = coalesce(?10, ephemeral), draft = iif(?11 IS NULL, draft, nullif(?11, '')), v = ?12, avatar = iif(?14 IS NULL, avatar, nullif(?14, '')), avatar_id = iif(?15 IS NULL, avatar_id, nullif(?15, '')) WHERE coalesce(?2, kind) IS NOT kind OR coalesce(?3, person) IS NOT person OR coalesce(?4, name) IS NOT name OR coalesce(?5, pinned) IS NOT pinned OR coalesce(?6, archived) IS NOT archived OR coalesce(?7, muted_until) IS NOT muted_until OR coalesce(?8, marked_unread) IS NOT marked_unread OR iif(?9 IS NULL, community, nullif(?9, '')) IS NOT community OR coalesce(?10, ephemeral) IS NOT ephemeral OR iif(?11 IS NULL, draft, nullif(?11, '')) IS NOT draft OR iif(?14 IS NULL, avatar, nullif(?14, '')) IS NOT avatar OR iif(?15 IS NULL, avatar_id, nullif(?15, '')) IS NOT avatar_id RETURNING n, community, avatar, person
+INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread, community, ephemeral, draft, v, avatar, avatar_id, ephemeral_at) VALUES (?1, coalesce(?2, ?13), ?3, ?4, coalesce(?5, 0), coalesce(?6, 0), coalesce(?7, 0), coalesce(?8, 0), nullif(?9, ''), coalesce(?10, 0), nullif(?11, ''), ?12, nullif(?14, ''), nullif(?15, ''), ?16) ON CONFLICT (id) DO UPDATE SET kind = coalesce(?2, kind), person = coalesce(?3, person), name = coalesce(?4, name), pinned = coalesce(?5, pinned), archived = coalesce(?6, archived), muted_until = coalesce(?7, muted_until), marked_unread = coalesce(?8, marked_unread), community = iif(?9 IS NULL, community, nullif(?9, '')), ephemeral = coalesce(?10, ephemeral), draft = iif(?11 IS NULL, draft, nullif(?11, '')), v = ?12, avatar = iif(?14 IS NULL, avatar, nullif(?14, '')), avatar_id = iif(?15 IS NULL, avatar_id, nullif(?15, '')) WHERE coalesce(?2, kind) IS NOT kind OR coalesce(?3, person) IS NOT person OR coalesce(?4, name) IS NOT name OR coalesce(?5, pinned) IS NOT pinned OR coalesce(?6, archived) IS NOT archived OR coalesce(?7, muted_until) IS NOT muted_until OR coalesce(?8, marked_unread) IS NOT marked_unread OR iif(?9 IS NULL, community, nullif(?9, '')) IS NOT community OR coalesce(?10, ephemeral) IS NOT ephemeral OR iif(?11 IS NULL, draft, nullif(?11, '')) IS NOT draft OR iif(?14 IS NULL, avatar, nullif(?14, '')) IS NOT avatar OR iif(?15 IS NULL, avatar_id, nullif(?15, '')) IS NOT avatar_id RETURNING n, community, avatar, person
     SEARCH folder_chats USING INDEX folder_chats_by_chat (chat=?)
     SEARCH folder_items USING COVERING INDEX folder_items_by_chat (chat=?)
     SEARCH favourites USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
@@ -4069,6 +4158,10 @@ SELECT EXISTS (SELECT 1 FROM app_state WHERE key = ?1) OR EXISTS (SELECT 1 FROM 
 SELECT j.jid FROM chats c JOIN person_jids j ON j.person = c.person WHERE c.id = ?1 AND c.kind = 'direct'
     SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
     SEARCH j USING INDEX person_jids_by_person (person=?)
+
+-- src/store/write.rs
+UPDATE chats SET ephemeral_at = ?2 WHERE n = ?1 AND ?2 >= coalesce(ephemeral_at, ?2)
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
 SELECT person FROM person_jids WHERE n = ?1
@@ -4155,7 +4248,7 @@ DELETE FROM favourites WHERE chat = ?1
     SEARCH favourites USING INDEX sqlite_autoindex_favourites_2 (chat=?)
 
 -- src/store/write.rs
-UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived), muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread), draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar), avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral), frecency = ?4, opened_at = ?5, v = ?3 FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1
+UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived), muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread), draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar), avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = iif((coalesce(g.ephemeral_at, -1), g.ephemeral) > (coalesce(k.ephemeral_at, -1), k.ephemeral), g.ephemeral, k.ephemeral), ephemeral_at = max(coalesce(k.ephemeral_at, g.ephemeral_at), coalesce(g.ephemeral_at, k.ephemeral_at)), frecency = ?4, opened_at = ?5, v = ?3 FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -4248,7 +4341,7 @@ SELECT count(*) FROM person_jids WHERE person = (SELECT person FROM chats WHERE 
       SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
-UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived), muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread), draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar), avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral), opened_at = max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at)), v = ?3 FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1 AND (max(k.pinned, g.pinned), min(k.archived, g.archived), max(k.muted_until, g.muted_until), max(k.marked_unread, g.marked_unread), coalesce(k.draft, g.draft), coalesce(k.name, g.name), coalesce(k.avatar, g.avatar), coalesce(k.avatar_id, g.avatar_id), max(k.ephemeral, g.ephemeral), max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at))) IS NOT (k.pinned, k.archived, k.muted_until, k.marked_unread, k.draft, k.name, k.avatar, k.avatar_id, k.ephemeral, k.opened_at)
+UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived), muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread), draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar), avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = iif((coalesce(g.ephemeral_at, -1), g.ephemeral) > (coalesce(k.ephemeral_at, -1), k.ephemeral), g.ephemeral, k.ephemeral), ephemeral_at = max(coalesce(k.ephemeral_at, g.ephemeral_at), coalesce(g.ephemeral_at, k.ephemeral_at)), opened_at = max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at)), v = ?3 FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1 AND (max(k.pinned, g.pinned), min(k.archived, g.archived), max(k.muted_until, g.muted_until), max(k.marked_unread, g.marked_unread), coalesce(k.draft, g.draft), coalesce(k.name, g.name), coalesce(k.avatar, g.avatar), coalesce(k.avatar_id, g.avatar_id), iif((coalesce(g.ephemeral_at, -1), g.ephemeral) > (coalesce(k.ephemeral_at, -1), k.ephemeral), g.ephemeral, k.ephemeral), max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at))) IS NOT (k.pinned, k.archived, k.muted_until, k.marked_unread, k.draft, k.name, k.avatar, k.avatar_id, k.ephemeral, k.opened_at)
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -4359,11 +4452,12 @@ SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'messages'), 0) + 
 INSERT INTO fts_backlog (n) VALUES (?1)
 
 -- src/store/write.rs
-UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, text = ?6, spans = ?7, summary = ?8, reply = ?9, detail = ?10, forwarded = ?11, edited_at = ?12, deleted = ?13, expires_at = ?14, starred = ?15, view_once = ?16, raw = iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17), v = ?18, mentions_me = ?20, envelope = coalesce(envelope, ?21) WHERE n = ?19 AND (at IS NOT ?1 OR sender IS NOT ?2 OR mine IS NOT ?3 OR kind IS NOT ?4 OR status IS NOT ?5 OR text IS NOT ?6 OR spans IS NOT ?7 OR summary IS NOT ?8 OR reply IS NOT ?9 OR detail IS NOT ?10 OR forwarded IS NOT ?11 OR edited_at IS NOT ?12 OR deleted IS NOT ?13 OR expires_at IS NOT ?14 OR starred IS NOT ?15 OR view_once IS NOT ?16 OR iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17) IS NOT raw OR mentions_me IS NOT ?20 OR coalesce(envelope, ?21) IS NOT envelope) RETURNING n
+UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, text = ?6, spans = ?7, summary = ?8, reply = ?9, detail = ?10, forwarded = ?11, edited_at = ?12, deleted = ?13, expires_at = iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at), starred = ?15, view_once = max(view_once, ?16), raw = iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17), v = ?18, mentions_me = ?20, envelope = coalesce(envelope, ?21) WHERE n = ?19 AND (at IS NOT ?1 OR sender IS NOT ?2 OR mine IS NOT ?3 OR kind IS NOT ?4 OR status IS NOT ?5 OR text IS NOT ?6 OR spans IS NOT ?7 OR summary IS NOT ?8 OR reply IS NOT ?9 OR detail IS NOT ?10 OR forwarded IS NOT ?11 OR edited_at IS NOT ?12 OR deleted IS NOT ?13 OR iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at) IS NOT expires_at OR starred IS NOT ?15 OR max(view_once, ?16) IS NOT view_once OR iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17) IS NOT raw OR mentions_me IS NOT ?20 OR coalesce(envelope, ?21) IS NOT envelope) RETURNING n
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
 INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, reply, detail, forwarded, edited_at, deleted, expires_at, starred, view_once, raw, v, n, mentions_me, envelope, chat, id, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) RETURNING n
+    SEARCH opened USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH outgoing USING COVERING INDEX outgoing_by_message (message=?)
     SEARCH unopened USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
@@ -4388,6 +4482,13 @@ UPDATE chats SET last_at = max(last_at, ?2), last_message = ?3, v = ?4 WHERE n =
       SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
+INSERT OR IGNORE INTO tombstones (chat, id, at) VALUES (?1, ?2, ?3)
+
+-- src/store/write.rs
+DELETE FROM pending WHERE chat = ?1 AND target = ?2
+    SEARCH pending USING INDEX pending_by_target_at (chat=? AND target=?)
+
+-- src/store/write.rs
 SELECT n, sender, mine, at, effect, raw FROM pending WHERE chat = ?1 AND target = ?2 ORDER BY at, n
     SEARCH pending USING INDEX pending_by_target_at (chat=? AND target=?)
 
@@ -4399,9 +4500,6 @@ DELETE FROM pending WHERE n = ?1
 SELECT 1 FROM tombstones t JOIN chats c ON c.n = t.chat WHERE c.id = ?1 AND t.id = ?2
     SEARCH c USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
     SEARCH t USING PRIMARY KEY (chat=? AND id=?)
-
--- src/store/write.rs
-INSERT OR IGNORE INTO tombstones (chat, id, at) VALUES (?1, ?2, ?3)
 
 -- src/store/write.rs
 INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)

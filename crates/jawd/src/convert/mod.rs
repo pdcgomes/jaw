@@ -289,7 +289,12 @@ struct Context {
 fn context(info: Option<&e2e::ContextInfo>) -> Context {
     let Some(info) = info else { return Context::default() };
     let reply = info.stanza_id.as_ref().filter(|id| !id.is_empty()).map(|id| {
-        let summary = info.quoted_message.as_deref().map(|quoted| kinds::body(unwrap(quoted).0, &[]).summary);
+        // A view-once message is quoted as what it is, as its own row says it.
+        let summary = info.quoted_message.as_deref().map(|quoted| {
+            let (inner, wrapped) = unwrap(quoted);
+            let body = kinds::body(inner, &[]);
+            if opens_once(&wrapped, inner, body.kind) { kinds::view_once(body.kind).to_string() } else { body.summary }
+        });
         json!({
             "id": id,
             "from": info.participant.as_deref().map(user_jid),
@@ -316,6 +321,58 @@ struct Wrapped {
 /// The message inside its wrappers, without what they say of it.
 pub fn unwrap_message(message: &e2e::Message) -> &e2e::Message {
     unwrap(message).0
+}
+
+/// Whether a message out of its wrappers says it's to be seen once, as a photo, a video or a voice
+/// message quoted without its wrapper does.
+fn flagged_once(m: &e2e::Message) -> bool {
+    m.image_message.as_deref().and_then(|x| x.view_once).unwrap_or(false)
+        || m.video_message.as_deref().and_then(|x| x.view_once).unwrap_or(false)
+        || m.audio_message.as_deref().and_then(|x| x.view_once).unwrap_or(false)
+}
+
+/// Whether a message of `kind` out of its wrappers is one to open once: a photo, a video or a voice
+/// message wrapped or flagged so. Anything else a view-once wrapper carries has no file to open, so
+/// it shows as it is.
+fn opens_once(wrapped: &Wrapped, m: &e2e::Message, kind: &str) -> bool {
+    matches!(kind, "image" | "video" | "gif" | "video_note" | "voice" | "audio")
+        && (wrapped.view_once || flagged_once(m))
+}
+
+/// What a reply quotes of a view-once message: what it is, wrapped as one, with none of its
+/// file's keys, caption or thumbnail, so the quote opens nothing.
+pub fn once_quoted(message: &e2e::Message) -> e2e::Message {
+    let inner = unwrap(message).0;
+    let mut quoted = e2e::Message::default();
+    if let Some(x) = inner.image_message.as_deref() {
+        let image = e2e::ImageMessage { mimetype: x.mimetype.clone(), view_once: Some(true), ..Default::default() };
+        quoted.image_message = Some(Box::new(image));
+    } else if let Some(x) = inner.video_message.as_deref() {
+        let video = e2e::VideoMessage {
+            mimetype: x.mimetype.clone(),
+            seconds: x.seconds,
+            view_once: Some(true),
+            ..Default::default()
+        };
+        quoted.video_message = Some(Box::new(video));
+    } else if let Some(x) = inner.audio_message.as_deref() {
+        let audio =
+            e2e::AudioMessage { mimetype: x.mimetype.clone(), seconds: x.seconds, ptt: x.ptt, ..Default::default() };
+        quoted.audio_message = Some(Box::new(audio));
+    }
+    let once = e2e::FutureProofMessage { message: Some(Box::new(quoted)) };
+    e2e::Message { view_once_message_v2: Some(Box::new(once)), ..Default::default() }
+}
+
+/// A view-once message's caption, parsed as a row's text is, for the interface that opens it.
+pub fn once_caption(message: &e2e::Message) -> serde_json::Value {
+    let body = kinds::body(unwrap(message).0, &[]);
+    let parsed = body.text.as_deref().and_then(|_| spans::json(&body.spans));
+    match (parsed, body.text) {
+        (Some(spans), _) => serde_json::from_str(&spans).unwrap_or_default(),
+        (None, Some(text)) => json!([{ "t": "text", "s": text }]),
+        (None, None) => json!([]),
+    }
 }
 
 /// The message inside its wrappers.
@@ -447,6 +504,16 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         context.reply = wrapped.comment_on.as_ref().and_then(commented);
     }
     let mentions_me = context.mentioned.iter().any(|jid| me.is(jid));
+    let view_once = opens_once(&wrapped, message, body.kind);
+    // A view-once message's row says only what it is until it's opened, so no search finds its
+    // caption, nor any summary shows it; its raw protobuf keeps it for the opening.
+    let (text, spans, summary) = if view_once {
+        (None, None, kinds::view_once(body.kind).to_string())
+    } else if body.shown {
+        (body.text.clone(), body.text.as_deref().and_then(|_| spans::json(&body.spans)), body.summary)
+    } else {
+        (body.text.clone(), Some(spans::kept(&body.spans)), body.summary)
+    };
     let info = envelope.info;
     let status = envelope.from.mine.then(|| status(info.status));
     let expires_at = match (info.ephemeral_start_timestamp, info.ephemeral_duration.or(context.expires_in)) {
@@ -462,19 +529,15 @@ fn convert(envelope: &Envelope, message: &e2e::Message, me: &Me, changes: &mut V
         mine: envelope.from.mine,
         kind: body.kind,
         status,
-        spans: if body.shown {
-            body.text.as_deref().and_then(|_| spans::json(&body.spans))
-        } else {
-            Some(spans::kept(&body.spans))
-        },
-        text: body.text,
-        summary: body.summary,
+        spans,
+        text,
+        summary,
         reply: context.reply,
         detail: body.detail,
         forwarded: context.forwarded,
         expires_at,
         starred: info.starred.unwrap_or(false),
-        view_once: wrapped.view_once,
+        view_once,
         live: envelope.live,
         mentions_me,
         raw: Some(Packed::new(&info.encode_to_vec())),
@@ -847,7 +910,12 @@ fn protocol_message(envelope: &Envelope, protocol: &e2e::ProtocolMessage, me: &M
         }
         Type::EphemeralSetting => {
             let seconds = protocol.ephemeral_expiration.unwrap_or(0);
-            changes.push(Change::Chat(Chat { id: envelope.chat.clone(), ephemeral: Some(seconds), ..Chat::default() }));
+            // The setting's own time says which of two settings is newer, as the phones compare them;
+            // one that gives none was made when it was sent.
+            let at = protocol.ephemeral_setting_timestamp.filter(|&at| at > 0).map_or(envelope.at, |at| at * 1000);
+            let chat =
+                Chat { id: envelope.chat.clone(), ephemeral: Some(seconds), ephemeral_at: Some(at), ..Chat::default() };
+            changes.push(Change::Chat(chat));
             changes.push(Change::Message(system(envelope, "system", &kinds::ephemeral_sentence(seconds))));
         }
         _ => {}

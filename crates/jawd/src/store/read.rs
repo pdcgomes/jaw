@@ -692,8 +692,10 @@ pub(super) fn with_media(
         return None;
     };
     let trusted = copy.sha256.as_deref().is_none_or(|sha256| files.is_none_or(|files| files.trusted(sha256)));
-    let previews = copy.small.clone().zip(copy.large.clone()).filter(|_| trusted);
-    let thumbnail = copy.thumbnail.clone().filter(|_| trusted);
+    // A view-once message's file goes only to the interface that opens it, in its answer.
+    let shown = trusted && !view_once;
+    let previews = copy.small.clone().zip(copy.large.clone()).filter(|_| shown);
+    let thumbnail = copy.thumbnail.clone().filter(|_| shown);
     if let Value::Object(media) = parsed.entry("media").or_insert_with(|| Value::Object(Default::default())) {
         media.insert("state".into(), copy.state.clone().into());
         if copy.state == "downloading" {
@@ -702,7 +704,7 @@ pub(super) fn with_media(
         if let Some(error) = &copy.error {
             media.insert("error".into(), error.clone().into());
         }
-        if let Some(path) = &copy.path {
+        if let Some(path) = copy.path.as_ref().filter(|_| !view_once) {
             media.insert("path".into(), path.clone().into());
         }
         if let Some((small, large)) = &previews {

@@ -174,6 +174,9 @@ struct Inner {
     full_flush: bool,
     /// What sends files to the drive.
     drive: drive::Drive,
+    /// The view-once messages being opened, by n, whose files are downloaded and drawn as no other
+    /// view-once message's are (`open_file`).
+    opening: Mutex<std::collections::HashSet<i64>>,
     /// The cleaner's passes that found nothing more to do, as a test waits for one.
     #[cfg(test)]
     tidied: std::sync::atomic::AtomicU64,
@@ -255,6 +258,7 @@ impl Media {
             checked: std::sync::atomic::AtomicBool::new(false),
             full_flush,
             drive,
+            opening: Mutex::default(),
             #[cfg(test)]
             tidied: std::sync::atomic::AtomicU64::new(0),
         });
@@ -462,6 +466,32 @@ impl Media {
     pub fn free_space(&self) -> Option<u64> {
         self.inner.free_space()
     }
+
+    /// The file of view-once message `n`, someone else's, as it's opened: wanted now, ahead of what
+    /// downloads by itself, and waited for, with its previews for a photo (`pictured`). Error 4 if
+    /// it can't be downloaded, as when WhatsApp no longer has it.
+    pub async fn open_file(&self, n: i64, pictured: bool) -> Result<Opening, Error> {
+        let inner = &self.inner;
+        inner.opening.lock().expect("view-once files").insert(n);
+        let opened = async {
+            let want = Change::Media(Step::Want { message: n, variant: "sd", at: now_ms(), asked: true });
+            durably(inner, vec![want], "keep that the file was asked for").await?;
+            inner.schedule.wake();
+            save::opened(inner, n, pictured).await
+        }
+        .await;
+        inner.opening.lock().expect("view-once files").remove(&n);
+        opened
+    }
+}
+
+/// A view-once message's file in place, as it's opened, with its previews where it has them, each
+/// relative to jaw's folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opening {
+    pub path: String,
+    pub small: Option<String>,
+    pub large: Option<String>,
 }
 
 /// A voice message's file: its message, its copy's hash, its whole path while it's in the cache, and

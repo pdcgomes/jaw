@@ -1534,6 +1534,26 @@ pub(super) const MIGRATIONS: &[&str] = &[
     INSERT INTO backfills (name, after, upto) SELECT 'voices', 0, seq FROM sqlite_sequence
         WHERE name = 'messages' AND seq > 0;
     ",
+    // 31, a schema step: disappearing and view-once messages. Each chat keeps when its timer was
+    // set, so a setting older than it, as history arriving late brings, never replaces it: a
+    // nullable column with no CHECK on chats, which isn't STRICT, so SQLite reads none of its rows;
+    // and a new table, empty, of the view-once messages opened here. It costs the same however big
+    // jaw.db is.
+    "
+    -- Class: fetched from WhatsApp, as `ephemeral` is. When the chat's disappearing timer was set,
+    -- in milliseconds since the epoch: the setting's own time, a group change's, history's
+    -- conversation's (0 when it gave none), or when a group's list said it. A setting older than it
+    -- never replaces the timer. NULL until a setting with a time is written.
+    ALTER TABLE chats ADD COLUMN ephemeral_at INTEGER;
+
+    -- Class: jaw's own. Each view-once message of someone else's opened here, with when it goes if
+    -- nothing closes it first, until it's erased, which its row goes with: so it's opened once
+    -- however jawd stops, and a start erases those its connections left open. At most 16.
+    CREATE TABLE opened (
+        message INTEGER PRIMARY KEY REFERENCES messages (n) ON DELETE CASCADE,
+        until INTEGER NOT NULL
+    ) STRICT;
+    ",
 ];
 
 /// Migration 28's text, named so the tests that check and measure it find it whatever number it

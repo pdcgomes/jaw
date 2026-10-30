@@ -726,6 +726,16 @@ fn capitalised(s: &str) -> String {
     chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
+/// What a view-once message of `kind` says it is, all its row says until it's opened.
+pub fn view_once(kind: &str) -> &'static str {
+    match kind {
+        "image" => "View once photo",
+        "video" | "gif" | "video_note" => "View once video",
+        "voice" | "audio" => "View once voice message",
+        _ => "View once message",
+    }
+}
+
 /// What a chat's disappearing-message timer being set to `seconds` reads as.
 pub fn ephemeral_sentence(seconds: u32) -> String {
     match seconds {

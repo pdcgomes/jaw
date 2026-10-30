@@ -26,6 +26,7 @@ mod forward;
 mod info;
 pub mod link;
 mod media;
+mod once;
 mod outbox;
 mod places;
 mod poll;
@@ -46,6 +47,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use jaw_proto::disappearing::ViewOnce;
 use jaw_proto::media::SendMedia;
 use jaw_proto::send::{
     ChatArchive, ChatInfo, ChatMarkUnread, ChatMute, ChatPin, ChatStart, Delete, DraftSet, Edit, Forward, MessageInfo,
@@ -145,6 +147,8 @@ struct Inner {
     copies: watch::Receiver<u64>,
     /// The account and the connection as sync keeps them, for what needs a linked account.
     live: Shared,
+    /// The view-once messages open now, whose files `media` downloads.
+    open: once::Open,
     /// Stops the next attempt that withdraws an action, between reading its row and withdrawing it:
     /// it notifies the first when it stops, and goes on once the second is notified.
     #[cfg(test)]
@@ -212,6 +216,7 @@ impl Sending {
             media,
             copies,
             live,
+            open: once::Open::default(),
             #[cfg(test)]
             pausing: Pause::default(),
             #[cfg(test)]
@@ -227,7 +232,28 @@ impl Sending {
         tokio::spawn(presence::follow(inner.clone(), pushes, focused, online));
         outbox::resume(&inner).await?;
         reads::resume(&inner).await?;
+        once::restarted(&inner).await?;
         Ok(Sending { inner })
+    }
+
+    /// The view-once messages open now, for `status`.
+    pub fn open(&self) -> u64 {
+        self.inner.open.count()
+    }
+
+    /// Answers `view_once.open` and `view_once.close` for the interface on `connection`.
+    pub async fn call_from(&self, method: &str, params: Value, connection: u64) -> Result<Value, Error> {
+        let inner = &self.inner;
+        match method {
+            "view_once.open" => once::open(inner, params_of::<ViewOnce>(method, params)?, connection).await,
+            "view_once.close" => once::close(inner, params_of::<ViewOnce>(method, params)?, connection).await,
+            _ => Err(Error::new(code::UNKNOWN_METHOD, format!("jawd doesn't know {method}"))),
+        }
+    }
+
+    /// The connection `connection` ended: the view-once messages it had open are erased.
+    pub async fn ended(&self, connection: u64) {
+        once::ended(&self.inner, connection).await;
     }
 
     /// The sends' lane, for `status`.

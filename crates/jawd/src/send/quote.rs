@@ -13,10 +13,10 @@ use crate::convert::{self, Me};
 use crate::store::unpack;
 
 pub(super) const QUOTED: &str = "SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, ''),
-        m.kind, m.text, m.edited_at IS NOT NULL
+        m.kind, m.text, m.edited_at IS NOT NULL, m.view_once
     FROM messages m LEFT JOIN person_jids j ON j.n = m.sender WHERE m.chat = ?1 AND m.id = ?2";
 pub(super) const QUOTED_MERGING: &str = "SELECT m.mine, j.jid, m.deleted, m.raw, coalesce(m.text, m.summary, ''),
-        m.kind, m.text, m.edited_at IS NOT NULL
+        m.kind, m.text, m.edited_at IS NOT NULL, m.view_once
     FROM chat_merges c JOIN messages m ON m.chat = c.gone AND m.id = ?2 LEFT JOIN person_jids j ON j.n = m.sender
     WHERE c.keep = ?1 LIMIT 1";
 pub(super) const MEMBER_JID: &str =
@@ -52,6 +52,7 @@ struct Found {
     kind: String,
     text: Option<String>,
     edited: bool,
+    view_once: bool,
 }
 
 /// Message `id` in chat `chat` (by n, as the writer finds it), or in a chat being merged into it,
@@ -70,6 +71,7 @@ pub(super) fn quoted(db: &Connection, chat: i64, id: &str, me: &Me) -> anyhow::R
                     kind: r.get(5)?,
                     text: r.get(6)?,
                     edited: r.get(7)?,
+                    view_once: r.get(8)?,
                 })
             })
             .optional()
@@ -86,7 +88,7 @@ pub(super) fn quoted(db: &Connection, chat: i64, id: &str, me: &Me) -> anyhow::R
         .and_then(|packed| unpack(&packed).ok())
         .and_then(|raw| WebMessageInfo::decode(raw.as_slice()).ok())
         .and_then(|info| info.message)
-        .map(|message| convert::bare(&message));
+        .map(|message| if found.view_once { convert::once_quoted(&message) } else { convert::bare(&message) });
     let text = |text: &str| e2e::Message { conversation: Some(text.into()), ..Default::default() };
     let message = match (said, found.kind.as_str(), found.text.as_deref()) {
         (_, "text", Some(said)) if found.edited => text(said),

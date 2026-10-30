@@ -115,6 +115,40 @@ impl Rig {
         socket
     }
 
+    /// jawd's socket in the rig's folder, served with sending as well, so view-once messages open.
+    async fn serve_sending(&self) -> std::path::PathBuf {
+        let feed = crate::feed::Feed::start(self.store.clone(), Arc::new(|| false), crate::feed::Timing::default());
+        let attention = Arc::new(crate::attention::Attention::default());
+        let sending = crate::send::Sending::start(
+            self.store.clone(),
+            Some(self.supervisor.clone()),
+            self.live.clone(),
+            &self.pushes,
+            attention.focus(),
+            crate::send::Timing::default(),
+            crate::send::Makers { previews: crate::send::link::Previews::off(), media: Some(self.media.clone()) },
+        )
+        .await
+        .unwrap();
+        let socket = jaw_proto::local::socket(self.home.path());
+        let listener = crate::sock::listen(&socket).unwrap();
+        let state = crate::state::State::new(
+            self.home.path(),
+            Ok(self.supervisor.clone()),
+            self.media.lanes(),
+            self.live.clone(),
+            Some(self.store.clone()),
+            self.pushes.clone(),
+        )
+        .unwrap()
+        .with_feed(feed)
+        .with_attention(attention)
+        .with_sending(sending)
+        .with_media(self.media.clone());
+        tokio::spawn(crate::sock::serve(Arc::new(state), listener));
+        socket
+    }
+
     /// Message `id` in `chat`, as messages.watch sends it.
     async fn row(&self, chat: &'static str, id: &str) -> Value {
         let id = id.to_string();
@@ -3140,4 +3174,85 @@ async fn a_jaw_db_main_made_gets_the_copy_of_every_file_it_holds_and_each_is_fet
     ] {
         assert_eq!(rig.call("media.fetch", json!({ "message": id })).await.unwrap_err().code, code, "{id}");
     }
+}
+
+/// A view-once photo from Ana, `id`, with a caption.
+async fn view_once_photo(rig: &Rig, picture: &Picture, id: &str) {
+    let mut event = rig.world.photo(picture, ANA, ANA, id, now_ms(), "where we met");
+    if let Some(pb::event::Kind::Message(message)) = event.kind.as_mut() {
+        let photo = e2e::Message::decode(message.raw.as_slice()).unwrap();
+        let once = e2e::FutureProofMessage { message: Some(Box::new(photo)) };
+        message.raw = e2e::Message { view_once_message_v2: Some(Box::new(once)), ..Default::default() }.encode_to_vec();
+    }
+    rig.world.deliver(event).await.unwrap();
+    rig.until(ANA, id, "converted", |row| !row.is_null()).await;
+}
+
+/// Waits until message `id` in Ana's chat has gone, and its files with it.
+async fn gone_with_its_files(rig: &Rig, id: &str) {
+    rig.until(ANA, id, "erased", Value::is_null).await;
+    rig.media.inner.clean.notify_one();
+    let count = |folder: &str| std::fs::read_dir(rig.home.path().join(folder)).map_or(0, |entries| entries.count());
+    for _ in 0..500 {
+        if count(FILES) == 0 && count(PREVIEWS) == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("its files stayed: {} in files, {} in previews", count(FILES), count(PREVIEWS));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_once_photo_opens_once_named_only_in_the_answer_and_goes_with_its_files_once_closed() {
+    let rig = rig(quick()).await;
+    view_once_photo(&rig, &Picture::lake(640, 480), "3EB0ONCE").await;
+    let row = rig.row(ANA, "3EB0ONCE").await;
+    assert_eq!((&row["view_once"], &row["spans"]), (&json!(true), &json!([])), "no caption shows: {row}");
+    let mut ui = Interface::open(&rig.serve_sending().await).await;
+    let hello = json!({ "protocol": jaw_proto::PROTOCOL, "client": "test", "version": "0" });
+    ui.call(1, "hello", hello.clone()).await;
+    let opened = ui.call(2, "view_once.open", json!({ "message": "3EB0ONCE" })).await;
+    let answer = &opened["result"];
+    assert_eq!(answer["kind"], json!("image"), "{opened}");
+    assert_eq!(answer["spans"], json!([{ "t": "text", "s": "where we met" }]), "its caption, once it's open");
+    assert!(rig.file(&answer["path"]).is_file() && rig.file(&answer["media"]["previews"]["768"]).is_file(), "{answer}");
+    assert!(answer["until"].as_i64().is_some_and(|until| until > now_ms() + 50_000), "a minute to show it: {answer}");
+    let row = rig.row(ANA, "3EB0ONCE").await;
+    assert!(row["media"]["path"].is_null() && row["media"]["previews"].is_null(), "no window gets its file: {row}");
+    assert_eq!(
+        ui.call(3, "view_once.open", json!({ "message": "3EB0ONCE" })).await["result"],
+        *answer,
+        "the same, again"
+    );
+    let mut other = Interface::open(&jaw_proto::local::socket(rig.home.path())).await;
+    other.call(1, "hello", hello).await;
+    let refused = other.call(2, "view_once.open", json!({ "message": "3EB0ONCE" })).await;
+    assert_eq!(refused["error"]["code"], json!(jaw_proto::code::NOT_ALLOWED), "open in one interface at a time");
+    let played = |asked: &pb::command::Kind| matches!(asked, pb::command::Kind::MarkRead(mark) if mark.r#type == "played" && mark.ids == ["3EB0ONCE"]);
+    for _ in 0..500 {
+        if rig.world.asked().iter().any(played) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(rig.world.asked().iter().any(played), "WhatsApp is told it was played");
+    assert_eq!(ui.call(4, "view_once.close", json!({ "message": "3EB0ONCE" })).await["result"], json!({}));
+    gone_with_its_files(&rig, "3EB0ONCE").await;
+    let again = ui.call(5, "view_once.open", json!({ "message": "3EB0ONCE" })).await;
+    assert_eq!(again["error"]["code"], json!(jaw_proto::code::NOT_FOUND), "it's gone: {again}");
+    assert_eq!(ui.call(6, "view_once.close", json!({ "message": "3EB0ONCE" })).await["result"], json!({}), "done");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_once_photo_goes_once_the_interface_that_opened_it_goes() {
+    let rig = rig(quick()).await;
+    view_once_photo(&rig, &Picture::lake(320, 240), "3EB0LEFT").await;
+    let socket = rig.serve_sending().await;
+    {
+        let mut ui = Interface::open(&socket).await;
+        ui.call(1, "hello", json!({ "protocol": jaw_proto::PROTOCOL, "client": "test", "version": "0" })).await;
+        let opened = ui.call(2, "view_once.open", json!({ "message": "3EB0LEFT" })).await;
+        assert!(opened["result"]["path"].is_string(), "{opened}");
+    }
+    gone_with_its_files(&rig, "3EB0LEFT").await;
 }

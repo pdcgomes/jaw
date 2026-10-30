@@ -294,6 +294,10 @@ fn chat(c: &Conversation) -> (String, Vec<Change>) {
         marked_unread: c.marked_as_unread,
         community: c.parent_group_id.clone(),
         ephemeral: c.ephemeral_expiration,
+        // As old as can be when history doesn't say, so any setting with a time is newer.
+        ephemeral_at: c
+            .ephemeral_expiration
+            .map(|_| c.ephemeral_setting_timestamp.filter(|&at| at > 0).map_or(0, |at| at.saturating_mul(1000))),
         ..Chat::default()
     };
     let jids = [Some(&c.id), pn.as_ref(), lid.as_ref()].into_iter().flatten().cloned().collect();

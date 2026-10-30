@@ -49,7 +49,8 @@ const SHOWN: &str = "UPDATE messages SET kind = ?2,
         summary = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), summary,
             iif(?5 IS ?3, NULL, ?5)),
         reply = iif(?15, reply, ?6), detail = ?7, forwarded = iif(?15, forwarded, ?8),
-        expires_at = iif(?15, expires_at, ?9), view_once = iif(?15, view_once, ?10),
+        expires_at = iif(?15 OR ?9 IS NULL OR ?9 >= coalesce(expires_at, ?9 + 1), expires_at, ?9),
+        view_once = iif(?15, view_once, max(view_once, ?10)),
         mentions_me = iif(?15, mentions_me, ?11), v = ?14
     WHERE n = ?1 AND NOT deleted";
 const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2";
@@ -184,6 +185,7 @@ fn show(
         polls::options(db, n, &message.poll)?;
     }
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+    stamps.expires(message.expires_at);
     // Its file, as a copy that nothing wants until it's shown or asked for, as history's are.
     if let Some(copy) = &message.media {
         media::upsert(db, stamps, n, chat, "sd", copy, None)?;

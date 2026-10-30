@@ -223,6 +223,57 @@ async fn a_persons_two_chats_become_one_when_their_number_and_lid_are_joined() {
     assert!(rows.last().unwrap().reactions.get().contains("👍"), "with the reaction that waited under the LID");
 }
 
+/// A chat's disappearing timer set to `seconds` at `at`.
+fn timer(chat: &str, seconds: u32, at: i64) -> Change {
+    Change::Chat(Chat { id: chat.into(), ephemeral: Some(seconds), ephemeral_at: Some(at), ..Chat::default() })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disappearing_timer_set_before_the_chats_never_replaces_it_and_one_said_again_moves_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    apply(&store, vec![timer(ANA, 604_800, AT)]).await;
+    assert_eq!(chat(&store, ANA).await.ephemeral, 604_800);
+    // History's conversation, made before the setting, comes after it.
+    apply(&store, vec![timer(ANA, 0, AT - 1)]).await;
+    assert_eq!(chat(&store, ANA).await.ephemeral, 604_800, "an older setting replaced a newer one");
+    let v = chat(&store, ANA).await.v;
+    let seq = store.committed().borrow().to_owned();
+    apply(&store, vec![timer(ANA, 604_800, AT), timer(ANA, 604_800, AT + 5)]).await;
+    assert_eq!(chat(&store, ANA).await.v, v, "the same timer again moved the chat's version");
+    assert_eq!(events(&store, seq).await, [], "the same timer again wrote an event");
+    apply(&store, vec![timer(ANA, 86_400, AT + 10)]).await;
+    assert_eq!(chat(&store, ANA).await.ephemeral, 86_400, "a newer setting is taken");
+    // The setting at AT + 5 said again, after the newer one: it's older now, so it changes nothing.
+    apply(&store, vec![timer(ANA, 604_800, AT + 5)]).await;
+    assert_eq!(chat(&store, ANA).await.ephemeral, 86_400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_chats_merged_into_one_keep_the_disappearing_timer_set_last() {
+    for (lid_at, number_at, kept) in [(AT + 1, AT, 86_400), (AT, AT + 1, 0)] {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        apply(
+            &store,
+            vec![
+                Change::Message(message(ANA_LID, "l1", AT, "under the LID")),
+                Change::Message(message(ANA, "p1", AT + 1, "under the number")),
+                timer(ANA_LID, 86_400, lid_at),
+                timer(ANA, 0, number_at),
+            ],
+        )
+        .await;
+        joined(&store).await;
+        merged(&store).await;
+        assert_eq!(
+            chat(&store, ANA).await.ephemeral,
+            kept,
+            "the LID's timer set at {lid_at}, the number's at {number_at}"
+        );
+    }
+}
+
 /// Joins Ana's number and LID, so her LID chat starts being merged into her number's, and says
 /// whether chats are being merged.
 async fn joined(store: &Store) {

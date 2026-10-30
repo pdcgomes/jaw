@@ -1409,6 +1409,33 @@ async fn receipts_move_your_message_forward_even_when_they_come_first() {
     assert!(matches!(read_elsewhere.as_slice(), [Change::Read(read)] if read.at == AT + 3 && read.ids == ["mine"]));
 }
 
+#[test]
+fn your_own_played_receipt_says_a_message_was_opened_on_another_device_and_anyone_elses_says_theirs() {
+    let receipt = |kind: &str, from_me: bool| pb::Receipt {
+        chat: ANA.into(),
+        sender: if from_me { "351910000001@s.whatsapp.net".into() } else { ANA.into() },
+        from_me,
+        ids: vec!["once".into(), "twice".into()],
+        timestamp_ms: AT,
+        r#type: kind.into(),
+        ..Default::default()
+    };
+    let opened = |changes: Vec<Change>| -> Vec<String> {
+        changes
+            .into_iter()
+            .filter_map(|c| match c {
+                Change::Amend(a) if a.what == crate::store::Amendment::Opened && a.mine => Some(a.target),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(opened(drain::receipt_changes(&receipt("played-self", true))), ["once", "twice"]);
+    assert_eq!(opened(drain::receipt_changes(&receipt("played", true))), ["once", "twice"]);
+    assert_eq!(opened(drain::receipt_changes(&receipt("played", false))), Vec::<String>::new(), "theirs: a status");
+    assert_eq!(opened(drain::receipt_changes(&receipt("read-self", true))), Vec::<String>::new());
+    assert!(drain::receipt_changes(&receipt("played-self", true)).iter().any(|c| matches!(c, Change::Read(_))));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_clean_stop_is_noted_and_the_next_start_notes_it_is_running_before_it_returns() {
     let home = tempfile::tempdir().unwrap();

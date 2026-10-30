@@ -155,6 +155,7 @@ const ALLOWED: &[(&str, &str)] = &[
         "coalesce(sum(bytes), 0) FROM thumbnails",
         "once at start, and for jawd status; the thumbnails are as many as fit in 256 MB, tens of thousands at most",
     ),
+    ("SELECT message FROM opened ORDER BY message LIMIT", "the view-once messages open, 16 at most, read at start"),
     (
         "FROM outgoing g JOIN outbox o ON o.n = g.outbox LEFT JOIN messages m",
         "outgoing holds a row for each copy of a file of yours on its way, each beside an outbox row, so at most \

@@ -8,6 +8,7 @@ pub mod chat_actions;
 pub mod contacts;
 pub mod copies;
 mod events;
+pub mod expiry;
 pub mod folders;
 pub mod kinds;
 pub mod layout;
@@ -128,6 +129,14 @@ pub enum Change {
     Media(media::Step),
     /// Media out: the copies of your files made and uploaded, and your files no copy needs.
     Outgoing(outgoing::Step),
+    /// Message `n` erased if its time has come by `at`, as a disappearing message goes
+    /// (`expiry::expire`).
+    Expire {
+        n: i64,
+        at: i64,
+    },
+    /// A view-once message opened here, or shown no more (`expiry::once`).
+    Once(expiry::Once),
 }
 
 /// A merge of one chat into another, as a merge step names it.
@@ -198,6 +207,10 @@ pub enum Amendment {
         starred: bool,
     },
     DeleteForMe,
+    /// Played on another of your devices, as your own played receipt says: someone else's
+    /// view-once message is erased, as it goes from every device on the phones; any other message
+    /// stays as it is.
+    Opened,
     /// A receipt from a recipient: `delivered`, `read` or `played`.
     Status {
         status: String,
@@ -244,6 +257,7 @@ impl Amendment {
             Amendment::Revoke => "revoke",
             Amendment::Star { .. } => "star",
             Amendment::DeleteForMe => "delete",
+            Amendment::Opened => "opened",
             Amendment::Status { .. } => "receipt",
             Amendment::Keep { kind } => kind,
             Amendment::Vote { .. } => "vote",
@@ -310,6 +324,9 @@ pub struct Chat {
     pub community: Option<String>,
     /// The disappearing-message timer in seconds, or 0 for off.
     pub ephemeral: Option<u32>,
+    /// When that timer was set, in milliseconds: a timer set before the chat's is older and changes
+    /// nothing. `None` is as of now, for what says the timer as it is, such as a group's list.
+    pub ephemeral_at: Option<i64>,
     /// What's typed in its box, or empty to clear it.
     pub draft: Option<String>,
     /// Its picture's path in jaw's folder, and WhatsApp's ID for it; empty when it has none.
@@ -453,6 +470,12 @@ pub(super) struct Stamps {
     /// deletion takes an HD copy's, so whatever makes, uploads or waits for one is told once it
     /// commits.
     copies_taken: bool,
+    /// The soonest time a message written in the transaction goes, for the timer that erases them.
+    /// One a savepoint rolled back stays noted: it only wakes the timer, which looks again.
+    expiring: Option<i64>,
+    /// When the transaction erased a message whose links' words only a merge of links_fts takes
+    /// out (`expiry`), as kept in sync_state.
+    links_erased: Option<i64>,
 }
 
 /// What the transaction's messages said of where a chat was read, applied once before it commits.
@@ -494,6 +517,8 @@ impl Stamps {
             unsettling: Vec::new(),
             opening: false,
             copies_taken: false,
+            expiring: None,
+            links_erased: None,
         })
     }
 
@@ -503,6 +528,8 @@ impl Stamps {
         self.order.clear();
         self.unsettled.clear();
         self.unsettling.clear();
+        self.expiring = None;
+        self.links_erased = None;
         self.opening = false;
         self.copies_taken = false;
     }
@@ -524,6 +551,8 @@ impl Stamps {
         self.unsettled.clear();
         self.unsettling.clear();
         self.copies_taken = false;
+        self.expiring = None;
+        self.links_erased = None;
     }
 
     /// Notes that a statement took `rows` outbox rows whose copies may be on their way.
@@ -534,6 +563,28 @@ impl Stamps {
     /// Whether the transaction took outbox rows whose copies may be on their way.
     pub(super) fn copies_taken(&self) -> bool {
         self.copies_taken
+    }
+
+    /// Notes that a message written goes at `at`.
+    pub(super) fn expires(&mut self, at: Option<i64>) {
+        if let Some(at) = at {
+            self.expiring = Some(self.expiring.map_or(at, |soonest| soonest.min(at)));
+        }
+    }
+
+    /// The soonest time a message the committed transaction wrote goes, taken once.
+    pub(super) fn take_expiring(&mut self) -> Option<i64> {
+        self.expiring.take()
+    }
+
+    /// Notes that the transaction erased a message with links, at `at`, as sync_state keeps it.
+    pub(super) fn links_erased(&mut self, at: i64) {
+        self.links_erased = Some(at);
+    }
+
+    /// When the committed transaction last erased a message with links, taken once.
+    pub(super) fn take_links_erased(&mut self) -> Option<i64> {
+        self.links_erased.take()
     }
 
     /// Notes that chat `n`'s unread messages may have changed.
@@ -661,6 +712,8 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
         Some(Change::Folders(step)) => folders::provenance(step),
         Some(Change::Media(step)) => media::provenance(step),
         Some(Change::Outgoing(step)) => outgoing::provenance(step),
+        Some(Change::Expire { n, .. }) => ("expire", n.to_string(), None),
+        Some(Change::Once(once)) => ("once", format!("{once:?}"), None),
         None => ("nothing", String::new(), None),
     };
     (source, reference, raw.map(Cow::Borrowed))
@@ -714,14 +767,19 @@ fn now_ms() -> i64 {
 pub(super) fn touches_fts(changes: &[Change]) -> bool {
     changes.iter().any(|change| match change {
         Change::Amend(amend) => {
-            matches!(amend.what, Amendment::Edit { .. } | Amendment::Revoke | Amendment::DeleteForMe)
+            matches!(
+                amend.what,
+                Amendment::Edit { .. } | Amendment::Revoke | Amendment::DeleteForMe | Amendment::Opened
+            )
         }
         Change::Edited { .. }
         | Change::DeleteMessage { .. }
         | Change::MergeStep(_)
         | Change::Outbox(_)
         | Change::Backfill(_)
-        | Change::Opening => true,
+        | Change::Opening
+        | Change::Expire { .. }
+        | Change::Once(_) => true,
         Change::AppState { changes, .. } => touches_fts(changes),
         _ => false,
     })
@@ -825,6 +883,8 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         Change::Folders(step) => folders::apply(db, stamps, step),
         Change::Media(step) => media::apply(db, stamps, step),
         Change::Outgoing(step) => outgoing::apply(db, stamps, step),
+        Change::Expire { n, at } => expiry::expire(db, stamps, *n, *at),
+        Change::Once(once) => expiry::once(db, stamps, once),
     }
 }
 
@@ -1505,13 +1565,14 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
         }
         _ => None,
     };
+    let ephemeral = newest_timer(db, chat, existing.as_ref().map(|(n, _, _)| *n))?;
     let seq = stamps.seq(CHAT, existing.as_ref().map(|(n, _, _)| *n));
     let changed: Option<(i64, Shown)> = db
         .prepare_cached(
             "INSERT INTO chats (id, kind, person, name, pinned, archived, muted_until, marked_unread,
-                community, ephemeral, draft, v, avatar, avatar_id)
+                community, ephemeral, draft, v, avatar, avatar_id, ephemeral_at)
             VALUES (?1, coalesce(?2, ?13), ?3, ?4, coalesce(?5, 0), coalesce(?6, 0), coalesce(?7, 0), coalesce(?8, 0),
-                nullif(?9, ''), coalesce(?10, 0), nullif(?11, ''), ?12, nullif(?14, ''), nullif(?15, ''))
+                nullif(?9, ''), coalesce(?10, 0), nullif(?11, ''), ?12, nullif(?14, ''), nullif(?15, ''), ?16)
             ON CONFLICT (id) DO UPDATE SET
                 kind = coalesce(?2, kind), person = coalesce(?3, person), name = coalesce(?4, name),
                 pinned = coalesce(?5, pinned), archived = coalesce(?6, archived),
@@ -1540,12 +1601,13 @@ fn upsert_chat(db: &Connection, stamps: &mut Stamps, chat: &Chat) -> Result<bool
                 chat.muted_until,
                 chat.marked_unread,
                 chat.community,
-                chat.ephemeral,
+                ephemeral.map(|(seconds, _)| seconds),
                 chat.draft,
                 seq,
                 kind_of(&chat.id),
                 chat.avatar,
-                chat.avatar_id
+                chat.avatar_id,
+                ephemeral.map(|(_, at)| at),
             ],
             |r| Ok((r.get(0)?, Shown { community: r.get(1)?, avatar: r.get(2)?, person: r.get(3)? })),
         )
@@ -1623,6 +1685,20 @@ fn unsaid(db: &Connection, chat: &Chat, jids: &[String]) -> Result<Chat> {
         chat.marked_unread = None;
     }
     Ok(chat)
+}
+
+/// The timer a change to chat `n` sets, with when it was set: none when it says none, or when the
+/// chat's was set later, as history's conversation can say a timer the chat has changed since. A
+/// timer at least as new is taken, and its time kept here whether or not its value changes, so the
+/// chat's version moves only when the timer does.
+fn newest_timer(db: &Connection, chat: &Chat, n: Option<i64>) -> Result<Option<(u32, i64)>> {
+    let Some(seconds) = chat.ephemeral else { return Ok(None) };
+    let at = chat.ephemeral_at.unwrap_or_else(now_ms);
+    let Some(n) = n else { return Ok(Some((seconds, at))) };
+    let taken = db
+        .prepare_cached("UPDATE chats SET ephemeral_at = ?2 WHERE n = ?1 AND ?2 >= coalesce(ephemeral_at, ?2)")?
+        .execute(params![n, at])?;
+    Ok((taken > 0).then_some((seconds, at)))
 }
 
 /// The person a JID belongs to, making one if needed.
@@ -1817,7 +1893,10 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
         "UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived),
             muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread),
             draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar),
-            avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral),
+            avatar_id = coalesce(k.avatar_id, g.avatar_id),
+            ephemeral = iif((coalesce(g.ephemeral_at, -1), g.ephemeral) > (coalesce(k.ephemeral_at, -1), k.ephemeral),
+                g.ephemeral, k.ephemeral),
+            ephemeral_at = max(coalesce(k.ephemeral_at, g.ephemeral_at), coalesce(g.ephemeral_at, k.ephemeral_at)),
             frecency = ?4, opened_at = ?5, v = ?3
         FROM (SELECT * FROM chats WHERE n = ?2) AS g WHERE k.n = ?1",
     )?
@@ -1837,7 +1916,7 @@ fn start_merge(db: &Connection, stamps: &mut Stamps, keep: &(i64, String), gone:
 /// the person's chats may have landed on its chat. A chain takes three of a person's chats, so
 /// only a person with three JIDs or more has its settings merged again, and for them, what was
 /// undone on the kept chat while the merge ran (a pin, a mute or an archive, the mark, a draft
-/// sent, the disappearing timer) comes back once.
+/// sent, and a disappearing timer set before chats kept when theirs was set) comes back once.
 fn merge_started(gone: i64) -> String {
     format!("merge.started.{gone}")
 }
@@ -2034,12 +2113,17 @@ fn merge_settings_again(db: &Connection, stamps: &mut Stamps, keep: (i64, &str),
             "UPDATE chats AS k SET pinned = max(k.pinned, g.pinned), archived = min(k.archived, g.archived),
                 muted_until = max(k.muted_until, g.muted_until), marked_unread = max(k.marked_unread, g.marked_unread),
                 draft = coalesce(k.draft, g.draft), name = coalesce(k.name, g.name), avatar = coalesce(k.avatar, g.avatar),
-                avatar_id = coalesce(k.avatar_id, g.avatar_id), ephemeral = max(k.ephemeral, g.ephemeral),
+                avatar_id = coalesce(k.avatar_id, g.avatar_id),
+                ephemeral = iif((coalesce(g.ephemeral_at, -1), g.ephemeral) > (coalesce(k.ephemeral_at, -1), k.ephemeral),
+                    g.ephemeral, k.ephemeral),
+                ephemeral_at = max(coalesce(k.ephemeral_at, g.ephemeral_at), coalesce(g.ephemeral_at, k.ephemeral_at)),
                 opened_at = max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at)), v = ?3
             FROM (SELECT * FROM chats WHERE n = ?2) AS g
             WHERE k.n = ?1 AND (max(k.pinned, g.pinned), min(k.archived, g.archived), max(k.muted_until, g.muted_until),
                 max(k.marked_unread, g.marked_unread), coalesce(k.draft, g.draft), coalesce(k.name, g.name),
-                coalesce(k.avatar, g.avatar), coalesce(k.avatar_id, g.avatar_id), max(k.ephemeral, g.ephemeral),
+                coalesce(k.avatar, g.avatar), coalesce(k.avatar_id, g.avatar_id),
+                iif((coalesce(g.ephemeral_at, -1), g.ephemeral) > (coalesce(k.ephemeral_at, -1), k.ephemeral),
+                    g.ephemeral, k.ephemeral),
                 max(coalesce(k.opened_at, g.opened_at), coalesce(g.opened_at, k.opened_at)))
                 IS NOT (k.pinned, k.archived, k.muted_until, k.marked_unread, k.draft, k.name, k.avatar, k.avatar_id,
                 k.ephemeral, k.opened_at)",
@@ -2409,6 +2493,13 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     if existing.as_ref().is_some_and(|kept| kept.deleted) {
         return Ok(false);
     }
+    // One whose time came before it did, as a catch-up can bring, is never shown: it's erased as
+    // it would have been, leaving its tombstone, and what waited for it goes with it.
+    if existing.is_none() && message.expires_at.is_some_and(|at| at <= now_ms()) {
+        db.prepare_cached(TOMBSTONE)?.execute(params![chat, message.id, now_ms()])?;
+        db.prepare_cached(PENDING_FOR)?.execute(params![chat_id, message.id])?;
+        return Ok(false);
+    }
     let seq = stamps.seq(MESSAGE, existing.as_ref().map(|kept| kept.n));
     let raw = message.raw.as_ref().map(|packed| packed.0.as_slice());
     let mut text = message.text.clone();
@@ -2489,13 +2580,15 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         db.prepare_cached(
             "UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, text = ?6, spans = ?7,
                 summary = ?8, reply = ?9, detail = ?10, forwarded = ?11, edited_at = ?12, deleted = ?13,
-                expires_at = ?14, starred = ?15, view_once = ?16,
+                expires_at = iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at), starred = ?15,
+                view_once = max(view_once, ?16),
                 raw = iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17), v = ?18,
                 mentions_me = ?20, envelope = coalesce(envelope, ?21)
             WHERE n = ?19 AND (at IS NOT ?1 OR sender IS NOT ?2 OR mine IS NOT ?3 OR kind IS NOT ?4
                 OR status IS NOT ?5 OR text IS NOT ?6 OR spans IS NOT ?7 OR summary IS NOT ?8 OR reply IS NOT ?9
                 OR detail IS NOT ?10 OR forwarded IS NOT ?11 OR edited_at IS NOT ?12 OR deleted IS NOT ?13
-                OR expires_at IS NOT ?14 OR starred IS NOT ?15 OR view_once IS NOT ?16
+                OR iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at) IS NOT expires_at OR starred IS NOT ?15
+                OR max(view_once, ?16) IS NOT view_once
                 OR iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17) IS NOT raw
                 OR mentions_me IS NOT ?20 OR coalesce(envelope, ?21) IS NOT envelope)
             RETURNING n",
@@ -2524,6 +2617,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         };
     };
     stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+    stamps.expires(message.expires_at);
     if !message.poll.is_empty() {
         polls::options(db, n, &message.poll)?;
     }
@@ -2557,9 +2651,18 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     }
     if existing.is_none() {
         apply_pending(db, stamps, chat, n, &chat_id, &message.id, message.kind)?;
+        // Opened on another of your devices before it came, past the receipts that wait for it.
+        if message.view_once && !message.mine && expiry::opened_aside(db, &chat_id, &message.id)? {
+            expiry::opened_elsewhere(db, stamps, n)?;
+        }
     }
     Ok(true)
 }
+
+/// A message erased, or never shown, as a deletion for you leaves it: by its chat and ID, when.
+const TOMBSTONE: &str = "INSERT OR IGNORE INTO tombstones (chat, id, at) VALUES (?1, ?2, ?3)";
+/// What waits in `pending` for message ?2 in the chat whose JID is ?1.
+const PENDING_FOR: &str = "DELETE FROM pending WHERE chat = ?1 AND target = ?2";
 
 /// Applies what was waiting in `pending` for a message of kind `kind` that has just arrived, or has
 /// just moved into `chat` with a merge; for a poll, the votes set aside for it come back to wait
@@ -2603,9 +2706,10 @@ pub(super) fn apply_pending(
             what => (what, at),
         };
         let gone = matches!(what, Amendment::DeleteForMe);
-        apply_amendment(db, stamps, chat, n, Doing { what: &what, sender: sender.as_deref(), mine, at })?;
+        let applied = apply_amendment(db, stamps, chat, n, Doing { what: &what, sender: sender.as_deref(), mine, at })?;
         db.prepare_cached("DELETE FROM pending WHERE n = ?1")?.execute([pending])?;
-        if gone {
+        // What waits for it after its deletion, or its erasure, has nothing left to change.
+        if gone || (applied && matches!(what, Amendment::Opened)) {
             break;
         }
     }
@@ -2698,6 +2802,7 @@ fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<
             match amend.what.kind() {
                 "vote" => polls::bounded(db)?,
                 kind if events::WAITING_KINDS.contains(&kind) => events::bounded(db, kind)?,
+                "opened" => expiry::opened_bounded(db)?,
                 _ => {}
             }
             Ok(false)
@@ -2730,6 +2835,9 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
     };
     if matches!(what, Amendment::DeleteForMe) {
         return delete_row(db, stamps, chat, n);
+    }
+    if matches!(what, Amendment::Opened) {
+        return expiry::opened_elsewhere(db, stamps, n);
     }
     let seq = stamps.seq(MESSAGE, Some(n));
     let changed = match what {
@@ -2794,7 +2902,7 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
                 .query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .optional()?;
             if kept.is_some() {
-                outbox::received(db, n)?;
+                outbox::received(db, stamps, n)?;
             }
             let reached = match &kept {
                 Some((_, true, _)) => Some(status.as_str()),
@@ -2852,7 +2960,7 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
                 WHERE n = ?1 AND kind = 'event' AND NOT deleted AND (edited_at IS NULL OR edited_at < ?6)",
             )?
             .execute(params![n, text, spans, summary, detail, at, seq])?,
-        Amendment::DeleteForMe | Amendment::Keep { .. } => 0,
+        Amendment::DeleteForMe | Amendment::Opened | Amendment::Keep { .. } => 0,
     };
     if changed == 0 {
         return Ok(false);

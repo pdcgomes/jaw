@@ -64,7 +64,7 @@ pub use self::write::{
     Amend, Amendment, Change, Chat, Drained, Members, Merging, Message, Opened, Packed, Person, Read, frecency,
     merge_reference,
 };
-pub use self::write::{contacts, copies, kinds, links, media, outbox, outgoing, polls};
+pub use self::write::{contacts, copies, expiry, kinds, links, media, outbox, outgoing, polls};
 use crate::engine::Ack;
 use crate::work::{Report, Samples};
 
@@ -343,6 +343,34 @@ pub struct Store {
     /// Whether barriers fence jaw.db's checkpoints, rather than full flushes.
     fenced: bool,
     files: Arc<files::Files>,
+    soonest: Arc<Soonest>,
+}
+
+/// The soonest time a message the writer has committed since the timer last looked goes, which
+/// wakes the timer when it's sooner than the time it waits for.
+#[derive(Default)]
+pub struct Soonest {
+    at: Mutex<Option<i64>>,
+    noted: Notify,
+}
+
+impl Soonest {
+    fn note(&self, at: i64) {
+        let mut soonest = self.at.lock().expect("the soonest expiry");
+        *soonest = Some(soonest.map_or(at, |was| was.min(at)));
+        drop(soonest);
+        self.noted.notify_one();
+    }
+
+    /// What's been noted since the last take, and nothing until more is.
+    pub fn take(&self) -> Option<i64> {
+        self.at.lock().expect("the soonest expiry").take()
+    }
+
+    /// Waits until a time is noted, at once if one was since the last wait.
+    pub async fn noted(&self) {
+        self.noted.notified().await;
+    }
 }
 
 const BATCH_ROWS: usize = 1_000;
@@ -367,6 +395,10 @@ const LIVE_PAUSE: Duration = Duration::from_millis(10);
 const STREAM_STEP: Duration = Duration::from_millis(100);
 /// The pages of FTS5 merging a step does, about a millisecond's worth.
 const MERGE_PAGES: i64 = 64;
+/// How long after one whole merge of links_fts began another may, to take out the words of
+/// messages erased since: a message's links are erased from that contentless index only by a merge,
+/// and a merge of the whole of it costs every page it has.
+const LINKS_MERGE_EVERY: Duration = Duration::from_secs(600);
 const WRITER_CACHE_KIB: i64 = 32 * 1024;
 /// How long any connection waits for a lock before it fails, which the writer then tries again.
 const BUSY_MS: i64 = 5_000;
@@ -432,6 +464,7 @@ struct Limits {
     stream_step: Duration,
     batch_time: Duration,
     yield_after: Duration,
+    links_merge_every: Duration,
 }
 
 const LIMITS: Limits = Limits {
@@ -443,6 +476,7 @@ const LIMITS: Limits = Limits {
     stream_step: STREAM_STEP,
     batch_time: BATCH_TIME,
     yield_after: YIELD_AFTER,
+    links_merge_every: LINKS_MERGE_EVERY,
 };
 
 /// What a connection to jaw.db is for, which decides how it's set up.
@@ -486,6 +520,10 @@ fn connect(path: &Path, role: Role) -> Result<Connection> {
             pragma(&db, "wal_autocheckpoint", 0)?;
             // History lands all over the indexes, so the writer keeps more of them than SQLite's 2 MB.
             pragma(&db, "cache_size", -WRITER_CACHE_KIB)?;
+            // What's deleted is zeroed in the pages written anyway; an erasure zeroes the pages it
+            // frees too (`expiry::erasing`).
+            db.execute_batch("PRAGMA secure_delete = FAST").context("can't set secure_delete")?;
+            check(&db, "secure_delete", &expiry::FAST.to_string())?;
         }
         Role::Checkpointer => {
             check(&db, "journal_mode", "wal")?;
@@ -680,13 +718,19 @@ impl Store {
         let (copies, copies_taken) = watch::channel(0);
         let (trouble, troubled) = watch::channel(None);
         let backlog = db.query_row("SELECT EXISTS (SELECT 1 FROM fts_backlog)", [], |r| r.get(0))?;
+        let links_erased: Option<i64> = db
+            .query_row("SELECT value FROM sync_state WHERE key = ?1", [expiry::LINKS_ERASED], |r| r.get::<_, String>(0))
+            .optional()?
+            .and_then(|at| at.parse().ok());
         let kept: i64 = db.query_row("SELECT coalesce(sum(bytes), 0) FROM thumbnails", [], |r| r.get(0))?;
         let thumbnails = Arc::new(Thumbnails::open(home, kept.max(0) as u64));
         let stats = Arc::new(Mutex::new(Stats::default()));
         let inboxed = Arc::new(Notify::new());
         let opening = Arc::new(Notify::new());
         let wal = Arc::new(Wal::new(limits.wal_soft, limits.wal_hard));
+        let soonest = Arc::new(Soonest::default());
         let writer = Writer {
+            soonest: soonest.clone(),
             stats: stats.clone(),
             inboxed: inboxed.clone(),
             opening: opening.clone(),
@@ -706,6 +750,10 @@ impl Store {
             index_pace: Pace::new(&limits),
             backlog,
             unmerged: true,
+            links_erased,
+            links_merging: None,
+            links_merged: None,
+            links_merge_every: limits.links_merge_every,
             indexed: Vec::new(),
             index_after: None,
             index_retry: RETRY_FIRST,
@@ -740,7 +788,13 @@ impl Store {
             thumbnails,
             fenced,
             files,
+            soonest,
         })
+    }
+
+    /// The soonest time a message committed since the timer last looked goes.
+    pub fn soonest(&self) -> Arc<Soonest> {
+        self.soonest.clone()
     }
 
     /// The thumbnails of link previews, kept as files beside jaw.db.
@@ -979,6 +1033,7 @@ struct Writer {
     inboxed: Arc<Notify>,
     /// Woken once a commit leaves what waits for an event to be taken in steps.
     opening: Arc<Notify>,
+    soonest: Arc<Soonest>,
     db: Connection,
     stamps: Stamps,
     realtime: Receiver<Inbox>,
@@ -1002,6 +1057,13 @@ struct Writer {
     backlog: bool,
     /// Whether FTS5 may have segments to merge.
     unmerged: bool,
+    /// When a message with links was last erased, as sync_state keeps it, until links_fts has
+    /// been merged whole since; the merge of the whole of it under way, as of the erasure it began
+    /// after; and when the last such merge began.
+    links_erased: Option<i64>,
+    links_merging: Option<i64>,
+    links_merged: Option<Instant>,
+    links_merge_every: Duration,
     /// Who waits for everything written to be indexed.
     indexed: Vec<oneshot::Sender<Result<(), String>>>,
     /// When indexing, after a step failed, is tried again, and how long the next failure waits.
@@ -1182,7 +1244,9 @@ impl Writer {
     /// How long the writer may wait for work before an indexing step is due.
     fn idle_for(&self) -> Duration {
         if !self.backlog && !self.unmerged {
-            return Duration::from_secs(3600);
+            return self.links_merge_due().map_or(Duration::from_secs(3600), |due| {
+                due.saturating_duration_since(Instant::now()).max(INDEX_PAUSE)
+            });
         }
         self.index_due().map_or(INDEX_PAUSE, |due| due.saturating_duration_since(Instant::now()).max(INDEX_PAUSE))
     }
@@ -1208,7 +1272,7 @@ impl Writer {
         }
         self.unhold();
         // Merging first keeps FTS5's levels short of a merge it would do all at once.
-        let step = if self.unmerged {
+        let step = if self.unmerged || self.links_merge_due().is_some_and(|due| due <= Instant::now()) {
             self.merge()
         } else if self.backlog {
             self.index()
@@ -1249,6 +1313,19 @@ impl Writer {
         self.wal.frames.store(frames, Ordering::Relaxed);
         self.wal.peak.fetch_max(frames, Ordering::Relaxed);
         let _ = self.kick.try_send(());
+        if let Some(at) = self.stamps.take_expiring() {
+            self.soonest.note(at);
+        }
+        if let Some(at) = self.stamps.take_links_erased() {
+            self.links_erased = Some(at);
+        }
+    }
+
+    /// When links_fts is next to be merged whole, for the words of messages erased since the last
+    /// such merge began, if any were.
+    fn links_merge_due(&self) -> Option<Instant> {
+        let since = self.links_merged.map_or_else(Instant::now, |began| began + self.links_merge_every);
+        (self.links_erased.is_some() && self.links_merging.is_none()).then_some(since)
     }
 
     /// Makes the writer's commits reach the disk before they return, or go back to letting a later
@@ -1623,23 +1700,45 @@ impl Writer {
     fn merge(&mut self) -> Result<()> {
         let began = Instant::now();
         self.synced(false)?;
+        let whole = self.links_merge_due().is_some_and(|due| due <= Instant::now());
+        let merging = self.links_merging;
         let tx = self.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // The messages' index first, then the links' and the items', each once the one before it has
         // nothing to merge, a step's worth.
         let mut merged = false;
-        for merge in [
-            "INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)",
-            "INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)",
-            "INSERT INTO library_fts (library_fts, rank) VALUES ('merge', ?1)",
-        ] {
-            let before = tx.total_changes();
-            tx.execute(merge, [MERGE_PAGES])?;
-            merged = tx.total_changes() > before + 1;
-            if merged {
-                break;
+        if whole {
+            // Every segment of the links' index made one, a step at a time as the steps after this
+            // go on with it, so the words of the messages erased since, which a contentless index
+            // keeps until a merge, go.
+            tx.execute("INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)", [-MERGE_PAGES])?;
+            merged = true;
+        } else {
+            for merge in [
+                "INSERT INTO messages_fts (messages_fts, rank) VALUES ('merge', ?1)",
+                "INSERT INTO links_fts (links_fts, rank) VALUES ('merge', ?1)",
+                "INSERT INTO library_fts (library_fts, rank) VALUES ('merge', ?1)",
+            ] {
+                let before = tx.total_changes();
+                tx.execute(merge, [MERGE_PAGES])?;
+                merged = tx.total_changes() > before + 1;
+                if merged {
+                    break;
+                }
+            }
+            if let Some(began) = merging.filter(|_| !merged) {
+                // The whole merge is done: the erasures before it began left nothing.
+                tx.execute(
+                    "DELETE FROM sync_state WHERE key = ?1 AND value = ?2",
+                    params![expiry::LINKS_ERASED, began.to_string()],
+                )?;
             }
         }
         tx.commit()?;
+        if whole {
+            (self.links_merging, self.links_merged) = (self.links_erased, Some(Instant::now()));
+        } else if let Some(began) = self.links_merging.take_if(|_| !merged) {
+            self.links_erased = self.links_erased.filter(|&erased| erased != began);
+        }
         self.unmerged = merged;
         self.committed();
         self.count(None, began.elapsed());

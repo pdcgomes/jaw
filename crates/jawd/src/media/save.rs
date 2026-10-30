@@ -67,6 +67,55 @@ fn target(to: &str) -> Result<PathBuf, Error> {
     })
 }
 
+/// Waits for view-once message `n`'s file to be in the cache, with its previews if it's `pictured`
+/// and they can be drawn, and says where; or why it can't be.
+pub(super) async fn opened(inner: &Inner, n: i64, pictured: bool) -> Result<super::Opening, Error> {
+    let mut committed = inner.store.committed();
+    let waited = tokio::time::timeout(WAIT, async {
+        loop {
+            let now = inner
+                .store
+                .reads()
+                .query(Priority::Interactive, move |db| {
+                    Ok(db
+                        .prepare_cached(
+                            "SELECT f.path, f.small, f.large, md.state, md.error, md.wanted IS NOT NULL FROM media md
+                            LEFT JOIN media_files f ON f.sha256 = md.sha256 WHERE md.message = ?1 AND md.variant = 'sd'",
+                        )?
+                        .query_row([n], |r| {
+                            Ok((
+                                r.get::<_, Option<String>>(0)?,
+                                r.get::<_, Option<String>>(1)?,
+                                r.get::<_, Option<String>>(2)?,
+                                r.get::<_, String>(3)?,
+                                r.get::<_, Option<String>>(4)?,
+                                r.get::<_, bool>(5)?,
+                            ))
+                        })
+                        .optional()?)
+                })
+                .await
+                .map_err(|e| internal("read jaw.db", e))?;
+            match now {
+                None => return Err(Error::new(code::NOT_FOUND, "the message went while its file was downloading")),
+                Some((Some(path), small, large, _, _, wanted)) if !pictured || small.is_some() || !wanted => {
+                    return Ok(super::Opening { path, small, large });
+                }
+                Some((None, _, _, state, error, false)) if state != "waiting_for_phone" => {
+                    let why = error.unwrap_or_else(|| "its download was cancelled".into());
+                    return Err(Error::new(code::NOT_ALLOWED, format!("jawd couldn't download the file: {why}")));
+                }
+                Some(_) => {}
+            }
+            if committed.changed().await.is_err() {
+                return Err(Error::new(code::INTERNAL, "jawd's store stopped"));
+            }
+        }
+    })
+    .await;
+    waited.unwrap_or_else(|_| Err(Error::new(code::NOT_ALLOWED, "the file didn't download in time; open it again")))
+}
+
 /// Waits for the copy's file to be in the cache, and says where; or why it can't be.
 pub(super) async fn downloaded(inner: &Inner, message: i64, variant: &'static str) -> Result<String, Error> {
     let mut committed = inner.store.committed();

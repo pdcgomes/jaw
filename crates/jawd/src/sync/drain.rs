@@ -144,7 +144,7 @@ fn convert_row(row: &Row, me: &Me) -> Converted {
         },
         "group_change" => match pb::GroupChange::decode(row.payload.as_slice()) {
             Ok(change) => {
-                out.changes.extend(people::group_change(&change));
+                out.changes.extend(people::group_change(&change, me));
                 true
             }
             Err(e) => undecodable(row, e),
@@ -197,15 +197,28 @@ pub fn receipt_changes(receipt: &pb::Receipt) -> Vec<Change> {
     if chat.is_empty() {
         return Vec::new();
     }
+    // Played on another of your devices, a view-once message goes from every device.
+    let played_here = receipt.r#type == "played-self" || (receipt.r#type == "played" && receipt.from_me);
+    let opened: Vec<Change> = receipt
+        .ids
+        .iter()
+        .filter(|_| played_here)
+        .map(|id| {
+            Change::Amend(Amend {
+                chat: chat.clone(),
+                target: id.clone(),
+                sender: None,
+                mine: true,
+                at: receipt.timestamp_ms,
+                what: Amendment::Opened,
+                raw: None,
+            })
+        })
+        .collect();
     let status = match receipt.r#type.as_str() {
         "read-self" | "played-self" => {
-            return vec![Change::Read(Read {
-                chat,
-                at: receipt.timestamp_ms,
-                ids: receipt.ids.clone(),
-                phone: None,
-                here: false,
-            })];
+            let read = Read { chat, at: receipt.timestamp_ms, ids: receipt.ids.clone(), phone: None, here: false };
+            return std::iter::once(Change::Read(read)).chain(opened).collect();
         }
         "" | "delivered" => "delivered",
         "read" => "read",
@@ -213,7 +226,7 @@ pub fn receipt_changes(receipt: &pb::Receipt) -> Vec<Change> {
         _ => return Vec::new(),
     };
     if receipt.from_me || receipt.sender.is_empty() {
-        return Vec::new();
+        return opened;
     }
     receipt
         .ids

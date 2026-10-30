@@ -123,6 +123,7 @@ const CLASSES: &[(&str, Class, &[&str])] = &[
     ("library_links", Derived, &[]),
     ("outgoing", Own, &[]),
     ("outgoing_drop", Own, &[]),
+    ("opened", Own, &[]),
 ];
 
 /// The rows the test writes, in an order that keeps every foreign key, each column's value as SQL.
@@ -465,6 +466,7 @@ const SEEDS: &[(&str, &[(&str, &str)])] = &[
             ("echo_by", "7"),
         ],
     ),
+    ("opened", &[("message", "2"), ("until", "1790000001100")]),
 ];
 
 /// Columns of jaw's own or raw a migration dropped by decision, by its number: the table, the

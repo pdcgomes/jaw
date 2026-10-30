@@ -1,9 +1,15 @@
 //! People and groups, as the engine describes them: contacts and push names from whatsmeow's store,
 //! LIDs joined to phone numbers, and groups with their members and communities.
 
-use super::{is_person, user_jid};
+use serde_json::json;
+
+use super::{Me, is_person, kinds, user_jid};
 use crate::engine::pb;
-use crate::store::{Change, Chat, Members, Person};
+use crate::store::{Change, Chat, Members, Message, Person};
+
+/// What the line a group's timer changing leaves has for its ID, before the change's time: WhatsApp
+/// gives the change none, and its time is the same each time the change comes again.
+pub const TIMER_LINE: &str = "jaw-timer-";
 
 /// Someone known by one or two JIDs, with whatever names are known.
 fn person(jids: &[&str], name: Option<&str>, push_name: Option<&str>, verified: Option<&str>) -> Option<Change> {
@@ -82,8 +88,9 @@ pub fn group(g: &pb::GroupInfo) -> Vec<Change> {
     changes
 }
 
-/// What changed in a group.
-pub fn group_change(c: &pb::GroupChange) -> Vec<Change> {
+/// What changed in a group. A change of its disappearing timer leaves its line, as the phones
+/// show one.
+pub fn group_change(c: &pb::GroupChange, me: &Me) -> Vec<Change> {
     let mut changes = Vec::new();
     if !c.sender.is_empty() && !c.sender_pn.is_empty() {
         changes.extend(person(&[&c.sender, &c.sender_pn], None, None, None));
@@ -92,10 +99,27 @@ pub fn group_change(c: &pb::GroupChange) -> Vec<Change> {
         id: c.jid.clone(),
         name: c.name.clone().filter(|n| !n.is_empty()),
         ephemeral: c.ephemeral_seconds,
+        ephemeral_at: (c.timestamp_ms > 0).then_some(c.timestamp_ms),
         ..Chat::default()
     };
     if chat.name.is_some() || chat.ephemeral.is_some() {
         changes.push(Change::Chat(chat));
+    }
+    if let Some(seconds) = c.ephemeral_seconds.filter(|_| c.timestamp_ms > 0) {
+        let sentence = kinds::ephemeral_sentence(seconds);
+        let mine = !c.sender.is_empty() && me.is(&c.sender);
+        changes.push(Change::Message(Message {
+            chat: c.jid.clone(),
+            id: format!("{TIMER_LINE}{}", c.timestamp_ms),
+            at: c.timestamp_ms,
+            sender: (!mine && !c.sender.is_empty()).then(|| user_jid(&c.sender)),
+            mine,
+            kind: "system",
+            summary: sentence.clone(),
+            detail: Some(json!({ "system": sentence }).to_string()),
+            live: true,
+            ..Message::default()
+        }));
     }
     if !c.linked.is_empty() {
         changes.push(Change::Chat(Chat { id: c.linked.clone(), community: Some(c.jid.clone()), ..Chat::default() }));
@@ -175,17 +199,43 @@ mod tests {
             leave: vec!["351910000004@s.whatsapp.net".into()],
             ..Default::default()
         };
-        let changes = group_change(&change);
+        let changes = group_change(&change, &Me::default());
         let Change::Chat(chat) = &changes[0] else { panic!("the chat first") };
         assert_eq!((chat.name.as_deref(), chat.ephemeral, chat.kind), (Some("Climbing on Saturdays"), None, None));
         let Change::Members(members) = &changes[1] else { panic!("then its members") };
         assert!(!members.all);
         assert_eq!(members.set, [("351910000003@s.whatsapp.net".to_string(), "member")]);
         assert_eq!(members.remove, ["351910000004@s.whatsapp.net"]);
-        let unlinked =
-            group_change(&pb::GroupChange { jid: "1@g.us".into(), unlinked: "3@g.us".into(), ..Default::default() });
+        let unlinked = group_change(
+            &pb::GroupChange { jid: "1@g.us".into(), unlinked: "3@g.us".into(), ..Default::default() },
+            &Me::default(),
+        );
         let [Change::Chat(chat)] = unlinked.as_slice() else { panic!("an unlinked group leaves its community") };
         assert_eq!((chat.id.as_str(), chat.community.as_deref()), ("3@g.us", Some("")));
+    }
+
+    #[test]
+    fn a_groups_timer_changing_says_when_it_was_set_and_leaves_its_line_once_however_often_it_comes() {
+        let me = Me::new(["351910000001@s.whatsapp.net".to_string()]);
+        let change = |sender: &str| pb::GroupChange {
+            jid: "3@g.us".into(),
+            sender: sender.into(),
+            timestamp_ms: 1_790_000_000_123,
+            ephemeral_seconds: Some(604_800),
+            ..Default::default()
+        };
+        let from_ana = group_change(&change("100000000002@lid"), &me);
+        let [Change::Chat(chat), Change::Message(line)] = from_ana.as_slice() else { panic!("{from_ana:?}") };
+        assert_eq!((chat.ephemeral, chat.ephemeral_at), (Some(604_800), Some(1_790_000_000_123)));
+        assert_eq!((line.id.as_str(), line.at, line.kind), ("jaw-timer-1790000000123", 1_790_000_000_123, "system"));
+        assert_eq!(line.summary, "Disappearing messages turned on: 7 days");
+        assert_eq!((line.sender.as_deref(), line.mine), (Some("100000000002@lid"), false));
+        let again = group_change(&change("100000000002@lid"), &me);
+        assert!(matches!(&again[1], Change::Message(m) if m.id == line.id), "the same change, the same line");
+        let mine = group_change(&change("351910000001:2@s.whatsapp.net"), &me);
+        assert!(matches!(&mine[1], Change::Message(m) if m.mine && m.sender.is_none()), "{mine:?}");
+        let untimed = group_change(&pb::GroupChange { timestamp_ms: 0, ..change("100000000002@lid") }, &me);
+        assert!(untimed.iter().all(|c| !matches!(c, Change::Message(_))), "no time, no line: {untimed:?}");
     }
 
     #[test]

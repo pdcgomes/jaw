@@ -632,6 +632,108 @@ fn device_sent_ephemeral_and_view_once_wrappers_are_unwrapped() {
     assert_eq!((m.kind, m.view_once, m.expires_at), ("image", true, Some(AT + 86_400_000)));
 }
 
+/// A photo with `caption`, as a view-once wrapper carries it.
+fn once(caption: &str) -> e2e::Message {
+    let image = e2e::Message {
+        image_message: Some(Box::new(e2e::ImageMessage {
+            caption: Some(caption.into()),
+            mimetype: Some("image/jpeg".into()),
+            media_key: Some(vec![7; 32]),
+            jpeg_thumbnail: Some(vec![0xff, 0xd8, 0xff, 0xe0]),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    e2e::Message {
+        view_once_message_v2: Some(Box::new(e2e::FutureProofMessage { message: Some(Box::new(image)) })),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_view_once_photos_row_says_only_what_it_is_and_keeps_its_caption_in_its_raw_protobuf_alone() {
+    let m = row(once("guess where https://secret.example"));
+    assert_eq!((m.kind, m.view_once, m.summary.as_str()), ("image", true, "View once photo"));
+    assert_eq!((&m.text, &m.spans), (&None, &None), "nothing for search or a window to show");
+    assert!(m.detail.as_deref().is_some_and(|d| !d.contains("guess") && !d.contains("secret")), "{:?}", m.detail);
+    let raw = unpack(&m).message.unwrap();
+    assert_eq!(
+        once_caption(&raw),
+        json!([{ "t": "text", "s": "guess where " }, {
+        "t": "link", "s": "https://secret.example", "url": "https://secret.example" }])
+    );
+}
+
+#[test]
+fn only_a_photo_a_video_or_a_voice_message_is_one_to_open_once_and_anything_else_shows_as_it_is() {
+    let wrapped = |inner: e2e::Message| e2e::Message {
+        view_once_message_v2: Some(Box::new(e2e::FutureProofMessage { message: Some(Box::new(inner)) })),
+        ..Default::default()
+    };
+    let text = row(wrapped(e2e::Message { conversation: Some("nothing to open".into()), ..Default::default() }));
+    assert_eq!((text.kind, text.view_once, text.text.as_deref()), ("text", false, Some("nothing to open")));
+    let flagged = e2e::Message {
+        extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
+            text: Some("flagged".into()),
+            view_once: Some(true),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let flagged = row(flagged);
+    assert_eq!((flagged.view_once, flagged.text.as_deref()), (false, Some("flagged")));
+    let voice = e2e::Message {
+        audio_message: Some(Box::new(e2e::AudioMessage {
+            ptt: Some(true),
+            seconds: Some(9),
+            view_once: Some(true),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let voice = row(voice);
+    assert_eq!((voice.kind, voice.view_once, voice.summary.as_str()), ("voice", true, "View once voice message"));
+}
+
+#[test]
+fn a_reply_quotes_a_view_once_message_as_what_it_is_wrapped_or_flagged() {
+    let flagged = e2e::Message {
+        image_message: Some(Box::new(e2e::ImageMessage {
+            caption: Some("the caption".into()),
+            view_once: Some(true),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    for quoted in [once("the caption"), flagged] {
+        let reply = e2e::Message {
+            extended_text_message: Some(Box::new(e2e::ExtendedTextMessage {
+                text: Some("wow".into()),
+                context_info: context(|c| {
+                    c.stanza_id = Some("3EB0ONCE".into());
+                    c.participant = Some(ANA.into());
+                    c.quoted_message = Some(Box::new(quoted.clone()));
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let m = row(reply);
+        let reply: serde_json::Value = serde_json::from_str(m.reply.as_deref().unwrap()).unwrap();
+        assert_eq!(reply["summary"], json!("View once photo"), "{quoted:?}");
+    }
+}
+
+#[test]
+fn a_view_once_message_is_quoted_without_its_files_keys_caption_or_thumbnail() {
+    let quoted = once_quoted(&once("the caption"));
+    let inner = quoted.view_once_message_v2.as_deref().and_then(|m| m.message.as_deref()).unwrap();
+    let image = inner.image_message.as_deref().unwrap();
+    assert_eq!((image.mimetype.as_deref(), image.view_once), (Some("image/jpeg"), Some(true)));
+    assert_eq!((&image.caption, &image.media_key, &image.jpeg_thumbnail, &image.url), (&None, &None, &None, &None));
+    assert_eq!(kinds::body(unwrap(&quoted).0, &[]).kind, "image");
+}
+
 #[test]
 fn edits_deletes_reactions_and_votes_amend_the_message_they_name() {
     let edit = e2e::Message {

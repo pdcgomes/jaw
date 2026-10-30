@@ -248,7 +248,8 @@ async fn a_copy_coming_onto_an_earlier_jawds_unreadable_stand_in_shows_and_keeps
     store.apply(Lane::Live, live).await.unwrap();
     store.apply(Lane::Background, convert::message(&answer("ai2", "Lisbon is a city."), &me, false)).await.unwrap();
     // What a copy brought: its quote, forwarding, mention of you, expiry and view-once, and when
-    // the message was edited.
+    // the message was edited. An answer in a view-once wrapper has no file to open, so it isn't
+    // one to open once, and shows as it is.
     type Brought = (Option<String>, i64, bool, Option<i64>, bool, Option<i64>);
     let read = |n: i64| {
         let store = store.clone();
@@ -269,7 +270,7 @@ async fn a_copy_coming_onto_an_earlier_jawds_unreadable_stand_in_shows_and_keeps
     };
     let brought = |n: i64| -> Brought {
         let sent = if n == 1 { AT + 10_000 } else { AT };
-        (Some("3EB0Q".to_string()), 2, true, Some(sent + 7_776_000_000), true, Some(AT + 5))
+        (Some("3EB0Q".to_string()), 2, true, Some(sent + 7_776_000_000), false, Some(AT + 5))
     };
     let mentions = |store: &Store| {
         let store = store.clone();
