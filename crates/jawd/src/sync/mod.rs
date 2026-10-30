@@ -7,7 +7,7 @@
 //! connection and catching up go out to interfaces as pushes.
 
 mod avatars;
-mod backfill;
+pub(crate) mod backfill;
 mod drain;
 mod fetch;
 mod merge;

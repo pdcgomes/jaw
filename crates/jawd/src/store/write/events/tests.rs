@@ -894,6 +894,30 @@ async fn what_was_sealed_between_jids_jaw_learns_are_its_people_only_afterwards_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn what_a_join_leaves_to_try_again_is_taken_in_the_background_with_nothing_else_to_wake_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    tokio::spawn(crate::sync::backfill::run(store.clone()));
+    // Five answers to Ana's event come sealed for her LID, which jaw doesn't know is hers, and are
+    // kept; the background, with nothing to do, waits to be told.
+    apply(&store, event("e1")).await;
+    for i in 0..5 {
+        let who = format!("3519300{i:05}@s.whatsapp.net");
+        apply(&store, sealed_answer("e1", (ANA_LID, &who), &who, &format!("a{i}"), AT + 10 + i, Going)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(counts(&store, "e1").await.0, 0, "they stay sealed");
+    // Jaw learns her LID is hers, and the join leaves them to be tried again in steps.
+    apply(&store, vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]).await;
+    let began = std::time::Instant::now();
+    while counts(&store, "e1").await.0 < 5 {
+        let going = counts(&store, "e1").await.0;
+        assert!(began.elapsed() < std::time::Duration::from_secs(30), "the background never took them: {going} going");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_answer_kept_sealed_and_then_set_aside_past_the_bound_opens_once_jaw_learns_its_answerers_jid() {
     const BEA: &str = "351910000004@s.whatsapp.net";
     const BEA_LID: &str = "100000000004@lid";
