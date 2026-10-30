@@ -27,6 +27,10 @@ extension AppModel: SidebarHost {
         return Menus.items(FolderMenu.folderEntries(folder, tree: tree)) { id in bound.first { $0.id == id } }
     }
 
+    func sidebar(_: SidebarController, do act: FolderAct, name: String) {
+        folderAct(act, name: name)
+    }
+
     /// ⇧⌘N: a new folder, in the folder picked when it's yours, or at the top, named in place.
     func newFolder() {
         guard tree.served else { return say("folders come with jawd's M6") }

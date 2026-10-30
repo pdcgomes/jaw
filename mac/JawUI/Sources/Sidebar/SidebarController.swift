@@ -11,6 +11,8 @@ public protocol SidebarHost: AnyObject {
     /// The menu of a folder right-clicked, made as it opens; for nil, on a heading or the space under
     /// the rows, the sidebar's own.
     func sidebar(_ sidebar: SidebarController, menuFor folder: String?) -> [NSMenuItem]
+    /// Something dropped on the tree: what it does, and the name of what was dropped, for what's said.
+    func sidebar(_ sidebar: SidebarController, do act: FolderAct, name: String)
 }
 
 /// The sidebar: the folder tree, as jawd's M6 serves it, on the sidebar's glass. The built-in folders
@@ -84,6 +86,8 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         menu.autoenablesItems = false
         menu.delegate = self
         outline.menu = menu
+        outline.registerForDraggedTypes([.jawChat, .jawCommunity, .jawPerson, .jawFolder])
+        outline.setDraggingSourceOperationMask(.move, forLocal: true)
         outline.setAccessibilityLabel("Folders")
         Scrolling.style(scroll)
         scroll.documentView = outline

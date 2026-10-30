@@ -171,3 +171,19 @@ func `an unread count sits in the middle of its badge`(scale: Int) throws {
     list.apply(Update(seq: 2, upsert: [Samples.direct], total: 1))
     #expect(list.emptyLabel.isHidden)
 }
+
+@MainActor
+@Test func `a community's row drags with a type of its own, which no pane takes, and a chat's as before`() throws {
+    let list = ChatListController(folder: "all", roles: Catalog.jaw.roles(dark: true))
+    _ = list.view
+    list.shown = Samples.chats
+    list.table.reloadData()
+    let at = try #require(Samples.chats.firstIndex { $0.kind == .community })
+    let community = try #require(list.tableView(list.table, pasteboardWriterForRow: at) as? NSPasteboardItem)
+    #expect(community.string(forType: .jawCommunity) == Samples.chats[at].id && community.string(forType: .jawChat) == nil)
+    #expect(community.string(forType: .string) == Samples.chats[at].name)
+    let direct = try #require(Samples.chats.firstIndex { $0.kind == .direct })
+    let chat = try #require(list.tableView(list.table, pasteboardWriterForRow: direct) as? NSPasteboardItem)
+    #expect(chat.string(forType: .jawChat) == Samples.chats[direct].id && chat.string(forType: .jawCommunity) == nil)
+    #expect(!GridView().registeredDraggedTypes.contains(.jawCommunity), "a pane can't take a community")
+}

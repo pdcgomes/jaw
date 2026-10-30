@@ -272,10 +272,11 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
     }
 
     /// A chat dragged out of the list, onto a pane.
+    /// A chat dragged out of the list, onto a pane or a folder; a community's row, onto a folder only.
     public func tableView(_: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
-        guard row < shown.count, shown[row].kind != .community else { return nil }
+        guard row < shown.count else { return nil }
         let item = NSPasteboardItem()
-        item.setString(shown[row].id, forType: .jawChat)
+        item.setString(shown[row].id, forType: shown[row].kind == .community ? .jawCommunity : .jawChat)
         item.setString(shown[row].name, forType: .string)
         return item
     }
@@ -556,4 +557,11 @@ final class ChatCell: NSView {
 public extension NSPasteboard.PasteboardType {
     /// A chat's id, dragged from the list.
     static let jawChat = NSPasteboard.PasteboardType("dev.badcoffee.jaw.chat")
+    /// Someone's `person:` id, dragged from the roster.
+    static let jawPerson = NSPasteboard.PasteboardType("dev.badcoffee.jaw.person")
+    /// A folder of yours' id, dragged in the sidebar.
+    static let jawFolder = NSPasteboard.PasteboardType("dev.badcoffee.jaw.folder")
+    /// A community's id, dragged from the chat list onto a folder; no pane registers it, as a community
+    /// can't go in a pane.
+    static let jawCommunity = NSPasteboard.PasteboardType("dev.badcoffee.jaw.community")
 }

@@ -27,6 +27,12 @@ final class SideHost: SidebarHost {
         menusFor.append(folder)
         return [NSMenuItem(title: folder ?? "New Folder…", action: nil, keyEquivalent: "")]
     }
+
+    var did: [(FolderAct, String)] = []
+
+    func sidebar(_: SidebarController, do act: FolderAct, name: String) {
+        did.append((act, name))
+    }
 }
 
 @MainActor
@@ -343,4 +349,64 @@ final class PlainSourceList: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     #expect(!s.hasKeys)
     window.makeFirstResponder(s.outline)
     #expect(s.hasKeys)
+}
+
+@MainActor
+@Test func `a drop lands onto a folder, between the rows in one or under Folders, and nowhere among the built-in rows`() {
+    let s = sidebar()
+    s.apply(Samples.folderUpdate)
+    let onto = s.place(s.item("folder:1"), NSOutlineViewDropOnItemIndex)
+    #expect(onto?.target == "folder:1" && onto?.at == nil)
+    let between = s.place(s.item(SidebarController.foldersHeading), 2)
+    #expect(between != nil && between?.target == nil && between?.at == 2)
+    #expect(s.place(s.item(SidebarController.foldersHeading), NSOutlineViewDropOnItemIndex)?.at == 4, "onto Folders: last at the top")
+    #expect(s.place(nil, 0) == nil && s.place(s.item(SidebarController.smartHeading), 0) == nil)
+}
+
+@MainActor
+@Test func `a folder of yours drags as itself, a built-in one doesn't, and a drag says what it carries`() throws {
+    let s = sidebar()
+    s.apply(Samples.folderUpdate)
+    let family = try #require(s.outlineView(s.outline, pasteboardWriterForItem: s.item("folder:1")) as? NSPasteboardItem)
+    #expect(family.string(forType: .jawFolder) == "folder:1" && family.string(forType: .string) == "Family")
+    #expect(s.outlineView(s.outline, pasteboardWriterForItem: s.item("all")) == nil)
+    let board = NSPasteboard(name: .init("jaw-test-\(UUID().uuidString)"))
+    defer { board.releaseGlobally() }
+    board.clearContents()
+    let chat = NSPasteboardItem()
+    chat.setString("ana@s.whatsapp.net", forType: .jawChat)
+    chat.setString("Ana Ribeiro", forType: .string)
+    board.writeObjects([chat])
+    #expect(SidebarController.dragged(board) == .item("ana@s.whatsapp.net", name: "Ana Ribeiro"))
+    board.clearContents()
+    board.writeObjects([family])
+    #expect(SidebarController.dragged(board) == .folder("folder:1"))
+    board.clearContents()
+    let community = NSPasteboardItem()
+    community.setString("120363000000000000@g.us", forType: .jawCommunity)
+    community.setString("Bairro Alto", forType: .string)
+    board.writeObjects([community])
+    #expect(SidebarController.dragged(board) == .item("120363000000000000@g.us", name: "Bairro Alto"), "a community files as a chat does")
+    board.clearContents()
+    let person = NSPasteboardItem()
+    person.setString("person:4", forType: .jawPerson)
+    person.setString("Inês Gomes", forType: .string)
+    board.writeObjects([person])
+    #expect(SidebarController.dragged(board) == .item("person:4", name: "Inês Gomes"), "someone from the roster, by their person id")
+}
+
+@MainActor
+@Test func `a chat dropped near a row's edge goes onto the folder under the pointer, and a folder dropped there goes between the rows`() {
+    let s = sidebar()
+    s.apply(Samples.folderUpdate)
+    let chat = FolderTree.Dragged.item("ana@s.whatsapp.net", name: "Ana")
+    #expect(s.dropTarget(chat, row: 6)?.id == "folder:1", "Family's row")
+    #expect(s.dropTarget(chat, row: 0) == nil && s.dropTarget(chat, row: 5) == nil, "not All, nor the Folders heading")
+    #expect(s.dropTarget(.folder("folder:3"), row: 6) == nil, "a folder near a row's edge goes between the rows, as AppKit proposes")
+}
+
+@MainActor
+@Test func `the tree takes chats, communities, people and folders dragged onto it`() {
+    let s = sidebar()
+    #expect(Set(s.outline.registeredDraggedTypes).isSuperset(of: [.jawChat, .jawCommunity, .jawPerson, .jawFolder]))
 }

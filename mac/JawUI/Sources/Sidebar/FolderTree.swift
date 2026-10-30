@@ -163,6 +163,33 @@ public struct FolderTree: Sendable, Equatable {
         !served || rows[folder] != nil ? folder : "all"
     }
 
+    /// What's dragged onto the tree: a chat or someone, by id and name, or a folder.
+    public enum Dragged: Sendable, Equatable {
+        case item(String, name: String)
+        case folder(String)
+    }
+
+    /// What dropping `dragged` does, onto `target` (`at` nil) or between the rows in `target` (`at`
+    /// their place, a nil `target` being the top): a chat or someone dropped onto a folder of yours is
+    /// filed there; a folder of yours dropped onto another is nested in it, last, and between rows goes
+    /// there. Built-in and smart folders take nothing, and no folder goes into itself or a folder under
+    /// it. Nil when it isn't a drop.
+    public func drop(_ dragged: Dragged, onto target: String?, at index: Int?) -> FolderAct? {
+        if let target, rows[target]?.isYours != true { return nil }
+        switch dragged {
+        case let .item(id, _):
+            guard let target, index == nil else { return nil }
+            return .add(item: id, to: target)
+        case let .folder(id):
+            guard rows[id]?.isYours == true else { return nil }
+            if let target, subtree(id).contains(target) { return nil }
+            guard let index else { return target.map { .moveFolder(id, to: $0, position: nil) } }
+            // jawd counts a folder's place among its new siblings, which don't count it.
+            let at = children(of: target).firstIndex { $0.id == id }.map { $0 < index ? index - 1 : index } ?? index
+            return .moveFolder(id, to: target, position: at)
+        }
+    }
+
     /// What lays the tree out: each folder's place and name. A change to anything else, such as its
     /// counts, draws its row again where it is.
     var shape: [String: Shape] {

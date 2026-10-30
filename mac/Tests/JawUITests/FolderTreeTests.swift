@@ -98,3 +98,22 @@ import Testing
     #expect(tree.showing("folder:1") == "all", "deleted from another interface")
     #expect(tree.showing("folder:2") == "folder:2", "a folder that was in it is still there")
 }
+
+@Test func `a chat dropped onto a folder of yours is filed there, and anywhere else isn't a drop`() {
+    let tree = Samples.tree
+    let chat = FolderTree.Dragged.item("ana@s.whatsapp.net", name: "Ana")
+    #expect(tree.drop(chat, onto: "folder:1", at: nil) == .add(item: "ana@s.whatsapp.net", to: "folder:1"))
+    #expect(tree.drop(chat, onto: "all", at: nil) == nil && tree.drop(chat, onto: "smart:1", at: nil) == nil)
+    #expect(tree.drop(chat, onto: "folder:1", at: 0) == nil && tree.drop(chat, onto: nil, at: 2) == nil, "between rows isn't a folder")
+}
+
+@Test func `a folder dropped onto another nests in it, between rows goes there, and never into itself or a folder under it`() {
+    let tree = Samples.tree
+    #expect(tree.drop(.folder("folder:3"), onto: "folder:1", at: nil) == .moveFolder("folder:3", to: "folder:1", position: nil))
+    #expect(tree.drop(.folder("folder:1"), onto: "folder:2", at: nil) == nil, "Cousins is under Family")
+    #expect(tree.drop(.folder("folder:1"), onto: "folder:1", at: nil) == nil)
+    #expect(tree.drop(.folder("folder:5"), onto: nil, at: 0) == .moveFolder("folder:5", to: nil, position: 0), "Work first at the top")
+    #expect(tree.drop(.folder("folder:1"), onto: nil, at: 3) == .moveFolder("folder:1", to: nil, position: 2),
+            "before Work, among siblings that don't count Family")
+    #expect(tree.drop(.folder("all"), onto: "folder:1", at: nil) == nil && tree.drop(.folder("folder:3"), onto: "smart:1", at: nil) == nil)
+}
