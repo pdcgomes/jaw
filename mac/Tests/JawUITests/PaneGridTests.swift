@@ -128,6 +128,43 @@ func pinwheel() -> PaneGrid {
     }
 }
 
+@Test func `a tree read as a grid has one line where its panes meet, however the arithmetic rounds`() {
+    let nested = PaneLayout.split(.across, 0.21, .split(.across, 0.28, .pane("a"), .pane("b")), .pane("c"))
+    #expect(PaneGrid.from(nested) == PaneGrid(cols: [0, 0.0588, 0.21, 1], rows: [0, 1], slots: [
+        .init(id: 1, c0: 0, c1: 1, r0: 0, r1: 1, chat: "a"),
+        .init(id: 2, c0: 1, c1: 2, r0: 0, r1: 1, chat: "b"),
+        .init(id: 3, c0: 2, c1: 3, r0: 0, r1: 1, chat: "c"),
+    ]), "b's right edge is the line its parent split at")
+    let edge = PaneLayout.split(.across, 0.29, .pane("a"), .split(.across, 0.2, .pane("b"), .pane("c")))
+    #expect(PaneGrid.from(edge) == PaneGrid(cols: [0, 0.29, 0.432, 1], rows: [0, 1], slots: [
+        .init(id: 1, c0: 0, c1: 1, r0: 0, r1: 1, chat: "a"),
+        .init(id: 2, c0: 1, c1: 2, r0: 0, r1: 1, chat: "b"),
+        .init(id: 3, c0: 2, c1: 3, r0: 0, r1: 1, chat: "c"),
+    ]), "and c's is the grid's")
+    let stacked = PaneLayout.split(.down, 0.5, .split(.across, 0.2, .pane("a"), .split(.across, 0.5, .pane("b"), .pane("c"))),
+                                   .split(.across, 0.6, .pane("d"), .pane("e")))
+    #expect(PaneGrid.from(stacked) == PaneGrid(cols: [0, 0.2, 0.6, 1], rows: [0, 0.5, 1], slots: [
+        .init(id: 1, c0: 0, c1: 1, r0: 0, r1: 1, chat: "a"),
+        .init(id: 2, c0: 1, c1: 2, r0: 0, r1: 1, chat: "b"),
+        .init(id: 3, c0: 2, c1: 3, r0: 0, r1: 1, chat: "c"),
+        .init(id: 4, c0: 0, c1: 2, r0: 1, r1: 2, chat: "d"),
+        .init(id: 5, c0: 2, c1: 3, r0: 1, r1: 2, chat: "e"),
+    ]), "a fifth and half the rest is the 0.6 the row below splits at, one line")
+    #expect([nested, edge, stacked].allSatisfy { PaneGrid.from($0).holds })
+    let shares = stride(from: 200, through: 800, by: 10).map { Double($0) / 1000 }
+    var trees: [PaneLayout] = []
+    for (outer, inner) in [(PaneLayout.Axis.across, PaneLayout.Axis.across), (.across, .down), (.down, .across), (.down, .down)] {
+        for s in shares {
+            for t in shares {
+                trees.append(.split(outer, s, .pane("a"), .split(inner, t, .pane("b"), .pane("c"))))
+                trees.append(.split(outer, s, .split(inner, t, .pane("a"), .pane("b")), .pane("c")))
+            }
+        }
+    }
+    let wrong = trees.filter { !PaneGrid.from($0).holds }
+    #expect(wrong.isEmpty, "\(wrong.count) of the terminal's \(trees.count) trees of three panes don't hold")
+}
+
 @Test func `the editor's cells: lines snap to them, merging takes in what it cuts, splitting back is bounded`() throws {
     let cells = work().onCells(columns: 6, rows: 4)
     #expect(cells.cols.count == 7 && cells.rows.count == 5)

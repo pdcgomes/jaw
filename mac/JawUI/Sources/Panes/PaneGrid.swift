@@ -375,17 +375,20 @@ public struct PaneGrid: Hashable, Sendable, Codable {
 
     // MARK: A tree of splits
 
-    /// The layout a tree of splits draws, its panes' chats in their slots.
+    /// The layout a tree of splits draws, its panes' chats in their slots. Each pane's edges are
+    /// taken to the nearest billionth first, since nested splits can round edges that meet a hair
+    /// apart, and panes that meet should meet on one line.
     public static func from(_ tree: PaneLayout) -> PaneGrid {
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
         let frames = tree.frames(in: unit)
-        let xs = Set(frames.values.flatMap { [Double($0.minX), Double($0.maxX)] }).sorted()
-        let ys = Set(frames.values.flatMap { [Double($0.minY), Double($0.maxY)] }).sorted()
+        let snap = { (v: CGFloat) in (Double(v) * 1e9).rounded() / 1e9 }
+        let xs = Set(frames.values.flatMap { [snap($0.minX), snap($0.maxX)] }).sorted()
+        let ys = Set(frames.values.flatMap { [snap($0.minY), snap($0.maxY)] }).sorted()
         var slots: [Slot] = []
         for (i, id) in tree.panes.enumerated() {
             guard let f = frames[id] else { continue }
-            slots.append(Slot(id: i + 1, c0: xs.firstIndex(of: Double(f.minX))!, c1: xs.firstIndex(of: Double(f.maxX))!,
-                              r0: ys.firstIndex(of: Double(f.minY))!, r1: ys.firstIndex(of: Double(f.maxY))!, chat: id))
+            slots.append(Slot(id: i + 1, c0: xs.firstIndex(of: snap(f.minX))!, c1: xs.firstIndex(of: snap(f.maxX))!,
+                              r0: ys.firstIndex(of: snap(f.minY))!, r1: ys.firstIndex(of: snap(f.maxY))!, chat: id))
         }
         return PaneGrid(cols: xs, rows: ys, slots: slots)
     }

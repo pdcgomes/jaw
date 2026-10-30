@@ -37,6 +37,10 @@ struct Answered<R: Decodable>: Decodable {
     #expect(span(terminal.grid.slot(1)) == [0, 1, 0, 2], "ana takes both rows")
     #expect(terminal.focus == 3 && terminal.grid.slot(3)?.chat == "rui")
     #expect(terminal.said == "the terminal's 3 panes")
+    let past = try TerminalPanes.read(KeptLayout(interface: "jaw", v: 1, layout: SplitLayout(focused: 3, tree: tree))).get()
+    #expect(past.focus == 3, "keys past the last pane go to the last slot")
+    let before = try TerminalPanes.read(KeptLayout(interface: "jaw", v: 1, layout: SplitLayout(focused: -1, tree: tree))).get()
+    #expect(before.focus == 1, "and keys before the first to the first")
 }
 
 @Test func `what can't open says why: nothing kept, every pane's chat gone, more panes than the grid holds, or no grid`() {
@@ -56,6 +60,11 @@ struct Answered<R: Decodable>: Decodable {
         "jawd sends shares of 1 to 999 thousandths, and one of none or all leaves a slot no width")
     let all = SplitTree.split(.across, first: 1000, .chat("ana"), .chat("rui"))
     #expect(TerminalPanes.read(KeptLayout(interface: "jaw", v: 5, layout: SplitLayout(focused: 0, tree: all))) == .failure(.unreadable))
+    let less = SplitTree.split(.across, first: -1, .chat("ana"), .chat("rui"))
+    #expect(TerminalPanes.read(KeptLayout(interface: "jaw", v: 5, layout: SplitLayout(focused: 0, tree: less))) == .failure(.unreadable),
+        "nor one past either end")
+    let more = SplitTree.split(.across, first: 1001, .chat("ana"), .chat("rui"))
+    #expect(TerminalPanes.read(KeptLayout(interface: "jaw", v: 5, layout: SplitLayout(focused: 0, tree: more))) == .failure(.unreadable))
     #expect(TerminalPanes.Refusal.nothing.said == "the terminal hasn't kept any panes")
     #expect(TerminalPanes.Refusal.gone(1).said == "the terminal's pane showed a chat that's gone")
     #expect(TerminalPanes.Refusal.gone(2).said == "the terminal's 2 panes showed chats that are gone")
