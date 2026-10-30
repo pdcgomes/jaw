@@ -60,12 +60,27 @@ fn log(home: &Path) -> String {
     std::fs::read_to_string(home.join("jawd.log")).unwrap()
 }
 
+/// Waits until jawd answers hello, which it does only once its start is over and it serves.
+fn answering(home: &Path) {
+    let socket = home.join("jaw.sock");
+    let ready = Instant::now() + Duration::from_secs(30);
+    while jaw_client::Connection::open(&socket, "stopping test", "0").is_err() {
+        assert!(Instant::now() < ready, "jawd never answered hello:\n{}", log(home));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn jawd_whose_engine_is_missing_stops_on_sigterm_within_its_bound() {
     let home = tempfile::tempdir().unwrap();
     let mut child = jawd(home.path(), &home.path().join("no-such-engine"));
-    // Long enough for the supervisor to have failed to start it and be waiting to try again.
-    std::thread::sleep(Duration::from_millis(1_500));
+    // Started, however long that takes, and its supervisor waiting to try the engine again.
+    answering(home.path());
+    let ready = Instant::now() + Duration::from_secs(30);
+    while !log(home.path()).contains("starting it again") {
+        assert!(Instant::now() < ready, "jawd never tried its engine again:\n{}", log(home.path()));
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let (status, took) = terminate(&mut child);
     let log = log(home.path());
     assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
@@ -116,12 +131,7 @@ fn jawd_started_with_sigterm_blocked_as_jaw_starts_it_still_stops_on_sigterm_wit
         }
     });
     // Once hello is answered jawd is serving, where a `kill` after jaw says to stop it comes.
-    let socket = home.path().join("jaw.sock");
-    let ready = Instant::now() + Duration::from_secs(30);
-    while jaw_client::Connection::open(&socket, "stopping test", "0").is_err() {
-        assert!(Instant::now() < ready, "jawd never answered hello:\n{}", log(home.path()));
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    answering(home.path());
     let (status, took) = terminate(&mut child);
     let log = log(home.path());
     assert!(status.success() && took < BOUND, "{status} after {took:?}:\n{log}");
