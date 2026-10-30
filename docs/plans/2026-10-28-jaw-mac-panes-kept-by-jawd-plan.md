@@ -47,12 +47,13 @@ Changed:
 - `mac/JawKit/Sources/Client/Incoming.swift`: `Expect.layout` and `Reply.layout`, and their decoding.
 - `mac/JawKit/Sources/Client/Jawd.swift`: `layout(of:what:)`, `lookUp(_:)` and its window, `Looked`, `JawUpdate.layout` and `JawUpdate.looked`.
 - `mac/JawUI/Sources/Panes/GridView.swift`: `show`'s `unopened` words, `GridView.gone`, and the empty pane's words, kept within its well.
+- `mac/JawUI/Sources/Panes/PaneGrid.swift`: `from(_:)` takes each pane's edges to the nearest billionth (Task 3).
 - `mac/JawUI/Sources/Window/DetailController.swift` and `mac/JawUI/Sources/Window/WindowContent.swift`, the harness's second phase's: `unopened` passed on, and carried in `WindowContent.Panes`.
 - `mac/JawApp/Sources/AppModel.swift`: `openTerminalPanes()`, `terminalPanes(_:)`, `lookedUp(_:_:)`, `unopened`, and the lookups in `reconcile(focus:)`.
 - `mac/JawApp/Sources/MainWindowController.swift`: `panesShown` passes `unopened`.
 - `mac/JawApp/Sources/Commands.swift`: Open the Terminal's Panes.
 - `mac/JawApp/Sources/Bench.swift`: the snapshot's `terminal-panes` step.
-- `mac/Tests/JawKitTests/FixtureTests.swift`, `ClientTests.swift`, `LiveTests.swift`.
+- `mac/Tests/JawKitTests/FixtureTests.swift`, `ClientTests.swift`, `LiveTests.swift`; `mac/Tests/JawUITests/PaneGridTests.swift` (Task 3).
 - `mac/parity.toml` (Task 1); `mac/README.md` and `docs/plans/2026-10-27-jaw-mac-parity-plan.md` (Task 6).
 
 ---
@@ -680,10 +681,11 @@ EOF
 
 **Files:**
 - Create: `mac/JawUI/Sources/Panes/TerminalPanes.swift`
-- Test: `mac/Tests/JawUITests/TerminalPanesTests.swift`
+- Modify: `mac/JawUI/Sources/Panes/PaneGrid.swift` (`from(_:)`) and `mac/Tests/JawUITests/PaneGridTests.swift` (a test after "a tree of splits reads as the same panes in the same places"), as amended while it was built (the task's last paragraph)
+- Test: `mac/Tests/JawUITests/TerminalPanesTests.swift`, with the expectations added while it was built
 
 **Interfaces:**
-- Consumes: `KeptLayout`, `SplitLayout` and `SplitTree` (Task 1); `PaneGrid.from(_:)`, `PaneGrid.most`, `PaneGrid.holds` and `PaneLayout`, as they are.
+- Consumes: `KeptLayout`, `SplitLayout` and `SplitTree` (Task 1); `PaneGrid.most`, `PaneGrid.holds` and `PaneLayout`, as they are; and `PaneGrid.from(_:)`, amended while this task was built to take each pane's edges to the nearest billionth (the task's last paragraph).
 - Produces, in JawUI:
   - `public struct TerminalPanes: Equatable, Sendable`, with `public static let interface = "jaw"`, `public let grid: PaneGrid`, `public let focus: Int` (a slot's id), `public let said: String` and `public static func read(_ kept: KeptLayout) -> Result<TerminalPanes, Refusal>`.
   - `public enum TerminalPanes.Refusal: Error, Equatable, Sendable { case nothing, gone(Int), most(Int), unreadable }`, with `public var said: String`.
@@ -847,6 +849,8 @@ git commit -F- <<'EOF'
 The terminal's panes read as a grid, TerminalPanes in JawUI: its tree's splits become the grid's lines, its panes slots numbered 1, 2, … in the tree's order and its pane with the keys the slot with the focus, through PaneGrid.from, with what's said once they open, how many and how many more jawd left out; nothing kept, every pane's chat gone, more than 12 panes and a tree that makes no grid are refused, each in words; tests on the protocol's fixture, on three panes, and on each refusal
 EOF
 ```
+
+**Amended while it was built.** `PaneGrid.from`, taken as it was, read each pane's edges as `CGRect.divided`'s arithmetic left them, and a nested split's far edge, worked out as origin plus width, could land a hair from the line its parent split at. In a split across at 210 thousandths whose first side is split across at 280, the middle pane's right edge came out at 0.21000000000000002 and the outer split's line at 0.21, so the grid had two lines where the panes meet and didn't hold, and `read` called an ordinary resized terminal layout unreadable. A probe on the build Mac refused 396 of the 29,768 trees of three panes the terminal can make (shares of 200 to 800 thousandths in steps of 10, both shapes, each split either way), and a model of the same arithmetic, which foresaw those 396, refuses about 1.3% of trees of three panes, 4.6% of four, 9.9% of five and 16.1% of six. A tree whose splits are all still at 500, as the terminal makes them before a divider moves, is never refused. Where two rows' lines meet only in exact arithmetic, as a fifth and half the rest meets the 0.6 the row below splits at, the grid held but kept two lines a hair apart where it should have one. The app's own restore of an older saved tree, `AppModel.restorePanes`, goes through `PaneGrid.from` too, so it had the same fault. The fix, e1a71397, is in `PaneGrid.from`: it takes each pane's edges to the nearest billionth before it takes the lines, and finds each slot's line indices by the same values. A billionth is both coarse enough and fine enough: the hair is in a double's last bits, millions of times finer, so edges that meet come to the same billionth; a billionth of a window a thousand points wide is a millionth of a point; and an edge up to three splits deep at shares in thousandths is a whole number of billionths, so it keeps the decimal its shares make, such as 0.0588, which is 0.28 of 0.21. In the model it leaves no tree refused, from two panes to six. A new test in `PaneGridTests.swift` reads three trees that drifted, each now with one line where its panes meet and the slots it should have: the nested one above, one whose last pane's right edge came out at 0.9999999999999999 rather than the grid's 1, and the two rows that meet at 0.6. It also reads all 29,768 trees of three panes, and every one holds. `TerminalPanesTests.swift` gained expectations: shares of -1 and 1001 are unreadable, as 0 and 1000 are, and a focus past the last pane goes to the last slot and one before the first to the first.
 
 ---
 
