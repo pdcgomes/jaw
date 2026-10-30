@@ -272,7 +272,7 @@ async fn a_card_asked_again_with_its_key_goes_once_and_cards_in_a_disappearing_c
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_card_sent_reads_its_chat_and_leaves_what_was_typed_there_where_text_sent_is_what_was() {
+async fn a_card_or_a_poll_sent_reads_its_chat_and_leaves_what_was_typed_there_where_text_sent_is_what_was() {
     let home = tempfile::tempdir().unwrap();
     let running = Running::start(home.path(), true).await;
     let theirs = crate::store::Message {
@@ -294,6 +294,9 @@ async fn a_card_sent_reads_its_chat_and_leaves_what_was_typed_there_where_text_s
     let after = chat().await;
     assert_eq!((after.unread, after.draft.as_deref()), (0, Some("aqui está")), "read, and what's typed stays");
     running.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::MarkRead(_)))).await;
+    let poll = json!({ "chat": ANA, "question": "Jantar?", "options": ["Ramen", "Pizza"] });
+    assert_eq!(running.call("send.poll", poll).await.unwrap()["row"]["kind"], "poll");
+    assert_eq!(chat().await.draft.as_deref(), Some("aqui está"), "and stays after a poll too");
     running.call("send.text", json!({ "chat": ANA, "text": "aqui está" })).await.unwrap();
     assert_eq!(chat().await.draft, None, "text sent is what was typed");
 }
