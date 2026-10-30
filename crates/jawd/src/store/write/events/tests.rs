@@ -1,4 +1,5 @@
 use rusqlite::Connection;
+use rusqlite::types::ValueRef;
 use serde_json::Value;
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
@@ -844,6 +845,146 @@ async fn steps_go_on_from_where_the_last_got_to_past_more_than_a_step_takes_of_w
     assert_eq!(counts(&store, "e1").await, (10, 0, 0, Value::Null), "what opens counts");
     assert_eq!(store.count("pending WHERE target = 'e1'").unwrap(), 150, "what doesn't is kept");
     assert_eq!(store.count("unopened").unwrap(), 1, "and noted, to be tried again");
+}
+
+/// What jaw.db at `path` keeps of messages, the answers to events not deleted, what waits for them
+/// and what's left to take or noted for them, without times, versions or row numbers, so two runs
+/// that took different steps to the same end say the same. A deleted event's answers are left out:
+/// how many it took before its deletion depends on when the steps ran, and none counts.
+fn contents(path: &std::path::Path) -> Vec<String> {
+    let db = Connection::open(path).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let mut rows = Vec::new();
+    for (table, sql) in [
+        (
+            "messages",
+            "SELECT c.id, m.id, m.kind, m.text, m.detail, m.edited_at, m.deleted FROM messages m
+            JOIN chats c ON c.n = m.chat ORDER BY c.id, m.id",
+        ),
+        (
+            "answers",
+            "SELECT c.id, m.id, j.jid, a.answer, a.guests, a.at, a.id FROM event_answers a
+            JOIN person_jids j ON j.n = a.who JOIN messages m ON m.n = a.message JOIN chats c ON c.n = m.chat
+            WHERE NOT m.deleted ORDER BY 1, 2, 3",
+        ),
+        ("pending", "SELECT chat, target, kind, at, raw, sender, mine, effect FROM pending ORDER BY 1, 2, 4, hex(raw)"),
+        ("quarantine", "SELECT source, ref, error, raw FROM quarantine ORDER BY source, ref"),
+        (
+            "openings",
+            "SELECT c.id, m.id FROM openings o JOIN messages m ON m.n = o.message JOIN chats c ON c.n = m.chat",
+        ),
+        (
+            "unopened",
+            "SELECT c.id, m.id FROM unopened u JOIN messages m ON m.n = u.message JOIN chats c ON c.n = m.chat",
+        ),
+    ] {
+        let mut statement = db.prepare(sql).unwrap();
+        let columns = statement.column_count();
+        let said = statement
+            .query_map([], |r| Ok((0..columns).map(|i| cell(r.get_ref(i).unwrap())).collect::<Vec<_>>().join("|")))
+            .unwrap();
+        rows.extend(said.map(|row| format!("{table}: {}", row.unwrap())));
+    }
+    rows.sort();
+    rows
+}
+
+fn cell(value: ValueRef) -> String {
+    match value {
+        ValueRef::Null => "NULL".into(),
+        ValueRef::Integer(i) => i.to_string(),
+        ValueRef::Real(f) => f.to_string(),
+        ValueRef::Text(t) => format!("{:?}", String::from_utf8_lossy(t)),
+        ValueRef::Blob(b) => b.iter().map(|byte| format!("{byte:02x}")).collect(),
+    }
+}
+
+/// How many of `contents`' rows are `table`'s.
+fn rows_of(contents: &[String], table: &str) -> usize {
+    contents.iter().filter(|row| row.starts_with(&format!("{table}: "))).count()
+}
+
+/// jaw.db as it is now, copied into `into` as the next of `copied`, made after a commit of `part`.
+async fn snapshot(store: &Store, into: &std::path::Path, copied: &mut Vec<(usize, std::path::PathBuf)>, part: usize) {
+    let to = into.join(format!("after-{}.db", copied.len()));
+    let path = to.display().to_string();
+    query(store, move |db| Ok(db.execute("VACUUM INTO ?1", [path])?)).await;
+    copied.push((part, to));
+}
+
+/// A scene: each of `parts` applied in turn, each followed by as many as it says of the steps that
+/// take what waits for events, one to a transaction, and then the rest of those steps until none is
+/// left. jaw.db is copied after every commit, and from each copy, as jawd finds jaw.db after a kill
+/// there, a new store applies the parts not applied yet and takes what's left: each must end as the
+/// scene did whole. Says what that is, as `contents` does.
+async fn scene(home: &std::path::Path, store: Store, parts: Vec<(Vec<Change>, usize)>) -> Vec<String> {
+    let copies = home.join("copies");
+    std::fs::create_dir(&copies).unwrap();
+    let mut copied = Vec::new();
+    for (part, (changes, steps)) in parts.iter().enumerate() {
+        let applied = apply(&store, changes.clone()).await;
+        assert_eq!(applied.quarantined, 0, "part {part} went in: {applied:?}");
+        snapshot(&store, &copies, &mut copied, part).await;
+        for _ in 0..*steps {
+            if store.count("openings").unwrap() == 0 {
+                break;
+            }
+            let applied = store.apply(Lane::Background, vec![Change::Opening]).await.unwrap();
+            assert_eq!(applied.quarantined, 0, "a step failed: {applied:?}");
+            snapshot(&store, &copies, &mut copied, part).await;
+        }
+    }
+    let mut steps = store.opening_steps();
+    while store.count("openings").unwrap() > 0 {
+        steps.take("what waited for the event was never all taken");
+        let applied = store.apply(Lane::Background, vec![Change::Opening]).await.unwrap();
+        assert_eq!(applied.quarantined, 0, "a step failed: {applied:?}");
+        snapshot(&store, &copies, &mut copied, parts.len() - 1).await;
+    }
+    drop(store);
+    let whole = contents(&home.join("jaw.db"));
+    for (k, (part, copy)) in copied.iter().enumerate() {
+        let again = home.join(format!("again-{k}"));
+        std::fs::create_dir(&again).unwrap();
+        std::fs::copy(copy, again.join("jaw.db")).unwrap();
+        let store = Store::open(&again).unwrap();
+        for (changes, _) in &parts[part + 1..] {
+            let applied = apply(&store, changes.clone()).await;
+            assert_eq!(applied.quarantined, 0, "started again after commit {k}: {applied:?}");
+        }
+        taken(&store).await;
+        drop(store);
+        assert_eq!(contents(&again.join("jaw.db")), whole, "killed after commit {k}, in part {part}");
+    }
+    whole
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_deleted_for_everyone_while_what_waited_for_it_is_taken_in_steps_leaves_nothing_waiting() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    waiting_for(home.path(), "e1", 100);
+    let revoke = e2e::Message {
+        protocol_message: Some(Box::new(e2e::ProtocolMessage {
+            key: Some(key("e1", ANA)),
+            r#type: Some(e2e::protocol_message::Type::Revoke as i32),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let deleting = live(WebMessageInfo {
+        key: key("d1", ANA),
+        message: Some(revoke),
+        message_timestamp: Some((AT / 1000) as u64 + 30),
+        ..Default::default()
+    });
+    // e1 comes and takes some of what waits for it, a step takes more, and then Ana deletes it for
+    // everyone; jawd may be killed after any of their commits.
+    let end = scene(home.path(), store, vec![(event("e1"), 1), (deleting, 0)]).await;
+    let deleted = |row: &String| row.starts_with("messages: ") && row.contains("|\"e1\"|") && row.ends_with("|1");
+    assert!(end.iter().any(deleted), "it's deleted: {end:?}");
+    assert_eq!(rows_of(&end, "pending"), 0, "and what was left waiting for it goes, as for one deleted before it came");
+    assert_eq!(rows_of(&end, "openings"), 0, "with nothing left to take");
 }
 
 #[tokio::test(flavor = "multi_thread")]
