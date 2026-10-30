@@ -58,7 +58,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
 
         sidebar.host = model
-        if keeps { sidebar.keepsOpen = "jaw.sidebar.open" }
+        if keeps {
+            sidebar.keepsOpen = "jaw.sidebar.open"
+            sidebar.keepsDivider = "jaw.sidebar.divider"
+        }
+        sidebar.roster.host = model
         chatList.host = model
         palette.model.find = { [weak model] id, query, kinds, chat, limit in
             model?.jawd.find(id: id, query: query, kinds: kinds, chat: chat, limit: limit)

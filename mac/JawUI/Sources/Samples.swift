@@ -74,6 +74,39 @@ public enum Samples {
         Update(seq: 300, upsert: folders, favourites: favourites)
     }
 
+    /// People as a roster sends them, from the smallest sort up: Ana, Marta and Rui online, Mãe last
+    /// seen 12 minutes ago where jawd isn't following her now, Inês and Tiago last seen longer ago,
+    /// then four who hide it; filed in `folders`' Family, Cousins, Climbing and Work, and Leonor in
+    /// none. Who's typing comes from their chats, so a test or a scene says it with the roster's
+    /// `typing`.
+    public static var people: [RosterRow] {
+        func seen(_ ago: Int64) -> String {
+            "1~\(Int64.max - (now - ago))~"
+        }
+        return [
+            RosterRow(id: "person:1", v: 1, sort: "0~ana ribeiro\u{1}000000000001", name: "Ana Ribeiro", presence: Presence(state: .online),
+                      chat: direct.id, folders: ["folder:1"]),
+            RosterRow(id: "person:20", v: 1, sort: "0~marta\u{1}000000000020", name: "Marta", presence: Presence(state: .online),
+                      folders: ["folder:3"]),
+            RosterRow(id: "person:3", v: 1, sort: "0~rui costa\u{1}000000000003", name: "Rui Costa", presence: Presence(state: .online),
+                      chat: "351913410003@s.whatsapp.net", folders: ["folder:3"]),
+            RosterRow(id: "person:2", v: 1, sort: seen(12 * 60000) + "mãe\u{1}000000000002", name: "Mãe",
+                      presence: Presence(state: .seen, at: now - 12 * 60000, known: false), chat: "351913000000@s.whatsapp.net",
+                      folders: ["folder:1"]),
+            RosterRow(id: "person:4", v: 1, sort: seen(2 * 3_600_000) + "inês gomes\u{1}000000000004", name: "Inês Gomes",
+                      presence: Presence(state: .seen, at: now - 2 * 3_600_000), folders: ["folder:2"]),
+            RosterRow(id: "person:6", v: 1, sort: seen(3 * 86_400_000) + "tiago fonseca\u{1}000000000006", name: "Tiago Fonseca",
+                      presence: Presence(state: .seen, at: now - 3 * 86_400_000), chat: "351913660006@s.whatsapp.net", folders: ["folder:5"]),
+            RosterRow(id: "person:7", v: 1, sort: "2~avó lurdes\u{1}000000000007", name: "Avó Lurdes", presence: Presence(state: .hidden),
+                      chat: "351213770007@s.whatsapp.net", folders: ["folder:1"]),
+            RosterRow(id: "person:21", v: 1, sort: "2~joão\u{1}000000000021", name: "João", presence: Presence(state: .hidden),
+                      folders: ["folder:3"]),
+            RosterRow(id: "person:22", v: 1, sort: "2~leonor\u{1}000000000022", name: "Leonor", presence: Presence(state: .hidden)),
+            RosterRow(id: "person:5", v: 1, sort: "2~sofia martins\u{1}000000000005", name: "Sofia Martins", presence: Presence(state: .hidden),
+                      chat: "351913550005@s.whatsapp.net", folders: ["folder:2"]),
+        ]
+    }
+
     static func m(_ n: Int, _ spans: [Span], at: Int64, from: Sender? = nil, mine: Bool = false, kind: MessageKind = .text,
                   status: MessageStatus? = nil, reply: Quote? = nil, reactions: [Reaction] = [], edited: Bool = false,
                   deleted: Bool = false, system: String? = nil, chat: String = group.id) -> MessageRow

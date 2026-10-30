@@ -100,7 +100,7 @@ enum Bench {
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
                 || key.hasPrefix("menu-key:") || key == "promise" || key == "window"
-                || key == "sidebar" || key.hasPrefix("folder:") || key == "tree:samples" || key == "show:sidebar" || key.hasPrefix("type:")
+                || key == "sidebar" || key.hasPrefix("folder:") || key == "tree:samples" || key == "show:sidebar" || key.hasPrefix("type:") || key == "roster"
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key == "promise" { keepPromise(model) }
@@ -180,6 +180,8 @@ enum Bench {
                     let keys = model.window?.window?.isKeyWindow == true
                         && (model.window?.window?.firstResponder as? NSView)?.isDescendant(of: sidebar.view) == true ? " · with the keys" : ""
                     FileHandle.standardError.write(Data("sidebar: \(sidebar.said.joined(separator: " | ")) · picked \(sidebar.picked) · selected \(sidebar.selected ?? "nothing")\(keys)\n".utf8))
+                } else if key == "roster", let roster = model.window?.sidebar.roster {
+                    FileHandle.standardError.write(Data("roster: \(roster.said.joined(separator: " | "))\n".utf8))
                 } else {
                     let open = model.window.flatMap { w in w.palette.isVisible ? w.palette.model : nil }
                     let palette = open.map { p in

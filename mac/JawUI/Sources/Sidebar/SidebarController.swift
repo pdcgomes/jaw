@@ -21,13 +21,14 @@ public protocol SidebarHost: AnyObject {
 /// mentions, and its ⌘ digit when it's a favourite. Picking a row makes the chat list its window.
 /// Until jawd serves folders it has All and Archived, as jawd serves them now.
 @MainActor
-public final class SidebarController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
+public final class SidebarController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSplitViewDelegate {
     public weak var host: SidebarHost?
     public internal(set) var tree = FolderTree()
     /// The folder the chat list shows, selected whenever its row is in sight.
     public internal(set) var picked = "all"
     public var roles: Roles? {
         didSet {
+            roster.roles = roles
             guard isViewLoaded else { return }
             keepingNaming {
                 outline.reloadData()
@@ -54,6 +55,13 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
     var items: [String: Item] = [:]
     /// What's open: the headings until they're closed by hand, and your folders left open.
     var open: Set<String> = [SidebarController.foldersHeading, SidebarController.smartHeading]
+    /// The picked folder's people, under the tree.
+    public let roster = RosterController()
+    let split = NSSplitView()
+    /// The defaults key the divider is kept under from launch to launch, as the share of the height the
+    /// tree has: the app gives one, the harness and the tests none.
+    public var keepsDivider: String?
+    var placed = false
     /// A folder being named in place, while its field is open.
     public internal(set) var naming: Naming?
     /// While the field is drawn again, its editing ending isn't the field given up.
@@ -92,7 +100,14 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         Scrolling.style(scroll)
         scroll.documentView = outline
         scroll.drawsBackground = false
-        view = scroll
+        split.isVertical = false
+        split.dividerStyle = .thin
+        split.delegate = self
+        split.addArrangedSubview(scroll)
+        addChild(roster)
+        split.addArrangedSubview(roster.view)
+        roster.view.isHidden = !tree.served
+        view = split
         outline.reloadData()
         restoreOpen()
     }
@@ -113,6 +128,10 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
                 outline.reloadData()
                 restoreOpen()
             }
+            // The roster groups and names by the tree's shape, so a flood's counts don't draw it again.
+            roster.tree = tree
+            roster.view.isHidden = !tree.served
+            view.needsLayout = true
             return
         }
         // Drawing a row again replaces its cell, which would end the editing in it, so the folder being
@@ -183,6 +202,20 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
             if outline.isExpandable(items[id]) { line += outline.isItemExpanded(items[id]) ? " ▾" : " ▸" }
             return line
         }
+    }
+
+    /// The divider under the tree, where it was left, or at 60% of the height, once the roster shows.
+    override public func viewDidLayout() {
+        super.viewDidLayout()
+        guard !placed, split.bounds.height > 0, !roster.view.isHidden else { return }
+        placed = true
+        let kept = keepsDivider.map { UserDefaults.standard.double(forKey: $0) } ?? 0
+        split.setPosition(split.bounds.height * (kept > 0 ? kept : 0.6), ofDividerAt: 0)
+    }
+
+    public func splitViewDidResizeSubviews(_: Notification) {
+        guard placed, let keepsDivider, split.bounds.height > 0, !roster.view.isHidden else { return }
+        UserDefaults.standard.set(scroll.frame.height / split.bounds.height, forKey: keepsDivider)
     }
 
     /// Whether the tree has the keys, as ⌘⌫ needs it to.

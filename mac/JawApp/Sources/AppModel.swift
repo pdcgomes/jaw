@@ -32,6 +32,7 @@ final class AppModel {
     var folderItemsMade: [String] = []
     /// A chat a favourite or the roster opens once jawd finds its row.
     var opening: Opening?
+    var rosterWindow: WindowID?
     var folder = "all"
     /// Who's typing in the chats jawd's windows show, as it last said.
     var typing: Typists = [:]
@@ -169,6 +170,7 @@ final class AppModel {
             linked = w.account.state == .linked
             self.me = Set(me)
             window?.chatList.root = w.root
+            window?.sidebar.roster.root = w.root
             pictures.files = .folder(w.root)
         case let .unreachable(why, retryIn):
             if let stopped = agent.stopped {
@@ -201,6 +203,7 @@ final class AppModel {
                     DispatchQueue.main.async { first() }
                 }
             }
+            window?.sidebar.roster.typing = rosterTyping()
         case let .messages(w, u):
             if let chat = paneWindows[w] { panes[chat]?.apply(u) } else { glance.apply(w, u) }
             if pending != nil { cameFor(u.upsert) }
@@ -211,6 +214,7 @@ final class AppModel {
             typing = now
             ConversationController.give(now, to: panes.values)
             window?.chatList.typing = now
+            window?.sidebar.roster.typing = rosterTyping()
         case let .sent(key, _, _):
             sending[key] = nil
         case let .unsent(chat, key, text, why):
@@ -254,9 +258,15 @@ final class AppModel {
             } else {
                 window?.chatList.emptyLine = tree.emptyLine(folder)
             }
+            if rosterWindow == nil, tree.served { watchRoster() }
         case let .windowFailed(w, failure) where w == foldersWindow:
             // A jawd from before M6 doesn't know folders.watch: the sidebar keeps All and Archived.
             if failure.code != ErrorCode.unknownMethod { say("the folders couldn't be watched: \(failure)", warn: true) }
+        case let .roster(w, u) where w == rosterWindow:
+            window?.sidebar.roster.apply(u)
+            window?.sidebar.roster.typing = rosterTyping()
+        case let .windowFailed(w, failure) where w == rosterWindow:
+            say("the people couldn't be watched: \(failure)", warn: true)
         case let .windowFailed(w, failure) where w == listWindow && folder != "all":
             say("\(failure)", warn: true)
             pick(folder: "all")
@@ -559,6 +569,7 @@ final class AppModel {
         window?.chatList.emptyLine = tree.emptyLine(id)
         window?.chatList.show(folder: id)
         listWindow = jawd.watchChats(id, .top(ChatListController.rows))
+        if tree.served { watchRoster() }
         if saying, let line = FolderTree.pickedLine(tree.label(id), sidebarShown: window?.sidebar.isShown ?? false,
                                                      listShown: window?.chatList.isShown ?? false, focusMode: focusMode)
         {

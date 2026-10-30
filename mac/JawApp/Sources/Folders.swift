@@ -175,3 +175,28 @@ extension AppModel: SidebarHost {
         }
     }
 }
+
+extension AppModel: RosterHost {
+    /// The picked folder's people, under the tree; watching them is what tells jawd whose presence to
+    /// follow, within its limits.
+    func watchRoster() {
+        if let w = rosterWindow { jawd.unwatch(w) }
+        window?.sidebar.roster.show(folder: folder)
+        rosterWindow = jawd.watchRoster(folder, .top(RosterController.rows))
+    }
+
+    func roster(_: RosterController, move place: Place) {
+        if let w = rosterWindow { jawd.move(w, place) }
+    }
+
+    /// Who in the roster is typing or recording in their one-to-one chat, from who jawd says is typing
+    /// in the chats its windows show, as a pane reads its typing; nobody whose chat no list or pane
+    /// shows, as jawd sends typing only for those.
+    func rosterTyping() -> Set<String> {
+        guard let roster = window?.sidebar.roster else { return [] }
+        return Set(roster.people.list.compactMap { p in
+            guard let chat = p.chat, typing[chat]?.contains(where: { $0.id == p.id }) == true else { return nil }
+            return p.id
+        })
+    }
+}

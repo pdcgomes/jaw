@@ -423,3 +423,11 @@ final class PlainSourceList: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     s.view.isHidden = true
     #expect(!s.isShown)
 }
+
+@MainActor
+@Test func `the roster sits under the tree once jawd serves folders, and not before`() {
+    let s = sidebar()
+    #expect(s.roster.view.isHidden)
+    s.apply(Samples.folderUpdate)
+    #expect(!s.roster.view.isHidden && s.roster.tree == Samples.tree)
+}
