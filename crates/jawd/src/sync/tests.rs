@@ -3007,3 +3007,44 @@ async fn typed(seen: &crate::feed::typing::Watching, chats: &[(&str, usize)], wh
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_waits_for_an_event_past_what_its_own_transaction_takes_is_taken_in_the_background_once_the_writer_says() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    tokio::spawn(backfill::run(store.clone()));
+    // With nothing to do, the background waits to be told.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // A hundred answers history brought opened wait for Ana's event e1, which jaw hasn't seen yet.
+    let db = Connection::open(home.path().join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute(
+        "WITH RECURSIVE k(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM k WHERE i < 100)
+        INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect)
+        SELECT ?1, 'e1', 'answer', ?2 + i, x'', printf('3519300%05d@s.whatsapp.net', i), 0,
+            json_object('do', 'answer', 'answer', 'going', 'guests', 0, 'id', 'h' || i)
+        FROM k",
+        rusqlite::params![GROUP, AT],
+    )
+    .unwrap();
+    drop(db);
+    let event = crate::store::Message {
+        chat: GROUP.into(),
+        id: "e1".into(),
+        at: AT,
+        sender: Some(ANA.into()),
+        kind: "event",
+        text: Some("Sintra".into()),
+        summary: "Event: Sintra".into(),
+        live: true,
+        ..Default::default()
+    };
+    store.apply(Lane::Live, vec![Change::Message(event)]).await.unwrap();
+    let began = Instant::now();
+    while store.count("event_answers").unwrap() < 100 {
+        let answered = store.count("event_answers").unwrap();
+        assert!(began.elapsed() < Duration::from_secs(30), "the background never took the rest: {answered} answered");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(store.count("openings").unwrap(), 0, "and nothing is left to take");
+}

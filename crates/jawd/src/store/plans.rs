@@ -36,6 +36,14 @@ const ALLOWED: &[(&str, &str)] = &[
     ("DELETE FROM events WHERE seq IN", "a range of the rowid, stopping at its limit"),
     ("SELECT EXISTS (SELECT 1 FROM fts_backlog)", "stops at its first row, once when the writer starts"),
     (
+        "SELECT EXISTS (SELECT 1 FROM openings)",
+        "stops at its first row, as the background looks for what's left to take for events, once for 64 steps",
+    ),
+    (
+        "FROM openings o JOIN messages m ON m.n = o.message",
+        "a scan down the rowid that stops at its first row: the first event with what waits for it left to take",
+    ),
+    (
         "SELECT n, id, name, person, frecency, opened_at, last_at FROM chats",
         "the palette's index is built from every chat once, at start",
     ),

@@ -4,6 +4,8 @@
 //! the messages jawd couldn't show when they came, converted again, and the copies of the files of
 //! the messages it held before media was kept. Code works with the data either way meanwhile. A
 //! step that fails is kept in quarantine and tried again later and later.
+//! The answers and edits waiting for an event beyond the few its own transaction takes are taken
+//! here too, a step at a time as `openings` keeps them, once the writer says a commit has left some.
 
 use std::time::Duration;
 
@@ -16,9 +18,11 @@ const STEPS: usize = 64;
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MOST: Duration = Duration::from_secs(300);
 
-/// Does the backfills left, one after another, until none are.
+/// Does the backfills left, and what's left to take for events, one after another, waiting once
+/// none are until the writer says a commit has left more for events, for as long as jawd runs.
 pub async fn run(store: Store) {
     let mut pause = RETRY_FIRST;
+    let opening = store.opening();
     loop {
         let left = store
             .reads()
@@ -29,13 +33,22 @@ pub async fn run(store: Store) {
                         left.push(name);
                     }
                 }
-                Ok(left)
+                let opening =
+                    db.prepare_cached("SELECT EXISTS (SELECT 1 FROM openings)")?.query_row([], |r| r.get(0))?;
+                Ok((left, opening))
             })
             .await;
         let failed = match left {
-            Ok(left) if left.is_empty() => return,
-            Ok(left) => {
-                let steps = left.iter().flat_map(|&name| std::iter::repeat_n(Change::Backfill(name), STEPS)).collect();
+            Ok((left, false)) if left.is_empty() => {
+                opening.notified().await;
+                continue;
+            }
+            Ok((left, opening)) => {
+                let mut steps: Vec<Change> =
+                    left.iter().flat_map(|&name| std::iter::repeat_n(Change::Backfill(name), STEPS)).collect();
+                if opening {
+                    steps.extend(std::iter::repeat_n(Change::Opening, STEPS));
+                }
                 match store.apply(Lane::Background, steps).await {
                     Ok(applied) if applied.quarantined == 0 => None,
                     Ok(_) => Some("a step failed and is kept in quarantine".to_string()),

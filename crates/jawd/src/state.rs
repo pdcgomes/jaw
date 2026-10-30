@@ -285,6 +285,7 @@ impl State {
                     answers_waiting: store.count("pending WHERE kind = 'answer'").ok()?,
                     answers_set_aside: store.count("quarantine WHERE source = 'answer'").ok()?,
                     edits_set_aside: store.count("quarantine WHERE source = 'edit'").ok()?,
+                    events_opening: store.count("openings").ok()?,
                 })
             }),
             interfaces: Some(Interfaces {

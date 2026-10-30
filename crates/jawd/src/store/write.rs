@@ -89,6 +89,9 @@ pub enum Change {
     Layout(layout::Keep),
     /// One step of a backfill a migration left (`links::BACKFILLS`), from where the last left off.
     Backfill(&'static str),
+    /// One step of taking what waits for the first event that has some left to take, from where the
+    /// last left off (`events::step`).
+    Opening,
     /// A link preview's thumbnail, written to media/links/ and synced: its row goes in, and message
     /// `id` in `chat`, which shows it, takes a new version.
     Thumbnail {
@@ -419,6 +422,9 @@ pub(super) struct Stamps {
     /// Each entry of `unsettled` as it was before each change to it, None for one added, so a
     /// savepoint rolled back moves no chat's read position.
     unsettling: Vec<(usize, Option<Unsettled>)>,
+    /// Whether the transaction left what waits for an event to be taken in steps, which the
+    /// background is told of once it commits.
+    opening: bool,
 }
 
 /// What the transaction's messages said of where a chat was read, applied once before it commits.
@@ -456,6 +462,7 @@ impl Stamps {
             order: Vec::new(),
             unsettled: Vec::new(),
             unsettling: Vec::new(),
+            opening: false,
         })
     }
 
@@ -465,6 +472,17 @@ impl Stamps {
         self.order.clear();
         self.unsettled.clear();
         self.unsettling.clear();
+        self.opening = false;
+    }
+
+    /// Notes that the transaction leaves what waits for an event to be taken in steps.
+    fn opening(&mut self) {
+        self.opening = true;
+    }
+
+    /// Whether the transaction left what waits for an event to be taken in steps.
+    pub(super) fn opened_later(&self) -> bool {
+        self.opening
     }
 
     pub(super) fn rolled_back(&mut self) {
@@ -588,6 +606,7 @@ fn provenance(group: &[Change]) -> (&'static str, String, Option<Cow<'_, [u8]>>)
         Some(Change::Outbox(step)) => outbox::provenance(step),
         Some(Change::Layout(keep)) => layout::provenance(keep),
         Some(Change::Backfill(name)) => ("backfill", name.to_string(), None),
+        Some(Change::Opening) => ("opening", String::new(), None),
         Some(Change::Thumbnail { sha256, chat, id, .. }) => ("thumbnail", format!("{chat} {id} {sha256}"), None),
         Some(Change::Folders(step)) => folders::provenance(step),
         Some(Change::Media(step)) => media::provenance(step),
@@ -649,7 +668,8 @@ pub(super) fn touches_fts(changes: &[Change]) -> bool {
         | Change::DeleteMessage { .. }
         | Change::MergeStep(_)
         | Change::Outbox(_)
-        | Change::Backfill(_) => true,
+        | Change::Backfill(_)
+        | Change::Opening => true,
         _ => false,
     })
 }
@@ -729,6 +749,7 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, change: &Change) -> Re
         Change::Outbox(step) => outbox::apply(db, stamps, step),
         Change::Layout(keep) => layout::apply(db, keep),
         Change::Backfill(name) => links::backfill(db, stamps, name),
+        Change::Opening => events::step(db, stamps),
         Change::Thumbnail { sha256, bytes, chat, id } => links::thumbnail(db, stamps, sha256, *bytes, chat, id),
         Change::Folders(step) => folders::apply(db, stamps, step),
         Change::Media(step) => media::apply(db, stamps, step),
@@ -2351,9 +2372,9 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
 }
 
 /// Applies what was waiting in `pending` for a message of kind `kind` that has just arrived, or has
-/// just moved into `chat` with a merge; for a poll or an event, the votes or the answers set aside
-/// for it come back to wait there first. What was kept sealed for an event opens with its secret,
-/// and what still doesn't stays kept.
+/// just moved into `chat` with a merge; for a poll, the votes set aside for it come back to wait
+/// there first. What waits for an event, which its secret opens one by one, is taken a few at a
+/// time, the rest in steps (`events::arrived`).
 pub(super) fn apply_pending(
     db: &Connection,
     stamps: &mut Stamps,
@@ -2365,7 +2386,7 @@ pub(super) fn apply_pending(
 ) -> Result<()> {
     match kind {
         "poll" => polls::set_aside_back(db, chat_jid, id)?,
-        "event" => events::set_aside_back(db, chat_jid, id)?,
+        "event" => return events::arrived(db, stamps, (chat, n, chat_jid, id)),
         _ => {}
     }
     let waiting: Vec<Waiting> = db

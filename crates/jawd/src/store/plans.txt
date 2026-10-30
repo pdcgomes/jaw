@@ -2100,12 +2100,33 @@ DELETE FROM pending WHERE n = ?1
     SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/events.rs
-INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) SELECT raw ->> '$.chat', raw ->> '$.target', raw ->> '$.kind', raw ->> '$.at', unhex(raw ->> '$.raw'), raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect' FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2
-    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
+SELECT n, sender, mine, at, effect, raw FROM pending WHERE chat = ?1 AND target = ?2 AND (at, n) > (?3, ?4) ORDER BY at, n LIMIT ?5
+    SEARCH pending USING INDEX pending_by_target_at (chat=? AND target=? AND at>?)
 
 -- src/store/write/events.rs
-DELETE FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2
-    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
+SELECT n FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2 LIMIT ?3
+    SEARCH quarantine USING COVERING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
+
+-- src/store/write/events.rs
+INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) SELECT raw ->> '$.chat', raw ->> '$.target', raw ->> '$.kind', raw ->> '$.at', unhex(raw ->> '$.raw'), raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect' FROM quarantine WHERE n = ?1 RETURNING n, sender, mine, at, effect, raw
+    SEARCH quarantine USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/events.rs
+DELETE FROM quarantine WHERE n = ?1
+    SEARCH quarantine USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/events.rs
+INSERT INTO openings (message, at, n) VALUES (?1, ?2, ?3) ON CONFLICT (message) DO UPDATE SET at = excluded.at, n = excluded.n
+
+-- src/store/write/events.rs
+DELETE FROM openings WHERE message = ?1
+    SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/events.rs
+SELECT o.message, o.at, o.n, m.chat, c.id, m.id FROM openings o JOIN messages m ON m.n = o.message JOIN chats c ON c.n = m.chat ORDER BY o.message LIMIT 1
+    SCAN o
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/events.rs
 UPDATE quarantine SET ref = ?4 || substr(ref, length(?3) + 1) || iif(EXISTS (SELECT 1 FROM quarantine q WHERE q.source = quarantine.source AND q.ref = ?4 || substr(quarantine.ref, length(?3) + 1)), ' ' || n, ''), raw = jsonb_set(raw, '$.chat', ?4) WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2 RETURNING raw ->> '$.target'
@@ -3176,6 +3197,7 @@ INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM message
 -- src/store/write.rs
 DELETE FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH event_answers USING PRIMARY KEY (message=?)
     SEARCH media USING PRIMARY KEY (message=?)
     SEARCH poll_voters USING PRIMARY KEY (message=?)
@@ -3570,6 +3592,7 @@ UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, tex
 
 -- src/store/write.rs
 INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, reply, detail, forwarded, edited_at, deleted, expires_at, starred, view_once, raw, v, n, mentions_me, envelope, chat, id, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) RETURNING n
+    SEARCH openings USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH event_answers USING PRIMARY KEY (message=?)
     SEARCH media USING PRIMARY KEY (message=?)
     SEARCH poll_voters USING PRIMARY KEY (message=?)
@@ -3690,6 +3713,12 @@ SELECT avatar_id, kind FROM chats WHERE id = ?1
 -- src/sync/backfill.rs
 SELECT 1 FROM backfills WHERE name = ?1
     SEARCH backfills USING PRIMARY KEY (name=?)
+
+-- src/sync/backfill.rs
+SELECT EXISTS (SELECT 1 FROM openings)
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 1
+      SCAN openings
 
 -- src/sync/drain.rs
 SELECT seq, kind, payload FROM inbox WHERE seq > ?1 ORDER BY seq LIMIT ?2

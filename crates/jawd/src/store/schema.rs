@@ -1174,6 +1174,22 @@ pub(super) const MIGRATIONS: &[&str] = &[
     INSERT INTO backfills (name, after, upto) SELECT 'events', 0, seq FROM sqlite_sequence
         WHERE name = 'messages' AND seq > 0;
     ",
+    // 23, a schema step: what waits for an event is taken a few at a time. The transaction that
+    // brings an event, moves it with a merge or reads it again takes only a few of the answers and
+    // edits waiting for it, which an event's secret opens one by one, and leaves the rest to short
+    // steps in the background, from where it got to. The table is new and empty, so it costs the
+    // same however many messages there are.
+    "
+    -- Class: jaw's own, as backfills is: each event jaw has with what waits for it still to be
+    -- taken, and where its next step goes on from: past the row of pending last taken, by when it
+    -- was done and then its n; past every row of pending, at its largest, once those set aside in
+    -- quarantine for it are coming back. It goes once nothing is left for it, or with its event.
+    CREATE TABLE openings (
+        message INTEGER PRIMARY KEY REFERENCES messages (n) ON DELETE CASCADE,
+        at INTEGER NOT NULL,
+        n INTEGER NOT NULL
+    ) STRICT;
+    ",
 ];
 
 /// Migration 19's text, named so the tests that check and measure it find it whatever number it

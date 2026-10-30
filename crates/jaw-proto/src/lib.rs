@@ -560,6 +560,10 @@ pub struct Stored {
     /// wait among `encrypted_kept`.
     #[serde(default)]
     pub edits_set_aside: u64,
+    /// Events jawd has with answers and edits that waited for them still to be taken, a step at a
+    /// time in the background, past the few the transaction that brought each took.
+    #[serde(default)]
+    pub events_opening: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

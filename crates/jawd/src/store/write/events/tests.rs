@@ -10,7 +10,7 @@ use crate::convert::Me;
 use crate::convert::secret::Between;
 use crate::store::write::{Packed, links};
 use crate::store::{Applied, Change, Lane, Person, Store, read, schema};
-use crate::work::Priority;
+use crate::work::{Priority, Report};
 
 const GROUP: &str = "120363000000000001@g.us";
 const ANA: &str = "351910000002@s.whatsapp.net";
@@ -730,6 +730,157 @@ async fn an_events_copy_in_a_chat_merged_folds_in_its_answers_each_answerers_new
         (&Value::from("Sintra, later"), &Value::from((START + 3_600) * 1000), &Value::from(true), true),
         "and what her edit made it, where and when as well as its name"
     );
+}
+
+/// `count` answers to Ana's event `event`, going, each sealed for real by an answerer of its own and
+/// waiting in `pending` as a live one does, written beside the writer as `fill_sealed` writes its.
+fn waiting_for(home: &std::path::Path, event: &str, count: usize) {
+    let mut raw = Connection::open(home.join("jaw.db")).unwrap();
+    raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let tx = raw.transaction().unwrap();
+    {
+        let mut insert = tx
+            .prepare(
+                "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect)
+                VALUES (?1, ?2, 'rsvp', ?3, ?4, ?5, 0, json_object('do', 'keep', 'kind', 'rsvp'))",
+            )
+            .unwrap();
+        for i in 0..count {
+            let who = format!("3519300{i:05}@s.whatsapp.net");
+            let at = AT + 1_000 + i as i64;
+            let info = answer_info(event, (ANA, &who), &who, &format!("{event}-{i}"), at, Going);
+            let sealed = Packed::new(&info.encode_to_vec()).0;
+            insert.execute(rusqlite::params![GROUP, event, at / 1000 * 1000, sealed, who]).unwrap();
+        }
+    }
+    tx.commit().unwrap();
+}
+
+/// Takes the steps that take what's left waiting for events until none is, failing at once should
+/// one fail, and once there have been more than they can need. Says how many there were.
+async fn taken(store: &Store) -> usize {
+    let (mut steps, mut taken) = (store.opening_steps(), 0);
+    while store.count("openings").unwrap() > 0 {
+        steps.take("what waited for the event was never all taken");
+        let applied = store.apply(Lane::Background, vec![Change::Opening]).await.unwrap();
+        assert_eq!(applied.quarantined, 0, "a step failed: {applied:?}");
+        taken += 1;
+    }
+    taken
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_arriving_with_more_waiting_than_its_transaction_takes_has_the_rest_taken_in_steps_from_where_it_got_to()
+ {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    // A hundred answers wait for e1, sealed, and past the bound the oldest of them are set aside.
+    waiting_for(home.path(), "e1", 100);
+    fill_pending(home.path());
+    apply(&store, answer("e9", RUI, "r9", AT + 10, Going)).await;
+    let aside = store.count("quarantine WHERE source = 'answer'").unwrap();
+    assert_eq!(aside, SET_ASIDE_MOST as u64, "one change sets aside so many at most, the next more");
+    apply(&store, event("e1")).await;
+    assert_eq!(counts(&store, "e1").await.0, TAKEN_AT_ONCE as i64, "its own transaction takes so many, counting them");
+    assert_eq!(store.count("openings").unwrap(), 1, "and leaves the rest to steps, as jawd status counts them");
+    // A step goes on from where it got to, a jawd started again too.
+    let applied = store.apply(Lane::Background, vec![Change::Opening]).await.unwrap();
+    assert_eq!(applied.quarantined, 0);
+    let stepped = counts(&store, "e1").await.0;
+    assert!(stepped > TAKEN_AT_ONCE as i64, "a step takes more: {stepped}");
+    drop(store);
+    let store = Store::open(home.path()).unwrap();
+    assert!(taken(&store).await >= 1);
+    assert_eq!(counts(&store, "e1").await, (100, 0, 0, Value::Null), "each taken once, those set aside too");
+    assert_eq!(store.count("pending WHERE target = 'e1'").unwrap(), 0);
+    assert_eq!(store.count("quarantine WHERE source = 'answer'").unwrap(), 0);
+    assert_eq!(store.count("openings").unwrap(), 0, "and nothing is left to take");
+    assert_eq!(apply(&store, vec![Change::Opening]).await.changed, 0, "a step then does nothing");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_waits_for_an_event_and_fails_to_be_taken_is_kept_in_quarantine_and_holds_up_nothing_after_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = opened(home.path()).await;
+    // An answer an earlier jawd kept wrong, which event_answers refuses, first among those that open.
+    let raw = Connection::open(home.path().join("jaw.db")).unwrap();
+    raw.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    raw.execute(
+        "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) VALUES (?1, 'e1', 'answer', ?2, x'', ?3, 0,
+            json_object('do', 'answer', 'answer', 'perhaps', 'guests', 0, 'id', 'h0'))",
+        rusqlite::params![GROUP, AT + 1, RUI],
+    )
+    .unwrap();
+    drop(raw);
+    waiting_for(home.path(), "e1", 30);
+    apply(&store, event("e1")).await;
+    taken(&store).await;
+    assert_eq!(counts(&store, "e1").await, (30, 0, 0, Value::Null), "the rest are taken");
+    let kept: Vec<(String, String)> = query(&store, |db| {
+        Ok(db
+            .prepare("SELECT ref, error FROM quarantine WHERE source = 'opening'")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .await;
+    assert_eq!(kept.len(), 1, "the one that failed is kept in quarantine, with why: {kept:?}");
+    assert!(kept[0].0.starts_with(&format!("{GROUP} e1 ")), "{kept:?}");
+    assert_eq!(store.count("pending WHERE target = 'e1'").unwrap(), 1, "and left where it was");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_an_earlier_jawd_kept_for_an_event_its_backfill_reads_again_is_taken_a_few_at_once_too() {
+    let home = tempfile::tempdir().unwrap();
+    before_answers(home.path());
+    waiting_for(home.path(), "e2", 40);
+    let store = Store::open(home.path()).unwrap();
+    backfilled(&store).await;
+    assert_eq!(
+        counts(&store, "e2").await.0,
+        TAKEN_AT_ONCE as i64 - 1,
+        "its step takes as the event's own transaction would, the kept one that doesn't open first"
+    );
+    assert_eq!(store.count("openings").unwrap(), 1, "and leaves the rest to steps");
+    taken(&store).await;
+    assert_eq!(counts(&store, "e2").await, (40, 0, 0, Value::Null));
+    assert_eq!(store.count("pending WHERE target = 'e2'").unwrap(), 1, "the one that doesn't open stays kept");
+}
+
+/// An event arriving live with JAW_MEASURE_WAITING answers waiting for it (a comma-separated list),
+/// each sealed by an answerer of its own: its own transaction, and the rest taken as sync::backfill
+/// takes them, 64 steps to an apply, the writer fitting as many in each transaction as its budget
+/// allows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn measure_an_event_arriving_with_answers_waiting() {
+    let list = std::env::var("JAW_MEASURE_WAITING").unwrap_or_else(|_| "100,1000,9999".into());
+    for waiting in list.split(',').map(|n| n.trim().parse::<usize>().unwrap()) {
+        let home = tempfile::tempdir().unwrap();
+        let store = opened(home.path()).await;
+        waiting_for(home.path(), "x1", waiting);
+        let began = std::time::Instant::now();
+        apply(&store, live(event_from("x1", ANA))).await;
+        let arrived = began.elapsed();
+        let began = std::time::Instant::now();
+        let (mut transactions, mut applies) = (0, 0);
+        while store.count("openings").unwrap() > 0 {
+            let applied = store.apply(Lane::Background, vec![Change::Opening; 64]).await.unwrap();
+            assert_eq!(applied.quarantined, 0, "a step failed");
+            (transactions, applies) = (transactions + applied.transactions, applies + 1);
+        }
+        let rest = began.elapsed();
+        let run = store.report().run.unwrap();
+        assert_eq!(store.count("event_answers").unwrap() as usize, waiting, "each opened");
+        eprintln!(
+            "MEASURE: an event arriving with {waiting} sealed answers waiting: its own transaction applied in {:.2} ms; \
+             the rest in {:.0} ms, {transactions} transactions in {applies} applies; the writer's last 1,024 \
+             transactions {:.2} ms p50, {:.2} ms p99",
+            arrived.as_secs_f64() * 1e3,
+            rest.as_secs_f64() * 1e3,
+            run.p50_us as f64 / 1e3,
+            run.p99_us as f64 / 1e3,
+        );
+    }
 }
 
 /// Message `id` from the other side of one-to-one chat `chat`.

@@ -3,8 +3,13 @@
 //! opened here with the secret the event's raw protobuf keeps, once jaw has the event, so they're
 //! read whichever way they came (live, from history, or kept by an earlier jawd that couldn't);
 //! and the answers waiting in `pending` for an event jaw hasn't seen yet, ANSWERS_WAITING of each
-//! form at most. How many are going, maybe and not going, and what you answered, aren't kept
-//! anywhere: windows count them from these rows as they read the event (`read`).
+//! form at most. Once jaw has the event, what waited for it is taken TAKEN_AT_ONCE at a time by the
+//! transaction that brought it, and the rest in short steps in the background, each from where the
+//! last got to (`openings`), so an event that comes with thousands waiting holds up nothing behind
+//! it. How many are going, maybe and not going, and what you answered, aren't kept anywhere:
+//! windows count them from these rows as they read the event (`read`).
+
+use std::time::Instant;
 
 use anyhow::Result;
 use prost::Message as _;
@@ -13,7 +18,10 @@ use sha2::{Digest, Sha256};
 use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
-use super::{Amendment, CHAT, MESSAGE, Stamps, kinds, now_ms, unpack};
+use super::{
+    Amendment, CHAT, Doing, MESSAGE, Stamps, Waiting, apply_amendment, kinds, now_ms, record_quarantine,
+    sealed_for_events, transient, unpack,
+};
 use crate::convert::{self, secret, user_jid};
 
 /// The most answers of each form, opened and sealed, and the most sealed edits, kept waiting in
@@ -56,12 +64,33 @@ const ANSWER_ASIDE: &str =
     "more answers waited for events jaw has not seen than it keeps in pending, so this one waits here for its event";
 const EDIT_ASIDE: &str =
     "more edits waited for events jaw has not seen than it keeps in pending, so this one waits here for its event";
-// What's set aside for events, answers and edits, named from ?1 to ?2, back in pending.
-const BACK: &str = "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect)
+/// The most of what waits in a form that one change sets aside, so a transaction that finds many
+/// more waiting than the bound, as what comes back for an event and stays sealed can leave, stays
+/// short; the next set aside more.
+const SET_ASIDE_MOST: i64 = 16;
+/// The next ?5 rows of pending waiting for message ?2 in chat ?1, by when they were done and then
+/// their n, past (?3, ?4).
+const NEXT_WAITING: &str = "SELECT n, sender, mine, at, effect, raw FROM pending
+    WHERE chat = ?1 AND target = ?2 AND (at, n) > (?3, ?4) ORDER BY at, n LIMIT ?5";
+/// The first ?3 answers and edits set aside for an event, named from ?1 to ?2.
+const SET_ASIDE_FOR: &str =
+    "SELECT n FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2 LIMIT ?3";
+// What's set aside as quarantine's row ?1 back in pending, as it was there.
+const ONE_BACK: &str = "INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect)
     SELECT raw ->> '$.chat', raw ->> '$.target', raw ->> '$.kind', raw ->> '$.at', unhex(raw ->> '$.raw'),
         raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect'
-    FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2";
-const BACK_DONE: &str = "DELETE FROM quarantine WHERE source IN ('answer', 'edit') AND ref >= ?1 AND ref < ?2";
+    FROM quarantine WHERE n = ?1
+    RETURNING n, sender, mine, at, effect, raw";
+const ONE_BACK_DONE: &str = "DELETE FROM quarantine WHERE n = ?1";
+const TAKEN: &str = "DELETE FROM pending WHERE n = ?1";
+/// Where the next step taking what waits for event ?1 goes on from.
+const OPENING: &str = "INSERT INTO openings (message, at, n) VALUES (?1, ?2, ?3)
+    ON CONFLICT (message) DO UPDATE SET at = excluded.at, n = excluded.n";
+const OPENED: &str = "DELETE FROM openings WHERE message = ?1";
+/// The first event with what waits for it still to be taken, where its step goes on from, and the
+/// chat it's in.
+const FIRST_OPENING: &str = "SELECT o.message, o.at, o.n, m.chat, c.id, m.id FROM openings o
+    JOIN messages m ON m.n = o.message JOIN chats c ON c.n = m.chat ORDER BY o.message LIMIT 1";
 // The answers and edits set aside for chat ?3, named from ?1 to ?2, named and kept for chat ?4
 // instead; one whose new name one set aside for ?4 has already keeps its own row, its n after the
 // name.
@@ -218,14 +247,198 @@ pub(super) fn joining(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64
     Ok(())
 }
 
-/// Puts the answers and edits set aside for event `id` in `chat`, which has just come or moved there
-/// with a merge, back in `pending`, to be applied with the rest waiting for it.
-pub(super) fn set_aside_back(db: &Connection, chat: &str, id: &str) -> Result<()> {
-    let (from, to) = (format!("{chat} {id} "), format!("{chat} {id}!"));
-    if db.prepare_cached(BACK)?.execute([&from, &to])? > 0 {
-        db.prepare_cached(BACK_DONE)?.execute([&from, &to])?;
+/// The most of what waits for an event that the transaction bringing it takes, moving it with a
+/// merge or reading it again: as many as an event usually has waiting, so it shows them at once,
+/// while each answer or edit its secret opens costs as much as dozens of rows. The rest are taken
+/// a step at a time in the background (`step`).
+pub(super) const TAKEN_AT_ONCE: usize = 16;
+/// The most a step takes of what waits for an event, ending once it has taken for a millisecond,
+/// after one at least, as a step of a backfill does.
+const STEP_MOST: usize = 64;
+/// Where taking what waits for an event begins, and where it goes on once every row of pending
+/// waiting for it has been taken, as those set aside for it come back.
+const FROM_START: (i64, i64) = (i64::MIN, i64::MIN);
+const PAST_PENDING: (i64, i64) = (i64::MAX, i64::MAX);
+
+/// An event that what waits for it is taken for: its chat's n, its own n, its chat's JID and its ID.
+pub(super) type Arrived<'a> = (i64, i64, &'a str, &'a str);
+
+/// How far taking what waits for an event got: to the row of pending last taken, by when it was
+/// done and its n, or PAST_PENDING; or to the end, nothing being left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Left {
+    At((i64, i64)),
+    Done,
+}
+
+/// What taking one row of what waits for an event did.
+enum Taken {
+    /// It's applied, changing the event or not, or it's for an event deleted for everyone.
+    Applied(bool),
+    /// It stays where it was, sealed for a later jawd, or kept as one that failed.
+    Kept,
+    /// It deleted the event for you, so nothing more is done to it.
+    Gone,
+}
+
+/// Takes what waits for `event`, which has just come, moved with a merge or been read again:
+/// TAKEN_AT_ONCE of it at most, from the first, leaving the rest to steps.
+pub(super) fn arrived(db: &Connection, stamps: &mut Stamps, event: Arrived) -> Result<()> {
+    let (left, _) = take(db, stamps, event, FROM_START, TAKEN_AT_ONCE, false)?;
+    left_to_take(db, stamps, event.1, left)
+}
+
+/// Takes the next few of what waits for the first event with some left, from where the last step
+/// got to, as `take` does, saying whether anything changed.
+pub(super) fn step(db: &Connection, stamps: &mut Stamps) -> Result<bool> {
+    let first: Option<(i64, i64, i64, i64, String, String)> = db
+        .prepare_cached(FIRST_OPENING)?
+        .query_row([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+        .optional()?;
+    let Some((n, at, after, chat, chat_jid, id)) = first else { return Ok(false) };
+    let (left, changed) = take(db, stamps, (chat, n, &chat_jid, &id), (at, after), STEP_MOST, true)?;
+    left_to_take(db, stamps, n, left)?;
+    Ok(changed)
+}
+
+/// Keeps where taking what waits for event `n` goes on from, for its next step, or that nothing is
+/// left.
+fn left_to_take(db: &Connection, stamps: &mut Stamps, n: i64, left: Left) -> Result<()> {
+    match left {
+        Left::At((at, after)) => {
+            db.prepare_cached(OPENING)?.execute(params![n, at, after])?;
+            stamps.opening();
+        }
+        Left::Done => {
+            db.prepare_cached(OPENED)?.execute([n])?;
+        }
     }
     Ok(())
+}
+
+/// Takes what waits for `event` from `from`, `most` at most and, `briefly`, only until it has
+/// taken for a millisecond after the first: the rows of pending waiting for it, by when they were
+/// done, then those set aside for it in quarantine, each brought back as it's taken. Each is done
+/// as it would have been in pending once the event came, what's sealed opened with the event's
+/// secret and what still doesn't stay kept, in a savepoint of its own: one whose taking fails is
+/// kept in quarantine too, and left in pending, while the rest go on. Says how far it got, and
+/// whether anything changed.
+fn take(
+    db: &Connection,
+    stamps: &mut Stamps,
+    event: Arrived,
+    from: (i64, i64),
+    most: usize,
+    briefly: bool,
+) -> Result<(Left, bool)> {
+    let (_, _, chat_jid, id) = event;
+    let began = Instant::now();
+    let enough = |taken: usize| taken >= most || (briefly && taken > 0 && began.elapsed() >= kinds::CONVERTING);
+    let (mut taken, mut changed, mut at) = (0, false, from);
+    while at != PAST_PENDING {
+        let page: Vec<Waiting> = db
+            .prepare_cached(NEXT_WAITING)?
+            .query_map(params![chat_jid, id, at.0, at.1, STEP_MOST as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let last = page.len() < STEP_MOST;
+        for row in &page {
+            if enough(taken) {
+                return Ok((Left::At(at), changed));
+            }
+            match guarded(db, stamps, event, row)? {
+                Taken::Applied(did) => changed |= did,
+                Taken::Kept => {}
+                Taken::Gone => return Ok((Left::Done, true)),
+            }
+            taken += 1;
+            at = (row.3, row.0);
+        }
+        if last {
+            at = PAST_PENDING;
+        }
+    }
+    let (named, past) = (format!("{chat_jid} {id} "), format!("{chat_jid} {id}!"));
+    loop {
+        if enough(taken) {
+            return Ok((Left::At(PAST_PENDING), changed));
+        }
+        let aside: Vec<i64> = db
+            .prepare_cached(SET_ASIDE_FOR)?
+            .query_map(params![named, past, (most - taken) as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if aside.is_empty() {
+            return Ok((Left::Done, changed));
+        }
+        for kept in aside {
+            if enough(taken) {
+                return Ok((Left::At(PAST_PENDING), changed));
+            }
+            let row: Waiting = db
+                .prepare_cached(ONE_BACK)?
+                .query_row([kept], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+            db.prepare_cached(ONE_BACK_DONE)?.execute([kept])?;
+            match guarded(db, stamps, event, &row)? {
+                Taken::Applied(did) => changed |= did,
+                Taken::Kept => {}
+                Taken::Gone => return Ok((Left::Done, true)),
+            }
+            taken += 1;
+        }
+    }
+}
+
+/// Takes `row` of what waits for `event` as `take_one` does, in a savepoint: one whose taking fails
+/// for a reason that doesn't pass is rolled back, kept in quarantine with its raw protobuf and why,
+/// and left in pending, so it holds up nothing after it; one failing for a reason that passes fails
+/// the step.
+fn guarded(db: &Connection, stamps: &mut Stamps, event: Arrived, row: &Waiting) -> Result<Taken> {
+    let mark = stamps.mark();
+    db.execute_batch("SAVEPOINT taking")?;
+    match take_one(db, stamps, event, row) {
+        Ok(taken) => {
+            db.execute_batch("RELEASE taking")?;
+            Ok(taken)
+        }
+        Err(e) if transient(&e) => Err(e),
+        Err(e) => {
+            db.execute_batch("ROLLBACK TO taking; RELEASE taking")?;
+            stamps.undo(mark);
+            let (_, _, chat_jid, id) = event;
+            eprintln!("jawd: kept what waited for event {id} in {chat_jid} in quarantine, as taking it failed: {e:#}");
+            record_quarantine(db, "opening", &format!("{chat_jid} {id} {}", row.0), &format!("{e:#}"), Some(&row.5))?;
+            Ok(Taken::Kept)
+        }
+    }
+}
+
+/// Does what `row` of pending says to `event`, as it would be done to the event had it waited
+/// there for it, and removes the row once it's done; what's sealed is opened with the event's
+/// secret first, and what doesn't open is left as it is.
+fn take_one(db: &Connection, stamps: &mut Stamps, event: Arrived, row: &Waiting) -> Result<Taken> {
+    let (chat, n, _, _) = event;
+    let (pending, sender, mine, at, effect, raw) = row;
+    let Ok(what) = serde_json::from_str::<Amendment>(effect) else { return Ok(Taken::Kept) };
+    let (what, at) = match what {
+        Amendment::Keep { kind } if sealed_for_events(&kind) => {
+            match opened(db, n, &Sealed { raw, sender: sender.as_deref(), mine: *mine, at: *at })? {
+                Opening::Opened(what, at) => (what, at),
+                Opening::Gone => {
+                    db.prepare_cached(TAKEN)?.execute([pending])?;
+                    return Ok(Taken::Applied(false));
+                }
+                Opening::Sealed => return Ok(Taken::Kept),
+            }
+        }
+        Amendment::Keep { .. } => return Ok(Taken::Kept),
+        what => (what, *at),
+    };
+    let gone = matches!(what, Amendment::DeleteForMe);
+    let doing = Doing { what: &what, sender: sender.as_deref(), mine: *mine, at };
+    let changed = apply_amendment(db, stamps, chat, n, doing)?;
+    db.prepare_cached(TAKEN)?.execute([pending])?;
+    Ok(if gone { Taken::Gone } else { Taken::Applied(changed) })
 }
 
 /// Has the answers and edits set aside for events in chat `gone` wait for them in chat `keep`
@@ -240,12 +453,12 @@ pub(super) fn set_aside_moved(db: &Connection, keep: &str, gone: &str) -> Result
 }
 
 /// Keeps what waits in `kind`'s form, one of WAITING_KINDS, within ANSWERS_WAITING, setting the
-/// oldest past it aside: answers as `answer`, edits as `edit`.
+/// oldest past it aside, SET_ASIDE_MOST at most: answers as `answer`, edits as `edit`.
 pub(super) fn bounded(db: &Connection, kind: &str) -> Result<()> {
     let waiting: i64 = db.prepare_cached(WAITING)?.query_row([kind], |r| r.get(0))?;
     if waiting > ANSWERS_WAITING {
         let aside = if kind == "secret" { ("edit", EDIT_ASIDE) } else { ("answer", ANSWER_ASIDE) };
-        set_aside(db, kind, waiting - ANSWERS_WAITING, aside)?;
+        set_aside(db, kind, (waiting - ANSWERS_WAITING).min(SET_ASIDE_MOST), aside)?;
     }
     Ok(())
 }

@@ -111,6 +111,14 @@ impl Store {
         let moving = self.count("messages WHERE chat IN (SELECT gone FROM chat_merges)").unwrap();
         Steps { most: moving + self.count("chat_merges").unwrap() + 1, taken: 0 }
     }
+
+    /// The steps taking what waits for events can need from here: each takes a row of pending, or
+    /// one set aside for an event, or ends what's left for its event.
+    pub fn opening_steps(&self) -> Steps {
+        let rows =
+            self.count("pending").unwrap() + self.count("quarantine WHERE source IN ('answer', 'edit')").unwrap();
+        Steps { most: rows + self.count("openings").unwrap() + 1, taken: 0 }
+    }
 }
 
 /// How a batch of changes went into the database.
@@ -325,6 +333,7 @@ pub struct Store {
     committed: watch::Receiver<i64>,
     stats: Arc<Mutex<Stats>>,
     inboxed: Arc<Notify>,
+    opening: Arc<Notify>,
     wal: Arc<Wal>,
     trouble: watch::Receiver<Option<String>>,
     thumbnails: Arc<Thumbnails>,
@@ -671,10 +680,12 @@ impl Store {
         let thumbnails = Arc::new(Thumbnails::open(home, kept.max(0) as u64));
         let stats = Arc::new(Mutex::new(Stats::default()));
         let inboxed = Arc::new(Notify::new());
+        let opening = Arc::new(Notify::new());
         let wal = Arc::new(Wal::new(limits.wal_soft, limits.wal_hard));
         let writer = Writer {
             stats: stats.clone(),
             inboxed: inboxed.clone(),
+            opening: opening.clone(),
             db,
             stamps,
             realtime: realtime_rx,
@@ -717,6 +728,7 @@ impl Store {
             committed,
             stats,
             inboxed,
+            opening,
             wal,
             trouble: troubled,
             thumbnails,
@@ -743,6 +755,12 @@ impl Store {
     /// What's woken each time an engine event is committed to the inbox.
     pub fn inboxed(&self) -> Arc<Notify> {
         self.inboxed.clone()
+    }
+
+    /// What's woken once a commit leaves what waits for an event to be taken in steps
+    /// (`Change::Opening`).
+    pub fn opening(&self) -> Arc<Notify> {
+        self.opening.clone()
     }
 
     /// Why jaw.db can't be written, while it can't: what arrives then waits on the phone.
@@ -941,6 +959,8 @@ const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 struct Writer {
     stats: Arc<Mutex<Stats>>,
     inboxed: Arc<Notify>,
+    /// Woken once a commit leaves what waits for an event to be taken in steps.
+    opening: Arc<Notify>,
     db: Connection,
     stamps: Stamps,
     realtime: Receiver<Inbox>,
@@ -1363,6 +1383,9 @@ impl Writer {
                         self.backlog = true;
                         let last = self.stamps.last();
                         self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
+                        if self.stamps.opened_later() {
+                            self.opening.notify_one();
+                        }
                         for write in shared {
                             let _ = write.done.send(Ok(Applied {
                                 changed: write.made.changed,
@@ -1773,6 +1796,9 @@ impl Writer {
                 let last = self.stamps.last();
                 self.seq.send_if_modified(|seq| std::mem::replace(seq, last) != last);
                 self.backlog = true;
+                if self.stamps.opened_later() {
+                    self.opening.notify_one();
+                }
             }
             Err(_) => self.stamps.rolled_back(),
         }
