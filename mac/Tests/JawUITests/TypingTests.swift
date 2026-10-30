@@ -159,6 +159,7 @@ final class Reader: ConversationHost {
     func conversation(_: ConversationController, forward _: MessageRow) {}
     func conversation(_: ConversationController, reactTo _: MessageRow) {}
     func conversation(_: ConversationController, open _: String) {}
+    func conversation(_: ConversationController, vote _: String, options _: [String]) {}
 
     func conversationFocused(_: ConversationController) {
         focused += 1

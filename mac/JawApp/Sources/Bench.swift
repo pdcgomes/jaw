@@ -92,7 +92,7 @@ enum Bench {
             NSApp.activate()
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
-                || key.hasPrefix("menu:") || key == "terminal-panes"
+                || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:")
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -108,6 +108,7 @@ enum Bench {
             if key == "revert" { model.revertLayout() }
             if key == "settings" { model.window?.showSettings() }
             if key == "terminal-panes" { model.openTerminalPanes() }
+            if key.hasPrefix("vote:"), let c = model.conversation, let poll = c.newestPoll { c.vote(String(key.dropFirst(5)), in: poll.id) }
             if key.hasPrefix("size:") {
                 let wh = key.dropFirst(5).split(separator: "x").compactMap { Double($0) }
                 if wh.count == 2 { model.window?.window?.setContentSize(NSSize(width: wh[0], height: wh[1])) }
@@ -136,9 +137,11 @@ enum Bench {
             {
                 NSApp.sendEvent(event)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (key.hasPrefix("vote:") ? 0.8 : 0.3)) {
                 if key.hasPrefix("menu:") {
                     FileHandle.standardError.write(Data("\(key): \(menuSaid(String(key.dropFirst(5)), model: model))\n".utf8))
+                } else if key.hasPrefix("vote:") {
+                    FileHandle.standardError.write(Data("\(key): \(pollSaid(model.conversation?.newestPoll))\(model.notice.map { " · said \"\($0.0)\"" } ?? "")\n".utf8))
                 } else {
                     let palette = (model.window?.palette.isVisible ?? false) ? " · palette at \(model.window?.palette.model.index ?? -1) of \(model.window?.palette.model.items.count ?? 0)" : ""
                     let glance = model.glance.isOpen ? model.window?.window.map { w in
@@ -178,6 +181,15 @@ enum Bench {
         default:
             return "unknown step: menu:\(what) (the menu steps are menu:list:<row>, menu:header and menu:message:<row>)"
         }
+    }
+
+    /// A poll as its row is, for the snapshot's log: its question, each option's tally with yours
+    /// ticked, how many voted, and its state when it's yours.
+    static func pollSaid(_ m: MessageRow?) -> String {
+        guard let m, let poll = m.poll else { return "no poll" }
+        let options = poll.options.map { "\($0.name) \($0.votes)\($0.mine ? " ✓" : "")" }
+        let status = m.mine ? m.status.map { " · \($0.rawValue)" } ?? "" : ""
+        return ([poll.question] + options + ["\(poll.voters) voted"]).joined(separator: " · ") + status
     }
 
     /// Menu items as words, as the menu shows them: hidden ones left out, greyed ones in brackets, a

@@ -763,6 +763,10 @@ extension AppModel: ConversationHost {
         jawd.historyMore(c.chat.id)
     }
 
+    func conversation(_ c: ConversationController, vote message: String, options: [String]) {
+        jawd.vote(chat: c.chat.id, message: message, options: options)
+    }
+
     func conversation(_: ConversationController, open url: String) {
         guard let u = URL(string: url.contains("://") ? url : "https://" + url) else { return }
         NSWorkspace.shared.open(u)

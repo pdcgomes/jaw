@@ -58,6 +58,8 @@ public enum Region: Sendable, Hashable {
     case quote(String)
     /// A card that opens something: a place in Maps, a link's page.
     case open(String)
+    /// A poll's option, by name, which a click votes for.
+    case vote(String)
 }
 
 /// A message laid out at a width: its height, and what to draw, already measured.

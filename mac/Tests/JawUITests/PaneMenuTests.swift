@@ -15,6 +15,8 @@ import Testing
 @MainActor
 final class PaneHost: ConversationHost {
     var focused = 0
+    /// The votes asked for: each poll, and the options chosen.
+    var votes: [(message: String, options: [String])] = []
 
     func conversation(_: ConversationController, move _: Place) {}
     func conversation(_: ConversationController, send _: String, key _: String, reply _: String?, mentions _: [String]) {}
@@ -31,6 +33,7 @@ final class PaneHost: ConversationHost {
     func conversation(_: ConversationController, reactTo _: MessageRow) {}
     func conversationFocused(_: ConversationController) { focused += 1 }
     func conversation(_: ConversationController, open _: String) {}
+    func conversation(_: ConversationController, vote message: String, options: [String]) { votes.append((message, options)) }
     func conversationIsRead(_: ConversationController) -> Bool { false }
 }
 

@@ -23,6 +23,8 @@ public protocol ConversationHost: AnyObject {
     /// The pane was clicked or typed in: it takes the keys.
     func conversationFocused(_ c: ConversationController)
     func conversation(_ c: ConversationController, open url: String)
+    /// Your vote in a poll: every option chosen now, by name, none to take it back.
+    func conversation(_ c: ConversationController, vote message: String, options: [String])
     /// Whether what's on screen counts as read now: the app active and the window key.
     func conversationIsRead(_ c: ConversationController) -> Bool
 }
@@ -569,6 +571,9 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             case .showMore: unfold(m.id)
             case let .quote(id): go(to: id)
             case let .open(url): host?.conversation(self, open: url)
+            // A double click's second click would take back the vote its first made.
+            case let .vote(name) where clicks == 1: vote(name, in: m.id)
+            case .vote: break
             }
             return
         }
@@ -670,7 +675,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         relayout()
     }
 
-    /// Enter on a message: try a failed one again, unfold a long one, open its first link.
+    /// Enter on a message: try a failed one again, unfold a long one, open a poll's Vote menu under
+    /// it, open its first link.
     func open(_ m: MessageRow) {
         if m.mine, m.status == .failed {
             host?.conversation(self, retry: m.id)
@@ -678,6 +684,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
                   m.plain.split(separator: "\n").count > MessageLayout.fold
         {
             unfold(m.id)
+        } else if let votes = voteMenu(for: m) {
+            showVotes(votes, for: m)
         } else if let link = m.spans.first(where: { $0.t == .link }) {
             host?.conversation(self, open: link.url ?? link.s)
         }
@@ -726,6 +734,53 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         let strip = { (s: String) in s.unicodeScalars.filter { $0.value != 0xFE0F }.map(String.init).joined() }
         let mine = m.reactions.first { $0.mine }.map { strip($0.emoji) == strip(emoji) } ?? false
         host?.conversation(self, react: m.id, emoji: mine ? "" : emoji)
+    }
+
+    /// Votes for `name` in poll `id` as its row is now, as a click on the option, the Vote menu and
+    /// the snapshot's step ask; a choice past what the poll takes is said, and asks jawd nothing.
+    public func vote(_ name: String, in id: String) {
+        guard let m = window.get(id), let poll = m.poll, !m.deleted else { return }
+        switch Voting.choosing(name, in: poll) {
+        case let .vote(options): host?.conversation(self, vote: m.id, options: options)
+        case let .tooMany(most): say(Voting.tooMany(most))
+        }
+    }
+
+    /// The newest poll the pane holds that can be voted in.
+    public var newestPoll: MessageRow? {
+        rows.last { $0.kind == .poll && $0.poll != nil && !$0.deleted }
+    }
+
+    /// A poll's options to vote with, yours ticked, the first nine on their digits, and Take Back My
+    /// Vote once you have one; nil for anything that isn't a poll that can be voted in.
+    func voteMenu(for m: MessageRow) -> NSMenu? {
+        guard m.kind == .poll, let poll = m.poll, !m.deleted else { return nil }
+        let menu = NSMenu()
+        for (i, option) in poll.options.enumerated() {
+            let item = ClosureItem(title: option.name) { [weak self] in self?.vote(option.name, in: m.id) }
+            item.state = option.mine ? .on : .off
+            if i < 9 {
+                item.keyEquivalent = "\(i + 1)"
+                item.keyEquivalentModifierMask = []
+            }
+            menu.addItem(item)
+        }
+        if !poll.mine.isEmpty {
+            menu.addItem(.separator())
+            menu.addItem(ClosureItem(title: "Take Back My Vote") { [weak self] in
+                guard let self else { return }
+                host?.conversation(self, vote: m.id, options: [])
+            })
+        }
+        return menu
+    }
+
+    /// The Vote menu under a poll's bubble, as Enter opens it.
+    func showVotes(_ menu: NSMenu, for m: MessageRow) {
+        guard let i = rows.firstIndex(where: { $0.id == m.id }),
+              let cell = table.view(atColumn: 0, row: i, makeIfNecessary: false) as? MessageView, let laid = cell.laid
+        else { return }
+        _ = cell.popUp.show(menu, at: NSPoint(x: laid.body.minX, y: laid.body.maxY), in: cell)
     }
 
     func forward(_ m: MessageRow) {
@@ -902,6 +957,11 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             }
             react.submenu = sub
             menu.addItem(react)
+            if let votes = voteMenu(for: m) {
+                let vote = NSMenuItem(title: "Vote", action: nil, keyEquivalent: "")
+                vote.submenu = votes
+                menu.addItem(vote)
+            }
             item("Copy", "y") { [weak self] in self?.copy(m) }
             if Self.notForwardable(m) == nil {
                 item("Forward…", "f") { [weak self] in self?.forward(m) }

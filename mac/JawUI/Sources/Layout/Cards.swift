@@ -346,6 +346,7 @@ extension MessageLayout.Builder {
         let several = poll.max > 1
         let x = r.minX + 24
         for option in poll.options {
+            regions.append((CGRect(x: r.minX, y: top - 4, width: r.width, height: optionHeight), .vote(option.name)))
             let tick = CGRect(x: r.minX, y: top, width: 16, height: lineHeight(fonts.body))
             let mark = several ? (option.mine ? "checkmark.square.fill" : "square") : (option.mine ? "checkmark.circle.fill" : "circle")
             symbol(mark, 14, option.mine ? roles.accent : roles.tertiary, centredIn: tick)
