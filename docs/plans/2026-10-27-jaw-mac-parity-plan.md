@@ -77,7 +77,7 @@ The terminal's Enter opens a photo, a video or a file in its app, and s saves it
 
 - **The Mac's:** Space or a click looks at a photo, a video or a document with Quick Look, ⌘↩ opens it in its app, Save puts it in Downloads (`media.save`), and it drags out to the Finder. Each download state (remote, downloading with its ring, expired, waiting for the phone, gone) says what it is and offers what can be done, asking again with `media.fetch`. Quick Look gives what the terminal's opening gives; the Mac design's own viewer comes after parity (Phase 4).
 - **Needs from jawd:** media in (`media.fetch`, `media.save`, `media.cancel`).
-- **The check:** nothing yet; when the terminal sends `media.save` or `media.fetch`, they're queued here.
+- **The check:** the Mac sends `media.fetch`, `media.save` and `media.cancel`, which the terminal doesn't yet; `media.cancel`'s row, held for 2.5, came out of the list with it, and the terminal sending any of the three later queues nothing, since the Mac sends them first.
 
 ### 2.4 The library
 
@@ -93,7 +93,7 @@ The terminal's Ctrl-O has a picker and `send.media`, SD or HD, albums, progress 
 
 - **The Mac's** is Mac-M3's step 5, the box design's B2: pasting, dropping, ⌘O and ⇧⌘O, the strip of up to 30 above the field with captions, SD or HD (⌥ held as Send is pressed), `send.media`, progress from the `job` pushes, and cancelling. The camera (B3) comes after, and "no ffmpeg" is said here, as jawd's `status` reports it.
 - **Needs from jawd:** media out, on `media-out`, built and landing after media in.
-- **The check:** `send.media`, `media.cancel` and the `job` push.
+- **The check:** `send.media` and the `job` push; the Mac sends `media.cancel` already, for downloads (2.3).
 
 ### 2.6 Voice messages
 

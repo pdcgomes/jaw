@@ -18,7 +18,6 @@
 "library.watch" = "2.4"
 "library.shown" = { step = "2.4", from = "library" }
 "send.media" = "2.5"
-"media.cancel" = "2.5"
 "send.contact" = "3.9"
 "voice.play" = "2.6"
 "voice.pause" = "2.6"
