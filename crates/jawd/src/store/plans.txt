@@ -434,6 +434,107 @@ SELECT c.id, c.name, p.name, p.push_name, p.verified_name, iif(c.name IS NULL AN
         SEARCH gp USING INTEGER PRIMARY KEY (rowid=?)
       SCAN (subquery-1)
 
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_by_t WHERE (t, rank) < (?1, ?2) AND t >= ?3 ORDER BY t DESC, rank DESC LIMIT ?4
+    SEARCH library_links USING INDEX library_links_by_t (t>? AND (t,rank)<(?,?))
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_by_t WHERE (t, rank) > (?1, ?2) AND t <= ?3 ORDER BY t, rank LIMIT ?4
+    SEARCH library_links USING INDEX library_links_by_t ((t,rank)>(?,?) AND t<?)
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_in WHERE chat = ?1 AND (t, rank) < (?2, ?3) AND t >= ?4 ORDER BY t DESC, rank DESC LIMIT ?5
+    SEARCH library_links USING INDEX library_links_in (chat=? AND t>? AND (t,rank)<(?,?))
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_in WHERE chat = ?1 AND (t, rank) > (?2, ?3) AND t <= ?4 ORDER BY t, rank LIMIT ?5
+    SEARCH library_links USING INDEX library_links_in (chat=? AND (t,rank)>(?,?) AND t<?)
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_in WHERE chat = ?1 AND sender IS ?2 AND mine = ?3 AND (t, rank) < (?4, ?5) AND t >= ?6 ORDER BY t DESC, rank DESC LIMIT ?7
+    SEARCH library_links USING INDEX library_links_in (chat=? AND t>? AND (t,rank)<(?,?))
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_in WHERE chat = ?1 AND sender IS ?2 AND mine = ?3 AND (t, rank) > (?4, ?5) AND t <= ?6 ORDER BY t, rank LIMIT ?7
+    SEARCH library_links USING INDEX library_links_in (chat=? AND (t,rank)>(?,?) AND t<?)
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_by WHERE sender IS ?1 AND mine = ?2 AND (t, rank) < (?3, ?4) AND t >= ?5 ORDER BY t DESC, rank DESC LIMIT ?6
+    SEARCH library_links USING INDEX library_links_by (sender=? AND mine=? AND t>? AND (t,rank)<(?,?))
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_by WHERE sender IS ?1 AND mine = ?2 AND (t, rank) > (?3, ?4) AND t <= ?5 ORDER BY t, rank LIMIT ?6
+    SEARCH library_links USING INDEX library_links_by (sender=? AND mine=? AND (t,rank)>(?,?) AND t<?)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM library_links INDEXED BY library_links_by_t WHERE t <= ?1 AND t >= ?2 LIMIT ?3)
+    CO-ROUTINE (subquery-1)
+      SEARCH library_links USING COVERING INDEX library_links_by_t (t>? AND t<?)
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM library_links INDEXED BY library_links_in WHERE chat = ?1 AND t <= ?2 AND t >= ?3 LIMIT ?4)
+    CO-ROUTINE (subquery-1)
+      SEARCH library_links USING COVERING INDEX library_links_in (chat=? AND t>? AND t<?)
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM library_links INDEXED BY library_links_in WHERE chat = ?1 AND sender IS ?2 AND mine = ?3 AND t <= ?4 AND t >= ?5 LIMIT ?6)
+    CO-ROUTINE (subquery-1)
+      SEARCH library_links USING COVERING INDEX library_links_in (chat=? AND t>? AND t<?)
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM library_links INDEXED BY library_links_by WHERE sender IS ?1 AND mine = ?2 AND t <= ?3 AND t >= ?4 LIMIT ?5)
+    CO-ROUTINE (subquery-1)
+      SEARCH library_links USING COVERING INDEX library_links_by (sender=? AND mine=? AND t>? AND t<?)
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT items FROM shelves WHERE chat = ?1 AND shelf = 'link'
+    SEARCH shelves USING PRIMARY KEY (chat=? AND shelf=?)
+
+-- src/store/library.rs
+SELECT ~rowid FROM library_fts WHERE library_fts MATCH ?1 AND rowid >= ?2 AND rowid <= ?3 ORDER BY rowid LIMIT ?4
+    SCAN library_fts VIRTUAL TABLE INDEX 64:M2><
+
+-- src/store/library.rs
+SELECT ~rowid FROM library_fts WHERE library_fts MATCH ?1 AND rowid >= ?2 AND rowid <= ?3 ORDER BY rowid DESC LIMIT ?4
+    SCAN library_fts VIRTUAL TABLE INDEX 192:M2><
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_by_t WHERE t = ?1 AND (t, rank) < (?2, ?3) ORDER BY rank DESC
+    SEARCH library_links USING INDEX library_links_by_t (t=?)
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_by_t WHERE t = ?1 AND (t, rank) > (?2, ?3) ORDER BY rank
+    SEARCH library_links USING INDEX library_links_by_t (t=?)
+
+-- src/store/library.rs
+SELECT count(*) FROM (SELECT 1 FROM library_fts CROSS JOIN library_links l INDEXED BY library_links_by_t ON l.t = ~library_fts.rowid WHERE library_fts MATCH ?1 AND library_fts.rowid >= ?2 AND library_fts.rowid <= ?3 LIMIT ?4)
+    CO-ROUTINE (subquery-1)
+      SCAN library_fts VIRTUAL TABLE INDEX 0:M2><
+      SEARCH l USING COVERING INDEX library_links_by_t (t=?)
+    SCAN (subquery-1)
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_named WHERE id = ?1 AND place = ?2
+    SEARCH library_links USING INDEX library_links_named (id=?)
+
+-- src/store/library.rs
+SELECT message, place, t FROM library_links INDEXED BY library_links_named WHERE id = ?1 AND place = ?2 AND chat = (SELECT n FROM chats WHERE id = ?3)
+    SEARCH library_links USING INDEX library_links_named (id=?)
+    SCALAR SUBQUERY 1
+      SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
+
+-- src/store/library.rs
+SELECT m.n, m.id, m.chat, c.id, m.v, m.at, m.t, m.mine, m.text, l.place, l.url, l.host, l.title, l.description, p.n, p.name, p.push_name, p.verified_name, j.jid FROM links l JOIN messages m ON m.n = l.message JOIN chats c ON c.n = m.chat LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person WHERE l.message = ?1 AND l.place = ?2
+    SEARCH l USING INDEX sqlite_autoindex_links_2 (message=? AND place=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH j USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?) LEFT-JOIN
+
 -- src/store/lists.rs
 SELECT rule FROM folders WHERE n = ?1 AND rule IS NOT NULL
     SEARCH folders USING INTEGER PRIMARY KEY (rowid=?)
@@ -2612,6 +2713,10 @@ SELECT 1 FROM links WHERE message = ?1
     SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
 
 -- src/store/write/links.rs
+SELECT chat FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/links.rs
 INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description) SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links WHERE message = ?1
     COMPOUND QUERY
       LEFT-MOST SUBQUERY
@@ -3379,23 +3484,34 @@ UPDATE chats SET v = ?3, last_message = (SELECT n FROM messages WHERE chat = ?1 
       SEARCH messages USING COVERING INDEX messages_by_time (chat=?)
 
 -- src/store/write.rs
-SELECT m.t, b.n, m.chat FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b JOIN messages m ON m.n = b.n
+SELECT m.t, b.n, m.chat, m.shelf IS NOT NULL AND m.text IS NOT NULL, EXISTS (SELECT 1 FROM library_links l WHERE l.message = b.n) FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b JOIN messages m ON m.n = b.n
     CO-ROUTINE b
       SCAN fts_backlog
     SCAN b
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH l USING PRIMARY KEY (message=?)
 
 -- src/store/write.rs
 INSERT INTO messages_fts (rowid, text) SELECT t, text FROM messages WHERE n = ?1 AND text IS NOT NULL
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
-INSERT OR REPLACE INTO library_fts (rowid, text, tags) SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none')) FROM messages WHERE n = ?1 AND text IS NOT NULL AND shelf IS NOT NULL
-    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
-
--- src/store/write.rs
 DELETE FROM fts_backlog WHERE n = ?1
     SEARCH fts_backlog USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+INSERT OR REPLACE INTO library_fts (rowid, text, tags) SELECT ~w.t, w.text, 'slink c' || m.chat || ' f' || coalesce(m.sender, iif(m.mine, 'me', 'none')) FROM messages m JOIN message_link_text w ON w.message = m.n WHERE m.n = ?1 AND w.text IS NOT NULL
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 3
+      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 3
+      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+
+-- src/store/write.rs
+INSERT OR REPLACE INTO library_fts (rowid, text, tags) SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none')) FROM messages WHERE n = ?1 AND text IS NOT NULL AND shelf IS NOT NULL
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
 SELECT coalesce(k.id, c.id) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n LEFT JOIN chats k ON k.n = m.keep WHERE c.id = ?1
@@ -4246,6 +4362,48 @@ INSERT INTO links_fts (rowid, text) SELECT t, text FROM message_link_text WHERE 
       SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
     CORRELATED SCALAR SUBQUERY 4
       SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+
+-- trigger links_shelved
+INSERT INTO library_links (message, place, t, id, chat, sender, mine) SELECT ?, ?, m.t, m.id, ?, ?, ? FROM messages m WHERE m.n = ?
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- trigger links_shelved
+INSERT INTO shelves (chat, shelf, items) VALUES (?, 'link', 1) ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1
+
+-- trigger links_shelved
+INSERT INTO shelves (chat, shelf, items) VALUES (0, 'link', 1) ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1
+
+-- trigger links_shelved
+INSERT OR REPLACE INTO library_fts (rowid, text, tags) SELECT ~w.t, w.text, 'slink c' || ? || ' f' || coalesce(?, iif(?, 'me', 'none')) FROM message_link_text w WHERE w.message = ? AND w.text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = ?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SCALAR SUBQUERY 1
+      SEARCH fts_backlog USING INTEGER PRIMARY KEY (rowid=?)
+    CORRELATED SCALAR SUBQUERY 4
+      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+    CORRELATED SCALAR SUBQUERY 4
+      SEARCH l USING INDEX sqlite_autoindex_links_2 (message=?)
+
+-- trigger links_unshelved
+DELETE FROM library_fts WHERE rowid = ~(SELECT t FROM library_links WHERE message = ? AND place = ?) AND NOT EXISTS (SELECT 1 FROM links WHERE message = ?) AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = ?)
+    SCAN library_fts VIRTUAL TABLE INDEX 0:=
+    SCALAR SUBQUERY 1
+      SEARCH library_links USING PRIMARY KEY (message=? AND place=?)
+    SCALAR SUBQUERY 2
+      SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
+    SCALAR SUBQUERY 3
+      SEARCH fts_backlog USING INTEGER PRIMARY KEY (rowid=?)
+
+-- trigger links_unshelved
+DELETE FROM library_links WHERE message = ? AND place = ?
+    SEARCH library_links USING PRIMARY KEY (message=? AND place=?)
+
+-- trigger links_unshelved
+DELETE FROM shelves WHERE chat IN (?, 0) AND shelf = 'link' AND items = 1
+    SEARCH shelves USING PRIMARY KEY (chat=? AND shelf=?)
+
+-- trigger links_unshelved
+UPDATE shelves SET items = items - 1 WHERE chat IN (?, 0) AND shelf = 'link'
+    SEARCH shelves USING PRIMARY KEY (chat=? AND shelf=?)
 
 -- trigger media_files_added
 UPDATE media_cache SET bytes = bytes + ?, files = files + 1 WHERE id = 1

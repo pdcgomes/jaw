@@ -70,6 +70,38 @@ fn item(chat: &str, id: &str, at: i64, sender: Option<&str>, kind: &'static str,
     }
 }
 
+/// A message giving `urls`, each marked in its words as the converter marks a link, and a preview
+/// of the first with its title and description when it has one.
+#[allow(clippy::too_many_arguments)]
+fn linked(
+    chat: &str,
+    id: &str,
+    at: i64,
+    sender: Option<&str>,
+    kind: &'static str,
+    said: &str,
+    urls: &[&str],
+    preview: Option<(&str, &str)>,
+) -> Message {
+    let mut message = item(chat, id, at, sender, kind, Some(said));
+    let mut text = said.to_string();
+    let mut spans = vec![json!({"t": "text", "s": said})];
+    for url in urls {
+        text.push(' ');
+        text.push_str(url);
+        spans.push(json!({"t": "text", "s": " "}));
+        spans.push(json!({"t": "link", "s": url, "url": url}));
+    }
+    let mut detail: Value = message.detail.as_deref().map_or(json!({}), |detail| serde_json::from_str(detail).unwrap());
+    if let (Some((title, description)), Some(url)) = (preview, urls.first()) {
+        detail["link"] = json!({"url": url, "title": title, "description": description});
+    }
+    message.text = Some(text);
+    message.spans = Some(Value::Array(spans).to_string());
+    message.detail = (detail != json!({})).then(|| detail.to_string());
+    message
+}
+
 fn ids(result: &Value) -> Vec<&str> {
     result["rows"].as_array().unwrap().iter().map(|row| row["id"].as_str().unwrap()).collect()
 }
@@ -109,7 +141,7 @@ async fn a_window_holds_a_kinds_items_newest_first_with_what_each_needs_and_ever
     let photos = w.call("library.watch", watch("photo", json!({}))).await.unwrap();
     assert_eq!(ids(&photos), ["p2", "p1"], "newest first, the sticker and the text no items");
     assert_eq!((photos["total"].as_u64(), photos["older"].as_bool()), (Some(2), Some(false)));
-    assert_eq!(photos["counts"], json!({"photo": 2, "video": 3, "voice": 1, "file": 2}), "every kind's, links unknown");
+    assert_eq!(photos["counts"], json!({"photo": 2, "video": 3, "voice": 1, "file": 2, "link": 0}), "every kind's");
     let p1 = row(&photos, "p1");
     assert_eq!((p1["kind"].as_str(), p1["message"].as_str()), (Some("photo"), Some("p1")));
     assert_eq!((p1["chat"].as_str(), p1["chat_name"].as_str()), (Some(CLIMBING), Some("Lisbon Climbing")));
@@ -148,7 +180,7 @@ async fn a_window_holds_a_kinds_items_newest_first_with_what_each_needs_and_ever
     let familia = w.call("library.watch", watch("file", json!({"chat": FAMILIA}))).await.unwrap();
     assert_eq!(
         (ids(&familia), familia["counts"].clone()),
-        (vec!["a1", "d1"], json!({"photo": 1, "video": 0, "voice": 0, "file": 2}))
+        (vec!["a1", "d1"], json!({"photo": 1, "video": 0, "voice": 0, "file": 2, "link": 0}))
     );
     let hers = w.call("library.watch", watch("file", json!({"chat": FAMILIA, "person": "person:1"}))).await.unwrap();
     assert_eq!(ids(&hers), ["a1"], "one person's items in one chat");
@@ -213,19 +245,100 @@ async fn library_watch_says_what_it_cant_do() {
     assert_eq!(code(w.call("library.watch", asked(json!({"kind": "pictures", "around": "top"}))).await).0, -32602);
 }
 
+/// Links in three messages, one a photo's caption, after what `shared` holds.
+async fn links(bed: &Bed) {
+    bed.apply(vec![
+        Change::Message(linked(
+            FAMILIA,
+            "l1",
+            11_000,
+            Some(ANA),
+            "text",
+            "olha",
+            &["https://www.ipma.pt/previsao", "cp.pt/sintra"],
+            None,
+        )),
+        Change::Message(linked(
+            CLIMBING,
+            "l2",
+            12_000,
+            Some(RUI_LID),
+            "text",
+            "a via",
+            &["https://27crags.com/peninha"],
+            Some(("Peninha · 27 Crags", "Escalada em Sintra")),
+        )),
+        Change::Message(linked(FAMILIA, "p3", 13_000, None, "image", "na praia", &["https://praia.pt"], None)),
+    ])
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn the_links_window_is_empty_and_says_links_come_later() {
+async fn a_links_window_holds_every_link_newest_first_and_a_messages_first_to_last() {
     let bed = Bed::new(brisk());
     shared(&bed).await;
+    links(&bed).await;
     let mut w = bed.watcher(64);
-    let links = w.call("library.watch", json!({"kind": "link", "around": "top", "after": 10})).await.unwrap();
-    assert!(ids(&links).is_empty() && links["total"] == 0 && links["older"] == false);
-    assert_eq!(links["note"].as_str(), Some(NO_LINKS));
-    assert!(links["counts"].get("link").is_none(), "not a count of none: {}", links["counts"]);
-    let all = w.call("library.watch", json!({"kind": "all", "around": "top", "after": 3})).await.unwrap();
-    assert_eq!(all["note"].as_str(), Some(NO_LINKS));
-    let photos = w.call("library.watch", json!({"kind": "photo", "around": "top", "after": 3})).await.unwrap();
-    assert!(photos.get("note").is_none());
+    let watch = |more: Value| {
+        let mut params = json!({"kind": "link", "around": "top", "after": 10});
+        params.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+        params
+    };
+    let links = w.call("library.watch", watch(json!({}))).await.unwrap();
+    assert_eq!(ids(&links), ["p3~0", "l2~0", "l1~0", "l1~1"], "a photo's link too, each message's in its order");
+    assert_eq!((links["total"].as_u64(), links["older"].as_bool()), (Some(4), Some(false)));
+    assert_eq!(links["counts"], json!({"photo": 3, "video": 3, "voice": 1, "file": 2, "link": 4}));
+    assert!(links.get("note").is_none(), "nothing it can't hold");
+    let l2 = row(&links, "l2~0");
+    assert_eq!((l2["kind"].as_str(), l2["message"].as_str()), (Some("link"), Some("l2")));
+    assert_eq!((l2["chat_name"].as_str(), l2["from"]["name"].as_str()), (Some("Lisbon Climbing"), Some("Rui")));
+    assert_eq!(
+        l2["link"],
+        json!({"url": "https://27crags.com/peninha", "host": "27crags.com", "title": "Peninha · 27 Crags",
+            "description": "Escalada em Sintra"})
+    );
+    assert_eq!(row(&links, "l1~1")["link"], json!({"url": "https://cp.pt/sintra", "host": "cp.pt"}), "made whole");
+    let sorts: Vec<&str> = links["rows"].as_array().unwrap().iter().map(|row| row["sort"].as_str().unwrap()).collect();
+    assert!(sorts.windows(2).all(|pair| pair[0] > pair[1]), "read from the largest sort down: {sorts:?}");
+
+    let all = w.call("library.watch", json!({"kind": "all", "around": "top", "after": 1})).await.unwrap();
+    assert_eq!(ids(&all), ["p3", "n1", "s1", "a1", "p3~0"], "the newest of each kind, a link among them");
+    assert_eq!(all["total"].as_u64(), Some(13));
+    let familia = w.call("library.watch", watch(json!({"chat": FAMILIA}))).await.unwrap();
+    assert_eq!((ids(&familia), familia["counts"]["link"].as_u64()), (vec!["p3~0", "l1~0", "l1~1"], Some(3)));
+    let rui = w.call("library.watch", watch(json!({"person": "person:2"}))).await.unwrap();
+    assert_eq!((ids(&rui), rui["counts"]["link"].as_u64()), (vec!["l2~0"], Some(1)), "by either of his JIDs");
+    let mine = w.call("library.watch", watch(json!({"person": "me"}))).await.unwrap();
+    assert_eq!(ids(&mine), ["p3~0"]);
+    let early = w.call("library.watch", watch(json!({"until": 11_000}))).await.unwrap();
+    assert_eq!(ids(&early), ["l1~0", "l1~1"], "in a stretch of time");
+
+    // By their words: hosts, URLs, and a preview's title and description, accent-blind.
+    bed.store.indexed().await.unwrap();
+    let sintra = w.call("library.watch", watch(json!({"text": "SINTRA"}))).await.unwrap();
+    assert_eq!(ids(&sintra), ["l2~0", "l1~0", "l1~1"], "each link of the messages whose links say it");
+    assert_eq!(sintra["counts"]["link"].as_u64(), Some(3));
+    let crags = w.call("library.watch", watch(json!({"text": "peninha crags"}))).await.unwrap();
+    assert_eq!(ids(&crags), ["l2~0"]);
+    let praia = w.call("library.watch", watch(json!({"text": "praia", "chat": FAMILIA}))).await.unwrap();
+    assert_eq!(ids(&praia), ["p3~0"], "in one chat");
+    let photos = w.call("library.watch", json!({"kind": "photo", "text": "ipma", "around": "top"})).await.unwrap();
+    assert!(ids(&photos).is_empty(), "a link's words aren't a photo's");
+
+    // Around a link, before and after it, and keeping its place when it goes.
+    let watched = w.watch("library.watch", watch(json!({}))).await;
+    let moved =
+        w.call("watch.move", json!({"watch": watched, "around": "l1~0", "before": 1, "after": 1})).await.unwrap();
+    assert!(moved.get("rows").is_some());
+    assert_eq!(w.windows[&watched].ids(), ["l2~0", "l1~0", "l1~1"].map(String::from));
+    let seq = bed.apply(vec![revoke(FAMILIA, "l1")]).await;
+    w.settle(seq).await;
+    let model = &w.windows[&watched];
+    assert_eq!(model.ids(), ["l2~0"].map(String::from), "deleted for everyone, its links go, the place kept");
+    assert_eq!((model.total, model.counts["link"].as_u64()), (2, Some(2)));
+    let code = |result: Result<Value, jaw_proto::Error>| result.unwrap_err().code;
+    assert_eq!(code(w.call("library.watch", watch(json!({"around": "l1~0"}))).await), 3, "a link gone");
+    assert_eq!(code(w.call("library.watch", watch(json!({"around": "l2"}))).await), 3, "a message isn't a link");
 }
 
 fn revoke(chat: &str, id: &str) -> Change {
@@ -281,7 +394,7 @@ async fn an_item_that_comes_again_or_twice_changes_nothing_twice() {
     w.settle(seq.max(bed.feed.seq() as i64)).await;
     let model = &w.windows[&watch];
     assert_eq!((model.ids(), model.total), (vec!["p2".to_string(), "p1".into()], 2));
-    assert_eq!(model.counts, json!({"photo": 2, "video": 3, "voice": 1, "file": 2}));
+    assert_eq!(model.counts, json!({"photo": 2, "video": 3, "voice": 1, "file": 2, "link": 0}));
     let praia = w.call("library.watch", json!({"kind": "photo", "text": "praia", "around": "top", "after": 5})).await;
     assert_eq!(ids(&praia.unwrap()), ["p1"], "once");
 }
@@ -349,6 +462,19 @@ async fn windows_match_fresh_watches_after_random_writes() {
     const SAID: [Option<&str>; 4] = [None, Some("na praia"), Some("o jantar"), Some("fotos da praia")];
     const CHATS: [&str; 3] = [ANA, CLIMBING, FAMILIA];
     const SENDERS: [Option<&str>; 4] = [None, Some(ANA), Some(RUI), Some(RUI_LID)];
+    const URLS: [&str; 3] = ["https://praia.pt/sintra", "www.ipma.pt", "https://cp.pt/jantar"];
+    // A message as `item` makes one, or giving a link or two, one in three.
+    let made_by = |rng: &mut Rng, chat: &str, id: &str, at: i64, kind: &'static str| {
+        let (sender, said) = (*rng.pick(&SENDERS), *rng.pick(&SAID));
+        match rng.below(3) {
+            0 => {
+                let urls: Vec<&str> = (0..1 + rng.below(2)).map(|_| *rng.pick(&URLS)).collect();
+                let preview = (rng.below(2) == 0).then_some(("Jantar em Sintra", "olá"));
+                linked(chat, id, at, sender, kind, said.unwrap_or("olha"), &urls, preview)
+            }
+            _ => item(chat, id, at, sender, kind, said),
+        }
+    };
     for seed in 1..=4u64 {
         let bed = Bed::new(brisk());
         bed.apply(people_and_chats()).await;
@@ -365,6 +491,17 @@ async fn windows_match_fresh_watches_after_random_writes() {
                 made.push((chat.into(), id));
             }
         }
+        bed.apply(vec![Change::Message(linked(
+            CLIMBING,
+            "w15",
+            15_500,
+            Some(RUI),
+            "text",
+            "a via",
+            URLS.as_slice(),
+            None,
+        ))])
+        .await;
         let wants = [
             json!({"kind": "photo", "around": "top", "after": 5}),
             json!({"kind": "photo", "around": "s15", "before": 3, "after": 3}),
@@ -375,6 +512,12 @@ async fn windows_match_fresh_watches_after_random_writes() {
             json!({"kind": "photo", "text": "praia", "around": "top", "after": 4}),
             json!({"kind": "voice", "person": "me", "around": "top", "after": 3}),
             json!({"kind": "photo", "since": 20_000, "until": 60_000, "around": "top", "after": 6}),
+            json!({"kind": "link", "around": "top", "after": 4}),
+            json!({"kind": "link", "around": "w15~1", "before": 2, "after": 2}),
+            json!({"kind": "link", "chat": FAMILIA, "around": "top", "after": 3}),
+            json!({"kind": "link", "person": "person:2", "around": "top", "after": 3}),
+            json!({"kind": "link", "text": "sintra", "around": "top", "after": 4}),
+            json!({"kind": "link", "since": 20_000, "around": "top", "after": 5}),
         ];
         let mut w = bed.watcher(256);
         let mut watched = Vec::new();
@@ -390,17 +533,14 @@ async fn windows_match_fresh_watches_after_random_writes() {
                     0..=4 => {
                         let (chat, kind) = (*rng.pick(&CHATS), *rng.pick(&KINDS));
                         let id = format!("r{round}-{}", rng.next() % 100_000);
-                        let message = item(chat, &id, at, *rng.pick(&SENDERS), kind, *rng.pick(&SAID));
+                        let message = made_by(&mut rng, chat, &id, at, kind);
                         made.push((chat.into(), id));
                         changes.push(Change::Message(message));
                     }
                     5 => {
                         let (chat, kind) = (*rng.pick(&CHATS), *rng.pick(&KINDS));
                         let id = format!("h{round}-{}", rng.next() % 100_000);
-                        let old = Message {
-                            live: false,
-                            ..item(chat, &id, at - 500_000, *rng.pick(&SENDERS), kind, *rng.pick(&SAID))
-                        };
+                        let old = Message { live: false, ..made_by(&mut rng, chat, &id, at - 500_000, kind) };
                         made.push((chat.into(), id));
                         history.push(Change::Message(old));
                     }
@@ -471,6 +611,32 @@ async fn older_says_an_item_is_left_past_the_window_and_not_when_exactly_after_r
     assert_eq!((held.windows[&short].ids(), held.windows[&short].older), (vec!["p3".into(), "p2".into()], true));
 }
 
+/// The same of links, three messages of two each, so a window's edge can fall between a message's.
+#[tokio::test(flavor = "multi_thread")]
+async fn older_says_a_link_is_left_past_the_window_and_not_when_exactly_after_remain() {
+    let bed = Bed::new(brisk());
+    bed.apply(people_and_chats()).await;
+    let urls = ["https://a.pt", "https://b.pt"];
+    let messages = (1..=3).map(|k| {
+        Change::Message(linked(CLIMBING, &format!("m{k}"), k * 1_000, Some(RUI), "text", "olha", &urls, None))
+    });
+    bed.apply(messages.collect()).await;
+    let mut w = bed.watcher(64);
+    let mut window = async |params: Value| {
+        let result = w.call("library.watch", params).await.unwrap();
+        (ids(&result).iter().map(|id| id.to_string()).collect::<Vec<_>>(), result["older"].as_bool().unwrap())
+    };
+    let top = |after| json!({"kind": "link", "chat": CLIMBING, "around": "top", "after": after});
+    assert!(!window(top(6)).await.1, "all six, none past them");
+    let five = ["m3~0", "m3~1", "m2~0", "m2~1", "m1~0"].map(String::from).to_vec();
+    assert_eq!(window(top(5)).await, (five, true));
+    let around = |after| json!({"kind": "link", "chat": CLIMBING, "around": "m2~1", "before": 0, "after": after});
+    assert_eq!(window(around(2)).await, (["m2~1", "m1~0", "m1~1"].map(String::from).to_vec(), false));
+    assert_eq!(window(around(1)).await, (["m2~1", "m1~0"].map(String::from).to_vec(), true));
+    let before = json!({"kind": "link", "chat": CLIMBING, "around": "m2~1", "before": 3, "after": 0});
+    assert_eq!(window(before).await, (["m3~0", "m3~1", "m2~0", "m2~1"].map(String::from).to_vec(), true));
+}
+
 /// The window a fresh watch of `method` with `params` gives, on a connection of its own; none when
 /// it's refused, as a watch of a chat that's gone is.
 async fn watched_afresh(bed: &Bed, method: &str, params: &Value) -> Option<Model> {
@@ -528,7 +694,9 @@ fn inexact(path: &str) -> Vec<String> {
     let kept = triples("SELECT chat, shelf, items FROM shelves");
     let counted = triples(
         "SELECT chat, shelf, count(*) FROM messages WHERE shelf IS NOT NULL GROUP BY chat, shelf
-        UNION ALL SELECT 0, shelf, count(*) FROM messages WHERE shelf IS NOT NULL GROUP BY shelf",
+        UNION ALL SELECT 0, shelf, count(*) FROM messages WHERE shelf IS NOT NULL GROUP BY shelf
+        UNION ALL SELECT chat, 'link', count(*) FROM links GROUP BY chat
+        UNION ALL SELECT 0, 'link', count(*) FROM links HAVING count(*) > 0",
     );
     if kept != counted {
         problems.push(format!(
@@ -546,6 +714,21 @@ fn inexact(path: &str) -> Vec<String> {
         .unwrap();
     if drifted > 0 {
         problems.push(format!("message_count: {drifted} chats drifted"));
+    }
+    let unkept: i64 = db
+        .query_row(
+            "SELECT (SELECT count(*) FROM (SELECT l.message, l.place, m.t, m.id, l.chat, l.sender, l.mine FROM links l
+                    JOIN messages m ON m.n = l.message
+                EXCEPT SELECT message, place, t, id, chat, sender, mine FROM library_links))
+            + (SELECT count(*) FROM (SELECT message, place, t, id, chat, sender, mine FROM library_links
+                EXCEPT SELECT l.message, l.place, m.t, m.id, l.chat, l.sender, l.mine FROM links l
+                    JOIN messages m ON m.n = l.message))",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if unkept > 0 {
+        problems.push(format!("library_links: {unkept} links differ from links"));
     }
     let afresh = Connection::open_in_memory().unwrap();
     afresh
@@ -576,6 +759,24 @@ fn inexact(path: &str) -> Vec<String> {
                 )
                 .unwrap();
         }
+    }
+    let mut select = db
+        .prepare(
+            "SELECT ~m.t, w.text, 'slink c' || m.chat || ' f' || coalesce(m.sender, iif(m.mine, 'me', 'none'))
+            FROM messages m JOIN message_link_text w ON w.message = m.n
+            WHERE w.text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog b WHERE b.n = m.n)",
+        )
+        .unwrap();
+    let rows =
+        select.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))).unwrap();
+    for row in rows {
+        let (rowid, text, tags) = row.unwrap();
+        afresh
+            .execute(
+                "INSERT INTO library_fts (rowid, text, tags) VALUES (?1, ?2, ?3)",
+                rusqlite::params![rowid, text, tags],
+            )
+            .unwrap();
     }
     for index in ["messages_fts", "library_fts"] {
         let (found, wanted) = (postings(&db, index).unwrap(), postings(&afresh, index).unwrap());
@@ -636,6 +837,21 @@ async fn merged_step_by_step(yours: bool) {
         let sender = (!yours).then_some(ANA_LID);
         changes.push(Change::Message(item(ANA_LID, &format!("l{k:03}"), 1_000 + k * 1_000, sender, "image", caption)));
     }
+    // Links in the chat merged away too, between its photos.
+    for k in 0..45 {
+        let sender = (!yours).then_some(ANA_LID);
+        let at = 1_500 + k * 10_000;
+        changes.push(Change::Message(linked(
+            ANA_LID,
+            &format!("u{k:02}"),
+            at,
+            sender,
+            "text",
+            "olha",
+            &["praia.pt"],
+            None,
+        )));
+    }
     for k in 0..30 {
         changes.push(Change::Message(item(
             ANA,
@@ -660,6 +876,9 @@ async fn merged_step_by_step(yours: bool) {
         ("library.watch", json!({"kind": "photo", "around": "top", "after": 50})),
         ("library.watch", json!({"kind": "photo", "person": format!("person:{ana}"), "around": "top", "after": 50})),
         ("library.watch", json!({"kind": "photo", "chat": ANA_LID, "text": "praia", "around": "top", "after": 20})),
+        ("library.watch", json!({"kind": "link", "chat": ANA_LID, "around": "top", "after": 30})),
+        ("library.watch", json!({"kind": "link", "chat": ANA, "around": "top", "after": 30})),
+        ("library.watch", json!({"kind": "link", "chat": ANA_LID, "text": "praia", "around": "top", "after": 20})),
         ("messages.watch", json!({"chat": ANA_LID, "around": "newest", "before": 50, "after": 0})),
         ("messages.watch", json!({"chat": ANA, "around": "newest", "before": 50, "after": 0})),
     ];
@@ -689,7 +908,7 @@ async fn merged_step_by_step(yours: bool) {
         let seq = bed.store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap().seq;
         w.settle(seq.max(bed.feed.seq() as i64)).await;
     }
-    assert_eq!(step, 3, "450 messages merge in three steps");
+    assert_eq!(step, 3, "495 messages merge in three steps");
     assert!(stale.is_empty(), "windows differed from fresh watches during the merge:\n{}", stale.join("\n"));
 }
 

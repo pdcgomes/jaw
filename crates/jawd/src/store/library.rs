@@ -2,9 +2,11 @@
 //! that kind, its `shelf` (migration 25). The items of a kind are read newest first by their t (the
 //! message's time, then its place in that millisecond) on an index that holds only items: across
 //! chats, in one chat, or from one sender, by keyset, so the thousandth page costs what the first
-//! does. Their words come from library_fts, which holds only items'. How many there are of each
-//! kind, in a chat or in all of them, is read from `shelves`, which the triggers counting messages
-//! keep; with any other filter, they're counted up to `COUNTED`.
+//! does. Each of a message's links is an item too, read from library_links in the same order, then
+//! first to last among the message's links. Their words come from library_fts, which holds only
+//! items' and links'. How many there are of each kind, in a chat or in all of them, is read from
+//! `shelves`, which the triggers counting messages and links keep; with any other filter, they're
+//! counted up to `COUNTED`.
 //!
 //! jaw.db is never analyzed, so the planner can't tell a sender's or a chat's items from all of a
 //! kind's: each read names the index it's for, and fails to prepare if that index can't serve it.
@@ -257,10 +259,10 @@ const WORDS_NEWER: &str = "SELECT m.n, m.t FROM library_fts CROSS JOIN messages 
 const WORDS_COUNT: &str = "SELECT count(*) FROM (SELECT 1 FROM library_fts
     WHERE library_fts MATCH ?1 AND rowid <= ?2 AND rowid >= ?3 LIMIT ?4)";
 
-/// The FTS5 query for the items of `shelf` in `scope` with every word of `words` (an FTS5 query of
-/// them), or None when nobody `scope` asks for could have sent any.
-fn tagged(words: &str, shelf: Shelf, scope: &Scope) -> Option<String> {
-    let mut query = format!("text : ({words}) AND tags : (s{})", shelf.as_str());
+/// The FTS5 query for the items of `kind` (a shelf, or `link`) in `scope` with every word of
+/// `words` (an FTS5 query of them), or None when nobody `scope` asks for could have sent any.
+fn tagged(words: &str, kind: &str, scope: &Scope) -> Option<String> {
+    let mut query = format!("text : ({words}) AND tags : (s{kind})");
     if let Some(chat) = scope.chat {
         query.push_str(&format!(" AND tags : (c{chat})"));
     }
@@ -287,7 +289,7 @@ pub fn words(
     from: i64,
     limit: usize,
 ) -> Result<Vec<(i64, i64)>> {
-    let Some(query) = tagged(words, shelf, scope) else { return Ok(Vec::new()) };
+    let Some(query) = tagged(words, shelf.as_str(), scope) else { return Ok(Vec::new()) };
     let (past, to) = bounds(scope, toward, from);
     let mut select =
         if toward == Toward::Older { db.prepare_cached(WORDS_OLDER)? } else { db.prepare_cached(WORDS_NEWER)? };
@@ -303,7 +305,7 @@ pub fn word_counts(db: &Connection, words: &str, scope: &Scope) -> Result<HashMa
     let mut counts = HashMap::new();
     let mut select = db.prepare_cached(WORDS_COUNT)?;
     for shelf in Shelf::ALL {
-        let n: i64 = match tagged(words, shelf, scope) {
+        let n: i64 = match tagged(words, shelf.as_str(), scope) {
             Some(query) => select.query_row(params![query, scope.until, scope.since, COUNTED as i64], |r| r.get(0))?,
             None => 0,
         };
@@ -496,6 +498,323 @@ pub fn chat_names(db: &Connection, chats: impl IntoIterator<Item = i64>) -> Resu
         }
     }
     Ok(names)
+}
+
+/// A link's place in the library's order: its message's t, then its rank, its place among the
+/// message's links made negative, so a window read newest first reads a message's links first to
+/// last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Place {
+    pub t: i64,
+    pub rank: i64,
+}
+
+/// A link a read found: its message's n and t, and its place among the message's links.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkKey {
+    pub message: i64,
+    pub place: i64,
+    pub t: i64,
+}
+
+impl LinkKey {
+    pub fn at(&self) -> Place {
+        Place { t: self.t, rank: -self.place }
+    }
+}
+
+/// A link's id on the wire: its message's ID, `~` and its place among the message's links.
+pub fn link_id(message: &str, place: i64) -> String {
+    format!("{message}~{place}")
+}
+
+/// The message ID and place a link's id names.
+pub fn link_named(id: &str) -> Option<(&str, i64)> {
+    let (message, place) = id.rsplit_once('~')?;
+    let place: i64 = place.parse().ok().filter(|&place| place >= 0)?;
+    (!message.is_empty()).then_some((message, place))
+}
+
+/// A link's sort on the wire: its message's, then its place among the message's links, counted down
+/// so a message's links come first to last as the window reads them. A message holds 65,536
+/// characters at most, so fewer than 100,000 links.
+pub fn link_sort(t: i64, place: i64) -> String {
+    format!("{}~{:05}", sort(t), 99_999 - place.clamp(0, 99_999))
+}
+
+/// The bounds of a read of links toward `toward` from just past `from`: past this place, not
+/// including it, to that t, including it.
+fn link_bounds(scope: &Scope, toward: Toward, from: Place) -> (Place, i64) {
+    match toward {
+        Toward::Older => (from.min(Place { t: scope.until.saturating_add(1), rank: i64::MIN }), scope.since),
+        Toward::Newer => (from.max(Place { t: scope.since.saturating_sub(1), rank: i64::MAX }), scope.until),
+    }
+}
+
+const LINKS_OLDER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_by_t
+    WHERE (t, rank) < (?1, ?2) AND t >= ?3 ORDER BY t DESC, rank DESC LIMIT ?4";
+const LINKS_NEWER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_by_t
+    WHERE (t, rank) > (?1, ?2) AND t <= ?3 ORDER BY t, rank LIMIT ?4";
+const LINKS_IN_OLDER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_in
+    WHERE chat = ?1 AND (t, rank) < (?2, ?3) AND t >= ?4 ORDER BY t DESC, rank DESC LIMIT ?5";
+const LINKS_IN_NEWER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_in
+    WHERE chat = ?1 AND (t, rank) > (?2, ?3) AND t <= ?4 ORDER BY t, rank LIMIT ?5";
+// One sender's links in a chat are the chat's, with who sent each read from the same index.
+const LINKS_IN_FROM_OLDER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_in
+    WHERE chat = ?1 AND sender IS ?2 AND mine = ?3 AND (t, rank) < (?4, ?5) AND t >= ?6
+    ORDER BY t DESC, rank DESC LIMIT ?7";
+const LINKS_IN_FROM_NEWER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_in
+    WHERE chat = ?1 AND sender IS ?2 AND mine = ?3 AND (t, rank) > (?4, ?5) AND t <= ?6 ORDER BY t, rank LIMIT ?7";
+const LINKS_FROM_OLDER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_by
+    WHERE sender IS ?1 AND mine = ?2 AND (t, rank) < (?3, ?4) AND t >= ?5 ORDER BY t DESC, rank DESC LIMIT ?6";
+const LINKS_FROM_NEWER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_by
+    WHERE sender IS ?1 AND mine = ?2 AND (t, rank) > (?3, ?4) AND t <= ?5 ORDER BY t, rank LIMIT ?6";
+
+/// Up to `limit` links in `scope` from just past `from` toward older or newer ones, nearest first.
+pub fn link_keys(db: &Connection, scope: &Scope, toward: Toward, from: Place, limit: usize) -> Result<Vec<LinkKey>> {
+    let (past, to) = link_bounds(scope, toward, from);
+    let most = limit as i64;
+    let key = |r: &Row| Ok(LinkKey { message: r.get(0)?, place: r.get(1)?, t: r.get(2)? });
+    let older = toward == Toward::Older;
+    let mut found: Vec<LinkKey> = match (scope.chat, &scope.sender) {
+        (None, Sender::Anyone) => {
+            let mut select = if older { db.prepare_cached(LINKS_OLDER)? } else { db.prepare_cached(LINKS_NEWER)? };
+            select.query_map(params![past.t, past.rank, to, most], key)?.collect::<rusqlite::Result<_>>()?
+        }
+        (Some(chat), Sender::Anyone) => {
+            let mut select =
+                if older { db.prepare_cached(LINKS_IN_OLDER)? } else { db.prepare_cached(LINKS_IN_NEWER)? };
+            select.query_map(params![chat, past.t, past.rank, to, most], key)?.collect::<rusqlite::Result<_>>()?
+        }
+        (chat, sender) => {
+            let mut found = Vec::new();
+            for (jid, mine) in sender.keys() {
+                let rows: Vec<LinkKey> = match chat {
+                    Some(chat) => {
+                        let mut select = if older {
+                            db.prepare_cached(LINKS_IN_FROM_OLDER)?
+                        } else {
+                            db.prepare_cached(LINKS_IN_FROM_NEWER)?
+                        };
+                        select
+                            .query_map(params![chat, jid, mine, past.t, past.rank, to, most], key)?
+                            .collect::<rusqlite::Result<_>>()?
+                    }
+                    None => {
+                        let mut select = if older {
+                            db.prepare_cached(LINKS_FROM_OLDER)?
+                        } else {
+                            db.prepare_cached(LINKS_FROM_NEWER)?
+                        };
+                        select
+                            .query_map(params![jid, mine, past.t, past.rank, to, most], key)?
+                            .collect::<rusqlite::Result<_>>()?
+                    }
+                };
+                found.extend(rows);
+            }
+            found
+        }
+    };
+    // A person's JIDs are read one at a time, each in order, and put in order together here.
+    if older {
+        found.sort_unstable_by_key(|key| std::cmp::Reverse(key.at()));
+    } else {
+        found.sort_unstable_by_key(LinkKey::at);
+    }
+    found.truncate(limit);
+    Ok(found)
+}
+
+const LINKS_COUNT: &str = "SELECT count(*) FROM (SELECT 1 FROM library_links INDEXED BY library_links_by_t
+    WHERE t <= ?1 AND t >= ?2 LIMIT ?3)";
+const LINKS_IN_COUNT: &str = "SELECT count(*) FROM (SELECT 1 FROM library_links INDEXED BY library_links_in
+    WHERE chat = ?1 AND t <= ?2 AND t >= ?3 LIMIT ?4)";
+const LINKS_IN_FROM_COUNT: &str = "SELECT count(*) FROM (SELECT 1 FROM library_links INDEXED BY library_links_in
+    WHERE chat = ?1 AND sender IS ?2 AND mine = ?3 AND t <= ?4 AND t >= ?5 LIMIT ?6)";
+const LINKS_FROM_COUNT: &str = "SELECT count(*) FROM (SELECT 1 FROM library_links INDEXED BY library_links_by
+    WHERE sender IS ?1 AND mine = ?2 AND t <= ?3 AND t >= ?4 LIMIT ?5)";
+const LINKS_KEPT: &str = "SELECT items FROM shelves WHERE chat = ?1 AND shelf = 'link'";
+
+/// How many links `scope` holds: as `shelves` keeps them for a chat or all of them, and counted up
+/// to COUNTED with any other filter.
+pub fn link_count(db: &Connection, scope: &Scope) -> Result<u64> {
+    if !scope.narrowed() {
+        let kept: Option<i64> =
+            db.prepare_cached(LINKS_KEPT)?.query_row([scope.chat.unwrap_or(0)], |r| r.get(0)).optional()?;
+        return Ok(kept.unwrap_or(0).max(0) as u64);
+    }
+    let (until, since, most) = (scope.until, scope.since, COUNTED as i64);
+    let count = |r: &Row| r.get::<_, i64>(0);
+    let n: i64 = match (scope.chat, &scope.sender) {
+        (None, Sender::Anyone) => db.prepare_cached(LINKS_COUNT)?.query_row(params![until, since, most], count)?,
+        (Some(chat), Sender::Anyone) => {
+            db.prepare_cached(LINKS_IN_COUNT)?.query_row(params![chat, until, since, most], count)?
+        }
+        (chat, sender) => {
+            let mut n = 0;
+            for (jid, mine) in sender.keys() {
+                n += match chat {
+                    Some(chat) => db
+                        .prepare_cached(LINKS_IN_FROM_COUNT)?
+                        .query_row(params![chat, jid, mine, until, since, most], count)?,
+                    None => {
+                        db.prepare_cached(LINKS_FROM_COUNT)?.query_row(params![jid, mine, until, since, most], count)?
+                    }
+                };
+            }
+            n
+        }
+    };
+    Ok((n.max(0) as u64).min(COUNTED))
+}
+
+// A message's links' words are one entry of library_fts, by ~t, so ~t's order is t's backwards and
+// a search reads the messages newest first by rowid alone, the order FTS5 gives, then each one's
+// links through library_links by its t.
+const LINK_WORDS_OLDER: &str = "SELECT ~rowid FROM library_fts
+    WHERE library_fts MATCH ?1 AND rowid >= ?2 AND rowid <= ?3 ORDER BY rowid LIMIT ?4";
+const LINK_WORDS_NEWER: &str = "SELECT ~rowid FROM library_fts
+    WHERE library_fts MATCH ?1 AND rowid >= ?2 AND rowid <= ?3 ORDER BY rowid DESC LIMIT ?4";
+const LINKS_OF_OLDER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_by_t
+    WHERE t = ?1 AND (t, rank) < (?2, ?3) ORDER BY rank DESC";
+const LINKS_OF_NEWER: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_by_t
+    WHERE t = ?1 AND (t, rank) > (?2, ?3) ORDER BY rank";
+const LINK_WORDS_COUNT: &str = "SELECT count(*) FROM (SELECT 1 FROM library_fts
+    CROSS JOIN library_links l INDEXED BY library_links_by_t ON l.t = ~library_fts.rowid
+    WHERE library_fts MATCH ?1 AND library_fts.rowid >= ?2 AND library_fts.rowid <= ?3 LIMIT ?4)";
+
+/// Up to `limit` links in `scope` with every word of `words` (an FTS5 query of them) among their
+/// message's links' words, from just past `from` toward older or newer ones, nearest first.
+pub fn link_words(
+    db: &Connection,
+    words: &str,
+    scope: &Scope,
+    toward: Toward,
+    from: Place,
+    limit: usize,
+) -> Result<Vec<LinkKey>> {
+    let Some(query) = tagged(words, "link", scope) else { return Ok(Vec::new()) };
+    let (past, to) = link_bounds(scope, toward, from);
+    // ~ reverses t's order: the stretch of t from `to` to `past` is the stretch of ~t between them.
+    let (low, high) = match toward {
+        Toward::Older => (!past.t, !to),
+        Toward::Newer => (!to, !past.t),
+    };
+    let older = toward == Toward::Older;
+    let mut select = if older { db.prepare_cached(LINK_WORDS_OLDER)? } else { db.prepare_cached(LINK_WORDS_NEWER)? };
+    // Each message found has a link at least, so one more than `limit` covers what's left of `from`'s.
+    let messages: Vec<i64> = select
+        .query_map(params![query, low, high, limit as i64 + 1], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut links = if older { db.prepare_cached(LINKS_OF_OLDER)? } else { db.prepare_cached(LINKS_OF_NEWER)? };
+    let mut found = Vec::with_capacity(limit);
+    for t in messages {
+        let keys = links.query_map(params![t, past.t, past.rank], |r| {
+            Ok(LinkKey { message: r.get(0)?, place: r.get(1)?, t: r.get(2)? })
+        })?;
+        for key in keys {
+            if found.len() == limit {
+                return Ok(found);
+            }
+            found.push(key?);
+        }
+    }
+    Ok(found)
+}
+
+/// How many links with every word of `words` `scope` holds, counted up to COUNTED.
+pub fn link_word_count(db: &Connection, words: &str, scope: &Scope) -> Result<u64> {
+    let Some(query) = tagged(words, "link", scope) else { return Ok(0) };
+    let n: i64 = db
+        .prepare_cached(LINK_WORDS_COUNT)?
+        .query_row(params![query, !scope.until, !scope.since, COUNTED as i64], |r| r.get(0))?;
+    Ok(n.max(0) as u64)
+}
+
+const LINK_NAMED: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_named
+    WHERE id = ?1 AND place = ?2";
+const LINK_NAMED_IN: &str = "SELECT message, place, t FROM library_links INDEXED BY library_links_named
+    WHERE id = ?1 AND place = ?2 AND chat = (SELECT n FROM chats WHERE id = ?3)";
+
+/// The links a link's `id` names, in `chat` or in any chat.
+pub fn named_links(db: &Connection, id: &str, chat: Option<&str>) -> Result<Vec<LinkKey>> {
+    let Some((message, place)) = link_named(id) else { return Ok(Vec::new()) };
+    let key = |r: &Row| Ok(LinkKey { message: r.get(0)?, place: r.get(1)?, t: r.get(2)? });
+    Ok(match chat {
+        Some(chat) => db
+            .prepare_cached(LINK_NAMED_IN)?
+            .query_map(params![message, place, chat], key)?
+            .collect::<rusqlite::Result<_>>()?,
+        None => {
+            db.prepare_cached(LINK_NAMED)?.query_map(params![message, place], key)?.collect::<rusqlite::Result<_>>()?
+        }
+    })
+}
+
+/// A link as its row shows it.
+#[derive(Debug)]
+pub struct LinkItem {
+    pub n: i64,
+    pub id: String,
+    pub place: i64,
+    pub chat_n: i64,
+    pub chat: String,
+    pub v: i64,
+    pub at: i64,
+    pub t: i64,
+    pub mine: bool,
+    /// Its message's words.
+    pub caption: String,
+    pub url: String,
+    pub host: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub from: Option<From>,
+}
+
+const LINK: &str = "SELECT m.n, m.id, m.chat, c.id, m.v, m.at, m.t, m.mine, m.text, l.place, l.url, l.host, l.title,
+        l.description, p.n, p.name, p.push_name, p.verified_name, j.jid
+    FROM links l JOIN messages m ON m.n = l.message JOIN chats c ON c.n = m.chat
+        LEFT JOIN person_jids j ON j.n = m.sender LEFT JOIN people p ON p.n = j.person
+    WHERE l.message = ?1 AND l.place = ?2";
+
+/// The links these keys name that are still there, in the order given.
+pub fn links(db: &Connection, keys: &[LinkKey]) -> Result<Vec<LinkItem>> {
+    let mut select = db.prepare_cached(LINK)?;
+    let mut links = Vec::with_capacity(keys.len());
+    for key in keys {
+        let link = select
+            .query_row(params![key.message, key.place], |r| {
+                let from = match r.get::<_, Option<i64>>(14)? {
+                    Some(id) => {
+                        let jid: Option<String> = r.get(18)?;
+                        Some(From { id, name: shown(r.get(15)?, r.get(16)?, r.get(17)?, jid.as_deref()) })
+                    }
+                    None => None,
+                };
+                Ok(LinkItem {
+                    n: r.get(0)?,
+                    id: r.get(1)?,
+                    chat_n: r.get(2)?,
+                    chat: r.get(3)?,
+                    v: r.get(4)?,
+                    at: r.get(5)?,
+                    t: r.get(6)?,
+                    mine: r.get(7)?,
+                    caption: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                    place: r.get(9)?,
+                    url: r.get(10)?,
+                    host: r.get(11)?,
+                    title: r.get(12)?,
+                    description: r.get(13)?,
+                    from,
+                })
+            })
+            .optional()?;
+        links.extend(link);
+    }
+    Ok(links)
 }
 
 #[cfg(test)]

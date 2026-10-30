@@ -40,6 +40,7 @@ const NEXT_PLACES: &str =
 const NEXT_EVENTS: &str =
     "SELECT n, kind = 'event' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
 const LINKED: &str = "SELECT 1 FROM links WHERE message = ?1";
+const CHAT_OF: &str = "SELECT chat FROM messages WHERE n = ?1";
 const LINK: &str = "INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description)
     SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links
     WHERE message = ?1";
@@ -112,12 +113,16 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
     Ok(changed)
 }
 
-/// Links message `n`, unless the triggers have since.
-fn link(db: &Connection, _: &mut Stamps, n: i64) -> Result<bool> {
+/// Links message `n`, unless the triggers have since. Its links are the library's now, so its event
+/// is written, though its row is as it was.
+fn link(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
     if db.prepare_cached(LINKED)?.exists([n])? || db.prepare_cached(LINK)?.execute([n])? == 0 {
         return Ok(false);
     }
     db.prepare_cached(INDEX_LINKS)?.execute([n])?;
+    let chat: i64 = db.prepare_cached(CHAT_OF)?.query_row([n], |r| r.get(0))?;
+    let seq = stamps.seq(MESSAGE, Some(n));
+    stamps.record(db, MESSAGE, n, Some(chat), seq)?;
     Ok(true)
 }
 

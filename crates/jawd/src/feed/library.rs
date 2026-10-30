@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::window::from_row;
 use crate::find::{Words, snippet};
-use crate::store::library::{self as store, Item, Scope, Sender, Shelf, Toward};
+use crate::store::library::{self as store, Item, LinkItem, LinkKey, Place, Scope, Sender, Shelf, Toward};
 use crate::store::read;
 
 /// A stretch of a kind's items: its newest `after`, or `before` items newer than one and `after`
@@ -42,15 +42,14 @@ pub(super) enum Whose {
     Person(i64),
 }
 
-/// The item a window is anchored on, and its place, which the window keeps if the item goes.
+/// The item a window is anchored on, and its place, which the window keeps if the item goes: its
+/// message's t, and for a link its rank among the message's links.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ItemAnchor {
     pub id: String,
     pub t: i64,
+    pub rank: i64,
 }
-
-/// What a library window holds until jawd keeps links, in words to show.
-pub(super) const NO_LINKS: &str = "Links come once jaw keeps them; until then the library has no links.";
 
 /// A library window as one read found it.
 pub(super) struct Library {
@@ -75,6 +74,22 @@ fn shelf(kind: Kind) -> Option<Shelf> {
         Kind::File => Some(Shelf::File),
         Kind::Link | Kind::All => None,
     }
+}
+
+/// Up to `limit` links from just past `from` toward older or newer ones, nearest first, with the
+/// window's words if it has any.
+fn link_page(
+    db: &Connection,
+    scope: &Scope,
+    words: Option<&str>,
+    toward: Toward,
+    from: Place,
+    limit: usize,
+) -> Result<Vec<LinkKey>> {
+    Ok(match words {
+        Some(words) => store::link_words(db, words, scope, toward, from, limit)?,
+        None => store::link_keys(db, scope, toward, from, limit)?,
+    })
 }
 
 /// Up to `limit` items of `shelf` from just past `from` toward older or newer ones, nearest first,
@@ -104,7 +119,7 @@ pub(super) fn read(db: &Connection, spec: &LibrarySpec) -> Result<Library> {
         chat: None,
         senders: HashSet::new(),
         chats: HashSet::new(),
-        note: matches!(spec.kind, Kind::Link | Kind::All).then(|| NO_LINKS.to_string()),
+        note: None,
     };
     let chat = match &spec.chat {
         Some(id) => match read::chat_n(db, id)? {
@@ -124,9 +139,9 @@ pub(super) fn read(db: &Connection, spec: &LibrarySpec) -> Result<Library> {
     let scope = Scope { chat, sender, since, until };
     let words = Words::new(&spec.text);
     let query = (!words.is_empty()).then(|| words.fts());
-    let counts = match &query {
-        Some(query) => store::word_counts(db, query, &scope)?,
-        None => store::counts(db, &scope)?,
+    let (counts, links) = match &query {
+        Some(query) => (store::word_counts(db, query, &scope)?, store::link_word_count(db, query, &scope)?),
+        None => (store::counts(db, &scope)?, store::link_count(db, &scope)?),
     };
     let count = |shelf: Shelf| counts.get(&shelf).copied().unwrap_or(0);
     library.counts = Counts {
@@ -134,19 +149,46 @@ pub(super) fn read(db: &Connection, spec: &LibrarySpec) -> Result<Library> {
         video: count(Shelf::Video),
         voice: count(Shelf::Voice),
         file: count(Shelf::File),
-        link: None,
+        link: Some(links),
     };
     let query = query.as_deref();
+    let top = Place { t: i64::MAX, rank: i64::MAX };
+    let mut link_keys = Vec::new();
     let keys = match (spec.kind, shelf(spec.kind)) {
         (Kind::All, _) => {
-            library.total = Shelf::ALL.into_iter().map(count).sum();
+            library.total = Shelf::ALL.into_iter().map(count).sum::<u64>() + links;
             let mut keys = Vec::new();
             for shelf in Shelf::ALL {
                 keys.extend(page(db, shelf, &scope, query, Toward::Older, i64::MAX, spec.after)?);
             }
+            link_keys = link_page(db, &scope, query, Toward::Older, top, spec.after)?;
             keys
         }
-        (_, None) => Vec::new(),
+        (_, None) => {
+            library.total = links;
+            link_keys = match &spec.anchor {
+                None => {
+                    let mut keys = link_page(db, &scope, query, Toward::Older, top, spec.after + 1)?;
+                    library.older = keys.len() > spec.after;
+                    keys.truncate(spec.after);
+                    keys
+                }
+                Some(anchor) => {
+                    let at = Place { t: anchor.t, rank: anchor.rank };
+                    let mut keys = link_page(db, &scope, query, Toward::Newer, at, spec.before)?;
+                    keys.reverse();
+                    // From the anchor down: the anchor first, if it's still a link here.
+                    let past = Place { t: at.t, rank: at.rank.saturating_add(1) };
+                    let mut from = link_page(db, &scope, query, Toward::Older, past, spec.after + 2)?;
+                    let kept = spec.after + usize::from(from.first().is_some_and(|key| key.at() == at));
+                    library.older = from.len() > kept;
+                    from.truncate(kept);
+                    keys.append(&mut from);
+                    keys
+                }
+            };
+            Vec::new()
+        }
         (_, Some(shelf)) => {
             library.total = count(shelf);
             match &spec.anchor {
@@ -173,7 +215,9 @@ pub(super) fn read(db: &Connection, spec: &LibrarySpec) -> Result<Library> {
     };
     let ns: Vec<i64> = keys.iter().map(|&(n, _)| n).collect();
     let items = store::items(db, &ns)?;
-    let names = store::chat_names(db, items.iter().map(|item| item.chat_n))?;
+    let links = store::links(db, &link_keys)?;
+    let chats = items.iter().map(|item| item.chat_n).chain(links.iter().map(|link| link.chat_n));
+    let names = store::chat_names(db, chats)?;
     for item in items {
         library.chats.insert(item.chat_n);
         if let Some(from) = &item.from {
@@ -182,7 +226,40 @@ pub(super) fn read(db: &Connection, spec: &LibrarySpec) -> Result<Library> {
         let chat_name = names.get(&item.chat_n).cloned().unwrap_or_else(|| item.chat.clone());
         library.rows.push((item.n, row(item, chat_name, &words)));
     }
+    for link in links {
+        library.chats.insert(link.chat_n);
+        if let Some(from) = &link.from {
+            library.senders.insert(from.id);
+        }
+        let chat_name = names.get(&link.chat_n).cloned().unwrap_or_else(|| link.chat.clone());
+        library.rows.push((link.n, link_row(link, chat_name, &words)));
+    }
     Ok(library)
+}
+
+/// A link's row.
+fn link_row(link: LinkItem, chat_name: String, words: &Words) -> proto::LibraryRow {
+    let caption = match link.caption.trim() {
+        "" => Vec::<Span>::new(),
+        caption => snippet(caption, &words.marks(caption)),
+    };
+    proto::LibraryRow {
+        id: store::link_id(&link.id, link.place),
+        v: link.v.max(0) as u64,
+        sort: store::link_sort(link.t, link.place),
+        kind: Kind::Link,
+        message: link.id,
+        chat: link.chat,
+        chat_name,
+        from: link.from.map(from_row),
+        mine: link.mine,
+        at: link.at,
+        caption,
+        media: None,
+        voice: None,
+        file: None,
+        link: Some(proto::Link { url: link.url, host: link.host, title: link.title, description: link.description }),
+    }
 }
 
 /// An item's row.

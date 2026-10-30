@@ -74,7 +74,7 @@ pub struct Counts {
     pub video: u64,
     pub voice: u64,
     pub file: u64,
-    /// Absent while jawd doesn't keep links.
+    /// Absent from a jawd from before links were kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<u64>,
 }
@@ -136,7 +136,8 @@ pub struct LibraryRow {
     pub id: String,
     /// Its message's version.
     pub v: u64,
-    /// Its message's time, then its place in that millisecond, and a link's place.
+    /// Its message's time, then its place in that millisecond, and for a link 99,999 less its place
+    /// among its message's links, so they come first to last.
     pub sort: String,
     pub kind: Kind,
     /// Its message's ID, to go to.

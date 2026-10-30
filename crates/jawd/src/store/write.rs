@@ -1224,48 +1224,69 @@ fn remove_row(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result
 }
 
 /// Indexes up to `limit` messages from fts_backlog for search, their text and their links' words,
-/// and those that are the library's items for its search too, the latest written first, stopping
+/// and the library's items' and links' for its search too, the latest written first, stopping
 /// early when `enough` says so, given how many it has taken. They go into FTS5 in the order of its
 /// rowid, their time, since FTS5 writes out what it holds whenever a rowid comes lower than the
-/// last. An item found by its words now changes what a library window shows, so its message's
-/// event is written, though its row is as it was. Says how many it took and whether the backlog may
-/// have more.
+/// last. An item or a link found by its words now changes what a library window shows, so its
+/// message's event is written, though its row is as it was. Says how many it took and whether the
+/// backlog may have more.
 pub(super) fn index(
     db: &Connection,
     stamps: &mut Stamps,
     limit: usize,
     mut enough: impl FnMut(usize) -> bool,
 ) -> Result<(usize, bool)> {
-    let mut waiting: Vec<(i64, i64, i64)> = db
+    // Whether each is an item with words, or has links, so the library's statements run only for those.
+    let mut waiting: Vec<(i64, i64, i64, bool, bool)> = db
         .prepare_cached(
-            "SELECT m.t, b.n, m.chat FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b
-            JOIN messages m ON m.n = b.n",
+            "SELECT m.t, b.n, m.chat, m.shelf IS NOT NULL AND m.text IS NOT NULL,
+                EXISTS (SELECT 1 FROM library_links l WHERE l.message = b.n)
+            FROM (SELECT n FROM fts_backlog ORDER BY n DESC LIMIT ?1) b JOIN messages m ON m.n = b.n",
         )?
-        .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
         .collect::<rusqlite::Result<_>>()?;
     waiting.sort_unstable();
     let mut taken = 0;
-    for &(_, n, chat) in &waiting {
+    for &(_, n, ..) in &waiting {
         db.prepare_cached(
             "INSERT INTO messages_fts (rowid, text) SELECT t, text FROM messages WHERE n = ?1 AND text IS NOT NULL",
         )?
         .execute([n])?;
-        let item = db
-            .prepare_cached(
-                "INSERT OR REPLACE INTO library_fts (rowid, text, tags)
-                SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none'))
-                FROM messages WHERE n = ?1 AND text IS NOT NULL AND shelf IS NOT NULL",
-            )?
-            .execute([n])?;
-        if item > 0 {
-            let seq = stamps.seq(MESSAGE, Some(n));
-            stamps.record(db, MESSAGE, n, Some(chat), seq)?;
-        }
         db.prepare_cached("DELETE FROM fts_backlog WHERE n = ?1")?.execute([n])?;
         db.prepare_cached(links::INDEX_LINKS)?.execute([n])?;
         taken += 1;
         if enough(taken) {
             break;
+        }
+    }
+    // library_fts takes links' words by ~t, so they go in newest first and before items' words,
+    // which go in by t, and its rowids still only rise.
+    let taken_rows = &waiting[..taken];
+    let mut found = vec![0; taken];
+    for (i, &(_, n, _, _, linked)) in taken_rows.iter().enumerate().rev() {
+        if linked {
+            found[i] += db
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO library_fts (rowid, text, tags)
+                    SELECT ~w.t, w.text, 'slink c' || m.chat || ' f' || coalesce(m.sender, iif(m.mine, 'me', 'none'))
+                    FROM messages m JOIN message_link_text w ON w.message = m.n WHERE m.n = ?1 AND w.text IS NOT NULL",
+                )?
+                .execute([n])?;
+        }
+    }
+    for (i, &(_, n, chat, item, _)) in taken_rows.iter().enumerate() {
+        if item {
+            found[i] += db
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO library_fts (rowid, text, tags)
+                    SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none'))
+                    FROM messages WHERE n = ?1 AND text IS NOT NULL AND shelf IS NOT NULL",
+                )?
+                .execute([n])?;
+        }
+        if found[i] > 0 {
+            let seq = stamps.seq(MESSAGE, Some(n));
+            stamps.record(db, MESSAGE, n, Some(chat), seq)?;
         }
     }
     Ok((taken, taken < waiting.len() || waiting.len() == limit))

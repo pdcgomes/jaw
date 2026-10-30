@@ -833,7 +833,7 @@ pub struct LibraryWindow {
     pub total: Option<u32>,
     pub older: Option<bool>,
     pub counts: Option<HashMap<LibraryKind, u32>>,
-    /// What the window can't hold yet and why, in words to show: links, until jawd keeps them.
+    /// What the window can't hold yet and why, in words to show: links, from a jawd from before they were kept.
     pub note: Option<String>,
 }
 

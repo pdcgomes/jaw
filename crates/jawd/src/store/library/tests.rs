@@ -28,6 +28,8 @@ impl Rng {
 const KINDS: [&str; 10] =
     ["text", "image", "video", "gif", "video_note", "voice", "audio", "document", "sticker", "location"];
 const WORDS: [&str; 8] = ["praia", "jantar", "fotos", "relatório", "domingo", "lisboa", "pdf", "olá"];
+/// URLs a made-up message can give, some of them saying WORDS.
+const URLS: [&str; 4] = ["https://praia.pt/sintra", "www.ipma.pt/domingo", "https://cp.pt/lisboa", "https://jaw.dev"];
 
 fn migrated() -> Connection {
     let mut db = Connection::open_in_memory().unwrap();
@@ -51,6 +53,33 @@ fn said(rng: &mut Rng) -> Option<String> {
     }
 }
 
+/// A made-up message's spans, with a link or two in one of three, as the converter marks them, and
+/// its words with the links' URLs.
+fn linked(rng: &mut Rng, said: Option<String>) -> (Option<String>, Option<String>) {
+    if rng.below(3) > 0 {
+        return (said, None);
+    }
+    let mut text = said.unwrap_or_default();
+    let mut spans = vec![serde_json::json!({"t": "text", "s": text.clone()})];
+    for _ in 0..1 + rng.below(2) {
+        let url = *rng.pick(&URLS);
+        text.push(' ');
+        text.push_str(url);
+        spans.push(serde_json::json!({"t": "text", "s": " "}));
+        spans.push(serde_json::json!({"t": "link", "s": url, "url": url}));
+    }
+    (Some(text), Some(serde_json::Value::Array(spans).to_string()))
+}
+
+/// A link preview, now and then, which links its URL, with words of its own.
+fn previewed(rng: &mut Rng) -> Option<String> {
+    (rng.below(6) == 0).then(|| {
+        serde_json::json!({"link": {"url": "https://www.publico.pt/jantar", "title": "Jantar de domingo",
+            "description": "Olá, Lisboa"}})
+        .to_string()
+    })
+}
+
 /// Writes a message as the writer does, waiting in fts_backlog first when it's history.
 fn insert(db: &Connection, rng: &mut Rng, next: &mut i64, history: bool) {
     *next += 1;
@@ -64,9 +93,14 @@ fn insert(db: &Connection, rng: &mut Rng, next: &mut i64, history: bool) {
         2 => (Some(2), false),
         _ => (Some(3), false),
     };
+    let kind = *rng.pick(&KINDS);
+    let said = said(rng);
+    let (text, spans) = linked(rng, said);
+    let view_once = rng.below(10) == 0;
+    let detail = previewed(rng);
     db.execute(
-        "INSERT INTO messages (n, chat, id, at, t, sender, mine, kind, text, deleted, view_once, v)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, 1)",
+        "INSERT INTO messages (n, chat, id, at, t, sender, mine, kind, text, spans, detail, deleted, view_once, v)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, 1)",
         params![
             n,
             1 + rng.below(3) as i64,
@@ -75,17 +109,19 @@ fn insert(db: &Connection, rng: &mut Rng, next: &mut i64, history: bool) {
             (1_790_000_000_000 + n * 1_000) << 20,
             sender,
             mine,
-            rng.pick(&KINDS),
-            said(rng),
-            rng.below(10) == 0,
+            kind,
+            text,
+            spans,
+            detail,
+            view_once,
         ],
     )
     .unwrap();
 }
 
 /// Something done to a message: a new one, live or from history; one deleted for you, deleted for
-/// everyone, edited, seen once, turned into another kind or moved to another chat as a merge
-/// moves it; history's words indexed.
+/// everyone, edited (its links too, now and then), seen once, turned into another kind or moved to
+/// another chat as a merge moves it; history's words indexed.
 fn act(db: &Connection, rng: &mut Rng, next: &mut i64) {
     let some: Option<i64> = db
         .query_row(
@@ -103,8 +139,13 @@ fn act(db: &Connection, rng: &mut Rng, next: &mut i64) {
         (5, Some(n)) => {
             db.execute("UPDATE messages SET deleted = 1, text = NULL WHERE n = ?1", [n]).unwrap();
         }
-        (6, Some(n)) => {
+        (6, Some(n)) if rng.below(2) == 0 => {
             db.execute("UPDATE messages SET text = ?2 WHERE n = ?1", params![n, said(rng)]).unwrap();
+        }
+        (6, Some(n)) => {
+            let said = said(rng);
+            let (text, spans) = linked(rng, said);
+            db.execute("UPDATE messages SET text = ?2, spans = ?3 WHERE n = ?1", params![n, text, spans]).unwrap();
         }
         (7, Some(n)) => {
             db.execute(
@@ -129,10 +170,12 @@ fn indexed(db: &Connection, most: usize) -> bool {
     crate::store::write::index(db, &mut stamps, most, |_| false).unwrap().1
 }
 
-/// What `shelves` should hold, counted afresh from messages.
+/// What `shelves` should hold, counted afresh from messages and their links.
 fn counted(db: &Connection) -> BTreeMap<(i64, String), i64> {
     let mut counted = BTreeMap::new();
-    let mut select = db.prepare("SELECT chat, shelf FROM messages WHERE shelf IS NOT NULL").unwrap();
+    let mut select = db
+        .prepare("SELECT chat, shelf FROM messages WHERE shelf IS NOT NULL UNION ALL SELECT chat, 'link' FROM links")
+        .unwrap();
     let rows = select.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))).unwrap();
     for row in rows {
         let (chat, shelf) = row.unwrap();
@@ -160,10 +203,81 @@ fn expected(db: &Connection, index: &str, word: &str) -> BTreeSet<i64> {
     rows.map(Result::unwrap).filter(|(_, text)| !folded.marks(text).is_empty()).map(|(t, _)| t).collect()
 }
 
+/// The t of every message `word` finds in `index`; in library_fts, only items', whose rowids are
+/// their t, where links' are ~t.
 fn found(db: &Connection, index: &str, word: &str) -> BTreeSet<i64> {
-    let sql = format!("SELECT rowid FROM {index} WHERE {index} MATCH ?1");
+    let sql = format!("SELECT rowid FROM {index} WHERE {index} MATCH ?1 AND rowid >= 0");
     let mut select = db.prepare(&sql).unwrap();
     select.query_map([crate::find::Words::new(word).fts()], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+}
+
+/// The t of every message whose links' words `word` finds in library_fts.
+fn found_links(db: &Connection, word: &str) -> BTreeSet<i64> {
+    let mut select = db.prepare("SELECT ~rowid FROM library_fts WHERE library_fts MATCH ?1 AND rowid < 0").unwrap();
+    select.query_map([crate::find::Words::new(word).fts()], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+}
+
+/// Each message with links, as library_fts should hold its words: its t, its links' words as
+/// links_fts has them, its chat, sender and whether it's yours; none waiting in fts_backlog.
+fn link_texts(db: &Connection) -> Vec<(i64, String, i64, Option<i64>, bool)> {
+    let mut select = db
+        .prepare(
+            "SELECT m.t, w.text, m.chat, m.sender, m.mine FROM messages m JOIN message_link_text w ON w.message = m.n
+            WHERE w.text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog b WHERE b.n = m.n)",
+        )
+        .unwrap();
+    select
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// The t of every message whose links' words `word` should find in library_fts.
+fn expected_links(db: &Connection, word: &str) -> BTreeSet<i64> {
+    let folded = crate::find::Words::new(word);
+    link_texts(db).into_iter().filter(|(_, text, ..)| !folded.marks(text).is_empty()).map(|(t, ..)| t).collect()
+}
+
+/// A link as library_links holds it: its message, its place, its message's t and ID, its chat, who
+/// sent it and whether it's yours.
+type Kept = (i64, i64, i64, String, i64, Option<i64>, bool);
+
+/// Every link, as library_links should hold it, from links and their messages.
+fn linked_afresh(db: &Connection) -> BTreeSet<Kept> {
+    let mut select = db
+        .prepare(
+            "SELECT l.message, l.place, m.t, m.id, l.chat, l.sender, l.mine FROM links l JOIN messages m ON m.n = l.message",
+        )
+        .unwrap();
+    select
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn links_kept(db: &Connection) -> BTreeSet<Kept> {
+    let mut select =
+        db.prepare("SELECT message, place, t, id, chat, sender, mine FROM library_links WHERE rank = -place").unwrap();
+    select
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// The link of every message in `scope` whose links' words `word` should find, by message and place.
+fn expected_link_words(db: &Connection, word: &str, scope: &Scope) -> BTreeSet<(i64, i64)> {
+    let folded = crate::find::Words::new(word);
+    let matching: BTreeSet<i64> = link_texts(db)
+        .into_iter()
+        .filter(|(t, text, chat, sender, mine)| {
+            !folded.marks(text).is_empty() && holds(scope, *chat, *sender, *mine, *t)
+        })
+        .map(|(t, ..)| t)
+        .collect();
+    linked_afresh(db).into_iter().filter(|link| matching.contains(&link.2)).map(|link| (link.0, link.1)).collect()
 }
 
 /// The t of every item of `shelf` in `scope` that `word` should find in library_fts, its words
@@ -191,11 +305,15 @@ fn expected_in(db: &Connection, word: &str, shelf: Shelf, scope: &Scope) -> BTre
 
 fn check(db: &Connection, what: &str) {
     assert_eq!(kept(db), counted(db), "{what}: shelves");
+    assert_eq!(links_kept(db), linked_afresh(db), "{what}: library_links");
     for index in ["messages_fts", "library_fts"] {
         db.execute(&format!("INSERT INTO {index} ({index}, rank) VALUES ('integrity-check', 0)"), []).unwrap();
         for word in WORDS {
             assert_eq!(found(db, index, word), expected(db, index, word), "{what}: {index} for {word}");
         }
+    }
+    for word in WORDS.iter().chain(&["https", "sintra", "ipma", "jaw"]) {
+        assert_eq!(found_links(db, word), expected_links(db, word), "{what}: links' words for {word}");
     }
     // Each item's tags follow its kind, chat and sender as they change.
     let open = Scope { chat: None, sender: Sender::Anyone, since: 0, until: i64::MAX };
@@ -214,6 +332,15 @@ fn check(db: &Connection, what: &str) {
                     .collect();
                 assert_eq!(found, expected_in(db, word, shelf, scope), "{what}: {word} in {shelf:?} {scope:?}");
             }
+        }
+        for scope in &scopes {
+            let top = Place { t: i64::MAX, rank: i64::MAX };
+            let found: BTreeSet<(i64, i64)> = link_words(db, &query, scope, Toward::Older, top, 10_000)
+                .unwrap()
+                .into_iter()
+                .map(|key| (key.message, key.place))
+                .collect();
+            assert_eq!(found, expected_link_words(db, word, scope), "{what}: {word} in links {scope:?}");
         }
     }
 }
@@ -253,7 +380,17 @@ fn indexing_historys_words_tells_the_feed_of_each_item_it_makes_findable() {
         t(3)
     ))
     .unwrap();
+    // And a message with a link, which is a link of the library's however it's indexed.
+    db.execute("INSERT INTO fts_backlog (n) VALUES (4)", []).unwrap();
+    db.execute(
+        "INSERT INTO messages (n, chat, id, at, t, sender, mine, kind, text, spans, v) VALUES
+            (4, 2, 'linked', 4, ?1, 1, 0, 'text', 'olha https://praia.pt',
+            '[{\"t\":\"text\",\"s\":\"olha \"},{\"t\":\"link\",\"s\":\"https://praia.pt\",\"url\":\"https://praia.pt\"}]', 1)",
+        [t(4)],
+    )
+    .unwrap();
     assert!(found(&db, "library_fts", "praia").is_empty(), "waiting to be indexed");
+    assert!(found_links(&db, "praia").is_empty(), "its link's words too");
     let events = |db: &Connection| -> Vec<(String, i64, Option<i64>)> {
         let mut select = db.prepare("SELECT type, key, chat FROM events ORDER BY seq").unwrap();
         select.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect()
@@ -261,7 +398,12 @@ fn indexing_historys_words_tells_the_feed_of_each_item_it_makes_findable() {
     assert!(events(&db).is_empty());
     assert!(!indexed(&db, 10), "all of it");
     assert_eq!(found(&db, "library_fts", "praia"), BTreeSet::from([t(1)]));
-    assert_eq!(events(&db), [("message".into(), 1, Some(2))], "the item found by its words now, and only it");
+    assert_eq!(found_links(&db, "praia"), BTreeSet::from([t(4)]));
+    assert_eq!(
+        events(&db),
+        [("message".into(), 1, Some(2)), ("message".into(), 4, Some(2))],
+        "the item and the link found by their words now, and only those"
+    );
 }
 
 #[test]
@@ -365,6 +507,150 @@ fn a_kinds_items_page_by_keyset_each_once_newest_first_in_every_scope() {
     }
 }
 
+/// Every link `scope` holds, newest first and a message's first to last, read whole from links.
+fn every_link(db: &Connection, scope: &Scope) -> Vec<LinkKey> {
+    let mut select = db
+        .prepare(
+            "SELECT l.message, l.place, m.t, l.chat, l.sender, l.mine FROM links l JOIN messages m ON m.n = l.message
+            ORDER BY m.t DESC, l.place",
+        )
+        .unwrap();
+    let rows = select
+        .query_map([], |r| {
+            Ok((
+                LinkKey { message: r.get(0)?, place: r.get(1)?, t: r.get(2)? },
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+                r.get::<_, bool>(5)?,
+            ))
+        })
+        .unwrap();
+    rows.map(Result::unwrap)
+        .filter(|(key, chat, sender, mine)| holds(scope, *chat, *sender, *mine, key.t))
+        .map(|(key, ..)| key)
+        .collect()
+}
+
+#[test]
+fn links_page_by_keyset_each_once_newest_first_and_a_messages_first_to_last_in_every_scope() {
+    let db = library();
+    let messages_with_two: i64 = db
+        .query_row("SELECT count(*) FROM (SELECT message FROM links GROUP BY message HAVING count(*) > 1)", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(messages_with_two > 10, "messages with two links each, to page between");
+    for scope in scopes() {
+        let all = every_link(&db, &scope);
+        let mut paged = Vec::new();
+        let mut from = Place { t: i64::MAX, rank: i64::MAX };
+        loop {
+            let page = link_keys(&db, &scope, Toward::Older, from, 3).unwrap();
+            let Some(last) = page.last() else { break };
+            from = last.at();
+            paged.extend(page);
+        }
+        assert_eq!(paged, all, "links in {scope:?}, older");
+        let mut up = Vec::new();
+        let mut from = Place { t: i64::MIN, rank: i64::MIN };
+        loop {
+            let page = link_keys(&db, &scope, Toward::Newer, from, 2).unwrap();
+            let Some(last) = page.last() else { break };
+            from = last.at();
+            up.extend(page);
+        }
+        up.reverse();
+        assert_eq!(up, all, "links in {scope:?}, newer");
+        // By their words, a page at a time too, as one read whole finds them, every page but the
+        // last full, though it may begin past every link of the message it begins in.
+        let query = crate::find::Words::new("https").fts();
+        let whole =
+            link_words(&db, &query, &scope, Toward::Older, Place { t: i64::MAX, rank: i64::MAX }, 10_000).unwrap();
+        let mut paged = Vec::new();
+        let mut from = Place { t: i64::MAX, rank: i64::MAX };
+        loop {
+            let page = link_words(&db, &query, &scope, Toward::Older, from, 3).unwrap();
+            let Some(last) = page.last() else { break };
+            from = last.at();
+            assert!(page.len() == 3 || paged.len() + page.len() == whole.len(), "a short page in {scope:?}");
+            paged.extend(page);
+        }
+        assert_eq!(paged, whole, "links by their words in {scope:?}, older");
+        let mut up = Vec::new();
+        let mut from = Place { t: i64::MIN, rank: i64::MIN };
+        loop {
+            let page = link_words(&db, &query, &scope, Toward::Newer, from, 2).unwrap();
+            let Some(last) = page.last() else { break };
+            from = last.at();
+            assert!(page.len() == 2 || up.len() + page.len() == whole.len(), "a short page in {scope:?}");
+            up.extend(page);
+        }
+        up.reverse();
+        assert_eq!(up, whole, "links by their words in {scope:?}, newer");
+    }
+}
+
+#[test]
+fn the_links_backfill_gives_the_library_each_link_it_finds_and_tells_the_feed() {
+    let db = migrated();
+    let mut rng = Rng(23);
+    let mut next = 0;
+    for _ in 0..120 {
+        insert(&db, &mut rng, &mut next, false);
+    }
+    let linked: BTreeSet<i64> = {
+        let mut select = db.prepare("SELECT DISTINCT message FROM links").unwrap();
+        select.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    assert!(linked.len() > 20, "messages with links");
+    // As jaw.db held them before links were kept: none, and the backfill's row.
+    db.execute_batch(
+        "DELETE FROM links; DELETE FROM links_fts;
+        INSERT INTO backfills (name, after, upto) SELECT 'links', 0, max(n) FROM messages;",
+    )
+    .unwrap();
+    assert!(links_kept(&db).is_empty() && !kept(&db).keys().any(|(_, shelf)| shelf == "link"));
+    check(&db, "before the backfill");
+    let mut stamps = crate::store::write::Stamps::load(&db).unwrap();
+    stamps.begin();
+    while db
+        .query_row("SELECT EXISTS (SELECT 1 FROM backfills WHERE name = 'links')", [], |r| r.get::<_, bool>(0))
+        .unwrap()
+    {
+        crate::store::write::apply(&db, &mut stamps, &crate::store::Change::Backfill("links")).unwrap();
+    }
+    check(&db, "after the backfill");
+    let told: BTreeSet<i64> = {
+        let mut select = db.prepare("SELECT key FROM events WHERE type = 'message'").unwrap();
+        select.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    assert_eq!(told, linked, "each message whose links it found, and only those");
+}
+
+#[test]
+fn a_link_is_named_by_its_message_id_and_place_in_its_chat_or_in_any() {
+    let db = library();
+    let (message, place, t, id, chat): (i64, i64, i64, String, String) = db
+        .query_row(
+            "SELECT l.message, l.place, m.t, m.id, c.id FROM links l JOIN messages m ON m.n = l.message
+                JOIN chats c ON c.n = m.chat
+            WHERE l.place = 1 LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    let named = link_id(&id, place);
+    assert_eq!(link_named(&named), Some((id.as_str(), 1)));
+    let key = LinkKey { message, place, t };
+    assert_eq!(named_links(&db, &named, Some(&chat)).unwrap(), [key]);
+    assert_eq!(named_links(&db, &named, None).unwrap(), [key]);
+    assert!(named_links(&db, &link_id(&id, 9), None).unwrap().is_empty(), "no tenth link");
+    assert!(named_links(&db, &id, None).unwrap().is_empty(), "a message's ID alone names no link");
+    assert!(link_named("3EB0~x").is_none() && link_named("~1").is_none() && link_named("3EB0~-1").is_none());
+    assert!(link_sort(t, 0) > link_sort(t, 1), "a message's first link reads first, newest first");
+    assert!(link_sort(t, 0) < link_sort(t + 1, 5), "and after the links of a newer one");
+}
+
 #[test]
 fn counts_are_kept_for_a_chat_or_all_and_counted_up_to_a_thousand_otherwise() {
     let db = library();
@@ -373,6 +659,10 @@ fn counts_are_kept_for_a_chat_or_all_and_counted_up_to_a_thousand_otherwise() {
         for shelf in Shelf::ALL {
             assert_eq!(counts[&shelf], every(&db, shelf, &scope).len() as u64, "{shelf:?} in {scope:?}");
         }
+        assert_eq!(link_count(&db, &scope).unwrap(), every_link(&db, &scope).len() as u64, "links in {scope:?}");
+        let query = crate::find::Words::new("https").fts();
+        let by_words = link_words(&db, &query, &scope, Toward::Older, Place { t: i64::MAX, rank: i64::MAX }, 10_000);
+        assert_eq!(link_word_count(&db, &query, &scope).unwrap(), by_words.unwrap().len() as u64, "{scope:?}");
     }
     let many = migrated();
     many.execute_batch(

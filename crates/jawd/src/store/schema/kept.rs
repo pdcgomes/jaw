@@ -102,6 +102,7 @@ const CLASSES: &[(&str, Class, &[&str])] = &[
     ("library_fts_idx", Derived, &[]),
     ("library_fts_docsize", Derived, &[]),
     ("library_fts_config", Derived, &[]),
+    ("library_links", Derived, &[]),
 ];
 
 /// The rows the test writes, in an order that keeps every foreign key, each column's value as SQL.

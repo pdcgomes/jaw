@@ -1304,13 +1304,10 @@ impl Client {
         };
         let anchor = match around {
             Around::Top => None,
-            Around::Row(id) if shelf.is_some() => Some(id),
             Around::Row(_) if filters.kind == LibraryKind::All => {
                 return Err(bad("around", "a library window of every kind holds the newest of each, from the top"));
             }
-            Around::Row(id) => {
-                return Err(Error::new(code::NOT_FOUND, format!("jawd keeps no links yet, so not {id}")));
-            }
+            Around::Row(id) => Some(id),
             Around::Newest | Around::Unread => {
                 return Err(bad("around", "a library window is anchored at top or on an item's id"));
             }
@@ -1323,14 +1320,19 @@ impl Client {
                     Whose::Person(n) => Some(items::person(db, n)?.is_some()),
                     Whose::Anyone | Whose::Me => None,
                 };
-                let named = match &anchor {
-                    Some(id) => items::named(db, id, chat.as_deref())?
+                let named = match (&anchor, shelf) {
+                    (Some(id), Some(shelf)) => items::named(db, id, chat.as_deref())?
                         .into_iter()
-                        .filter(|&(_, _, found)| Some(found) == shelf)
+                        .filter(|&(_, _, found)| found == shelf)
                         .map(|(_, t, _)| t)
                         .max()
-                        .map(|t| ItemAnchor { id: id.clone(), t }),
-                    None => None,
+                        .map(|t| ItemAnchor { id: id.clone(), t, rank: 0 }),
+                    (Some(id), None) => items::named_links(db, id, chat.as_deref())?
+                        .into_iter()
+                        .map(|key| key.at())
+                        .max()
+                        .map(|at| ItemAnchor { id: id.clone(), t: at.t, rank: at.rank }),
+                    (None, _) => None,
                 };
                 anyhow::Ok((chat_found, person_found, anchor, named))
             })

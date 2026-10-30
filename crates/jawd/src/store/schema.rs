@@ -1231,9 +1231,34 @@ pub(super) const MIGRATIONS: &[&str] = &[
     -- An item by its message's ID alone, for a window anchored on it across chats.
     CREATE INDEX messages_shelved_named ON messages (id) WHERE shelf IS NOT NULL;
 
-    -- Class: derived from messages, kept by their triggers: how many items of each kind each chat
-    -- has, and every chat together as chat 0, so a library window's counts are read, not counted.
-    -- Links are counted here once jaw keeps them.
+    -- Class: derived from messages, as links is, from which the triggers on links below keep it:
+    -- each of a message's links as the library pages them, by its message's t and then `rank`, its
+    -- place among the message's links made negative, so a window read newest first reads a
+    -- message's links first to last; with the message's ID, its chat and who sent it, so a window of
+    -- links is a keyset across chats, in a chat or from one sender, in the order of items. links'
+    -- own order can't be the library's: a message's links take new rowids each time they're derived
+    -- again, and a later copy of a message can change its time but never its t.
+    CREATE TABLE library_links (
+        message INTEGER NOT NULL,
+        place INTEGER NOT NULL CHECK (place >= 0),
+        t INTEGER NOT NULL,
+        id TEXT NOT NULL,
+        chat INTEGER NOT NULL,
+        sender INTEGER,
+        mine INTEGER NOT NULL CHECK (mine IN (0, 1)),
+        rank INTEGER NOT NULL GENERATED ALWAYS AS (-place) VIRTUAL,
+        PRIMARY KEY (message, place)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX library_links_by_t ON library_links (t, rank);
+    CREATE INDEX library_links_in ON library_links (chat, t, rank, sender, mine);
+    CREATE INDEX library_links_by ON library_links (sender, mine, t, rank);
+    CREATE INDEX library_links_named ON library_links (id);
+    INSERT INTO library_links (message, place, t, id, chat, sender, mine)
+    SELECT l.message, l.place, m.t, m.id, l.chat, l.sender, l.mine FROM links l JOIN messages m ON m.n = l.message;
+
+    -- Class: derived from messages, kept by the triggers on messages and on links: how many items of
+    -- each kind each chat has, links among them, and every chat together as chat 0, so a library
+    -- window's counts are read, not counted.
     CREATE TABLE shelves (
         chat INTEGER NOT NULL CHECK (chat >= 0),
         shelf TEXT NOT NULL CHECK (shelf IN ('photo', 'video', 'voice', 'file', 'link')),
@@ -1243,16 +1268,21 @@ pub(super) const MIGRATIONS: &[&str] = &[
     INSERT INTO shelves (chat, shelf, items)
     SELECT chat, shelf, count(*) FROM messages INDEXED BY messages_shelved_in WHERE shelf IS NOT NULL
     GROUP BY chat, shelf;
+    INSERT INTO shelves (chat, shelf, items)
+    SELECT chat, 'link', count(*) FROM library_links INDEXED BY library_links_in GROUP BY chat;
     INSERT INTO shelves (chat, shelf, items) SELECT 0, shelf, sum(items) FROM shelves GROUP BY shelf;
 
     -- Class: derived from messages, as messages_fts is: the words of each item, its caption and a
     -- file's name, by its message's t, and in `tags` its kind, its chat and who sent it (`s` and the
     -- kind, `c` and the chat's n, `f` and the sender's n in person_jids, or `fme` for yours), so the
     -- library's search reads only the items a window asks for, newest first, and stops at a page,
-    -- and counts them by their rowids alone. A message waiting in fts_backlog is indexed here when
-    -- it's indexed there, and the writer merges its segments as it merges messages_fts's. Every
-    -- entry is written OR REPLACE: a contentless table takes a second insert of a rowid it holds,
-    -- and a delete then takes only the second, leaving the first findable.
+    -- and counts them by their rowids alone. A message's links' words, as links_fts has them, are
+    -- one entry of kind `link`, by ~t, the complement of its message's t, which is negative where
+    -- every t is not, so a message can be an item and have links, and ~t's order is t's backwards. A
+    -- message waiting in fts_backlog is indexed here when it's indexed there, and the writer merges
+    -- its segments as it merges messages_fts's. Every entry is written OR REPLACE: a contentless
+    -- table takes a second insert of a rowid it holds, and a delete then takes only the second,
+    -- leaving the first findable.
     CREATE VIRTUAL TABLE library_fts USING fts5 (
         text,
         tags,
@@ -1266,6 +1296,41 @@ pub(super) const MIGRATIONS: &[&str] = &[
     SELECT t, text, 's' || shelf || ' c' || chat || ' f' || coalesce(sender, iif(mine, 'me', 'none'))
     FROM messages INDEXED BY messages_shelved WHERE shelf IS NOT NULL AND text IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM fts_backlog b WHERE b.n = messages.n);
+    -- Newest first, so ~t rises, as FTS5 takes rowids best.
+    INSERT OR REPLACE INTO library_fts (rowid, text, tags)
+    SELECT ~l.t, w.text, 'slink c' || m.chat || ' f' || coalesce(m.sender, iif(m.mine, 'me', 'none'))
+    FROM (SELECT t, message FROM library_links INDEXED BY library_links_by_t GROUP BY t ORDER BY t DESC) l
+        JOIN messages m ON m.n = l.message JOIN message_link_text w ON w.message = l.message
+    WHERE w.text IS NOT NULL AND NOT EXISTS (SELECT 1 FROM fts_backlog b WHERE b.n = l.message)
+    ORDER BY l.t DESC;
+
+    -- A link that comes or goes is an item that comes or goes: in library_links, counted in its chat
+    -- and in all of them, and its message's links' words written again with its chat and sender as
+    -- tags, unless the message waits in fts_backlog, whose steps index them with its text. The
+    -- triggers on messages write a message's links together and take them all away together, as a
+    -- deletion of the message does, so its words are written again as each link comes and go with
+    -- the last; that one's t is read from library_links, since its message may be gone.
+    CREATE TRIGGER links_shelved AFTER INSERT ON links BEGIN
+        INSERT INTO library_links (message, place, t, id, chat, sender, mine)
+            SELECT new.message, new.place, m.t, m.id, new.chat, new.sender, new.mine FROM messages m
+            WHERE m.n = new.message;
+        INSERT INTO shelves (chat, shelf, items) VALUES (new.chat, 'link', 1)
+            ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1;
+        INSERT INTO shelves (chat, shelf, items) VALUES (0, 'link', 1)
+            ON CONFLICT (chat, shelf) DO UPDATE SET items = items + 1;
+        INSERT OR REPLACE INTO library_fts (rowid, text, tags)
+            SELECT ~w.t, w.text, 'slink c' || new.chat || ' f' || coalesce(new.sender, iif(new.mine, 'me', 'none'))
+            FROM message_link_text w WHERE w.message = new.message AND w.text IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = new.message);
+    END;
+    CREATE TRIGGER links_unshelved AFTER DELETE ON links BEGIN
+        DELETE FROM library_fts WHERE rowid = ~(SELECT t FROM library_links WHERE message = old.message AND place = old.place)
+            AND NOT EXISTS (SELECT 1 FROM links WHERE message = old.message)
+            AND NOT EXISTS (SELECT 1 FROM fts_backlog WHERE n = old.message);
+        DELETE FROM library_links WHERE message = old.message AND place = old.place;
+        DELETE FROM shelves WHERE chat IN (old.chat, 0) AND shelf = 'link' AND items = 1;
+        UPDATE shelves SET items = items - 1 WHERE chat IN (old.chat, 0) AND shelf = 'link';
+    END;
 
     -- The triggers that count messages count items too: one that comes, goes, moves to another chat
     -- or becomes another kind of item or none moves its count, and a chat's count of a kind goes with
@@ -2324,8 +2389,9 @@ mod tests {
     }
 
     /// Measures the library's migration on a jaw.db at the version before it with this many
-    /// messages, one in seven of them an item: how long the upgrade takes, its backup apart, and
-    /// what it takes on disk beside jaw.db at its peak:
+    /// messages, one in seven of them an item and one in forty-five with a link, as jawd runs it, on
+    /// its writer's connection: how long the upgrade takes, its backup apart, and what it takes on
+    /// disk beside jaw.db at its peak:
     /// `JAW_MEASURE_MESSAGES=1000000 cargo test --release -p jawd measure_the_librarys -- --ignored --nocapture`.
     #[test]
     #[ignore = "a measurement, a minute long at a million messages"]
@@ -2333,7 +2399,7 @@ mod tests {
         let messages: i64 = std::env::var("JAW_MEASURE_MESSAGES").ok().and_then(|n| n.parse().ok()).unwrap_or(200_000);
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("jaw.db");
-        let mut db = Connection::open(&path).unwrap();
+        let db = Connection::open(&path).unwrap();
         db.pragma_update(None, "journal_mode", "WAL").unwrap();
         let version = super::before_the_library();
         for migration in &MIGRATIONS[..version] {
@@ -2355,10 +2421,14 @@ mod tests {
             INSERT INTO messages (n, chat, id, at, t, sender, mine, kind, text, spans, summary, detail, raw, v)
             SELECT x, 1 + x % 2000, printf('3EB0%016d', x), 1790000000000 + x * 1000, (1790000000000 + x * 1000) << 20,
                 iif(x % 7 = 0, NULL, 1 + x % 5000), x % 7 = 0, kind,
-                CASE kind WHEN 'text' THEN 'mensagem número ' || x || ' com algumas palavras de conversa'
-                    WHEN 'image' THEN iif(x % 3 = 0, 'na praia com a família ' || x, NULL)
-                    WHEN 'document' THEN 'relatorio-' || x || '.pdf' END,
-                NULL, 'mensagem ' || x,
+                CASE WHEN kind = 'text' AND x % 40 = 1 THEN 'vê https://www.ipma.pt/previsao/' || x
+                    WHEN kind = 'text' THEN 'mensagem número ' || x || ' com algumas palavras de conversa'
+                    WHEN kind = 'image' THEN iif(x % 3 = 0, 'na praia com a família ' || x, NULL)
+                    WHEN kind = 'document' THEN 'relatorio-' || x || '.pdf' END,
+                iif(kind = 'text' AND x % 40 = 1, json_array(json_object('t', 'text', 's', 'vê '),
+                    json_object('t', 'link', 's', 'https://www.ipma.pt/previsao/' || x,
+                        'url', 'https://www.ipma.pt/previsao/' || x)), NULL),
+                'mensagem ' || x,
                 iif(kind = 'text', NULL, json_object('media', json_object('mime', 'image/jpeg', 'w', 1600, 'h', 1200))),
                 randomblob(300), x
             FROM k;
@@ -2374,6 +2444,9 @@ mod tests {
             (pages * page) as u64
         };
         let before = bytes(&db);
+        drop(db);
+        // As jawd opens jaw.db and runs what's pending.
+        let mut db = crate::store::connect(&path, crate::store::Role::Writer).unwrap();
         let copy = home.path().join("copy.db");
         let began = std::time::Instant::now();
         db.execute("VACUUM INTO ?1", [copy.to_str().unwrap()]).unwrap();
@@ -2399,12 +2472,15 @@ mod tests {
         let took = began.elapsed();
         stop.store(true, Ordering::Relaxed);
         sampler.join().unwrap();
-        let items: i64 = db.query_row("SELECT sum(items) FROM shelves WHERE chat = 0", [], |r| r.get(0)).unwrap();
+        let items: i64 = db
+            .query_row("SELECT sum(items) FROM shelves WHERE chat = 0 AND shelf <> 'link'", [], |r| r.get(0))
+            .unwrap();
+        let links: i64 = db.query_row("SELECT count(*) FROM library_links", [], |r| r.get(0)).unwrap();
         let beside = peak.load(Ordering::Relaxed).saturating_sub(before);
         eprintln!(
-            "{messages} messages, {items} items: jaw.db {:.0} MB at version {version}; upgraded in {:.1} s, of which its backup \
-             about {:.1} s and the step {:.1} s; {:.0} MB beside jaw.db at its peak, {:.2} times it (DATA_STEP_ROOM is \
-             {DATA_STEP_ROOM}); jaw.db after: {:.0} MB; load {:.0}",
+            "{messages} messages, {items} items and {links} links: jaw.db {:.0} MB at version {version}; upgraded in {:.1} s, \
+             of which its backup about {:.1} s and the step {:.1} s; {:.0} MB beside jaw.db at its peak, {:.2} times it \
+             (DATA_STEP_ROOM is {DATA_STEP_ROOM}); jaw.db after: {:.0} MB; load {:.0}",
             before as f64 / 1e6,
             took.as_secs_f64(),
             backup.as_secs_f64(),
