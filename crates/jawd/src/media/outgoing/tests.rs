@@ -1287,3 +1287,211 @@ async fn a_kill_once_its_file_is_uploaded_sends_the_same_message_again_and_uploa
     let image = image(&e2e::Message::decode(raw.as_slice()).unwrap()).clone();
     assert!(image.direct_path.is_some() && image.media_key.is_some(), "it was uploaded before the kill");
 }
+
+/// A photo sent in HD, both copies made and held half uploaded, then the SD copy marked uploaded in
+/// jaw.db from outside, so its message goes while its HD copy is still on its way.
+async fn sd_gone_and_hd_on_its_way(rig: &Rig, picked: &Path) -> String {
+    rig.world.gate_uploads(true);
+    let path = yours(picked, "big.jpg", &Picture::lake(2400, 1800));
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    let both = tokio::time::timeout(Duration::from_secs(60), async {
+        while rig.world.uploads().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    both.await.expect("both copies made and on their way up");
+    let db = Connection::open(rig.home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    let marked =
+        db.execute("UPDATE outgoing SET state = 'ready' WHERE variant = 'sd' AND state = 'uploading'", []).unwrap();
+    assert_eq!(marked, 1);
+    rig.media.inner.sending.changed();
+    rig.until(&id, "sent", sent).await;
+    id
+}
+
+/// What the demo's WhatsApp was sent, in order, each as a message, its HD copy or a deletion.
+fn kinds_sent(rig: &Rig) -> Vec<(String, &'static str)> {
+    rig.world
+        .sends()
+        .into_iter()
+        .map(|s| {
+            let m = e2e::Message::decode(s.raw.as_slice()).unwrap();
+            let kind = if m.protocol_message.is_some() {
+                "revoke"
+            } else if m.associated_child_message.is_some() {
+                "hd"
+            } else {
+                "message"
+            };
+            (s.id, kind)
+        })
+        .collect()
+}
+
+/// Message `id` of yours deleted for everyone from your phone.
+fn revoked_from_your_phone(id: &str) -> Change {
+    Change::Amend(Amend {
+        chat: ANA.into(),
+        target: id.into(),
+        sender: None,
+        mine: true,
+        at: now_ms(),
+        what: Amendment::Revoke,
+        raw: None,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_hd_copy_never_goes_once_its_sent_message_is_deleted_for_everyone_from_your_phone() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
+    rig.store.apply(Lane::Live, vec![revoked_from_your_phone(&id)]).await.unwrap();
+    let hd: i64 =
+        rig.query(|db| Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?)).await;
+    eprintln!("AUDIT-A: HD rows left once the message is deleted for everyone: {hd}");
+    rig.world.gate_uploads(false);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let kinds = kinds_sent(&rig);
+    eprintln!("AUDIT-A: sent {kinds:?}");
+    assert_eq!(kinds.len(), 1, "the HD copy of a message deleted for everyone went: {kinds:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_retry_never_sends_the_failed_hd_copy_of_a_message_deleted_for_everyone() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.world.gate_uploads(true);
+    let path = yours(picked.path(), "big.jpg", &Picture::lake(2400, 1800));
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    let both = tokio::time::timeout(Duration::from_secs(60), async {
+        while rig.world.uploads().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    both.await.expect("both copies made and on their way up");
+    // The HD copy's upload refused for good, as Unsent leaves it, and the SD copy's done.
+    let db = Connection::open(rig.home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute_batch(
+        "UPDATE outgoing SET state = 'failed', error = 'refused in the audit' WHERE variant = 'hd';
+         UPDATE outbox SET state = 'failed', error = 'refused in the audit' WHERE kind = 'hd';
+         UPDATE outgoing SET state = 'ready' WHERE variant = 'sd';",
+    )
+    .unwrap();
+    rig.media.inner.sending.changed();
+    rig.until(&id, "sent", sent).await;
+    rig.store.apply(Lane::Live, vec![revoked_from_your_phone(&id)]).await.unwrap();
+    let hd: i64 =
+        rig.query(|db| Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?)).await;
+    eprintln!("AUDIT-B: failed HD rows left once the message is deleted for everyone: {hd}");
+    rig.world.gate_uploads(false);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let retried = rig.call("send.retry", json!({ "message": id })).await;
+    eprintln!("AUDIT-B: send.retry answered {retried:?}");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let kinds = kinds_sent(&rig);
+    eprintln!("AUDIT-B: sent {kinds:?}");
+    assert_eq!(kinds.len(), 1, "send.retry sent the HD copy of a message deleted for everyone: {kinds:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn your_deletion_for_everyone_takes_the_hd_copy_on_its_way_which_never_goes() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
+    let deleted = rig.call("delete", json!({ "message": id, "for": "everyone" })).await;
+    eprintln!("AUDIT-C: delete answered {deleted:?}");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let before = kinds_sent(&rig);
+    eprintln!("AUDIT-C: sent while the HD copy waits: {before:?}");
+    rig.world.gate_uploads(false);
+    let went = tokio::time::timeout(Duration::from_secs(20), async {
+        while kinds_sent(&rig).len() < 3 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    let _ = went.await;
+    let order = kinds_sent(&rig);
+    eprintln!("AUDIT-C: sent in order {order:?}");
+    let kinds: Vec<&str> = order.iter().map(|(_, k)| *k).collect();
+    assert_eq!(kinds, ["message", "revoke"], "the deletion waited behind the HD copy, which went first");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn your_deletion_for_everyone_goes_at_once_rather_than_wait_behind_the_hd_copy_it_takes() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
+    // The HD copy's upload stays held, so its row, waiting for it, keeps the front of the chat's queue.
+    rig.call("delete", json!({ "message": id, "for": "everyone" })).await.unwrap();
+    let went = tokio::time::timeout(Duration::from_secs(10), async {
+        while !kinds_sent(&rig).iter().any(|(_, kind)| *kind == "revoke") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    went.await.expect("the deletion went while the HD copy it took was still held half uploaded");
+    let kinds: Vec<&str> = kinds_sent(&rig).iter().map(|(_, kind)| *kind).collect();
+    assert_eq!(kinds, ["message", "revoke"]);
+    rig.world.gate_uploads(false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_hd_copy_whose_message_is_deleted_for_everyone_is_withdrawn_whatever_left_its_row() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
+    // Deleted for everyone by something that leaves its HD copy's row, as nothing in jaw.db does now.
+    let db = Connection::open(rig.home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    db.execute("UPDATE messages SET deleted = 1 WHERE id = ?1", [&id]).unwrap();
+    rig.world.gate_uploads(false);
+    let gone = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let hd: i64 = rig
+                .query(|db| Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?))
+                .await;
+            if hd == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    gone.await.expect("its row went once its copy was uploaded");
+    assert_eq!(kinds_sent(&rig), [(id, "message")], "the HD copy of a message deleted for everyone was sent");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_retry_refuses_the_failed_hd_copy_of_a_message_deleted_for_everyone() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let id = sd_gone_and_hd_on_its_way(&rig, picked.path()).await;
+    let db = Connection::open(rig.home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    // Its HD copy refused, and the message deleted for everyone by something that leaves the HD
+    // copy's row, as nothing in jaw.db does now.
+    db.execute_batch(&format!(
+        "UPDATE outgoing SET state = 'failed', error = 'refused by the test' WHERE variant = 'hd';
+         UPDATE outbox SET state = 'failed', error = 'refused by the test' WHERE kind = 'hd';
+         UPDATE messages SET deleted = 1 WHERE id = '{id}';"
+    ))
+    .unwrap();
+    rig.world.gate_uploads(false);
+    let refused = rig.call("send.retry", json!({ "message": id })).await.unwrap_err();
+    assert_eq!(refused.code, jaw_proto::code::NOT_ALLOWED, "{refused:?}");
+    let state: String =
+        rig.query(|db| Ok(db.query_row("SELECT state FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?)).await;
+    assert_eq!(state, "failed", "nor is it queued again");
+    assert_eq!(kinds_sent(&rig), [(id, "message")]);
+}

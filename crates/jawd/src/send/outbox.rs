@@ -567,22 +567,28 @@ async fn settle(inner: &Inner, changes: Vec<Change>) -> Applied {
 }
 
 /// Queues a failed message of yours again; one still on its way or waiting for a receipt has
-/// nothing to retry, and one deleted for everyone, or being, isn't sent again.
+/// nothing to retry, and one deleted for everyone, or being, isn't sent again, nor its HD copy.
 pub(super) async fn retry(inner: &Arc<Inner>, retry: SendRetry) -> Result<Value, Error> {
     let id = retry.message.clone();
     let (found, hd) = query(inner, move |db| {
         let Some(row) = outbox::outboxed_by_id(db, &id)? else {
             // The message went, and its HD copy didn't.
-            let hd = outbox::hd_failed(db, &id)?
-                .into_iter()
-                .map(|n| outbox::outboxed_by_n(db, n))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            return Ok((None, hd.into_iter().flatten().collect::<Vec<_>>()));
+            let mut hd = Vec::new();
+            for n in outbox::hd_failed(db, &id)? {
+                if let Some(row) = outbox::outboxed_by_n(db, n)? {
+                    hd.push((row, outbox::retryable(db, n)?));
+                }
+            }
+            return Ok((None, hd));
         };
         let retryable = outbox::retryable(db, row.outbox)?;
         Ok((Some((row, retryable)), Vec::new()))
     })
     .await?;
+    if hd.iter().any(|(_, retryable)| *retryable == Some(false)) {
+        return Err(Error::new(code::NOT_ALLOWED, "it's being deleted for everyone, so it isn't sent again"));
+    }
+    let hd: Vec<Outboxed> = hd.into_iter().map(|(row, _)| row).collect();
     if !hd.is_empty() {
         let changes = hd.iter().map(|row| Change::Outbox(Step::Retry { outbox: row.outbox })).collect();
         durably(inner, changes, "queue the HD copy again").await?;

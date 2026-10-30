@@ -137,7 +137,7 @@ impl Sending {
         self.changed.0.subscribe()
     }
 
-    fn changed(&self) {
+    pub(super) fn changed(&self) {
         self.changed.0.send_modify(|n| *n += 1);
     }
 

@@ -3266,6 +3266,22 @@ DELETE FROM outbox WHERE target = ?1 AND kind = 'hd' AND NOT EXISTS (SELECT 1 FR
     SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/outbox.rs
+DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'
+    SEARCH outbox USING INDEX outbox_by_target (target=?)
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+DELETE FROM outbox WHERE target = ?1 AND kind = 'hd' AND EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.deleted)
+    SEARCH outbox USING INDEX outbox_by_target (target=?)
+    SCALAR SUBQUERY 1
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
+SELECT coalesce(message, iif(kind = 'hd', target, NULL)) FROM outbox WHERE n = ?1
+    SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/outbox.rs
 SELECT value FROM sync_state WHERE key = 'me'
     SEARCH sync_state USING PRIMARY KEY (key=?)
 

@@ -106,8 +106,8 @@ pub enum Step {
     /// The messages a forward sends, each a message of yours, all in one transaction or none; the
     /// interface's `key` names them all. What they came to is put in `written`.
     Forward { sending: Vec<Forwarding>, key: Option<String>, written: Written },
-    /// Action `outbox`, still to send, isn't sent, its message having been deleted for everyone
-    /// since (`Outboxed::withdrawn`): its row goes, as a refused one's does.
+    /// Action or HD copy `outbox`, still to send, isn't sent, its message having been deleted for
+    /// everyone since (`Outboxed::withdrawn`): its row goes, as a refused one's does.
     Withdrawn { outbox: i64 },
     /// The messages `send.media` sends, in order, each a message of yours with its outbox row, and
     /// for each file the copies to make of it; all in one transaction or none, the interface's `key`
@@ -350,6 +350,16 @@ const HD_FAILED: &str =
 const ORPHANED_HD: &str = "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'
     AND NOT EXISTS (SELECT 1 FROM outbox w WHERE w.message = ?1)
     AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.status IN ('sent', 'delivered', 'read', 'played'))";
+/// The HD copies of message ?1, which never go once it's deleted for everyone, or being, whether or
+/// not the message itself went.
+const HD_WITHDRAWN: &str = "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'";
+/// The HD copies of message ?1 if it's deleted for everyone, as a merge leaves them when it folds a
+/// copy of a message into one deleted already.
+const HD_OF_DELETED: &str = "DELETE FROM outbox WHERE target = ?1 AND kind = 'hd'
+    AND EXISTS (SELECT 1 FROM messages m WHERE m.n = ?1 AND m.deleted)";
+/// The message whose retry by hand outbox row ?1 is: its own, or for an HD copy, the one it goes
+/// after.
+const RETRIED: &str = "SELECT coalesce(message, iif(kind = 'hd', target, NULL)) FROM outbox WHERE n = ?1";
 
 const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 const RECIPIENTS: &str = "INSERT OR IGNORE INTO recipients (message, member, chat)
@@ -494,9 +504,14 @@ pub(super) fn apply(db: &Connection, stamps: &mut Stamps, step: &Step) -> Result
 }
 
 /// An action still to send whose message was deleted for everyone goes, as a refused one does, and
-/// windows show its message without it; one that has gone to WhatsApp meanwhile stays.
+/// windows show its message without it; one that has gone to WhatsApp meanwhile stays. An HD copy
+/// still to send goes too, and shows nothing of its own.
 fn withdrawn(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     if !db.prepare_cached(STILL_QUEUED)?.exists([outbox])? {
+        return Ok(false);
+    }
+    if db.prepare_cached(IS_HD)?.query_row([outbox], |r| r.get::<_, bool>(0))? {
+        db.prepare_cached(DROP_ROW)?.execute([outbox])?;
         return Ok(false);
     }
     match action(db, outbox)? {
@@ -543,7 +558,8 @@ fn full(db: &Connection, written: &Written) -> Result<bool> {
 /// message deleted for everyone, or being, isn't taken: `react`, `edit` and `vote` check on a
 /// reader, but a deletion can commit after that read, and while a chat merges, the copy they read
 /// may not be the one found here, and a deletion can be aimed at either, so the copies merging into
-/// this one are read too.
+/// this one are read too. A deletion for everyone takes the message's HD copies with it, so none
+/// goes after it, nor holds it back in its chat's queue.
 fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String>, written: &Written) -> Result<bool> {
     if keyed_before(db, key, written)? || full(db, written)? {
         return Ok(false);
@@ -566,6 +582,9 @@ fn act(db: &Connection, stamps: &mut Stamps, acting: Acting, key: &Option<String
         |r| r.get(0),
     )?;
     db.prepare_cached(OWN_ID)?.execute(params![chat_n, acting.id, now])?;
+    if matches!(acting.effect, Amendment::Revoke) {
+        db.prepare_cached(HD_WITHDRAWN)?.execute([n])?;
+    }
     db.prepare_cached(PRUNE_KEYS)?.execute(params![now - KEY_KEPT_MS, KEYS_PRUNED])?;
     if let Some(key) = key {
         db.prepare_cached(KEEP_KEY)?.execute(params![key, None::<i64>, chat, acting.id, now])?;
@@ -1077,10 +1096,12 @@ pub(super) fn prune_kept(db: &Connection) -> Result<()> {
 /// makes one impossible to send removes it in the same transaction. This removes message `n`'s if
 /// it has failed and the message is deleted for everyone, or your deletion of it is kept for a late
 /// receipt; a deletion for you removes it too (`deleted_for_you`). The message's row still shows it
-/// failed.
+/// failed. Its HD copies go once it will never reach WhatsApp, or once it's deleted for everyone,
+/// as a merge can leave them on a copy deleted already.
 pub(super) fn tidied(db: &Connection, n: i64) -> Result<()> {
     db.prepare_cached(UNRETRYABLE)?.execute([n])?;
     db.prepare_cached(ORPHANED_HD)?.execute([n])?;
+    db.prepare_cached(HD_OF_DELETED)?.execute([n])?;
     Ok(())
 }
 
@@ -1097,10 +1118,11 @@ pub(super) fn deleted_for_you(db: &Connection, n: i64) -> Result<()> {
 }
 
 /// Message `n` of yours was deleted for everyone, by jawd or by your other devices or history: if
-/// WhatsApp refused it, or has had no receipt for it, nothing of it is sent again, nor its HD copy.
+/// WhatsApp refused it, or has had no receipt for it, nothing of it is sent again; and its HD copy,
+/// whatever its state and whether or not the message went, never goes.
 pub(super) fn deleted_for_everyone(db: &Connection, n: i64) -> Result<()> {
     db.prepare_cached(CANCELLED)?.execute([n])?;
-    db.prepare_cached(ORPHANED_HD)?.execute([n])?;
+    db.prepare_cached(HD_WITHDRAWN)?.execute([n])?;
     Ok(())
 }
 
@@ -1119,12 +1141,15 @@ fn shown_failed(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, status:
 /// pending. A message deleted for everyone, or being, isn't sent again, or its recipients would be
 /// left with it after the deletion. A copy that failed is made or uploaded again from where it got
 /// to, and the HD copies that failed with the message are queued again with it; an HD copy's own
-/// row, its message gone already, is retried on its own.
+/// row, its message gone already, is retried on its own, unless that message is deleted for
+/// everyone, or being.
 fn retry(db: &Connection, stamps: &mut Stamps, outbox: i64) -> Result<bool> {
     let now = now_ms();
     let Some(row) = outboxed(db, outbox)? else { return Ok(false) };
     let Some((n, chat, _)) = row else {
-        if !db.prepare_cached(IS_HD)?.query_row([outbox], |r| r.get::<_, bool>(0))? {
+        if !db.prepare_cached(IS_HD)?.query_row([outbox], |r| r.get::<_, bool>(0))?
+            || retryable(db, outbox)? != Some(true)
+        {
             return Ok(false);
         }
         let queued = db.prepare_cached(REQUEUE)?.execute(params![outbox, now])?;
@@ -1326,9 +1351,10 @@ impl Outboxed {
     /// asked, which isn't sent: the phones show nothing of any of them on a deleted message, and
     /// jaw.db would keep the reaction on the deleted row. Whoever deleted the message, you, your
     /// other devices, history or whoever sent it, and whether or not you've deleted it for you
-    /// since, it's withdrawn as a refused one is.
+    /// since, it's withdrawn as a refused one is. So is an HD copy of a message deleted for everyone,
+    /// whatever left its row.
     pub fn withdrawn(&self) -> bool {
-        self.target_deleted && matches!(self.kind.as_str(), "reaction" | "edit" | "vote")
+        self.target_deleted && matches!(self.kind.as_str(), "reaction" | "edit" | "vote" | "hd")
     }
 
     /// Whether it's an action that has to wait for its message to reach WhatsApp, so it never goes
@@ -1387,10 +1413,12 @@ pub fn is_action(kind: &str) -> bool {
     matches!(kind, "reaction" | "edit" | "revoke" | "vote" | "app_state")
 }
 
-/// Whether outbox row `outbox`'s message may be sent again by hand: not if it was deleted for
-/// everyone, or is being; `None` when it has no row, deleted for you.
+/// Whether outbox row `outbox`'s message, or for an HD copy the one it goes after, may be sent again
+/// by hand: not if it was deleted for everyone, or is being; `None` when it has no row, deleted for
+/// you.
 pub fn retryable(db: &Connection, outbox: i64) -> Result<Option<bool>> {
-    let Some(Some((n, _, _))) = outboxed(db, outbox)? else { return Ok(None) };
+    let n: Option<i64> = db.prepare_cached(RETRIED)?.query_row([outbox], |r| r.get(0)).optional()?.flatten();
+    let Some(n) = n else { return Ok(None) };
     Ok(Some(db.prepare_cached(RETRYABLE)?.query_row([n], |r| r.get(0))?))
 }
 
@@ -1742,6 +1770,17 @@ mod tests {
                 ORPHANED_HD,
                 "SEARCH outbox USING INDEX outbox_by_target (target=?)\nSCALAR SUBQUERY 1\nSEARCH w USING COVERING INDEX sqlite_autoindex_outbox_1 (message=?)\nSCALAR SUBQUERY 2\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
             ),
+            (
+                "HD copies withdrawn",
+                HD_WITHDRAWN,
+                "SEARCH outbox USING INDEX outbox_by_target (target=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
+            (
+                "HD copies of a message deleted",
+                HD_OF_DELETED,
+                "SEARCH outbox USING INDEX outbox_by_target (target=?)\nSCALAR SUBQUERY 1\nSEARCH m USING INTEGER PRIMARY KEY (rowid=?)\nSEARCH outgoing USING INTEGER PRIMARY KEY (rowid=?)",
+            ),
+            ("a row's retry", RETRIED, "SEARCH outbox USING INTEGER PRIMARY KEY (rowid=?)"),
         ];
         let mut wrong = Vec::new();
         for (what, sql, expected) in statements {
@@ -3255,5 +3294,158 @@ mod tests {
         assert_eq!(at(), (Some(5), Some(2)));
         db.execute(TOLD, params![1, 5, 2, 5, 3]).unwrap();
         assert_eq!(at(), (None, None), "once it's at the position, WhatsApp knows as much as jaw");
+    }
+
+    /// A photo of yours `send.media` writes in HD as message `id` in `chat`, with its HD copy's own
+    /// message `hd`, each with its copy to make from jaw's copy of the file.
+    fn attaching(chat: &str, id: &str, hd: &str, at: i64) -> crate::store::Change {
+        let message = Message { chat: chat.into(), kind: "image", ..mine(id, at) };
+        crate::store::Change::Outbox(Step::Attach {
+            sending: vec![Attached {
+                message,
+                kind: "image",
+                raw: vec![1],
+                file: Some(Kept { path: format!("media/outgoing/{id}.jpg"), bytes: 10 }),
+                hd: Some((hd.into(), vec![2])),
+            }],
+            key: None,
+            written: Written::default(),
+        })
+    }
+
+    /// Outbox row `id`'s n.
+    async fn row_of(store: &crate::store::Store, id: &'static str) -> i64 {
+        on(store, move |db| Ok(db.query_row("SELECT n FROM outbox WHERE id = ?1", [id], |r| r.get(0))?)).await
+    }
+
+    /// The HD copies' outbox rows and the copies on their way, together.
+    async fn hd_left(store: &crate::store::Store) -> i64 {
+        on(store, |db| {
+            Ok(db.query_row(
+                "SELECT (SELECT count(*) FROM outbox WHERE kind = 'hd') + (SELECT count(*) FROM outgoing)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deletion_for_everyone_takes_the_hd_copies_of_a_message_that_went_whatever_their_state() {
+        use crate::store::{Amend, Amendment, Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        // Two photos of yours that went in HD, one's HD copy still on its way, the other's refused.
+        apply(vec![attaching(ANA, "p1", "h1", 1_000), attaching(ANA, "p2", "h2", 2_000)]).await.unwrap();
+        let (p1, p2, h2) = (row_of(&store, "p1").await, row_of(&store, "p2").await, row_of(&store, "h2").await);
+        apply(vec![
+            Change::Outbox(Step::Sent { outbox: p1 }),
+            Change::Outbox(Step::Sent { outbox: p2 }),
+            Change::Outbox(Step::Unsent { outbox: h2, error: "refused".into() }),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(hd_left(&store).await, 4, "each HD copy's row and its copy");
+        for id in ["p1", "p2"] {
+            let revoked = Amend {
+                chat: ANA.into(),
+                target: id.into(),
+                sender: None,
+                mine: true,
+                at: 3_000,
+                what: Amendment::Revoke,
+                raw: None,
+            };
+            apply(vec![Change::Amend(revoked)]).await.unwrap();
+        }
+        assert_eq!(hd_left(&store).await, 0, "deleted for everyone from your phone, neither HD copy is left to go");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retry_by_hand_of_an_hd_copy_queues_nothing_once_its_message_is_deleted_for_everyone() {
+        use crate::store::{Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        apply(vec![attaching(ANA, "p1", "h1", 1_000)]).await.unwrap();
+        let (p1, h1) = (row_of(&store, "p1").await, row_of(&store, "h1").await);
+        apply(vec![
+            Change::Outbox(Step::Sent { outbox: p1 }),
+            Change::Outbox(Step::Unsent { outbox: h1, error: "refused".into() }),
+        ])
+        .await
+        .unwrap();
+        let state = || {
+            on(&store, move |db| {
+                Ok(db.query_row("SELECT state = 'queued' FROM outbox WHERE n = ?1", [h1], |r| r.get(0))?)
+            })
+        };
+        // Deleted for everyone by something that left its HD copy's row, as nothing in jaw.db does now,
+        // between send.retry's look and its step.
+        let side = Connection::open(home.path().join("jaw.db")).unwrap();
+        side.busy_timeout(Duration::from_secs(10)).unwrap();
+        side.execute("UPDATE messages SET deleted = 1 WHERE id = 'p1'", []).unwrap();
+        apply(vec![Change::Outbox(Step::Retry { outbox: h1 })]).await.unwrap();
+        assert_eq!(state().await, 0, "the HD copy of a message deleted for everyone isn't queued again");
+        side.execute("UPDATE messages SET deleted = 0 WHERE id = 'p1'", []).unwrap();
+        apply(vec![Change::Outbox(Step::Retry { outbox: h1 })]).await.unwrap();
+        assert_eq!(state().await, 1, "as it is once its message may go again");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_merge_folding_an_hd_copy_into_a_copy_deleted_for_everyone_takes_it() {
+        use crate::store::{Amend, Amendment, Change, Lane, Person, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        // Under her LID, a photo of yours that went, its HD copy refused; under her number, the same
+        // message as history brings it, which your phone then deleted for everyone.
+        apply(vec![
+            Change::Message(from_ana(ANA_LID, "l1", 1_000)),
+            attaching(ANA_LID, "p1", "h1", 4_000),
+            Change::Message(Message {
+                chat: ANA.into(),
+                live: false,
+                status: Some("delivered"),
+                kind: "image",
+                ..mine("p1", 4_000)
+            }),
+        ])
+        .await
+        .unwrap();
+        let (p1, h1) = (row_of(&store, "p1").await, row_of(&store, "h1").await);
+        apply(vec![
+            Change::Outbox(Step::Sent { outbox: p1 }),
+            Change::Outbox(Step::Unsent { outbox: h1, error: "refused".into() }),
+        ])
+        .await
+        .unwrap();
+        let revoked = Amend {
+            chat: ANA.into(),
+            target: "p1".into(),
+            sender: None,
+            mine: true,
+            at: 5_000,
+            what: Amendment::Revoke,
+            raw: None,
+        };
+        apply(vec![Change::Amend(revoked)]).await.unwrap();
+        assert_eq!(hd_left(&store).await, 2, "the copy deleted isn't the one the HD copy goes after");
+        apply(vec![Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })])
+            .await
+            .unwrap();
+        loop {
+            let merging =
+                on(&store, |db| Ok(db.query_row("SELECT count(*) FROM chat_merges", [], |r| r.get(0))?)).await;
+            if merging == 0 {
+                break;
+            }
+            store.apply(Lane::Background, vec![Change::MergeStep(None)]).await.unwrap();
+        }
+        let deleted =
+            on(&store, |db| Ok(db.query_row("SELECT deleted FROM messages WHERE id = 'p1'", [], |r| r.get(0))?)).await;
+        assert_eq!(deleted, 1, "the message kept is the one deleted for everyone");
+        assert_eq!(hd_left(&store).await, 0, "and its HD copy, folded into it, is left neither to go nor to retry");
     }
 }

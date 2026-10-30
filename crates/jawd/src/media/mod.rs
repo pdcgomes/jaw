@@ -341,6 +341,12 @@ impl Media {
         self.inner.sending.changes()
     }
 
+    /// Moves `copies_changed` on, for copies whose rows went without media knowing, so whatever
+    /// waits for one finds it gone.
+    pub fn copies_withdrawn(&self) {
+        self.inner.sending.changed();
+    }
+
     /// The cache and what's waiting, for `status`.
     pub fn status(&self) -> MediaStatus {
         let inner = &self.inner;
