@@ -550,13 +550,20 @@ final class AppModel {
         if done { savePanes() }
     }
 
-    func pick(folder id: String) {
+    /// The chat list made the folder's window, its row selected in the sidebar; `saying`, for a key or a
+    /// favourite, names it in the status line while the sidebar isn't shown.
+    func pick(folder id: String, saying: Bool = false) {
         folder = id
         window?.sidebar.select(id)
         if let w = listWindow { jawd.unwatch(w) }
         window?.chatList.emptyLine = tree.emptyLine(id)
         window?.chatList.show(folder: id)
         listWindow = jawd.watchChats(id, .top(ChatListController.rows))
+        if saying, let line = FolderTree.pickedLine(tree.label(id), sidebarShown: window?.sidebar.isShown ?? false,
+                                                     listShown: window?.chatList.isShown ?? false, focusMode: focusMode)
+        {
+            say(line)
+        }
     }
 
     /// ⌥↑ and ⌥↓: the chat before or after, passing over chats other panes show.

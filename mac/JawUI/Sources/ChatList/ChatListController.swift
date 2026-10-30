@@ -172,6 +172,11 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         shown
     }
 
+    /// Whether it's on screen: in a window, and not folded away.
+    public var isShown: Bool {
+        isViewLoaded && view.window != nil && !view.isHiddenOrHasHiddenAncestor && view.frame.width >= 1
+    }
+
     // MARK: Holding the order
 
     func pointer(_ inside: Bool) {

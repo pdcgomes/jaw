@@ -255,6 +255,10 @@ extension AppModel {
                     place: .view, group: 3, palette: false) { [weak self] in self?.step(-1) })
         add(Command("chat.next", "Next Chat", phrase: "The chat after", detail: "in the list", key: Shortcut("↓", .option),
                     place: .view, group: 3, palette: false) { [weak self] in self?.step(1) })
+        add(Command("folder.previous", "Previous Folder", phrase: "The folder before", detail: "in the sidebar",
+                    key: Shortcut("↑", [.option, .shift]), place: .view, group: 3, palette: false) { [weak self] in self?.stepFolder(-1) })
+        add(Command("folder.next", "Next Folder", phrase: "The folder after", detail: "in the sidebar",
+                    key: Shortcut("↓", [.option, .shift]), place: .view, group: 3, palette: false) { [weak self] in self?.stepFolder(1) })
         add(Command("full.screen", "Enter Full Screen", key: Shortcut("f", [.command, .control]), place: .view, group: 4,
                     send: #selector(NSWindow.toggleFullScreen(_:))))
 

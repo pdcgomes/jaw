@@ -163,6 +163,24 @@ public struct FolderTree: Sendable, Equatable {
         !served || rows[folder] != nil ? folder : "all"
     }
 
+    /// The folder before or after `folder`, in the tree's order with every folder open, nested ones
+    /// included, as ⌥⇧↑ and ⌥⇧↓ step through it; at either end it stays, as ⌥↑ and ⌥↓ do.
+    public func step(from folder: String, by: Int) -> String {
+        let order = self.order
+        guard !order.isEmpty else { return folder }
+        let at = order.firstIndex(of: folder) ?? 0
+        return order[min(max(at + by, 0), order.count - 1)]
+    }
+
+    /// What the status line says of a folder a key or a favourite picks: nothing while the sidebar shows
+    /// it; its name while the chat list shows its chats; and the key that shows them when neither is
+    /// shown, as the terminal's footer says it.
+    public static func pickedLine(_ name: String, sidebarShown: Bool, listShown: Bool, focusMode: Bool) -> String? {
+        if sidebarShown { return nil }
+        if listShown { return name }
+        return focusMode ? "\(name): ⇧⌘↩ shows its chats" : "\(name): ⇧⌘L shows its chats"
+    }
+
     /// What's dragged onto the tree: a chat or someone, by id and name, or a folder.
     public enum Dragged: Sendable, Equatable {
         case item(String, name: String)

@@ -125,10 +125,18 @@ extension AppModel: SidebarHost {
             return say("nothing is on ⌘\(slot); a chat's or a folder's Favourite menu puts one there")
         }
         if let folder = f.folder {
-            pick(folder: folder)
+            pick(folder: folder, saying: true)
         } else if let chat = f.chat {
             openChat(chat, name: f.name ?? chat)
         }
+    }
+
+    /// ⌥⇧↑ and ⌥⇧↓: the folder before or after, from anywhere ⌥↑ and ⌥↓ work, picked as a click picks it,
+    /// the folders it's in opened.
+    func stepFolder(_ by: Int) {
+        guard tree.served else { return say("folders come with jawd's M6") }
+        let next = tree.step(from: folder, by: by)
+        if next != folder { pick(folder: next, saying: true) }
     }
 
     /// A chat to open that the app may hold no row for, as a favourite's or someone's in the roster:

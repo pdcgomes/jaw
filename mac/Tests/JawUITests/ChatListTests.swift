@@ -187,3 +187,17 @@ func `an unread count sits in the middle of its badge`(scale: Int) throws {
     #expect(chat.string(forType: .jawChat) == Samples.chats[direct].id && chat.string(forType: .jawCommunity) == nil)
     #expect(!GridView().registeredDraggedTypes.contains(.jawCommunity), "a pane can't take a community")
 }
+
+@MainActor
+@Test func `the chat list is shown only on screen and not folded away`() {
+    let list = ChatListController(folder: "all", roles: Catalog.jaw.roles(dark: true))
+    _ = list.view
+    #expect(!list.isShown, "in no window")
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    defer { window.close() }
+    window.contentView = list.view
+    #expect(list.isShown)
+    list.view.isHidden = true
+    #expect(!list.isShown)
+}

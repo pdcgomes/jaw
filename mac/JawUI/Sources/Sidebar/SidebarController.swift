@@ -190,6 +190,11 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         isViewLoaded && view.window?.firstResponder === outline
     }
 
+    /// Whether it's on screen: in a window, and not folded away.
+    public var isShown: Bool {
+        isViewLoaded && view.window != nil && !view.isHiddenOrHasHiddenAncestor && view.frame.width >= 1
+    }
+
     func reselect() {
         let row = outline.row(forItem: items[picked])
         if row >= 0 {

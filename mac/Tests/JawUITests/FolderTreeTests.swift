@@ -117,3 +117,18 @@ import Testing
             "before Work, among siblings that don't count Family")
     #expect(tree.drop(.folder("all"), onto: "folder:1", at: nil) == nil && tree.drop(.folder("folder:3"), onto: "smart:1", at: nil) == nil)
 }
+
+@Test func `the folder before or after, in the tree's order with every folder open, staying at either end`() {
+    let tree = Samples.tree
+    #expect(tree.step(from: "archived", by: 1) == "folder:1" && tree.step(from: "folder:1", by: 1) == "folder:2", "into Family's Cousins")
+    #expect(tree.step(from: "folder:6", by: 1) == "smart:1" && tree.step(from: "smart:3", by: 1) == "smart:3")
+    #expect(tree.step(from: "all", by: -1) == "all" && tree.step(from: "folder:5", by: -1) == "folder:4")
+    #expect(FolderTree().step(from: "all", by: 1) == "archived")
+}
+
+@Test func `a folder a key picks is named while the sidebar isn't shown, with the key that shows its chats when the list isn't either`() {
+    #expect(FolderTree.pickedLine("Family", sidebarShown: true, listShown: true, focusMode: false) == nil)
+    #expect(FolderTree.pickedLine("Family", sidebarShown: false, listShown: true, focusMode: false) == "Family")
+    #expect(FolderTree.pickedLine("Family", sidebarShown: false, listShown: false, focusMode: false) == "Family: ⇧⌘L shows its chats")
+    #expect(FolderTree.pickedLine("Family", sidebarShown: false, listShown: false, focusMode: true) == "Family: ⇧⌘↩ shows its chats")
+}

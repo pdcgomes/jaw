@@ -410,3 +410,16 @@ final class PlainSourceList: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     let s = sidebar()
     #expect(Set(s.outline.registeredDraggedTypes).isSuperset(of: [.jawChat, .jawCommunity, .jawPerson, .jawFolder]))
 }
+
+@MainActor
+@Test func `the sidebar is shown only on screen and not folded away`() {
+    let s = sidebar()
+    #expect(!s.isShown, "in no window")
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 220, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    defer { window.close() }
+    window.contentView = s.view
+    #expect(s.isShown)
+    s.view.isHidden = true
+    #expect(!s.isShown)
+}
