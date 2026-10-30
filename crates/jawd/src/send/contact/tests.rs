@@ -269,6 +269,17 @@ async fn a_card_asked_again_with_its_key_goes_once_and_cards_in_a_disappearing_c
     let timer = sent[0].contact_message.as_ref().unwrap().context_info.as_ref().and_then(|c| c.expiration);
     let array_timer = sent[1].contacts_array_message.as_ref().unwrap().context_info.as_ref().and_then(|c| c.expiration);
     assert_eq!((timer, array_timer), (Some(86_400), Some(86_400)), "one card and several carry the chat's timer");
+    running.world.gate(true);
+    let held = running.cards(CLIMBING, &[("Rui", RUI)]).await;
+    let row = |id: String| running.query(move |db| Ok(read::message(db, CLIMBING, &id)?.unwrap().0));
+    assert_eq!(row(held.clone()).await.expires_at, None, "its timer waits for it to go");
+    running.world.gate(false);
+    let id = held.clone();
+    running
+        .until("its timer started", move |db| Ok(read::message(db, CLIMBING, &id)?.unwrap().0.expires_at.is_some()))
+        .await;
+    let gone = row(held).await;
+    assert!(gone.expires_at.is_some_and(|at| at > gone.at), "and starts once the server has it");
 }
 
 #[tokio::test(flavor = "multi_thread")]
