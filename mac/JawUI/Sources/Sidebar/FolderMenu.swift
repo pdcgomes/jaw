@@ -37,6 +37,11 @@ public enum FolderAct: Sendable, Equatable {
     case newFolder(parent: String?, filing: Filed?)
     /// A folder of yours, its name opened in place.
     case rename(String)
+    /// A folder of yours nested in `to`, or put back at the top, at `position` among its new siblings
+    /// or last.
+    case moveFolder(String, to: String?, position: Int?)
+    /// A folder of yours deleted, after asking.
+    case delete(String)
 }
 
 /// The folder items of a chat's menus and of someone's in the roster: entries worked out from the tree
@@ -105,8 +110,49 @@ public enum FolderMenu {
         case let .add(_, to): "\(name) filed in \(tree.label(to))"
         case let .remove(_, from): "\(name) taken out of \(tree.label(from))"
         case let .move(_, from, to): "\(name) moved from \(tree.label(from)) to \(tree.label(to))"
+        case let .moveFolder(folder, to, _): "\(tree.label(folder)) moved to \(to.map { tree.label($0) } ?? "the top")"
+        case let .delete(folder): "\(tree.label(folder)) deleted; its chats stay wherever else they're filed"
         case .newFolder, .rename: nil
         }
+    }
+
+    /// A folder's menu in the sidebar: for one of yours, New Folder Inside…, Rename, Move to ▸ (the top,
+    /// or a folder of yours that isn't it or under it, where it is now greyed) and Delete…; for a
+    /// built-in or smart folder, and on the sidebar's space, New Folder…. None before jawd serves folders.
+    public static func folderEntries(_ folder: String?, tree: FolderTree) -> [MenuEntry] {
+        guard tree.served else { return [] }
+        guard let folder, tree.row(folder)?.isYours == true else { return [.command("folder.new.top")] }
+        let under = tree.subtree(folder)
+        let targets = tree.yours.filter { !under.contains($0.row.id) }.map { MenuEntry.command("folder.to:\($0.row.id)") }
+        return [.command("folder.new.inside"), .command("folder.rename"), .submenu("Move to", [.command("folder.to.top"), .separator] + targets),
+                .command("folder.delete")]
+    }
+
+    /// The commands those entries name, bound to `folder`.
+    @MainActor
+    public static func folderCommands(_ folder: String?, tree: FolderTree,
+                                      act: @escaping @MainActor @Sendable (FolderAct) -> Void) -> [Command]
+    {
+        var out = [Command("folder.new.top", "New Folder…", place: nil, palette: false) { act(.newFolder(parent: nil, filing: nil)) }]
+        guard let folder, let row = tree.row(folder), row.isYours else { return out }
+        let label = tree.label(folder), under = tree.subtree(folder)
+        out.append(Command("folder.new.inside", "New Folder Inside…", phrase: "New folder in \(label)", detail: "nested in it", place: nil) {
+            act(.newFolder(parent: folder, filing: nil))
+        })
+        out.append(Command("folder.rename", "Rename", phrase: "Rename \(label)", hint: "↩", place: nil) { act(.rename(folder)) })
+        out.append(Command("folder.to.top", "The Top", phrase: "Move \(label) to the top", place: nil, enabled: { row.parent != nil }) {
+            act(.moveFolder(folder, to: nil, position: nil))
+        })
+        for (target, depth) in tree.yours where !under.contains(target.id) {
+            out.append(Command("folder.to:\(target.id)", target.name, phrase: "Move \(label) into \(tree.label(target.id))", place: nil,
+                               indent: depth, enabled: { row.parent != target.id })
+            {
+                act(.moveFolder(folder, to: target.id, position: nil))
+            })
+        }
+        out.append(Command("folder.delete", "Delete…", phrase: "Delete the folder \(label)", detail: "its chats stay wherever else they're filed",
+                           key: Shortcut("⌫"), place: nil) { act(.delete(folder)) })
+        return out
     }
 
     /// What the status line says, before jawd's words, when Move to leaves the item in both folders:

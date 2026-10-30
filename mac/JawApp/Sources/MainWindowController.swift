@@ -383,6 +383,15 @@ extension MainWindowController {
             if response == .alertFirstButtonReturn { model?.deleteLayout(name) }
         }
     }
+
+    /// Delete…: asks first, then deletes the folder of yours, saying so once jawd has.
+    func askFolderDelete(_ folder: String) {
+        guard let window, let row = model.tree.row(folder), row.isYours else { return }
+        Prompts.deleteFolder(row.name).beginSheetModal(for: window) { [weak model] response in
+            guard response == .alertFirstButtonReturn, let model else { return }
+            model.jawd.folderDelete(folder, said: FolderMenu.said(.delete(folder), name: row.name, tree: model.tree))
+        }
+    }
 }
 
 /// Quick Look asks the key window's responder chain for whoever shows files in it: the window's

@@ -151,3 +151,48 @@ func ana(in folders: [String]) -> ChatRow {
     run(menu.items.first?.submenu?.items.last)
     #expect(acts.done == [.newFolder(parent: nil, filing: item)])
 }
+
+@MainActor
+@Test func `a folder of yours has New Folder Inside, Rename, Move to and Delete, and the others New Folder alone`() {
+    let tree = Samples.tree
+    let family = folderMenu(FolderMenu.folderEntries("folder:1", tree: tree), FolderMenu.folderCommands("folder:1", tree: tree) { _ in })
+    #expect(shows(family) == ["New Folder Inside…", "Rename", "Move to ▸ [The Top], —, Climbing, Friends, Work, · Clients", "Delete…"])
+    #expect(family.items.last?.keyEquivalent == "\u{8}" && family.items.last?.keyEquivalentModifierMask == .command, "⌘⌫ shown")
+    for id in ["all", "smart:1", nil] as [String?] {
+        #expect(shows(folderMenu(FolderMenu.folderEntries(id, tree: tree), FolderMenu.folderCommands(id, tree: tree) { _ in })) == ["New Folder…"])
+    }
+    #expect(FolderMenu.folderEntries("folder:1", tree: FolderTree()).isEmpty && FolderMenu.folderEntries(nil, tree: FolderTree()).isEmpty)
+}
+
+@MainActor
+@Test func `a folder moves to the top or into one of yours that isn't it or under it, where it is greyed, and each item does what it says`() {
+    let acts = Acts()
+    let tree = Samples.tree
+    let cousins = folderMenu(FolderMenu.folderEntries("folder:2", tree: tree), FolderMenu.folderCommands("folder:2", tree: tree) { acts.done.append($0) })
+    #expect(shows(cousins)[2] == "Move to ▸ The Top, —, [Family], Climbing, Friends, Work, · Clients")
+    run(cousins.items[0])
+    run(cousins.items[1])
+    run(cousins.items[2].submenu?.items[0])
+    run(cousins.items[2].submenu?.items[5])
+    run(cousins.items[3])
+    #expect(acts.done == [.newFolder(parent: "folder:2", filing: nil), .rename("folder:2"), .moveFolder("folder:2", to: nil, position: nil),
+                          .moveFolder("folder:2", to: "folder:5", position: nil), .delete("folder:2")])
+    let none = Acts()
+    run(folderMenu(FolderMenu.folderEntries(nil, tree: tree), FolderMenu.folderCommands(nil, tree: tree) { none.done.append($0) }).items.first)
+    #expect(none.done == [.newFolder(parent: nil, filing: nil)], "New Folder… makes one at the top")
+}
+
+@Test func `what's said once jawd has moved a folder or deleted it`() {
+    let tree = Samples.tree
+    #expect(FolderMenu.said(.moveFolder("folder:2", to: nil, position: nil), name: "", tree: tree) == "Cousins moved to the top")
+    #expect(FolderMenu.said(.moveFolder("folder:2", to: "folder:5", position: nil), name: "", tree: tree) == "Cousins moved to Work")
+    #expect(FolderMenu.said(.delete("folder:2"), name: "", tree: tree) == "Cousins deleted; its chats stay wherever else they're filed")
+}
+
+@MainActor
+@Test func `Delete… asks first, saying the folder's chats stay wherever else they're filed and its subfolders take its place`() {
+    let alert = Prompts.deleteFolder("Family")
+    #expect(alert.messageText == "Delete Family?")
+    #expect(alert.informativeText == "Its chats stay wherever else they're filed, and its subfolders take its place.")
+    #expect(alert.buttons.map(\.title) == ["Delete", "Cancel"] && alert.buttons.first?.hasDestructiveAction == true)
+}

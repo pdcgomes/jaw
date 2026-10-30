@@ -44,6 +44,16 @@ extension AppModel {
             guard let self else { return }
             folderAct(.rename(folder), name: "")
         })
+        // ⌘⌫ deletes to a line's start in the box, so it's a folder's only while the tree has the keys.
+        add(Command("folder.delete", "Delete Folder…", phrase: "Delete this folder", detail: "after asking", key: Shortcut("⌫"), place: .file,
+                    group: 2, palette: false, enabled: { [weak self] in
+                        guard let self, let sidebar = window?.sidebar else { return false }
+                        return sidebar.hasKeys && tree.row(folder)?.isYours == true
+                    })
+        { [weak self] in
+            guard let self else { return }
+            window?.askFolderDelete(folder)
+        })
 
         // Edit
         for (id, title, key, mods, action) in [

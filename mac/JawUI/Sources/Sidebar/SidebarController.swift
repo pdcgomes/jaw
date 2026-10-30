@@ -8,6 +8,9 @@ public protocol SidebarHost: AnyObject {
     func sidebar(_ sidebar: SidebarController, pick folder: String)
     /// Return in the name field: make the folder, or rename it, with `name`.
     func sidebar(_ sidebar: SidebarController, name: String, as naming: SidebarController.Naming)
+    /// The menu of a folder right-clicked, made as it opens; for nil, on a heading or the space under
+    /// the rows, the sidebar's own.
+    func sidebar(_ sidebar: SidebarController, menuFor folder: String?) -> [NSMenuItem]
 }
 
 /// The sidebar: the folder tree, as jawd's M6 serves it, on the sidebar's glass. The built-in folders
@@ -77,6 +80,10 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         outline.dataSource = self
         outline.delegate = self
         outline.sidebar = self
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+        outline.menu = menu
         outline.setAccessibilityLabel("Folders")
         Scrolling.style(scroll)
         scroll.documentView = outline
@@ -174,6 +181,11 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         }
     }
 
+    /// Whether the tree has the keys, as ⌘⌫ needs it to.
+    public var hasKeys: Bool {
+        isViewLoaded && view.window?.firstResponder === outline
+    }
+
     func reselect() {
         let row = outline.row(forItem: items[picked])
         if row >= 0 {
@@ -266,6 +278,7 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
         }
         let cell = (outlineView.makeView(withIdentifier: FolderCell.id, owner: self) as? FolderCell) ?? FolderCell()
         cell.show(tree.row(id), badges: tree.badges(id), roles: roles)
+        cell.menuFor = { [weak self] cell in self?.menu(for: cell) }
         return cell
     }
 

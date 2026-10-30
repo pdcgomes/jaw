@@ -260,8 +260,13 @@ enum Bench {
         case let ("message", i?):
             guard let menu = model.conversation?.menu(forRow: i) else { return "no message \(i)" }
             return words(menu.items)
+        case let ("folder", i?):
+            return words(model.window?.sidebar.menuItems(forRow: i) ?? [])
+        case ("sidebar", _) where parts.count == 1:
+            return words(model.window?.sidebar.menuItems(forRow: -1) ?? [])
         default:
-            return "unknown step: menu:\(what) (the menu steps are menu:list:<row>, menu:header, menu:message:<row> and menu:bar:<menu>)"
+            return "unknown step: menu:\(what) (the menu steps are menu:list:<row>, menu:header, menu:message:<row>, menu:bar:<menu>, "
+                + "menu:folder:<row> and menu:sidebar)"
         }
     }
 

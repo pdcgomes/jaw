@@ -68,6 +68,15 @@ final class FolderCell: NSTableCellView {
         []
     }
 
+    /// The menu of the folder on this row, from the sidebar.
+    var menuFor: ((FolderCell) -> NSMenu?)?
+    var popUp = MenuPopUp()
+
+    /// VoiceOver's Show Menu: the folder's menu under its row.
+    override func accessibilityPerformShowMenu() -> Bool {
+        popUp.show(menuFor?(self), at: NSPoint(x: bounds.minX, y: bounds.minY), in: self)
+    }
+
     static func image(_ symbol: String) -> NSImage? {
         NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(symbolSize)
     }

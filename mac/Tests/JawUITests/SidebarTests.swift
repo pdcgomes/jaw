@@ -20,6 +20,13 @@ final class SideHost: SidebarHost {
     func sidebar(_: SidebarController, name: String, as naming: SidebarController.Naming) {
         named.append((name, naming))
     }
+
+    var menusFor: [String?] = []
+
+    func sidebar(_: SidebarController, menuFor folder: String?) -> [NSMenuItem] {
+        menusFor.append(folder)
+        return [NSMenuItem(title: folder ?? "New Folder…", action: nil, keyEquivalent: "")]
+    }
 }
 
 @MainActor
@@ -302,4 +309,38 @@ final class PlainSourceList: NSObject, NSOutlineViewDataSource, NSOutlineViewDel
     #expect(s.outline.rect(ofRow: 5).height == plain.rect(ofRow: 1).height, "a heading")
     #expect(s.outline.rect(ofRow: 6).height == plain.rect(ofRow: 0).height, "a folder")
     withExtendedLifetime(source) {}
+}
+
+@MainActor
+@Test func `a right click on a folder asks for its menu, and on a heading or the space under the rows for the sidebar's`() throws {
+    let host = SideHost()
+    let s = sidebar(host)
+    s.apply(Samples.folderUpdate)
+    let menu = try #require(s.outline.menu)
+    #expect(menu.delegate === s, "filled for the row right-clicked as it opens")
+    #expect(s.menuItems(forRow: 6).map(\.title) == ["folder:1"])
+    #expect(s.menuItems(forRow: 5).map(\.title) == ["New Folder…"] && s.menuItems(forRow: -1).map(\.title) == ["New Folder…"])
+    #expect(host.menusFor == ["folder:1", nil, nil])
+}
+
+@MainActor
+@Test func `VoiceOver's Show Menu on a folder's row opens its menu under the row`() throws {
+    let host = SideHost()
+    let s = sidebar(host)
+    s.apply(Samples.folderUpdate)
+    let cell = try #require(s.outline.view(atColumn: 0, row: 6, makeIfNecessary: true) as? FolderCell)
+    var popped: [(NSMenu, NSPoint)] = []
+    cell.popUp.run = { menu, point, _ in popped.append((menu, point)) }
+    #expect(cell.accessibilityPerformShowMenu())
+    #expect(popped.first?.0.items.map(\.title) == ["folder:1"] && popped.first?.1 == NSPoint(x: cell.bounds.minX, y: cell.bounds.minY))
+}
+
+@MainActor
+@Test func `the tree has the keys only while its outline is the window's first responder`() {
+    let s = sidebar()
+    let window = NSWindow(contentViewController: s)
+    defer { withExtendedLifetime(window) {} }
+    #expect(!s.hasKeys)
+    window.makeFirstResponder(s.outline)
+    #expect(s.hasKeys)
 }

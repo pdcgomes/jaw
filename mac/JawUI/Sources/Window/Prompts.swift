@@ -29,4 +29,15 @@ public enum Prompts {
         alert.addButton(withTitle: "Cancel")
         return alert
     }
+
+    /// Delete…'s question for a folder of yours: its chats stay wherever else they're filed, and its
+    /// subfolders take its place, as jawd's `folder.delete` does.
+    public static func deleteFolder(_ name: String) -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "Delete \(name)?"
+        alert.informativeText = "Its chats stay wherever else they're filed, and its subfolders take its place."
+        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        return alert
+    }
 }

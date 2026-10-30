@@ -22,6 +22,11 @@ extension AppModel: SidebarHost {
         }
     }
 
+    func sidebar(_: SidebarController, menuFor folder: String?) -> [NSMenuItem] {
+        let bound = FolderMenu.folderCommands(folder, tree: tree) { [weak self] act in self?.folderAct(act, name: "") }
+        return Menus.items(FolderMenu.folderEntries(folder, tree: tree)) { id in bound.first { $0.id == id } }
+    }
+
     /// ⇧⌘N: a new folder, in the folder picked when it's yours, or at the top, named in place.
     func newFolder() {
         guard tree.served else { return say("folders come with jawd's M6") }
@@ -91,6 +96,10 @@ extension AppModel: SidebarHost {
         case let .rename(id):
             window?.showSidebar()
             window?.sidebar.beginRenaming(id)
+        case let .moveFolder(id, to, position):
+            jawd.folderMove(id, parent: to, position: position, said: said)
+        case let .delete(id):
+            window?.askFolderDelete(id)
         }
     }
 
