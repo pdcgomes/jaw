@@ -19,7 +19,7 @@ func ordinary(_ method: String, _ params: JSONValue, _ id: UInt64) -> [String] {
     case "messages.watch":
         let rows = [FakeJawd.message("m1", v: 5, sort: "1", text: "hi"), FakeJawd.message("m2", v: 6, sort: "2", text: "there")]
         return ["{\"id\":\(id),\"result\":{\"watch\":\"w2\",\"seq\":10,\"total\":2,\"older\":false,\"newer\":0,\"rows\":[\(rows.joined(separator: ","))]}}"]
-    case "send.text":
+    case "send.text", "send.poll":
         let key = params["key"]?.string ?? ""
         return ["{\"id\":\(id),\"result\":{\"message\":\"3EB0\(key.suffix(4))\"}}"]
     default:

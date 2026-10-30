@@ -433,10 +433,28 @@ public struct Album: Decodable, Sendable, Hashable {
     }
 }
 
+/// A link's preview, as its message carries it: where it goes, the page's title and description, and
+/// its thumbnail once jawd keeps one.
 public struct LinkPreview: Decodable, Sendable, Hashable {
     public var url: String
     public var title: String?
     public var description: String?
+    /// The thumbnail's path under jawd's root, in `media/links/`, once jawd keeps it: 140 pixels on its
+    /// long side for a preview you send, as it came for one someone else sends.
+    public var preview: String?
+
+    public init(url: String, title: String? = nil, description: String? = nil, preview: String? = nil) {
+        self.url = url
+        self.title = title
+        self.description = description
+        self.preview = preview
+    }
+
+    /// Where it goes, as its card says it: the URL's host without `www.`, or the URL when it has none.
+    public var host: String {
+        guard let host = URL(string: url)?.host(), !host.isEmpty else { return url }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
 }
 
 public struct Poll: Decodable, Sendable, Hashable {
@@ -444,11 +462,33 @@ public struct Poll: Decodable, Sendable, Hashable {
     public var options: [Option]
     /// How many options a vote may choose.
     public var max: Int
+    /// How many people chose any option.
+    public var voters: Int
+
+    /// The options you chose, in their order.
+    public var mine: [String] {
+        options.filter(\.mine).map(\.name)
+    }
+
+    public init(question: String, options: [Option], max: Int = 1, voters: Int = 0) {
+        self.question = question
+        self.options = options
+        self.max = max
+        self.voters = voters
+    }
 
     public struct Option: Decodable, Sendable, Hashable {
         public var name: String
+        /// How many chose it.
         public var votes: Int
+        /// Whether you did.
         public var mine: Bool
+
+        public init(name: String, votes: Int = 0, mine: Bool = false) {
+            self.name = name
+            self.votes = votes
+            self.mine = mine
+        }
 
         public init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: Keys.self)
@@ -467,9 +507,10 @@ public struct Poll: Decodable, Sendable, Hashable {
         question = try c.decode(String.self, forKey: .question)
         options = (try? c.decodeIfPresent([Option].self, forKey: .options)) ?? []
         max = try c.decodeIfPresent(Int.self, forKey: .max) ?? 1
+        voters = try c.decodeIfPresent(Int.self, forKey: .voters) ?? 0
     }
 
     enum Keys: String, CodingKey {
-        case question, options, max
+        case question, options, max, voters
     }
 }

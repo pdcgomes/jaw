@@ -37,7 +37,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         case "find": .find
         case "chats.watch": .chats
         case "messages.watch", "watch.move": .messages
-        case "send.text": .reply(.sent)
+        case "send.text", "send.poll": .reply(.sent)
         case "chat.start": .reply(.chat)
         case "message.info": .reply(.info)
         case "chat.info": .reply(.chatInfo)
@@ -145,6 +145,41 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
     #expect(unnamed.kind == .invite && unnamed.invite != nil && unnamed.invite?.name == nil)
 }
 
+@Test func `a link's preview and a poll's tallies decode as jawd sends them`() throws {
+    guard case let .reply(_, .sent(sent)) = try incoming("send.poll.result.json", .reply(.sent)), let poll = sent.row else {
+        Issue.record("not send.poll's answer")
+        return
+    }
+    #expect(sent.message == "3EB0F2A9B8E7D61A2B4C5D" && poll.kind == .poll && poll.mine && poll.status == .pending)
+    #expect(poll.poll?.question == "Onde jantamos sexta?" && poll.poll?.max == 1 && poll.poll?.voters == 0)
+    #expect(poll.poll?.options.map(\.name) == ["Ramen", "Tasca do Chico", "Pizza"] && poll.poll?.mine == [])
+
+    func row(_ kind: String) throws -> MessageRow {
+        try JSONDecoder().decode(MessageRow.self, from: Data("""
+        {"id":"3EB0DEMO00000004","v":81240,"sort":"1792145190123~000000000126","chat":"351912345678@s.whatsapp.net",
+         "at":1792145190123,"from":{"id":"person:12","name":"Ana","colour":4},"mine":false,\(kind)}
+        """.utf8))
+    }
+    let link = try row("""
+    "kind":"text","spans":[{"t":"text","s":"a previsão "},{"t":"link","s":"https://www.ipma.pt/pt/otempo/","url":"https://www.ipma.pt/pt/otempo/"}],
+    "link":{"url":"https://www.ipma.pt/pt/otempo/","title":"Previsão para Sintra · IPMA","description":"Céu pouco nublado.","preview":"media/links/3f2a.jpg"}
+    """)
+    #expect(link.link == LinkPreview(url: "https://www.ipma.pt/pt/otempo/", title: "Previsão para Sintra · IPMA",
+                                     description: "Céu pouco nublado.", preview: "media/links/3f2a.jpg"))
+    #expect(link.link?.host == "ipma.pt", "the host, without www.")
+    let history = try row(#""kind":"text","spans":[],"link":{"url":"https://climb.pt/sintra","title":"Sintra"}"#)
+    #expect(history.link?.preview == nil && history.link?.host == "climb.pt", "history's previews come without their thumbnail")
+    #expect(LinkPreview(url: "not a link").host == "not a link")
+
+    let voted = try row("""
+    "kind":"poll","spans":[{"t":"text","s":"Which day?"}],"poll":{"question":"Which day?","max":2,"voters":4,
+    "options":[{"name":"Saturday","votes":3,"mine":true},{"name":"Sunday","votes":2,"mine":true},{"name":"Monday","votes":0,"mine":false}]}
+    """)
+    #expect(voted.poll?.voters == 4 && voted.poll?.max == 2 && voted.poll?.mine == ["Saturday", "Sunday"])
+    let older = try row(#""kind":"poll","spans":[],"poll":{"question":"Jantar?","options":[{"name":"Ramen","votes":1},{"name":"Pizza"}]}"#)
+    #expect(older.poll?.voters == 0 && older.poll?.max == 1 && older.poll?.options.map(\.votes) == [1, 0], "what an older jawd leaves out")
+}
+
 @Test func `each request JawKit writes equals its fixture`() throws {
     func same(_ name: String, _ written: JSONValue) throws {
         #expect(written == (try JSONValue.parse(fixture(name))), "\(name)")
@@ -179,6 +214,13 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
     )))
     try same("edit.request.json", written(id: 42, "edit", Edit(message: "3EB0C431F2A9B8E7D61A2B", text: "afinal chego às 21h")))
     try same("delete.request.json", written(id: 43, "delete", Delete(message: "3EB0C431F2A9B8E7D61A2B", for: .everyone)))
+    try same("send.poll.request.json", written(id: 12, "send.poll", SendPoll(
+        chat: "120363012345678901@g.us", question: "Onde jantamos sexta?", options: ["Ramen", "Tasca do Chico", "Pizza"], max: 1,
+        key: "jaw-1c2d3e4f",
+    )))
+    try same("poll.vote.request.json", written(id: 13, "poll.vote", PollVote(
+        message: "3EB0DEMO00000005", options: ["Pizza"], chat: "120363012345678901@g.us", key: "jaw-9e8d7c6b",
+    )))
     try same("forward.request.json", written(id: 44, "forward", Forward(
         messages: ["3EB0A1B2C3D4E5F6"], to: ["351913000031@s.whatsapp.net"], key: "jaw-0c51e2aa",
     )))

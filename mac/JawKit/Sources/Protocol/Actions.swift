@@ -31,7 +31,47 @@ public struct SendText: Encodable, Sendable, Hashable {
     }
 }
 
-/// `send.text`'s answer.
+/// `send.poll`'s params: a poll's question, its options in their order, each named once, and how many
+/// of them one vote may choose; it's answered as `send.text` is.
+public struct SendPoll: Encodable, Sendable, Hashable {
+    public var chat: String
+    public var question: String
+    public var options: [String]
+    public var max: Int
+    public var key: String?
+
+    public init(chat: String, question: String, options: [String], max: Int = 1, key: String?) {
+        self.chat = chat
+        self.question = question
+        self.options = options
+        self.max = max
+        self.key = key
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: Keys.self)
+        try c.encode(chat, forKey: .chat)
+        try c.encode(question, forKey: .question)
+        try c.encode(options, forKey: .options)
+        try c.encode(max, forKey: .max)
+        try c.encodeIfPresent(key, forKey: .key)
+    }
+
+    enum Keys: String, CodingKey {
+        case chat, question, options, max, key
+    }
+}
+
+/// `poll.vote`'s params: your vote in poll `message`, every option you choose now by name, none to
+/// take your vote back.
+public struct PollVote: Encodable, Sendable, Hashable {
+    public var message: String
+    public var options: [String]
+    public var chat: String?
+    public var key: String?
+}
+
+/// `send.text`'s answer, and `send.poll`'s.
 public struct Sent: Decodable, Sendable, Hashable {
     public var message: String
     public var row: MessageRow?

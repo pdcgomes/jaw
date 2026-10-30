@@ -175,6 +175,8 @@ final class AppModel {
         case let .unsent(chat, key, text, why):
             sending[key] = nil
             if let c = panes[chat] { c.unsent(text: text, why: why) } else { say("not sent: \(why)", warn: true) }
+        case let .pollUnsent(_, _, poll, why):
+            say("the poll \"\(poll.question)\" wasn't sent: \(why)", warn: true)
         case .unsure:
             say("asking jawd again once it's back")
         case let .acted(_, said):

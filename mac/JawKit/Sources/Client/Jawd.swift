@@ -68,6 +68,21 @@ public final class Jawd {
         ask("send.text", sending.params, .send(sending), expect: .sent)
     }
 
+    /// Sends a poll with the key its form made for it, as a message is sent: asked again with that key
+    /// if the answer was lost, and handed back whole if jawd turns it down.
+    public func sendPoll(chat: String, question: String, options: [String], max: Int, key: String) {
+        let polling = Polling(params: SendPoll(chat: chat, question: question, options: options, max: max, key: key), first: now())
+        ask("send.poll", polling.params, .sendPoll(polling), expect: .sent)
+    }
+
+    /// Your vote in a poll: every option you choose now, by name, none to take your vote back.
+    @discardableResult
+    public func vote(chat: String, message: String, options: [String]) -> String {
+        let key = Self.key()
+        act(.vote(PollVote(message: message, options: options, chat: chat, key: key)), chat: chat, key: key, what: "voting")
+        return key
+    }
+
     @discardableResult
     public func react(chat: String, message: String, emoji: String) -> String {
         let key = Self.key()
@@ -306,6 +321,8 @@ public final class Jawd {
         switch (asked, reply) {
         case let (.send(sending), .sent(sent)):
             out.append(.sent(key: sending.params.key ?? "", message: sent.message, row: sent.row))
+        case let (.sendPoll(polling), .sent(sent)):
+            out.append(.sent(key: polling.params.key ?? "", message: sent.message, row: sent.row))
         case let (.act(acting), _):
             out.append(.acted(key: acting.key, said: acting.done))
         case let (.owed(key, owed), _):
@@ -333,6 +350,12 @@ public final class Jawd {
         let first: Date
     }
 
+    /// A poll being sent, as `Sending` is a message.
+    struct Polling {
+        let params: SendPoll
+        let first: Date
+    }
+
     /// A chat being looked up: its window of one row, and the list it's looked for in.
     struct Lookup {
         let window: WindowID
@@ -341,7 +364,7 @@ public final class Jawd {
     }
 
     enum ActParams {
-        case react(React), edit(Edit), delete(Delete), forward(Forward)
+        case react(React), edit(Edit), delete(Delete), forward(Forward), vote(PollVote)
     }
 
     /// An action on messages, asked with a key made for it alone and kept until jawd answers for it.
@@ -360,6 +383,7 @@ public final class Jawd {
     /// back, in the order it was first asked, so two edits of a message end as the second.
     enum Again {
         case send(Sending)
+        case sendPoll(Polling)
         case act(Acting)
     }
 
@@ -382,6 +406,7 @@ public final class Jawd {
     /// What a request was, for what to say if jawd turns it down.
     enum Asked {
         case send(Sending)
+        case sendPoll(Polling)
         case act(Acting)
         case retry
         case owed(OwedKey, Owed)
@@ -414,6 +439,7 @@ public final class Jawd {
         case let .edit(p): ask("edit", p, .act(acting))
         case let .delete(p): ask("delete", p, .act(acting))
         case let .forward(p): ask("forward", p, .act(acting))
+        case let .vote(p): ask("poll.vote", p, .act(acting))
         }
     }
 
@@ -444,9 +470,14 @@ public final class Jawd {
             switch item {
             case let .send(sending) where away(sending.first):
                 out.append(.unsent(chat: sending.params.chat, key: sending.params.key ?? "", text: sending.params.text,
-                                   why: "jawd was away too long to tell whether it went, so look in the chat before sending it again"))
+                                   why: Self.awayTooLong))
             case let .send(sending):
                 ask("send.text", sending.params, .send(sending), expect: .sent)
+            case let .sendPoll(polling) where away(polling.first):
+                out.append(.pollUnsent(chat: polling.params.chat, key: polling.params.key ?? "", poll: polling.params,
+                                       why: Self.awayTooLong))
+            case let .sendPoll(polling):
+                ask("send.poll", polling.params, .sendPoll(polling), expect: .sent)
             case let .act(acting) where away(acting.first):
                 out.append(.acted(key: acting.key,
                                   said: "jawd was away too long to tell whether it was done, so look in the chat before \(acting.what) again"))
@@ -459,6 +490,9 @@ public final class Jawd {
         }
     }
 
+    /// Why a message or a poll whose answer was lost goes back to where it was written.
+    static let awayTooLong = "jawd was away too long to tell whether it went, so look in the chat before sending it again"
+
     /// What the app hears of a request jawd didn't do.
     func refused(_ asked: Asked, _ failure: Failure) -> [JawUpdate] {
         switch asked {
@@ -469,6 +503,13 @@ public final class Jawd {
                 return [.unsure(chat: chat, key: key)]
             }
             return [.unsent(chat: chat, key: key, text: sending.params.text, why: Self.whyUnsent(failure))]
+        case let .sendPoll(polling):
+            let chat = polling.params.chat, key = polling.params.key ?? ""
+            if failure == .lost {
+                again.append(.sendPoll(polling))
+                return [.unsure(chat: chat, key: key)]
+            }
+            return [.pollUnsent(chat: chat, key: key, poll: polling.params, why: Self.whyUnsent(failure))]
         case let .act(acting):
             if failure == .lost {
                 again.append(.act(acting))
@@ -538,6 +579,8 @@ public enum JawUpdate: Sendable {
     case sent(key: String, message: String, row: MessageRow?)
     /// A message jawd didn't take: its text goes back to its box, with why.
     case unsent(chat: String, key: String, text: String, why: String)
+    /// A poll jawd didn't take: it goes back to its form whole, with why.
+    case pollUnsent(chat: String, key: String, poll: SendPoll, why: String)
     /// A message or an action whose answer was lost, to be asked for again once jawd is back.
     case unsure(chat: String, key: String)
     /// An action jawd answered for, and what to say of it, if anything.
