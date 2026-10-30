@@ -336,6 +336,7 @@ pub(crate) fn chat_row(row: read::ChatRow) -> proto::ChatRow {
         draft: row.draft,
         community: row.community,
         children_unread: row.children_unread.map(|n| n.max(0) as u64),
+        children_mentions: None,
         folders: row.folders.into_iter().map(|n| format!("folder:{n}")).collect(),
         favourite: row.favourite.map(|slot| slot.clamp(1, 9) as u8),
     }

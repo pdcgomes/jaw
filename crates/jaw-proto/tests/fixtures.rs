@@ -74,7 +74,10 @@ fn every_fixture_reads_and_writes_back_the_same() {
             _ => (stem, None),
         };
         let book = example == Some("book");
-        assert!(example.is_none() || book, "{name}: this test has no type for the example {example:?}");
+        // A chat list holding a community for its groups reads as any chat list.
+        let community = example == Some("community")
+            && matches!(stem, "chats.watch.request" | "chats.watch.result" | "chats.push" | "watch.move.request");
+        assert!(example.is_none() || book || community, "{name}: this test has no type for the example {example:?}");
         let parts: Vec<&str> = stem.rsplitn(2, '.').collect();
         let (kind, method) = match parts.as_slice() {
             [kind, method] => (*kind, *method),

@@ -842,7 +842,7 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
         let Place { around, before, after } = place.clone();
         let line = match &w.watch {
             Some(watch) if !again => {
-                let moving = WatchMove { watch: watch.clone(), around, before, after };
+                let moving = WatchMove { watch: watch.clone(), around, before, after, open: None };
                 encode(id, "watch.move", value(&moving))
             }
             _ => {
@@ -852,7 +852,8 @@ impl<C: Row + DeserializeOwned + Send + 'static, M: Row + DeserializeOwned + Sen
                     // A chat list held while catching up sends rows with an old sort and their v
                     // unchanged, so a chat list comes whole, its have saying which rows left.
                     Kind::Chats => {
-                        let watch = ChatsWatch { folder: w.of.clone(), around, before, after, since: None, have };
+                        let watch =
+                            ChatsWatch { folder: w.of.clone(), around, before, after, since: None, have, open: None };
                         encode(id, "chats.watch", value(&watch))
                     }
                     Kind::Messages => {

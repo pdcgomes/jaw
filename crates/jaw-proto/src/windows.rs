@@ -62,6 +62,9 @@ pub struct ChatsWatch {
     /// The rows the client already holds for this window, when it watches again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub have: Vec<String>,
+    /// The communities whose groups the window brings; every community's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<Vec<String>>,
 }
 
 /// `messages.watch`'s params.
@@ -88,6 +91,9 @@ pub struct WatchMove {
     pub before: u32,
     #[serde(default)]
     pub after: u32,
+    /// For a chat list, the communities whose groups it brings now; as it was when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<Vec<String>>,
 }
 
 /// `unwatch`'s params, and the `resync` push's.
@@ -232,9 +238,12 @@ pub struct ChatRow {
     pub draft: Option<String>,
     /// For a group in a community, the community's `id`.
     pub community: Option<String>,
-    /// For a community, its groups' unread total.
+    /// For a community, the unread messages of the groups under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub children_unread: Option<u64>,
+    /// For a community, how many of the unread messages of the groups under it mention you.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub children_mentions: Option<u64>,
     /// The IDs of your folders it sits in directly, or its person does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<String>,
