@@ -1562,6 +1562,37 @@ async fn two_sends_at_once_cant_both_pass_the_bound_on_files_kept() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn two_sends_at_once_with_one_key_answer_the_same_messages_and_write_them_once() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    let path = yours(picked.path(), "k.jpg", &Picture::lake(400, 300));
+    let ask = json!({ "chat": ANA, "files": [{ "path": path }], "key": "jaw-keyed-at-once" });
+    // The first is held once it has looked for its key and kept its file, while the second does
+    // both and is written.
+    let (stopped, go) = rig.sending.pause_next_media();
+    let (sending, asked) = (rig.sending.clone(), ask.clone());
+    let first = tokio::spawn(async move { sending.call("send.media", asked).await });
+    stopped.notified().await;
+    let second = rig.call("send.media", ask).await.unwrap();
+    go.notify_one();
+    let first = first.await.unwrap().unwrap();
+    assert_eq!(first["messages"], second["messages"], "the key named the second's messages when the first was written");
+    let id = second["messages"][0].as_str().unwrap().to_string();
+    rig.until(&id, "sent", sent).await;
+    let messages: i64 = rig.query(|db| Ok(db.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))?)).await;
+    assert_eq!(messages, 1, "written once");
+    assert_eq!(rig.world.sends().len(), 1, "and sent once");
+    for _ in 0..300 {
+        if rig.files(OUTGOING).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(rig.files(OUTGOING).is_empty(), "the first's copy of your file went too: {:?}", rig.files(OUTGOING));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_file_kept_by_copying_it_is_kept_only_with_room_for_it_on_the_disk() {
     let home = tempfile::tempdir().unwrap();
     let picked = tempfile::tempdir().unwrap();
