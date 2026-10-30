@@ -1211,8 +1211,8 @@ async fn a_phone_read_naming_the_chat_by_a_jid_merged_into_it_never_cancels_the_
 }
 
 /// The number's chat with n0 to n4, read on the phone past every message, and the LID's with l0 to
-/// l4, never read, merged: the number's chat owes l0 to l4, whose reading WhatsApp hasn't heard of.
-async fn read_on_the_phone_and_merged() -> (tempfile::TempDir, Store) {
+/// l4, never read, joined, so the LID's chat starts merging into the number's.
+async fn read_on_the_phone_and_joined() -> (tempfile::TempDir, Store) {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
     let mut changes: Vec<Change> = (0..5).map(|i| message(NEW, &format!("n{i}"), AT + i)).collect();
@@ -1221,6 +1221,12 @@ async fn read_on_the_phone_and_merged() -> (tempfile::TempDir, Store) {
     let on_the_phone = Change::Read(Read { chat: NEW.into(), at: AT + 5_000, ..Read::default() });
     store.apply(Lane::Live, vec![on_the_phone]).await.unwrap();
     store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    (home, store)
+}
+
+/// Those merged: the number's chat owes l0 to l4, whose reading WhatsApp hasn't heard of.
+async fn read_on_the_phone_and_merged() -> (tempfile::TempDir, Store) {
+    let (home, store) = read_on_the_phone_and_joined().await;
     merged(&store, LID).await;
     assert_eq!(owed(&store, NEW).await, ids("l", 0..5), "whether the phone read the LID's can't be known");
     (home, store)
@@ -1250,6 +1256,55 @@ async fn a_phone_read_of_the_chat_that_stays_by_its_own_jid_never_cancels_the_re
     store.apply(Lane::Live, vec![on_the_phone(AT + 8_100)]).await.unwrap();
     assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "then on the phone, by the JID n6 came under");
     assert_eq!(unread(&store).await, [(NEW.to_string(), 1)], "l5, after it, still unread");
+}
+
+/// During the merge, a read on the phone by her number, or one of yours from another device to her
+/// number, tells WhatsApp of all the number's chat holds, and the LID's l0 to l4, still in the chat
+/// going, count read from the number's position; then something naming l0 moves it into the
+/// number's chat before its turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_moved_out_of_turn_once_the_chat_that_stays_is_read_during_its_merge_is_owed_when_it_ends() {
+    let openers = [
+        (
+            "a read on the phone by her number",
+            Change::Read(Read { chat: NEW.into(), at: AT + 6_000, ..Read::default() }),
+        ),
+        ("one of yours from another device to her number", Change::Message(mine(NEW, "y0", AT + 6_000))),
+    ];
+    let naming = |here| Change::Read(Read { chat: LID.into(), ids: vec!["l0".into()], here, ..Read::default() });
+    // Each with the first of l0 to l4 owed once the merge ends.
+    let moves = [
+        ("a copy of l0 from history", Some(Change::Message(Message { live: false, ..text(LID, "l0", AT + 10) })), 0),
+        ("a copy of l0, live", Some(message(LID, "l0", AT + 10)), 0),
+        ("a reaction to l0", Some(react(LID, "l0", AT + 6_100, "👍")), 0),
+        ("l0 read here", Some(naming(true)), 0),
+        ("a read on the phone by her LID naming l0, which tells WhatsApp of it", Some(naming(false)), 1),
+        ("nothing", None, 0),
+    ];
+    let mut wrong = Vec::new();
+    for (opened, open) in &openers {
+        for (moved, moving, first) in &moves {
+            let (_home, store) = read_on_the_phone_and_joined().await;
+            store.apply(Lane::Live, vec![open.clone()]).await.unwrap();
+            let told = query(&store, |db| {
+                Ok(db.query_row("SELECT told_at FROM chats WHERE id = ?1", [NEW], |r| r.get::<_, Option<i64>>(0))?)
+            })
+            .await;
+            assert_eq!(told, None, "{opened} tells WhatsApp of all the number's chat holds");
+            if let Some(moving) = moving {
+                store.apply(Lane::Live, vec![moving.clone()]).await.unwrap();
+            }
+            let l0 =
+                column::<String>(&store, "SELECT c.id FROM messages m JOIN chats c ON c.n = m.chat WHERE m.id = 'l0'");
+            assert_eq!(l0.await, [if moving.is_some() { NEW } else { LID }], "{opened}, then {moved}: l0's chat");
+            merged(&store, LID).await;
+            let (got, want) = (owed(&store, NEW).await, ids("l", *first..5));
+            if got != want {
+                wrong.push(format!("{opened}, then {moved}: owes {got:?}, not {want:?}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "what the merge left owed:\n{}", wrong.join("\n"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

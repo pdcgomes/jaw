@@ -1975,6 +1975,9 @@ fn moved_from_merging(db: &Connection, stamps: &mut Stamps, keep: i64, id: &str)
         .query_row(params![keep, id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
     let Some((gone, n)) = found else { return Ok(None) };
+    // Where the chat going was read is merged into the kept chat's before the message moves, as
+    // before a step's, since what's owed for it is found only while it's still there.
+    merge_reads(db, stamps, keep, gone)?;
     let moved = move_merged(db, stamps, gone, keep, n)?;
     show_newest(db, stamps, gone)?;
     show_newest(db, stamps, keep)?;
