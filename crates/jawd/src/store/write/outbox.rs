@@ -3456,6 +3456,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_deletion_kept_for_a_late_receipt_takes_the_hd_copy_of_a_message_that_never_went() {
+        use crate::store::{Change, Lane, Store};
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let apply = |changes: Vec<Change>| store.apply(Lane::Live, changes);
+        // A message of yours still to go, and your deletion of it for everyone held behind it.
+        apply(vec![Change::Remember { key: "me".into(), value: ME_JID.into() }, sending(ANA, "m1", 1_000, None)])
+            .await
+            .unwrap();
+        apply(vec![acting(ANA, "m1", "x1", Amendment::Revoke, 2_000)]).await.unwrap();
+        // An HD copy of it the deletion's own transaction didn't take, as nothing in jaw.db leaves
+        // now, written from outside.
+        let side = Connection::open(home.path().join("jaw.db")).unwrap();
+        side.busy_timeout(Duration::from_secs(10)).unwrap();
+        side.execute(
+            "INSERT INTO outbox (target, jid, id, kind, raw, next_at, created_at)
+             SELECT n, ?1, 'h1', 'hd', x'01', 0, 0 FROM messages WHERE id = 'm1'",
+            [ANA],
+        )
+        .unwrap();
+        // WhatsApp refuses the message, and the deletion, refused once it may have gone, has no
+        // receipt in its day, so it's kept for a late one and nothing can send the message again.
+        apply(vec![Change::Outbox(Step::Failed { outbox: 1, error: "406".into(), next_at: None })]).await.unwrap();
+        let hd =
+            || on(&store, |db| Ok(db.query_row("SELECT count(*) FROM outbox WHERE kind = 'hd'", [], |r| r.get(0))?));
+        assert_eq!(hd().await, 1, "while the deletion may still go, the message's failed row holds its HD copy");
+        apply(vec![Change::Outbox(Step::Unconfirmed { outbox: 2, error: "503".into(), until: 0 })]).await.unwrap();
+        apply(vec![Change::Outbox(Step::NoReceipt { outbox: 2, error: "no receipt".into() })]).await.unwrap();
+        let failed = on(&store, |db| {
+            Ok(db.query_row("SELECT count(*) FROM outbox WHERE message IS NOT NULL", [], |r| r.get(0))?)
+        })
+        .await;
+        assert_eq!(failed, 0, "the message's failed row goes, as nothing can send it again");
+        assert_eq!(hd().await, 0, "and its HD copy, with nothing left to go after, goes with it");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_fold_carries_an_hd_copy_on_its_way_to_the_kept_message() {
         use crate::store::{Change, Lane, Person, Store};
         let home = tempfile::tempdir().unwrap();
