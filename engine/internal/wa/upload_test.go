@@ -323,13 +323,15 @@ func roomFor(dir string, free *uint64) error {
 func TestAnUploadNeedsALinkedAccount(t *testing.T) {
 	_, jawd, _, closeLink := engineWithoutSession(t, link.Protocol)
 	defer closeLink()
-	up := &enginepb.MediaUpload{Id: "up:1:sd", Kind: enginepb.MediaDownload_IMAGE, Path: "/tmp/x.jpg", Temp: "/tmp/x", FileSha256: make([]byte, 32)}
+	// A file that's there and is the one named, so only the missing session stops it.
+	up := uploadOf(t, t.TempDir(), photo(1_000))
+	mkdir(t, filepath.Dir(up.Temp))
 	command(t, jawd, 1, &enginepb.Command{Kind: &enginepb.Command_MediaUpload{MediaUpload: up}})
 	reply, err := jawd.Recv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply.GetReply().GetFailure() == nil {
+	if failure := reply.GetReply().GetFailure(); failure == nil || !strings.Contains(failure.Message, "no session") {
 		t.Fatalf("an upload without a session gave %v", reply)
 	}
 }

@@ -18,7 +18,7 @@ use super::{OUTGOING, UPLOADS};
 use crate::engine::demo::{self, DemoEngine, Picture, Replies, World};
 use crate::engine::supervisor::{Backoff, Supervisor};
 use crate::send::{Makers, Sending, Timing};
-use crate::store::{Chat, Lane, read};
+use crate::store::{Amend, Amendment, Chat, Lane, read};
 
 const ANA: &str = "351912345678@s.whatsapp.net";
 
@@ -939,6 +939,137 @@ async fn a_copys_upload_is_kept_in_a_synced_commit_before_its_message_goes() {
     rig.world.gate_uploads(false);
     rig.world.until(|asked| asked.iter().any(|k| matches!(k, pb::command::Kind::Send(s) if s.id == id))).await;
     assert!(rig.store.storage().synced_commits > synced, "the message went before its upload reached the disk");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_media_and_its_cancel_reach_the_disk_before_they_are_answered() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    // Nothing is made meanwhile, so the synced commits counted are the requests' own.
+    rig.media.hold_making(true);
+    let path = yours(picked.path(), "a.jpg", &Picture::lake(640, 480));
+    let synced = || rig.store.storage().synced_commits;
+    let before = synced();
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+    assert!(synced() > before, "send.media was answered before its messages reached the disk");
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    let before = synced();
+    rig.media.call("media.cancel", json!({ "message": id })).await.unwrap();
+    assert!(synced() > before, "media.cancel was answered before it reached the disk");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_of_your_file_no_row_names_goes_at_the_start() {
+    let home = tempfile::tempdir().unwrap();
+    // As a stop between keeping a file and the commit naming it leaves one.
+    std::fs::create_dir_all(home.path().join(OUTGOING)).unwrap();
+    let left = home.path().join(OUTGOING).join("3EB0STOPPED.jpg");
+    std::fs::write(&left, b"a copy of yours no message names").unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    assert!(!left.exists(), "the start removes it before anything runs");
+    assert_eq!(rig.media.status().orphans_removed, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_send_deleted_for_everyone_from_your_phone_takes_its_hd_copy_with_it() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.world.refuse_next(1);
+    let path = yours(picked.path(), "big.jpg", &Picture::lake(2400, 1800));
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    rig.until(&id, "refused", failed).await;
+    let revoked = Amend {
+        chat: ANA.into(),
+        target: id.clone(),
+        sender: None,
+        mine: true,
+        at: now_ms(),
+        what: Amendment::Revoke,
+        raw: None,
+    };
+    rig.store.apply(Lane::Live, vec![Change::Amend(revoked)]).await.unwrap();
+    let rows = |db: &Connection| -> anyhow::Result<(i64, i64)> {
+        Ok((
+            db.query_row("SELECT count(*) FROM outbox WHERE kind NOT IN ('app_state', 'revoke')", [], |r| r.get(0))?,
+            db.query_row("SELECT count(*) FROM outgoing", [], |r| r.get(0))?,
+        ))
+    };
+    assert_eq!(rig.query(rows).await, (0, 0), "nothing of it is left to send, nor its HD copy");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sends: Vec<String> = rig.world.sends().into_iter().map(|s| s.id).collect();
+    assert_eq!(sends, [id], "its HD copy never goes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_hd_copy_waits_while_whatsapp_has_refused_its_message_and_goes_after_it_once_sent_again() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.world.refuse_next(1);
+    let path = yours(picked.path(), "big.jpg", &Picture::lake(2400, 1800));
+    let answer =
+        rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }], "quality": "hd" })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    rig.until(&id, "refused", failed).await;
+    let hd_ready = |db: &Connection| -> anyhow::Result<bool> {
+        Ok(db.query_row("SELECT count(*) FROM outgoing WHERE variant = 'hd' AND state = 'ready'", [], |r| {
+            r.get::<_, i64>(0)
+        })? == 1)
+    };
+    for _ in 0..1_000 {
+        if rig.query(hd_ready).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(rig.query(hd_ready).await, "its HD copy made and uploaded meanwhile");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sends = || rig.world.sends().into_iter().map(|s| s.id).collect::<Vec<_>>();
+    assert_eq!(sends(), std::slice::from_ref(&id), "the HD copy doesn't go while its message hasn't");
+    rig.call("send.retry", json!({ "message": id })).await.unwrap();
+    let went = tokio::time::timeout(Duration::from_secs(30), async {
+        while sends().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    went.await.expect("the message and its HD copy went");
+    let order = sends();
+    assert_eq!(order[..2], [id.clone(), id.clone()], "refused, then sent again: {order:?}");
+    assert_ne!(order[2], id, "then its HD copy");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_whose_message_was_deleted_for_you_leaves_the_cache_once_it_has_gone() {
+    let home = tempfile::tempdir().unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let rig = Rig::on(home.path(), world()).await;
+    rig.world.gate_uploads(true);
+    let path = yours(picked.path(), "a.jpg", &Picture::lake(640, 480));
+    let answer = rig.call("send.media", json!({ "chat": ANA, "files": [{ "path": path }] })).await.unwrap();
+    let id = answer["messages"][0].as_str().unwrap().to_string();
+    let made = rig.until(&id, "its copy made", |row| row["media"]["state"] == "local").await;
+    let file = home.path().join(made["media"]["path"].as_str().unwrap());
+    // Deleted for you on its way, it goes all the same, and only the copy on its way names its file.
+    rig.call("delete", json!({ "message": id, "for": "me" })).await.unwrap();
+    rig.world.gate_uploads(false);
+    let went = tokio::time::timeout(Duration::from_secs(30), async {
+        while rig.sent(&id).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    went.await.expect("it went");
+    for _ in 0..500 {
+        rig.media.inner.clean.notify_one();
+        if !file.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!file.exists(), "once it has gone, nothing names its file, which goes with the cache far from full");
 }
 
 #[tokio::test(flavor = "multi_thread")]
