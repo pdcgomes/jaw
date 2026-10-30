@@ -86,12 +86,29 @@ async fn a_message_goes_at_its_time_once_however_often_its_erasure_comes_and_no_
     )
     .await;
     let n = n_of(&store, "goes").await.unwrap();
+    let reacted = Amend {
+        chat: ANA.into(),
+        target: "goes".into(),
+        sender: Some(RUI.into()),
+        mine: false,
+        at: AT + 20,
+        what: Amendment::React { emoji: "❤".into() },
+        raw: None,
+    };
+    apply(&store, vec![Change::Amend(reacted)]).await;
     assert_eq!(apply(&store, vec![Change::Expire { n, at: LATER + 99 }]).await.changed, 0, "before its time");
     assert_eq!(ids(&store, ANA).await, ["stays", "goes"]);
     let seq = store.committed().borrow().to_owned();
     assert_eq!(apply(&store, vec![Change::Expire { n, at: LATER + 100 }]).await.changed, 1);
     assert_eq!(ids(&store, ANA).await, ["stays"]);
     assert!(tombstoned(&store, "goes").await);
+    let (reactions, outbox): (i64, i64) = query(&store, |db| {
+        Ok(db.query_row("SELECT (SELECT count(*) FROM reactions), (SELECT count(*) FROM outbox)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?)
+    })
+    .await;
+    assert_eq!((reactions, outbox), (0, 0), "its reaction goes with it, and no device is told");
     assert!(events(&store, seq).await.contains(&("message".into(), n)), "windows are told it went");
     assert_eq!(chat_shows(&store, ANA).await, (Some("stays".into()), 1, 1), "the chat shows the one before it");
     let seq = store.committed().borrow().to_owned();
@@ -244,18 +261,29 @@ async fn an_erased_messages_words_and_raw_protobuf_are_gone_from_jaw_db_and_its_
     assert_eq!(left, 0, "its link went with it");
 }
 
+/// Message `id` of Rui's, `raw` its raw protobuf, written and then deleted for you, as an ordinary
+/// deletion is; says whether jaw.db and its WAL still hold any of `raw` after it.
+async fn deleted_leaves(store: &Store, home: &Path, id: &'static str, raw: &[u8]) -> bool {
+    let packed = Packed::new(raw);
+    apply(store, vec![Change::Message(Message { raw: Some(packed.clone()), ..message(RUI, id, AT, "mango", None) })])
+        .await;
+    store.indexed().await.unwrap();
+    apply(store, vec![Change::DeleteMessage { chat: RUI.into(), id: id.into() }]).await;
+    store.truncate().await.unwrap();
+    holds(&files(home), &packed.0[packed.0.len() / 2..packed.0.len() / 2 + 32])
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_writer_runs_with_fast_secure_delete_and_an_erasure_leaves_it_so() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
+    // A raw protobuf small enough to sit in its row's page, which the deletion writes anyway.
+    assert!(!deleted_leaves(&store, home.path(), "r0", &noise(3, 300)).await, "deleted, it's zeroed where it was");
     apply(&store, vec![Change::Message(message(ANA, "goes", AT, "kiwi", Some(LATER + 1)))]).await;
     let n = n_of(&store, "goes").await.unwrap();
     apply(&store, vec![Change::Expire { n, at: LATER + 1 }]).await;
     // The next change to the FTS index is no secure delete: an ordinary message deleted for you.
-    apply(&store, vec![Change::Message(message(RUI, "r1", AT, "mango", None))]).await;
-    store.indexed().await.unwrap();
-    apply(&store, vec![Change::DeleteMessage { chat: RUI.into(), id: "r1".into() }]).await;
-    store.truncate().await.unwrap();
+    assert!(!deleted_leaves(&store, home.path(), "r1", &noise(4, 300)).await, "and still is after an erasure");
     let db = Connection::open(home.path().join("jaw.db")).unwrap();
     let config: Vec<(String, i64)> = db
         .prepare("SELECT k, v FROM messages_fts_config WHERE k = 'secure-delete' UNION ALL SELECT k, v FROM links_fts_config WHERE k = 'secure-delete'")
@@ -398,6 +426,61 @@ async fn erasing_killed_after_any_of_its_commits_and_started_again_ends_as_one_n
         store.indexed().await.unwrap();
         assert_eq!(link_words(killed.path()), kept, "killed after commit {at}");
     }
+}
+
+/// Message `id` of Ana's with a link to `site`, due at LATER + `k`.
+fn linked(id: &str, site: &str, k: i64) -> Message {
+    let spans = serde_json::json!([{ "t": "text", "s": "see " },
+        { "t": "link", "s": format!("https://{site}.example"), "url": format!("https://{site}.example") }]);
+    Message {
+        spans: Some(spans.to_string()),
+        ..message(ANA, id, AT + k, &format!("see https://{site}.example"), Some(LATER + k))
+    }
+}
+
+/// When sync_state says links_fts is to be merged whole for an erasure, if it does.
+async fn merge_noted(store: &Store) -> Option<String> {
+    query(store, |db| {
+        Ok(db.query_row("SELECT value FROM sync_state WHERE key = ?1", [LINKS_ERASED], |r| r.get(0)).optional()?)
+    })
+    .await
+}
+
+/// Waits up to five seconds for the whole merge sync_state notes to be done.
+async fn merged(store: &Store) -> bool {
+    for _ in 0..250 {
+        if merge_noted(store).await.is_none() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// Killed after an erasure's commit, before the whole merge of links_fts it leaves to do has begun,
+/// jawd started again still does it: the erasure notes it in the same commit. The erasure's own
+/// secure-delete has taken its link's words out already, in the SQLite jaw bundles.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_merge_an_erasure_leaves_to_do_is_noted_with_it_so_a_kill_before_it_begins_loses_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let stays = Message { expires_at: None, ..linked("stays", "numbatstays", 3) };
+    let (first, second) = (linked("first", "quokkafirst", 1), linked("second", "wombatsecond", 2));
+    apply(&store, vec![Change::Message(first), Change::Message(second), Change::Message(stays)]).await;
+    store.indexed().await.unwrap();
+    let first = n_of(&store, "first").await.unwrap();
+    store.apply_durable(vec![Change::Expire { n: first, at: LATER + 1 }]).await.unwrap();
+    assert!(merged(&store).await, "the first erasure's merge is done");
+    // The next whole merge waits ten minutes after that one began, so a kill now finds it to do.
+    let second = n_of(&store, "second").await.unwrap();
+    store.apply_durable(vec![Change::Expire { n: second, at: LATER + 2 }]).await.unwrap();
+    assert!(merge_noted(&store).await.is_some(), "the erasure notes the merge it leaves to do");
+    let killed = killed(home.path());
+    let left = files(killed.path());
+    assert!(!holds(&left, b"wombatsecond") && holds(&left, b"numbatstays"), "its link's words went with it");
+    let again = Store::open(killed.path()).unwrap();
+    assert!(merge_noted(&again).await.is_some(), "a kill keeps the merge noted");
+    assert!(merged(&again).await, "and started again, jawd does it");
 }
 
 fn opened(chat: &str, id: &str) -> Change {

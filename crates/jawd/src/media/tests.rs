@@ -144,7 +144,8 @@ impl Rig {
         .with_feed(feed)
         .with_attention(attention)
         .with_sending(sending)
-        .with_media(self.media.clone());
+        .with_media(self.media.clone())
+        .with_expiry(crate::expiry::start(self.store.clone()));
         tokio::spawn(crate::sock::serve(Arc::new(state), listener));
         socket
     }
@@ -3236,11 +3237,53 @@ async fn a_view_once_photo_opens_once_named_only_in_the_answer_and_goes_with_its
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(rig.world.asked().iter().any(played), "WhatsApp is told it was played");
+    let status = ui.call(10, "status", Value::Null).await;
+    let said = &status["result"]["disappearing"];
+    assert_eq!((&said["open"], &said["open_most"], &said["erased"]), (&json!(1), &json!(16), &json!(0)), "{status}");
     assert_eq!(ui.call(4, "view_once.close", json!({ "message": "3EB0ONCE" })).await["result"], json!({}));
     gone_with_its_files(&rig, "3EB0ONCE").await;
+    let status = ui.call(11, "status", Value::Null).await;
+    let said = &status["result"]["disappearing"];
+    assert_eq!((&said["open"], &said["erased"]), (&json!(0), &json!(1)), "opened ones count as erased: {status}");
     let again = ui.call(5, "view_once.open", json!({ "message": "3EB0ONCE" })).await;
     assert_eq!(again["error"]["code"], json!(jaw_proto::code::NOT_FOUND), "it's gone: {again}");
     assert_eq!(ui.call(6, "view_once.close", json!({ "message": "3EB0ONCE" })).await["result"], json!({}), "done");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_once_photo_isnt_downloaded_until_its_opened_as_a_photo_beside_it_is() {
+    let rig = rig(quick()).await;
+    view_once_photo(&rig, &Picture::lake(320, 240), "3EB0ONCE").await;
+    rig.photo(&Picture::lake(200, 150), ANA, ANA, "3EB0PLAIN").await;
+    rig.until(ANA, "3EB0PLAIN", "downloaded", local).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let files = std::fs::read_dir(rig.home.path().join(FILES)).unwrap().count();
+    assert_eq!(files, 1, "the ordinary photo's file alone");
+    assert!(!local(&rig.row(ANA, "3EB0ONCE").await), "the view-once photo stays where WhatsApp has it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disappearing_photos_file_and_previews_go_from_jaws_folder_as_it_does() {
+    let rig = rig(quick()).await;
+    let mut event = rig.world.photo(&Picture::lake(320, 240), ANA, ANA, "3EB0GOES", now_ms(), "gone tomorrow");
+    if let Some(pb::event::Kind::Message(message)) = event.kind.as_mut() {
+        let mut photo = e2e::Message::decode(message.raw.as_slice()).unwrap();
+        if let Some(image) = photo.image_message.as_mut() {
+            image.context_info = Some(Box::new(e2e::ContextInfo { expiration: Some(86_400), ..Default::default() }));
+        }
+        message.raw = photo.encode_to_vec();
+    }
+    rig.world.deliver(event).await.unwrap();
+    let row = rig
+        .until(ANA, "3EB0GOES", "downloaded with its previews", |row| {
+            local(row) && row["media"]["previews"]["768"].is_string()
+        })
+        .await;
+    let expires_at = row["expires_at"].as_i64().expect("it disappears");
+    assert!(rig.file(&row["media"]["path"]).is_file() && rig.file(&row["media"]["previews"]["768"]).is_file());
+    let batch = crate::expiry::erase_due(&rig.store, expires_at, &[]).await.unwrap();
+    assert_eq!(batch.erased, 1);
+    gone_with_its_files(&rig, "3EB0GOES").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

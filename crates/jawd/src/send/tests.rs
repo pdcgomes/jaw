@@ -1353,6 +1353,8 @@ async fn a_timer_set_from_jaw_shows_at_once_goes_after_the_chats_earlier_sends_a
     assert_eq!(running.call("chat.disappearing", json!({ "chat": ANA, "seconds": 604_800 })).await.unwrap(), json!({}));
     let (seconds, set_at) = timer_of(&running, ANA).await;
     assert_eq!(seconds, 604_800, "the chat shows it before WhatsApp has it");
+    let row = running.query(|db| Ok(read::chat(db, read::chat_n(db, ANA)?.unwrap())?.unwrap())).await;
+    assert_eq!(crate::feed::chat_row(row).ephemeral, 604_800, "as every window's chat row says it");
     let set_at = set_at.unwrap();
     assert!(set_at % 1000 == 0 && set_at >= before / 1000 * 1000, "set when asked, in whole seconds: {set_at}");
     let lines = lines_of(&running, ANA).await;
@@ -1473,6 +1475,76 @@ async fn a_timer_set_from_jaw_is_newer_than_the_chats_whatever_clock_set_that() 
         .await;
     assert_eq!(timers_asked(&running)[0].at_ms, ahead / 1000 * 1000 + 1000);
     assert_eq!(lines_of(&running, ANA).await[0].1, "Disappearing messages turned off");
+}
+
+/// A copy of `home`'s jaw.db as a stop now would leave it, in a folder of its own.
+fn stopped(home: &Path) -> tempfile::TempDir {
+    let copy = tempfile::tempdir().unwrap();
+    let db = Connection::open(home.join("jaw.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute("VACUUM INTO ?1", [copy.path().join("jaw.db").to_str().unwrap()]).unwrap();
+    copy
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_once_message_left_open_when_jawd_stopped_is_erased_as_it_starts() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let once = Message {
+        chat: ANA.into(),
+        id: "3EB0ONCE".into(),
+        at: now_ms(),
+        sender: Some(ANA.into()),
+        kind: "image",
+        summary: "View once photo".into(),
+        view_once: true,
+        live: true,
+        ..Message::default()
+    };
+    store.apply(Lane::Live, vec![Change::Message(once)]).await.unwrap();
+    let n: i64 = store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            Ok(db.query_row("SELECT n FROM messages WHERE id = '3EB0ONCE'", [], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    let opened = crate::store::expiry::Once::Opened {
+        n,
+        until: now_ms() + 3_600_000,
+        jid: ANA.into(),
+        id: "3EB0ONCE".into(),
+        receipt: Vec::new(),
+    };
+    store.apply_durable(vec![Change::Once(opened)]).await.unwrap();
+    let copy = stopped(home.path());
+    let running = Running::on(copy.path(), Arc::default(), false).await;
+    let left = running
+        .query(|db| {
+            Ok((
+                db.prepare("SELECT 1 FROM messages WHERE id = '3EB0ONCE'")?.exists([])?,
+                db.prepare("SELECT 1 FROM tombstones WHERE id = '3EB0ONCE'")?.exists([])?,
+                db.query_row("SELECT count(*) FROM opened", [], |r| r.get::<_, i64>(0))?,
+            ))
+        })
+        .await;
+    assert_eq!(left, (false, true, 0), "a start erases what a stop left open");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timer_left_queued_by_a_stop_and_refused_is_put_back_at_once_not_left_waiting_for_a_receipt() {
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::unconnected(home.path()).await;
+    running.chats(&[ANA]).await;
+    running.call("chat.disappearing", json!({ "chat": ANA, "seconds": 604_800 })).await.unwrap();
+    let copy = stopped(home.path());
+    let world = world();
+    world.refuse_next(1);
+    let again = Running::on(copy.path(), world, true).await;
+    again
+        .until("the refusal", |db| Ok(db.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))? == 0))
+        .await;
+    assert_eq!(timer_of(&again, ANA).await.0, 0, "the timer is put back, not left waiting for a receipt");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1637,6 +1709,9 @@ async fn each_sending_call_that_keeps_something_is_one_synced_commit() {
         running.call(method, params).await.unwrap();
         assert_eq!(synced() - before, 0, "{method} keeps nothing");
     }
+    let before = synced();
+    running.call("chat.disappearing", json!({ "chat": ANA, "seconds": 604_800 })).await.unwrap();
+    assert_eq!(synced() - before, 1, "chat.disappearing");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1962,6 +2037,63 @@ async fn named(running: &Running, jid: &str, name: &str) -> i64 {
     running
         .query(move |db| Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [jid], |r| r.get(0))?))
         .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_to_a_view_once_photo_quotes_it_without_its_files_keys_or_caption() {
+    use wa_proto::wa_web_protobufs_e2e as e2e;
+    let home = tempfile::tempdir().unwrap();
+    let running = Running::new(home.path()).await;
+    running.store.apply(Lane::Live, vec![Change::Remember { key: "me".into(), value: ME.into() }]).await.unwrap();
+    let image = e2e::ImageMessage {
+        caption: Some("guess where".into()),
+        mimetype: Some("image/jpeg".into()),
+        media_key: Some(vec![7; 32]),
+        jpeg_thumbnail: Some(vec![0xff, 0xd8, 0xff]),
+        direct_path: Some("/v/t62.7118-24/once".into()),
+        ..Default::default()
+    };
+    let photo = e2e::Message { image_message: Some(Box::new(image)), ..Default::default() };
+    let once = e2e::Message {
+        view_once_message_v2: Some(Box::new(e2e::FutureProofMessage { message: Some(Box::new(photo)) })),
+        ..Default::default()
+    };
+    let info = wa_proto::wa_web_protobufs_web::WebMessageInfo {
+        key: wa_proto::wa_common::MessageKey {
+            remote_jid: Some(ANA.into()),
+            from_me: Some(false),
+            id: Some("3EB0ONCE".into()),
+            participant: None,
+        },
+        message: Some(once),
+        message_timestamp: Some((now_ms() / 1000) as u64 - 60),
+        ..Default::default()
+    };
+    let row = Message {
+        chat: ANA.into(),
+        id: "3EB0ONCE".into(),
+        at: now_ms() - 60_000,
+        sender: Some(ANA.into()),
+        kind: "image",
+        summary: "View once photo".into(),
+        view_once: true,
+        live: true,
+        raw: Some(crate::store::Packed::new(&info.encode_to_vec())),
+        ..Message::default()
+    };
+    running.store.apply(Lane::Live, vec![Change::Message(row)]).await.unwrap();
+    let answer = running.call("send.text", json!({ "chat": ANA, "text": "wow", "reply": "3EB0ONCE" })).await.unwrap();
+    assert_eq!(answer["row"]["reply"]["summary"], "View once photo");
+    let context = sent(&running, 1).await.extended_text_message.unwrap().context_info.unwrap();
+    let quoted = context.quoted_message.unwrap();
+    let inner = quoted.view_once_message_v2.and_then(|m| m.message).expect("quoted as a view-once message");
+    let image = inner.image_message.unwrap();
+    assert_eq!(image.view_once, Some(true));
+    assert_eq!(
+        (image.caption, image.media_key, image.jpeg_thumbnail, image.direct_path),
+        (None, None, None, None),
+        "nothing to open it with, and no caption"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

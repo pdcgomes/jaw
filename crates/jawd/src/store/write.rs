@@ -476,6 +476,8 @@ pub(super) struct Stamps {
     /// When the transaction erased a message whose links' words only a merge of links_fts takes
     /// out (`expiry`), as kept in sync_state.
     links_erased: Option<i64>,
+    /// How many messages the transaction erased, disappeared or opened, for `status`.
+    erased: u64,
 }
 
 /// What the transaction's messages said of where a chat was read, applied once before it commits.
@@ -503,6 +505,7 @@ pub(super) struct Mark {
     touched: usize,
     unsettling: usize,
     copies_taken: bool,
+    erased: u64,
 }
 
 impl Stamps {
@@ -519,6 +522,7 @@ impl Stamps {
             copies_taken: false,
             expiring: None,
             links_erased: None,
+            erased: 0,
         })
     }
 
@@ -530,6 +534,7 @@ impl Stamps {
         self.unsettling.clear();
         self.expiring = None;
         self.links_erased = None;
+        self.erased = 0;
         self.opening = false;
         self.copies_taken = false;
     }
@@ -553,6 +558,7 @@ impl Stamps {
         self.copies_taken = false;
         self.expiring = None;
         self.links_erased = None;
+        self.erased = 0;
     }
 
     /// Notes that a statement took `rows` outbox rows whose copies may be on their way.
@@ -587,6 +593,16 @@ impl Stamps {
         self.links_erased.take()
     }
 
+    /// Notes that the transaction erased a message.
+    pub(super) fn erased_one(&mut self) {
+        self.erased += 1;
+    }
+
+    /// How many messages the committed transaction erased, taken once.
+    pub(super) fn take_erased(&mut self) -> u64 {
+        std::mem::take(&mut self.erased)
+    }
+
     /// Notes that chat `n`'s unread messages may have changed.
     fn unsettle(&mut self, n: i64) -> &mut Unsettled {
         let at = match self.unsettled.iter().position(|(chat, _)| *chat == n) {
@@ -609,6 +625,7 @@ impl Stamps {
             touched: self.order.len(),
             unsettling: self.unsettling.len(),
             copies_taken: self.copies_taken,
+            erased: self.erased,
         }
     }
 
@@ -619,6 +636,7 @@ impl Stamps {
         }
         self.next = mark.next;
         self.copies_taken = mark.copies_taken;
+        self.erased = mark.erased;
         for (at, was) in self.unsettling.drain(mark.unsettling..).rev() {
             match was {
                 Some(was) => self.unsettled[at].1 = was,

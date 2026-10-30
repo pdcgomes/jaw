@@ -880,6 +880,21 @@ fn a_disappearing_timer_sets_the_chat_and_leaves_a_line() {
     assert!(line.is_empty());
     let m = changes.iter().find_map(|c| if let Change::Message(m) = c { Some(m) } else { None }).unwrap();
     assert_eq!((m.kind, m.summary.as_str()), ("system", "Disappearing messages turned on: 7 days"));
+    let set_at = |changes: &[Change]| {
+        changes.iter().find_map(|c| if let Change::Chat(chat) = c { Some(chat.ephemeral_at) } else { None }).unwrap()
+    };
+    assert_eq!(set_at(&changes), Some(AT), "one that says no time of its own was set when it was sent");
+    let timed = e2e::Message {
+        protocol_message: Some(Box::new(e2e::ProtocolMessage {
+            r#type: Some(e2e::protocol_message::Type::EphemeralSetting as i32),
+            ephemeral_expiration: Some(0),
+            ephemeral_setting_timestamp: Some(AT / 1000 - 60),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let changes = message(&info(ANA, timed), &me(), true);
+    assert_eq!(set_at(&changes), Some(AT - 60_000), "its own time, in milliseconds");
 }
 
 #[test]

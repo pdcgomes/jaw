@@ -109,6 +109,12 @@ fn seconds(detail: Option<&str>) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// When a message opened at `now`, with its row's `detail`, goes if nothing closes it first: a
+/// minute past its length.
+fn until(now: i64, detail: Option<&str>) -> i64 {
+    now + (seconds(detail) * 1000.0) as i64 + LEFT_OPEN_MS
+}
+
 /// `view_once.open`, for the interface on `connection`.
 pub(super) async fn open(inner: &Arc<Inner>, asked: ViewOnce, connection: u64) -> Result<Value, Error> {
     let (id, chat) = (asked.message.clone(), asked.chat.clone());
@@ -151,7 +157,7 @@ pub(super) async fn open(inner: &Arc<Inner>, asked: ViewOnce, connection: u64) -
         .and_then(|raw| WebMessageInfo::decode(raw.as_slice()).ok())
         .and_then(|info| info.message);
     let spans = message.as_ref().map_or_else(|| json!([]), convert::once_caption);
-    let until = now_ms() + (seconds(found.detail.as_deref()) * 1000.0) as i64 + LEFT_OPEN_MS;
+    let until = until(now_ms(), found.detail.as_deref());
     let group = !convert::is_person(&found.chat);
     let receipt = pb::MarkRead {
         chat: found.chat.clone(),
@@ -249,4 +255,17 @@ pub(super) async fn ended(inner: &Arc<Inner>, connection: u64) {
 pub(super) async fn restarted(inner: &Arc<Inner>) -> anyhow::Result<()> {
     inner.store.apply(Lane::Live, vec![Change::Once(Once::Restarted)]).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_opened_message_goes_a_minute_past_its_length_if_nothing_closes_it() {
+        let video = r#"{"media":{"seconds":42.5,"w":640,"h":480}}"#;
+        assert_eq!(until(1_000, Some(video)), 1_000 + 42_500 + 60_000);
+        assert_eq!(until(1_000, Some(r#"{"media":{"w":640,"h":480}}"#)), 61_000, "a photo has no length");
+        assert_eq!(until(1_000, None), 61_000);
+    }
 }

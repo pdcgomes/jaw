@@ -344,6 +344,8 @@ pub struct Store {
     fenced: bool,
     files: Arc<files::Files>,
     soonest: Arc<Soonest>,
+    /// How many messages have been erased since jaw.db was opened, disappeared or opened alike.
+    erased: Arc<AtomicU64>,
 }
 
 /// The soonest time a message the writer has committed since the timer last looked goes, which
@@ -729,8 +731,10 @@ impl Store {
         let opening = Arc::new(Notify::new());
         let wal = Arc::new(Wal::new(limits.wal_soft, limits.wal_hard));
         let soonest = Arc::new(Soonest::default());
+        let erased = Arc::new(AtomicU64::new(0));
         let writer = Writer {
             soonest: soonest.clone(),
+            erased: erased.clone(),
             stats: stats.clone(),
             inboxed: inboxed.clone(),
             opening: opening.clone(),
@@ -789,12 +793,18 @@ impl Store {
             fenced,
             files,
             soonest,
+            erased,
         })
     }
 
     /// The soonest time a message committed since the timer last looked goes.
     pub fn soonest(&self) -> Arc<Soonest> {
         self.soonest.clone()
+    }
+
+    /// How many messages have been erased since jaw.db was opened, disappeared or opened alike.
+    pub fn erased(&self) -> u64 {
+        self.erased.load(Ordering::Relaxed)
     }
 
     /// The thumbnails of link previews, kept as files beside jaw.db.
@@ -1034,6 +1044,7 @@ struct Writer {
     /// Woken once a commit leaves what waits for an event to be taken in steps.
     opening: Arc<Notify>,
     soonest: Arc<Soonest>,
+    erased: Arc<AtomicU64>,
     db: Connection,
     stamps: Stamps,
     realtime: Receiver<Inbox>,
@@ -1319,6 +1330,7 @@ impl Writer {
         if let Some(at) = self.stamps.take_links_erased() {
             self.links_erased = Some(at);
         }
+        self.erased.fetch_add(self.stamps.take_erased(), Ordering::Relaxed);
     }
 
     /// When links_fts is next to be merged whole, for the words of messages erased since the last

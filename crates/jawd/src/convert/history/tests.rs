@@ -451,3 +451,27 @@ fn a_blob_walks_exactly_when_prost_decodes_it_whole_and_one_that_doesnt_hands_no
     }
     assert!(refused > data.len(), "{refused} of {} damaged blobs refused", blobs.len());
 }
+
+#[test]
+fn a_conversations_timer_was_set_when_it_says_or_before_any_setting_with_a_time() {
+    let set = |c: &Conversation| {
+        let (_, changes) = chat(c);
+        changes.into_iter().find_map(|c| match c {
+            Change::HistoryChat { chat, .. } => Some((chat.ephemeral, chat.ephemeral_at)),
+            _ => None,
+        })
+    };
+    let timed = Conversation {
+        id: "351910000002@s.whatsapp.net".into(),
+        ephemeral_expiration: Some(604_800),
+        ephemeral_setting_timestamp: Some(1_790_000_000),
+        ..Default::default()
+    };
+    assert_eq!(set(&timed), Some((Some(604_800), Some(1_790_000_000_000))));
+    let untimed = Conversation { ephemeral_setting_timestamp: None, ..timed.clone() };
+    assert_eq!(set(&untimed), Some((Some(604_800), Some(0))), "as old as can be when history doesn't say");
+    let zero = Conversation { ephemeral_setting_timestamp: Some(0), ..timed.clone() };
+    assert_eq!(set(&zero), Some((Some(604_800), Some(0))));
+    let none = Conversation { ephemeral_expiration: None, ..timed };
+    assert_eq!(set(&none), Some((None, None)), "no timer, no time");
+}

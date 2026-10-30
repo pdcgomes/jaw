@@ -57,6 +57,9 @@ pub(super) fn expire(db: &Connection, stamps: &mut Stamps, n: i64, at: i64) -> R
 pub(super) fn erase(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64) -> Result<bool> {
     let linked = db.prepare_cached(LINKED)?.exists([n])?;
     let erased = erasing(db, || delete_row(db, stamps, chat, n))?;
+    if erased {
+        stamps.erased_one();
+    }
     if linked && erased {
         let now = now_ms();
         db.prepare_cached(NOTE_LINKS_ERASED)?.execute([now.to_string()])?;

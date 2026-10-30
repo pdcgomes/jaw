@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -25,23 +26,43 @@ const LOOK_EVERY: Duration = Duration::from_secs(1);
 const RETRY_FIRST: Duration = Duration::from_secs(60);
 const RETRY_MOST: Duration = Duration::from_secs(3600);
 
-/// The timer, running: what it has erased since jawd started.
+/// The timer, running.
 #[derive(Default)]
 pub struct Expiry {
-    erased: AtomicU64,
+    /// How far a test has moved the wall clock on past what the timer's sleep counts, as the Mac
+    /// sleeping does, and how often the timer has looked again while it waited.
+    #[cfg(test)]
+    skew: std::sync::atomic::AtomicI64,
+    #[cfg(test)]
+    looks: std::sync::atomic::AtomicU64,
 }
 
 impl Expiry {
     /// What `status` says: the messages with a time to go and when the next does, read from jaw.db,
-    /// and those erased since jawd started; `open` and `open_most` are the view-once messages'.
+    /// and those erased since jawd started, disappeared and opened alike; `open` and `open_most` are
+    /// the view-once messages'.
     pub fn status(&self, store: &Store) -> DisappearingStatus {
         let next = store.pair(expiry::NEXT_FOR_STATUS).ok().map(|(at, _)| at).filter(|&at| at > 0);
         DisappearingStatus {
             expiring: store.count(expiry::EXPIRING).unwrap_or(0),
             next,
-            erased: self.erased.load(Ordering::Relaxed),
+            erased: store.erased(),
             ..DisappearingStatus::default()
         }
+    }
+
+    /// The wall clock, in milliseconds.
+    fn now(&self) -> i64 {
+        #[cfg(test)]
+        let skew = self.skew.load(Ordering::Relaxed);
+        #[cfg(not(test))]
+        let skew = 0;
+        now_ms() + skew
+    }
+
+    fn looked(&self) {
+        #[cfg(test)]
+        self.looks.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -56,10 +77,11 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
 }
 
-/// What one batch came to: how many it erased, whether more may be due, and which it found due and
-/// couldn't erase, kept in quarantine instead.
+/// What one batch came to: whether more may be due, and which it found due and couldn't erase, kept
+/// in quarantine instead; and for tests how many it erased, which `status` has from the store.
 #[derive(Debug, Default)]
 pub struct Batch {
+    #[cfg(test)]
     pub erased: usize,
     pub more: bool,
     pub failed: Vec<i64>,
@@ -100,7 +122,12 @@ pub async fn erase_due(store: &Store, now: i64, skip: &[i64]) -> Result<Batch> {
     } else {
         Vec::new()
     };
-    Ok(Batch { erased: applied.changed, more: due.len() == expiry::BATCH, failed })
+    Ok(Batch {
+        #[cfg(test)]
+        erased: applied.changed,
+        more: due.len() == expiry::BATCH,
+        failed,
+    })
 }
 
 /// The soonest time a message goes, as jaw.db has it now, but for those in `skip`.
@@ -127,9 +154,8 @@ async fn run(store: Store, expiry: Arc<Expiry>) {
     loop {
         failing.retain(|_, (again, _)| *again > Instant::now());
         let skip: Vec<i64> = failing.keys().copied().collect();
-        match erase_due(&store, now_ms(), &skip).await {
+        match erase_due(&store, expiry.now(), &skip).await {
             Ok(batch) => {
-                expiry.erased.fetch_add(batch.erased as u64, Ordering::Relaxed);
                 for n in batch.failed {
                     let pause = failing.get(&n).map_or(RETRY_FIRST, |(_, pause)| (*pause * 2).min(RETRY_MOST));
                     eprintln!(
@@ -157,7 +183,7 @@ async fn run(store: Store, expiry: Arc<Expiry>) {
             }
         };
         let retry = failing.values().map(|(again, _)| *again).min();
-        if !wait(&soonest, &mut committed, due, retry).await {
+        if !wait(&expiry, &soonest, &mut committed, due, retry).await {
             return;
         }
     }
@@ -166,6 +192,7 @@ async fn run(store: Store, expiry: Arc<Expiry>) {
 /// Waits until `due`, by the wall clock, or `retry`, or a sooner time is committed; says whether
 /// jawd goes on.
 async fn wait(
+    expiry: &Expiry,
     soonest: &crate::store::Soonest,
     committed: &mut tokio::sync::watch::Receiver<i64>,
     mut due: Option<i64>,
@@ -173,10 +200,11 @@ async fn wait(
 ) -> bool {
     let mut look_after = Instant::now();
     loop {
-        if due.is_some_and(|due| due <= now_ms()) || retry.is_some_and(|retry| retry <= Instant::now()) {
+        if due.is_some_and(|due| due <= expiry.now()) || retry.is_some_and(|retry| retry <= Instant::now()) {
             return true;
         }
-        let sleep = due.map(|due| Duration::from_millis((due - now_ms()).max(0) as u64));
+        expiry.looked();
+        let sleep = due.map(|due| Duration::from_millis((due - expiry.now()).max(0) as u64));
         let sleep = match (sleep, retry) {
             (Some(sleep), Some(retry)) => Some(sleep.min(retry.saturating_duration_since(Instant::now()))),
             (sleep, retry) => sleep.or(retry.map(|retry| retry.saturating_duration_since(Instant::now()))),
@@ -274,15 +302,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn what_came_due_while_the_timer_wasnt_running_goes_once_it_starts() {
-        let home = tempfile::tempdir().unwrap();
-        let store = Store::open(home.path()).unwrap();
+    async fn what_came_due_while_the_timer_wasnt_running_goes_once_it_starts_32_to_a_synced_commit() {
+        let before = tempfile::tempdir().unwrap();
+        let stopped = Store::open(before.path()).unwrap();
         let soon = now_ms() + 200;
         let changes = (0..70).map(|k| Change::Message(message(&format!("due{k:02}"), soon + k))).collect();
-        store.apply(Lane::Live, changes).await.unwrap();
+        stopped.apply(Lane::Live, changes).await.unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
+        // jawd started again on what the stop left, which no writer of this run has noted anything of.
+        let home = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(before.path().join("jaw.db")).unwrap();
+        db.execute("VACUUM INTO ?1", [home.path().join("jaw.db").to_str().unwrap()]).unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let synced = store.storage().synced_commits;
         let expiry = start(store.clone());
         assert!(gone(&store, "due69", Duration::from_secs(10)).await, "the last of three batches");
         assert_eq!(expiry.status(&store), DisappearingStatus { erased: 70, ..DisappearingStatus::default() });
+        assert_eq!(store.storage().synced_commits - synced, 3, "32, 32 and 6, each in a synced commit");
+    }
+
+    /// A message without a time to go, which wakes the timer only by its commit.
+    fn timeless(id: &str) -> Message {
+        Message { expires_at: None, ..message(id, 0) }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_whose_time_passed_while_the_timers_sleep_didnt_count_it_goes_at_the_next_commit() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        store.apply(Lane::Live, vec![Change::Message(message("asleep", now_ms() + 3_600_000))]).await.unwrap();
+        let expiry = start(store.clone());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The Mac slept an hour and a minute: its wall clock moved on, the timer's sleep didn't.
+        expiry.skew.store(3_660_000, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(there(&store, "asleep").await, "nothing has woken the timer yet");
+        store.apply(Lane::Live, vec![Change::Message(timeless("wakes"))]).await.unwrap();
+        assert!(gone(&store, "asleep", Duration::from_secs(5)).await, "a commit had it look at the wall clock");
+        assert!(there(&store, "wakes").await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_nothing_to_erase_the_timer_waits_for_the_writer_alone_however_much_is_committed() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        let expiry = start(store.clone());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let looks = expiry.looks.load(Ordering::Relaxed);
+        for k in 0..20 {
+            store.apply(Lane::Live, vec![Change::Message(timeless(&format!("m{k:02}")))]).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert_eq!(expiry.looks.load(Ordering::Relaxed), looks, "neither commits nor time woke it");
+        store.apply(Lane::Live, vec![Change::Message(message("goes", now_ms() + 100))]).await.unwrap();
+        assert!(gone(&store, "goes", Duration::from_secs(5)).await, "a time to go did");
     }
 }
