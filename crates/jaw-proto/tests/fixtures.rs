@@ -18,7 +18,7 @@ use jaw_proto::sync::{HistoryMore, Notice};
 use jaw_proto::themes::Themes;
 use jaw_proto::windows::{
     ChatRow, ChatsPush, ChatsWatch, ChatsWatched, FolderRow, FoldersPush, FoldersWatch, FoldersWatched, MessageRow,
-    MessagesPush, MessagesWatch, MessagesWatched, RosterRow, RosterWatch, TypingPush, Watch, WatchMove,
+    MessagesPush, MessagesWatch, MessagesWatched, PresencePush, RosterRow, RosterWatch, TypingPush, Watch, WatchMove,
 };
 use jaw_proto::{Connection, Focus, FromJawd, Hello, Outcome, Push, Reply, Request, Status, Welcome};
 use serde::Serialize;
@@ -192,6 +192,7 @@ fn every_fixture_reads_and_writes_back_the_same() {
                     "layout" => params::<Saved>(&name, &push.params),
                     "settings" => params::<Settings>(&name, &push.params),
                     "typing" => params::<TypingPush>(&name, &push.params),
+                    "presence" => params::<PresencePush>(&name, &push.params),
                     _ => panic!("no type for {name}'s params"),
                 }
             }

@@ -1,7 +1,8 @@
 //! Windows: a stretch of rows around an anchor, which jawd keeps current. A watch returns its rows,
 //! then pushes upserts and removals; rows carry a `sort` that compares bytewise and a version `v`,
 //! so applying an update twice, or two out of order, ends the same. Who's typing in the window's
-//! chats comes with each watch's answer and then as `typing` pushes, with no `v`.
+//! chats, and a one-to-one chat's person's presence, come with each watch's answer and then as
+//! `typing` and `presence` pushes, with no `v`.
 
 use std::collections::BTreeMap;
 
@@ -129,6 +130,27 @@ pub struct MessagesWatched<R = MessageRow> {
     /// Who's typing in the window's chat now, if anyone is, as a chat list's answer has it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub typing: Typists,
+    /// A one-to-one chat's person's presence now; absent for any other chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<PersonPresence>,
+}
+
+/// The presence of the person of a one-to-one chat, as its conversation shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonPresence {
+    /// `person:` and a number.
+    pub person: String,
+    #[serde(flatten)]
+    pub presence: Presence,
+}
+
+/// The `presence` push: the presence of the person of a one-to-one chat the connection has open,
+/// as it is now that it changed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresencePush {
+    pub chat: String,
+    #[serde(flatten)]
+    pub presence: PersonPresence,
 }
 
 /// Who's typing in each chat where someone is, by the chat's `id`.

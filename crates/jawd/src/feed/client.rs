@@ -711,9 +711,17 @@ fn result(watch: String, update: Update, typing: Typists) -> Value {
     let Update { kind, seq, total, older, newer, upsert: rows, remove, favourites, counts, note } = update;
     let value = match kind {
         Kind::Chats | Kind::Roster => serde_json::to_value(ChatsWatched { watch, seq, total, rows, remove, typing }),
-        Kind::Messages => {
-            serde_json::to_value(MessagesWatched { watch, seq, total, older, newer, rows, remove, typing })
-        }
+        Kind::Messages => serde_json::to_value(MessagesWatched {
+            watch,
+            seq,
+            total,
+            older,
+            newer,
+            rows,
+            remove,
+            typing,
+            presence: None,
+        }),
         Kind::Folders => {
             let favourites: Vec<Favourite> =
                 favourites.map(|json| serde_json::from_str(json.get()).unwrap_or_default()).unwrap_or_default();
