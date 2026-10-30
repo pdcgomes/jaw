@@ -346,13 +346,7 @@ impl Media {
         let inner = &self.inner;
         let count = |what: &str| inner.store.count(what).unwrap_or(0);
         let (cache_bytes, cache_files) = cache::size(&inner.store).unwrap_or((0, 0));
-        let (kept_files, kept_bytes) = inner
-            .store
-            .pair(
-                "SELECT count(*), coalesce(sum(bytes), 0)
-                FROM (SELECT source, max(bytes) AS bytes FROM outgoing WHERE source IS NOT NULL GROUP BY source)",
-            )
-            .unwrap_or((0, 0));
+        let sending = inner.store.outgoing_counts().unwrap_or_default();
         let stats = inner.stats.lock().expect("media stats");
         MediaStatus {
             cache_bytes,
@@ -381,12 +375,12 @@ impl Media {
             progress_waiting: inner.schedule.progress_behind.load(std::sync::atomic::Ordering::Relaxed),
             progress_most: schedule::PROGRESS_BEHIND as u64,
             progress_passed: inner.schedule.progress_passed.load(std::sync::atomic::Ordering::Relaxed),
-            preparing: count("outgoing WHERE state = 'preparing'"),
-            uploading: count("outgoing WHERE state = 'uploading'"),
-            unsent: count("outgoing WHERE state = 'failed'"),
-            kept_files: kept_files.max(0) as u64,
-            kept_bytes: kept_bytes.max(0) as u64,
-            kept_unneeded: count("outgoing_drop"),
+            preparing: sending.preparing,
+            uploading: sending.uploading,
+            unsent: sending.unsent,
+            kept_files: sending.kept_files,
+            kept_bytes: sending.kept_bytes,
+            kept_unneeded: sending.unneeded,
         }
     }
 

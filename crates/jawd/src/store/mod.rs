@@ -878,6 +878,12 @@ impl Store {
         Ok(LayoutsKept { kept, largest, books, largest_book })
     }
 
+    /// Media out's copies on their way and the files of yours kept for them, read on a connection
+    /// of its own so the writer doesn't wait.
+    pub fn outgoing_counts(&self) -> Result<outgoing::Counts> {
+        outgoing::counts(&connect(&self.path, Role::Reader)?)
+    }
+
     /// How many messages backfill `name` has still to look at, 0 once it's done, read on a
     /// connection of its own.
     pub fn backfill_left(&self, name: &str) -> Result<u64> {

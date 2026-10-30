@@ -160,6 +160,11 @@ const ALLOWED: &[(&str, &str)] = &[
         "send.retry of a message that went without its HD copy; outgoing holds at most the outbox's 1,000 rows",
     ),
     (
+        "count(*) FILTER (WHERE state = 'preparing')",
+        "jawd status; outgoing holds at most the outbox's 1,000 rows, and outgoing_drop the copies of your files \
+        nothing needs, each gone within seconds",
+    ),
+    (
         "SELECT path FROM outgoing_drop LIMIT",
         "the copies of your files nothing needs, waiting to go; it stops at its limit",
     ),

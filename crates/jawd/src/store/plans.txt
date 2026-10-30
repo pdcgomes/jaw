@@ -83,12 +83,6 @@ SELECT settled, made FROM media_made WHERE id = 1
     SEARCH media_made USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/media/mod.rs
-SELECT count(*), coalesce(sum(bytes), 0) FROM (SELECT source, max(bytes) AS bytes FROM outgoing WHERE source IS NOT NULL GROUP BY source)
-    CO-ROUTINE (subquery-1)
-      SEARCH outgoing USING INDEX outgoing_by_source (source>?)
-    SCAN (subquery-1)
-
--- src/media/mod.rs
 SELECT made - settled, 0 FROM media_made WHERE id = 1
     SEARCH media_made USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -3389,6 +3383,12 @@ SELECT count(*), coalesce(sum(bytes), 0) FROM (SELECT source, max(bytes) AS byte
     CO-ROUTINE (subquery-1)
       SEARCH outgoing USING INDEX outgoing_by_source (source>?)
     SCAN (subquery-1)
+
+-- src/store/write/outgoing.rs
+SELECT count(*) FILTER (WHERE state = 'preparing'), count(*) FILTER (WHERE state = 'uploading'), count(*) FILTER (WHERE state = 'failed'), (SELECT count(*) FROM outgoing_drop) FROM outgoing
+    SCAN outgoing
+    SCALAR SUBQUERY 1
+      SCAN outgoing_drop
 
 -- src/store/write/outgoing.rs
 UPDATE outgoing SET state = 'uploading', sha256 = ?2, source = NULL, error = NULL WHERE outbox = ?1 AND state = 'preparing' RETURNING message, variant

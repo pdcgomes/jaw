@@ -120,6 +120,9 @@ const NEEDED: &str = "SELECT EXISTS (SELECT 1 FROM outgoing WHERE source = ?1)";
 const TO_DROP: &str = "SELECT path FROM outgoing_drop LIMIT ?1";
 const KEPT: &str = "SELECT count(*), coalesce(sum(bytes), 0)
     FROM (SELECT source, max(bytes) AS bytes FROM outgoing WHERE source IS NOT NULL GROUP BY source)";
+const COUNTS: &str = "SELECT count(*) FILTER (WHERE state = 'preparing'), count(*) FILTER (WHERE state = 'uploading'),
+        count(*) FILTER (WHERE state = 'failed'), (SELECT count(*) FROM outgoing_drop)
+    FROM outgoing";
 
 const PREPARED: &str = "UPDATE outgoing SET state = 'uploading', sha256 = ?2, source = NULL, error = NULL
     WHERE outbox = ?1 AND state = 'preparing' RETURNING message, variant";
@@ -205,6 +208,27 @@ pub fn to_drop(db: &Connection, most: usize) -> Result<Vec<String>> {
 pub fn kept(db: &Connection) -> Result<(u64, u64)> {
     let (files, bytes): (i64, i64) = db.prepare_cached(KEPT)?.query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok((files.max(0) as u64, bytes.max(0) as u64))
+}
+
+/// What `jawd status` says of media out: the copies on their way by state, and the files of yours
+/// kept for them, their bytes, and those nothing needs any more.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Counts {
+    pub preparing: u64,
+    pub uploading: u64,
+    pub unsent: u64,
+    pub kept_files: u64,
+    pub kept_bytes: u64,
+    pub unneeded: u64,
+}
+
+pub fn counts(db: &Connection) -> Result<Counts> {
+    let [preparing, uploading, unsent, unneeded] = db
+        .prepare_cached(COUNTS)?
+        .query_row([], |r| Ok([r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?, r.get(3)?]))?
+        .map(|n| n.max(0) as u64);
+    let (kept_files, kept_bytes) = kept(db)?;
+    Ok(Counts { preparing, uploading, unsent, kept_files, kept_bytes, unneeded })
 }
 
 pub(super) fn provenance(step: &Step) -> (&'static str, String, Option<&[u8]>) {
