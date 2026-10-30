@@ -1205,13 +1205,16 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // 25, a data step: the library. Every message that's a photo, a video, a voice message or a file
     // is an item of that kind (its shelf), found by indexes on messages that hold only the items, in
     // the order of their t, so a library window is a keyset across chats, in a chat or from one
-    // sender; how many items of each kind each chat has is kept by the triggers that count its
-    // messages, and items' words are indexed apart from the rest by the triggers that index
-    // messages', with each item's kind, chat and sender as tags, so neither adds a trigger to fire
-    // for every message and a search reads only what its window asks for. Its indexes read every
-    // message once each, so its cost grows with them: 4.6 to 6.0 s for a million messages, 150,000 of
-    // them items, in a jaw.db of 618 MB, which it grows by 20 MB, at a load of 50 to 74, after the 2.3
-    // to 3.6 s a data step's backup takes; the backup is all it needs beside jaw.db.
+    // sender; each of a message's links is an item too, kept in the same order in library_links by
+    // triggers on links. How many items of each kind each chat has is kept by the triggers that count
+    // its messages and those on links, and items' and links' words are indexed apart from the rest,
+    // with each one's kind, chat and sender as tags, by the triggers that index messages' and those on
+    // links, so none adds a trigger to fire for every message and a search reads only what its window
+    // asks for. Its indexes read every message once each, so its cost grows with them: as jawd runs
+    // it, on its writer's connection, 4.45 to 4.63 s for a million messages, 150,000 of them items
+    // and 21,000 links, its foreign_key_check, fingerprint and commit included, at a load of 58 to 66,
+    // after the 2.9 to 3.2 s its backup of a 649 MB jaw.db takes; it grows jaw.db by 26 MB, and the
+    // backup is all it needs beside it (measure_the_librarys_step).
     "
     -- Class: derived from messages, a column of each one's kind and flags, computed as it's read and
     -- never stored: the library's kind of the item it is. A message deleted for everyone or seen once
@@ -2389,9 +2392,9 @@ mod tests {
     }
 
     /// Measures the library's migration on a jaw.db at the version before it with this many
-    /// messages, one in seven of them an item and one in forty-five with a link, as jawd runs it, on
-    /// its writer's connection: how long the upgrade takes, its backup apart, and what it takes on
-    /// disk beside jaw.db at its peak:
+    /// messages, one in seven of them an item and about one in fifty with a link, as jawd runs it, on
+    /// its writer's connection: how long the upgrade takes, its backup and its step, and what it takes
+    /// on disk beside jaw.db at its peak:
     /// `JAW_MEASURE_MESSAGES=1000000 cargo test --release -p jawd measure_the_librarys -- --ignored --nocapture`.
     #[test]
     #[ignore = "a measurement, a minute long at a million messages"]
@@ -2447,31 +2450,39 @@ mod tests {
         drop(db);
         // As jawd opens jaw.db and runs what's pending.
         let mut db = crate::store::connect(&path, crate::store::Role::Writer).unwrap();
-        let copy = home.path().join("copy.db");
-        let began = std::time::Instant::now();
-        db.execute("VACUUM INTO ?1", [copy.to_str().unwrap()]).unwrap();
-        let backup = began.elapsed();
-        std::fs::remove_file(&copy).unwrap();
         let (stop, peak) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
+        let backed_up = Arc::new(std::sync::Mutex::new(None));
+        let began = std::time::Instant::now();
+        // What's beside jaw.db at its peak, and when the backup is whole, which splits the upgrade
+        // into the backup and the step.
         let sampler = {
-            let (stop, peak, folder) = (stop.clone(), peak.clone(), home.path().to_path_buf());
+            let (stop, peak, backed_up, folder) =
+                (stop.clone(), peak.clone(), backed_up.clone(), home.path().to_path_buf());
+            let backup = backup_name(version);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    let used: u64 = std::fs::read_dir(&folder)
+                    let files: Vec<(String, u64)> = std::fs::read_dir(&folder)
                         .unwrap()
-                        .filter_map(|e| e.ok()?.metadata().ok())
-                        .map(|m| m.len())
-                        .sum();
-                    peak.fetch_max(used, Ordering::Relaxed);
+                        .filter_map(|e| {
+                            let e = e.ok()?;
+                            Some((e.file_name().to_string_lossy().into_owned(), e.metadata().ok()?.len()))
+                        })
+                        .collect();
+                    peak.fetch_max(files.iter().map(|(_, len)| len).sum(), Ordering::Relaxed);
+                    let mut whole = backed_up.lock().unwrap();
+                    if whole.is_none() && files.iter().any(|(name, _)| *name == backup) {
+                        *whole = Some(std::time::Instant::now());
+                    }
+                    drop(whole);
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
             })
         };
-        let began = std::time::Instant::now();
         Runner::default().run(&mut db).unwrap();
         let took = began.elapsed();
         stop.store(true, Ordering::Relaxed);
         sampler.join().unwrap();
+        let backup = backed_up.lock().unwrap().expect("a backup before the step").duration_since(began);
         let items: i64 = db
             .query_row("SELECT sum(items) FROM shelves WHERE chat = 0 AND shelf <> 'link'", [], |r| r.get(0))
             .unwrap();
@@ -2479,7 +2490,7 @@ mod tests {
         let beside = peak.load(Ordering::Relaxed).saturating_sub(before);
         eprintln!(
             "{messages} messages, {items} items and {links} links: jaw.db {:.0} MB at version {version}; upgraded in {:.1} s, \
-             of which its backup about {:.1} s and the step {:.1} s; {:.0} MB beside jaw.db at its peak, {:.2} times it \
+             its backup {:.1} s and the step {:.2} s; {:.0} MB beside jaw.db at its peak, {:.2} times it \
              (DATA_STEP_ROOM is {DATA_STEP_ROOM}); jaw.db after: {:.0} MB; load {:.0}",
             before as f64 / 1e6,
             took.as_secs_f64(),
