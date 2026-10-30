@@ -160,6 +160,29 @@ func helloed(_ all: [JawUpdate]) -> Int {
         #expect(answers.count == 1 && answers[0].0 == 2 && answers[0].1 == 3)
     }
 
+    @Test func `the terminal's panes are asked for by its name and come whole, and a jawd without them says so`() async throws {
+        let fake = try FakeJawd { method, params, id in
+            guard method == "layout.get" else { return ordinary(method, params, id) }
+            return ["{\"id\":\(id),\"result\":{\"interface\":\"jaw\",\"v\":7,\"layout\":{\"format\":1,\"focused\":1,\"tree\":{\"split\":{\"how\":\"down\",\"first\":400,\"a\":{\"chat\":\"ana\"},\"b\":{\"chat\":\"rui\"}}}},\"dropped\":[\"mum\"]}}"]
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = await drain(jawd) { helloed($0) == 1 }
+        jawd.layout(of: "jaw", what: "opening the terminal's panes")
+        let all = await drain(jawd) { all in all.contains { if case .layout = $0 { true } else { false } } }
+        let kept = all.compactMap { if case let .layout(k) = $0 { k } else { nil } }.first
+        #expect(kept == KeptLayout(interface: "jaw", v: 7, layout: SplitLayout(focused: 1, tree: .split(.down, first: 400, .chat("ana"), .chat("rui"))),
+                                   dropped: ["mum"]))
+        #expect(requests(fake, "layout.get") == [.object(["interface": .string("jaw")])])
+        let refused = jawd.refused(.layout("opening the terminal's panes"), .jawd(JawError(code: ErrorCode.unknownMethod, message: "?")))
+        guard case let .notice(text, tone)? = refused.first else {
+            Issue.record("nothing said: \(refused)")
+            return
+        }
+        #expect(text == "opening the terminal's panes comes with the next step" && tone == .warning)
+    }
+
     @Test func `what jawd refuses to send says why, the outbox in a few words`() {
         let full = Failure.jawd(JawError(code: ErrorCode.limit, message: "the outbox is full",
                                          data: .object(["limit": .string("outbox"), "waiting": .number(1000), "failed": .number(2)])))

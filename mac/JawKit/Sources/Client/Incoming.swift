@@ -2,7 +2,7 @@ import Foundation
 
 /// What a request's result is read as, so each line is decoded once, into the value it is.
 public enum Expect: Sendable, Hashable {
-    case json, sent, chat, info, chatInfo, status
+    case json, sent, chat, info, chatInfo, status, layout
 }
 
 /// A request's answer, read as what it was asked for.
@@ -13,6 +13,7 @@ public enum Reply: Sendable, Hashable {
     case info(MessageInfo)
     case chatInfo(ChatInfo)
     case status(Status)
+    case layout(KeptLayout)
 }
 
 /// What the reader expects of the reply with an id: looked up as the line decodes.
@@ -80,6 +81,7 @@ struct IncomingLine: Decodable {
                 case .reply(.info): value = try .reply(id, .info(c.decode(MessageInfo.self, forKey: .result)))
                 case .reply(.chatInfo): value = try .reply(id, .chatInfo(c.decode(ChatInfo.self, forKey: .result)))
                 case .reply(.status): value = try .reply(id, .status(c.decode(Status.self, forKey: .result)))
+                case .reply(.layout): value = try .reply(id, .layout(c.decode(KeptLayout.self, forKey: .result)))
                 }
             } catch {
                 value = .bad(id, "what jawd sent isn't jaw's protocol: \(error)")

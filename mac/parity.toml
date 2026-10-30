@@ -5,7 +5,6 @@
 # a branch it's being built on; one whose name main's protocol doesn't have yet says that branch.
 
 [requests]
-"layout.get" = "1.1"
 "layout.set" = "1.1"
 "folders.watch" = "2.1"
 "roster.watch" = "2.1"

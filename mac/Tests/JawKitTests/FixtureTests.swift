@@ -42,6 +42,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         case "message.info": .reply(.info)
         case "chat.info": .reply(.chatInfo)
         case "status": .reply(.status)
+        case "layout.get": .reply(.layout)
         default: .reply(.json)
         }
         let value = try incoming(name, want)
@@ -96,6 +97,24 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         return
     }
     #expect(error.code == ErrorCode.cancelled)
+}
+
+@Test func `the panes jawd keeps decode as a tree, with the chats of the panes it left out`() throws {
+    guard case let .reply(_, .layout(kept)) = try incoming("layout.get.result.json", .reply(.layout)) else {
+        Issue.record("not layout.get's answer")
+        return
+    }
+    #expect(kept == KeptLayout(interface: "jaw", v: 1_792_000_000_123, layout: SplitLayout(focused: 1, tree: .split(
+        .across, first: 500, .chat("351912345678@s.whatsapp.net"), .chat("120363012345678901@g.us"),
+    )), dropped: ["351919999999@s.whatsapp.net"]))
+    let none = try JSONDecoder().decode(KeptLayout.self, from: Data(#"{"interface":"jaw","v":0}"#.utf8))
+    #expect(none == KeptLayout(interface: "jaw", v: 0), "nothing kept")
+    let book = try JSONDecoder().decode(KeptLayout.self, from: Data(#"{"interface":"jaw-mac","v":5,"layout":{"format":2,"layouts":[]}}"#.utf8))
+    #expect(book.v == 5 && book.layout == nil, "panes in a format other than 1's tree are none this Jaw reads")
+    let malformed = #"{"interface":"jaw","v":5,"layout":{"format":1,"focused":0,"tree":{"split":{"how":"sideways"}}},"dropped":["351911111111@s.whatsapp.net"]}"#
+    #expect(throws: DecodingError.self, "a malformed tree fails the answer rather than reading as panes left out") {
+        try JSONDecoder().decode(KeptLayout.self, from: Data(malformed.utf8))
+    }
 }
 
 @Test func `an invitation decodes with what it invites to and when it runs out`() throws {
@@ -165,6 +184,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
     )))
     try same("message.info.request.json", written(id: 45, "message.info", MessageRef(message: "3EB0C431F2A9B8E7D61A2B")))
     try same("chat.info.request.json", written(id: 46, "chat.info", ChatRef(chat: "120363000000000002@g.us")))
+    try same("layout.get.request.json", written(id: 30, "layout.get", LayoutGet(interface: "jaw")))
     try same("status.request.json", written(id: 2, "status", NoParams?.none))
 }
 

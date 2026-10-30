@@ -155,6 +155,12 @@ public final class Jawd {
         ask("status", NoParams?.none, .status, expect: .status)
     }
 
+    /// Asks for the panes jawd keeps for `interface`, by the name it gives in hello. They come as
+    /// `.layout`; what stops them is said as `what` not being done.
+    public func layout(of interface: String, what: String) {
+        ask("layout.get", LayoutGet(interface: interface), .layout(what), expect: .layout)
+    }
+
     public func startChat(person: String) {
         ask("chat.start", ChatStart(phone: nil, person: person), .startChat, expect: .chat)
     }
@@ -252,6 +258,8 @@ public final class Jawd {
             out.append(.members(chat: chat, info.members))
         case let (.status, .status(status)):
             out.append(.status(status))
+        case let (.layout, .layout(kept)):
+            out.append(.layout(kept))
         default:
             break
         }
@@ -316,6 +324,8 @@ public final class Jawd {
         case info(String)
         case members(String)
         case status
+        /// Panes asked for, named as opening them is said: "opening the terminal's panes".
+        case layout(String)
         case quiet
     }
 
@@ -412,6 +422,8 @@ public final class Jawd {
             return [.info(message: message, info: nil, why: Self.whyNot(failure, "a message's info"))]
         case let .members(chat):
             return [.members(chat: chat, [])]
+        case let .layout(what):
+            return [.notice(Self.whyNot(failure, what), .warning)]
         case .status, .quiet:
             return []
         }
@@ -461,5 +473,7 @@ public enum JawUpdate: Sendable {
     case chatStarted(ChatRow)
     case notStarted(String)
     case status(Status)
+    /// The panes jawd keeps for an interface, as `layout.get` answered.
+    case layout(KeptLayout)
     case push(method: String, params: JSONValue)
 }
