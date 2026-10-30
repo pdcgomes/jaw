@@ -64,11 +64,13 @@ public struct PictureSlot: Sendable, Hashable {
         (max(Int((rect.width * scale).rounded()), 1), max(Int((rect.height * scale).rounded()), 1))
     }
 
-    /// The decodes it can be drawn from at `scale`, best first, and its blurred thumbnail.
+    /// The decodes it can be drawn from at `scale`, best first, and its blurred thumbnail, which is
+    /// a quarter of its pixels each way, since a blur loses nothing drawn larger and the cache
+    /// keeps previews in what that leaves.
     public func keys(_ scale: CGFloat) -> (previews: [PictureKey], thumbnail: PictureKey?) {
         let (w, h) = pixels(scale)
         let previews = source.previews(for: CGFloat(max(w, h))).map { PictureKey(path: $0, width: w, height: h, fit: fit, blurred: false) }
-        return (previews, source.thumbnail.map { PictureKey(path: $0, width: w, height: h, fit: fit, blurred: true) })
+        return (previews, source.thumbnail.map { PictureKey(path: $0, width: max(w / 4, 1), height: max(h / 4, 1), fit: fit, blurred: true) })
     }
 }
 

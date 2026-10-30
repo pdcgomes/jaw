@@ -73,7 +73,7 @@ func key(_ path: String, _ w: Int, _ h: Int, fit: PictureFit = .fill, blurred: B
     #expect(tile.keys(2).previews.first == key("s.jpg", 256, 256), "and at 2x still")
     let photo = PictureSlot(rect: CGRect(x: 0, y: 0, width: 320, height: 240), radius: 10, source: both, message: "m")
     #expect(photo.keys(2).previews.first == key("l.jpg", 640, 480), "a photo at 2x takes the 768")
-    #expect(photo.keys(2).thumbnail == key("t.jpg", 640, 480, blurred: true))
+    #expect(photo.keys(2).thumbnail == key("t.jpg", 160, 120, blurred: true), "a blurred thumbnail at a quarter of its pixels each way")
 }
 
 @Test func `a picture is decoded at the pixels it's drawn at, filled from its centre or fitted whole`() throws {
@@ -170,6 +170,7 @@ func key(_ path: String, _ w: Int, _ h: Int, fit: PictureFit = .fill, blurred: B
     let drawn = try #require(pictures.drawable(slot, scale: 2))
     #expect(drawn.isPreview && drawn.exact && drawn.image.width == 640)
     #expect(pictures.queue.counts.decoded == 2)
+    #expect(!pictures.cache.has(try #require(slot.keys(2).thumbnail)), "its thumbnail let go once its preview is drawn")
 
     let wider = PictureSlot(rect: CGRect(x: 0, y: 0, width: 300, height: 225), radius: 10, source: slot.source, message: "m")
     let meanwhile = try #require(pictures.drawable(wider, scale: 2))

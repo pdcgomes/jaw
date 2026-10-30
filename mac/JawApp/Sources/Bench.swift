@@ -15,8 +15,10 @@ import QuartzCore
 @MainActor
 enum Bench {
     static func run(_ what: String, model: AppModel) {
-        deadline(what == "idle" ? 120 : 30)
+        deadline(what == "idle" ? 120 : what == "pictures" ? 150 : 30)
         switch what {
+        case "pictures":
+            BenchPictures.run(model)
         case "launch":
             model.firstRows = {
                 nextFrame {

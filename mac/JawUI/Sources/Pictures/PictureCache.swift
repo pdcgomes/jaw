@@ -67,6 +67,16 @@ public final class PictureCache: Sendable {
         }
     }
 
+    /// Lets one picture go, as a slot's thumbnail once its preview is drawn.
+    public func drop(_ key: PictureKey) {
+        state.withLock { s in
+            guard let gone = s.kept.removeValue(forKey: key) else { return }
+            s.bytes -= gone.bytes
+            s.families[key.family]?.remove(key)
+            if s.families[key.family]?.isEmpty == true { s.families[key.family] = nil }
+        }
+    }
+
     public func has(_ key: PictureKey) -> Bool {
         state.withLock { $0.kept[key] != nil }
     }

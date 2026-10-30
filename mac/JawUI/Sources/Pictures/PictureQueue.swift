@@ -36,6 +36,8 @@ public final class PictureQueue: Sendable {
         var failed: Set<PictureKey> = []
         var next: UInt64 = 0
         var counts = Counts()
+        /// Who's told of what's been decoded since the main thread was last asked to tell them.
+        var told: [(Done, PictureKey)] = []
     }
 
     struct Job {
@@ -140,15 +142,31 @@ public final class PictureQueue: Sendable {
             guard let (key, files) = next else { return }
             workers.async { [self] in
                 let image = Decode.picture(key, from: files)
-                let told = finish(key, image, started: true)
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        for done in told {
-                            done(key)
-                        }
-                    }
-                }
+                tell(finish(key, image, started: true), key)
                 pump()
+            }
+        }
+    }
+
+    /// Tells those waiting for `key` on the main thread, together with whoever else's picture is
+    /// decoded before it gets there, so pictures coming at once cost the main thread one turn and
+    /// each cell one drawing.
+    func tell(_ waiting: [Done], _ key: PictureKey) {
+        guard !waiting.isEmpty else { return }
+        let first = state.withLock { s -> Bool in
+            s.told.append(contentsOf: waiting.map { ($0, key) })
+            return s.told.count == waiting.count
+        }
+        guard first else { return }
+        DispatchQueue.main.async { [self] in
+            let told = state.withLock { s in
+                defer { s.told.removeAll() }
+                return s.told
+            }
+            MainActor.assumeIsolated {
+                for (done, key) in told {
+                    done(key)
+                }
             }
         }
     }

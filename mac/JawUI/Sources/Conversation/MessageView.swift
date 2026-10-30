@@ -2,6 +2,18 @@ import AppKit
 import JawKit
 import JawThemes
 
+/// What a transcript's cells cost to draw while a bench measures them: how many were drawn and
+/// the milliseconds each took, and how many pictures came for them.
+@MainActor
+public final class CellTiming {
+    public static var now: CellTiming?
+    public var draws = 0
+    public var drawMs: [Double] = []
+    public var came = 0
+
+    public init() {}
+}
+
 /// One message's row: it draws the layout made for it, and nothing it would have to measure, and
 /// its pictures from the bitmaps decoded for them, asking for what isn't there and letting it go
 /// when it's reused or leaves the transcript, so what's scrolled past is never decoded.
@@ -72,7 +84,15 @@ final class MessageView: NSView {
         false
     }
 
-    override func draw(_: NSRect) {
+    override func draw(_ rect: NSRect) {
+        guard let timing = CellTiming.now else { return drawn(rect) }
+        let start = CACurrentMediaTime()
+        drawn(rect)
+        timing.draws += 1
+        timing.drawMs.append((CACurrentMediaTime() - start) * 1000)
+    }
+
+    func drawn(_: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext, let laid else { return }
         if selected, let roles {
             ctx.setFillColor(roles.selection.opacity(0.55).cgColor)
@@ -108,6 +128,7 @@ final class MessageView: NSView {
     /// is just there.
     @discardableResult
     func pictureCame() -> Bool {
+        CellTiming.now?.came += 1
         guard let laid, let pictures else { return false }
         let scale = scale
         let fades = drewOnce && laid.pictures.indices.contains { i in

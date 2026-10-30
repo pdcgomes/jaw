@@ -40,7 +40,10 @@ public final class MessagePictures {
     public func drawable(_ slot: PictureSlot, scale: CGFloat) -> Drawable? {
         let (previews, thumbnail) = slot.keys(scale)
         for key in previews {
-            if let image = cache.image(key) { return Drawable(image: image, isPreview: true, exact: true) }
+            guard let image = cache.image(key) else { continue }
+            // Its thumbnail isn't needed once its preview is drawn; it's made again if that goes.
+            if let thumbnail { cache.drop(thumbnail) }
+            return Drawable(image: image, isPreview: true, exact: true)
         }
         for key in previews {
             if let image = cache.another(key) { return Drawable(image: image, isPreview: true, exact: false) }

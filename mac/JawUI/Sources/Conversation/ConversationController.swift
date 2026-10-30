@@ -382,6 +382,21 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         scroll.reflectScrolledClipView(clip)
     }
 
+    /// The transcript's height and the height of it shown, and a scroll to a place in it, for the
+    /// bench's fling.
+    public var transcript: (height: CGFloat, shown: CGFloat) {
+        (table.bounds.height, scroll.contentView.bounds.height)
+    }
+
+    public func scrollTranscript(to y: CGFloat) {
+        scroll(to: y)
+    }
+
+    /// Draws every row again, as the bench does when it changes the pictures the pane draws from.
+    public func relayoutForBench() {
+        relayout()
+    }
+
     func scrollToBottom() {
         scroll(to: .greatestFiniteMagnitude)
     }
