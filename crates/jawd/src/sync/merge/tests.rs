@@ -1410,6 +1410,48 @@ async fn with_nothing_owed_one_of_yours_from_another_device_by_the_lid_owes_what
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn with_nothing_owed_one_of_yours_from_another_device_by_the_lid_owes_her_numbers_the_counts_left_unread() {
+    let (_home, store) = merged_and_told().await;
+    let changes = vec![message(NEW, "n5", AT + 6_000), message(NEW, "n6", AT + 6_001), message(NEW, "n7", AT + 6_002)];
+    store.apply(Lane::Live, changes).await.unwrap();
+    // Read on the phone by her number with its counts of 2: WhatsApp knows of n5, and n6 and n7
+    // are unread there.
+    let counted = Read { chat: NEW.into(), at: AT + 6_500, phone: Some((2, 0)), ..Read::default() };
+    store.apply(Lane::Live, vec![Change::Read(counted)]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 2)]);
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "n6 and n7 count unread");
+    store.apply(Lane::Live, vec![message(LID, "l5", AT + 7_000)]).await.unwrap();
+    store.apply(Lane::Live, vec![Change::Message(mine(LID, "y0", AT + 8_000))]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 0)], "it reads the chat");
+    assert_eq!(
+        owed(&store, NEW).await,
+        ["n6", "n7", "l5"],
+        "but says nothing of what came under her number, which the phone counted unread; l5 again, which is harmless"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_nothing_owed_a_phone_read_by_her_number_owes_the_lids_the_counts_left_unread() {
+    let (_home, store) = merged_and_told().await;
+    store.apply(Lane::Live, vec![message(LID, "l5", AT + 6_000), message(LID, "l6", AT + 6_001)]).await.unwrap();
+    // Read on the phone by her LID with its counts of 2: WhatsApp knows of l4, and l5 and l6 are
+    // unread there.
+    let counted = Read { chat: LID.into(), at: AT + 6_500, phone: Some((2, 0)), ..Read::default() };
+    store.apply(Lane::Live, vec![Change::Read(counted)]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 2)]);
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "l5 and l6 count unread");
+    store.apply(Lane::Live, vec![message(NEW, "n5", AT + 7_000)]).await.unwrap();
+    let on_the_phone = Change::Read(Read { chat: NEW.into(), at: AT + 7_500, ..Read::default() });
+    store.apply(Lane::Live, vec![on_the_phone]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 0)]);
+    assert_eq!(
+        owed(&store, NEW).await,
+        ["l5", "l6", "n5"],
+        "it says nothing of what came under the LID, which the phone counted unread; n5 again, which is harmless"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn with_nothing_owed_history_by_her_number_read_as_it_comes_owes_what_came_under_the_lid() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
