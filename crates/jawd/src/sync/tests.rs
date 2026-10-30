@@ -1282,6 +1282,61 @@ fn a_live_poll_vote_is_what_the_engine_decrypted_timed_by_its_voters_clock() {
     );
 }
 
+#[test]
+fn a_live_answer_or_edit_sealed_with_its_events_secret_is_drained_to_open_and_another_secret_edit_stays() {
+    let event =
+        MessageKey { remote_jid: Some(GROUP.into()), from_me: Some(false), id: Some("e1".into()), participant: None };
+    let answer = e2e::Message {
+        enc_event_response_message: Some(e2e::EncEventResponseMessage {
+            event_creation_message_key: Some(event.clone()),
+            enc_payload: Some(vec![1; 18]),
+            enc_iv: Some(vec![2; 12]),
+        }),
+        ..Default::default()
+    };
+    let edit = |kind: e2e::secret_encrypted_message::SecretEncType| e2e::Message {
+        secret_encrypted_message: Some(e2e::SecretEncryptedMessage {
+            target_message_key: Some(event.clone()),
+            enc_payload: Some(vec![1; 30]),
+            enc_iv: Some(vec![2; 12]),
+            secret_enc_type: Some(kind as i32),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    use e2e::secret_encrypted_message::SecretEncType;
+    let rows: Vec<Row> = [answer, edit(SecretEncType::EventEdit), edit(SecretEncType::MessageEdit)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, message)| Row {
+            seq: i as i64 + 1,
+            kind: "message".into(),
+            payload: live_message(GROUP, "100000000003@lid", &format!("s{i}"), AT, message).encode_to_vec(),
+        })
+        .collect();
+    let converted = drain::convert_rows(&rows, &me());
+    let drained: Vec<i64> = converted
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Drained(crate::store::Drained::Inbox(seq)) => Some(*seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(drained, [1, 2], "the answer and the event's edit go on, sealed; a message's edit stays in the inbox");
+    let kept: Vec<&str> = converted
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Amend(crate::store::Amend {
+                what: crate::store::Amendment::Keep { kind }, raw: Some(_), ..
+            }) => Some(kind.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kept, ["rsvp", "secret"], "each with its raw protobuf, to open with the event's secret");
+}
+
 /// What a scripted engine answers when asked for a history blob, by its notification's direct path.
 #[derive(Clone)]
 enum Blob {

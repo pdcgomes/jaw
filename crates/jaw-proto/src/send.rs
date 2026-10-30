@@ -65,6 +65,41 @@ pub struct SendLocation {
     pub key: Option<String>,
 }
 
+/// `send.event`'s params: an event, as the phones make one, starting at `start` and ending at
+/// `end` (milliseconds since the epoch), with what it says, where it is and whether it has a
+/// WhatsApp call link; answered as `send.text` is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SendEvent {
+    pub chat: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub start: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<Place>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// Where an event is: a place's name, or a place as `send.location` takes one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Place {
+    Named(String),
+    At {
+        lat: f64,
+        lon: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+    },
+}
+
 /// `poll.vote`'s params: your vote in poll `message`, the options chosen by name, none to take your
 /// vote back; `chat` and `key` as the actions on a message have them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

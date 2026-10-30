@@ -17,8 +17,11 @@ pub const LINKS: &str = "links";
 pub const POLLS: &str = "polls";
 /// The backfill that reads the locations jaw.db held again, so each is found by its address too.
 pub const PLACES: &str = "places";
+/// The backfill that reads the events jaw.db held again, for their place and call link, and opens
+/// the answers and edits an earlier jawd kept sealed for them.
+pub const EVENTS: &str = "events";
 /// The backfills this jawd knows, which a migration may leave rows for.
-pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS, COPIES, PLACES];
+pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS, COPIES, PLACES, EVENTS];
 /// How many messages one step of a backfill looks at: most are none of its business, and a look at
 /// one that isn't is a read of its row.
 const STEP: i64 = 64;
@@ -33,6 +36,9 @@ const NEXT_POLLS: &str =
 /// The next messages, each with whether it's a location still there.
 const NEXT_PLACES: &str =
     "SELECT n, kind = 'location' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
+/// The next messages, each with whether it's an event still there.
+const NEXT_EVENTS: &str =
+    "SELECT n, kind = 'event' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
 const LINKED: &str = "SELECT 1 FROM links WHERE message = ?1";
 const LINK: &str = "INSERT INTO links (message, place, chat, at, sender, mine, url, host, title, description)
     SELECT message, place, chat, at, sender, mine, url, host, title, description FROM message_links
@@ -72,6 +78,7 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
         KINDS => (kinds::NEXT_UNSHOWN, kinds::backfilled, Some(kinds::CONVERTING), STEP),
         COPIES => (copies::NEXT_COPYLESS, copies::backfilled, Some(copies::COPYING), copies::STEP),
         PLACES => (NEXT_PLACES, super::again::places, Some(kinds::CONVERTING), STEP),
+        EVENTS => (NEXT_EVENTS, super::again::events, Some(kinds::CONVERTING), STEP),
         other => bail!("jawd doesn't know the backfill {other}"),
     };
     let rows: Vec<(i64, Option<bool>)> = db

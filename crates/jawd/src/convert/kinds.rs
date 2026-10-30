@@ -387,22 +387,28 @@ fn said(s: &Option<String>) -> Option<String> {
     s.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
-/// A pin, and the place's name and address when it's one: found by both, and shown as its fields.
-fn location(x: &e2e::LocationMessage) -> Body {
+/// A pin's fields as a row shows them, `lat`, `lon`, `name`, `address` and `url`, each trimmed, and
+/// the words that find it, its name and its address.
+fn pin(x: &e2e::LocationMessage) -> (Value, Vec<String>) {
     let (name, address) = (said(&x.name), said(&x.address));
-    let called = name.as_deref().or(address.as_deref());
-    let summary = called.map_or("Location".to_string(), |called| format!("Location: {called}"));
-    let mut body = Body::new("location", spans::one_line(&summary, SUMMARY));
-    let words: Vec<&str> =
-        [name.as_deref(), address.as_deref().filter(|a| Some(*a) != name.as_deref())].into_iter().flatten().collect();
-    body.text = (!words.is_empty()).then(|| words.join("\n"));
-    body.shown = false;
+    let words = [name.clone(), address.clone().filter(|a| Some(a) != name.as_ref())].into_iter().flatten().collect();
     let mut where_ = place(x.degrees_latitude, x.degrees_longitude);
     if let Value::Object(map) = &mut where_ {
         map.insert("name".into(), json!(name));
         map.insert("address".into(), json!(address));
         map.insert("url".into(), json!(said(&x.url)));
     }
+    (where_, words)
+}
+
+/// A pin, and the place's name and address when it's one: found by both, and shown as its fields.
+fn location(x: &e2e::LocationMessage) -> Body {
+    let (where_, words) = pin(x);
+    let called = words.first();
+    let summary = called.map_or("Location".to_string(), |called| format!("Location: {called}"));
+    let mut body = Body::new("location", spans::one_line(&summary, SUMMARY));
+    body.text = (!words.is_empty()).then(|| words.join("\n"));
+    body.shown = false;
     body.detail(json!({ "location": where_ }))
 }
 
@@ -469,20 +475,36 @@ fn poll_body(x: &e2e::PollCreationMessage) -> Body {
     body
 }
 
+/// An event: its name, what it says, when it starts and ends (milliseconds since the epoch), where,
+/// as a pin's fields, a place by its name alone having no `lat` and `lon`, its call link, and
+/// whether it's cancelled; found by its name, what it says and its place, and shown as its fields.
+/// How many are going, maybe and not going, and what you answered, are counted from its answers as
+/// windows read it.
 fn event(x: &e2e::EventMessage) -> Body {
-    let name = x.name.as_deref().unwrap_or_default();
+    let (name, description) = (said(&x.name), said(&x.description));
     let cancelled = x.is_canceled.unwrap_or(false);
     let what = if cancelled { "Event cancelled" } else { "Event" };
-    let mut body = Body::new("event", spans::one_line(&format!("{what}: {name}"), SUMMARY));
-    body.text = Some([name, x.description.as_deref().unwrap_or_default()].join("\n").trim().to_string());
+    let summary = name.as_ref().map_or(what.to_string(), |name| format!("{what}: {name}"));
+    let mut body = Body::new("event", spans::one_line(&summary, SUMMARY));
+    let place = x.location.as_deref().map(pin).filter(|(at, words)| !words.is_empty() || !at["lat"].is_null());
+    let mut words: Vec<String> = [name.clone(), description.clone()].into_iter().flatten().collect();
+    words.extend(place.iter().flat_map(|(_, found)| found.iter().filter(|w| Some(*w) != name.as_ref()).cloned()));
+    body.text = (!words.is_empty()).then(|| words.join("\n"));
+    body.shown = false;
+    let at = |s: Option<i64>| s.filter(|&s| s > 0).map(|s| s * 1000);
     body.detail(json!({
         "event": {
-            "name": name,
-            "description": x.description,
-            "start": x.start_time.map(|s| s * 1000),
-            "end": x.end_time.map(|s| s * 1000),
+            "name": name.unwrap_or_default(),
+            "description": description,
+            "start": at(x.start_time),
+            "end": at(x.end_time),
+            "place": place.map(|(at, _)| at),
+            "call": said(&x.join_link),
             "cancelled": cancelled,
-            "link": x.join_link,
+            "going": 0,
+            "maybe": 0,
+            "not_going": 0,
+            "mine": null,
         }
     }))
 }

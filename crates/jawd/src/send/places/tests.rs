@@ -14,11 +14,11 @@ use crate::send::{Sending, Timing, link};
 use crate::store::{Chat, Lane, Store, read};
 use crate::work::Priority;
 
-const CLIMBING: &str = "120363012345678901@g.us";
+pub(in crate::send) const CLIMBING: &str = "120363012345678901@g.us";
 
 /// jawd's sending on a jaw.db in `home`, through the demo engine, connected, with the climbing
 /// group's chat.
-async fn sending(home: &Path) -> (Store, Sending, Arc<World>) {
+pub(in crate::send) async fn sending(home: &Path) -> (Store, Sending, Arc<World>) {
     let store = Store::open(home).unwrap();
     let live: crate::sync::Shared = Arc::new(std::sync::Mutex::new(crate::sync::starting(&store, true)));
     let (pushes, _) = broadcast::channel(256);
@@ -69,7 +69,7 @@ async fn sending(home: &Path) -> (Store, Sending, Arc<World>) {
     (store, sending, world)
 }
 
-async fn query<T: Send + 'static>(
+pub(in crate::send) async fn query<T: Send + 'static>(
     store: &Store,
     query: impl FnOnce(&Connection) -> anyhow::Result<T> + Send + 'static,
 ) -> T {
@@ -77,7 +77,7 @@ async fn query<T: Send + 'static>(
 }
 
 /// What the demo engine was asked to send, once `n` sends have gone.
-async fn sent(world: &World, n: usize) -> Vec<e2e::Message> {
+pub(in crate::send) async fn sent(world: &World, n: usize) -> Vec<e2e::Message> {
     world.until(|asked| asked.iter().filter(|kind| matches!(kind, pb::command::Kind::Send(_))).count() >= n).await;
     world.sends().into_iter().map(|send| e2e::Message::decode(send.raw.as_slice()).unwrap()).collect()
 }

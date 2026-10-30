@@ -1289,6 +1289,7 @@ dependencies = [
  "libc",
  "nucleo-matcher",
  "prost",
+ "ring",
  "rusqlite",
  "rustls",
  "serde",

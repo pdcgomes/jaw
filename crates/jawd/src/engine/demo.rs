@@ -24,9 +24,11 @@ use prost::Message as _;
 use tokio::sync::{Notify, mpsc, oneshot};
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
+use wa_proto::wa_web_protobufs_e2e::event_response_message::EventResponseType;
 
 use super::pb::chat_presence::State as Said;
 use super::{Ack, BoxFuture, Commands, Engine, EngineError, Incoming, Instance, Outgoing, PROTOCOL, pb};
+use crate::convert::secret::{self, Between};
 use crate::media::drive;
 use crate::store::polls::option_hash;
 
@@ -458,6 +460,35 @@ impl DemoEngine {
                     description: "Céu pouco nublado, vento fraco. Máxima de 22 °C.",
                 },
             ),
+            event(
+                climbing,
+                rui,
+                "3EB0DEMO00000009",
+                now - 400_000,
+                &Planned {
+                    name: "Sintra",
+                    description: "Bring the rope",
+                    at: (saturday(now), saturday(now) + 6 * 3_600),
+                    place: (38.780_3, -9.498_9, "Cabo da Roca", "Estrada do Cabo da Roca, Colares"),
+                },
+            ),
+            answer(
+                climbing,
+                MEMBERS[1],
+                "3EB0DEMO0000000A",
+                now - 390_000,
+                ("3EB0DEMO00000009", rui),
+                EventResponseType::Going,
+            ),
+            // Yours, from your phone.
+            answer(
+                climbing,
+                ME,
+                "3EB0DEMO0000000B",
+                now - 380_000,
+                ("3EB0DEMO00000009", rui),
+                EventResponseType::Maybe,
+            ),
             poll(
                 climbing,
                 rui,
@@ -657,6 +688,113 @@ pub fn location(chat: &str, sender: &str, id: &str, at_ms: i64, at: (f64, f64), 
         message.raw = raw.encode_to_vec();
     }
     event
+}
+
+/// The secret the demo's events go with, as the phones give each event one of its own.
+const EVENT_SECRET: [u8; 32] = [9; 32];
+
+/// 9:00 UTC on the first Saturday after `now_ms`'s day (UTC), a week on from a Saturday, in seconds
+/// since the epoch.
+fn saturday(now_ms: i64) -> i64 {
+    let days = now_ms.div_euclid(86_400_000);
+    // The epoch was a Thursday; Saturday is two days on.
+    let ahead = match (2 - days.rem_euclid(7)).rem_euclid(7) {
+        0 => 7,
+        n => n,
+    };
+    (days + ahead) * 86_400 + 9 * 3_600
+}
+
+/// An event as someone plans one: its name, what it says, when it starts and ends (seconds since
+/// the epoch) and where (a pin, with the place's name and address).
+pub struct Planned<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+    pub at: (i64, i64),
+    pub place: (f64, f64, &'a str, &'a str),
+}
+
+/// An event from `sender` in `chat`, with a secret of its own, as the phones send one.
+pub fn event(chat: &str, sender: &str, id: &str, at_ms: i64, planned: &Planned) -> pb::Event {
+    let (lat, lon, name, address) = planned.place;
+    let raw = e2e::Message {
+        event_message: Some(Box::new(e2e::EventMessage {
+            name: Some(planned.name.into()),
+            description: Some(planned.description.into()),
+            start_time: Some(planned.at.0),
+            end_time: Some(planned.at.1),
+            location: Some(Box::new(e2e::LocationMessage {
+                degrees_latitude: Some(lat),
+                degrees_longitude: Some(lon),
+                name: Some(name.into()),
+                address: Some(address.into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })),
+        message_context_info: Some(e2e::MessageContextInfo {
+            message_secret: Some(EVENT_SECRET.to_vec()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut event = text(chat, sender, id, at_ms, "");
+    if let Some(pb::event::Kind::Message(message)) = &mut event.kind {
+        message.raw = raw.encode_to_vec();
+    }
+    event
+}
+
+/// `who`'s answer, as message `id`, to the event `event` (its ID and who sent it), sealed with
+/// the demo's events' secret as the phones seal one.
+pub fn answer(chat: &str, who: &str, id: &str, at_ms: i64, event: (&str, &str), said: EventResponseType) -> pb::Event {
+    answer_sealed(chat, who, id, at_ms, (event.0, event.1, &EVENT_SECRET), said)
+}
+
+/// `who`'s answer, as message `id`, to the event `event` (its ID, who sent it and its secret).
+fn answer_sealed(
+    chat: &str,
+    who: &str,
+    id: &str,
+    at_ms: i64,
+    event: (&str, &str, &[u8]),
+    said: EventResponseType,
+) -> pb::Event {
+    let (event_id, author, secret) = event;
+    let plain =
+        e2e::EventResponseMessage { response: Some(said as i32), timestamp_ms: Some(at_ms), ..Default::default() };
+    let between = Between { id: event_id, author, who };
+    let iv = [1; 12];
+    let raw = e2e::Message {
+        enc_event_response_message: Some(e2e::EncEventResponseMessage {
+            event_creation_message_key: Some(MessageKey {
+                remote_jid: Some(chat.into()),
+                from_me: Some(author == ME),
+                id: Some(event_id.into()),
+                participant: (chat.ends_with("@g.us") && author != ME).then(|| author.into()),
+            }),
+            enc_payload: Some(secret::seal(secret, secret::EVENT_RESPONSE, between, iv, &plain.encode_to_vec())),
+            enc_iv: Some(iv.to_vec()),
+        }),
+        ..Default::default()
+    };
+    let mut answer = text(chat, who, id, at_ms, "");
+    if let Some(pb::event::Kind::Message(message)) = &mut answer.kind {
+        message.raw = raw.encode_to_vec();
+        if let Some(info) = message.info.as_mut() {
+            info.from_me = who == ME;
+        }
+    }
+    answer
+}
+
+/// What a recipient's phone answers to an event of yours, `send`, once it has read it: going.
+fn answering(send: &pb::Send, who: &str) -> Option<pb::Event> {
+    let sent = e2e::Message::decode(send.raw.as_slice()).ok()?;
+    sent.event_message.as_ref()?;
+    let secret = sent.message_context_info.as_ref()?.message_secret.as_deref()?;
+    let id = format!("{}-going", send.id);
+    Some(answer_sealed(&send.chat, who, &id, now_ms(), (&send.id, ME, secret), EventResponseType::Going))
 }
 
 /// `voter`'s vote, as message `id`, in the poll `poll` (its ID and who sent it), choosing `options`
@@ -1315,6 +1453,9 @@ impl Sender {
                         return;
                     }
                 }
+                if let Some(answer) = recipients.first().and_then(|who| answering(&send, who)) {
+                    sender.send(answer).await;
+                }
             });
         }
         Ok(pb::reply::Kind::Sent(pb::Sent { id: send.id, at_ms: at, chat: send.chat }))
@@ -1631,5 +1772,37 @@ mod tests {
         assert!(rx.recv().await.unwrap().ack.is_none());
         drop(rx);
         assert!(world.deliver(text(ANA, ANA, "late", 0, "hi")).await.is_none(), "jawd has gone");
+    }
+
+    #[test]
+    fn the_demos_event_is_at_9_utc_on_the_first_saturday_after_today_a_week_on_from_a_saturday() {
+        // Saturday 31 October 2026 at 9:00 UTC, and the Saturday after, in seconds since the epoch.
+        const OCT_31: i64 = 1_793_437_200;
+        const NOV_7: i64 = OCT_31 + 7 * 86_400;
+        // `ms` milliseconds into the day `days` on from 31 October, UTC.
+        let at = |days: i64, ms: i64| (OCT_31 - 9 * 3_600 + days * 86_400) * 1_000 + ms;
+        let hours = |h: i64| h * 3_600_000;
+        for (now, wanted, when) in [
+            (at(-2, hours(12)), OCT_31, "Thursday at noon"),
+            (at(-1, 0), OCT_31, "Friday at midnight"),
+            (at(0, -1), OCT_31, "Friday, a millisecond before midnight"),
+            (at(0, 0), NOV_7, "Saturday at midnight"),
+            (at(0, hours(9) - 1), NOV_7, "Saturday, a millisecond before 9:00"),
+            (at(0, hours(9)), NOV_7, "Saturday at 9:00"),
+            (at(1, -1), NOV_7, "Saturday, a millisecond before midnight"),
+            (at(1, 0), NOV_7, "Sunday at midnight"),
+            (at(3, hours(12)), NOV_7, "Tuesday at noon"),
+            (at(7, -1), NOV_7, "the next Friday, a millisecond before midnight"),
+        ] {
+            assert_eq!(saturday(now), wanted, "{when}");
+        }
+        // Every minute of three weeks: 9:00 UTC on a Saturday, never today and at most a week on.
+        for minute in 0..21 * 24 * 60 {
+            let now = at(-3, minute * 60_000);
+            let starts = saturday(now);
+            let ahead = starts.div_euclid(86_400) - now.div_euclid(86_400_000);
+            assert_eq!((starts - OCT_31).rem_euclid(7 * 86_400), 0, "a Saturday at 9:00 from {now}");
+            assert!((1..=7).contains(&ahead), "{ahead} days on from {now}");
+        }
     }
 }

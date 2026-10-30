@@ -1262,6 +1262,7 @@ async fn each_sending_call_that_keeps_something_is_one_synced_commit() {
     let calls = [
         ("send.text", json!({ "chat": ANA, "text": "one" })),
         ("send.location", json!({ "chat": ANA, "lat": 38.7, "lon": -9.1 })),
+        ("send.event", json!({ "chat": ANA, "name": "Jantar", "start": 1_892_000_000_000_i64 })),
         ("draft.set", json!({ "chat": ANA, "text": "two" })),
         ("read", json!({ "chat": ANA, "up_to": "m1" })),
         ("chat.start", json!({ "person": format!("person:{rui}") })),

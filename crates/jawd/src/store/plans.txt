@@ -1617,6 +1617,11 @@ SELECT voter, position FROM poll_votes WHERE message = ?1
     SEARCH poll_votes USING COVERING INDEX poll_votes_by_option (message=?)
 
 -- src/store/read.rs
+SELECT ea.answer, pj.person, pj.jid, ea.at, ea.id FROM event_answers ea JOIN person_jids pj ON pj.n = ea.who WHERE ea.message = ?1
+    SEARCH ea USING PRIMARY KEY (message=?)
+    SEARCH pj USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/read.rs
 SELECT value FROM sync_state WHERE key = 'me'
     SEARCH sync_state USING PRIMARY KEY (key=?)
 
@@ -2026,6 +2031,15 @@ UPDATE messages SET text = ?2, spans = ?3, summary = ?4, detail = ?5, v = ?6 WHE
 UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
+-- src/store/write/again.rs
+SELECT m.chat, c.id, m.id FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/again.rs
+SELECT count(*) FROM pending WHERE chat = ?1 AND target = ?2
+    SEARCH pending USING COVERING INDEX pending_by_target_at (chat=? AND target=?)
+
 -- src/store/write/copies.rs
 SELECT n, NOT deleted AND instr(detail, '"media":') > 0 AND NOT EXISTS (SELECT 1 FROM media WHERE message = messages.n AND variant = 'sd') FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
@@ -2040,6 +2054,78 @@ SELECT chat, id, raw FROM messages WHERE n = ?1 AND NOT deleted
 SELECT c.id, m.id, m.raw FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1
     SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH c USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/events.rs
+SELECT at, id FROM event_answers WHERE message = ?1 AND who = ?2
+    SEARCH event_answers USING PRIMARY KEY (message=? AND who=?)
+
+-- src/store/write/events.rs
+INSERT INTO event_answers (message, who, answer, guests, at, id) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (message, who) DO UPDATE SET answer = excluded.answer, guests = excluded.guests, at = excluded.at, id = excluded.id
+
+-- src/store/write/events.rs
+SELECT deleted FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/events.rs
+SELECT id, raw, mine, sender FROM messages WHERE n = ?1 AND kind = 'event' AND NOT deleted
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/events.rs
+SELECT j.jid FROM person_jids s JOIN person_jids j ON j.person = s.person WHERE s.jid = ?1 ORDER BY j.n
+    SEARCH s USING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+    SEARCH j USING INDEX person_jids_by_person (person=?)
+
+-- src/store/write/events.rs
+SELECT j.jid FROM person_jids s JOIN person_jids j ON j.person = s.person WHERE s.n = ?1 ORDER BY j.n
+    SEARCH s USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH j USING INDEX person_jids_by_person (person=?)
+
+-- src/store/write/events.rs
+SELECT count(*) FROM pending WHERE kind = ?1
+    SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
+
+-- src/store/write/events.rs
+INSERT INTO quarantine (at, source, ref, error, raw) SELECT ?1, 'answer', chat || ' ' || target || ' ' || coalesce(sender, '') || ' ' || coalesce(effect ->> '$.id', n), 'more answers waited for events jaw has not seen than it keeps in pending, so this one waits here for its event', jsonb_object('chat', chat, 'target', target, 'kind', kind, 'at', at, 'sender', sender, 'mine', mine, 'effect', effect, 'raw', hex(raw)) FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = ?3 ORDER BY n LIMIT ?2) ON CONFLICT (source, ref) DO NOTHING
+    SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
+    LIST SUBQUERY 1
+      SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
+
+-- src/store/write/events.rs
+DELETE FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = ?2 ORDER BY n LIMIT ?1)
+    SEARCH pending USING INTEGER PRIMARY KEY (rowid=?)
+    LIST SUBQUERY 1
+      SEARCH pending USING COVERING INDEX pending_by_kind (kind=?)
+
+-- src/store/write/events.rs
+INSERT INTO pending (chat, target, kind, at, raw, sender, mine, effect) SELECT raw ->> '$.chat', raw ->> '$.target', raw ->> '$.kind', raw ->> '$.at', unhex(raw ->> '$.raw'), raw ->> '$.sender', raw ->> '$.mine', raw ->> '$.effect' FROM quarantine WHERE source = 'answer' AND ref >= ?1 AND ref < ?2
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
+
+-- src/store/write/events.rs
+DELETE FROM quarantine WHERE source = 'answer' AND ref >= ?1 AND ref < ?2
+    SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
+
+-- src/store/write/events.rs
+UPDATE quarantine SET ref = ?4 || substr(ref, length(?3) + 1) || iif(EXISTS (SELECT 1 FROM quarantine q WHERE q.source = 'answer' AND q.ref = ?4 || substr(quarantine.ref, length(?3) + 1)), ' ' || n, ''), raw = jsonb_set(raw, '$.chat', ?4) WHERE source = 'answer' AND ref >= ?1 AND ref < ?2 RETURNING raw ->> '$.target'
+    SEARCH quarantine USING COVERING INDEX quarantine_by_ref (source=? AND ref>? AND ref<?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH q USING COVERING INDEX quarantine_by_ref (source=? AND ref=?)
+
+-- src/store/write/events.rs
+SELECT g.message, m.chat FROM person_jids gj JOIN event_answers g ON g.who = gj.n JOIN messages m ON m.n = g.message WHERE gj.person = ?2 AND EXISTS (SELECT 1 FROM person_jids kj JOIN event_answers k ON k.who = kj.n WHERE kj.person = ?1 AND k.message = g.message)
+    SEARCH gj USING COVERING INDEX person_jids_by_person (person=?)
+    SEARCH g USING COVERING INDEX event_answers_by_who (who=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH kj USING COVERING INDEX person_jids_by_person (person=?)
+      SEARCH k USING COVERING INDEX event_answers_by_who (who=? AND message=?)
+    SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/events.rs
+UPDATE messages SET v = ?2 WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/events.rs
+UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/folders.rs
 DELETE FROM folder_chats
@@ -2332,6 +2418,10 @@ SELECT n, kind = 'poll' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 O
 
 -- src/store/write/links.rs
 SELECT n, kind = 'location' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
+
+-- src/store/write/links.rs
+SELECT n, kind = 'event' AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
 
 -- src/store/write/links.rs
@@ -3083,6 +3173,7 @@ INSERT OR IGNORE INTO tombstones (chat, id, at) SELECT chat, id, ?2 FROM message
 -- src/store/write.rs
 DELETE FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+    SEARCH event_answers USING PRIMARY KEY (message=?)
     SEARCH media USING PRIMARY KEY (message=?)
     SEARCH poll_voters USING PRIMARY KEY (message=?)
     SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
@@ -3147,6 +3238,7 @@ INSERT INTO people (v) VALUES (?1) RETURNING n
 
 -- src/store/write.rs
 INSERT INTO person_jids (jid, person) VALUES (?1, ?2) RETURNING n
+    SEARCH event_answers USING INDEX event_answers_by_who (who=?)
     SEARCH poll_voters USING INDEX poll_voters_by_voter (voter=?)
     SEARCH links USING COVERING INDEX links_by_sender (sender=?)
     SEARCH regroup USING INDEX regroup_by_member (member=?)
@@ -3411,7 +3503,7 @@ SELECT c.n, m.n FROM chats c LEFT JOIN messages m ON m.chat = c.n AND m.id = ?2 
     SEARCH m USING COVERING INDEX messages_by_id (chat=? AND id=?) LEFT-JOIN
 
 -- src/store/write.rs
-UPDATE messages AS k SET text = iif(g.edited_at > coalesce(k.edited_at, -1), g.text, k.text), spans = iif(g.edited_at > coalesce(k.edited_at, -1), g.spans, k.spans), summary = iif(g.edited_at > coalesce(k.edited_at, -1), g.summary, k.summary), edited_at = max(coalesce(k.edited_at, g.edited_at), coalesce(g.edited_at, k.edited_at)), status = iif(coalesce(?4 ->> g.status, -1) > coalesce(?4 ->> k.status, -1), g.status, k.status), starred = max(k.starred, g.starred), mentions_me = max(k.mentions_me, g.mentions_me), raw = coalesce(k.raw, g.raw), envelope = coalesce(k.envelope, g.envelope), v = ?3 FROM (SELECT * FROM messages WHERE n = ?2) AS g WHERE k.n = ?1
+UPDATE messages AS k SET text = iif(g.edited_at > coalesce(k.edited_at, -1), g.text, k.text), spans = iif(g.edited_at > coalesce(k.edited_at, -1), g.spans, k.spans), summary = iif(g.edited_at > coalesce(k.edited_at, -1), g.summary, k.summary), detail = iif(k.kind = 'event' AND NOT k.deleted AND g.edited_at > coalesce(k.edited_at, -1), g.detail, k.detail), edited_at = max(coalesce(k.edited_at, g.edited_at), coalesce(g.edited_at, k.edited_at)), status = iif(coalesce(?4 ->> g.status, -1) > coalesce(?4 ->> k.status, -1), g.status, k.status), starred = max(k.starred, g.starred), mentions_me = max(k.mentions_me, g.mentions_me), raw = coalesce(k.raw, g.raw), envelope = coalesce(k.envelope, g.envelope), v = ?3 FROM (SELECT * FROM messages WHERE n = ?2) AS g WHERE k.n = ?1
     SEARCH k USING INTEGER PRIMARY KEY (rowid=?)
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -3445,6 +3537,10 @@ INSERT INTO poll_voters (message, voter, at, id) SELECT ?1, voter, at, id FROM p
     SEARCH poll_voters USING PRIMARY KEY (message=?)
 
 -- src/store/write.rs
+INSERT INTO event_answers (message, who, answer, guests, at, id) SELECT ?1, who, answer, guests, at, id FROM event_answers WHERE message = ?2 ON CONFLICT (message, who) DO UPDATE SET answer = excluded.answer, guests = excluded.guests, at = excluded.at, id = excluded.id WHERE (excluded.at, excluded.id) > (event_answers.at, event_answers.id)
+    SEARCH event_answers USING PRIMARY KEY (message=?)
+
+-- src/store/write.rs
 SELECT deleted FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
@@ -3453,7 +3549,7 @@ SELECT t FROM messages WHERE t BETWEEN ?1 AND ?2 ORDER BY t DESC LIMIT 1
     SEARCH messages USING COVERING INDEX sqlite_autoindex_messages_1 (t>? AND t<?)
 
 -- src/store/write.rs
-SELECT n, t, deleted, edited_at, starred, text, spans, summary, status FROM messages WHERE chat = ?1 AND id = ?2
+SELECT n, t, deleted, edited_at, starred, text, spans, summary, status, detail FROM messages WHERE chat = ?1 AND id = ?2
     SEARCH messages USING INDEX messages_by_id (chat=? AND id=?)
 
 -- src/store/write.rs
@@ -3471,6 +3567,7 @@ UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, tex
 
 -- src/store/write.rs
 INSERT INTO messages (at, sender, mine, kind, status, text, spans, summary, reply, detail, forwarded, edited_at, deleted, expires_at, starred, view_once, raw, v, n, mentions_me, envelope, chat, id, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) RETURNING n
+    SEARCH event_answers USING PRIMARY KEY (message=?)
     SEARCH media USING PRIMARY KEY (message=?)
     SEARCH poll_voters USING PRIMARY KEY (message=?)
     SEARCH links USING COVERING INDEX sqlite_autoindex_links_2 (message=?)
@@ -3491,7 +3588,7 @@ UPDATE chats SET last_at = max(last_at, ?2), last_message = ?3, v = ?4 WHERE n =
       SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
-SELECT n, sender, mine, at, effect FROM pending WHERE chat = ?1 AND target = ?2 ORDER BY at, n
+SELECT n, sender, mine, at, effect, raw FROM pending WHERE chat = ?1 AND target = ?2 ORDER BY at, n
     SEARCH pending USING INDEX pending_by_target_at (chat=? AND target=?)
 
 -- src/store/write.rs
@@ -3546,6 +3643,14 @@ UPDATE messages SET status = ?2, v = ?3 WHERE n = ?1
 
 -- src/store/write.rs
 SELECT kind = 'poll' AND NOT deleted FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+SELECT kind = 'event' AND NOT deleted FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), detail = ?5, edited_at = ?6, v = ?7 WHERE n = ?1 AND kind = 'event' AND NOT deleted AND (edited_at IS NULL OR edited_at < ?6)
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs

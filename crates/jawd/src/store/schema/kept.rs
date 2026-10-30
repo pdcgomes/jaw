@@ -72,6 +72,7 @@ const CLASSES: &[(&str, Class, &[&str])] = &[
     ("backfills", Own, &[]),
     ("thumbnails", Own, &[]),
     ("poll_voters", Own, &[]),
+    ("event_answers", Own, &[]),
     ("events", Derived, &[]),
     ("fts_backlog", Derived, &[]),
     ("messages_fts", Derived, &[]),
@@ -373,6 +374,17 @@ const SEEDS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     ("poll_voters", &[("message", "2"), ("voter", "3"), ("at", "1790000000980"), ("id", "'v1'")]),
+    (
+        "event_answers",
+        &[
+            ("message", "2"),
+            ("who", "3"),
+            ("answer", "'maybe'"),
+            ("guests", "1"),
+            ("at", "1790000000990"),
+            ("id", "'a1'"),
+        ],
+    ),
     (
         "media_files",
         &[

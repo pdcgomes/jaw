@@ -32,7 +32,7 @@ const QUESTION_MOST: usize = 255;
 const OPTION_MOST: usize = 100;
 
 /// The protocol's error for something longer than WhatsApp takes, saying which and how long.
-fn too_long(what: &str, most: usize, message: String) -> Error {
+pub(super) fn too_long(what: &str, most: usize, message: String) -> Error {
     let mut error = Error::new(code::LIMIT, message);
     error.data = Some(serde_json::json!({ "limit": what, "most": most }));
     error
@@ -40,7 +40,7 @@ fn too_long(what: &str, most: usize, message: String) -> Error {
 
 /// A new secret for a poll, 32 random bytes, as WhatsApp's phones make one: each vote in it is
 /// encrypted with a key made from it.
-fn secret() -> std::io::Result<Vec<u8>> {
+pub(super) fn secret() -> std::io::Result<Vec<u8>> {
     let mut bytes = vec![0u8; 32];
     // SAFETY: getentropy fills the buffer it's given, which may be up to 256 bytes.
     if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {

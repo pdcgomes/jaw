@@ -281,6 +281,9 @@ impl State {
                     copies_backfill: store.backfill_left(copies::COPIES).ok()?,
                     encrypted_kept: store.count("pending WHERE kind IN ('secret', 'rsvp')").ok()?,
                     places_backfill: store.backfill_left(links::PLACES).ok()?,
+                    events_backfill: store.backfill_left(links::EVENTS).ok()?,
+                    answers_waiting: store.count("pending WHERE kind = 'answer'").ok()?,
+                    answers_set_aside: store.count("quarantine WHERE source = 'answer'").ok()?,
                 })
             }),
             interfaces: Some(Interfaces {

@@ -22,6 +22,7 @@ jaw-version.workspace = true
 libc.workspace = true
 nucleo-matcher.workspace = true
 prost.workspace = true
+ring.workspace = true
 rusqlite = { workspace = true, features = ["hooks"] }
 rustls.workspace = true
 serde.workspace = true

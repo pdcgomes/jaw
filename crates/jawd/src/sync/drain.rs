@@ -233,12 +233,15 @@ fn message(row: &Row, me: &Me, out: &mut Converted) -> bool {
     let mut changes = convert::message(&web, me, true);
     // A poll vote is readable only through what the engine decrypted, which the inbox row holds and
     // a message's raw protobuf doesn't; one the engine couldn't decrypt, or an encrypted reaction,
-    // stays in the inbox for a jawd that can read it.
+    // stays in the inbox for a jawd that can read it. An answer to an event or an edit of one goes
+    // on, sealed, to be opened with the event's secret once jaw has the event.
     if !live.decrypted.is_empty() {
         convert::decrypted_vote(&mut changes, web.key.id.as_deref().unwrap_or_default(), &live.decrypted);
     }
-    if changes.iter().any(|c| matches!(c, Change::Amend(Amend { what: Amendment::Keep { kind }, .. }) if kind != "pin"))
-    {
+    if changes.iter().any(|c| {
+        matches!(c, Change::Amend(Amend { what: Amendment::Keep { kind }, .. })
+            if kind != "pin" && !convert::opens_here(kind, &web))
+    }) {
         return false;
     }
     // The row keeps the engine's whole event, which says more than the WebMessageInfo made from it.

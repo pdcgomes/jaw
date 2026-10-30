@@ -5,6 +5,7 @@
 
 mod again;
 pub mod copies;
+mod events;
 pub mod folders;
 pub mod kinds;
 pub mod layout;
@@ -190,6 +191,22 @@ pub enum Amendment {
     Hd {
         copy: Box<media::MediaCopy>,
     },
+    /// An answer to an event, its answerer's latest: `going`, `maybe`, `not_going`, or `none` for
+    /// one saying none of them, with the guests it brings; `id` is the answer's own message's,
+    /// which orders two sent in the same millisecond.
+    Answer {
+        answer: String,
+        guests: u32,
+        id: String,
+    },
+    /// An event as an edit of it, opened, makes it: its text, spans, summary and detail, which the
+    /// newest edit gives, by its time.
+    EventEdit {
+        text: Option<String>,
+        spans: Option<String>,
+        summary: String,
+        detail: Option<String>,
+    },
 }
 
 impl Amendment {
@@ -204,6 +221,8 @@ impl Amendment {
             Amendment::Keep { kind } => kind,
             Amendment::Vote { .. } => "vote",
             Amendment::Hd { .. } => "hd",
+            Amendment::Answer { .. } => "answer",
+            Amendment::EventEdit { .. } => "event_edit",
         }
     }
 }
@@ -1483,10 +1502,11 @@ fn upsert_person(db: &Connection, stamps: &mut Stamps, person: &Person) -> Resul
 
 /// Joins `gone` into `keep`: its JIDs, its chats and its folder places move, the fields `keep`
 /// lacks are filled from it, and it's removed. Rows that name a JID aren't touched, which keeps a
-/// join to a few rows however many messages they sent; the polls both voted in take a new
-/// version, since their tallies count the two as one from here on.
+/// join to a few rows however many messages they sent; the polls both voted in and the events both
+/// answered take a new version, since their counts count the two as one from here on.
 fn join(db: &Connection, stamps: &mut Stamps, keep: i64, gone: i64) -> Result<()> {
     polls::joining(db, stamps, keep, gone)?;
+    events::joining(db, stamps, keep, gone)?;
     db.prepare_cached(
         "UPDATE people AS k SET name = coalesce(k.name, g.name), push_name = coalesce(k.push_name, g.push_name),
             verified_name = coalesce(k.verified_name, g.verified_name), about = coalesce(k.about, g.about),
@@ -1689,6 +1709,7 @@ fn follow(db: &Connection, stamps: &mut Stamps, from: &str, to: (i64, &str)) -> 
         .query_map([to_jid, from], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     waiting.extend(polls::set_aside_moved(db, to_jid, from)?);
+    waiting.extend(events::set_aside_moved(db, to_jid, from)?);
     waiting.sort_unstable();
     waiting.dedup();
     for id in waiting {
@@ -1697,7 +1718,7 @@ fn follow(db: &Connection, stamps: &mut Stamps, from: &str, to: (i64, &str)) -> 
             .query_row(params![to, id], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;
         if let Some((n, kind)) = found {
-            apply_pending(db, stamps, to, n, to_jid, &id, kind == "poll")?;
+            apply_pending(db, stamps, to, n, to_jid, &id, &kind)?;
         }
     }
     Ok(())
@@ -1956,7 +1977,7 @@ fn move_merged(db: &Connection, stamps: &mut Stamps, gone: i64, keep: i64, n: i6
     stamps.unsettle(keep);
     stamps.unsettle(gone);
     let keep_jid: String = db.prepare_cached("SELECT id FROM chats WHERE n = ?1")?.query_row([keep], |r| r.get(0))?;
-    apply_pending(db, stamps, keep, n, &keep_jid, &id, kind == "poll")?;
+    apply_pending(db, stamps, keep, n, &keep_jid, &id, &kind)?;
     Ok(db.prepare_cached("SELECT 1 FROM messages WHERE n = ?1")?.exists([n])?.then_some(n))
 }
 
@@ -2002,15 +2023,18 @@ fn located(db: &Connection, stamps: &mut Stamps, chat_jid: &str, id: &str) -> Re
 }
 
 /// Folds message `gone` into `kept`, the same message in the chat being kept: a later edit, a star,
-/// the live envelope, a raw protobuf, its reactions, receipts, votes and media go to the kept one,
-/// a deletion for everyone sticks, and `gone` is removed.
+/// the live envelope, a raw protobuf, its reactions, receipts, votes, answers and media go to the
+/// kept one, a deletion for everyone sticks, and `gone` is removed.
 fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -> Result<()> {
     let seq = stamps.seq(MESSAGE, Some(kept));
+    // An event's edit says where and when as well as what it's called.
     db.prepare_cached(
         "UPDATE messages AS k SET
             text = iif(g.edited_at > coalesce(k.edited_at, -1), g.text, k.text),
             spans = iif(g.edited_at > coalesce(k.edited_at, -1), g.spans, k.spans),
             summary = iif(g.edited_at > coalesce(k.edited_at, -1), g.summary, k.summary),
+            detail = iif(k.kind = 'event' AND NOT k.deleted AND g.edited_at > coalesce(k.edited_at, -1), g.detail,
+                k.detail),
             edited_at = max(coalesce(k.edited_at, g.edited_at), coalesce(g.edited_at, k.edited_at)),
             status = iif(coalesce(?4 ->> g.status, -1) > coalesce(?4 ->> k.status, -1), g.status, k.status),
             starred = max(k.starred, g.starred), mentions_me = max(k.mentions_me, g.mentions_me),
@@ -2059,6 +2083,16 @@ fn fold(db: &Connection, stamps: &mut Stamps, chat: i64, kept: i64, gone: i64) -
             WHERE (excluded.at, excluded.id) > (poll_voters.at, poll_voters.id)",
     )?
     .execute([kept, gone])?;
+    // Each answer to the copy, an event's, goes to the kept one if it's newer than its answerer's
+    // there, before removing the copy takes its answers with it.
+    db.prepare_cached(
+        "INSERT INTO event_answers (message, who, answer, guests, at, id)
+            SELECT ?1, who, answer, guests, at, id FROM event_answers WHERE message = ?2
+        ON CONFLICT (message, who) DO UPDATE SET answer = excluded.answer, guests = excluded.guests,
+            at = excluded.at, id = excluded.id
+            WHERE (excluded.at, excluded.id) > (event_answers.at, event_answers.id)",
+    )?
+    .execute([kept, gone])?;
     media::fold(db, kept, gone)?;
     outbox::folded(db, kept, gone)?;
     let revoked: bool =
@@ -2105,6 +2139,7 @@ struct Kept {
     spans: Option<String>,
     summary: Option<String>,
     status: Option<String>,
+    detail: Option<String>,
 }
 
 /// status_rank as JSON, for SQL to rank statuses by with `->>`; a missing one ranks lowest.
@@ -2140,7 +2175,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     let sender = message.sender.as_deref().map(|jid| ensure_jid(db, stamps, jid)).transpose()?;
     let existing: Option<Kept> = db
         .prepare_cached(
-            "SELECT n, t, deleted, edited_at, starred, text, spans, summary, status FROM messages
+            "SELECT n, t, deleted, edited_at, starred, text, spans, summary, status, detail FROM messages
             WHERE chat = ?1 AND id = ?2",
         )?
         .query_row(params![chat, message.id], |r| {
@@ -2154,6 +2189,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
                 spans: r.get(6)?,
                 summary: r.get(7)?,
                 status: r.get(8)?,
+                detail: r.get(9)?,
             })
         })
         .optional()?;
@@ -2166,6 +2202,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     let mut spans = message.spans.clone();
     let mut summary = (message.text.as_ref() != Some(&message.summary)).then(|| message.summary.clone());
     let mut edited_at = message.edited_at;
+    let mut detail = message.detail.clone();
     let mut starred = message.starred;
     let mut status = message.status.map(str::to_string);
     if let Some(kept) = &existing {
@@ -2174,6 +2211,10 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         if kept.edited_at > message.edited_at {
             (text, spans, summary, edited_at) =
                 (kept.text.clone(), kept.spans.clone(), kept.summary.clone(), kept.edited_at);
+            // An event's edit says where and when as well as what it's called.
+            if message.kind == "event" {
+                detail = kept.detail.clone();
+            }
         }
         // Stars come and go through app state, which a copy of the message doesn't know about.
         starred = kept.starred;
@@ -2213,7 +2254,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         spans,
         summary,
         message.reply,
-        message.detail,
+        detail,
         message.forwarded,
         edited_at,
         message.deleted,
@@ -2302,36 +2343,52 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         (false, _) => {}
     }
     if existing.is_none() {
-        apply_pending(db, stamps, chat, n, &chat_id, &message.id, message.kind == "poll")?;
+        apply_pending(db, stamps, chat, n, &chat_id, &message.id, message.kind)?;
     }
     Ok(true)
 }
 
-/// Applies what was waiting in `pending` for a message that has just arrived, or has just moved
-/// into `chat` with a merge; for a poll, the votes set aside for it come back to wait there first.
-fn apply_pending(
+/// Applies what was waiting in `pending` for a message of kind `kind` that has just arrived, or has
+/// just moved into `chat` with a merge; for a poll or an event, the votes or the answers set aside
+/// for it come back to wait there first. What was kept sealed for an event opens with its secret,
+/// and what still doesn't stays kept.
+pub(super) fn apply_pending(
     db: &Connection,
     stamps: &mut Stamps,
     chat: i64,
     n: i64,
     chat_jid: &str,
     id: &str,
-    poll: bool,
+    kind: &str,
 ) -> Result<()> {
-    if poll {
-        polls::set_aside_back(db, chat_jid, id)?;
+    match kind {
+        "poll" => polls::set_aside_back(db, chat_jid, id)?,
+        "event" => events::set_aside_back(db, chat_jid, id)?,
+        _ => {}
     }
-    let waiting: Vec<(i64, Option<String>, bool, i64, String)> = db
+    let waiting: Vec<Waiting> = db
         .prepare_cached(
-            "SELECT n, sender, mine, at, effect FROM pending WHERE chat = ?1 AND target = ?2 ORDER BY at, n",
+            "SELECT n, sender, mine, at, effect, raw FROM pending WHERE chat = ?1 AND target = ?2 ORDER BY at, n",
         )?
-        .query_map(params![chat_jid, id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .query_map(params![chat_jid, id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    for (pending, sender, mine, at, effect) in waiting {
+    for (pending, sender, mine, at, effect, raw) in waiting {
         let Ok(what) = serde_json::from_str::<Amendment>(&effect) else { continue };
-        if matches!(what, Amendment::Keep { .. }) {
-            continue;
-        }
+        let (what, at) = match what {
+            Amendment::Keep { kind } if sealed_for_events(&kind) => {
+                let sealed = events::Sealed { raw: &raw, sender: sender.as_deref(), mine, at };
+                match events::opened(db, n, &sealed)? {
+                    events::Opening::Opened(what, at) => (what, at),
+                    events::Opening::Gone => {
+                        db.prepare_cached("DELETE FROM pending WHERE n = ?1")?.execute([pending])?;
+                        continue;
+                    }
+                    events::Opening::Sealed => continue,
+                }
+            }
+            Amendment::Keep { .. } => continue,
+            what => (what, at),
+        };
         let gone = matches!(what, Amendment::DeleteForMe);
         apply_amendment(db, stamps, chat, n, Doing { what: &what, sender: sender.as_deref(), mine, at })?;
         db.prepare_cached("DELETE FROM pending WHERE n = ?1")?.execute([pending])?;
@@ -2340,6 +2397,15 @@ fn apply_pending(
         }
     }
     Ok(())
+}
+
+/// A row of `pending`: its n, who did what it says, whether it's yours, when, what it does and its
+/// raw protobuf.
+type Waiting = (i64, Option<String>, bool, i64, String, Vec<u8>);
+
+/// Whether what's kept as `kind` may be sealed with an event's secret: an answer, or an edit.
+fn sealed_for_events(kind: &str) -> bool {
+    kind == "rsvp" || kind == "secret"
 }
 
 /// The chat and n of the message an amendment names, if jaw has it, wherever a merge has it.
@@ -2374,6 +2440,22 @@ fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<
         ])?;
         return Ok(false);
     }
+    let raw = amend.raw.as_ref().map_or(&[][..], |packed| packed.0.as_slice());
+    // An answer or an edit sealed with its event's secret opens once jaw has the event; one for a
+    // message deleted for everyone has nothing left to change, as a vote in a deleted poll hasn't.
+    if let (Amendment::Keep { kind }, Some((chat, n))) = (&amend.what, found)
+        && sealed_for_events(kind)
+    {
+        let sealed = events::Sealed { raw, sender: amend.sender.as_deref(), mine: amend.mine, at: amend.at };
+        match events::opened(db, n, &sealed)? {
+            events::Opening::Opened(what, at) => {
+                let doing = Doing { what: &what, sender: amend.sender.as_deref(), mine: amend.mine, at };
+                return apply_amendment(db, stamps, chat, n, doing);
+            }
+            events::Opening::Gone => return Ok(false),
+            events::Opening::Sealed => {}
+        }
+    }
     match found {
         Some((chat, n)) if !matches!(amend.what, Amendment::Keep { .. }) => apply_amendment(
             db,
@@ -2383,7 +2465,6 @@ fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<
             Doing { what: &amend.what, sender: amend.sender.as_deref(), mine: amend.mine, at: amend.at },
         ),
         _ => {
-            let raw = amend.raw.as_ref().map_or(&[][..], |packed| packed.0.as_slice());
             // What's kept for a later jawd never applies, so a copy of it arriving again waits once.
             if matches!(amend.what, Amendment::Keep { .. }) && kinds::kept_already(db, &chat, amend, raw)? {
                 return Ok(false);
@@ -2401,8 +2482,10 @@ fn amend_message(db: &Connection, stamps: &mut Stamps, amend: &Amend) -> Result<
                 amend.mine,
                 serde_json::to_string(&amend.what)?
             ])?;
-            if amend.what.kind() == "vote" {
-                polls::bounded(db)?;
+            match amend.what.kind() {
+                "vote" => polls::bounded(db)?,
+                kind if events::WAITING_KINDS.contains(&kind) => events::bounded(db, kind)?,
+                _ => {}
             }
             Ok(false)
         }
@@ -2422,10 +2505,14 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
     let Doing { what, sender, mine, at } = doing;
     // Someone new who reacts is made first, since making them takes the next seq.
     let someone = match (what, sender) {
-        (Amendment::React { .. } | Amendment::Status { .. } | Amendment::Vote { .. }, Some(sender)) => {
-            Some(ensure_jid(db, stamps, sender)?)
-        }
-        (Amendment::React { .. } | Amendment::Status { .. } | Amendment::Vote { .. }, None) => return Ok(false),
+        (
+            Amendment::React { .. } | Amendment::Status { .. } | Amendment::Vote { .. } | Amendment::Answer { .. },
+            Some(sender),
+        ) => Some(ensure_jid(db, stamps, sender)?),
+        (
+            Amendment::React { .. } | Amendment::Status { .. } | Amendment::Vote { .. } | Amendment::Answer { .. },
+            None,
+        ) => return Ok(false),
         _ => None,
     };
     if matches!(what, Amendment::DeleteForMe) {
@@ -2533,6 +2620,25 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
                 db.prepare_cached("SELECT deleted FROM messages WHERE n = ?1")?.query_row([n], |r| r.get(0))?;
             usize::from(!deleted && media::upsert(db, stamps, n, chat, "hd", copy, None)?)
         }
+        Amendment::Answer { answer, guests, id } => {
+            let who = someone.expect("an answer's answerer is made above");
+            let event: bool = db
+                .prepare_cached("SELECT kind = 'event' AND NOT deleted FROM messages WHERE n = ?1")?
+                .query_row([n], |r| r.get(0))?;
+            let changed = if event { events::answer(db, n, who, (answer, *guests), id, at)? } else { 0 };
+            if changed > 0 {
+                db.prepare_cached("UPDATE messages SET v = ?2 WHERE n = ?1")?.execute([n, seq])?;
+            }
+            changed
+        }
+        // Only a newer edit replaces what an event shows, so one arriving again changes nothing.
+        Amendment::EventEdit { text, spans, summary, detail } => db
+            .prepare_cached(
+                "UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), detail = ?5,
+                    edited_at = ?6, v = ?7
+                WHERE n = ?1 AND kind = 'event' AND NOT deleted AND (edited_at IS NULL OR edited_at < ?6)",
+            )?
+            .execute(params![n, text, spans, summary, detail, at, seq])?,
         Amendment::DeleteForMe | Amendment::Keep { .. } => 0,
     };
     if changed == 0 {

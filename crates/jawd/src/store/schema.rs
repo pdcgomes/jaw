@@ -1150,6 +1150,30 @@ pub(super) const MIGRATIONS: &[&str] = &[
     INSERT INTO backfills (name, after, upto) SELECT 'places', 0, seq FROM sqlite_sequence
         WHERE name = 'messages' AND seq > 0;
     ",
+    // 22, a schema step: answers to events. Each person's latest answer to an event is kept, so an
+    // answer older than it never replaces it, and windows count going, maybe and not going from the
+    // event's own rows as they read it. Nothing kept answers before, so the table is empty, and it
+    // costs the same however many messages there are. The events jaw.db already holds are read
+    // again from their raw protobufs by a backfill, for their place and call link, and what an
+    // earlier jawd kept sealed with their secret, their answers and their edits, is opened.
+    "
+    -- Class: jaw's own, as poll_voters is, which keeps no raw once applied: each person's latest
+    -- answer to each event, by its sender's time and then its message's ID, which an answer older
+    -- than it never replaces: going, maybe or not going, or none of them, and the guests it brings.
+    CREATE TABLE event_answers (
+        message INTEGER NOT NULL REFERENCES messages (n) ON DELETE CASCADE,
+        who INTEGER NOT NULL REFERENCES person_jids (n),
+        answer TEXT NOT NULL CHECK (answer IN ('going', 'maybe', 'not_going', 'none')),
+        guests INTEGER NOT NULL CHECK (guests >= 0),
+        at INTEGER NOT NULL,
+        id TEXT NOT NULL,
+        PRIMARY KEY (message, who)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX event_answers_by_who ON event_answers (who);
+    -- The events among the messages jaw.db already holds.
+    INSERT INTO backfills (name, after, upto) SELECT 'events', 0, seq FROM sqlite_sequence
+        WHERE name = 'messages' AND seq > 0;
+    ",
 ];
 
 /// Migration 19's text, named so the tests that check and measure it find it whatever number it

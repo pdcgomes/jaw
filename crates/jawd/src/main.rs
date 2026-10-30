@@ -1070,6 +1070,68 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_demo_engines_account_shows_an_event_and_its_answers_and_takes_yours_through_the_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let socket = jaw_proto::local::socket(home.path());
+        let (lock, listener) = open(home.path(), &socket).unwrap();
+        let options = Options { no_notify: true, ..Options::default() };
+        let started = start(home.path(), lock, engine(EngineKind::Demo, home.path(), None), &options).await.unwrap();
+        tokio::spawn(sock::serve(started.state.clone(), listener));
+        let path = socket.clone();
+        let events = tokio::task::spawn_blocking(move || {
+            let (mut connection, _) = jaw_client::Connection::open(&path, "test", "0").unwrap();
+            let climbing = "120363012345678901@g.us";
+            let watched = connection
+                .call("messages.watch", serde_json::json!({ "chat": climbing, "around": "newest", "before": 20 }));
+            let found = |rows: &serde_json::Value, pick: &dyn Fn(&serde_json::Value) -> bool| {
+                rows.as_array().and_then(|rows| rows.iter().find(|row| pick(row)).cloned())
+            };
+            // Rui's event, once both answers to it have come.
+            let mut rows = watched.unwrap()["rows"].clone();
+            let theirs = loop {
+                let answered = |row: &serde_json::Value| {
+                    row["id"] == "3EB0DEMO00000009" && row["event"]["going"] == 1 && row["event"]["maybe"] == 1
+                };
+                if let Some(row) = found(&rows, &answered) {
+                    break row;
+                }
+                rows = connection.push().unwrap().params["upsert"].clone();
+            };
+            let planned = serde_json::json!({
+                "chat": climbing, "name": "Bouldering", "start": 1_892_000_000_000_i64, "place": "Lisboa Climbing Spot",
+                "key": "e1",
+            });
+            let sent = connection.call("send.event", planned).unwrap();
+            let id = sent["message"].as_str().unwrap().to_string();
+            let yours = loop {
+                rows = connection.push().unwrap().params["upsert"].clone();
+                if let Some(row) = found(&rows, &|row| row["id"] == id.as_str() && row["event"]["going"] == 1) {
+                    break row;
+                }
+            };
+            (theirs, yours, connection)
+        });
+        let (theirs, yours, mut connection) =
+            tokio::time::timeout(Duration::from_secs(30), events).await.expect("the events showed").unwrap();
+        let event = &theirs["event"];
+        assert_eq!((&theirs["kind"], &theirs["spans"]), (&"event".into(), &serde_json::json!([])));
+        assert_eq!((&event["name"], &event["place"]["name"]), (&"Sintra".into(), &"Cabo da Roca".into()));
+        assert_eq!(
+            (&event["going"], &event["maybe"], &event["mine"]),
+            (&1.into(), &1.into(), &"maybe".into()),
+            "{event}"
+        );
+        assert_eq!((&yours["kind"], yours["mine"].as_bool()), (&"event".into(), Some(true)));
+        assert_eq!(yours["event"]["place"]["name"], "Lisboa Climbing Spot", "yours, gone through the engine");
+        let stored = tokio::task::spawn_blocking(move || connection.call("status", serde_json::Value::Null).unwrap())
+            .await
+            .unwrap()["stored"]
+            .clone();
+        assert_eq!((&stored["events_backfill"], &stored["answers_waiting"]), (&0.into(), &0.into()));
+        stop(started, &socket).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn jawd_stops_well_within_its_bound_while_messages_pour_into_a_watched_chat() {
         let home = tempfile::tempdir().unwrap();
         let socket = jaw_proto::local::socket(home.path());

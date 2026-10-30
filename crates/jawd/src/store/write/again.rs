@@ -1,16 +1,18 @@
 //! Messages read again from their raw protobufs, by a backfill, once jaw reads their kind more
-//! fully: so far the locations jaw.db held before a location was found by its address as well as its
-//! name. Each is read as the converter reads one now, and its row takes a new version only if that
+//! fully: the locations jaw.db held before a location was found by its address as well as its name,
+//! and the events it held before their place and call link were read and their answers counted.
+//! Each is read as the converter reads one now, and its row takes a new version only if that
 //! changes what it shows or what finds it, so a step taken twice, or after the converter has
-//! written the row again itself, changes nothing.
+//! written the row again itself, changes nothing. An event's answers and edits that an earlier
+//! jawd kept sealed are opened with its secret, as they would be arriving now.
 
 use anyhow::Result;
 use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension, params};
 use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
-use super::links::PLACES;
-use super::{CHAT, MESSAGE, Stamps, kinds, unpack};
+use super::links::{EVENTS, PLACES};
+use super::{CHAT, MESSAGE, Stamps, apply_pending, kinds, unpack};
 use crate::store::Change;
 
 /// A message as its row keeps it, unless it's been deleted or edited since, which its raw protobuf
@@ -19,6 +21,8 @@ const KEPT: &str = "SELECT chat, kind, raw, text, spans, summary, detail FROM me
     WHERE n = ?1 AND NOT deleted AND edited_at IS NULL";
 const READ_AGAIN: &str = "UPDATE messages SET text = ?2, spans = ?3, summary = ?4, detail = ?5, v = ?6 WHERE n = ?1";
 const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2";
+const NAMED: &str = "SELECT m.chat, c.id, m.id FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1";
+const KEPT_FOR: &str = "SELECT count(*) FROM pending WHERE chat = ?1 AND target = ?2";
 
 /// What a message shows and what finds it: its text, spans, summary as a row keeps it (none when
 /// it's the text), and detail.
@@ -28,6 +32,24 @@ type Shown = (Option<String>, Option<String>, Option<String>, Option<String>);
 /// quarantine while the step goes on, as the kinds backfill keeps a conversion that fails.
 pub(super) fn places(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
     kinds::guarded(db, stamps, PLACES, n, read_again)
+}
+
+/// Reads event `n` again, as `read_again` does, and opens what an earlier jawd kept sealed for it,
+/// its answers and its edits; guarded as `places` is.
+pub(super) fn events(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
+    kinds::guarded(db, stamps, EVENTS, n, event_again)
+}
+
+fn event_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
+    let changed = read_again(db, stamps, n)?;
+    let (chat, chat_jid, id): (i64, String, String) =
+        db.prepare_cached(NAMED)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let kept = |db: &Connection| -> Result<i64> {
+        Ok(db.prepare_cached(KEPT_FOR)?.query_row(params![chat_jid, id], |r| r.get(0))?)
+    };
+    let before = kept(db)?;
+    apply_pending(db, stamps, chat, n, &chat_jid, &id, "event")?;
+    Ok(changed || kept(db)? < before)
 }
 
 /// Reads message `n` again from its raw protobuf, as the converter reads one now, and writes what

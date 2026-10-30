@@ -383,6 +383,66 @@ fn the_votes_history_keeps_on_a_poll_are_each_its_voters_with_their_time_and_the
 }
 
 #[test]
+fn an_event_is_found_by_its_name_what_it_says_and_its_place_and_shows_as_its_fields() {
+    let event = |location: Option<e2e::LocationMessage>, cancelled: bool| {
+        row(e2e::Message {
+            event_message: Some(Box::new(e2e::EventMessage {
+                name: Some(" Sintra ".into()),
+                description: Some("Bring the rope".into()),
+                start_time: Some(1_792_231_200),
+                end_time: Some(1_792_252_800),
+                location: location.map(Box::new),
+                join_link: Some("https://call.whatsapp.com/voice/abc".into()),
+                is_canceled: Some(cancelled),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    };
+    let cabo = e2e::LocationMessage {
+        degrees_latitude: Some(38.7803),
+        degrees_longitude: Some(-9.4989),
+        name: Some("Cabo da Roca".into()),
+        address: Some("Estrada do Cabo da Roca, Colares".into()),
+        ..Default::default()
+    };
+    let m = event(Some(cabo), false);
+    assert_eq!(m.summary, "Event: Sintra");
+    assert_eq!(
+        m.text.as_deref(),
+        Some("Sintra\nBring the rope\nCabo da Roca\nEstrada do Cabo da Roca, Colares"),
+        "found by its name, what it says and its place"
+    );
+    assert_eq!(m.spans.as_deref(), Some("[]"), "its text isn't what it shows");
+    assert_eq!(
+        detail_of(&m)["event"],
+        json!({
+            "name": "Sintra",
+            "description": "Bring the rope",
+            "start": 1_792_231_200_000_i64,
+            "end": 1_792_252_800_000_i64,
+            "place": {
+                "lat": 38.7803, "lon": -9.4989, "name": "Cabo da Roca",
+                "address": "Estrada do Cabo da Roca, Colares", "url": null,
+            },
+            "call": "https://call.whatsapp.com/voice/abc",
+            "cancelled": false,
+            "going": 0, "maybe": 0, "not_going": 0, "mine": null,
+        })
+    );
+    let named = e2e::LocationMessage { name: Some("Cabo da Roca".into()), ..Default::default() };
+    let m = event(Some(named), true);
+    assert_eq!(m.summary, "Event cancelled: Sintra");
+    assert_eq!(
+        detail_of(&m)["event"]["place"],
+        json!({ "lat": null, "lon": null, "name": "Cabo da Roca", "address": null, "url": null }),
+        "a place by its name alone"
+    );
+    assert_eq!(detail_of(&event(Some(e2e::LocationMessage::default()), false))["event"]["place"], json!(null));
+    assert_eq!(detail_of(&event(None, false))["event"]["place"], json!(null), "and none");
+}
+
+#[test]
 fn events_invites_calls_and_albums_have_a_line_each() {
     let m = row(e2e::Message {
         event_message: Some(Box::new(e2e::EventMessage {

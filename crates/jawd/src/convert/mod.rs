@@ -10,6 +10,7 @@ pub mod app_state;
 pub mod history;
 pub(crate) mod kinds;
 pub mod people;
+pub mod secret;
 pub mod spans;
 
 use prost::Message as _;
@@ -17,7 +18,7 @@ use serde_json::json;
 use wa_proto::wa_common::MessageKey;
 use wa_proto::wa_web_protobufs_e2e as e2e;
 use wa_proto::wa_web_protobufs_e2e::message_association::AssociationType;
-use wa_proto::wa_web_protobufs_web::{PollUpdate, WebMessageInfo, web_message_info};
+use wa_proto::wa_web_protobufs_web::{EventResponse, PollUpdate, WebMessageInfo, web_message_info};
 
 use crate::engine::pb;
 use crate::store::{Amend, Amendment, Change, Chat, Message, Packed, Person};
@@ -174,7 +175,61 @@ pub fn message(info: &WebMessageInfo, me: &Me, live: bool) -> Vec<Change> {
     }
     changes
         .extend(info.poll_updates.iter().filter_map(|update| history_vote(&envelope, update, me)).map(Change::Amend));
+    changes.extend(
+        info.event_responses.iter().filter_map(|response| history_answer(&envelope, response, me)).map(Change::Amend),
+    );
     changes
+}
+
+/// An answer to an event as jaw keeps it: `going`, `maybe` or `not_going`, or `none` for one that
+/// says none of them.
+pub fn answered(response: Option<i32>) -> &'static str {
+    use e2e::event_response_message::EventResponseType;
+    match response.and_then(|r| EventResponseType::try_from(r).ok()) {
+        Some(EventResponseType::Going) => "going",
+        Some(EventResponseType::Maybe) => "maybe",
+        Some(EventResponseType::NotGoing) => "not_going",
+        _ => "none",
+    }
+}
+
+/// An answer, `said`, made as message `id` at `at` (by the answerer's clock when it says, or else
+/// when it came), with the guests it brings.
+pub fn answer_of(said: &e2e::EventResponseMessage, id: &str, at: i64) -> (Amendment, i64) {
+    let guests = said.extra_guest_count.unwrap_or(0).max(0) as u32;
+    let at = said.timestamp_ms.filter(|&at| at > 0).unwrap_or(at);
+    (Amendment::Answer { answer: answered(said.response).into(), guests, id: id.into() }, at)
+}
+
+/// An answer history keeps on the event it's for, opened already.
+fn history_answer(envelope: &Envelope, response: &EventResponse, me: &Me) -> Option<Amend> {
+    let key = response.event_response_message_key.as_ref()?;
+    let said = response.event_response_message.as_ref()?;
+    let mine = key.from_me.unwrap_or(false);
+    let sender = if mine {
+        me.jid().map(str::to_string)
+    } else {
+        key.participant
+            .clone()
+            .or_else(|| key.remote_jid.clone())
+            .filter(|jid| !jid.is_empty())
+            .map(|jid| user_jid(&jid))
+    };
+    let came = response.timestamp_ms.filter(|&at| at > 0).unwrap_or(envelope.at);
+    let (what, at) = answer_of(said, key.id.as_deref().unwrap_or_default(), came);
+    Some(Amend { chat: envelope.chat.clone(), target: envelope.id.clone(), sender, mine, at, what, raw: None })
+}
+
+/// What an edit of an event, opened, makes it show: its text, spans, summary and detail as a row of
+/// the event would have them now. None for an edit that isn't of an event.
+pub fn event_edit(edited: &e2e::Message) -> Option<Amendment> {
+    let body = kinds::body(unwrap(edited).0, &[]);
+    (body.kind == "event").then(|| Amendment::EventEdit {
+        spans: Some(spans::kept(&body.spans)),
+        text: body.text,
+        summary: body.summary,
+        detail: body.detail,
+    })
 }
 
 /// Each option a vote chose, as the hex SHA-256 of its name it names it by.
@@ -256,6 +311,11 @@ struct Wrapped {
     view_once: bool,
     /// For a comment on a community's announcement, the announcement it's on.
     comment_on: Option<MessageKey>,
+}
+
+/// The message inside its wrappers, without what they say of it.
+pub fn unwrap_message(message: &e2e::Message) -> &e2e::Message {
+    unwrap(message).0
 }
 
 /// The message inside its wrappers.
@@ -432,6 +492,20 @@ fn encrypted_amendment(envelope: &Envelope, message: &e2e::Message, me: &Me) -> 
     }
     let x = message.enc_event_response_message.as_ref()?;
     keep(envelope, x.event_creation_message_key.as_ref()?, "rsvp", me)
+}
+
+/// Whether what a message keeps for a later jawd, as `kind`, is what this jawd opens itself once it
+/// has the event it's for: an answer to an event, or an edit of one, sealed with its secret.
+pub fn opens_here(kind: &str, info: &WebMessageInfo) -> bool {
+    use e2e::secret_encrypted_message::SecretEncType;
+    let sealed = info.message.as_ref().map(|m| unwrap(m).0);
+    match kind {
+        "rsvp" => true,
+        "secret" => sealed
+            .and_then(|m| m.secret_encrypted_message.as_ref())
+            .is_some_and(|x| x.secret_enc_type == Some(SecretEncType::EventEdit as i32)),
+        _ => false,
+    }
 }
 
 /// What a mention in a status, or an answer to one, says in the chat it reaches.

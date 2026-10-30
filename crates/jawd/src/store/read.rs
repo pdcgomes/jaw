@@ -394,6 +394,10 @@ const POLL_OPTIONS: &str = "SELECT position, name FROM poll_options WHERE messag
 const POLL_VOTERS: &str = "SELECT pv.voter, pj.person, pj.jid, pv.at, pv.id FROM poll_voters pv
     JOIN person_jids pj ON pj.n = pv.voter WHERE pv.message = ?1";
 const POLL_CHOICES: &str = "SELECT voter, position FROM poll_votes WHERE message = ?1";
+/// What an event's counts are counted from as a window reads it: each answerer's latest answer,
+/// with the person their JID is, a range of the event's own rows.
+const EVENT_ANSWERS: &str = "SELECT ea.answer, pj.person, pj.jid, ea.at, ea.id FROM event_answers ea
+    JOIN person_jids pj ON pj.n = ea.who WHERE ea.message = ?1";
 const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 
 /// A poll as a window shows it: each option's name, votes and whether you chose it; how many people
@@ -405,8 +409,17 @@ struct Tally {
     voted_at: Option<i64>,
 }
 
-/// What the rows a query reads need to show their polls: the connection, and the account's JIDs,
-/// read once the first poll among them is.
+/// An event as a window shows it: how many people are going, maybe and not going, and what you
+/// answered, if you did.
+struct Answers {
+    going: usize,
+    maybe: usize,
+    not_going: usize,
+    mine: Option<String>,
+}
+
+/// What the rows a query reads need to show their polls and events: the connection, and the
+/// account's JIDs, read once the first poll or event among them is.
 struct Polls<'a> {
     db: &'a Connection,
     me: Option<Vec<String>>,
@@ -421,15 +434,49 @@ impl<'a> Polls<'a> {
     /// their JIDs it came from, as the phones count one person's votes: the JIDs WhatsApp gave
     /// are found as people through person_jids, and the account's JIDs, and anyone they're found
     /// as, are you. Only that vote's choices count, and only those who chose something voted.
-    fn tally(&mut self, n: i64) -> rusqlite::Result<Tally> {
-        let db = self.db;
-        let me: &[String] = match &mut self.me {
+    /// The account's JIDs, read the first time they're needed.
+    fn me(&mut self) -> rusqlite::Result<&[String]> {
+        Ok(match &mut self.me {
             Some(me) => me,
             none => {
-                let me: Option<String> = db.prepare_cached(ME)?.query_row([], |r| r.get(0)).optional()?;
+                let me: Option<String> = self.db.prepare_cached(ME)?.query_row([], |r| r.get(0)).optional()?;
                 none.insert(me.unwrap_or_default().split_whitespace().map(str::to_string).collect())
             }
-        };
+        })
+    }
+
+    /// Event `n` as each person's newest answer has it, by its time and then its ID, whichever of
+    /// their JIDs it came from, as a poll's votes are counted: the account's JIDs, and anyone
+    /// they're found as, are you, and an answer of none counts nowhere.
+    fn answers(&mut self, n: i64) -> rusqlite::Result<Answers> {
+        let db = self.db;
+        let me = self.me()?;
+        let answers: Vec<(String, i64, String, i64, String)> = db
+            .prepare_cached(EVENT_ANSWERS)?
+            .query_map([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let yours: HashSet<i64> =
+            answers.iter().filter(|(_, _, jid, ..)| me.contains(jid)).map(|(_, person, ..)| *person).collect();
+        // Each person's newest answer, None being yours: (at, id, answer).
+        let mut newest: HashMap<Option<i64>, (i64, &str, &str)> = HashMap::new();
+        for (answer, person, jid, at, id) in &answers {
+            let who = (!me.contains(jid) && !yours.contains(person)).then_some(*person);
+            let said = (*at, id.as_str(), answer.as_str());
+            newest.entry(who).and_modify(|kept| *kept = (*kept).max(said)).or_insert(said);
+        }
+        let count = |what: &str| newest.values().filter(|&&(_, _, answer)| answer == what).count();
+        let mine = newest.get(&None).map(|&(_, _, answer)| answer).filter(|&answer| answer != "none");
+        Ok(Answers {
+            going: count("going"),
+            maybe: count("maybe"),
+            not_going: count("not_going"),
+            mine: mine.map(str::to_string),
+        })
+    }
+
+    fn tally(&mut self, n: i64) -> rusqlite::Result<Tally> {
+        let db = self.db;
+        let me = self.me()?;
         let voters: Vec<(i64, i64, String, i64, String)> = db
             .prepare_cached(POLL_VOTERS)?
             .query_map([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
@@ -531,6 +578,20 @@ fn previewed(detail: &str, kept: Option<&str>) -> String {
         if let Some(kept) = kept {
             link.insert("preview".into(), Value::String(super::thumbnails::path(kept)));
         }
+    }
+    serde_json::to_string(&parsed).unwrap_or_else(|_| detail.to_string())
+}
+
+/// An event's `detail` with how many are going, maybe and not going now, and what you answered.
+fn answered(detail: &str, answers: Answers) -> String {
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Map<String, Value>>(detail) else {
+        return detail.to_string();
+    };
+    if let Some(Value::Object(event)) = parsed.get_mut("event") {
+        event.insert("going".into(), answers.going.into());
+        event.insert("maybe".into(), answers.maybe.into());
+        event.insert("not_going".into(), answers.not_going.into());
+        event.insert("mine".into(), answers.mine.map_or(Value::Null, Value::String));
     }
     serde_json::to_string(&parsed).unwrap_or_else(|_| detail.to_string())
 }
@@ -661,6 +722,9 @@ fn message_row(r: &Row, polls: &mut Polls, files: Option<&Files>) -> rusqlite::R
         let tally = polls.tally(r.get(0)?)?;
         voted_at = tally.voted_at;
         detail = detail.map(|shown| tallied(&shown, tally));
+    } else if r.get_ref(6)? == ValueRef::Text(b"event") && !deleted {
+        let answers = polls.answers(r.get(0)?)?;
+        detail = detail.map(|shown| answered(&shown, answers));
     }
     let mut reactions: String = r.get::<_, Option<String>>(24)?.unwrap_or_else(|| "[]".into());
     let row = super::overlay::Shown {

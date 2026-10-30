@@ -32,6 +32,9 @@ prost-build = "0.14"
 protox = "0.10"
 qrcode = { version = "0.14", default-features = false }
 ratatui = "0.30"
+# HKDF and AES-GCM for what WhatsApp encrypts with a message's own secret, such as the answers to an
+# event; the same ring rustls already builds.
+ring = "0.17"
 rtrb = "0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # TLS for link previews, with ring as its one provider and Mozilla's roots compiled in.

@@ -546,6 +546,16 @@ pub struct Stored {
     /// looked at for locations to read again.
     #[serde(default)]
     pub places_backfill: u64,
+    /// Messages jaw.db held before events' answers were kept that are still to be looked at for
+    /// events to read again and what an earlier jawd kept sealed for them.
+    #[serde(default)]
+    pub events_backfill: u64,
+    /// Answers to events jawd hasn't seen, opened, waiting for them, and those set aside past the
+    /// 10,000 that wait; sealed ones wait among `encrypted_kept`.
+    #[serde(default)]
+    pub answers_waiting: u64,
+    #[serde(default)]
+    pub answers_set_aside: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

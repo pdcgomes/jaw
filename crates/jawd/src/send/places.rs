@@ -23,7 +23,7 @@ use crate::store::outbox::{Step, Written, keyed};
 const PLACE_MOST: usize = 1_024;
 
 /// What a place is called, unless it's only spaces.
-fn called(what: &str, said: Option<&str>) -> Result<Option<String>, Error> {
+pub(super) fn called(what: &str, said: Option<&str>) -> Result<Option<String>, Error> {
     let said = said.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     if said.as_ref().is_some_and(|s| s.chars().count() > PLACE_MOST) {
         let mut error = Error::new(code::LIMIT, format!("a location's {what} is {PLACE_MOST} characters at most"));
@@ -34,21 +34,37 @@ fn called(what: &str, said: Option<&str>) -> Result<Option<String>, Error> {
 }
 
 /// The chat's disappearing timer, as the message carries it, when it's on.
-fn expiring(ephemeral: u32) -> Option<Box<e2e::ContextInfo>> {
+pub(super) fn expiring(ephemeral: u32) -> Option<Box<e2e::ContextInfo>> {
     (ephemeral > 0).then(|| Box::new(e2e::ContextInfo { expiration: Some(ephemeral), ..Default::default() }))
 }
 
-pub(super) async fn send_location(inner: &Arc<Inner>, location: SendLocation) -> Result<Sent, Error> {
+/// A pin at `lat` and `lon`, with the place's name and address when it's one, each trimmed: a
+/// latitude outside -90 to 90 or a longitude outside -180 to 180 is -32602, and a name or an address
+/// past PLACE_MOST is error 5, each naming what it is as `within` says where it's taken.
+pub(super) fn pinned(
+    within: &str,
+    (lat, lon): (f64, f64),
+    name: Option<&str>,
+    address: Option<&str>,
+) -> Result<e2e::LocationMessage, Error> {
     let degrees = |what: &str, at: f64, most: f64| {
         if at.is_finite() && (-most..=most).contains(&at) {
             Ok(at)
         } else {
-            Err(bad_param(what, format!("{what} is from -{most} to {most} degrees")))
+            Err(bad_param(&format!("{within}{what}"), format!("{what} is from -{most} to {most} degrees")))
         }
     };
-    let (lat, lon) = (degrees("lat", location.lat, 90.0)?, degrees("lon", location.lon, 180.0)?);
-    let name = called("name", location.name.as_deref())?;
-    let address = called("address", location.address.as_deref())?;
+    Ok(e2e::LocationMessage {
+        degrees_latitude: Some(degrees("lat", lat, 90.0)?),
+        degrees_longitude: Some(degrees("lon", lon, 180.0)?),
+        name: called(&format!("{within}name"), name)?,
+        address: called(&format!("{within}address"), address)?,
+        ..Default::default()
+    })
+}
+
+pub(super) async fn send_location(inner: &Arc<Inner>, location: SendLocation) -> Result<Sent, Error> {
+    let pin = pinned("", (location.lat, location.lon), location.name.as_deref(), location.address.as_deref())?;
     check_key(&location.key)?;
     let chat = location.chat.as_str();
     let _place = composing(inner, &[chat]).await;
@@ -64,14 +80,7 @@ pub(super) async fn send_location(inner: &Arc<Inner>, location: SendLocation) ->
     }
     let Some(ephemeral) = ephemeral else { return Err(no_chat(chat)) };
     let raw = e2e::Message {
-        location_message: Some(Box::new(e2e::LocationMessage {
-            degrees_latitude: Some(lat),
-            degrees_longitude: Some(lon),
-            name,
-            address,
-            context_info: expiring(ephemeral),
-            ..Default::default()
-        })),
+        location_message: Some(Box::new(e2e::LocationMessage { context_info: expiring(ephemeral), ..pin })),
         ..Default::default()
     };
     let id = message_id().map_err(|e| internal("make a message ID", e.into()))?;
@@ -104,4 +113,4 @@ pub(super) async fn send_location(inner: &Arc<Inner>, location: SendLocation) ->
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
