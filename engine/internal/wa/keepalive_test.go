@@ -58,6 +58,35 @@ func saysNothing(t *testing.T, e *Engine, client *whatsmeow.Client, evt any, wha
 	}
 }
 
+// words collects the connection states the engine says to jawd.
+func words(jawd *link.Link) <-chan enginepb.Connection_State {
+	said := make(chan enginepb.Connection_State, 64)
+	go func() {
+		for {
+			frame, err := jawd.Recv()
+			if err != nil {
+				return
+			}
+			if c := frame.GetEvent().GetConnection(); c != nil {
+				said <- c.GetState()
+			}
+		}
+	}()
+	return said
+}
+
+// nextWord is the next connection state the engine says, which must come within 10 s.
+func nextWord(t *testing.T, said <-chan enginepb.Connection_State) enginepb.Connection_State {
+	t.Helper()
+	select {
+	case state := <-said:
+		return state
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine said nothing more")
+		return 0
+	}
+}
+
 func TestARestoreFromTheRunningClientSaysItsKeepaliveWorksAgain(t *testing.T) {
 	const apart = 50 * time.Millisecond
 	e, jawd, _, closeLink := connectedEngine(t, apart)
@@ -183,32 +212,12 @@ func TestARestoreRacingADisconnectNeverHasTheLastWord(t *testing.T) {
 	e, jawd, _, closeLink := connectedEngine(t, apart)
 	defer closeLink()
 	client := e.cli()
-	said := make(chan enginepb.Connection_State, 64)
-	go func() {
-		for {
-			frame, err := jawd.Recv()
-			if err != nil {
-				return
-			}
-			if c := frame.GetEvent().GetConnection(); c != nil {
-				said <- c.GetState()
-			}
-		}
-	}()
-	next := func() enginepb.Connection_State {
-		select {
-		case state := <-said:
-			return state
-		case <-time.After(10 * time.Second):
-			t.Fatal("the engine said nothing more")
-			return 0
-		}
-	}
+	said := words(jawd)
 	const rounds = 200
 	restoredLast := 0
 	for round := range rounds {
 		go e.handleFrom(client, failedPings(1, time.Now()))
-		if state := next(); state != enginepb.Connection_KEEPALIVE_TIMEOUT {
+		if state := nextWord(t, said); state != enginepb.Connection_KEEPALIVE_TIMEOUT {
 			t.Fatalf("round %d: the timeout said %v", round, state)
 		}
 		// Once the next ping could have got through.
@@ -223,7 +232,7 @@ func TestARestoreRacingADisconnectNeverHasTheLastWord(t *testing.T) {
 		// Said after both, so every word of theirs comes before it.
 		go e.handleFrom(client, connects(client, time.Now()))
 		var last enginepb.Connection_State
-		for state := next(); state != enginepb.Connection_CONNECTED; state = next() {
+		for state := nextWord(t, said); state != enginepb.Connection_CONNECTED; state = nextWord(t, said) {
 			last = state
 		}
 		if last != enginepb.Connection_DISCONNECTED {
@@ -232,6 +241,49 @@ func TestARestoreRacingADisconnectNeverHasTheLastWord(t *testing.T) {
 	}
 	if restoredLast > 0 {
 		t.Fatalf("in %d of %d rounds jawd's last word was the restore, after the Disconnected", restoredLast, rounds)
+	}
+}
+
+// The old connection's last timeout, dispatched as whatsmeow connects again (its forced reconnect
+// says no Disconnected), races the new connection's Connected: whichever is said first, jawd's last
+// word is the Connected, or it says connecting with a good socket and no restore to come.
+func TestAnOldTimeoutRacingANewConnectedNeverHasTheLastWord(t *testing.T) {
+	const apart = time.Millisecond
+	e, jawd, _, closeLink := connectedEngine(t, apart)
+	defer closeLink()
+	client := e.cli()
+	said := words(jawd)
+	const rounds = 200
+	timedOutLast := 0
+	for round := range rounds {
+		lastPing := time.Now()
+		go e.handleFrom(client, failedPings(1, lastPing))
+		if state := nextWord(t, said); state != enginepb.Connection_KEEPALIVE_TIMEOUT {
+			t.Fatalf("round %d: the first timeout said %v", round, state)
+		}
+		time.Sleep(5 * apart)
+		// The new connection began after the old one's second failure.
+		connected := connects(client, time.Now())
+		start := make(chan struct{})
+		var both sync.WaitGroup
+		both.Add(2)
+		go func() { defer both.Done(); <-start; e.handleFrom(client, failedPings(2, lastPing)) }()
+		go func() { defer both.Done(); <-start; e.handleFrom(client, connected) }()
+		close(start)
+		both.Wait()
+		// Said after both, so every word of theirs comes before it.
+		go e.handleFrom(client, &events.Disconnected{})
+		var last enginepb.Connection_State
+		for state := nextWord(t, said); state != enginepb.Connection_DISCONNECTED; state = nextWord(t, said) {
+			last = state
+		}
+		if last != enginepb.Connection_CONNECTED {
+			timedOutLast++
+		}
+		time.Sleep(2 * apart)
+	}
+	if timedOutLast > 0 {
+		t.Fatalf("in %d of %d rounds jawd's last word was the old timeout, after the new Connected", timedOutLast, rounds)
 	}
 }
 
