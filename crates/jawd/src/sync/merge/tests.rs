@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -1239,14 +1240,7 @@ async fn a_phone_read_of_the_chat_that_stays_by_its_own_jid_never_cancels_the_re
     all.push("n5".into());
     assert_eq!(owed(&store, NEW).await, all, "still owed after a read further on, n5's again, which is harmless");
     // Once those have gone, a read by the number past only what came under it tells WhatsApp of it.
-    let told = query(&store, |db| {
-        let n: i64 = db.query_row("SELECT n FROM chats WHERE id = ?1", [NEW], |r| r.get(0))?;
-        outbox::owed(db, n)
-    })
-    .await;
-    let Owing::Receipts(told) = told else { panic!("the new number's chat owes receipts: {told:?}") };
-    let told = outbox::Step::Told { chat: told.chat, from: told.from, upto: told.upto };
-    store.apply(Lane::Live, vec![Change::Outbox(told)]).await.unwrap();
+    assert_eq!(send_receipts(&store, NEW).await, all);
     assert_eq!(owed(&store, NEW).await, Vec::<String>::new());
     store.apply(Lane::Live, vec![message(NEW, "n6", AT + 8_000)]).await.unwrap();
     let here = Change::Read(Read { chat: NEW.into(), ids: vec!["n6".into()], here: true, ..Read::default() });
@@ -1335,6 +1329,124 @@ async fn history_read_as_it_comes_never_cancels_the_receipts_for_what_came_under
     store.apply(Lane::Live, vec![history("n5", AT + 20)]).await.unwrap();
     all.push("n5".into());
     assert_eq!(owed(&store, NEW).await, all, "history by the number says nothing of what came under the LID");
+}
+
+/// Sends the read receipts chat `jid` owes, as the receipts loop does, and keeps how far WhatsApp
+/// was told; says which messages they were for.
+async fn send_receipts(store: &Store, jid: &'static str) -> Vec<String> {
+    let owed = query(store, move |db| {
+        let n: i64 = db.query_row("SELECT n FROM chats WHERE id = ?1", [jid], |r| r.get(0))?;
+        outbox::owed(db, n)
+    })
+    .await;
+    let Owing::Receipts(lot) = owed else { panic!("{jid}'s chat owes receipts: {owed:?}") };
+    let told = outbox::Step::Told { chat: lot.chat, from: lot.from, upto: lot.upto };
+    store.apply(Lane::Live, vec![Change::Outbox(told)]).await.unwrap();
+    lot.messages.into_iter().map(|(id, _)| id).collect()
+}
+
+/// X4b's merge, with the receipts it owes for l0 to l4 sent, so WhatsApp knows as much as jaw.
+async fn merged_and_told() -> (tempfile::TempDir, Store) {
+    let (home, store) = read_on_the_phone_and_merged().await;
+    assert_eq!(send_receipts(&store, NEW).await, ids("l", 0..5));
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "nothing owed once they've gone");
+    (home, store)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_nothing_owed_a_phone_read_by_her_number_owes_the_receipts_for_what_came_under_the_lid() {
+    let (_home, store) = merged_and_told().await;
+    let on_the_phone = |at| Change::Read(Read { chat: NEW.into(), at, ..Read::default() });
+    store.apply(Lane::Live, vec![message(NEW, "n5", AT + 6_000)]).await.unwrap();
+    store.apply(Lane::Live, vec![on_the_phone(AT + 6_500)]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "past what came under her number, it tells WhatsApp");
+    store.apply(Lane::Live, vec![message(LID, "l5", AT + 7_000), message(LID, "l6", AT + 7_001)]).await.unwrap();
+    store.apply(Lane::Live, vec![on_the_phone(AT + 8_000)]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 0)]);
+    assert_eq!(owed(&store, NEW).await, ["l5", "l6"], "past what came under the LID, it says nothing of that");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_nothing_owed_a_phone_read_by_the_lid_owes_the_receipts_for_what_came_under_her_number() {
+    let (_home, store) = merged_and_told().await;
+    let on_the_phone = |at| Change::Read(Read { chat: LID.into(), at, ..Read::default() });
+    store.apply(Lane::Live, vec![message(NEW, "n5", AT + 6_000), message(NEW, "n6", AT + 6_001)]).await.unwrap();
+    store.apply(Lane::Live, vec![on_the_phone(AT + 7_000)]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 0)]);
+    assert_eq!(owed(&store, NEW).await, ["n5", "n6"], "past what came under her number, it says nothing of that");
+    assert_eq!(send_receipts(&store, NEW).await, ["n5", "n6"]);
+    store.apply(Lane::Live, vec![message(LID, "l5", AT + 8_000)]).await.unwrap();
+    store.apply(Lane::Live, vec![on_the_phone(AT + 9_000)]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "past what came under the LID, it tells WhatsApp");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_read_by_the_lid_past_only_what_came_under_it_tells_whatsapp_what_the_merge_left_owed() {
+    let (_home, store) = read_on_the_phone_and_merged().await;
+    let on_the_phone = Change::Read(Read { chat: LID.into(), at: AT + 5_000, ..Read::default() });
+    store.apply(Lane::Live, vec![on_the_phone]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "l0 to l4 came under the LID");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_nothing_owed_one_of_yours_from_another_device_by_her_number_owes_what_came_under_the_lid() {
+    let (_home, store) = merged_and_told().await;
+    store.apply(Lane::Live, vec![message(NEW, "n5", AT + 6_000)]).await.unwrap();
+    store.apply(Lane::Live, vec![Change::Message(mine(NEW, "y0", AT + 6_500))]).await.unwrap();
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new(), "past what came under her number, it tells WhatsApp");
+    store.apply(Lane::Live, vec![message(LID, "l5", AT + 7_000), message(LID, "l6", AT + 7_001)]).await.unwrap();
+    store.apply(Lane::Live, vec![Change::Message(mine(NEW, "y1", AT + 8_000))]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 0)], "it reads the chat");
+    assert_eq!(owed(&store, NEW).await, ["l5", "l6"], "but says nothing of what came under the LID");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_nothing_owed_one_of_yours_from_another_device_by_the_lid_owes_what_came_under_her_number() {
+    let (_home, store) = merged_and_told().await;
+    store.apply(Lane::Live, vec![message(NEW, "n5", AT + 6_000), message(NEW, "n6", AT + 6_001)]).await.unwrap();
+    store.apply(Lane::Live, vec![Change::Message(mine(LID, "y0", AT + 7_000))]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 0)], "it reads the chat");
+    assert_eq!(owed(&store, NEW).await, ["n5", "n6"], "but says nothing of what came under her number");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_nothing_owed_history_by_her_number_read_as_it_comes_owes_what_came_under_the_lid() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    // The LID's chat with l0 to l4, never read, and the number's with n0 from history, read as it
+    // came since nobody has said where it was: merged, l0 to l4 are unread and nothing is owed.
+    let history = |id: &str, at| Change::Message(Message { live: false, ..text(NEW, id, at) });
+    let mut changes: Vec<Change> = (0..5).map(|i| message(LID, &format!("l{i}"), AT + 10 + i)).collect();
+    changes.push(history("n0", AT));
+    store.apply(Lane::Live, changes).await.unwrap();
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    merged(&store, LID).await;
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 5)]);
+    assert_eq!(owed(&store, NEW).await, Vec::<String>::new());
+    // More of the number's history, newer, still with nobody saying where it was read: n1 owed
+    // again, which is harmless.
+    store.apply(Lane::Live, vec![history("n1", AT + 20)]).await.unwrap();
+    assert_eq!(unread(&store).await, [(NEW.to_string(), 0)], "read as it comes");
+    let mut all = ids("l", 0..5);
+    all.push("n1".into());
+    assert_eq!(owed(&store, NEW).await, all, "history by the number says nothing of what came under the LID");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_read_of_a_group_owes_nothing_whoever_its_messages_came_from() {
+    const GROUP: &str = "120363000000000001@g.us";
+    const RUI: &str = "351920000003@s.whatsapp.net";
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    store.apply(Lane::Live, vec![join(NEW, LID)]).await.unwrap();
+    let from =
+        |id: &str, sender: &str, at| Change::Message(Message { sender: Some(sender.into()), ..text(GROUP, id, at) });
+    store.apply(Lane::Live, vec![from("g0", NEW, AT), from("g1", LID, AT + 1), from("g2", RUI, AT + 2)]).await.unwrap();
+    store
+        .apply(Lane::Live, vec![Change::Read(Read { chat: GROUP.into(), at: AT + 10, ..Read::default() })])
+        .await
+        .unwrap();
+    assert_eq!(owed(&store, GROUP).await, Vec::<String>::new(), "a group's read on the phone tells WhatsApp of it all");
 }
 
 /// A xorshift generator, so a failing seed can be run again.
@@ -1508,47 +1620,200 @@ async fn came_and_read(store: &Store, id: String) -> (String, bool) {
     .await
 }
 
-/// Plays one of `reads_and_a_merge`'s histories, failing at the first read on the phone, or message
-/// of yours from another device, that leaves a receipt no longer owed for a message still read that
-/// came under a JID other than the one it came by, and at the first change after which, while no
-/// merge waits, `outbox::owed` gives other than `owing`.
+/// What WhatsApp has heard of the person's messages being read, as the merge's rules have it: for
+/// each JID, the places up to which a read on the phone or one of yours from another device, under
+/// that JID, said its messages were read; and the messages a receipt went for.
+#[derive(Default)]
+struct Heard {
+    by: HashMap<String, Vec<(i64, i64)>>,
+    receipted: HashSet<String>,
+}
+
+impl Heard {
+    fn of(&self, id: &str, jid: &str, place: (i64, i64)) -> bool {
+        self.receipted.contains(id) || self.by.get(jid).is_some_and(|by| by.iter().any(|&up_to| place <= up_to))
+    }
+}
+
+/// The chat a JID names now, as a write finds it: its own, or the chat that's merging into, or,
+/// once its own is gone, the person's.
+fn chat_named(db: &Connection, jid: &str) -> anyhow::Result<i64> {
+    let own: Option<i64> = db
+        .query_row(
+            "SELECT coalesce(m.keep, c.n) FROM chats c LEFT JOIN chat_merges m ON m.gone = c.n WHERE c.id = ?1",
+            [jid],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(own) = own {
+        return Ok(own);
+    }
+    Ok(db.query_row(
+        "SELECT c.n FROM person_jids j JOIN chats c ON c.person = j.person AND c.kind = 'direct'
+        WHERE j.jid = ?1 AND NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = c.n) ORDER BY c.n LIMIT 1",
+        [jid],
+        |r| r.get(0),
+    )?)
+}
+
+/// Where `change`, applied, told WhatsApp the messages under its JID were read up to, with that
+/// JID, if it told it anything: one of yours from another device, to itself; a read on the phone,
+/// to the message it names or to its time, but before the newest messages from others that the
+/// phone's counts call unread.
+fn heard_up_to(db: &Connection, change: &Change) -> anyhow::Result<Option<(String, (i64, i64))>> {
+    let read = match change {
+        Change::Message(message) if message.mine => {
+            let place = db
+                .query_row("SELECT at, n FROM messages WHERE id = ?1", [&message.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            return Ok(Some((message.chat.clone(), place)));
+        }
+        Change::Read(read) if !read.here => read,
+        _ => return Ok(None),
+    };
+    let chat = chat_named(db, &read.chat)?;
+    let named: Option<(i64, i64)> = db
+        .query_row(
+            "SELECT at, n FROM messages WHERE chat = ?1 AND id IN (SELECT value FROM json_each(?2))
+            ORDER BY at DESC, n DESC LIMIT 1",
+            params![chat, serde_json::to_string(&read.ids)?],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let to = named.unwrap_or((read.at, i64::MAX));
+    let Some((unread, _)) = read.phone.filter(|&(unread, _)| unread > 0) else {
+        return Ok(Some((read.chat.clone(), to)));
+    };
+    let read_up_to: Option<(i64, i64)> = db
+        .query_row(
+            "SELECT at, n FROM messages WHERE chat = ?1 AND mine = 0 AND kind NOT IN ('system', 'call')
+                AND (at, n) <= (?2, ?3)
+            ORDER BY at DESC, n DESC LIMIT 1 OFFSET ?4",
+            params![chat, to.0, to.1, unread],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(read_up_to.map(|up_to| (read.chat.clone(), up_to)))
+}
+
+/// The messages from others that a chat no merge waits on counts read, the phone's own unread
+/// messages left out, that aren't owed, nor heard of by WhatsApp.
+async fn read_and_untold(store: &Store, heard: &Heard) -> Vec<String> {
+    let read: Vec<(String, String, (i64, i64))> = query(store, |db| {
+        let chats: Vec<(i64, Option<i64>, Option<i64>)> = db
+            .prepare(
+                "SELECT n, told_at, told_n FROM chats c
+                WHERE NOT EXISTS (SELECT 1 FROM chat_merges m WHERE m.gone = c.n OR m.keep = c.n)",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut read = Vec::new();
+        for (chat, told_at, told_n) in chats {
+            let Some(to) = read_to(db, chat)? else { continue };
+            // What's owed lies past "told"; while there's none, nothing is.
+            let up_to = match (told_at, told_n) {
+                (Some(at), Some(n)) => to.min((at, n)),
+                _ => to,
+            };
+            let rows = db
+                .prepare(
+                    "SELECT m.id, j.jid, m.at, m.n FROM messages m JOIN person_jids j ON j.n = m.sender
+                    WHERE m.chat = ?1 AND m.mine = 0 AND m.kind NOT IN ('system', 'call') AND (m.at, m.n) <= (?2, ?3)",
+                )?
+                .query_map(params![chat, up_to.0, up_to.1], |r| Ok((r.get(0)?, r.get(1)?, (r.get(2)?, r.get(3)?))))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            read.extend(rows);
+        }
+        Ok(read)
+    })
+    .await;
+    read.into_iter().filter(|(id, jid, place)| !heard.of(id, jid, *place)).map(|(id, _, _)| id).collect()
+}
+
+/// What the receipts loop sends now, kept in `heard`, and the steps that keep how far WhatsApp was
+/// told of each chat.
+async fn receipts(store: &Store, heard: &mut Heard) -> Vec<Change> {
+    let mut told = Vec::new();
+    for chat in query(store, outbox::owing).await {
+        if let Owing::Receipts(lot) = query(store, move |db| outbox::owed(db, chat)).await {
+            heard.receipted.extend(lot.messages.into_iter().map(|(id, _)| id));
+            told.push(Change::Outbox(outbox::Step::Told { chat: lot.chat, from: lot.from, upto: lot.upto }));
+        }
+    }
+    told
+}
+
+/// Plays one of `reads_and_a_merge`'s histories, with the receipts loop run now and then, which
+/// sometimes keeps how far WhatsApp was told only after the next change, as a slow loop does.
+/// Fails at the first read on the phone, or message of yours from another device, that leaves a
+/// receipt no longer owed for a message still read that came under a JID other than the one it
+/// came by; at the first change after which, while no merge waits, `outbox::owed` gives other than
+/// `owing`; and at the first change or step after which a message counted read is neither owed nor
+/// heard of by WhatsApp, by `Heard`.
 async fn no_read_cancels_what_it_cant_vouch_for(seed: u64) {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
-    for (i, then) in reads_and_a_merge(seed).into_iter().enumerate() {
-        let changes = match then {
-            Then::Arrive(changes) => changes,
+    // When the loop runs, and when it's late, come from a generator of their own, so the rest of
+    // each history is as it was.
+    let mut sending = Rng(seed.wrapping_mul(0xA24B_AED4_963E_E407) | 1);
+    let (mut heard, mut late) = (Heard::default(), Vec::new());
+    let script = reads_and_a_merge(seed);
+    let ends = script.len();
+    for (i, then) in script.into_iter().enumerate() {
+        match then {
+            Then::Arrive(changes) => {
+                let named = match &changes[..] {
+                    [Change::Read(read)] if !read.here => Some(("a read on the phone", read.chat.clone())),
+                    [Change::Message(message)] if message.mine => {
+                        Some(("one of yours from another device", message.chat.clone()))
+                    }
+                    _ => None,
+                };
+                let before = owing(&store).await;
+                store.apply(Lane::Live, changes.clone()).await.unwrap();
+                let after = owing(&store).await;
+                if let Some(owed) = owed_by_each(&store).await {
+                    assert_eq!(owed, after, "seed {seed}, op {i}: what outbox::owed gives");
+                }
+                if let Some((what, named)) = named {
+                    for id in before.into_iter().filter(|id| !after.contains(id)) {
+                        let (under, read) = came_and_read(&store, id.clone()).await;
+                        assert!(
+                            !read || under == named,
+                            "seed {seed}, op {i}: {what} by {named} left {id}, which came under {under}, owed no more"
+                        );
+                    }
+                }
+                for change in changes {
+                    if let Some((jid, up_to)) = query(&store, move |db| heard_up_to(db, &change)).await {
+                        heard.by.entry(jid).or_default().push(up_to);
+                    }
+                }
+            }
             Then::Step => {
                 step(&store, LID).await;
-                continue;
             }
-            Then::Rest => {
-                merged(&store, LID).await;
-                continue;
-            }
-        };
-        let named = match &changes[..] {
-            [Change::Read(read)] if !read.here => Some(("a read on the phone", read.chat.clone())),
-            [Change::Message(message)] if message.mine => {
-                Some(("one of yours from another device", message.chat.clone()))
-            }
-            _ => None,
-        };
-        let before = owing(&store).await;
-        store.apply(Lane::Live, changes).await.unwrap();
-        let after = owing(&store).await;
-        if let Some(owed) = owed_by_each(&store).await {
-            assert_eq!(owed, after, "seed {seed}, op {i}: what outbox::owed gives");
+            Then::Rest => merged(&store, LID).await,
         }
-        let Some((what, named)) = named else { continue };
-        for id in before.into_iter().filter(|id| !after.contains(id)) {
-            let (under, read) = came_and_read(&store, id.clone()).await;
-            assert!(
-                !read || under == named,
-                "seed {seed}, op {i}: {what} by {named} left {id}, which came under {under}, owed no more"
-            );
+        if !late.is_empty() {
+            store.apply(Lane::Live, std::mem::take(&mut late)).await.unwrap();
+        }
+        let untold = read_and_untold(&store, &heard).await;
+        assert!(untold.is_empty(), "seed {seed}, op {i}: {untold:?} counted read, neither owed nor told");
+        if i + 1 == ends || sending.below(4) == 0 {
+            let told = receipts(&store, &mut heard).await;
+            if i + 1 < ends && sending.below(3) == 0 {
+                late = told;
+            } else if !told.is_empty() {
+                store.apply(Lane::Live, told).await.unwrap();
+                let untold = read_and_untold(&store, &heard).await;
+                assert!(
+                    untold.is_empty(),
+                    "seed {seed}, op {i}, receipts: {untold:?} counted read, neither owed nor told"
+                );
+            }
         }
     }
+    assert_eq!(owed_by_each(&store).await, Some(Vec::new()), "seed {seed}: nothing owed once the receipts have gone");
     assert_eq!(column::<String>(&store, "SELECT id FROM chats").await, [NEW], "seed {seed}: one chat at the end");
 }
 

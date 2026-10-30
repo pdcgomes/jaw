@@ -3021,6 +3021,20 @@ UPDATE chats SET marked_unread = ?2, v = ?3 WHERE n = ?1
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
+SELECT count(*) > 1 FROM person_jids WHERE person = (SELECT person FROM chats WHERE n = ?1 AND kind = 'direct')
+    SEARCH person_jids USING COVERING INDEX person_jids_by_person (person=?)
+    SCALAR SUBQUERY 1
+      SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+SELECT EXISTS (SELECT 1 FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND (at, n) <= (?4, ?5) AND mine = 0 AND kind NOT IN ('system', 'call') AND sender IS NOT (SELECT j.n FROM person_jids j WHERE j.jid = ?6))
+    SCAN CONSTANT ROW
+    SCALAR SUBQUERY 2
+      SEARCH messages USING INDEX messages_by_time (chat=? AND at>? AND at<?)
+      SCALAR SUBQUERY 1
+        SEARCH j USING COVERING INDEX sqlite_autoindex_person_jids_1 (jid=?)
+
+-- src/store/write.rs
 SELECT EXISTS (SELECT 1 FROM messages WHERE chat = ?1 AND (at, n) > (?2, ?3) AND (at, n) <= (?4, ?5) AND mine = 0 AND kind NOT IN ('system', 'call') AND sender IN (SELECT j.n FROM chats c JOIN person_jids j ON j.person = c.person WHERE c.n = ?1 AND j.jid <> c.id))
     SCAN CONSTANT ROW
     SCALAR SUBQUERY 2
