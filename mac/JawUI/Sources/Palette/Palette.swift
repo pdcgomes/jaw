@@ -79,6 +79,10 @@ public final class PaletteModel {
         case person(Person)
         case message(MessageRow)
         case folder(FolderRef)
+        /// A link found: Enter opens it.
+        case link(FoundLink)
+        /// The message a link found is in: ⌘G on a link, as on a message.
+        case linkMessage(FoundLink)
         case number(String)
         case action(PaletteAction)
         case emoji(message: String, String)
@@ -318,6 +322,13 @@ public final class PaletteModel {
         return m
     }
 
+    /// ⌘G on a link found goes to its message, as it goes to a message found; false for anything else.
+    public func goToLink() -> Bool {
+        guard index < items.count, case let .link(link) = items[index].pick else { return false }
+        chose?(.linkMessage(link))
+        return true
+    }
+
     // MARK: - Helpers
 
     static func pick(_ hit: Hit) -> Pick? {
@@ -326,6 +337,7 @@ public final class PaletteModel {
         case let .person(p): .person(p)
         case let .message(m): .message(m)
         case let .folder(f): .folder(f)
+        case let .link(l): .link(l)
         case .other: nil
         }
     }
@@ -336,6 +348,7 @@ public final class PaletteModel {
         case let .person(p): p.id
         case let .message(m): m.id
         case let .folder(f): f.id
+        case let .link(l): l.id
         case .other: ""
         }
     }
@@ -346,6 +359,7 @@ public final class PaletteModel {
         case let .person(p): p.name
         case let .message(m): m.plain
         case let .folder(f): f.name
+        case let .link(l): l.link.title.map { "\($0) · \(l.link.host ?? l.link.url)" } ?? l.link.url
         case .other: ""
         }
     }
@@ -361,6 +375,8 @@ public final class PaletteModel {
             return parts.joined(separator: " · ")
         case .person: return "no chat yet · ⏎ starts one"
         case let .message(m): return [m.from?.name ?? (m.mine ? "You" : nil), hit.chatName, Format.when(m.at, now: Format.now())]
+            .compactMap { $0 }.joined(separator: " · ")
+        case let .link(l): return [l.from?.name ?? (l.mine ? "You" : nil), l.chatName ?? hit.chatName, Format.when(l.at, now: Format.now())]
             .compactMap { $0 }.joined(separator: " · ")
         case .folder: return "folder"
         case .other: return ""
@@ -448,8 +464,8 @@ public struct PaletteView: View {
                         model.digit(Int(press.characters) ?? 0) ? .handled : .ignored
                     }
                     .onKeyPress(characters: CharacterSet(charactersIn: "gG")) { press in
-                        guard press.modifiers.contains(.command) || press.modifiers.contains(.control),
-                              let m = model.selectedMessage else { return .ignored }
+                        guard press.modifiers.contains(.command) || press.modifiers.contains(.control) else { return .ignored }
+                        guard let m = model.selectedMessage else { return model.goToLink() ? .handled : .ignored }
                         goTo(m)
                         return .handled
                     }

@@ -187,8 +187,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func goTo(_ m: MessageRow) {
-        if let chat = chatList.row(m.chat) ?? model.panes[m.chat]?.chat {
-            model.open(chat, opened: true, around: m.id)
+        goTo(message: m.id, in: m.chat)
+    }
+
+    func goTo(message: String, in id: String) {
+        if let chat = chatList.row(id) ?? model.panes[id]?.chat {
+            model.open(chat, opened: true, around: message)
         } else {
             model.say("that chat isn't in the list yet")
         }
@@ -202,6 +206,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         case let .person(p): model.jawd.startChat(person: p.id)
         case let .number(n): model.jawd.startChat(phone: n)
         case let .message(m): goTo(m)
+        case let .link(l): model.openLink(l.link.url)
+        case let .linkMessage(l): goTo(message: l.message, in: l.chat)
         case let .folder(f):
             if SidebarController.folders.contains(where: { $0.id == f.id }) { model.pick(folder: f.id) } else {
                 model.say("folders come with jawd's next step")

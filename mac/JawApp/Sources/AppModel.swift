@@ -783,6 +783,11 @@ extension AppModel: ConversationHost {
     }
 
     func conversation(_: ConversationController, open url: String) {
+        openLink(url)
+    }
+
+    /// Opens a link in the browser, with `https://` before one written without how it's reached.
+    func openLink(_ url: String) {
         guard let u = URL(string: url.contains("://") ? url : "https://" + url) else { return }
         NSWorkspace.shared.open(u)
     }

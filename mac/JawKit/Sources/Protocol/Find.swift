@@ -92,7 +92,9 @@ public struct Hit: Decodable, Sendable, Hashable {
             row = try (try? c.decode(Person.self, forKey: .row)).map(Found.Row.person) ?? .other(c.decode(JSONValue.self, forKey: .row))
         case .folder:
             row = try (try? c.decode(FolderRef.self, forKey: .row)).map(Found.Row.folder) ?? .other(c.decode(JSONValue.self, forKey: .row))
-        case .link, .media, .file:
+        case .link:
+            row = try (try? c.decode(FoundLink.self, forKey: .row)).map(Found.Row.link) ?? .other(c.decode(JSONValue.self, forKey: .row))
+        case .media, .file:
             row = try .other(c.decode(JSONValue.self, forKey: .row))
         }
     }
@@ -110,7 +112,47 @@ public extension Found {
         case message(MessageRow)
         case person(Person)
         case folder(FolderRef)
+        case link(FoundLink)
         case other(JSONValue)
+    }
+}
+
+/// A link `find` found, as the library's rows have one: the message it's in, where and when that was
+/// sent, and the link's address, host and its preview's words.
+public struct FoundLink: Decodable, Sendable, Hashable {
+    /// Its message's ID, with `~` and its place among the message's links.
+    public var id: String
+    public var message: String
+    public var chat: String
+    public var chatName: String?
+    /// Who sent it; absent on yours.
+    public var from: Sender?
+    public var mine: Bool
+    public var at: Int64
+    public var link: Link
+
+    public struct Link: Decodable, Sendable, Hashable {
+        public var url: String
+        public var host: String?
+        public var title: String?
+        public var description: String?
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = try c.decode(String.self, forKey: .id)
+        message = try c.decode(String.self, forKey: .message)
+        chat = try c.decodeIfPresent(String.self, forKey: .chat) ?? ""
+        chatName = try c.decodeIfPresent(String.self, forKey: .chatName)
+        from = try? c.decodeIfPresent(Sender.self, forKey: .from)
+        mine = try c.decodeIfPresent(Bool.self, forKey: .mine) ?? false
+        at = try c.decodeIfPresent(Int64.self, forKey: .at) ?? 0
+        link = try c.decode(Link.self, forKey: .link)
+    }
+
+    enum Keys: String, CodingKey {
+        case id, message, chat, from, mine, at, link
+        case chatName = "chat_name"
     }
 }
 
