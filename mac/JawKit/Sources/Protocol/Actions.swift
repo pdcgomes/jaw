@@ -203,11 +203,21 @@ public struct SendContact: Encodable, Sendable, Hashable {
         let bytes = cards.reduce(0) { $0 + $1.vcard.utf8.count }
         if bytes > vcardsMost { return .vcards(bytes) }
         for (i, card) in cards.enumerated() {
-            let name = card.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = card.name.unicodeScalars.trimmed
             if name.isEmpty { return .unnamed(i) }
-            if name.unicodeScalars.count > nameMost { return .name(i, name.unicodeScalars.count) }
+            if name.count > nameMost { return .name(i, name.count) }
         }
         return nil
+    }
+}
+
+extension String.UnicodeScalarView {
+    /// Without the white space around it, as Rust's `trim` takes it off: Unicode's White_Space,
+    /// where Foundation's `whitespacesAndNewlines` also holds U+200B, the zero-width space.
+    var trimmed: SubSequence {
+        let start = firstIndex { !$0.properties.isWhitespace } ?? endIndex
+        let end = lastIndex { !$0.properties.isWhitespace }.map(index(after:)) ?? start
+        return self[start ..< end]
     }
 }
 

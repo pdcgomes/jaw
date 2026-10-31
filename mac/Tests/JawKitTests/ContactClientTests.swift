@@ -65,6 +65,9 @@ func sized(_ bytes: Int, name: String = "Ana", filler: String = "x") -> SendCont
     #expect(SendContact.refusal([SendContact.Card(name: thumbs + "👍🏽", vcard: marta.vcard)]) == .name(0, 258),
             "Unicode scalars, as Rust's chars count, not the 129 characters Swift sees")
     #expect(SendContact.refusal([marta, SendContact.Card(name: "\u{A0}\u{2003}\t", vcard: marta.vcard)]) == .unnamed(1))
+    #expect(SendContact.refusal([SendContact.Card(name: a256 + "\u{200B}", vcard: marta.vcard)]) == .name(0, 257),
+            "a zero-width space isn't white space to Rust's trim, which Foundation's sets take it for, so it counts")
+    #expect(SendContact.refusal([SendContact.Card(name: "\u{200B}", vcard: marta.vcard)]) == nil, "and names a card")
     #expect(SendContact.refusal([SendContact.Card(name: a256 + "a", vcard: marta.vcard), SendContact.Card(name: " ", vcard: marta.vcard)])
         == .name(0, 257), "card by card, the first first")
 }
