@@ -63,7 +63,10 @@ extension SidebarController: NSTextFieldDelegate {
     public func named(_ row: FolderRow?) {
         let picks = naming.map { $0.renaming == nil && $0.filing == nil } ?? false
         naming = nil
-        if let row { tree.apply(Update(upsert: [row])) }
+        if let row {
+            tree.apply(Update(upsert: [row]))
+            roster.tree = tree
+        }
         outline.reloadData()
         restoreOpen()
         guard let row, picks else { return }

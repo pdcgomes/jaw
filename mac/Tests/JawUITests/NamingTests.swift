@@ -54,6 +54,7 @@ func plainKey(_ window: NSWindow, _ characters: String, _ code: UInt16) throws -
     s.named(FolderRow(id: "folder:7", v: 70, name: "Parents", position: 4))
     #expect(s.naming == nil && s.said[10] == "Parents")
     #expect(s.picked == "folder:7" && host.picked == ["folder:7"], "made from the sidebar, it's picked, as Notes picks a new folder")
+    #expect(s.roster.tree == s.tree, "the roster names it too, as its people are watched before jawd's push brings its row")
 }
 
 @MainActor
