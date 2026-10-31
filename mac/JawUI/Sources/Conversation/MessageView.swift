@@ -23,7 +23,7 @@ final class MessageView: NSView {
             if laid !== oldValue {
                 drawn.removeAll()
                 drewOnce = false
-                askPictures()
+                if window != nil { askPictures() }
             }
             needsDisplay = true
         }
@@ -39,6 +39,8 @@ final class MessageView: NSView {
     }
 
     var token: PictureToken?
+    /// The scale its pictures were last asked for at.
+    var askedScale: CGFloat?
     /// What each slot was last drawn from, by its place in the layout: 1 its blurred thumbnail, 2 its
     /// preview; a slot drawn as its well has none. Whatever comes better after the cell has drawn
     /// fades in.
@@ -109,10 +111,12 @@ final class MessageView: NSView {
         Laid.draw(laid.over, in: ctx, y: 0)
     }
 
-    /// Asks for each picture the layout shows that isn't decoded at this cell's pixels.
+    /// Asks for each picture the layout shows that isn't decoded at this cell's pixels; only once it's
+    /// in a window, whose scale says the pixels, so a new cell asks once.
     func askPictures() {
-        guard let laid, let pictures, let token else { return }
+        guard window != nil, let laid, let pictures, let token else { return }
         let scale = scale
+        askedScale = scale
         for slot in laid.pictures {
             pictures.ask(slot, scale: scale, for: token) { [weak self] in self?.pictureCame() }
         }
@@ -154,8 +158,12 @@ final class MessageView: NSView {
         if window == nil { letGo() } else { askPictures() }
     }
 
+    /// On a display of another scale, what was asked for at the old one is let go before its own is
+    /// asked for.
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        guard window != nil, askedScale != nil, scale != askedScale else { return }
+        letGo()
         askPictures()
         needsDisplay = true
     }

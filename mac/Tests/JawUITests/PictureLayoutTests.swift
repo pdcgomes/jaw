@@ -150,9 +150,7 @@ func shownCell(_ pictures: MessagePictures) -> (MessageView, NSTableRowView, NSW
 
 @MainActor @Test func `a preview decoded before the cell first draws is just there, and one coming after its thumbnail fades in`() async {
     let pictures = MessagePictures(files: .memory(["a.768.jpg": jpeg(768, 576), "a.256.jpg": jpeg(256, 192), "a.jpg": jpeg(96, 72)]), mode: .here)
-    let cell = MessageView(frame: CGRect(x: 0, y: 0, width: 640, height: 300))
-    cell.wantsLayer = true
-    cell.pictures = pictures
+    let (cell, _, window) = shownCell(pictures)
     cell.laid = laid(photo(4032, 3024))
     #expect(!cell.drewOnce && !cell.pictureCame(), "decoded before it was drawn: no fade")
     #expect(pictures.drawable(cell.laid!.pictures[0], scale: cell.scale)?.isPreview == true)
@@ -163,6 +161,28 @@ func shownCell(_ pictures: MessagePictures) -> (MessageView, NSTableRowView, NSW
     #expect(cell.pictureCame(), "a preview taking its thumbnail's place fades in")
     cell.drawn = [:]
     #expect(cell.pictureCame(), "and one taking its well's")
+    #expect(cell.window === window)
+}
+
+@MainActor @Test func `a new cell asks for its pictures once, as it comes into its window, and at a new scale only having let go of the old`() async {
+    let l = laid(photo(4032, 3024))
+    let pictures = busyPictures()
+    let cell = MessageView(frame: CGRect(x: 0, y: 0, width: 640, height: 300))
+    cell.pictures = pictures
+    cell.laid = l
+    #expect(pictures.queue.counts.asked == PictureQueue.most, "nothing asked before it's in a window, whose scale says its pixels")
+    let window = NSWindow(contentRect: cell.frame, styleMask: .borderless, backing: .buffered, defer: true)
+    let row = NSTableRowView(frame: cell.frame)
+    window.contentView?.addSubview(row)
+    row.addSubview(cell)
+    #expect(pictures.queue.counts.asked == PictureQueue.most + 2, "asked once as it comes into its window: \(pictures.queue.counts)")
+    cell.viewDidChangeBackingProperties()
+    #expect(pictures.queue.counts.asked == PictureQueue.most + 2, "nothing again at the scale it asked at")
+    cell.askedScale = cell.scale + 1
+    cell.viewDidChangeBackingProperties()
+    #expect(pictures.queue.counts.asked == PictureQueue.most + 4 && pictures.queue.counts.dropped == 2,
+            "on a display of another scale, what it asked for at the old one is let go first: \(pictures.queue.counts)")
+    #expect(cell.window === window)
 }
 
 @Test func `the chat of pictures draws as its references, in both looks, dark and light`() throws {

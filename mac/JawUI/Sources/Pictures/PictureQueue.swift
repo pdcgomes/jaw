@@ -41,7 +41,8 @@ public final class PictureQueue: Sendable {
     }
 
     struct Job {
-        var waiters: [PictureToken: [Done]] = [:]
+        /// Who's told once it's decoded: each cell once, however many times it asked.
+        var waiters: [PictureToken: Done] = [:]
         var started = false
     }
 
@@ -113,7 +114,7 @@ public final class PictureQueue: Sendable {
                 s.jobs[key] = Job()
                 s.waiting.append(key)
             }
-            s.jobs[key]!.waiters[token, default: []].append(done)
+            s.jobs[key]!.waiters[token] = done
             return true
         }
         if asked { pump() }
@@ -190,7 +191,7 @@ public final class PictureQueue: Sendable {
             } else {
                 s.counts.decoded += 1
             }
-            return s.jobs.removeValue(forKey: key)?.waiters.values.flatMap(\.self) ?? []
+            return s.jobs.removeValue(forKey: key).map { Array($0.waiters.values) } ?? []
         }
     }
 }

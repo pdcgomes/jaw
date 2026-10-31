@@ -154,6 +154,20 @@ func key(_ path: String, _ w: Int, _ h: Int, fit: PictureFit = .fill, blurred: B
     #expect(await eventually { done.keys == [key("p39", 300, 225)] }, "what's asked and kept is handed over on the main thread")
 }
 
+@MainActor @Test func `whoever asks for a picture twice is told once it's decoded`() async {
+    let queue = PictureQueue(cache: PictureCache())
+    queue.files = .memory(["p": jpeg(300, 200)])
+    final class Told: @unchecked Sendable {
+        var n = 0
+    }
+    let told = Told(), token = queue.token()
+    queue.ask(key("p", 300, 200), for: token) { _ in told.n += 1 }
+    queue.ask(key("p", 300, 200), for: token) { _ in told.n += 1 }
+    #expect(await eventually { told.n > 0 && !queue.busy })
+    try? await Task.sleep(for: .milliseconds(50))
+    #expect(told.n == 1 && queue.counts.asked == 2 && queue.counts.decoded == 1)
+}
+
 @MainActor @Test func `a slot draws its best preview, another size of it meanwhile, then its blurred thumbnail, and asks only for what it lacks`() async throws {
     let files: [String: Data] = ["s.jpg": jpeg(256, 192), "l.jpg": jpeg(768, 576), "t.jpg": jpeg(96, 72)]
     let pictures = MessagePictures(files: .memory(files))
