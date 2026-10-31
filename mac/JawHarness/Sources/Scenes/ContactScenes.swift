@@ -43,7 +43,7 @@ private struct ContactFormScene: View {
                  ContactForm(chat: "ana", to: "Ana"))
             band("Two cards", "Send 2 Contacts: Marta Lopes with both her numbers on a line and Inês Gomes with hers, each with initials on a colour of their own, as their message will draw them, no photo being sent; the first chosen, its row in the selection's colour, with × at the end of each; the keys said under them, and Send ready.",
                  ContactForm(chat: "ana", to: "Ana", cards: Samples.formCards))
-            band("In the way", "A card made from a contact with a long note takes 301 KiB, past the 256 KiB jawd takes in one message, said in red under the cards, and Send greyed until it's taken out.",
+            band("In the way", "A card past the 256 KiB jawd takes in one message, the two cards taking 301 KiB together, said in red under them, and Send greyed until it's taken out.",
                  ContactForm(chat: "ana", to: "Ana", cards: [Samples.formCards[0], Samples.formCard("Clínica Sorriso", ["+351 21 000 11 22"], note: 300 * 1024)]))
             band("Turned down", "jawd's words, after Not sent:, in red, the form opened again as it was, both cards on it and Send ready to try again.",
                  ContactForm(chat: "ana", to: "Ana", cards: Samples.formCards, said: "40 wait to send, 2 failed; it can go once some have"))

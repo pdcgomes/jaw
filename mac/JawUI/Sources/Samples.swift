@@ -395,8 +395,8 @@ public enum Samples {
     }
 
     /// A card as the contact form makes one from a contact, as Contacts exports it, with no photo and
-    /// none of WhatsApp's marks: its name and numbers, and `note` bytes of a note, for a contact
-    /// whose card takes a lot of room.
+    /// none of WhatsApp's marks: its name and numbers; and, for a card past what jawd takes in one
+    /// message, `note` bytes of a note, which Contacts itself leaves out.
     public static func formCard(_ name: String, _ numbers: [String], note: Int = 0) -> ContactForm.Card {
         let words = name.split(separator: " ")
         var card = "BEGIN:VCARD\r\nVERSION:3.0\r\nPRODID:-//Apple Inc.//macOS 26.0//EN\r\n"
