@@ -122,8 +122,34 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     }
 
     func rebuild() {
+        let kept = selectedLine
         lines = RosterLines.lines(people.list, folder: people.folder, tree: tree, open: open, typing: typing)
-        if isViewLoaded { table.reloadData() }
+        guard isViewLoaded else { return }
+        table.reloadData()
+        // Reloading keeps the selected row, not its line, so the selection follows someone as people
+        // come, go and move, and goes when their line does.
+        if let kept, let i = lines.firstIndex(where: { Self.key($0) == kept }) {
+            table.selectRowIndexes([i], byExtendingSelection: false)
+        } else if table.selectedRow >= 0 {
+            table.deselectAll(nil)
+        }
+    }
+
+    /// The selected line, as `key` names it.
+    var selectedLine: String? {
+        let i = table.selectedRow
+        return i >= 0 && i < lines.count ? Self.key(lines[i]) : nil
+    }
+
+    /// Someone's line by their group and id, as someone filed in two of your top folders has a line in
+    /// each under All, or a fold's by its group; none for the title or a heading, which can't be
+    /// selected.
+    static func key(_ line: RosterLine) -> String? {
+        switch line {
+        case let .person(p, group): "\(group)/\(p.id)"
+        case let .offline(group, _, _): "\(group)/offline"
+        case .title, .heading: nil
+        }
     }
 
     /// How someone is, typing… from their chat while it says so.
@@ -184,6 +210,24 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         if let p = person(at: table.selectedRow) { host?.roster(self, open: p) }
     }
 
+    /// A key on the selected line, by its code: Return on someone opens their chat; on a fold, Return or
+    /// Space opens or closes it, → opens it and ← closes it, as an outline's triangles take them. Says
+    /// whether it did something.
+    func pressed(_ key: UInt16) -> Bool {
+        let i = table.selectedRow
+        guard i >= 0, i < lines.count else { return false }
+        switch (lines[i], key) {
+        case (.person, 36), (.person, 76):
+            openSelected()
+        case let (.offline(group, _, _), 36), let (.offline(group, _, _), 76), let (.offline(group, _, _), 49),
+             let (.offline(group, _, false), 124), let (.offline(group, _, true), 123):
+            toggle(group)
+        default:
+            return false
+        }
+        return true
+    }
+
     public func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         for item in menuItems(forRow: table.clickedRow) {
@@ -227,8 +271,12 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         if case .title = lines[row] { true } else { false }
     }
 
+    /// Someone, or a fold, so the keys reach it.
     public func tableView(_: NSTableView, shouldSelectRow row: Int) -> Bool {
-        if case .person = lines[row] { true } else { false }
+        switch lines[row] {
+        case .person, .offline: true
+        case .title, .heading: false
+        }
     }
 
     public func tableView(_ tableView: NSTableView, viewFor _: NSTableColumn?, row: Int) -> NSView? {
@@ -246,9 +294,12 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
             cell.show(p, said: how(p), avatar: avatars.image(p.avatar, root: root), roles: roles)
             cell.menuFor = { [weak self] cell in self?.menu(for: cell) }
             return cell
-        case let .offline(_, count, open):
+        case let .offline(group, count, open):
             let cell = (tableView.makeView(withIdentifier: GroupCell.id, owner: self) as? GroupCell) ?? GroupCell()
-            cell.show("\(open ? "▾" : "▸") \(count) offline", "", roles: roles)
+            // Under All, whose fold it is: the group's heading is a line of its own.
+            let whose = people.folder != "all" ? "" : " in " + (group == "others" ? "Others" : tree.label(group))
+            cell.show("\(open ? "▾" : "▸") \(count) offline", "", roles: roles,
+                      fold: GroupCell.Fold(open: open, said: "\(count) offline\(whose)") { [weak self] in self?.toggle(group) })
             return cell
         }
     }
@@ -359,11 +410,33 @@ final class PersonCell: NSTableCellView, RowSelectable {
     }
 }
 
-/// A group's heading under All, with who's around of how many, or a fold of people.
-final class GroupCell: NSTableCellView {
+/// A group's heading under All, with who's around of how many, or a fold of people, which VoiceOver
+/// reads as a disclosure triangle, open or not, that a press opens or closes.
+final class GroupCell: NSTableCellView, RowSelectable {
     static let id = NSUserInterfaceItemIdentifier("group")
     let title = Labels.make("", .caption)
     let count = Labels.make("", .caption)
+    var roles: Roles?
+    /// A fold's: whether it's open, what VoiceOver says of it, and what opens or closes it.
+    var fold: Fold?
+
+    struct Fold {
+        let open: Bool
+        let said: String
+        let toggle: @MainActor () -> Void
+    }
+
+    /// A selected fold in a roster with the keys is drawn on the system's accent, in the selected text's
+    /// colour; any other in the theme's.
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { colour() }
+    }
+
+    /// Whether its row is selected, which its row says, since AppKit tells a cell only of a selection
+    /// with the keys.
+    var selected = false {
+        didSet { if selected != oldValue { colour() } }
+    }
 
     init() {
         super.init(frame: .zero)
@@ -385,25 +458,52 @@ final class GroupCell: NSTableCellView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func show(_ text: String, _ counted: String, roles: Roles?) {
+    func show(_ text: String, _ counted: String, roles: Roles?, fold: Fold? = nil) {
         title.stringValue = text
         count.stringValue = counted
         count.isHidden = counted.isEmpty
+        self.fold = fold
+        setAccessibilityElement(fold != nil)
+        setAccessibilityRole(fold == nil ? nil : .disclosureTriangle)
+        setAccessibilityLabel(fold?.said)
+        setAccessibilityValue(fold.map { NSNumber(value: $0.open ? 1 : 0) })
+        self.roles = roles
+        colour()
+    }
+
+    func colour() {
         guard let roles else { return }
-        Labels.style(title, .secondary, roles: roles)
-        Labels.style(count, .tertiary, roles: roles)
+        if backgroundStyle == .emphasized {
+            for label in [title, count] {
+                label.textColor = .alternateSelectedControlTextColor
+            }
+            return
+        }
+        // The selection's grey without the keys takes the quieter tones under 3:1 in the dark look.
+        Labels.style(title, selected ? .primary : .secondary, roles: roles)
+        Labels.style(count, selected ? .primary : .tertiary, roles: roles)
+    }
+
+    /// A fold's label says all of it, so nothing in it is read again.
+    override func accessibilityChildren() -> [Any]? {
+        fold == nil ? super.accessibilityChildren() : []
+    }
+
+    /// VoiceOver's press on a fold: opened, or closed.
+    override func accessibilityPerformPress() -> Bool {
+        guard let fold else { return false }
+        fold.toggle()
+        return true
     }
 }
 
-/// The roster's table: Return opens the selected person's chat.
+/// The roster's table: Return opens the selected person's chat, and Return, Space, → and ← open and
+/// close the selected fold.
 final class RosterTable: NSTableView {
     weak var roster: RosterController?
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 || event.keyCode == 76, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
-           let roster
-        {
-            roster.openSelected()
+        if event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty, let roster, roster.pressed(event.keyCode) {
             return
         }
         super.keyDown(with: event)
