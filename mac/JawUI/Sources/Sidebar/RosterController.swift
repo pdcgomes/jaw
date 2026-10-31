@@ -43,8 +43,11 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     let table = RosterTable()
     let scroll = NSScrollView()
     var avatars = AvatarCache()
-    /// Once a minute while it's on screen, how long ago people were seen is said again.
+    /// Once a minute, while the roster is on screen and says how long ago someone was seen, it says it
+    /// again, within 10 seconds, so the system can wake the app for it with other work.
     var minute: Timer?
+    /// Whether a window can be seen, as the minute needs; the tests set their own.
+    var visible: @MainActor (NSWindow) -> Bool = { $0.occlusionState.contains(.visible) }
 
     /// How many people the window keeps from the top, grown as the roster scrolls.
     public static let rows: UInt32 = 200
@@ -85,22 +88,68 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         scroll.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification,
                                                object: scroll.contentView)
+        NotificationCenter.default.addObserver(self, selector: #selector(occluded), name: NSWindow.didChangeOcclusionStateNotification,
+                                               object: nil)
         view = scroll
         rebuild()
     }
 
     override public func viewDidAppear() {
         super.viewDidAppear()
-        minute?.invalidate()
-        minute = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.table.reloadData() }
-        }
+        keepTime()
     }
 
     override public func viewDidDisappear() {
         super.viewDidDisappear()
-        minute?.invalidate()
-        minute = nil
+        keepTime()
+    }
+
+    /// The sidebar folded or unfolded, which comes as a layout and not as the view disappearing.
+    override public func viewDidLayout() {
+        super.viewDidLayout()
+        keepTime()
+    }
+
+    /// The window hidden, minimised, covered or shown again.
+    @objc func occluded(_ note: Notification) {
+        if isViewLoaded, (note.object as? NSWindow) === view.window { keepTime() }
+    }
+
+    /// Whether it's on screen: in a window that can be seen, and not folded away.
+    var isShown: Bool {
+        guard isViewLoaded, let window = view.window else { return false }
+        return visible(window) && !view.isHiddenOrHasHiddenAncestor && view.frame.width >= 1 && view.frame.height >= 1
+    }
+
+    /// The rows that say how long ago someone was seen, which change as the minutes pass.
+    var timed: IndexSet {
+        IndexSet(lines.indices.filter { i in
+            if case let .person(p, _) = lines[i] { p.presence.state == .seen && p.presence.at != nil && !typing.contains(p.id) } else { false }
+        })
+    }
+
+    /// The minute's timer runs while the roster is shown and says how long ago someone was seen, and
+    /// not otherwise.
+    func keepTime() {
+        guard isShown, !timed.isEmpty else {
+            minute?.invalidate()
+            minute = nil
+            return
+        }
+        guard minute == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        timer.tolerance = 10
+        minute = timer
+    }
+
+    /// A minute on: how long ago people were seen, said again in their rows, or the timer stopped if
+    /// the roster has gone from the screen meanwhile without saying so.
+    func tick() {
+        let rows = timed
+        guard isShown, !rows.isEmpty else { return keepTime() }
+        table.reloadData(forRowIndexes: rows, columnIndexes: [0])
     }
 
     /// A new folder's people: its window starts again from the top, its folds closed.
@@ -135,6 +184,7 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         }
         // A fold opened, or people gone, can bring the last person held into sight with no scroll.
         grow()
+        keepTime()
     }
 
     /// The selected line, as `key` names it.

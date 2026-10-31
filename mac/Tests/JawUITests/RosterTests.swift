@@ -157,6 +157,36 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     #expect(family.said.contains("Sofia Martins typing…") && other.moved == [.top(205)], "her chat says she's typing, which lists her")
 }
 
+@MainActor
+@Test func `the minute's timer runs, within 10 s, only while the roster is on screen and says how long ago someone was seen`() throws {
+    let host = RosterStub()
+    let r = roster(host)
+    r.visible = { _ in true }
+    r.keepTime()
+    #expect(r.minute == nil, "in no window")
+    let window = NSWindow(contentViewController: r)
+    defer { withExtendedLifetime(window) {} }
+    window.setContentSize(NSSize(width: 220, height: 600))
+    r.keepTime()
+    #expect(r.minute == nil, "under All, those last seen are folded, so no time ago is drawn")
+    r.toggle("folder:1")
+    let minute = try #require(r.minute, "Mãe, 12 min ago, and Inês, 2 h ago, drawn")
+    #expect(minute.isValid && minute.timeInterval == 60 && minute.tolerance >= 10)
+    r.visible = { _ in false }
+    NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+    #expect(r.minute == nil && !minute.isValid, "the window hidden, minimised or covered")
+    r.visible = { _ in true }
+    NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+    #expect(r.minute != nil, "and seen again")
+    r.view.isHidden = true
+    r.tick()
+    #expect(r.minute == nil, "folded away with nothing said, the next minute stops it")
+    r.view.isHidden = false
+    r.keepTime()
+    r.toggle("folder:1")
+    #expect(r.minute == nil, "Family's fold closed again, so no time ago is drawn")
+}
+
 @Test func `someone's menu opens or starts their chat, opens it in a new pane, and files them, with their chat's slot when they have one`() {
     let ana = Samples.people[0], marta = Samples.people[1]
     #expect(RosterMenu.entries(ana, tree: Samples.tree, list: "all").map(head)
