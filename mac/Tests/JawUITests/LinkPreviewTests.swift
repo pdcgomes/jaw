@@ -102,6 +102,65 @@ func pictureParts(_ l: Laid) -> Int {
     #expect(folder.picture("media/links/ipma.jpg", pixels: 140) === read, "and kept")
 }
 
+/// A folder for a test's pictures, as jawd's root is, removed by `done`.
+func pictureFolder() throws -> (root: String, done: () -> Void) {
+    let root = "/tmp/jawp-\(UInt32.random(in: 0 ... .max))"
+    try FileManager.default.createDirectory(atPath: root + "/media/links", withIntermediateDirectories: true)
+    return (root, { try? FileManager.default.removeItem(atPath: root) })
+}
+
+/// A picture `w` by `h` of one colour, written as a JPEG at `path`.
+func writeJPEG(_ path: String, _ w: Int, _ h: Int) throws {
+    let ctx = try #require(CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                     space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+    ctx.setFillColor(CGColor(srgbRed: 0.48, green: 0.64, blue: 0.97, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    let image = try #require(ctx.makeImage())
+    let destination = try #require(CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+    CGImageDestinationAddImage(destination, image, nil)
+    #expect(CGImageDestinationFinalize(destination))
+}
+
+@Test func `jawd's folder decodes a picture so its short side fills its square, and never larger than it is`() throws {
+    #expect(FolderPictures.longSide(400, 400, short: 140) == 140)
+    #expect(FolderPictures.longSide(1000, 523, short: 140) == 268, "a page's wide picture, 140 high")
+    #expect(FolderPictures.longSide(140, 73, short: 140) == 140, "one jawd made, as it is")
+    #expect(FolderPictures.longSide(4000, 400, short: 140) == 560, "a strip, at four times its square")
+    let (root, done) = try pictureFolder()
+    defer { done() }
+    let folder = FolderPictures(root: root)
+    for (w, h, decoded) in [(400, 400, [140, 140]), (560, 280, [280, 140]), (280, 560, [140, 280]), (140, 73, [140, 73]), (96, 96, [96, 96])] {
+        try writeJPEG("\(root)/media/links/\(w)x\(h).jpg", w, h)
+        let image = try #require(folder.picture("media/links/\(w)x\(h).jpg", pixels: 140))
+        #expect([image.width, image.height] == decoded, "\(w)×\(h)")
+    }
+}
+
+@Test func `jawd's folder keeps the pictures drawn last within its bytes, and reads again one it let go`() throws {
+    let (root, done) = try pictureFolder()
+    defer { done() }
+    let paths = (0 ..< 4).map { "media/links/\($0).jpg" }
+    for path in paths {
+        try writeJPEG("\(root)/\(path)", 140, 140)
+    }
+    let probe = try #require(FolderPictures(root: root).picture(paths[0], pixels: 140))
+    let one = probe.bytesPerRow * probe.height
+    let folder = FolderPictures(root: root, most: 3 * one)
+    let first = try paths.prefix(3).map { try #require(folder.picture($0, pixels: 140)) }
+    #expect(folder.kept.withLock { $0.bytes } == 3 * one, "three fill it")
+    #expect(folder.picture(paths[0], pixels: 140) === first[0], "the first, drawn again")
+    let fourth = try #require(folder.picture(paths[3], pixels: 140), "a fourth, past its bound")
+    #expect(folder.kept.withLock { $0.bytes } == 3 * one && folder.kept.withLock { $0.pictures.count } == 3, "still within its bytes")
+    #expect(folder.picture(paths[0], pixels: 140) === first[0] && folder.picture(paths[2], pixels: 140) === first[2],
+            "those drawn last are kept")
+    let again = try #require(folder.picture(paths[1], pixels: 140), "the one drawn longest ago is read again")
+    #expect(again !== first[1] && again.width == 140 && again.height == 140)
+    #expect(folder.picture(paths[3], pixels: 140) !== fourth, "and then the fourth, drawn longest ago, went")
+    #expect(folder.kept.withLock { $0.bytes } <= 3 * one)
+    let small = FolderPictures(root: root, most: one - 1)
+    #expect(small.picture(paths[0], pixels: 140) != nil && small.kept.withLock { $0.pictures.isEmpty }, "one larger than its bound is drawn, not kept")
+}
+
 @Test func `a picture fills its rect from the centre, keeping its shape`() {
     let square = CGRect(x: 10, y: 20, width: 70, height: 70)
     #expect(Fill.rect(CGSize(width: 280, height: 140), filling: square) == CGRect(x: -25, y: 20, width: 140, height: 70))
