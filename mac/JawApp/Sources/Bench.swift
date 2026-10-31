@@ -111,10 +111,12 @@ enum Bench {
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
                 || key.hasPrefix("menu-key:") || key == "promise" || key == "window"
                 || key == "sidebar" || key.hasPrefix("folder:") || key == "tree:samples" || key == "show:sidebar" || key.hasPrefix("type:") || key == "roster"
+                || key == "card" || key.hasPrefix("card:")
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key == "promise" { keepPromise(model) }
             if key == "window" { model.window?.window?.makeKeyAndOrderFront(nil) }
+            if key == "card" || key.hasPrefix("card:") { card(key, model: model) }
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -243,6 +245,23 @@ enum Bench {
         let type = (quarantine?[kLSQuarantineTypeKey as String] as? String).map { $0.replacingOccurrences(of: "LSQuarantineType", with: "") }
         let agent = quarantine?[kLSQuarantineAgentNameKey as String] as? String
         return " (\(String(mode, radix: 8)), \(type.map { "quarantined by \(agent ?? "?") as \($0)" } ?? "not quarantined"))"
+    }
+
+    /// Does what a click on the newest contact card in the focused pane does, as `card`, or with
+    /// `card:<n>` chooses its number `n`, from 0, when it has several; `card` on one with several
+    /// says its numbers.
+    static func card(_ step: String, model: AppModel) {
+        guard let c = model.conversation, let m = c.window.list.last(where: { $0.kind == .contact && !$0.deleted }) else {
+            return model.say("no contact card in this pane")
+        }
+        let n = step.split(separator: ":").dropFirst().first.flatMap { Int($0) }
+        if case let .choose(phones, name) = CardAction.of(m) {
+            guard let n, phones.indices.contains(n) else {
+                return FileHandle.standardError.write(Data("\(step): numbers \(words(c.numbersMenu(phones, name: name).items))\n".utf8))
+            }
+            return model.startChat(phone: phones[n].dialled, name: name)
+        }
+        c.card(m)
     }
 
     /// The chat list's row `i`, counting from 0, or nil when it has no such row.
@@ -431,7 +450,8 @@ enum Bench {
     static func draw(to path: String, model: AppModel) {
         // The window's frame view, so the toolbar is drawn too.
         let glance = model.glance.isOpen ? model.glance.panel.contentView : EmojiPicker.shared.panel.isVisible ? EmojiPicker.shared.panel.contentView : nil
-        guard let view = glance ?? model.window?.editorSheet?.contentView ?? model.window?.pollSheet?.contentView ?? model.window?.settings?.contentView
+        guard let view = glance ?? model.window?.cardsSheet?.contentView ?? model.window?.editorSheet?.contentView
+            ?? model.window?.pollSheet?.contentView ?? model.window?.settings?.contentView
             ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
         let rect = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }

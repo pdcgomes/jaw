@@ -177,6 +177,8 @@ final class FileHost: ConversationHost {
     func conversation(_: ConversationController, open _: String) {}
     func conversation(_: ConversationController, vote _: String, options _: [String]) {}
     func conversationIsRead(_: ConversationController) -> Bool { false }
+    func conversation(_: ConversationController, startChat _: String, name _: String) {}
+    func conversation(_: ConversationController, cardsOf _: MessageRow) {}
 
     func conversation(_: ConversationController, media act: MediaOffer.Act, _ offers: [MediaOffer], at: Int, of _: MessageRow) {
         acts.append((act, offers.map(\.message), at))

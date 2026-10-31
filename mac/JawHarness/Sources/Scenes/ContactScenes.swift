@@ -13,6 +13,36 @@ extension HarnessScene {
     }
 }
 
+extension HarnessScene {
+    static var contactSheet: HarnessScene {
+        HarnessScene(
+            id: "contact-sheet", title: "A message's contact cards", symbol: "person.2.crop.square.stack",
+            synopsis: "The sheet several cards open: each card's picture, name and numbers, and Message",
+            section: .overlays, covers: [ContactCardsView.self], width: 480,
+        ) { ContactSheetScene(conditions: $0) }
+    }
+}
+
+/// The sheet of Rui's five cards, and of Inês's two.
+private struct ContactSheetScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        SpecimenGroup(
+            title: "Five cards, and two",
+            note: "Each card in a row of its own: Tiago's and Mãe's photos and the others' initials on their colours, their names, each number with WhatsApp beside the account's, and Message; the first card chosen, its row in the selection's colour; ↑↓, ↩ and esc said at the foot beside Done.",
+            roles: conditions.roles,
+        ) {
+            ForEach(Array(Samples.contacts.filter { ($0.contact?.cards.count ?? 0) > 1 }.reversed().enumerated()), id: \.offset) { _, m in
+                if let contact = m.contact {
+                    ContactCardsView(contact: contact, from: "From \(m.from?.name ?? "someone")", roles: conditions.roles,
+                                     message: { _, _ in }, done: {})
+                }
+            }
+        }
+    }
+}
+
 /// The group's contact cards from `Samples`, as a pane 640 points wide shows them.
 private struct ContactCardsScene: View {
     let conditions: Conditions

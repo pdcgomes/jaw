@@ -34,6 +34,10 @@ public protocol ConversationHost: AnyObject {
     func conversation(_ c: ConversationController, dragging offer: MediaOffer) -> NSPasteboardWriting?
     /// The header's Library button: the chat's library, beside its pane.
     func conversationLibrary(_ c: ConversationController)
+    /// Message on a contact card: a chat with `phone`, the number to dial, for the card named `name`.
+    func conversation(_ c: ConversationController, startChat phone: String, name: String)
+    /// A message of several contact cards, clicked or opened: the sheet of them.
+    func conversation(_ c: ConversationController, cardsOf message: MessageRow)
 }
 
 public extension ConversationHost {
@@ -113,6 +117,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
 
     let newPill = PillButton()
     let hover = HoverBar()
+    /// Pops up a contact card's numbers to choose from, as a click on the card or Enter asks.
+    var popUp = MenuPopUp()
     public let composer: ComposerController
     var empty: NSHostingView<EmptyChatView>?
     var hoveredRow: Int?
@@ -664,7 +670,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
                 select(m.id)
                 media(.look, m, item: item)
             case let .stop(item): media(.stop, m, item: item)
-            case .card: select(m.id)
+            case .card: card(m, at: point, in: view)
             }
             return
         }
@@ -766,11 +772,13 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         relayout()
     }
 
-    /// Enter on a message: try a failed one again, unfold a long one, look at its file, open a poll's
-    /// Vote menu under it, open its first link.
+    /// Enter on a message: try a failed one again, message whoever a contact card shares, unfold a
+    /// long one, look at its file, open a poll's Vote menu under it, open its first link.
     func open(_ m: MessageRow) {
         if m.mine, m.status == .failed {
             host?.conversation(self, retry: m.id)
+        } else if m.kind == .contact, !m.deleted {
+            card(m, at: nil, in: nil)
         } else if contexts.indices.contains(rows.firstIndex(of: m) ?? -1), !unfolded.contains(m.id),
                   m.plain.split(separator: "\n").count > MessageLayout.fold
         {
@@ -808,6 +816,39 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
 
     var selectedMessage: MessageRow? {
         selected.flatMap { window.get($0) }
+    }
+
+    /// Message on a contact card, from a click on it, Enter or its menu: a chat with its one number,
+    /// its numbers to choose from where it was clicked, or under it, when it has several, or for
+    /// several cards the sheet of them.
+    public func card(_ m: MessageRow, at point: CGPoint? = nil, in view: NSView? = nil) {
+        switch CardAction.of(m) {
+        case let .message(phone, name):
+            host?.conversation(self, startChat: phone.dialled, name: name)
+        case let .choose(phones, name):
+            let menu = numbersMenu(phones, name: name)
+            if let point, let view {
+                _ = popUp.show(menu, at: point, in: view)
+            } else if let i = rows.firstIndex(where: { $0.id == m.id }) {
+                _ = popUp.show(menu, at: NSPoint(x: 40, y: table.rect(ofRow: i).midY), in: table)
+            }
+        case .nothing:
+            say(CardAction.noNumber)
+        case .cards:
+            host?.conversation(self, cardsOf: m)
+        }
+    }
+
+    /// A card's numbers to start a chat with one, each as the card writes it.
+    public func numbersMenu(_ phones: [ContactCard.Phone], name: String) -> NSMenu {
+        let menu = NSMenu(title: "Message \(name)")
+        for phone in phones {
+            menu.addItem(ClosureItem(title: CardAction.label(phone)) { [weak self] in
+                guard let self else { return }
+                host?.conversation(self, startChat: phone.dialled, name: name)
+            })
+        }
+        return menu
     }
 
     /// A key while a message is selected; says whether it took it.
@@ -1035,8 +1076,15 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
 
     func copy(_ m: MessageRow) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(m.plain, forType: .string)
+        NSPasteboard.general.setString(Self.copied(m), forType: .string)
         say("copied")
+    }
+
+    /// A message's words as they're copied: a contact card's lines as they're drawn, as the terminal
+    /// copies them, and the rest's text.
+    public static func copied(_ m: MessageRow) -> String {
+        guard m.kind == .contact, !m.deleted, let contact = m.contact else { return m.plain }
+        return ContactWords.lines(contact)
     }
 
     func showReactions(for m: MessageRow, from anchor: NSView?) {
@@ -1100,6 +1148,25 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             i.keyEquivalentModifierMask = []
             menu.addItem(i)
         }
+        switch CardAction.of(m) {
+        case let .message(phone, name):
+            item("Message \(name)", "\r") { [weak self] in
+                guard let self else { return }
+                host?.conversation(self, startChat: phone.dialled, name: name)
+            }
+        case let .choose(phones, name):
+            let message = NSMenuItem(title: "Message \(name)", action: nil, keyEquivalent: "")
+            message.submenu = numbersMenu(phones, name: name)
+            menu.addItem(message)
+        case .cards:
+            item("View Contacts…", "\r") { [weak self] in
+                guard let self else { return }
+                host?.conversation(self, cardsOf: m)
+            }
+        case .nothing:
+            break
+        }
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
         if !m.deleted {
             item("Reply", "r") { [weak self] in self?.reply(to: m) }
             let react = NSMenuItem(title: "React", action: nil, keyEquivalent: "")

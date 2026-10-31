@@ -1149,6 +1149,21 @@ extension AppModel: ConversationHost {
             saving[ticket] = (offer.message, false, done)
         }, placed: { [weak self] url in self?.say(saved: url) })
     }
+
+    func conversation(_: ConversationController, startChat phone: String, name: String) {
+        startChat(phone: phone, name: name)
+    }
+
+    func conversation(_: ConversationController, cardsOf message: MessageRow) {
+        window?.showCards(message)
+    }
+
+    /// A chat with whoever a contact card shares, by the number to dial: it opens once jawd has it,
+    /// and jawd's words say why when it hasn't.
+    func startChat(phone: String, name: String) {
+        say("opening a chat with \(name)")
+        jawd.startChat(phone: phone)
+    }
 }
 
 extension AppModel: ChatListHost {

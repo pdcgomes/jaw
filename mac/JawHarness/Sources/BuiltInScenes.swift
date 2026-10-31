@@ -23,6 +23,7 @@ enum BuiltInScenes {
         catalog.register(.librarySearch)
         catalog.register(.palette)
         catalog.register(.pollForm)
+        catalog.register(.contactSheet)
         catalog.register(.states)
         catalog.register(.screensJawd)
         catalog.register(.screensConnection)

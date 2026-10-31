@@ -134,6 +134,94 @@ func images(_ l: Laid) -> [CGRect] {
     #expect(took < .milliseconds(20), "laid out in \(took)")
 }
 
+// MARK: - Message, and the sheet of several
+
+@Test func `Message on a card with one number starts a chat with it, several are offered, none is said, and several cards open their sheet`() throws {
+    #expect(try CardAction.of(sampleCard(2)) == .message(ContactCard.Phone(number: "+351 913 002 210", whatsapp: "+351913002210"),
+                                                          name: "Inês Gomes"))
+    #expect(try CardAction.of(sampleCard(1)) == .choose([ContactCard.Phone(number: "+351 21 345 6789", whatsapp: "+351213456789"),
+                                                         ContactCard.Phone(number: "21 000 00 00")], name: "Marta Lopes"))
+    #expect(try CardAction.of(sampleCard(5)) == .nothing)
+    #expect(try CardAction.of(sampleCard(3)) == .cards)
+    #expect(try CardAction.of(sampleCard(8)) == .nothing, "a deleted card")
+    let twice = ContactCard(name: "Ana", phones: [ContactCard.Phone(number: "+351 912 345 678", whatsapp: "+351912345678"),
+                                                  ContactCard.Phone(number: "+351912345678")])
+    #expect(CardAction.numbers(twice).count == 1, "each number once, by the number it dials")
+}
+
+@MainActor @Test func `a click on a card starts its chat, pops its numbers up where it was clicked, says it has none, or asks for the sheet`() async throws {
+    let host = PaneHost()
+    let rows = try [sampleCard(2), sampleCard(1), sampleCard(3), sampleCard(5)]
+    let (c, window) = await shown(rows, host)
+    defer { window.close() }
+    var popped: [(NSMenu, NSPoint)] = []
+    c.popUp.run = { menu, point, _ in popped.append((menu, point)) }
+    var said: [String] = []
+    c.notice = { said.append($0) }
+    func click(_ m: MessageRow) throws -> CGPoint {
+        let view = try messageView(c, #require(c.rows.firstIndex { $0.id == m.id }))
+        let r = try #require(view.laid.flatMap(cardRect))
+        let point = CGPoint(x: r.midX, y: r.midY)
+        c.clicked(view, point, 1)
+        return point
+    }
+    _ = try click(rows[0])
+    #expect(host.started == ["+351913002210 Inês Gomes"])
+    let at = try click(rows[1])
+    #expect(popped.map(\.1) == [at], "where it was clicked")
+    #expect(popped.first?.0.items.map(\.title) == ["+351 21 345 6789 · WhatsApp", "21 000 00 00"])
+    (popped.first?.0.items.last as? ClosureItem)?.run()
+    #expect(host.started.last == "21 000 00 00 Marta Lopes")
+    _ = try click(rows[2])
+    #expect(host.sheets == [rows[2].id])
+    _ = try click(rows[3])
+    #expect(said == [CardAction.noNumber])
+}
+
+@MainActor @Test func `Enter on a card does what a click on it does, its numbers popped up under it`() async throws {
+    let host = PaneHost()
+    let rows = try [sampleCard(2), sampleCard(1)]
+    let (c, window) = await shown(rows, host)
+    defer { window.close() }
+    var popped: [(NSMenu, NSView)] = []
+    c.popUp.run = { menu, _, view in popped.append((menu, view)) }
+    c.select(rows[0].id)
+    c.act("\n")
+    #expect(host.started == ["+351913002210 Inês Gomes"])
+    c.select(rows[1].id)
+    c.act("\n")
+    #expect(popped.count == 1 && popped.first?.1 === c.table && popped.first?.0.items.count == 2)
+}
+
+@MainActor @Test func `a card's menu starts with Message, its numbers when it has several, and several cards' with View Contacts`() throws {
+    let c = pane(PaneHost())
+    func titles(_ m: MessageRow) throws -> [String] {
+        try #require(c.menu(for: m)).items.prefix(3).map { $0.isSeparatorItem ? "—" : $0.title }
+    }
+    #expect(try titles(sampleCard(2)) == ["Message Inês Gomes", "—", "Reply"])
+    let marta = try #require(c.menu(for: sampleCard(1)))
+    #expect(marta.items.first?.title == "Message Marta Lopes")
+    #expect(marta.items.first?.submenu?.items.map(\.title) == ["+351 21 345 6789 · WhatsApp", "21 000 00 00"])
+    #expect(try titles(sampleCard(3)) == ["View Contacts…", "—", "Reply"])
+    #expect(try titles(sampleCard(5)).first == "Reply", "a card without a number starts as any message's")
+    #expect(try ConversationController.copied(sampleCard(1)) == "Marta Lopes\n+351 21 345 6789, 21 000 00 00", "copied as it's drawn")
+}
+
+@MainActor @Test func `the sheet of several chooses a card with the arrows, and Return messages its number on WhatsApp`() throws {
+    let five = try #require(sampleCard(4).contact)
+    let sheet = ContactCardsSheet(cards: five.cards)
+    sheet.up()
+    #expect(sheet.selected == 0)
+    #expect(sheet.returned()?.phone == "+351916666666" && sheet.returned()?.name == "Tiago Martins")
+    for _ in 0 ..< 6 {
+        sheet.down()
+    }
+    #expect(sheet.selected == 4, "no further than the last")
+    sheet.choose(1)
+    #expect(sheet.returned()?.phone == "+351 917 777 777", "Sofia's number, which isn't on WhatsApp")
+    #expect(ContactCardsSheet(cards: [ContactCard(name: "Escola")]).returned() == nil, "a card without a number messages no one")
+}
+
 @Test func `every contact card draws as its reference, in both looks, dark and light`() throws {
     for look in Look.allCases {
         for dark in [true, false] {

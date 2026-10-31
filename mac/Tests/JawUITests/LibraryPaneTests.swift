@@ -68,6 +68,8 @@ import Testing
         func conversation(_: ConversationController, open _: String) {}
         func conversation(_: ConversationController, vote _: String, options _: [String]) {}
         func conversationIsRead(_: ConversationController) -> Bool { false }
+        func conversation(_: ConversationController, startChat _: String, name _: String) {}
+        func conversation(_: ConversationController, cardsOf _: MessageRow) {}
         func conversationLibrary(_: ConversationController) { asked += 1 }
     }
     let host = Host()

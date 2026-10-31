@@ -208,6 +208,8 @@ final class Reader: ConversationHost {
     func conversation(_: ConversationController, reactTo _: MessageRow) {}
     func conversation(_: ConversationController, open _: String) {}
     func conversation(_: ConversationController, vote _: String, options _: [String]) {}
+    func conversation(_: ConversationController, startChat _: String, name _: String) {}
+    func conversation(_: ConversationController, cardsOf _: MessageRow) {}
 
     func conversationFocused(_: ConversationController) {
         focused += 1

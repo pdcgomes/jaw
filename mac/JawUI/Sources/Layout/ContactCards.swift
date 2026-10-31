@@ -55,6 +55,11 @@ public enum ContactWords {
         "\(c.cards.count) contacts"
     }
 
+    /// What a card's colour goes by, as a chat's does: the chat of its WhatsApp account, or its name.
+    static func colourKey(_ card: ContactCard?, name: String) -> String {
+        card?.phones.first { $0.whatsapp != nil }?.whatsapp.map { String($0.dropFirst()) + "@s.whatsapp.net" } ?? name
+    }
+
     static func said(_ text: String?) -> String? {
         text.flatMap { $0.allSatisfy(\.isWhitespace) ? nil : $0 }
     }
@@ -120,7 +125,7 @@ extension MessageLayout.Builder {
         }
         let name = title ?? card?.name ?? ""
         let initials = Avatar.initials(name)
-        let colour = roles.sender(Avatar.colour(card?.phones.first?.whatsapp.map { String($0.dropFirst()) + "@s.whatsapp.net" } ?? name))
+        let colour = roles.sender(Avatar.colour(ContactWords.colourKey(card, name: name)))
         parts.append(.fill(circle, colour.opacity(0.85).cgColor, circle.width / 2))
         guard !initials.isEmpty, initials.first?.isLetter == true else {
             symbol("person.fill", 18, roles.isDark ? roles.ground : RGBA(0xFFFFFF), centredIn: circle)

@@ -273,6 +273,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window?.beginSheet(sheet)
     }
 
+    var cardsSheet: NSWindow?
+
+    /// A message's contact cards, in a sheet over the window: Message on one starts a chat with it.
+    func showCards(_ m: MessageRow) {
+        guard let window, cardsSheet == nil, let contact = m.contact else { return }
+        let end: @MainActor () -> Void = { [weak self] in
+            guard let self, let sheet = cardsSheet else { return }
+            window.endSheet(sheet)
+            cardsSheet = nil
+        }
+        let from = m.mine ? "Yours" : "From \(m.from?.name ?? "someone")"
+        let view = ContactCardsView(contact: contact, from: from, roles: model.roles, message: { [weak model] phone, name in
+            end()
+            model?.startChat(phone: phone, name: name)
+        }, done: end)
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
+        cardsSheet = sheet
+        window.beginSheet(sheet)
+    }
+
     var keysSheet: NSWindow?
 
     func showKeys() {
