@@ -155,7 +155,7 @@ extension AppModel: SidebarHost {
     /// Archived, the panes still waiting for theirs looked up after it.
     func openChat(_ id: String, name: String, inNewPane: Bool = false) {
         if let row = window?.chatList.row(id) ?? panes[id]?.chat {
-            return inNewPane ? openInNewPane(row) : open(row, opened: true)
+            return open(found: row, inNewPane: inNewPane)
         }
         opening = Opening(chat: id, name: name, inNewPane: inNewPane)
         let waiting = (grid?.reading ?? []).compactMap(\.chat).filter { panes[$0] == nil && unopened[$0] == nil && $0 != id }
@@ -172,10 +172,20 @@ extension AppModel: SidebarHost {
     /// A chat being opened, as jawd found it: opened, or why it won't be.
     func opened(_ wanted: Opening, _ found: Looked) {
         switch found {
-        case let .row(row): wanted.inNewPane ? openInNewPane(row) : open(row, opened: true)
+        case let .row(row): open(found: row, inNewPane: wanted.inNewPane)
         case .gone: say("\(wanted.name) isn't among your chats now", warn: true)
         case let .refused(why): say("\(wanted.name) couldn't be opened: \(why)", warn: true)
         }
+    }
+
+    /// A chat found to open: in the focused pane or a new one; or, for a community, which can't go in a
+    /// pane, its groups shown under it in the chat list, the list taken to the list that holds it when
+    /// the folder it shows doesn't, and the key that shows the list said while it's folded.
+    func open(found row: ChatRow, inNewPane: Bool) {
+        guard row.kind == .community else { return inNewPane ? openInNewPane(row) : open(row, opened: true) }
+        if window?.chatList.row(row.id) == nil { pick(folder: row.archived ? "archived" : "all", saying: true) }
+        window?.chatList.showGroups(of: row.id)
+        if let line = FolderTree.groupsLine(row.name, listShown: window?.chatList.isShown ?? false, focusMode: focusMode) { say(line) }
     }
 
     /// A filing jawd has done: a pane's chat the list doesn't hold gets no push to say where it's filed

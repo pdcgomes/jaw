@@ -188,6 +188,12 @@ public struct FolderTree: Sendable, Equatable {
         return focusMode ? "\(name): ⇧⌘↩ shows its chats" : "\(name): ⇧⌘L shows its chats"
     }
 
+    /// What the status line says of a community whose favourite's key shows its groups in the chat
+    /// list: nothing while the list is shown, and the key that shows the list when it isn't.
+    public static func groupsLine(_ name: String, listShown: Bool, focusMode: Bool) -> String? {
+        listShown ? nil : "\(name)'s groups are in the chat list: \(focusMode ? "⇧⌘↩" : "⇧⌘L") shows it"
+    }
+
     /// What's dragged onto the tree: a chat or someone, by id and name, or a folder.
     public enum Dragged: Sendable, Equatable {
         case item(String, name: String)

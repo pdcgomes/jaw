@@ -52,6 +52,8 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
 
     /// Called each time an update has been applied, for the bench.
     public var drawn: (() -> Void)?
+    /// A community whose groups were asked for, scrolled to once the list holds its row.
+    var revealing: String?
 
     public init(folder: String, roles: Roles) {
         chats = Chats(folder: folder, place: .top(Self.rows))
@@ -134,6 +136,15 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
     /// A new folder's list.
     public func show(folder: String) {
         chats = Chats(folder: folder, place: .top(Self.rows))
+        revealing = nil
+        rebuild()
+    }
+
+    /// A community's groups, shown under its row, scrolled into sight, as its favourite's key shows them,
+    /// since a community can't go in a pane; for a list still to bring the row, once it comes.
+    public func showGroups(of community: String) {
+        open.insert(community)
+        revealing = community
         rebuild()
     }
 
@@ -159,6 +170,12 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         table.reloadData()
         if let selected, let i = shown.firstIndex(where: { $0.id == selected }) {
             table.selectRowIndexes([i], byExtendingSelection: false)
+        }
+        if let id = revealing, let at = shown.firstIndex(where: { $0.id == id }) {
+            revealing = nil
+            // Its last group first, then its row, so the row shows with as many of its groups as fit.
+            table.scrollRowToVisible(shown.lastIndex { $0.community == id } ?? at)
+            table.scrollRowToVisible(at)
         }
         showEmpty()
     }

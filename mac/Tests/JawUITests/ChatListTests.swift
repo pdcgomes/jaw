@@ -189,6 +189,41 @@ func `an unread count sits in the middle of its badge`(scale: Int) throws {
 }
 
 @MainActor
+@Test func `a community's key shows its groups under its row, scrolled into sight, at once or once the list brings it`() throws {
+    let community = try #require(Samples.chats.first { $0.kind == .community })
+    let groups = (1 ... 2).map { i in
+        ChatRow(id: "12036300000000010\(i)@g.us", v: 20, sort: "0~179100000000\(i)~\(i)", kind: .group, name: "Sintra \(i)",
+                community: community.id)
+    }
+    // Newer than the community, so it starts out of sight.
+    let newer = (1 ... 40).map { i in
+        ChatRow(id: "35192\(String(format: "%07d", i))@s.whatsapp.net", v: 1, sort: "0~1792150\(String(format: "%06d", i))~\(i)", name: "Chat \(i)")
+    }
+    let rows = Samples.chats + groups + newer
+    let list = ChatListController(folder: "all", roles: Catalog.jaw.roles(dark: true))
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    defer { window.close() }
+    window.contentView = list.view
+    list.view.layoutSubtreeIfNeeded()
+    let inSight = { (id: String) -> Bool in
+        guard let at = list.all.firstIndex(where: { $0.id == id }) else { return false }
+        return list.table.rows(in: list.scroll.contentView.bounds).contains(at)
+    }
+    list.apply(Update(seq: 1, upsert: rows, total: UInt64(rows.count)))
+    #expect(!inSight(community.id) && !list.all.contains { $0.community == community.id }, "closed, and out of sight")
+    list.showGroups(of: community.id)
+    let at = try #require(list.all.firstIndex { $0.id == community.id })
+    #expect(Set(list.all[at + 1 ... at + 2].map(\.name)) == ["Sintra 1", "Sintra 2"] && inSight(community.id), "opened and scrolled to at once")
+
+    list.show(folder: "communities")
+    list.showGroups(of: community.id)
+    #expect(list.all.isEmpty)
+    list.apply(Update(seq: 2, upsert: rows, total: UInt64(rows.count)))
+    #expect(inSight(community.id) && list.all.contains { $0.community == community.id }, "and once a list still to bring it brings it")
+}
+
+@MainActor
 @Test func `the chat list is shown only on screen and not folded away`() {
     let list = ChatListController(folder: "all", roles: Catalog.jaw.roles(dark: true))
     _ = list.view

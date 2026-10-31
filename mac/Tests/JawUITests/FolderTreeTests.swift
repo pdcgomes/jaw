@@ -73,6 +73,14 @@ import Testing
     #expect(Samples.tree.notHeld("Family") == "Family is gone")
 }
 
+@Test func `a community's key says nothing while the chat list shows its groups, and the key that shows the list while it's folded`() {
+    #expect(FolderTree.groupsLine("Climbing Portugal", listShown: true, focusMode: false) == nil)
+    #expect(FolderTree.groupsLine("Climbing Portugal", listShown: false, focusMode: false)
+        == "Climbing Portugal's groups are in the chat list: ⇧⌘L shows it")
+    #expect(FolderTree.groupsLine("Climbing Portugal", listShown: false, focusMode: true)
+        == "Climbing Portugal's groups are in the chat list: ⇧⌘↩ shows it")
+}
+
 @Test func `a folder's list refused says the folder is gone, by its name, or jawd's words for why`() {
     #expect(Samples.tree.refused("folder:1", gone: true, why: "jawd has no folder folder:1") == "Family is gone", "not jawd's id for it")
     #expect(Samples.tree.refused("folder:1", gone: false, why: "every window is taken") == "Family couldn't be watched: every window is taken")
