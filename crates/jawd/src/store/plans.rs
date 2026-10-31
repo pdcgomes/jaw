@@ -325,6 +325,7 @@ fn is_statement(text: &str) -> bool {
             | "DELETE"
             | "WITH"
             | "{CHAT_SELECT}"
+            | "{MEMBER}"
             | "{PERSON_SELECT}"
             | "{MESSAGE_COLUMNS}"
             | "{from}"
