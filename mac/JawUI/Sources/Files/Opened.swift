@@ -56,6 +56,61 @@ public enum Opened {
         return target
     }
 
+    /// A folder of its own in this run's, for jawd to save a promised file into before it's put
+    /// where it was dropped.
+    public static func promised(in folder: URL = Opened.folder) throws -> URL {
+        let made = folder.appending(path: "promised", directoryHint: .isDirectory).appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: made, withIntermediateDirectories: true)
+        return made
+    }
+
+    /// Puts `file` at `url`, or beside it under its name with a number when that's taken, as jawd
+    /// names a copy, never over a file: moved when both are on one volume, otherwise copied whole,
+    /// synced, and `file` removed. Says where it is.
+    public static func put(_ file: URL, at url: URL) throws -> URL {
+        for candidate in named(url) {
+            if renamex_np(file.path, candidate.path, UInt32(RENAME_EXCL)) == 0 { return candidate }
+            switch errno {
+            case EEXIST: continue
+            case EXDEV: return try copied(file, to: url)
+            default: throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
+        throw CocoaError(.fileWriteFileExists)
+    }
+
+    /// `put`'s copy onto another volume: whole under the first name that's free, synced, then `file`
+    /// removed.
+    static func copied(_ file: URL, to url: URL) throws -> URL {
+        for candidate in named(url) {
+            do {
+                try FileManager.default.copyItem(at: file, to: candidate)
+            } catch CocoaError.fileWriteFileExists {
+                continue
+            } catch {
+                try? FileManager.default.removeItem(at: candidate)
+                throw error
+            }
+            let fd = open(candidate.path, O_RDONLY)
+            if fd >= 0 {
+                _ = fcntl(fd, F_FULLFSYNC)
+                close(fd)
+            }
+            try? FileManager.default.removeItem(at: file)
+            return candidate
+        }
+        throw CocoaError(.fileWriteFileExists)
+    }
+
+    /// `url`, then its name with a number before its extension, as jawd names a copy where one's
+    /// taken: `topo (1).pdf`.
+    static func named(_ url: URL) -> [URL] {
+        let folder = url.deletingLastPathComponent(), name = url.lastPathComponent
+        let (stem, ext) = name.lastIndex(of: ".").map { $0 == name.startIndex ? (name, "") : (String(name[..<$0]), String(name[$0...])) }
+            ?? (name, "")
+        return (0 ..< 1000).map { n in folder.appending(path: n == 0 ? name : "\(stem) (\(n))\(ext)") }
+    }
+
     /// Where `message`'s copy named `name` goes in `folder`, its folder made.
     static func place(_ message: String, _ name: String, in folder: URL) throws -> URL {
         let safe = message.map { $0.isLetter || $0.isNumber ? String($0) : "_" }.joined()

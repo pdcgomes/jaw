@@ -58,8 +58,8 @@ final class AppModel {
     /// A file asked to be looked at or opened before it was here, to be once it is.
     var pending: PendingOpen?
     /// Saves asked of jawd, by ticket: the message, whether to show the copy in the Finder once it's
-    /// made, and the drag's promise to keep.
-    var saving: [String: (message: String, reveal: Bool, done: (@Sendable ((any Error)?) -> Void)?)] = [:]
+    /// made, and the drag's promise, which takes the file jawd wrote.
+    var saving: [String: (message: String, reveal: Bool, done: (@Sendable (Result<URL, any Error>) -> Void)?)] = [:]
     /// Where each message's file was saved this run, for Show in Finder.
     var saved: [String: URL] = [:]
     /// `JAW_TRACE=1` says each update drained, on standard error.
@@ -846,11 +846,17 @@ extension AppModel: ConversationHost {
         if let here = offer.here, let file = pictures.url(here), let clone = Opened.clone(of: file, named: offer.name, for: offer.message) {
             return clone as NSURL
         }
-        return Dragged(offer) { [weak self] url, done in
-            guard let self else { return done(NotSaved("Jaw has gone")) }
-            let ticket = jawd.save(chat: offer.chat, message: offer.message, to: url.path)
+        return promise(for: offer)
+    }
+
+    /// The promise a file not here drags out as: jawd saves it into a folder of the app's own, and
+    /// the promise puts it where it's dropped, which is said.
+    func promise(for offer: MediaOffer) -> Dragged {
+        Dragged(offer, save: { [weak self] folder, done in
+            guard let self else { return done(.failure(NotSaved("Jaw has gone"))) }
+            let ticket = jawd.save(chat: offer.chat, message: offer.message, to: folder.path)
             saving[ticket] = (offer.message, false, done)
-        }
+        }, placed: { [weak self] url in self?.say(saved: url) })
     }
 }
 
@@ -957,15 +963,20 @@ extension AppModel {
     func savedAnswer(_ ticket: String, _ message: String, _ path: String?, _ why: String?) {
         let asked = saving.removeValue(forKey: ticket)
         if let done = asked?.done {
-            return done(path == nil ? NotSaved(why ?? "jawd didn't save it") : nil)
+            return done(path.map { .success(URL(fileURLWithPath: $0)) } ?? .failure(NotSaved(why ?? "jawd didn't save it")))
         }
         guard let path else { return say("not saved: \(why ?? "jawd didn't say why")", warn: true) }
         let url = URL(fileURLWithPath: path)
         saved[message] = url
+        say(saved: url)
+        if asked?.reveal == true { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+    }
+
+    /// Where a copy went, as the terminal says it: "saved to Downloads as …".
+    func say(saved url: URL) {
         let parent = url.deletingLastPathComponent().path
         let folder = parent == FileManager.default.homeDirectoryForCurrentUser.appending(path: "Downloads").path
             ? "Downloads" : (parent as NSString).abbreviatingWithTildeInPath
         say("saved to \(folder) as \(url.lastPathComponent)")
-        if asked?.reveal == true { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     }
 }

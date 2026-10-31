@@ -246,22 +246,61 @@ func key(_ characters: String, code: UInt16, _ modifiers: NSEvent.ModifierFlags 
     #expect(coming.contains("Stop Downloading"))
 }
 
-@MainActor @Test func `a file not here drags out as a promise, kept by saving it where it's dropped`() async throws {
+@MainActor @Test func `a file not here drags out as a promise kept in the app: saved by jawd into a folder of the app's, and put where it's dropped, with a number when its name is taken`() async throws {
     let offer = try #require(MediaOffer.of(state("D11")))
+    let scratch = try scratchFolder()
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    let run = scratch.appending(path: "run"), desktop = scratch.appending(path: "Desktop")
+    try FileManager.default.createDirectory(at: desktop, withIntermediateDirectories: true)
     final class Asked: @unchecked Sendable {
-        var to: [URL] = []
+        var into: [URL] = []
         var kept: [String] = []
+        var placed: [String] = []
     }
     let asked = Asked()
-    let promise = Dragged(offer) { url, done in
-        asked.to.append(url)
-        done(nil)
-    }
+    let promise = Dragged(offer, in: run, save: { folder, done in
+        asked.into.append(folder)
+        let file = folder.appending(path: "Sintra topo.pdf")
+        done(Result { try Data("the topo".utf8).write(to: file) }.map { file })
+    }, placed: { asked.placed.append($0.lastPathComponent) })
     #expect(promise.fileType == "com.adobe.pdf")
     #expect(promise.filePromiseProvider(promise, fileNameForType: promise.fileType) == "Sintra topo.pdf")
-    let drop = URL(fileURLWithPath: "/Users/me/Desktop/Sintra topo.pdf")
-    promise.filePromiseProvider(promise, writePromiseTo: drop) { error in asked.kept.append(error == nil ? "kept" : "broken") }
+    let drop = desktop.appending(path: "Sintra topo.pdf")
+    promise.filePromiseProvider(promise, writePromiseTo: drop) { error in asked.kept.append(error.map { "broken: \($0)" } ?? "kept") }
     #expect(await eventually { asked.kept == ["kept"] }, "kept once jawd has saved it")
-    #expect(asked.to == [drop], "into the folder it's dropped in, by the name the drop gives it")
-    #expect(NotSaved("jawd couldn't download the file").localizedDescription == "jawd couldn't download the file")
+    #expect(try Data(contentsOf: drop) == Data("the topo".utf8), "where it was dropped, by the name the drop gives it")
+    #expect(asked.into.count == 1 && asked.into[0].path.hasPrefix(run.path), "jawd saved it into a folder of the app's own")
+    #expect(await eventually { !FileManager.default.fileExists(atPath: asked.into[0].path) }, "which goes once it's put")
+    #expect(try quarantine(drop).type == kLSQuarantineTypeInstantMessageAttachment as String)
+
+    try Data("a file of yours".utf8).write(to: drop, options: [])
+    promise.filePromiseProvider(promise, writePromiseTo: drop) { error in asked.kept.append(error.map { "broken: \($0)" } ?? "kept") }
+    #expect(await eventually { asked.kept.count == 2 })
+    #expect(asked.kept == ["kept", "kept"] && (try? Data(contentsOf: desktop.appending(path: "Sintra topo (1).pdf"))) == Data("the topo".utf8),
+            "its name taken, it's put beside it with a number")
+    #expect(try Data(contentsOf: drop) == Data("a file of yours".utf8), "never over what was there")
+    #expect(await eventually { asked.placed == ["Sintra topo.pdf", "Sintra topo (1).pdf"] }, "and the name it took is said")
+
+    let refused = Dragged(offer, in: run, save: { _, done in done(.failure(NotSaved("jawd couldn't download the file: it's gone"))) })
+    refused.filePromiseProvider(refused, writePromiseTo: desktop.appending(path: "other.pdf")) { error in
+        asked.kept.append(error?.localizedDescription ?? "kept")
+    }
+    #expect(await eventually { asked.kept.count == 3 })
+    #expect(asked.kept.last == "jawd couldn't download the file: it's gone", "broken in jawd's words")
+    #expect(!FileManager.default.fileExists(atPath: desktop.appending(path: "other.pdf").path))
+    #expect(await eventually { (try? FileManager.default.contentsOfDirectory(atPath: run.appending(path: "promised").path))?.isEmpty == true },
+            "nothing left behind")
+}
+
+@Test func `a promised file goes onto another volume whole, under the first name that's free, as jawd names a copy`() throws {
+    let scratch = try scratchFolder()
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    let file = scratch.appending(path: "saved.tar.gz"), there = scratch.appending(path: "a.tar.gz")
+    try Data("one".utf8).write(to: there)
+    try Data("two".utf8).write(to: file)
+    let put = try Opened.copied(file, to: there)
+    #expect(put.lastPathComponent == "a.tar (1).gz" && (try? Data(contentsOf: put)) == Data("two".utf8))
+    #expect(!FileManager.default.fileExists(atPath: file.path) && (try? Data(contentsOf: there)) == Data("one".utf8))
+    #expect(Opened.named(scratch.appending(path: "README")).prefix(3).map(\.lastPathComponent) == ["README", "README (1)", "README (2)"])
+    #expect(Opened.named(scratch.appending(path: ".hidden"))[1].lastPathComponent == ".hidden (1)")
 }

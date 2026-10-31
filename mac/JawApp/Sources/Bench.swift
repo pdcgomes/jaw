@@ -96,9 +96,10 @@ enum Bench {
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
-                || key.hasPrefix("menu-key:")
+                || key.hasPrefix("menu-key:") || key == "promise"
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
+            if key == "promise" { keepPromise(model) }
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -180,6 +181,20 @@ enum Bench {
                     FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
                 }
                 press(Array(keys.dropFirst()), model: model, then: then)
+            }
+        }
+    }
+
+    /// Keeps the selected message's file's promise as a drop on the `--downloads` folder would have
+    /// the Finder ask, with no pointer to drag it: jawd saves it into the app's folder and it's put
+    /// there, under its name or with a number, which is said.
+    static func keepPromise(_ model: AppModel) {
+        guard let m = model.conversation?.selectedRow, let offer = MediaOffer.of(m) else { return model.say("no file selected") }
+        let promise = model.promise(for: offer)
+        let drop = URL(fileURLWithPath: model.launch.downloads).appending(path: promise.filePromiseProvider(promise, fileNameForType: promise.fileType))
+        promise.filePromiseProvider(promise, writePromiseTo: drop) { error in
+            if let error {
+                DispatchQueue.main.async { MainActor.assumeIsolated { model.say("the promise wasn't kept: \(error.localizedDescription)", warn: true) } }
             }
         }
     }
