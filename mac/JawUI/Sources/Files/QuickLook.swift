@@ -21,17 +21,29 @@ public final class QuickLook: NSObject {
     public private(set) var items: [Item] = []
     public private(set) var at = 0
 
-    /// Shows `files`, each with its title, from `at`, in the panel or in place of what it shows.
+    /// Shows `files`, each with its title, from `at`, in the panel or in place of what it shows; asked
+    /// for what it shows already, as Space does again, it closes, as the Finder's does.
     public func show(_ files: [(URL, String)], at: Int = 0) {
+        guard let panel = QLPreviewPanel.shared() else { return }
+        let showing = panel.isVisible && panel.dataSource === self
+        if showing, Self.again(files, showing: items) {
+            items = []
+            return panel.orderOut(nil)
+        }
         items = files.map { Item($0.0, $0.1) }
         self.at = min(max(at, 0), max(items.count - 1, 0))
-        guard !items.isEmpty, let panel = QLPreviewPanel.shared() else { return }
-        if panel.isVisible, panel.dataSource === self {
+        guard !items.isEmpty else { return }
+        if showing {
             panel.reloadData()
             panel.currentPreviewItemIndex = self.at
         } else {
             panel.makeKeyAndOrderFront(nil)
         }
+    }
+
+    /// Whether `files` are what's shown, whichever of them it's paged to.
+    static func again(_ files: [(URL, String)], showing: [Item]) -> Bool {
+        !files.isEmpty && files.map(\.0) == showing.compactMap(\.previewItemURL)
     }
 
     public func begin(_ panel: QLPreviewPanel) {
@@ -40,9 +52,11 @@ public final class QuickLook: NSObject {
         panel.currentPreviewItemIndex = at
     }
 
+    /// The panel closed: nothing's shown.
     public func end(_ panel: QLPreviewPanel) {
         panel.dataSource = nil
         panel.delegate = nil
+        items = []
     }
 }
 

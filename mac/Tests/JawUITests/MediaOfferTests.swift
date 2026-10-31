@@ -131,6 +131,14 @@ func quarantine(_ url: URL) throws -> (type: String?, agent: String?) {
             "a run with this process's ID that started at another time has gone, as has one with no process, and an earlier build's clones")
 }
 
+@MainActor @Test func `Space on what Quick Look shows closes it, and on another file shows that`() {
+    let lake = URL(fileURLWithPath: "/tmp/lake.jpg"), wall = URL(fileURLWithPath: "/tmp/wall.jpg")
+    let shown = [QuickLook.Item(lake, "lake.jpg"), QuickLook.Item(wall, "wall.jpg")]
+    #expect(QuickLook.again([(lake, "lake.jpg"), (wall, "wall.jpg")], showing: shown), "the same album, whichever it's paged to")
+    #expect(!QuickLook.again([(lake, "lake.jpg")], showing: shown), "another message's file")
+    #expect(!QuickLook.again([], showing: []) && !QuickLook.again([(lake, "lake.jpg")], showing: []))
+}
+
 @MainActor
 final class FileHost: ConversationHost {
     var acts: [(MediaOffer.Act, [String], Int)] = []

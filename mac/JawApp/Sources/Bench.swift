@@ -96,10 +96,11 @@ enum Bench {
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
-                || key.hasPrefix("menu-key:") || key == "promise"
+                || key.hasPrefix("menu-key:") || key == "promise" || key == "window"
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key == "promise" { keepPromise(model) }
+            if key == "window" { model.window?.window?.makeKeyAndOrderFront(nil) }
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
