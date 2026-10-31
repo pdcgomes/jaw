@@ -1441,6 +1441,30 @@ mod tests {
         assert!(!chat(&db, ANA).1, "app state brought it back by her LID, under which the blob names the conversation");
     }
 
+    /// Ana's LID joined to her number, under which jaw keeps her chat.
+    fn her_lid_joined(db: &Connection) {
+        written(db, &[Change::Person(Person { jids: vec![ANA.into(), ANA_LID.into()], ..Person::default() })]);
+    }
+
+    #[test]
+    fn a_receipt_naming_her_lid_while_jaws_mark_unread_waits_reads_the_chat_and_leaves_the_mark() {
+        let db = db();
+        written(&db, &[from_ana("m1", AT), from_ana("m2", AT + 10)]);
+        her_lid_joined(&db);
+        assert!(matches!(acted(&db, ANA, mark_at(ANA, true, "m2", AT + 1_000, "u1")), Acted::Queued { .. }));
+        // Your phone reads the chat before jaw's patch reaches WhatsApp, and its receipt names her LID.
+        let receipt = Read { chat: ANA_LID.into(), at: AT + 500, ids: vec!["m2".into()], ..Read::default() };
+        written(&db, &[Change::Read(receipt)]);
+        let (.., marked, unread, _) = chat(&db, ANA);
+        assert_eq!(
+            (marked, unread),
+            (true, 0),
+            "read, and still marked: jaw's mark is looked for under her chat's JID"
+        );
+        let read = acted(&db, ANA, mark_at(ANA, false, "m2", AT + 2_000, "r1"));
+        assert!(matches!(read, Acted::Queued { .. }), "marking it read isn't so already: {read:?}");
+    }
+
     #[test]
     fn a_patch_carrying_the_time_its_index_already_awaits_is_refused() {
         let db = db();
