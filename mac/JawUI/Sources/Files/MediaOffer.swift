@@ -111,6 +111,16 @@ public struct MediaOffer: Sendable, Hashable {
         }
     }
 
+    /// The same, as the palette says it.
+    public var statePhrase: String? {
+        switch media.state {
+        case .local, .waitingForPhone: nil
+        case .remote: media.error == nil ? "Download this file" : "Try downloading this file again"
+        case .downloading: "Stop downloading this file"
+        case .expired, .gone: "Ask the phone for this file again"
+        }
+    }
+
     /// The message's menu's file items, in order: each act, its title, and the key that does the
     /// same once the message is selected.
     public var menu: [(act: Act, title: String, key: String?)] {

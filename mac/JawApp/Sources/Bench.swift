@@ -187,12 +187,18 @@ enum Bench {
         return list[i]
     }
 
-    /// A right-click menu's items for the snapshot's log, as `menu:list:3` (the chat list's fourth
-    /// row), `menu:header` (the focused pane's) or `menu:message:5` (the sixth row of its
-    /// transcript) makes it; anything else is an unknown step.
+    /// A menu's items for the snapshot's log: a right-click menu, as `menu:list:3` (the chat list's
+    /// fourth row), `menu:header` (the focused pane's) or `menu:message:5` (the sixth row of its
+    /// transcript) makes it, or one of the menu bar's, as `menu:bar:Message`, as it opens; anything
+    /// else is an unknown step.
     static func menuSaid(_ what: String, model: AppModel) -> String {
         let parts = what.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
         let row = parts.count == 2 ? Int(parts[1]) : nil
+        if parts.count == 2, parts[0] == "bar" {
+            guard let menu = NSApp.mainMenu?.item(withTitle: parts[1])?.submenu else { return "no \(parts[1]) menu" }
+            menu.update()
+            return words(menu.items)
+        }
         switch (parts.first, row) {
         case let ("list", i?):
             guard let chat = listRow(i, model: model) else { return "no row \(i)" }
@@ -204,7 +210,7 @@ enum Bench {
             guard let menu = model.conversation?.menu(forRow: i) else { return "no message \(i)" }
             return words(menu.items)
         default:
-            return "unknown step: menu:\(what) (the menu steps are menu:list:<row>, menu:header and menu:message:<row>)"
+            return "unknown step: menu:\(what) (the menu steps are menu:list:<row>, menu:header, menu:message:<row> and menu:bar:<menu>)"
         }
     }
 
@@ -339,12 +345,14 @@ enum Bench {
     }
 
     /// Menu items as words, as the menu shows them: hidden ones left out, greyed ones in brackets, a
-    /// submenu's items after it.
+    /// submenu's items after it, made as it would be on opening.
     static func words(_ items: [NSMenuItem]) -> String {
         items.filter { !$0.isHidden }.map { item in
             if item.isSeparatorItem { return "—" }
             let title = item.isEnabled ? item.title : "[\(item.title)]"
             guard let sub = item.submenu else { return title }
+            sub.delegate?.menuNeedsUpdate?(sub)
+            if sub.autoenablesItems { sub.update() }
             return "\(title) ▸ (\(words(sub.items)))"
         }.joined(separator: " | ")
     }

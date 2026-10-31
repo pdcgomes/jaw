@@ -114,15 +114,28 @@ extension AppModel {
         }
         add(Command("message.retry", "Send Again", phrase: "Send it again", detail: "it wasn't sent", hint: "↩", place: .message, group: 1,
                     enabled: { selected().map { $0.mine && $0.status == .failed } ?? false }) { [weak self] in self?.conversation?.act("\n") })
-        // A message's file: the conversation takes the keys itself while a message is selected.
-        let hasFile: @MainActor @Sendable () -> Bool = { selected().map { MediaOffer.of($0) != nil } ?? false }
-        for (id, title, phrase, key, act) in [
-            ("look", "Quick Look", "Look at this file", "Space", MediaOffer.Act.look), ("open", "Open", "Open this file in its app", "⌘↩", .open),
-            ("save", "Save to Downloads", "Save this file to Downloads", "s", .save), ("reveal", "Show in Finder", "Show this file in Finder", nil, .reveal),
-        ] as [(String, String, String, String?, MediaOffer.Act)] {
+        // A message's file, as its menu has it: the conversation takes the keys itself while a message
+        // is selected.
+        let offer: @MainActor @Sendable () -> MediaOffer? = { selected().flatMap { MediaOffer.of($0) } }
+        func fileCommand(_ id: String, _ title: String, _ phrase: String, _ key: String?, _ act: MediaOffer.Act,
+                         enabled: @escaping @MainActor @Sendable () -> Bool = { offer() != nil })
+        {
             add(Command("message.\(id)", title, phrase: phrase, detail: "the selected message's", hint: key, place: .message, group: 2,
-                        enabled: hasFile) { [weak self] in self?.conversation?.media(act) })
+                        enabled: enabled) { [weak self] in self?.conversation?.media(act) })
         }
+        fileCommand("look", "Quick Look", "Look at this file", "Space", .look)
+        fileCommand("open", "Open", "Open this file in its app", "⌘↩", .open)
+        add(Command("message.open.with", "Open With", place: .message, group: 2, enabled: { offer()?.isHere ?? false },
+                    fill: { [weak self] in self?.conversation?.openWithItems() ?? [] }))
+        fileCommand("save", "Save to Downloads", "Save this file to Downloads", "s", .save)
+        fileCommand("save.hd", "Save HD Copy to Downloads", "Save this photo's HD copy to Downloads", nil, .saveHD, enabled: { offer()?.media.hd ?? false })
+        fileCommand("reveal", "Show in Finder", "Show this file in Finder", nil, .reveal)
+        add(Command("message.file.state", "Download", says: { (offer()?.statePhrase ?? "Download this file", "the selected message's") },
+                    titled: { offer()?.stateAct?.1 ?? "Download" }, place: .message, group: 2, enabled: { offer()?.stateAct != nil })
+            { [weak self] in
+                guard let act = offer()?.stateAct?.0 else { return }
+                self?.conversation?.media(act)
+            })
 
         // Panes
         add(Command("split.across", "Split Across", phrase: "Split this pane across", detail: "another chat beside it",

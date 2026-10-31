@@ -1075,7 +1075,15 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
                 }
                 if key != "⌘↩" { i.keyEquivalentModifierMask = [] }
                 menu.addItem(i)
-                if act == .open, let apps = openWith(offer, m) { menu.addItem(apps) }
+                let apps = act == .open ? openWith(offer, m) : []
+                if !apps.isEmpty {
+                    let holder = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+                    holder.submenu = NSMenu(title: "Open With")
+                    for app in apps {
+                        holder.submenu?.addItem(app)
+                    }
+                    menu.addItem(holder)
+                }
             }
         }
         if Self.notEditable(m) == nil {
@@ -1105,23 +1113,24 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         return menu
     }
 
-    /// Open With ▸, the apps that open a file that's here, its own first; nil before it's here.
-    func openWith(_ offer: MediaOffer, _ m: MessageRow) -> NSMenuItem? {
-        guard let here = offer.here, let url = pictures.url(here) else { return nil }
+    /// Open With's items, the apps that open a file that's here, its own first; none before it's here.
+    func openWith(_ offer: MediaOffer, _ m: MessageRow) -> [NSMenuItem] {
+        guard let here = offer.here, let url = pictures.url(here) else { return [] }
         let apps = NSWorkspace.shared.urlsForApplications(toOpen: url)
-        guard !apps.isEmpty else { return nil }
-        let item = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
         let first = NSWorkspace.shared.urlForApplication(toOpen: url)
-        for app in ([first].compactMap(\.self) + apps.filter { $0 != first }).prefix(12) {
+        return ([first].compactMap(\.self) + apps.filter { $0 != first }).prefix(12).map { app in
             let name = FileManager.default.displayName(atPath: app.path).replacingOccurrences(of: ".app", with: "")
             let i = ClosureItem(title: app == first ? "\(name) (default)" : name) { [weak self] in self?.media(.openWith(app), m, item: nil) }
             i.image = NSWorkspace.shared.icon(forFile: app.path)
             i.image?.size = NSSize(width: 16, height: 16)
-            sub.addItem(i)
+            return i
         }
-        item.submenu = sub
-        return item
+    }
+
+    /// Open With's items for the selected message's file, for the Message menu.
+    public func openWithItems() -> [NSMenuItem] {
+        guard let m = selectedMessage, let offer = MediaOffer.of(m) else { return [] }
+        return openWith(offer, m)
     }
 
     public var notice: ((String) -> Void)?

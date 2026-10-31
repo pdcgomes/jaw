@@ -46,30 +46,46 @@ public final class Command {
     public let enabled: @MainActor @Sendable () -> Bool
     /// A checkmark in the menu, when the command is a setting.
     public let on: (@MainActor @Sendable () -> Bool)?
+    /// Its title worked out as its menu opens, when that says what it will do now: a file's
+    /// Download, Try Again, Stop Downloading or Ask the Phone Again.
+    public let titled: (@MainActor @Sendable () -> String)?
+    /// The items of a submenu made as it opens, when the command is one: Open With, from the apps
+    /// that open the selected file.
+    public let fill: (@MainActor @Sendable () -> [NSMenuItem])?
     public let run: @MainActor @Sendable () -> Void
 
     public convenience init(_ id: String, _ title: String, phrase: String? = nil, detail: String = "",
-                says: (@MainActor @Sendable () -> (String, String))? = nil, symbol: String? = nil,
-                key: Shortcut? = nil, also: [Shortcut] = [], hint: String? = nil, place: MenuPlace?, submenu: String? = nil,
-                group: Int = 0, palette: Bool = true,
+                says: (@MainActor @Sendable () -> (String, String))? = nil, titled: (@MainActor @Sendable () -> String)? = nil,
+                symbol: String? = nil, key: Shortcut? = nil, also: [Shortcut] = [], hint: String? = nil, place: MenuPlace?,
+                submenu: String? = nil, group: Int = 0, palette: Bool = true,
                 enabled: @escaping @MainActor @Sendable () -> Bool = { true }, on: (@MainActor @Sendable () -> Bool)? = nil,
                 run: @escaping @MainActor @Sendable () -> Void)
     {
-        self.init(id, title, phrase: phrase, detail: detail, says: says, symbol: symbol, key: key, also: also, hint: hint,
-                  place: place, submenu: submenu, group: group, palette: palette, send: nil, enabled: enabled, on: on, run: run)
+        self.init(id, title, phrase: phrase, detail: detail, says: says, titled: titled, symbol: symbol, key: key, also: also, hint: hint,
+                  place: place, submenu: submenu, group: group, palette: palette, send: nil, enabled: enabled, on: on, fill: nil, run: run)
+    }
+
+    /// A submenu whose items are made as it opens, greyed while it can't be used; it isn't in the
+    /// palette.
+    public convenience init(_ id: String, _ title: String, place: MenuPlace, group: Int = 0,
+                            enabled: @escaping @MainActor @Sendable () -> Bool, fill: @escaping @MainActor @Sendable () -> [NSMenuItem])
+    {
+        self.init(id, title, phrase: nil, detail: "", says: nil, titled: nil, symbol: nil, key: nil, also: [], hint: nil, place: place,
+                  submenu: nil, group: group, palette: false, send: nil, enabled: enabled, on: nil, fill: fill, run: {})
     }
 
     /// A standard action, sent along the responder chain to whatever takes it: copy:, undo:,
     /// performClose:.
     public convenience init(_ id: String, _ title: String, key: Shortcut? = nil, place: MenuPlace, group: Int = 0, send: Selector) {
-        self.init(id, title, phrase: nil, detail: "", says: nil, symbol: nil, key: key, also: [], hint: nil, place: place, submenu: nil,
-                  group: group, palette: false, send: send, enabled: { true }, on: nil, run: {})
+        self.init(id, title, phrase: nil, detail: "", says: nil, titled: nil, symbol: nil, key: key, also: [], hint: nil, place: place,
+                  submenu: nil, group: group, palette: false, send: send, enabled: { true }, on: nil, fill: nil, run: {})
     }
 
     init(_ id: String, _ title: String, phrase: String?, detail: String, says: (@MainActor @Sendable () -> (String, String))?,
-         symbol: String?, key: Shortcut?, also: [Shortcut], hint: String?, place: MenuPlace?, submenu: String?, group: Int,
-         palette: Bool, send: Selector?, enabled: @escaping @MainActor @Sendable () -> Bool, on: (@MainActor @Sendable () -> Bool)?,
-         run: @escaping @MainActor @Sendable () -> Void)
+         titled: (@MainActor @Sendable () -> String)?, symbol: String?, key: Shortcut?, also: [Shortcut], hint: String?,
+         place: MenuPlace?, submenu: String?, group: Int, palette: Bool, send: Selector?,
+         enabled: @escaping @MainActor @Sendable () -> Bool, on: (@MainActor @Sendable () -> Bool)?,
+         fill: (@MainActor @Sendable () -> [NSMenuItem])?, run: @escaping @MainActor @Sendable () -> Void)
     {
         self.id = id
         self.title = title
@@ -86,6 +102,8 @@ public final class Command {
         self.send = send
         self.enabled = enabled
         self.on = on
+        self.titled = titled
+        self.fill = fill
         self.run = run
     }
 
@@ -95,10 +113,12 @@ public final class Command {
     }
 
     /// A menu item that runs the command, enabled and checked as it says; under a title of its own,
-    /// which says what it will do (Unpin), it has no tick.
+    /// which says what it will do (Unpin), it has no tick. A command that fills a submenu holds one,
+    /// greyed by the same rule.
     public func menuItem(title: String? = nil) -> NSMenuItem {
-        let item = NSMenuItem(title: title ?? self.title, action: send ?? #selector(CommandTarget.runCommand(_:)),
-                              keyEquivalent: shortcut?.menuKey ?? "")
+        let item = NSMenuItem(title: title ?? self.title, action: nil, keyEquivalent: shortcut?.menuKey ?? "")
+        if let fill { item.submenu = FilledMenu(title: title ?? self.title, fill: fill) }
+        item.action = send ?? #selector(CommandTarget.runCommand(_:))
         item.keyEquivalentModifierMask = shortcut?.modifiers ?? []
         item.target = send == nil ? CommandTarget.shared : nil
         item.representedObject = CommandBox(self, ticks: title == nil)
@@ -132,7 +152,8 @@ public final class Command {
 /// Holds a command in a menu item, which keeps its represented object strongly.
 final class CommandBox: NSObject {
     let command: Command
-    /// Whether the item shows the command's tick: not when its title says what it will do (Unpin).
+    /// Whether the item shows the command's tick, and its title as worked out when its menu opens:
+    /// not when it has a title of its own, which says what it will do (Unpin).
     let ticks: Bool
 
     @MainActor init(_ command: Command, ticks: Bool = true) {
@@ -154,7 +175,39 @@ final class CommandTarget: NSObject, NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let box = item.representedObject as? CommandBox else { return true }
         if box.ticks, let on = box.command.on { item.state = on() ? .on : .off }
+        if box.ticks, let titled = box.command.titled { item.title = titled() }
         return box.command.enabled()
+    }
+}
+
+/// A submenu whose items are made each time it opens, as Open With's from the selected file. It
+/// has no keys, so it isn't made for a key pressed: Launch Services is asked only as it opens.
+@MainActor
+final class FilledMenu: NSMenu, NSMenuDelegate {
+    let fill: @MainActor @Sendable () -> [NSMenuItem]
+
+    init(title: String, fill: @escaping @MainActor @Sendable () -> [NSMenuItem]) {
+        self.fill = fill
+        super.init(title: title)
+        delegate = self
+    }
+
+    @available(*, unavailable)
+    required init(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for item in fill() {
+            menu.addItem(item)
+        }
+    }
+
+    func menuHasKeyEquivalent(_: NSMenu, for _: NSEvent, target _: AutoreleasingUnsafeMutablePointer<AnyObject?>,
+                              action _: UnsafeMutablePointer<Selector?>) -> Bool
+    {
+        false
     }
 }
 

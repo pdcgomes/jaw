@@ -52,6 +52,37 @@ final class Ran {
 }
 
 @MainActor
+@Test func `a command can say what it will do as its menu opens, and fill a submenu as it opens, greyed while it can't be used`() throws {
+    let state = Ran(), apps = Ran()
+    let act = Command("file.state", "Download", titled: { state.n == 0 ? "Download" : "Stop Downloading" }, place: .message,
+                      enabled: { state.flag }) {}
+    let openWith = Command("open.with", "Open With", place: .message, enabled: { apps.flag },
+                           fill: { (0 ..< apps.n).map { NSMenuItem(title: "App \($0)", action: nil, keyEquivalent: "") } })
+    let message = try #require(Menus.bar([act, openWith]).item(withTitle: "Message")?.submenu)
+    message.update()
+    #expect(message.items.map(\.title) == ["Download", "Open With"])
+    state.n = 1
+    message.update()
+    #expect(message.items[0].title == "Stop Downloading", "its title as things stand when it opens")
+    let holder = message.items[1]
+    let sub = try #require(holder.submenu)
+    apps.n = 2
+    sub.delegate?.menuNeedsUpdate?(sub)
+    #expect(sub.items.map(\.title) == ["App 0", "App 1"])
+    apps.n = 1
+    sub.delegate?.menuNeedsUpdate?(sub)
+    #expect(sub.items.map(\.title) == ["App 0"], "made again each time it opens")
+    #expect(holder.isEnabled)
+    apps.flag = false
+    message.update()
+    #expect(!holder.isEnabled, "greyed while there's nothing to open")
+    #expect(!openWith.inPalette)
+    let own = act.menuItem(title: "Ask the Phone Again")
+    _ = CommandTarget.shared.validateMenuItem(own)
+    #expect(own.title == "Ask the Phone Again", "a title of its own stays")
+}
+
+@MainActor
 @Test func `menus are made by place, in groups, with submenus where they first come`() throws {
     let commands = [
         Command("a", "Bubbles", place: .view, submenu: "Message Style") {},

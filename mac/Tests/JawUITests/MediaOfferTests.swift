@@ -24,6 +24,10 @@ func titles(_ offer: MediaOffer?) -> [String] {
     let hd = MediaOffer.of(Samples.pictures.first { $0.id == "P4" }!)
     #expect(titles(hd).contains("Save HD Copy to Downloads"))
     #expect(MediaOffer.of(state("D2"))?.stateAct?.0 == .stop && MediaOffer.of(state("D5"))?.stateAct?.0 == .fetch)
+    #expect(["D11", "D3", "D2", "D5", "D6", "D4", "D15"].map { MediaOffer.of(state($0))?.statePhrase } == [
+        "Download this file", "Try downloading this file again", "Stop downloading this file", "Ask the phone for this file again",
+        "Ask the phone for this file again", nil, nil,
+    ], "the palette's words for the same")
 }
 
 @Test func `text, a voice message, one deleted and one to view once have no file to offer`() {
