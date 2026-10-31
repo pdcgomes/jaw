@@ -134,7 +134,8 @@ pub fn community_row(db: &Connection, id: &str) -> Result<Option<ChatRow>> {
 /// What `list` holds of community `id`: its row, what it sums up of the groups of it the list holds,
 /// those groups' rows when it's `open`, and its place, the newest of them and of itself if the
 /// list holds it. None when jaw has no community `id` or the list holds none of it. A closed
-/// community reads its groups' places and counts alone, and its newest group's row for its line.
+/// community reads its groups' places, counts and last messages' times alone, and the row of the
+/// group whose last message is newest for its line, as an open one takes that group's.
 fn gather(db: &Connection, list: &List, id: &str, open: bool, now: i64) -> Result<Option<Entry>> {
     let Some(row) = community_row(db, id)? else { return Ok(None) };
     let own = held(db, list, std::slice::from_ref(&row), now)?.contains(&row.n);
@@ -143,11 +144,15 @@ fn gather(db: &Connection, list: &List, id: &str, open: bool, now: i64) -> Resul
         let places: Vec<ChatCursor> = groups.iter().map(ChatRow::cursor).collect();
         let sum = |count: fn(&ChatRow) -> i64| groups.iter().map(count).sum::<i64>();
         let (unread, mentions) = (sum(|g| g.unread), sum(|g| g.mentions));
-        let last = groups.iter().filter_map(|g| g.last.as_ref()).max_by_key(|last| last.at).cloned();
+        let last = groups
+            .iter()
+            .filter_map(|g| g.last.as_ref().map(|last| (last.at, g.n, last)))
+            .max_by_key(|&(at, n, _)| (at, n))
+            .map(|(_, _, last)| last.clone());
         (groups, places, unread, mentions, last)
     } else {
         let members = community_members(db, list, id, now)?;
-        let newest = members.iter().max_by_key(|m| (m.last_at, m.n)).map(|m| m.n);
+        let newest = members.iter().filter_map(|m| m.last.map(|at| (at, m.n))).max().map(|(_, n)| n);
         let last = match newest {
             Some(n) => read::chat(db, n)?.and_then(|row| row.last),
             None => None,

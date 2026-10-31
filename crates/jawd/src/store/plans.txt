@@ -1473,36 +1473,48 @@ SELECT c.n, c.id, c.v, c.sort, c.kind, c.name, c.person, c.avatar, c.unread, c.m
       SEARCH g USING INDEX chats_by_community (community=?)
 
 -- src/store/lists.rs
-SELECT c.n, c.sort, c.unread, c.mentions, c.last_at FROM chats c WHERE c.community = ?2 AND c.archived = ?1 LIMIT ?3
-    SEARCH c USING INDEX chats_by_community (community=?)
-
--- src/store/lists.rs
-SELECT c.n, c.sort, c.unread, c.mentions, c.last_at FROM chats c WHERE c.community = ?1 AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) LIMIT ?2
-    SEARCH c USING INDEX chats_by_community (community=?)
-
--- src/store/lists.rs
-SELECT c.n, c.sort, c.unread, c.mentions, c.last_at FROM chats c WHERE c.community = ?1 AND c.archived = 0 AND c.kind IN ('group', 'announcement') LIMIT ?2
-    SEARCH c USING INDEX chats_by_community (community=?)
-
--- src/store/lists.rs
-SELECT c.n, c.sort, c.unread, c.mentions, c.last_at FROM chats c WHERE c.community = ?1 AND c.archived = 0 LIMIT ?2
-    SEARCH c USING INDEX chats_by_community (community=?)
-
--- src/store/lists.rs
-SELECT c.n, c.sort, c.unread, c.mentions, c.last_at FROM chats c WHERE c.community = ?2 AND EXISTS (SELECT 1 FROM folder_chats f WHERE f.folder = ?1 AND f.chat = c.n) LIMIT ?3
-    SEARCH c USING INDEX chats_by_community (community=?)
-    SEARCH f EXISTS USING COVERING INDEX folder_chats_by_chat (chat=? AND folder=?)
-
--- src/store/lists.rs
-SELECT c.n, c.sort, c.unread, c.mentions, c.last_at FROM chats c WHERE c.community = ?2 AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) LIMIT ?3
+SELECT c.n, c.sort, c.unread, c.mentions, (SELECT m.at FROM messages m WHERE m.n = c.last_message) FROM chats c WHERE c.community = ?2 AND c.archived = ?1 LIMIT ?3
     SEARCH c USING INDEX chats_by_community (community=?)
     CORRELATED SCALAR SUBQUERY 1
-      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/lists.rs
+SELECT c.n, c.sort, c.unread, c.mentions, (SELECT m.at FROM messages m WHERE m.n = c.last_message) FROM chats c WHERE c.community = ?1 AND c.archived = 0 AND (c.unread > 0 OR c.marked_unread <> 0) LIMIT ?2
+    SEARCH c USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/lists.rs
+SELECT c.n, c.sort, c.unread, c.mentions, (SELECT m.at FROM messages m WHERE m.n = c.last_message) FROM chats c WHERE c.community = ?1 AND c.archived = 0 AND c.kind IN ('group', 'announcement') LIMIT ?2
+    SEARCH c USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/lists.rs
+SELECT c.n, c.sort, c.unread, c.mentions, (SELECT m.at FROM messages m WHERE m.n = c.last_message) FROM chats c WHERE c.community = ?1 AND c.archived = 0 LIMIT ?2
+    SEARCH c USING INDEX chats_by_community (community=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/lists.rs
+SELECT c.n, c.sort, c.unread, c.mentions, (SELECT m.at FROM messages m WHERE m.n = c.last_message) FROM chats c WHERE c.community = ?2 AND EXISTS (SELECT 1 FROM folder_chats f WHERE f.folder = ?1 AND f.chat = c.n) LIMIT ?3
+    SEARCH c USING INDEX chats_by_community (community=?)
+    SEARCH f EXISTS USING COVERING INDEX folder_chats_by_chat (chat=? AND folder=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/lists.rs
+SELECT c.n, c.sort, c.unread, c.mentions, (SELECT m.at FROM messages m WHERE m.n = c.last_message) FROM chats c WHERE c.community = ?2 AND c.archived = 0 AND (?5 = 0 OR c.unread > 0 OR c.marked_unread <> 0) AND (?6 = 0 OR c.mentions > 0) AND (?7 IS NULL OR iif(?7 = 'direct', c.kind = 'direct', iif(?7 = 'group', c.kind IN ('group', 'announcement'), c.kind = 'community' OR c.community IS NOT NULL))) AND (?8 IS NULL OR c.community = ?8 OR c.id = ?8) AND (?9 = 0 OR c.muted_until > ?12) AND (?10 IS NULL OR c.kind = 'direct' AND c.last_at <= ?12 - ?10 * 1000 AND EXISTS (SELECT 1 FROM messages lm WHERE lm.n = c.last_message AND lm.mine = 0 AND lm.kind NOT IN ('system', 'call'))) AND (?11 = 0 OR EXISTS (SELECT 1 FROM favourites s WHERE s.chat = c.n) OR EXISTS (SELECT 1 FROM folder_chats fc JOIN favourites s ON s.folder = fc.folder WHERE fc.chat = c.n)) LIMIT ?3
+    SEARCH c USING INDEX chats_by_community (community=?)
     CORRELATED SCALAR SUBQUERY 2
-      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+      SEARCH lm USING INTEGER PRIMARY KEY (rowid=?)
     CORRELATED SCALAR SUBQUERY 3
+      SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_2 (chat=?)
+    CORRELATED SCALAR SUBQUERY 4
       SEARCH fc USING COVERING INDEX folder_chats_by_chat (chat=?)
       SEARCH s USING COVERING INDEX sqlite_autoindex_favourites_1 (folder=?)
+    CORRELATED SCALAR SUBQUERY 1
+      SEARCH m USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/lists.rs
 SELECT chat FROM folder_chats WHERE folder = ?1 AND chat IN (SELECT value FROM json_each(?2))

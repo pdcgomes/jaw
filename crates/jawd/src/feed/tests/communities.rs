@@ -657,6 +657,29 @@ async fn a_community_a_list_holds_for_itself_alone_shows_its_own_newest_message_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_closed_communitys_last_is_the_newest_of_its_groups_messages_as_an_open_ones_once_one_is_deleted_for_you() {
+    let bed = Bed::new(brisk());
+    bed.apply(vec![
+        person(RUI, "Rui"),
+        community(BAIRRO, "Bairro"),
+        group(FESTA, "Festa", BAIRRO),
+        group(XADREZ, "Xadrez", BAIRRO),
+        said(FESTA, "f1", AT + 10),
+        said(XADREZ, "x1", AT + 20),
+        said(FESTA, "f2", AT + 30),
+    ])
+    .await;
+    // Festa keeps its place, by f2's time, and shows f1, older than Xadrez's x1.
+    bed.apply(vec![Change::DeleteMessage { chat: FESTA.into(), id: "f2".into() }]).await;
+    let mut watcher = bed.watcher(64);
+    let open = Held::top(&mut watcher, "all").await;
+    let closed = Held::watch(&mut watcher, json!({"folder": "all", "around": "top", "after": 50, "open": []})).await;
+    assert_eq!(open.row(BAIRRO)["last"]["summary"], json!("x1"), "the newest of its groups' messages");
+    assert_eq!(closed.row(BAIRRO)["last"], open.row(BAIRRO)["last"], "closed as open");
+    assert_eq!(closed.row(BAIRRO)["sort"], open.row(BAIRRO)["sort"], "both at Festa's place");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_pinned_community_sits_among_the_pinned_at_its_own_place_above_its_groups() {
     let bed = Bed::new(brisk());
     bairro(&bed).await;

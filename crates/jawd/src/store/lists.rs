@@ -500,18 +500,21 @@ pub fn community_groups(db: &Connection, list: &List, community: &str, now: i64)
 }
 
 /// What a window needs of a group of a community it shows as its one row: where the group sorts,
-/// its unread messages and mentions, and when its newest message came.
+/// its unread messages and mentions, and when the message its row shows as its last was sent.
 #[derive(Debug)]
 pub struct Member {
     pub n: i64,
     pub cursor: ChatCursor,
     pub unread: i64,
     pub mentions: i64,
-    pub last_at: i64,
+    /// None when it has no message; earlier than its place's time once its newest is deleted for
+    /// you, as its row then shows the one before.
+    pub last: Option<i64>,
 }
 
 /// What community_members reads of a group `c`.
-const MEMBER: &str = "SELECT c.n, c.sort, c.unread, c.mentions, c.last_at";
+const MEMBER: &str =
+    "SELECT c.n, c.sort, c.unread, c.mentions, (SELECT m.at FROM messages m WHERE m.n = c.last_message)";
 
 fn members(db: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Member>> {
     Ok(db
@@ -522,7 +525,7 @@ fn members(db: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<
                 cursor: ChatCursor { sort: r.get(1)?, n: r.get(0)? },
                 unread: r.get(2)?,
                 mentions: r.get(3)?,
-                last_at: r.get(4)?,
+                last: r.get(4)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?)
