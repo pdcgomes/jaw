@@ -87,6 +87,20 @@ func one(_ text: String, sourceLocation: SourceLocation = #_sourceLocation) -> V
             "the last FN, blank, gives way to N")
 }
 
+@Test func `the white space around a name, a number, a parameter or a card's mark is Unicode's, as jaw-proto's trim has it`() {
+    #expect(one("BEGIN:VCARD\nN:Lopes;Marta;;;\nFN:\u{200B}\nTEL:\u{200B}\nEND:VCARD") == VCard.Card(name: "\u{200B}", phones: [phone("\u{200B}")]),
+            "a zero-width space isn't white space, so it names the card, and is a number, as in the terminal")
+    #expect(VCard.read("BEGIN:VCARD\nFN:Ana\nEND:VCARD\u{A0}\nFN:Rui\nEND:VCARD").map(\.name) == ["Ana"],
+            "a no-break space after END:VCARD still ends the card")
+    #expect(VCard.read("\u{A0}BEGIN\u{205F}:\u{2028}vcard\u{3000}\nFN:Ana\nEND:VCARD").map(\.name) == ["Ana"], "nor stops one beginning")
+    let card = one("BEGIN:VCARD\n\u{2003}FN\u{3000}:Ana\n\u{85}TEL;waid=\u{A0}351912345678\u{2009}:+351 912 345 678\nEND:VCARD")
+    #expect(card.name == "Ana" && card.phones == [phone("+351 912 345 678", "+351912345678")],
+            "around a property's name and its parameters' values, past ASCII's")
+    #expect(one("BEGIN:VCARD\nFN:\u{200B}Ana\u{200B}\nEND:VCARD").name == "\u{200B}Ana\u{200B}")
+    #expect(one("BEGIN:VCARD\nFN:" + String(repeating: " ", count: VCard.valueMost) + "Ana\nN:;Rui;;;\nEND:VCARD").name == "Rui",
+            "past the 64 KiB of a value kept as written, a name reads as none here, where the terminal reads it")
+}
+
 @Test func `names and numbers in another case, in a group, or with a BOM before them read as theirs`() {
     let card = one("begin:vcard\n\u{FEFF}fn:Ana\nGROUP.tel;WaId=351912345678:+351 912 345 678\nend:vcard")
     #expect(card.name == "Ana" && card.phones == [phone("+351 912 345 678", "+351912345678")])

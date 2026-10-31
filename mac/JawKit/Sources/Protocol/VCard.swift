@@ -116,8 +116,11 @@ public struct CardPicture: Sendable, Hashable {
 /// (`crates/jaw-proto/src/vcard.rs`) in Swift, so a card reads here as it does in the terminal: a
 /// card is what someone else's phone wrote, and can be as long as a line jawd sends, so only what's
 /// drawn is read, and only so much of it, in one pass whose cost grows with the card's length and no
-/// faster, however its lines are folded. Beyond jaw-proto's, it reads a card's photo when the card
-/// carries it inline.
+/// faster, however its lines are folded. It parts from jaw-proto's in one bound of its own: of a
+/// name, a number or BEGIN's or END's value it keeps the first `valueMost` bytes as written, where
+/// jaw-proto keeps them all, so one written after 64 KiB of white space, which no phone writes,
+/// reads as none here and as itself in the terminal. Beyond jaw-proto's, it reads a card's photo
+/// when the card carries it inline.
 enum VCard {
     /// The most cards read from one vCard, and numbers from one card.
     static let cardsMost = 256
@@ -342,14 +345,13 @@ enum VCard {
         mutating func ended() {
             let colon = colon!
             params = kept[0 ..< colon].firstIndex(of: UInt8(ascii: ";")) ?? colon
-            var start = (kept[0 ..< params].lastIndex(of: UInt8(ascii: ".")) ?? -1) + 1
-            var end = params
-            while start < end, VCard.space(kept[start]) { start += 1 }
-            while end > start, VCard.space(kept[end - 1]) { end -= 1 }
-            while end - start >= 3, kept[start] == 0xEF, kept[start + 1] == 0xBB, kept[start + 2] == 0xBF { start += 3 }
-            let named = kept[start ..< end]
+            let start = (kept[0 ..< params].lastIndex(of: UInt8(ascii: ".")) ?? -1) + 1
+            var named = VCard.trimmed(kept[start ..< params])
+            while named.starts(with: VCard.bom) {
+                named = named.dropFirst(VCard.bom.count)
+            }
             name = switch named.count {
-            case 1 where VCard.lower(named[start]) == UInt8(ascii: "n"): .structured
+            case 1 where VCard.lower(named[named.startIndex]) == UInt8(ascii: "n"): .structured
             case 2 where VCard.same(named, VCard.fn): .formatted
             case 3 where VCard.same(named, VCard.tel): .phone
             case 3 where VCard.same(named, VCard.endWord): .end
@@ -562,13 +564,16 @@ enum VCard {
     }
 
     /// `text` without the white space around it, as Rust's `trim` takes it off.
-    static func trim(_ text: some StringProtocol) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    static func trim(_ text: String) -> String {
+        String(text.unicodeScalars.trimmed)
     }
 
     /// The names of the properties a card is read for, in lower case.
     static let beginWord = Array("begin".utf8), endWord = Array("end".utf8), fn = Array("fn".utf8), tel = Array("tel".utf8),
                photoWord = Array("photo".utf8)
+    /// A byte order mark in UTF-8, which jaw-proto takes off the start of the text and of a
+    /// property's name.
+    static let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
 
     /// Whether `bytes` are `word`'s, in any case of their ASCII letters only, as Rust's
     /// `eq_ignore_ascii_case` has it.
@@ -597,11 +602,42 @@ enum VCard {
         byte == 0x20 || (0x09 ... 0x0D).contains(byte)
     }
 
-    /// `bytes` without the ASCII white space around them.
+    /// How many bytes the white space `bytes` begin with takes in UTF-8, or 0 when they don't begin
+    /// with any: Unicode's White_Space, as Rust's `trim` has it, ASCII's and the few past it.
+    static func spaceFirst(_ bytes: ArraySlice<UInt8>) -> Int {
+        guard let first = bytes.first else { return 0 }
+        if first < 0x80 { return space(first) ? 1 : 0 }
+        var parser = Unicode.UTF8.ForwardParser()
+        var each = bytes.makeIterator()
+        guard case let .valid(scalar) = parser.parseScalar(from: &each), Unicode.UTF8.decode(scalar).properties.isWhitespace else { return 0 }
+        return scalar.count
+    }
+
+    /// How many bytes the white space `bytes` end with takes in UTF-8, or 0.
+    static func spaceLast(_ bytes: ArraySlice<UInt8>) -> Int {
+        guard let last = bytes.last else { return 0 }
+        if last < 0x80 { return space(last) ? 1 : 0 }
+        var start = bytes.endIndex - 1
+        while start > bytes.startIndex, bytes.endIndex - start < 4, bytes[start] & 0xC0 == 0x80 {
+            start -= 1
+        }
+        let n = spaceFirst(bytes[start...])
+        return n == bytes.endIndex - start ? n : 0
+    }
+
+    /// `bytes` without the white space around them, as Rust's `trim` takes it off.
     static func trimmed(_ bytes: ArraySlice<UInt8>) -> ArraySlice<UInt8> {
         var out = bytes
-        while let first = out.first, space(first) { out = out.dropFirst() }
-        while let last = out.last, space(last) { out = out.dropLast() }
+        var n = spaceFirst(out)
+        while n > 0 {
+            out = out.dropFirst(n)
+            n = spaceFirst(out)
+        }
+        n = spaceLast(out)
+        while n > 0 {
+            out = out.dropLast(n)
+            n = spaceLast(out)
+        }
         return out
     }
 
