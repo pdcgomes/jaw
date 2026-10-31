@@ -566,15 +566,31 @@ async fn while_catching_up_a_community_held_only_for_its_groups_stays_in_its_win
     bed.catching_up.store(true, Ordering::Relaxed);
     let mut watcher = bed.watcher(64);
     let unread = watcher.watch("chats.watch", json!({"folder": "unread", "around": "top", "after": 10})).await;
+    let shut = json!({"folder": "unread", "around": "top", "after": 10, "open": []});
+    let closed = watcher.watch("chats.watch", shut).await;
     assert_eq!(watcher.windows[&unread].rows[BAIRRO]["children_unread"], json!(3));
     bed.apply(vec![said(FESTA, "f3", AT + 50)]).await;
-    while watcher.windows[&unread].rows[FESTA]["last"]["summary"] != "f3" {
+    while watcher.windows[&unread].rows[FESTA]["last"]["summary"] != "f3"
+        || watcher.windows[&closed].rows[BAIRRO]["children_unread"] != 4
+    {
         watcher.turn().await;
         watcher.drain();
     }
     let model = &watcher.windows[&unread];
     assert_eq!(model.rows[BAIRRO]["children_unread"], json!(4), "Bairro, held only for its groups, counts them still");
     summed(model, "held while catching up");
+    for (method, push) in watcher.pushes.iter().filter(|(method, push)| method == "chats" && push["watch"] == unread) {
+        let mut ids: Vec<&str> =
+            push["upsert"].as_array().into_iter().flatten().map(|r| r["id"].as_str().unwrap()).collect();
+        ids.sort();
+        let all = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), all, "each row once in a {method} push, open Bairro's groups under it alone: {push}");
+    }
+    let model = &watcher.windows[&closed];
+    let groups: Vec<&String> = model.rows.keys().filter(|id| model.rows[*id]["community"] == BAIRRO).collect();
+    assert!(groups.is_empty(), "closed, none of Bairro's groups comes while it's held: {groups:?}");
+    assert_eq!(shape(model), ["Ana", "Bairro 4/1", "Regata"], "held, in the order it was watched in");
     bed.catching_up.store(false, Ordering::Relaxed);
 }
 
