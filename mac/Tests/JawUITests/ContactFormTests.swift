@@ -50,7 +50,19 @@ let refusedWords = "40 wait to send, 2 failed; it can go once some have"
     let number = CNMutableContact()
     number.phoneNumbers = [CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: "+351 912 000 000"))]
     #expect(ContactForm.card(number)?.sent.name == "+351 912 000 000")
-    #expect(ContactForm.card(CNMutableContact()) == nil)
+    #expect(ContactForm.made(CNMutableContact()) == .unadded("that contact has no name, number or email to send"))
+}
+
+@MainActor @Test func `what a contact picked makes lands on the form: its card, or why there's none`() {
+    let form = ContactForm(chat: "ana", to: "Ana")
+    form.land(.card(Samples.formCards[0]))
+    #expect(form.cards == [Samples.formCards[0]] && form.warning == nil)
+    form.land(.unadded("that contact has no name, number or email to send"))
+    #expect(form.warning == "that contact has no name, number or email to send" && form.cards.count == 1)
+    form.land(.unfetched)
+    #expect(form.warning == "Contacts gave Jaw less of that contact than its card needs")
+    #expect(!["that contact has no name, number or email to send", form.warning].contains(ContactForm.unwritten),
+            "Contacts failing to write a card says so in words of its own")
 }
 
 @MainActor @Test func `the form says what's in the way as jawd counts it, and is ready only with cards to send`() {

@@ -117,25 +117,55 @@ public final class ContactForm {
         chosen = min(chosen + 1, max(cards.count - 1, 0))
     }
 
+    /// What a contact picked makes: its card; why it makes none, in jaw's words; or nothing yet, when
+    /// it came without what its card is made from, which Contacts is then asked for.
+    public enum Made: Sendable, Equatable {
+        case card(Card)
+        case unadded(String)
+        case unfetched
+    }
+
+    /// What a contact's card is made from, as Contacts is asked for it: what its vCard needs, and
+    /// what its name is made from.
+    public nonisolated static var keys: [any CNKeyDescriptor] {
+        [CNContactVCardSerialization.descriptorForRequiredKeys(), CNContactFormatter.descriptorForRequiredKeys(for: .fullName)]
+    }
+
     /// A contact's card as Contacts exports it, a vCard 3.0, without its photo, which keeps it small,
     /// as WhatsApp's phones send theirs; named as Contacts names it, or failing that by its
-    /// organisation, its first number or its first email. Nil for a contact with none of them, or
-    /// one fetched without the keys a vCard needs (`CNContactVCardSerialization`'s).
-    public nonisolated static func card(_ contact: CNContact) -> Card? {
-        guard contact.areKeysAvailable([CNContactVCardSerialization.descriptorForRequiredKeys(),
-                                        CNContactFormatter.descriptorForRequiredKeys(for: .fullName)]),
-            let copy = contact.mutableCopy() as? CNMutableContact
-        else { return nil }
+    /// organisation, its first number or its first email.
+    public nonisolated static func made(_ contact: CNContact) -> Made {
+        guard contact.areKeysAvailable(keys), let copy = contact.mutableCopy() as? CNMutableContact else { return .unfetched }
         let names = [CNContactFormatter.string(from: contact, style: .fullName), contact.organizationName,
                      contact.phoneNumbers.first?.value.stringValue, contact.emailAddresses.first.map { $0.value as String }]
         guard let name = names.compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) }).first(where: { !$0.isEmpty }) else {
-            return nil
+            return .unadded("that contact has no name, number or email to send")
         }
         copy.imageData = nil
-        guard let data = try? CNContactVCardSerialization.data(with: [copy]), let vcard = String(data: data, encoding: .utf8) else {
-            return nil
+        do {
+            let data = try CNContactVCardSerialization.data(with: [copy])
+            guard let vcard = String(data: data, encoding: .utf8) else { return .unadded(unwritten) }
+            return .card(Card(name: name, vcard: vcard))
+        } catch {
+            return .unadded(unwritten + ": " + error.localizedDescription)
         }
-        return Card(name: name, vcard: vcard)
+    }
+
+    /// What's said when Contacts can't write a contact as a card.
+    nonisolated static let unwritten = "Contacts couldn't write that contact as a card"
+
+    /// A contact's card, as `made` makes it, or nil when it makes none.
+    public nonisolated static func card(_ contact: CNContact) -> Card? {
+        if case let .card(card) = made(contact) { card } else { nil }
+    }
+
+    /// Puts on the form what was made of a contact picked for it: its card, or why there's none.
+    public func land(_ made: Made) {
+        switch made {
+        case let .card(card): add(card)
+        case let .unadded(why): unadded = why
+        case .unfetched: unadded = "Contacts gave Jaw less of that contact than its card needs"
+        }
     }
 }
 
