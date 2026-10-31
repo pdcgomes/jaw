@@ -73,6 +73,12 @@ import Testing
     #expect(Samples.tree.notHeld("Family") == "Family is gone")
 }
 
+@Test func `a folder's list refused says the folder is gone, by its name, or jawd's words for why`() {
+    #expect(Samples.tree.refused("folder:1", gone: true, why: "jawd has no folder folder:1") == "Family is gone", "not jawd's id for it")
+    #expect(Samples.tree.refused("folder:1", gone: false, why: "every window is taken") == "Family couldn't be watched: every window is taken")
+    #expect(Samples.tree.refused("folder:99", gone: true, why: "jawd has no folder folder:99") == "The folder is gone", "one the tree no longer holds")
+}
+
 @Test func `a slot says what's on it, and a folder of yours is named by its path where another has its name`() {
     var tree = Samples.tree
     #expect(tree.slotName(1) == "Family" && tree.slotName(2) == "Ana Ribeiro" && tree.slotName(4) == nil)

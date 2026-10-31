@@ -121,6 +121,13 @@ public struct FolderTree: Sendable, Equatable {
         served ? "\(name) is gone" : "folders come with jawd's M6"
     }
 
+    /// What's said when jawd refuses the window of a folder's chats, as when it comes back without the
+    /// folder: that it's gone, by its name, for a folder jawd has no more, or else jawd's words.
+    public func refused(_ folder: String, gone: Bool, why: String) -> String {
+        let name = rows[folder] == nil ? "The folder" : label(folder)
+        return gone ? notHeld(name) : "\(name) couldn't be watched: \(why)"
+    }
+
     /// The slot that holds a folder or a chat.
     public func slot(of target: String) -> Int? {
         favourites.first { $0.target == target }?.slot

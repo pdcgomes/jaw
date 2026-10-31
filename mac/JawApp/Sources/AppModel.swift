@@ -279,14 +279,19 @@ final class AppModel {
             window?.sidebar.roster.apply(u)
             window?.sidebar.roster.typing = rosterTyping()
         case let .windowFailed(w, failure) where w == rosterWindow:
-            say("the people couldn't be watched: \(failure)", warn: true)
+            // A folder gone is said once, by its list's failure, or not at all when the tree's push
+            // takes the list to All first.
+            if failure.code != ErrorCode.notFound { say("the people couldn't be watched: \(failure)", warn: true) }
         case let .windowFailed(w, failure) where w == listWindow && folder != "all":
-            say("\(failure)", warn: true)
+            say(tree.refused(folder, gone: failure.code == ErrorCode.notFound, why: "\(failure)"), warn: true)
             pick(folder: "all")
+        case let .windowFailed(w, failure) where w == listWindow || paneWindows[w] != nil:
+            say("a window couldn't be watched: \(failure)", warn: true)
         case let .windowFailed(w, why) where libraryWindows[w] != nil:
             if let id = libraryWindows[w] { libraries[id]?.refuse("\(why)") }
-        case let .windowFailed(_, failure):
-            say("a window couldn't be watched: \(failure)", warn: true)
+        case .windowFailed:
+            // A window let go since, as the roster's once its folder's list failing took the list to All.
+            break
         case let .layout(kept) where kept.interface == TerminalPanes.interface:
             terminalPanes(kept)
         case let .looked(chat, found):
