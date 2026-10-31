@@ -133,6 +133,8 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
         } else if table.selectedRow >= 0 {
             table.deselectAll(nil)
         }
+        // A fold opened, or people gone, can bring the last person held into sight with no scroll.
+        grow()
     }
 
     /// The selected line, as `key` names it.
@@ -180,7 +182,13 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     }
 
     @objc func scrolled() {
+        grow()
+    }
+
+    /// Asks for more, as `grow(visibleTo:)` does, from the lines in sight.
+    func grow() {
         let visible = table.rows(in: scroll.contentView.bounds)
+        guard visible.length > 0 else { return }
         grow(visibleTo: visible.location + visible.length)
     }
 
@@ -188,7 +196,7 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     /// sight, while the folder has more: with its folds closed the roster's lines are few, so the lines
     /// in sight say nothing of how near the end of its people it is.
     func grow(visibleTo end: Int) {
-        guard UInt64(people.count) < people.total, people.place.after < Self.most, let last = people.list.last?.id,
+        guard UInt64(people.count) < people.total, people.place.after < Self.most, let last = people.last?.id,
               let at = lines.firstIndex(where: { if case let .person(p, _) = $0 { p.id == last } else { false } }), at < end
         else { return }
         let after = min(UInt32(people.count) + Self.rows, Self.most)

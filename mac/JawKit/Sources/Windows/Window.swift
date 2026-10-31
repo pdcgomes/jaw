@@ -321,6 +321,11 @@ public struct People<R: WindowRow>: Sendable {
     public var list: [R] {
         rows.order.map { rows.byID[$0.id]! }
     }
+
+    /// The last person held, as jawd sorts them.
+    public var last: R? {
+        rows.order.last.flatMap { rows.byID[$0.id] }
+    }
 }
 
 /// A chat's messages, from the smallest `sort` up.

@@ -136,6 +136,27 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
     #expect(full.moved == [.top(1000)], "nothing more once it's there")
 }
 
+@MainActor
+@Test func `a fold opened, or someone listed, that brings the last person held into sight asks for more, as a scroll there would`() {
+    let host = RosterStub()
+    let r = roster(host)
+    r.view.frame = NSRect(x: 0, y: 0, width: 220, height: 600)
+    r.view.layoutSubtreeIfNeeded()
+    r.grow()
+    #expect(host.moved.isEmpty, "Sofia, the last it holds, is folded under Family's 4 offline")
+    r.toggle("folder:1")
+    #expect(host.moved == [.top(210)], "opening Family brings her into sight with no scroll")
+
+    let other = RosterStub()
+    let family = roster(other, folder: "folder:1", people: familyPeople)
+    family.view.frame = NSRect(x: 0, y: 0, width: 220, height: 600)
+    family.view.layoutSubtreeIfNeeded()
+    family.grow()
+    #expect(other.moved.isEmpty, "under Family, Sofia hides her presence, so she's folded")
+    family.typing = ["person:5"]
+    #expect(family.said.contains("Sofia Martins typing…") && other.moved == [.top(205)], "her chat says she's typing, which lists her")
+}
+
 @Test func `someone's menu opens or starts their chat, opens it in a new pane, and files them, with their chat's slot when they have one`() {
     let ana = Samples.people[0], marta = Samples.people[1]
     #expect(RosterMenu.entries(ana, tree: Samples.tree, list: "all").map(head)
