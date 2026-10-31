@@ -61,6 +61,20 @@ func picture(_ m: MessageRow, look: Look = .bubbles, width: CGFloat = 640) -> CG
     #expect(poster.pictures.first?.rect.size == CGSize(width: 225, height: 400))
 }
 
+@Test func `your own sticker or video message that didn't go says so with Retry, on its own as in a bubble`() {
+    for kind in [MessageKind.sticker, .videoNote] {
+        for look in Look.allCases {
+            var m = photo(512, 512, kind: kind)
+            m.mine = true
+            m.status = .failed
+            let failed = laid(m, look: look)
+            #expect(failed.regions.contains { $0.1 == .retry }, "\(kind) in \(look)")
+            m.status = .sent
+            #expect(laid(m, look: look).height < failed.height, "\(kind) in \(look): the line's own room")
+        }
+    }
+}
+
 func album(_ n: Int) -> MessageRow {
     var m = MessageRow(id: "AL", v: 1, sort: "1", chat: "c", at: Samples.now, kind: .album, spans: [])
     m.album = Album(items: (0 ..< n).map { Album.Item(id: "i\($0)", kind: $0 == 2 ? "video" : "image",

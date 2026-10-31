@@ -466,6 +466,7 @@ extension MessageLayout.Builder {
         parts.append(contentsOf: footParts(foot, at: CGPoint(x: m.mine ? width - metrics.margin - fw : x, y: y + ascent(fonts.time))))
         y += lineHeight(fonts.time)
         reactions(x: x, alignRight: m.mine, right: r.maxX)
+        failedLine(x: x, alignRight: m.mine, right: r.maxX)
         return Laid(height: ceil(y + 1), body: r, parts: parts, regions: regions, text: nil, pictures: slots, over: over)
     }
 
