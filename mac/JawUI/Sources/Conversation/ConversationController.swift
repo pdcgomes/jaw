@@ -45,6 +45,9 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     var unfolded: Set<String> = []
     /// The message selected with the keys or a click, by id.
     public private(set) var selected: String?
+    /// The choices of the vote last asked in each poll, by its message, until its row shows them or
+    /// jawd says it wasn't done.
+    var asked: [String: [String]] = [:]
     /// The newest message seen at the bottom, from which what arrives below is counted.
     var seen: String?
     var askedPlace: Place?
@@ -260,6 +263,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         let anchor = currentAnchor()
         let newest = window.newest
         window.apply(update)
+        shown(votes: update.upsert.map(\.id))
         rebuild()
         reloading = true
         if let newest { answered(update.upsert.filter { !$0.mine && Self.precedes(newest, $0) }) }
@@ -736,14 +740,37 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         host?.conversation(self, react: m.id, emoji: mine ? "" : emoji)
     }
 
-    /// Votes for `name` in poll `id` as its row is now, as a click on the option, the Vote menu and
-    /// the snapshot's step ask; a choice past what the poll takes is said, and asks jawd nothing.
+    /// Votes for `name` in poll `id`, as a click on the option, the Vote menu and the snapshot's step
+    /// ask: from the vote last asked in it while no row shows that yet, so a second click before
+    /// jawd's row for the first builds on it, or else from its row; a choice past what the poll takes
+    /// is said, and asks jawd nothing.
     public func vote(_ name: String, in id: String) {
         guard let m = window.get(id), let poll = m.poll, !m.deleted else { return }
-        switch Voting.choosing(name, in: poll) {
-        case let .vote(options): host?.conversation(self, vote: m.id, options: options)
+        switch Voting.choosing(name, in: poll, mine: asked[id]) {
+        case let .vote(options): ask(options, in: m.id)
         case let .tooMany(most): say(Voting.tooMany(most))
         }
+    }
+
+    /// Asks jawd for a vote of `options` in poll `id`, kept as the last asked until a row shows it.
+    func ask(_ options: [String], in id: String) {
+        asked[id] = options
+        host?.conversation(self, vote: id, options: options)
+    }
+
+    /// Lets go of the votes asked in polls `ids` that their rows, as the window now has them, show, or
+    /// whose poll was deleted.
+    func shown(votes ids: [String]) {
+        for id in ids {
+            guard let options = asked[id], let m = window.get(id) else { continue }
+            if m.deleted || Set(m.poll?.mine ?? []) == Set(options) { asked[id] = nil }
+        }
+    }
+
+    /// jawd said the vote last asked in poll `message` wasn't done, or can't tell whether it was, so
+    /// the next click goes by the poll's row.
+    public func forgetVote(in message: String) {
+        asked[message] = nil
     }
 
     /// The newest poll the pane holds that can be voted in.
@@ -767,10 +794,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         }
         if !poll.mine.isEmpty {
             menu.addItem(.separator())
-            menu.addItem(ClosureItem(title: "Take Back My Vote") { [weak self] in
-                guard let self else { return }
-                host?.conversation(self, vote: m.id, options: [])
-            })
+            menu.addItem(ClosureItem(title: "Take Back My Vote") { [weak self] in self?.ask([], in: m.id) })
         }
         return menu
     }

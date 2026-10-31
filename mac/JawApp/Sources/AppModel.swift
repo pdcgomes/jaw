@@ -44,6 +44,8 @@ final class AppModel {
     lazy var commands: [Command] = makeCommands()
     /// Messages sent and not yet answered for, by key, so a refused one goes back to its box.
     var sending: [String: (chat: String, text: String)] = [:]
+    /// Votes asked and not yet answered for, by key, so a pane forgets one jawd didn't do.
+    var voting: [String: (chat: String, message: String)] = [:]
     var notice: (text: String, until: Date, warn: Bool)?
     var infoFor: MessageRow?
     var focused = false
@@ -189,7 +191,8 @@ final class AppModel {
             }
         case .unsure:
             say("asking jawd again once it's back")
-        case let .acted(_, said):
+        case let .acted(key, said):
+            if let vote = voting.removeValue(forKey: key), said != nil { panes[vote.chat]?.forgetVote(in: vote.message) }
             if let said { say(said) }
         case let .found(id, found):
             window?.palette.model.answered(id: id, found)
@@ -779,7 +782,7 @@ extension AppModel: ConversationHost {
     }
 
     func conversation(_ c: ConversationController, vote message: String, options: [String]) {
-        jawd.vote(chat: c.chat.id, message: message, options: options)
+        voting[jawd.vote(chat: c.chat.id, message: message, options: options)] = (c.chat.id, message)
     }
 
     func conversation(_: ConversationController, open url: String) {

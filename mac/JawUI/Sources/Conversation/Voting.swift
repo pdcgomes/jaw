@@ -12,8 +12,10 @@ public enum Voting {
         case tooMany(Int)
     }
 
-    public static func choosing(_ name: String, in poll: Poll) -> Choice {
-        let mine = poll.mine
+    /// What a click on `name` votes for: from `mine`, your choices as you last asked for them while
+    /// the poll's row doesn't show them yet, or else from the row's.
+    public static func choosing(_ name: String, in poll: Poll, mine asked: [String]? = nil) -> Choice {
+        let mine = asked ?? poll.mine
         if poll.max <= 1 { return .vote(mine == [name] ? [] : [name]) }
         if mine.contains(name) { return .vote(mine.filter { $0 != name }) }
         guard mine.count < poll.max else { return .tooMany(poll.max) }

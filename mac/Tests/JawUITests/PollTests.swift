@@ -127,6 +127,42 @@ func pollOptions(_ names: String...) -> [Poll.Option] {
     #expect(host.votes.count == 1 && said == ["this poll takes 2 at most, so take one back first"])
 }
 
+@MainActor @Test func `a second click before jawd's row for the first builds on it, until a row shows it or jawd says it wasn't done`() async throws {
+    let host = PaneHost()
+    let (c, window) = await shown(Samples.polls, host)
+    defer { window.close() }
+    func click(_ id: String, _ option: String) throws {
+        let i = try #require(c.rows.firstIndex { $0.id == id })
+        let view = try messageView(c, i)
+        let rect = try #require(view.laid?.regions.first { $0.1 == .vote(option) }?.0)
+        c.clicked(view, CGPoint(x: rect.midX, y: rect.midY), 1)
+    }
+    /// The poll's row as jawd sends it once it has your vote of `mine`, a version later.
+    func voted(_ id: String, _ mine: [String], after: UInt64) -> MessageRow {
+        var m = samplePoll(id)
+        m.v += after
+        for (i, option) in (m.poll?.options ?? []).enumerated() {
+            m.poll?.options[i].mine = mine.contains(option.name)
+        }
+        return m
+    }
+    try click("P2", "Rope")
+    try click("P2", "Crash pads")
+    #expect(host.votes.map { $0.options } == [["Rope"], ["Rope", "Crash pads"]], "the second keeps the first, which no row shows yet")
+    c.apply(Update(seq: 2, upsert: [voted("P2", ["Rope"], after: 1)]))
+    try click("P2", "Quickdraws")
+    #expect(host.votes.last?.options == ["Rope", "Quickdraws", "Crash pads"], "a row showing the first alone doesn't show the second")
+    c.apply(Update(seq: 3, upsert: [voted("P2", ["Rope", "Quickdraws", "Crash pads"], after: 3)]))
+    try click("P2", "Rope")
+    #expect(host.votes.last?.options == ["Quickdraws", "Crash pads"], "once a row shows it, the row")
+    try click("P1", "Sunday")
+    try click("P1", "Sunday")
+    #expect(host.votes.suffix(2).map { $0.options } == [["Sunday"], []], "in a poll of one, Sunday again before its row takes it back")
+    c.forgetVote(in: "P1")
+    try click("P1", "Sunday")
+    #expect(host.votes.last?.options == ["Sunday"], "jawd said it wasn't done, so the row again")
+}
+
 @MainActor @Test func `a poll's menu has Vote with its options, yours ticked, on their digits, and Take Back My Vote`() async throws {
     let host = PaneHost()
     let (c, window) = await shown(Samples.polls, host)
