@@ -63,6 +63,8 @@ final class MessageView: NSView {
     var message: MessageRow?
     /// Told of a click: where it landed in the layout, and how many clicks it was.
     var clicked: ((MessageView, CGPoint, Int) -> Void)?
+    /// Told of VoiceOver's press; says whether it did anything.
+    var pressed: ((MessageView) -> Bool)?
     var menuFor: ((MessageView) -> NSMenu?)?
     var popUp = MenuPopUp()
     var hovered: ((MessageView, Bool) -> Void)?
@@ -260,6 +262,11 @@ final class MessageView: NSView {
     override func accessibilityPerformShowMenu() -> Bool {
         let body = laid?.body ?? bounds
         return popUp.show(menuFor?(self), at: NSPoint(x: body.minX, y: body.maxY), in: self)
+    }
+
+    /// Press, VoiceOver's VO-Space: what Enter does on the message, Message on a contact card among it.
+    override func accessibilityPerformPress() -> Bool {
+        pressed?(self) ?? false
     }
 
     override func accessibilityLabel() -> String? {

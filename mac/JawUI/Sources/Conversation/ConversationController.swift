@@ -587,6 +587,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             let v = MessageView(frame: .zero)
             v.identifier = id
             v.clicked = { [weak self] view, point, clicks in self?.clicked(view, point, clicks) }
+            v.pressed = { [weak self] view in self?.pressed(view) ?? false }
             v.menuFor = { [weak self] view in self?.menu(for: view) }
             v.hovered = { [weak self] view, inside in self?.hovered(view, inside) }
             v.dragFor = { [weak self] view, item in self?.dragging(view, item) }
@@ -773,8 +774,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     }
 
     /// Enter on a message: try a failed one again, message whoever a contact card shares, unfold a
-    /// long one, look at its file, open a poll's Vote menu under it, open its first link.
-    func open(_ m: MessageRow) {
+    /// long one, look at its file, open a poll's Vote menu under it, open its first link. Says
+    /// whether it did any of them.
+    @discardableResult
+    func open(_ m: MessageRow) -> Bool {
         if m.mine, m.status == .failed {
             host?.conversation(self, retry: m.id)
         } else if m.kind == .contact, !m.deleted {
@@ -789,7 +792,19 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             showVotes(votes, for: m)
         } else if let link = m.spans.first(where: { $0.t == .link }) {
             host?.conversation(self, open: link.url ?? link.s)
+        } else {
+            return false
         }
+        return true
+    }
+
+    /// VoiceOver's press on a message, which has no Enter of its own: the message selected, and what
+    /// Enter does on it done. Says whether that did anything.
+    func pressed(_ view: MessageView) -> Bool {
+        host?.conversationFocused(self)
+        guard let m = message(of: view) else { return false }
+        select(m.id)
+        return open(m)
     }
 
     /// Does `act` with a message's file, or its album's item's; an album looked at as a whole pages

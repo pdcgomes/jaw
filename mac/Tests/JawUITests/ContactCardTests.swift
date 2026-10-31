@@ -237,6 +237,23 @@ func fastest(_ run: () -> Void) -> Duration {
     #expect(menu.items.map(\.title) == ["+351 912 345 678 · WhatsApp +447700900123", "21 000 00 00"])
 }
 
+@MainActor @Test func `VoiceOver's press on a message does what Enter does on it, a card's Message among it`() async throws {
+    let host = PaneHost()
+    let plain = Samples.m(99, [Span(.text, "see you at the wall")], at: Samples.now - 1000, from: Samples.ana)
+    let rows = try [sampleCard(2), sampleCard(1), sampleCard(3), plain]
+    let (c, window) = await shown(rows, host)
+    defer { window.close() }
+    var popped: [(NSMenu, NSView)] = []
+    c.popUp.run = { menu, _, view in popped.append((menu, view)) }
+    func press(_ m: MessageRow) throws -> Bool {
+        try messageView(c, #require(c.rows.firstIndex { $0.id == m.id })).accessibilityPerformPress()
+    }
+    #expect(try press(rows[0]) && host.started == ["+351913002210 Inês Gomes"] && c.selected == rows[0].id)
+    #expect(try press(rows[1]) && popped.count == 1 && popped.first?.1 === c.table, "its numbers popped up under it")
+    #expect(try press(rows[2]) && host.sheets == [rows[2].id])
+    #expect(try !press(plain), "nothing for a message Enter does nothing to")
+}
+
 @MainActor @Test func `a card's menu starts with Message, its numbers when it has several, and several cards' with View Contacts`() throws {
     let c = pane(PaneHost())
     func titles(_ m: MessageRow) throws -> [String] {
