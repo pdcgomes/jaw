@@ -32,6 +32,43 @@ func carding(_ method: String, _ params: JSONValue, _ id: UInt64) -> [String] {
     return ["{\"id\":\(id),\"result\":{\"message\":\"\(message)\",\"row\":\(row)}}"]
 }
 
+/// A card named `name` whose vCard is `bytes` bytes long in UTF-8, filled with `filler`, a letter of
+/// one or two bytes, and as many `x` as make up the rest.
+func sized(_ bytes: Int, name: String = "Ana", filler: String = "x") -> SendContact.Card {
+    let begin = "BEGIN:VCARD\r\nFN:", end = "\r\nEND:VCARD\r\n"
+    let room = bytes - begin.utf8.count - end.utf8.count
+    let wide = filler.utf8.count
+    let fill = String(repeating: filler, count: room / wide) + String(repeating: "x", count: room % wide)
+    return SendContact.Card(name: name, vcard: begin + fill + end)
+}
+
+@Test func `jawd's limits are counted as jawd counts them, in its order: 64 cards, 256 KiB of vCards in UTF-8, a name of 256 characters trimmed`() {
+    #expect(SendContact.refusal([]) == .noCards)
+    #expect(SendContact.refusal(Array(repeating: marta, count: 64)) == nil, "64 cards go")
+    #expect(SendContact.refusal(Array(repeating: SendContact.Card(name: " ", vcard: marta.vcard), count: 65)) == .cards(65),
+            "65 don't, before their names are looked at")
+
+    let most = SendContact.vcardsMost
+    #expect(sized(most, filler: "ã").vcard.utf8.count == most && sized(most, filler: "ã").vcard.count < most / 2 + 30)
+    #expect(SendContact.refusal([sized(most, filler: "ã")]) == nil, "256 KiB in UTF-8, though half as many characters")
+    #expect(SendContact.refusal([sized(most + 1, filler: "ã")]) == .vcards(most + 1))
+    #expect(SendContact.refusal([sized(most / 2), sized(most / 2 + 1, name: " ")]) == .vcards(most + 1),
+            "together, before a card's blank name")
+
+    let a256 = String(repeating: "a", count: 256)
+    #expect(SendContact.refusal([SendContact.Card(name: "\u{3000} \(a256)\u{A0}\n", vcard: marta.vcard)]) == nil,
+            "256 once trimmed of spaces as Rust trims them, the ideographic and the no-break among them")
+    #expect(SendContact.refusal([SendContact.Card(name: a256 + "a", vcard: marta.vcard)]) == .name(0, 257))
+    let thumbs = String(repeating: "👍🏽", count: 128)
+    #expect(thumbs.count == 128 && thumbs.unicodeScalars.count == 256)
+    #expect(SendContact.refusal([SendContact.Card(name: thumbs, vcard: marta.vcard)]) == nil)
+    #expect(SendContact.refusal([SendContact.Card(name: thumbs + "👍🏽", vcard: marta.vcard)]) == .name(0, 258),
+            "Unicode scalars, as Rust's chars count, not the 129 characters Swift sees")
+    #expect(SendContact.refusal([marta, SendContact.Card(name: "\u{A0}\u{2003}\t", vcard: marta.vcard)]) == .unnamed(1))
+    #expect(SendContact.refusal([SendContact.Card(name: a256 + "a", vcard: marta.vcard), SendContact.Card(name: " ", vcard: marta.vcard)])
+        == .name(0, 257), "card by card, the first first")
+}
+
 @MainActor
 @Suite(.serialized) struct ContactClientTests {
     @Test func `cards go with their key, and come back as jawd's row with each card read`() async throws {
@@ -113,6 +150,46 @@ func carding(_ method: String, _ params: JSONValue, _ id: UInt64) -> [String] {
             "jaw-bad: each card's vcard is one vCard, from BEGIN:VCARD to END:VCARD",
             "jaw-before: sending contacts comes with the next step",
         ])
+    }
+
+    @Test func `jawd's other refusals bring the cards back whole in its words, and a jawd away says so at once`() async throws {
+        let fake = try FakeJawd { method, params, id in
+            guard method == "send.contact" else { return ordinary(method, params, id) }
+            return switch params["key"]?.string {
+            case "jaw-vcards":
+                [#"{"id":\#(id),"error":{"code":5,"message":"a message's vCards take 256 KiB at most together","data":{"limit":"vcards","most":262144}}}"#]
+            case "jaw-name":
+                [#"{"id":\#(id),"error":{"code":5,"message":"a card's name is 256 characters at most","data":{"limit":"name","most":256}}}"#]
+            case "jaw-chat":
+                [#"{"id":\#(id),"error":{"code":3,"message":"jawd has no chat ana; chat.start finds or makes one"}}"#]
+            default:
+                [#"{"id":\#(id),"error":{"code":5,"message":"40 messages of yours are waiting to send, 2 of them failed; jawd takes more once some have gone or been retried","data":{"limit":"outbox","waiting":40,"failed":2}}}"#]
+            }
+        }
+        defer { fake.stop() }
+        let jawd = connected(fake)
+        defer { jawd.close() }
+        _ = await drain(jawd) { helloed($0) == 1 }
+        for key in ["jaw-vcards", "jaw-name", "jaw-chat", "jaw-full"] {
+            jawd.sendContact(chat: "ana", cards: [marta], key: key)
+        }
+        let all = await drain(jawd) { $0.count { if case .contactUnsent = $0 { true } else { false } } == 4 }
+        let said = all.compactMap { if case let .contactUnsent(chat, key, cards, why) = $0, chat == "ana", cards == [marta] { "\(key): \(why)" } else { nil } }
+        #expect(said == [
+            "jaw-vcards: a message's vCards take 256 KiB at most together",
+            "jaw-name: a card's name is 256 characters at most",
+            "jaw-chat: jawd has no chat ana; chat.start finds or makes one",
+            "jaw-full: 40 wait to send, 2 failed; it can go once some have",
+        ])
+
+        let away = Jawd(socket: fake.socket + ".nobody", client: "jaw-mac-test", version: "0", focus: true) { _ in }
+        away.start()
+        defer { away.close() }
+        away.sendContact(chat: "ana", cards: [marta], key: "jaw-away")
+        let back = await drain(away) { all in all.contains { if case .contactUnsent = $0 { true } else { false } } }
+        #expect(back.contains { if case let .contactUnsent(_, key, cards, why) = $0 {
+            key == "jaw-away" && cards == [marta] && why == "jawd isn't connected; jaw is trying to reach it, so try again in a moment"
+        } else { false } })
     }
 
     @Test func `a card of 10 MiB is read on the client's thread as its row arrives, and the main thread's drain reads none of it`() async throws {

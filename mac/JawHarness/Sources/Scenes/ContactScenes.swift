@@ -23,6 +23,40 @@ extension HarnessScene {
     }
 }
 
+extension HarnessScene {
+    static var contactForm: HarnessScene {
+        HarnessScene(
+            id: "contact-form", title: "The contact form", symbol: "person.crop.circle.badge.plus",
+            synopsis: "The box's Contact…: as it opens, with two cards to send, with one in the way, and turned down by jawd",
+            section: .overlays, covers: [ContactFormView.self], width: 480,
+        ) { ContactFormScene(conditions: $0) }
+    }
+}
+
+/// The contact form to Ana, as it opens, ready, in the way and turned down.
+private struct ContactFormScene: View {
+    let conditions: Conditions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            band("As it opens", "Nothing on it yet: Send a Contact, To Ana, and how Add a Contact… picks one; the system's picker shows under Add a Contact… at once, and isn't drawn here. Send is greyed, and nothing is said in the way.",
+                 ContactForm(chat: "ana", to: "Ana"))
+            band("Two cards", "Send 2 Contacts: Marta Lopes with both her numbers on a line and Inês Gomes with hers, each with initials on a colour of their own, as their message will draw them, no photo being sent; the first chosen, its row in the selection's colour, with × at the end of each; the keys said under them, and Send ready.",
+                 ContactForm(chat: "ana", to: "Ana", cards: Samples.formCards))
+            band("In the way", "A card made from a contact with a long note takes 301 KiB, past the 256 KiB jawd takes in one message, said in red under the cards, and Send greyed until it's taken out.",
+                 ContactForm(chat: "ana", to: "Ana", cards: [Samples.formCards[0], Samples.formCard("Clínica Sorriso", ["+351 21 000 11 22"], note: 300 * 1024)]))
+            band("Turned down", "jawd's words, after Not sent:, in red, the form opened again as it was, both cards on it and Send ready to try again.",
+                 ContactForm(chat: "ana", to: "Ana", cards: Samples.formCards, said: "40 wait to send, 2 failed; it can go once some have"))
+        }
+    }
+
+    func band(_ title: String, _ note: String, _ form: ContactForm) -> some View {
+        SpecimenGroup(title: title, note: note, roles: conditions.roles) {
+            ContactFormView(form: form, roles: conditions.roles, pick: { _ in }, send: {}, cancel: {})
+        }
+    }
+}
+
 /// The sheet of Rui's five cards, and of Inês's two.
 private struct ContactSheetScene: View {
     let conditions: Conditions

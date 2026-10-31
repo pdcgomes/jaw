@@ -293,6 +293,29 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.beginSheet(sheet)
     }
 
+    var contactSheet: NSWindow?
+
+    /// The contact form, in a sheet over the window: Add a Contact… shows the system's picker from
+    /// under itself, Send sends the cards, and Cancel lets them go.
+    func showContactForm(_ form: ContactForm) {
+        guard let window, contactSheet == nil else { return }
+        let end: @MainActor () -> Void = { [weak self] in
+            guard let self, let sheet = contactSheet else { return }
+            model.contactPicking.close()
+            window.endSheet(sheet)
+            contactSheet = nil
+        }
+        let view = ContactFormView(form: form, roles: model.roles, pick: { [weak model] anchor in
+            model?.contactPicking.pick(for: form, under: anchor)
+        }, send: { [weak model] in
+            end()
+            model?.send(form)
+        }, cancel: end)
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
+        contactSheet = sheet
+        window.beginSheet(sheet)
+    }
+
     var keysSheet: NSWindow?
 
     func showKeys() {

@@ -65,6 +65,9 @@ final class AppModel {
     var sending: [String: (chat: String, text: String)] = [:]
     /// Votes asked and not yet answered for, by key, so a pane forgets one jawd didn't do.
     var voting: [String: (chat: String, message: String)] = [:]
+    /// The contact forms whose cards are on their way, so one jawd turns down opens again.
+    let contactsSent = ContactFormsSent()
+    let contactPicking = ContactPicking()
     var notice: (text: String, until: Date, warn: Bool)?
     var infoFor: MessageRow?
     var focused = false
@@ -223,6 +226,7 @@ final class AppModel {
             window?.sidebar.roster.typing = rosterTyping()
         case let .sent(key, _, _):
             sending[key] = nil
+            contactsSent.taken(key)
         case let .unsent(chat, key, text, why):
             sending[key] = nil
             if let c = panes[chat] { c.unsent(text: text, why: why) } else { say("not sent: \(why)", warn: true) }
@@ -232,8 +236,13 @@ final class AppModel {
             } else {
                 say("the poll \"\(poll.question)\" wasn't sent: \(why)", warn: true)
             }
-        case let .contactUnsent(_, _, cards, why):
-            say("\(cards.count == 1 ? "the card wasn't" : "the cards weren't") sent: \(why)", warn: true)
+        case let .contactUnsent(_, key, cards, why):
+            if window?.contactSheet == nil, let form = contactsSent.refused(key, why: why) {
+                window?.showContactForm(form)
+            } else {
+                contactsSent.taken(key)
+                say("\(cards.count == 1 ? "the card wasn't" : "the cards weren't") sent: \(why)", warn: true)
+            }
         case .unsure:
             say("asking jawd again once it's back")
         case let .acted(key, said):
@@ -1163,6 +1172,21 @@ extension AppModel: ConversationHost {
     func startChat(phone: String, name: String) {
         say("opening a chat with \(name)")
         jawd.startChat(phone: phone)
+    }
+
+    /// The contact form for the focused pane's chat, its picker shown at once.
+    func composeContact() {
+        guard let c = conversation else { return }
+        window?.showContactForm(ContactForm(chat: c.chat.id, to: c.chat.name))
+    }
+
+    /// Sends a form's cards to its chat in one message, with a key made for them, the form kept
+    /// until jawd answers; the card shows in the chat once jawd's row has it.
+    func send(_ form: ContactForm) {
+        guard form.ready else { return }
+        let key = Jawd.key()
+        contactsSent.going(form, key: key)
+        jawd.sendContact(chat: form.chat, cards: form.sending, key: key)
     }
 }
 

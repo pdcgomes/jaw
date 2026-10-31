@@ -110,9 +110,11 @@ let project = Project(
             productName: "Jaw",
             bundleId: prefix,
             deploymentTargets: .macOS(macOS),
-            infoPlist: appInfo(name: "Jaw"),
+            // Contacts is asked for in jaw's words, the first time a contact picked is sent as a card.
+            infoPlist: appInfo(name: "Jaw", extra: ["NSContactsUsageDescription": "Jaw reads the contacts you pick, to send each as a card."]),
             sources: ["JawApp/Sources/**"],
             resources: ["JawApp/Resources/**"],
+            entitlements: .file(path: "JawApp/Jaw.entitlements"),
             dependencies: [.target(name: "JawKit"), .target(name: "JawThemes"), .target(name: "JawUI")],
             settings: settings([
                 "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",

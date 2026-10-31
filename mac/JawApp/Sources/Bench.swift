@@ -1,4 +1,5 @@
 import AppKit
+import Contacts
 import CoreServices
 import Darwin
 import JawKit
@@ -107,16 +108,18 @@ enum Bench {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             NSApp.activate()
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
+            let contacts = key.hasPrefix("contact:") || key.hasPrefix("contact-form:")
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
                 || key.hasPrefix("menu-key:") || key == "promise" || key == "window"
                 || key == "sidebar" || key.hasPrefix("folder:") || key == "tree:samples" || key == "show:sidebar" || key.hasPrefix("type:") || key == "roster"
-                || key == "card" || key.hasPrefix("card:")
+                || key == "card" || key.hasPrefix("card:") || contacts
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
             if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key == "promise" { keepPromise(model) }
             if key == "window" { model.window?.window?.makeKeyAndOrderFront(nil) }
             if key == "card" || key.hasPrefix("card:") { card(key, model: model) }
+            if contacts { contact(key, model: model) }
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -194,6 +197,8 @@ enum Bench {
                     FileHandle.standardError.write(Data("sidebar: \(sidebar.said.joined(separator: " | ")) · picked \(sidebar.picked) · selected \(sidebar.selected ?? "nothing")\(keys)\n".utf8))
                 } else if key == "roster", let roster = model.window?.sidebar.roster {
                     FileHandle.standardError.write(Data("roster: \(roster.said.joined(separator: " | "))\n".utf8))
+                } else if contacts {
+                    FileHandle.standardError.write(Data("\(key): \(newestCard(model))\n".utf8))
                 } else {
                     let open = model.window.flatMap { w in w.palette.isVisible ? w.palette.model : nil }
                     let palette = open.map { p in
@@ -262,6 +267,34 @@ enum Bench {
             return model.startChat(phone: phones[n].dialled, name: name)
         }
         c.card(m)
+    }
+
+    /// Cards made as Add a Contact… makes them, from made-up contacts written
+    /// `<name>|<number>[|<number>…]`, several in one message with `;` between them, for the focused
+    /// pane's chat: `contact:` sends them as Send does, and `contact-form:` opens the form with them.
+    static func contact(_ step: String, model: AppModel) {
+        guard let c = model.conversation else { return model.say("no pane to send a contact to") }
+        let form = ContactForm(chat: c.chat.id, to: c.chat.name)
+        for written in step.drop(while: { $0 != ":" }).dropFirst().split(separator: ";") {
+            let parts = written.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+            let contact = CNMutableContact()
+            let words = (parts.first ?? "").split(separator: " ")
+            contact.givenName = words.dropLast().joined(separator: " ")
+            contact.familyName = words.last.map(String.init) ?? ""
+            contact.phoneNumbers = parts.dropFirst().map { CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: $0)) }
+            if let card = ContactForm.card(contact) { form.add(card) }
+        }
+        if step.hasPrefix("contact:") { model.send(form) } else { model.window?.showContactForm(form) }
+    }
+
+    /// The focused pane's newest contact card as jawd's row has it, for the snapshot's log.
+    static func newestCard(_ model: AppModel) -> String {
+        guard let m = model.conversation?.window.list.last(where: { $0.kind == .contact }), let contact = m.contact else {
+            return "no contact card in this pane"
+        }
+        let whose = m.mine ? "yours, \(m.status.map { "\($0)" } ?? "sent")" : "from \(m.from?.name ?? "someone")"
+        let cards = contact.cards.map { card in ([card.name ?? "no name"] + card.phones.map(\.number)).joined(separator: " · ") }
+        return "newest card \(m.id), \(whose): \(contact.name ?? "no name") (\(cards.joined(separator: "; ")))"
     }
 
     /// The chat list's row `i`, counting from 0, or nil when it has no such row.
@@ -450,8 +483,8 @@ enum Bench {
     static func draw(to path: String, model: AppModel) {
         // The window's frame view, so the toolbar is drawn too.
         let glance = model.glance.isOpen ? model.glance.panel.contentView : EmojiPicker.shared.panel.isVisible ? EmojiPicker.shared.panel.contentView : nil
-        guard let view = glance ?? model.window?.cardsSheet?.contentView ?? model.window?.editorSheet?.contentView
-            ?? model.window?.pollSheet?.contentView ?? model.window?.settings?.contentView
+        guard let view = glance ?? model.window?.contactSheet?.contentView ?? model.window?.cardsSheet?.contentView
+            ?? model.window?.editorSheet?.contentView ?? model.window?.pollSheet?.contentView ?? model.window?.settings?.contentView
             ?? model.window?.window?.contentView?.superview else { return finish(["error": 2]) }
         let rect = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: rect) else { return finish(["error": 3]) }

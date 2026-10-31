@@ -173,6 +173,42 @@ public struct SendContact: Encodable, Sendable, Hashable {
         self.cards = cards
         self.key = key
     }
+
+    /// What jawd takes in one message: cards, the characters of a card's name once it's trimmed,
+    /// counted as Unicode scalars as Rust counts a string's chars, and the bytes of their vCards
+    /// together, in UTF-8.
+    public static let cardsMost = 64
+    public static let nameMost = 256
+    public static let vcardsMost = 256 * 1024
+
+    /// What jawd would turn down in a message's cards.
+    public enum Refusal: Equatable, Sendable {
+        case noCards
+        /// More than `cardsMost`, this many.
+        case cards(Int)
+        /// Their vCards past `vcardsMost` bytes together, this many.
+        case vcards(Int)
+        /// The card at this place is named only with spaces.
+        case unnamed(Int)
+        /// The card at this place has a name past `nameMost` characters, this many.
+        case name(Int, Int)
+    }
+
+    /// What jawd would turn down in `cards`, checked as jawd checks them and in its order, or nil
+    /// when it takes them. jawd checks too that each vCard is one card, which one made from a
+    /// contact always is.
+    public static func refusal(_ cards: [Card]) -> Refusal? {
+        if cards.isEmpty { return .noCards }
+        if cards.count > cardsMost { return .cards(cards.count) }
+        let bytes = cards.reduce(0) { $0 + $1.vcard.utf8.count }
+        if bytes > vcardsMost { return .vcards(bytes) }
+        for (i, card) in cards.enumerated() {
+            let name = card.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty { return .unnamed(i) }
+            if name.unicodeScalars.count > nameMost { return .name(i, name.unicodeScalars.count) }
+        }
+        return nil
+    }
 }
 
 /// `message.info`'s answer.

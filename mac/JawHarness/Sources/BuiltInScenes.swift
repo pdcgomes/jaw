@@ -24,6 +24,7 @@ enum BuiltInScenes {
         catalog.register(.palette)
         catalog.register(.pollForm)
         catalog.register(.contactSheet)
+        catalog.register(.contactForm)
         catalog.register(.states)
         catalog.register(.screensJawd)
         catalog.register(.screensConnection)

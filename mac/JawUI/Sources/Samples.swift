@@ -394,6 +394,25 @@ public enum Samples {
         ].compactMap(\.self)
     }
 
+    /// A card as the contact form makes one from a contact, as Contacts exports it, with no photo and
+    /// none of WhatsApp's marks: its name and numbers, and `note` bytes of a note, for a contact
+    /// whose card takes a lot of room.
+    public static func formCard(_ name: String, _ numbers: [String], note: Int = 0) -> ContactForm.Card {
+        let words = name.split(separator: " ")
+        var card = "BEGIN:VCARD\r\nVERSION:3.0\r\nPRODID:-//Apple Inc.//macOS 26.0//EN\r\n"
+            + "N:\(words.last ?? "");\(words.dropLast().joined(separator: " "));;;\r\nFN:\(name)\r\n"
+        for (i, number) in numbers.enumerated() {
+            card += (i == 0 ? "TEL;type=CELL;type=VOICE;type=pref:" : "TEL;type=WORK;type=VOICE:") + number + "\r\n"
+        }
+        if note > 0 { card += "NOTE:" + String(repeating: "x", count: note) + "\r\n" }
+        return ContactForm.Card(name: name, vcard: card + "END:VCARD\r\n")
+    }
+
+    /// The contact form's cards: Marta Lopes with two numbers, and Inês Gomes with one.
+    public static var formCards: [ContactForm.Card] {
+        [formCard("Marta Lopes", ["+351 213 456 789", "21 000 00 00"]), formCard("Inês Gomes", ["+351 913 002 210"])]
+    }
+
     /// The window update a watch of the contact cards returns.
     public static var contactsUpdate: Update<MessageRow> {
         let rows = contacts
