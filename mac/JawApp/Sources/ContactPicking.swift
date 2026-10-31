@@ -4,9 +4,9 @@ import ContactsUI
 import JawUI
 
 /// The system's contact picker, shown from the contact form's Add a Contact…: the contact picked is
-/// made into its card off the main thread and put on the form, fetched again with what a vCard
-/// needs when the picker gave less, which asks for Contacts the first time; when Contacts isn't
-/// allowed, the form says where to allow it.
+/// made into its card off the main thread and put on the form if it hasn't closed since, fetched
+/// again with what its card is made from when the picker gave less, which asks for Contacts the
+/// first time; when Contacts isn't allowed, the form says where to allow it.
 @MainActor
 final class ContactPicking: NSObject, CNContactPickerDelegate {
     var picker: CNContactPicker?
@@ -49,9 +49,10 @@ final class ContactPicking: NSObject, CNContactPickerDelegate {
     func picked(_ given: Picked) {
         picker?.close()
         guard let form else { return }
+        let closings = form.closings
         Task.detached(priority: .userInitiated) {
             let made = await Self.card(of: given.contact)
-            await MainActor.run { form.land(made) }
+            await MainActor.run { form.land(made, pickedAfter: closings) }
         }
     }
 

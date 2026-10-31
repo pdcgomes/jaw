@@ -159,8 +159,18 @@ public final class ContactForm {
         if case let .card(card) = made(contact) { card } else { nil }
     }
 
-    /// Puts on the form what was made of a contact picked for it: its card, or why there's none.
-    public func land(_ made: Made) {
+    /// How many times the form has closed, by Send or Cancel: what's made of a contact picked before
+    /// it last closed doesn't land on it, even once jawd turns its cards down and it opens again.
+    @ObservationIgnored public private(set) var closings = 0
+
+    public func closed() {
+        closings += 1
+    }
+
+    /// Puts on the form what was made of a contact picked for it after it had closed `closings`
+    /// times, unless it has closed since: its card, or why there's none.
+    public func land(_ made: Made, pickedAfter closings: Int) {
+        guard closings == self.closings else { return }
         switch made {
         case let .card(card): add(card)
         case let .unadded(why): unadded = why

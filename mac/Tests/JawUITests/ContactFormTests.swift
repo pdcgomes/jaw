@@ -55,14 +55,30 @@ let refusedWords = "40 wait to send, 2 failed; it can go once some have"
 
 @MainActor @Test func `what a contact picked makes lands on the form: its card, or why there's none`() {
     let form = ContactForm(chat: "ana", to: "Ana")
-    form.land(.card(Samples.formCards[0]))
+    form.land(.card(Samples.formCards[0]), pickedAfter: form.closings)
     #expect(form.cards == [Samples.formCards[0]] && form.warning == nil)
-    form.land(.unadded("that contact has no name, number or email to send"))
+    form.land(.unadded("that contact has no name, number or email to send"), pickedAfter: form.closings)
     #expect(form.warning == "that contact has no name, number or email to send" && form.cards.count == 1)
-    form.land(.unfetched)
+    form.land(.unfetched, pickedAfter: form.closings)
     #expect(form.warning == "Contacts gave Jaw less of that contact than its card needs")
     #expect(!["that contact has no name, number or email to send", form.warning].contains(ContactForm.unwritten),
             "Contacts failing to write a card says so in words of its own")
+}
+
+@MainActor @Test func `a contact picked lands only on the form still open as it was picked, not once it's sent or cancelled, nor when it opens again`() throws {
+    let form = ContactForm(chat: "ana", to: "Ana", cards: [Samples.formCards[0]])
+    let picked = form.closings
+    form.closed()
+    form.land(.card(Samples.formCards[1]), pickedAfter: picked)
+    form.land(.unadded("Jaw isn't allowed to see your contacts"), pickedAfter: picked)
+    #expect(form.cards == [Samples.formCards[0]] && form.unadded == nil, "made after Send or Cancel, it's let go")
+    let sent = ContactFormsSent()
+    sent.going(form, key: "jaw-1")
+    let again = try #require(sent.refused("jaw-1", why: refusedWords))
+    again.land(.card(Samples.formCards[1]), pickedAfter: picked)
+    #expect(again.cards == [Samples.formCards[0]], "turned down, it opens again with the cards sent, not one picked before")
+    again.land(.card(Samples.formCards[1]), pickedAfter: again.closings)
+    #expect(again.cards == Samples.formCards, "and one picked since lands")
 }
 
 @MainActor @Test func `the form says what's in the way as jawd counts it, and is ready only with cards to send`() {

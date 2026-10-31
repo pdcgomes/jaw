@@ -301,6 +301,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guard let window, contactSheet == nil else { return }
         let end: @MainActor () -> Void = { [weak self] in
             guard let self, let sheet = contactSheet else { return }
+            form.closed()
             model.contactPicking.close()
             window.endSheet(sheet)
             contactSheet = nil
