@@ -266,14 +266,27 @@ final class MessageView: NSView {
         guard let m = message else { return nil }
         let who = m.mine ? "You" : (m.from?.name ?? "")
         let reactions = m.reactions.map { "\($0.n) \($0.emoji)" }.joined(separator: ", ")
-        let file = m.media.flatMap { media in
-            MessageLayout.Builder.comingWords(media).map { [$0.why, $0.act].compactMap(\.self).joined(separator: ", ") }
-                ?? (media.state == .downloading ? "downloading" : media.state == .remote ? "not downloaded" : nil)
-        } ?? ""
-        return [who, MessageLayout.Builder.said(m), MessageLayout.Builder.spoken(m) ?? "", file, Format.clock(m.at), m.status?.rawValue ?? "",
-                reactions]
+        let hd = m.media?.hd == true ? "HD" : ""
+        let file = m.media.flatMap(Self.said) ?? ""
+        let items = m.album?.items ?? []
+        let tiles = items.enumerated().compactMap { i, item in
+            item.media.flatMap(Self.said).map { "\(item.kind == "video" ? "video" : "photo") \(i + 1) of \(items.count): \($0)" }
+        }.joined(separator: "; ")
+        return [who, MessageLayout.Builder.said(m), MessageLayout.Builder.spoken(m) ?? "", hd, file, tiles, Format.clock(m.at),
+                m.status?.rawValue ?? "", reactions]
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
+    }
+
+    /// A file's state as VoiceOver says it, nothing once it's here: jawd's whole words and what can
+    /// be done, how much has come, or that it isn't downloaded.
+    static func said(_ media: Media) -> String? {
+        if let words = MessageLayout.Builder.comingWords(media) { return [words.why, words.act].compactMap(\.self).joined(separator: ", ") }
+        switch media.state {
+        case .downloading: return "downloading" + (media.progress.map { ", \(Int(($0 * 100).rounded()))%" } ?? "")
+        case .remote: return "not downloaded"
+        default: return nil
+        }
     }
 }
 

@@ -131,6 +131,22 @@ func quarantine(_ url: URL) throws -> (type: String?, agent: String?) {
             "a run with this process's ID that started at another time has gone, as has one with no process, and an earlier build's clones")
 }
 
+@MainActor @Test func `VoiceOver says how much of a file has come, each of an album's tiles in its state, and a photo's HD`() throws {
+    func said(_ m: MessageRow) -> String {
+        let cell = MessageView(frame: .zero)
+        cell.message = m
+        return cell.accessibilityLabel() ?? ""
+    }
+    #expect(said(state("D2")).contains("downloading, 40%"))
+    #expect(said(state("D1")).contains("not downloaded") && said(state("D15")).contains("not downloaded") == false)
+    let album = said(state("D10"))
+    #expect(album.contains("photo 2 of 4: downloading, 50%"), "\(album)")
+    #expect(album.contains("video 3 of 4: not downloaded"))
+    #expect(album.contains("photo 4 of 4: WhatsApp's server no longer has it; ask for it to have your phone send it again, Ask the phone again"))
+    #expect(!album.contains("photo 1 of 4"), "the one here says nothing more")
+    #expect(said(try #require(Samples.pictures.first { $0.id == "P4" })).contains("HD"))
+}
+
 @MainActor @Test func `Space on what Quick Look shows closes it, and on another file shows that`() {
     let lake = URL(fileURLWithPath: "/tmp/lake.jpg"), wall = URL(fileURLWithPath: "/tmp/wall.jpg")
     let shown = [QuickLook.Item(lake, "lake.jpg"), QuickLook.Item(wall, "wall.jpg")]
