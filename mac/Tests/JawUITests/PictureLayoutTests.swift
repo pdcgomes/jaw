@@ -199,6 +199,28 @@ func shownCell(_ pictures: MessagePictures) -> (MessageView, NSTableRowView, NSW
     #expect(cell.window === window)
 }
 
+@MainActor @Test func `the decoded pictures can all go, and the cells on screen ask for theirs again`() async {
+    let pictures = MessagePictures(files: .memory(SamplePictures.files), mode: .here)
+    let c = ConversationController(chat: Samples.direct, spec: spec(.bubbles, dark: true), layouts: Layouts(), place: .newest(100))
+    c.pictures = pictures
+    let window = NSWindow(contentRect: CGRect(x: -30000, y: -30000, width: 640, height: 900), styleMask: .borderless, backing: .buffered,
+                          defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = c.view
+    window.orderFront(nil)
+    defer { window.close() }
+    await withCheckedContinuation { done in
+        c.drawn = { done.resume() }
+        c.apply(Update(seq: 1, upsert: Samples.pictures, total: UInt64(Samples.pictures.count), older: false, newer: 0,
+                       moved: Moved(place: .newest(100), newer: 0)))
+    }
+    #expect(await eventually { window.layoutIfNeeded(); return pictures.cache.count > 0 }, "the cells on screen drew theirs")
+    pictures.cache.empty()
+    #expect(pictures.cache.count == 0 && pictures.cache.bytes == 0, "as the app does with no window open")
+    c.askPicturesAgain()
+    #expect(pictures.cache.count > 0, "decoded again for the cells on screen")
+}
+
 @Test func `the chat of pictures draws as its references, in both looks, dark and light`() throws {
     for look in Look.allCases {
         for dark in [true, false] {

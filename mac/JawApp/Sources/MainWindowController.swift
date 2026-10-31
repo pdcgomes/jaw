@@ -158,6 +158,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidBecomeKey(_: Notification) {
         model.updateFocus()
+        model.windowShown()
+    }
+
+    func windowWillClose(_: Notification) {
+        model.windowClosed()
     }
 
     func windowDidResignKey(_: Notification) {

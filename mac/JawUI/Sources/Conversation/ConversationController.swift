@@ -593,6 +593,16 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         }
     }
 
+    /// The cells on screen ask again for their pictures, let go of while the window was closed, so
+    /// they draw from them again rather than from their wells.
+    public func askPicturesAgain() {
+        table.enumerateAvailableRowViews { rowView, _ in
+            for case let cell as MessageView in rowView.subviews {
+                cell.askPictures()
+            }
+        }
+    }
+
     func message(of view: MessageView) -> MessageRow? {
         view.message.flatMap { window.get($0.id) }
     }

@@ -15,6 +15,8 @@ final class AppModel {
     let layouts = Layouts()
     /// Every pane's pictures, decoded once, at most 64 MB of them.
     let pictures = MessagePictures()
+    /// The decoded pictures went as the window closed, to be asked for again as it opens.
+    var picturesLetGo = false
     var jawd: Jawd!
     weak var window: MainWindowController?
 
@@ -755,6 +757,21 @@ final class AppModel {
     /// Sends a poll as its form has it, with the key its form made; jawd's row brings it into the chat.
     func sendPoll(chat: String, _ poll: (question: String, options: [String], max: Int), key: String) {
         jawd.sendPoll(chat: chat, question: poll.question, options: poll.options, max: poll.max, key: key)
+    }
+
+    /// With no window open the decoded pictures go, as the design's "under 25 MB with no window
+    /// open" asks; the panes' cells ask for theirs again once it's back.
+    func windowClosed() {
+        pictures.cache.empty()
+        picturesLetGo = true
+    }
+
+    func windowShown() {
+        guard picturesLetGo else { return }
+        picturesLetGo = false
+        for c in panes.values {
+            c.askPicturesAgain()
+        }
     }
 }
 
