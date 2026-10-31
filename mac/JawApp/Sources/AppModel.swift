@@ -75,6 +75,8 @@ final class AppModel {
     var saving: [String: (message: String, reveal: Bool, done: (@Sendable (Result<URL, any Error>) -> Void)?)] = [:]
     /// Where each message's file was saved this run, for Show in Finder.
     var saved: [String: URL] = [:]
+    /// What the pick bench waits for: the chat list's update reaching the app, before it's applied.
+    var listCame: (() -> Void)?
     /// `JAW_TRACE=1` says each update drained, on standard error.
     let trace = ProcessInfo.processInfo.environment["JAW_TRACE"] != nil
 
@@ -193,6 +195,7 @@ final class AppModel {
                 link = nil
             }
         case let .chats(w, u) where w == listWindow:
+            listCame?()
             window?.chatList.apply(u)
             for row in u.upsert {
                 panes[row.id]?.update(chat: row)

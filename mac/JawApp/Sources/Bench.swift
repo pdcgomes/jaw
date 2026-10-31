@@ -13,12 +13,15 @@ import QuartzCore
 /// - `open`: opening each of the first 20 chats, from the open to its messages drawn, p50 and p99.
 /// - `memory`: `phys_footprint` once the chat list and a chat are drawn and the app is quiet.
 /// - `idle`: wake-ups over a quiet minute, once the window has settled.
-/// - `pick`: picking each folder of the tree, from the pick to its chats drawn, p50 and p99.
+/// - `pick`: picking each folder of the tree five times, among them Bench, a folder of yours with 50
+///   chats filed in it, made first if the account has none: from the pick to the app having asked
+///   for the folder's chats and people, to jawd's answer reaching the app, and to its chats drawn,
+///   p50 and p99 of each.
 /// - `pictures` and `library`: a fling through a chat of pictures, and through the library's grid.
 @MainActor
 enum Bench {
     static func run(_ what: String, model: AppModel) {
-        deadline(what == "idle" ? 120 : what == "pictures" || what == "library" ? 150 : 30)
+        deadline(what == "idle" ? 120 : what == "pictures" || what == "library" ? 150 : what == "pick" ? 60 : 30)
         switch what {
         case "pictures":
             BenchPictures.run(model)
@@ -37,7 +40,9 @@ enum Bench {
             }
         case "pick":
             model.firstRows = {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { picks(model, model.tree.order, []) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    benchFolder(model) { picks(model, Array(repeating: model.tree.order, count: 5).flatMap(\.self), []) }
+                }
             }
         case "memory":
             model.firstRows = {
@@ -454,24 +459,67 @@ enum Bench {
         }
     }
 
-    static func picks(_ model: AppModel, _ folders: [String], _ times: [Double]) {
-        guard let folder = folders.first else {
-            let sorted = times.sorted()
-            func p(_ q: Double) -> Double {
-                sorted.isEmpty ? 0 : sorted[min(Int(Double(sorted.count) * q), sorted.count - 1)]
+    /// The pick bench's folder of yours, Bench, made when the account has none, with the chat list's
+    /// first 50 chats filed in it; `then` once jawd's tree counts them.
+    static func benchFolder(_ model: AppModel, then: @escaping @MainActor () -> Void) {
+        let chats = (model.window?.chatList.all ?? []).filter { $0.kind != .community }.prefix(50).map(\.id)
+        if benched(model) == nil { model.jawd.folderCreate(name: "Bench", parent: nil) }
+        until({ benched(model) != nil }) {
+            let folder = benched(model)!.id
+            for chat in chats {
+                model.jawd.folderAdd(folder, item: chat, said: nil)
             }
-            finish(["picks": Double(times.count), "pick_p50_ms": p(0.5), "pick_p99_ms": p(0.99)])
+            until({ (benched(model)?.count ?? 0) >= chats.count }, then: then)
+        }
+    }
+
+    static func benched(_ model: AppModel) -> FolderRow? {
+        model.tree.children(of: nil).first { $0.name == "Bench" }
+    }
+
+    /// Runs `then` once `done` holds, looking every 100 ms.
+    static func until(_ done: @escaping @MainActor () -> Bool, then: @escaping @MainActor () -> Void) {
+        if done() { return then() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { until(done, then: then) }
+    }
+
+    /// One pick's times from the pick: the app having asked for the folder's chats and people, the
+    /// list's first update reaching the app, which comes at once for a watch's answer, and its chats
+    /// drawn.
+    struct Picked {
+        var asked: Double
+        var answer: Double
+        var drawn: Double
+    }
+
+    static func picks(_ model: AppModel, _ folders: [String], _ times: [Picked]) {
+        guard let folder = folders.first else {
+            func p(_ span: KeyPath<Picked, Double>, _ q: Double) -> Double {
+                let sorted = times.map { $0[keyPath: span] }.sorted()
+                return sorted.isEmpty ? 0 : sorted[min(Int(Double(sorted.count) * q), sorted.count - 1)]
+            }
+            finish(["picks": Double(times.count), "pick_asked_p50_ms": p(\.asked, 0.5), "pick_asked_p99_ms": p(\.asked, 0.99),
+                    "pick_answer_p50_ms": p(\.answer, 0.5), "pick_answer_p99_ms": p(\.answer, 0.99),
+                    "pick_p50_ms": p(\.drawn, 0.5), "pick_p99_ms": p(\.drawn, 0.99)])
             return
         }
         let start = Date()
+        var asked = 0.0, answered: Double?
+        model.listCame = {
+            model.listCame = nil
+            answered = ms(Date().timeIntervalSince(start))
+        }
         model.window?.chatList.drawn = {
             model.window?.chatList.drawn = nil
+            let (asked, answered) = (asked, answered)
             nextFrame {
                 let took = ms(Date().timeIntervalSince(start))
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { picks(model, Array(folders.dropFirst()), times + [took]) }
+                let picked = Picked(asked: asked, answer: answered ?? took, drawn: took)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { picks(model, Array(folders.dropFirst()), times + [picked]) }
             }
         }
         model.pick(folder: folder)
+        asked = ms(Date().timeIntervalSince(start))
     }
 
     /// A run that hasn't finished by then says so and quits, stopping the jawd it started.
