@@ -234,7 +234,7 @@ private struct OneChatScene: View {
     var body: some View {
         ScreenBand(
             title: "Lisbon Climbing open",
-            note: "Lisbon Climbing, selected and open: its header says \"someone's typing…\" in the online colour; then come \"3 new\", Rui's card, Ana's link, your voice message, Inês's album and Rui's typing at the foot. In lines, the poll's end sits above \"3 new\", names head their messages, times are on the right and yours start a third of the way across. The box names the chat; the status line says \"someone's typing…\", its right empty, as the one chat that needs you is open: the glance band with Ana's chat open shows it filled. A picture can't hold the sidebar's selection (a black pill), the header's blur (what's under it shows through) or a key window's buttons.",
+            note: "Lisbon Climbing, selected and open: its header says \"Rui typing...\" in the online colour, the three dots still; then come \"3 new\", Rui's card, Ana's link, your voice message, Inês's album and Rui's typing at the foot. In lines, the poll's end sits above \"3 new\", names head their messages, times are on the right and yours start a third of the way across. The box names the chat; the status line says \"someone's typing…\", its right empty, as the one chat that needs you is open: the glance band with Ana's chat open shows it filled. A picture can't hold the sidebar's selection (a black pill), the header's blur (what's under it shows through) or a key window's buttons.",
             screen: Screen(open: [Samples.group]), conditions: conditions,
         )
     }

@@ -5,10 +5,29 @@ import QuartzCore
 /// The header's "typing" while someone types: its dots counting up, ".", "..", "...", over and
 /// over, under a subtle shimmer that sweeps across the words and the dots. Still, it's the words
 /// with all three dots and no shimmer. Room for the three dots is always kept, so what follows them
-/// doesn't move as they count.
+/// doesn't move as they count. In a group the names of who's typing come first, cut short with "…"
+/// when the header hasn't room for them, so the words and their dots always show.
 final class TypingLabel: LiveStateView {
+    /// Who's typing, in a group: "Ana, Rui".
+    var who = "" {
+        didSet { if who != oldValue { relayout() } }
+    }
+
     var words = "typing" {
         didSet { if words != oldValue { relayout() } }
+    }
+
+    /// The most it may take across, which its header gives it.
+    var room = CGFloat.greatestFiniteMagnitude {
+        didSet { if room != oldValue { relayout() } }
+    }
+
+    /// `who` as it fits in `room`, with a space after it: whole, cut short with "…", or nothing.
+    private(set) var shownWho = ""
+
+    /// What comes before the dots, as it's drawn.
+    var phrase: String {
+        shownWho + words
     }
 
     /// What follows the dots, as " · muted".
@@ -34,6 +53,9 @@ final class TypingLabel: LiveStateView {
 
     init() {
         super.init(frame: .zero)
+        // Below a window's hold on its size, so names never widen the window, and above a stack's
+        // hugging, so it keeps the width it asks for once `room` has fitted them.
+        setContentCompressionResistancePriority(NSLayoutConstraint.Priority(490), for: .horizontal)
         for d in dotLayers {
             d.isHidden = true
             d.contentsGravity = .resize
@@ -65,15 +87,15 @@ final class TypingLabel: LiveStateView {
 
     /// Where the `i`th dot starts: after the words and the dots before it.
     func dotX(_ i: Int) -> CGFloat {
-        width(words + String(repeating: ".", count: i))
+        width(phrase + String(repeating: ".", count: i))
     }
 
     var lineHeight: CGFloat {
-        ceil(NSAttributedString(string: words + "..." + rest, attributes: attributes).size().height)
+        ceil(NSAttributedString(string: phrase + "..." + rest, attributes: attributes).size().height)
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: ceil(width(words + "..." + rest)), height: lineHeight)
+        NSSize(width: ceil(width(phrase + "..." + rest)), height: lineHeight)
     }
 
     override var isFlipped: Bool {
@@ -83,10 +105,10 @@ final class TypingLabel: LiveStateView {
     override func draw(_: NSRect) {
         let a = attributes
         if playing {
-            NSAttributedString(string: words, attributes: a).draw(at: .zero)
+            NSAttributedString(string: phrase, attributes: a).draw(at: .zero)
             NSAttributedString(string: rest, attributes: a).draw(at: NSPoint(x: dotX(3), y: 0))
         } else {
-            NSAttributedString(string: words + "..." + rest, attributes: a).draw(at: .zero)
+            NSAttributedString(string: phrase + "..." + rest, attributes: a).draw(at: .zero)
         }
     }
 
@@ -95,8 +117,35 @@ final class TypingLabel: LiveStateView {
         shimmer.frame = bounds
     }
 
-    /// Its size, the dots' places and their image follow the words and the colour.
+    /// The characters a name cut short loses from its end before its "…".
+    static let trailing = CharacterSet(charactersIn: ", ")
+
+    /// `who` and a space, as they fit in `room` before the words, their dots and what follows them:
+    /// whole, or cut short with "…", or nothing when even "…" doesn't fit.
+    func fitted() -> String {
+        guard !who.isEmpty else { return "" }
+        let after = words + "..." + rest
+        guard width(who + " " + after) > room else { return who + " " }
+        // The longest start of the names that fits, found by halves, since a longer start is no narrower.
+        let characters = Array(who)
+        var lo = 1, hi = characters.count - 1, best = ""
+        while lo <= hi {
+            let n = (lo + hi) / 2
+            let cut = String(characters[..<n]).trimmingCharacters(in: Self.trailing) + "… "
+            if width(cut + after) <= room {
+                best = cut
+                lo = n + 1
+            } else {
+                hi = n - 1
+            }
+        }
+        return best
+    }
+
+    /// Its size, the names that fit, the dots' places and their image follow the words, the room
+    /// and the colour.
     func relayout() {
+        shownWho = fitted()
         invalidateIntrinsicContentSize()
         let (image, w) = dotImage()
         for (i, d) in dotLayers.enumerated() {

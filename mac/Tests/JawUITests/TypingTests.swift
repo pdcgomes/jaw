@@ -6,8 +6,24 @@ import QuartzCore
 import Testing
 
 /// Someone typing: the bubble of three dots after the newest message, as WhatsApp draws it, and the
-/// header's "typing" with its dots counting under a shimmer; when they play, and the bubble's row,
-/// which comes and goes keeping your place.
+/// header's who's typing with its dots counting under a shimmer; when they play, and the bubble's
+/// row, which comes and goes keeping your place; and who's typing said in the terminal's words.
+
+let ruiTyping = Typist(id: "person:7", name: "Rui")
+let ruiRecording = Typist(id: "person:7", name: "Rui", state: .recording)
+let anaTyping = Typist(id: "person:4", name: "Ana")
+
+@Test func `who's typing is said in the terminal's words, with the names first in a group`() {
+    #expect(TypingWords.line([], group: true) == nil && TypingWords.doing([]) == nil, "nobody's typing")
+    #expect(TypingWords.line([ruiTyping], group: false) == "typing…")
+    #expect(TypingWords.line([ruiRecording], group: false) == "recording…")
+    #expect(TypingWords.line([ruiTyping], group: true) == "Rui typing…")
+    #expect(TypingWords.line([anaTyping, ruiTyping], group: true) == "Ana, Rui typing…", "oldest first")
+    #expect(TypingWords.line([anaTyping, ruiRecording], group: true) == "Ana, Rui typing…", "typing while anyone types")
+    #expect(TypingWords.line([ruiRecording, Typist(id: "person:4", name: "Ana", state: .recording)], group: true)
+        == "Rui, Ana recording…", "recording while everyone records")
+    #expect(TypingWords.who([anaTyping, ruiTyping], group: false) == "", "a one-to-one chat names nobody")
+}
 
 @MainActor @Test func `it plays only where it's looked at, in a key window on screen, with motion allowed`() {
     #expect(LiveStateView.plays(allowed: true, key: true, visible: true, reduced: false))
@@ -112,11 +128,26 @@ import Testing
     #expect(!label.playing && label.layer?.mask == nil && label.dotLayers.allSatisfy(\.isHidden))
     #expect(label.intrinsicContentSize.width == ceil(label.width("typing... · muted")), "the dots' room, whatever the count")
     #expect(label.dotX(0) == label.width("typing") && label.dotX(3) == label.width("typing..."))
+    label.who = "Ana, Rui"
+    #expect(label.phrase == "Ana, Rui typing" && label.dotX(0) == label.width("Ana, Rui typing"), "the names, then the words, then the dots")
+    #expect(label.intrinsicContentSize.width == ceil(label.width("Ana, Rui typing... · muted")))
+}
+
+@MainActor @Test func `names that don't fit the header's room are cut short, and the words and their dots always show`() {
+    let label = TypingLabel()
+    label.who = "Ana Margarida Ribeiro, Rui Pedro Costa, Inês Gomes Sousa"
+    label.room = label.width("Ana Margarida… typing...") + 1
+    #expect(label.shownWho == "Ana Margarida… ", "the longest start of the names that fits, without its last comma or space")
+    #expect(label.intrinsicContentSize.width <= label.room && label.phrase.hasSuffix("… typing"))
+    label.room = label.width("typing...")
+    #expect(label.shownWho.isEmpty && label.phrase == "typing", "with no room for a name, none")
+    label.room = .greatestFiniteMagnitude
+    #expect(label.shownWho == label.who + " ", "whole once there's room")
 }
 
 @MainActor @Test func `playing, the header's dots count up under a shimmer, keeping time from when they began`() throws {
     let label = TypingLabel()
-    label.words = "someone's typing"
+    label.who = "Rui"
     label.since = 500
     label.play()
     let counts: [[Float]] = [[1, 1, 1], [0, 1, 1], [0, 0, 1]]
@@ -170,16 +201,20 @@ final class Reader: ConversationHost {
     }
 }
 
-/// The group's samples in a pane 640 by 480 in a window of its own, laid out and drawn.
+/// The group's samples in a pane `width` by `height` in a window of its own, in `layout`'s look and
+/// its appearance, laid out and drawn, with `typing` typing in it.
 @MainActor
-func pane(typing: [String], host: Reader? = nil) async -> (ConversationController, NSWindow) {
+func pane(typing: [Typist], host: Reader? = nil, layout: LayoutSpec = spec(.bubbles, dark: true), width: CGFloat = 640,
+          height: CGFloat = 480) async -> (ConversationController, NSWindow)
+{
     var chat = Samples.group
-    chat.typing = typing
     chat.unread = 0
-    let c = ConversationController(chat: chat, spec: spec(.bubbles, dark: true), layouts: Layouts(), place: .newest(100))
+    let c = ConversationController(chat: chat, spec: layout, layouts: Layouts(), place: .newest(100))
+    c.typing = typing
     c.host = host
-    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 480), styleMask: [.borderless], backing: .buffered,
+    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.borderless], backing: .buffered,
                      defer: true)
+    w.appearance = NSAppearance(named: layout.style.roles.isDark ? .darkAqua : .aqua)
     w.contentView = c.view
     c.view.layoutSubtreeIfNeeded()
     await applied(c, Samples.update)
@@ -207,11 +242,11 @@ func stillMotion(_ body: () async throws -> Void) async rethrows {
 @MainActor @Test(.timeLimit(.minutes(1))) func `the typing bubble waits after the newest message while someone types, and goes when they stop`() async throws {
     try await stillMotion {
         let reader = Reader()
-        let (c, w) = await pane(typing: ["person:7"], host: reader)
+        let (c, w) = await pane(typing: [ruiTyping], host: reader)
         #expect(c.showsTyping && c.table.numberOfRows == c.rows.count + 1)
         #expect(c.table.view(atColumn: 0, row: c.rows.count, makeIfNecessary: true) === c.typingRow)
         #expect(c.isAtBottom, "the chat opens at the bottom, the bubble in view")
-        #expect(c.typingRow.accessibilityLabel() == "someone's typing…")
+        #expect(c.typingRow.accessibilityLabel() == "Rui typing…")
         #expect(c.typingRow.dots.allowed && !c.typingRow.dots.playing, "allowed, but still in a window that isn't key")
         reader.reading = false
         c.lookingChanged()
@@ -224,26 +259,61 @@ func stillMotion(_ body: () async throws -> Void) async rethrows {
         #expect(reader.focused == 1 && c.selected == c.rows.last?.id, "a click gives the pane the keys and selects nothing")
         c.typing = []
         #expect(!c.showsTyping && c.table.numberOfRows == c.rows.count && c.isAtBottom, "gone, the bottom kept in view")
-        c.typing = ["person:7"]
+        c.typing = [ruiRecording]
         #expect(c.showsTyping && c.isAtBottom, "back, and still at the bottom")
+        #expect(c.typingRow.accessibilityLabel() == "Rui recording…")
     }
 }
 
 @MainActor @Test(.timeLimit(.minutes(1))) func `the header says who's typing with its dots counting, and goes back to its line when they stop`() async {
     await stillMotion {
         let reader = Reader()
-        let (c, _) = await pane(typing: ["person:7"], host: reader)
+        let (c, _) = await pane(typing: [ruiTyping], host: reader)
         let header = c.header
-        #expect(!header.typingLabel.isHidden && header.detail.isHidden && header.typingLabel.words == "someone's typing")
-        #expect(header.accessibilityLabel()?.contains("someone's typing…") == true, "VoiceOver hears it as before")
+        #expect(!header.typingLabel.isHidden && header.detail.isHidden && header.typingLabel.phrase == "Rui typing")
+        #expect(header.accessibilityLabel() == "Lisbon Climbing, Rui typing…", "VoiceOver hears who")
+        #expect(header.detail.textColor == c.spec.style.roles.online.nsColor, "in the online colour")
         #expect(header.typingLabel.allowed, "let play in the pane you're reading")
         reader.reading = false
         c.lookingChanged()
         #expect(!header.typingLabel.allowed)
         reader.reading = true
+        c.typing = [anaTyping, ruiRecording]
+        #expect(header.typingLabel.phrase == "Ana, Rui typing", "both, oldest first, typing while anyone types")
+        c.typing = [ruiRecording]
+        #expect(header.typingLabel.phrase == "Rui recording" && header.accessibilityLabel() == "Lisbon Climbing, Rui recording…")
         c.typing = []
         #expect(header.typingLabel.isHidden && !header.detail.isHidden && header.detail.stringValue == "group")
         #expect(!header.typingLabel.allowed, "nothing to play once nobody's typing")
+    }
+}
+
+@MainActor @Test func `a one-to-one chat's header says typing or recording, naming nobody`() {
+    let c = ConversationController(chat: Samples.direct, spec: spec(.bubbles, dark: true), layouts: Layouts(), place: .newest(100))
+    _ = c.view
+    let ana = Typist(id: "person:12", name: "Ana")
+    c.typing = [ana]
+    #expect(c.header.typingLabel.phrase == "typing" && c.header.accessibilityLabel() == "Ana Ribeiro, typing…")
+    c.typing = [Typist(id: "person:12", name: "Ana", state: .recording)]
+    #expect(c.header.typingLabel.phrase == "recording" && c.typingRow.accessibilityLabel() == "recording…")
+    c.typing = []
+    #expect(c.header.typingLabel.isHidden && c.header.detail.isHidden, "nothing more to say of a chat that isn't muted")
+}
+
+@MainActor @Test(.timeLimit(.minutes(1))) func `in a narrow pane the header cuts the names short, and the words and their dots stay inside it`() async {
+    await stillMotion {
+        let names = ["Ana Margarida Ribeiro", "Rui Pedro Costa", "Inês Gomes Sousa", "Francisco Xavier Mendonça", "Maria do Carmo Vasconcelos"]
+        let long = names.enumerated().map { Typist(id: "person:\($0.offset + 20)", name: $0.element) }
+        let (c, _) = await pane(typing: long, width: 360, height: 300)
+        c.view.layoutSubtreeIfNeeded()
+        let label = c.header.typingLabel
+        #expect(label.shownWho.hasSuffix("… ") && label.phrase.hasSuffix("… typing"), "\(label.phrase), in \(label.room) points")
+        let right = label.convert(label.bounds, to: c.header).maxX
+        #expect(right <= c.header.bounds.width - HeaderView.trailing + 0.5, "\(right) of \(c.header.bounds.width)")
+        #expect(ceil(label.width(label.phrase + "...")) <= label.bounds.width, "the words and their dots inside the label")
+        let (wide, _) = await pane(typing: long, width: 1200, height: 300)
+        wide.view.layoutSubtreeIfNeeded()
+        #expect(wide.header.typingLabel.phrase == names.joined(separator: ", ") + " typing", "whole where there's room")
     }
 }
 
@@ -254,7 +324,7 @@ func stillMotion(_ body: () async throws -> Void) async rethrows {
         c.scroll(to: 0)
         let before = try #require(c.currentAnchor())
         #expect(!c.isAtBottom)
-        c.typing = ["person:7"]
+        c.typing = [ruiTyping]
         #expect(c.showsTyping)
         let during = try #require(c.currentAnchor())
         #expect(during.id == before.id && during.offset == before.offset)
@@ -267,13 +337,13 @@ func stillMotion(_ body: () async throws -> Void) async rethrows {
 
 @MainActor @Test(.timeLimit(.minutes(1))) func `their message lands where the bubble was, and someone else's leaves it`() async {
     await stillMotion {
-        let (c, _) = await pane(typing: ["person:7"])
+        let (c, _) = await pane(typing: [ruiTyping])
         let count = c.rows.count
         // After the samples' cards, the newest, whose sorts start with their times, 1792159300000 to 1792159307000.
         var ana = Samples.m(98, [Span(.text, "I'm in")], at: Samples.now + 30000, from: Samples.ana)
         ana.sort = "9~1"
         await applied(c, Update(seq: 300, upsert: [ana], total: UInt64(count + 1), newer: 0))
-        #expect(c.rows.last?.id == ana.id && c.typing == ["person:7"] && c.showsTyping, "Ana's message leaves Rui typing")
+        #expect(c.rows.last?.id == ana.id && c.typing == [ruiTyping] && c.showsTyping, "Ana's message leaves Rui typing")
         var rui = Samples.m(99, [Span(.text, "Saturday at 9, then")], at: Samples.now + 60000, from: Samples.rui)
         rui.sort = "9~2"
         await applied(c, Update(seq: 301, upsert: [rui], total: UInt64(count + 2), newer: 0))
@@ -284,7 +354,7 @@ func stillMotion(_ body: () async throws -> Void) async rethrows {
 
 @MainActor @Test(.timeLimit(.minutes(1))) func `no bubble away from the newest messages, nor in an empty chat`() async throws {
     try await stillMotion {
-        let (c, _) = await pane(typing: ["person:7"])
+        let (c, _) = await pane(typing: [ruiTyping])
         let first = try #require(c.rows.first)
         await applied(c, Update(seq: 300, older: true, newer: 40, moved: Moved(place: .around(first.id, before: 100, after: 100), newer: 40)))
         #expect(!c.window.holdsNewest && !c.showsTyping && c.table.numberOfRows == c.rows.count)
@@ -292,6 +362,7 @@ func stillMotion(_ body: () async throws -> Void) async rethrows {
         var chat = Samples.group
         chat.unread = 0
         let empty = ConversationController(chat: chat, spec: spec(.bubbles, dark: true), layouts: Layouts(), place: .newest(100))
+        empty.typing = [ruiTyping]
         _ = empty.view
         empty.apply(Update(seq: 1, total: 0, older: false, newer: 0, moved: Moved(place: .newest(100), newer: 0)))
         try await Task.sleep(for: .milliseconds(100))

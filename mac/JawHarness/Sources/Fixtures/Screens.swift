@@ -3,12 +3,14 @@ import JawKit
 import JawThemes
 import JawUI
 
-/// A window as values: jawd's situation, the chats in the list, the chats open in panes (the first
-/// with the keys), the layout's name, focus mode and the window's size. The harness makes a
-/// `WindowContent` from one as the app makes one from jawd's windows, and shows it as of `Samples.now`.
+/// A window as values: jawd's situation, the chats in the list, who's typing in them, the chats open
+/// in panes (the first with the keys), the layout's name, focus mode and the window's size. The
+/// harness makes a `WindowContent` from one as the app makes one from jawd's windows, and shows it as
+/// of `Samples.now`.
 struct Screen {
     var situation = Situation(reach: .up, linked: true, connection: Connection(state: .online))
     var chats: [ChatRow] = Samples.chats
+    var typing: Typists = Samples.typing
     var open: [ChatRow] = []
     var layout = "Unsaved Panes"
     var focusMode = false
@@ -84,6 +86,7 @@ struct Screen {
         var box: NSView?
         for (i, chat) in open.enumerated() {
             let c = ConversationController(chat: chat, spec: spec, layouts: layouts, place: .newest(100))
+            c.typing = typing[chat.id] ?? []
             c.windowButtons = { [weak view = content.view] in
                 guard let view, let zoom = Self.titleBar.frame(of: .zoomButton, in: view) else { return nil }
                 return view.convert(zoom, to: nil)

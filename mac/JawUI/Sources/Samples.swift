@@ -45,6 +45,9 @@ public enum Samples {
     static let rui = Sender(id: "person:7", name: "Rui", colour: 2)
     static let ines = Sender(id: "person:9", name: "Inês", colour: 0)
 
+    /// Who's typing in the samples' chats, as jawd says it: Rui, in Lisbon Climbing.
+    public static let typing: Typists = [group.id: [Typist(id: rui.id, name: rui.name)]]
+
     /// A group's messages, oldest first.
     public static var messages: [MessageRow] {
         let yesterday = now - 86_400_000

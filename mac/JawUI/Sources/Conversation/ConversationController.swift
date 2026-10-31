@@ -96,14 +96,14 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     var empty: NSHostingView<EmptyChatView>?
     var hoveredRow: Int?
 
-    /// Who's typing in the chat now, by person: the chat's row says it today, and jawd's typing
-    /// push will once it comes (P7). While it isn't empty the header says so and the typing bubble
-    /// waits below the newest message.
-    public var typing: [String] = [] {
+    /// Who's typing in the chat now, oldest first, as jawd says it. While anyone is, the header says
+    /// who and the typing bubble waits below the newest message.
+    public var typing: [Typist] = [] {
         didSet {
             guard typing != oldValue else { return }
-            header.typing = !typing.isEmpty
+            header.typing = typing
             header.show(chat)
+            typingRow.words = TypingWords.line(typing, group: chat.kind.isGroup) ?? ""
             showTyping()
         }
     }
@@ -127,9 +127,6 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         window = Messages(chat: chat.id, place: place)
         composer = ComposerController(chat: chat)
         super.init(nibName: nil, bundle: nil)
-        typing = chat.typing
-        header.typing = !typing.isEmpty
-        typingRow.words = Self.typingWords(chat)
     }
 
     @available(*, unavailable)
@@ -247,13 +244,11 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
 
     // MARK: - jawd's rows
 
-    /// The chat's row changed: its name, who's typing, its draft.
+    /// The chat's row changed: its name, its draft, whether it's muted.
     public func update(chat row: ChatRow) {
         chat = row
         header.show(row)
         composer.chatChanged(row)
-        typingRow.words = Self.typingWords(row)
-        typing = row.typing
     }
 
     /// Applies a window update from jawd, keeping where you're reading.
@@ -511,7 +506,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     /// message lands where the typing bubble was.
     func answered(_ theirs: [MessageRow]) {
         guard !theirs.isEmpty, !typing.isEmpty else { return }
-        typing = chat.kind.isGroup ? typing.filter { id in !theirs.contains { $0.from?.id == id } } : []
+        typing = chat.kind.isGroup ? typing.filter { t in !theirs.contains { $0.from?.id == t.id } } : []
     }
 
     /// Lets the header's typing and the typing bubble play while this is the pane you're reading,
@@ -523,10 +518,6 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         let shown = showsTyping && NSLocationInRange(rows.count, table.rows(in: scroll.contentView.bounds))
         typingRow.dots.allowed = reading && shown
         header.typingLabel.allowed = reading && !typing.isEmpty
-    }
-
-    static func typingWords(_ chat: ChatRow) -> String {
-        chat.kind.isGroup ? "someone's typing…" : "typing…"
     }
 
     // MARK: - The table
@@ -1211,8 +1202,8 @@ final class HeaderView: NSView {
             lead,
             avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
             avatar.widthAnchor.constraint(equalToConstant: side), avatar.heightAnchor.constraint(equalToConstant: side),
-            stack.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: Space.m + 2),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -(Space.xxl + Space.xl)),
+            stack.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: Self.stackGap),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.trailing),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -1222,13 +1213,23 @@ final class HeaderView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// Whether someone's typing, as the conversation's `typing` says; its dots start counting when
-    /// someone starts.
-    var typing = false {
-        didSet { if typing, !oldValue { typingLabel.since = CACurrentMediaTime() } }
+    /// Who's typing, as the conversation's `typing` says; its dots start counting when someone starts.
+    var typing: [Typist] = [] {
+        didSet { if !typing.isEmpty, oldValue.isEmpty { typingLabel.since = CACurrentMediaTime() } }
     }
 
     var online = false
+
+    /// Where the name and how the chat is start, after the picture.
+    static let stackGap = Space.m + 2
+    /// What's kept clear at the header's right, for the pane's buttons.
+    static let trailing = Space.xxl + Space.xl
+
+    /// Who's typing gets the room the header has after its picture, its names cut short to fit.
+    override func layout() {
+        super.layout()
+        typingLabel.room = max(bounds.width - avatar.frame.maxX - Self.stackGap - Self.trailing, 0)
+    }
 
     /// Where the window's buttons are, as the conversation's `windowButtons` says: by default its
     /// window's zoom button, the last of the three.
@@ -1253,16 +1254,18 @@ final class HeaderView: NSView {
 
     func show(_ chat: ChatRow) {
         name.stringValue = chat.name
-        online = !typing && presence == "online"
+        let said = TypingWords.line(typing, group: chat.kind.isGroup)
+        online = said == nil && presence == "online"
         var parts: [String] = []
-        if typing { parts.append(chat.kind.isGroup ? "someone's typing…" : "typing…") }
-        if !typing, let presence { parts.append(presence) }
-        if chat.kind.isGroup, !typing { parts.append(members > 0 ? "\(members) members" : "group") }
+        if let said { parts.append(said) }
+        if said == nil, let presence { parts.append(presence) }
+        if chat.kind.isGroup, said == nil { parts.append(members > 0 ? "\(members) members" : "group") }
         if chat.muted { parts.append("muted") }
         detail.stringValue = parts.joined(separator: " · ")
-        detail.isHidden = parts.isEmpty || typing
-        typingLabel.isHidden = !typing
-        typingLabel.words = chat.kind.isGroup ? "someone's typing" : "typing"
+        detail.isHidden = parts.isEmpty || said != nil
+        typingLabel.isHidden = said == nil
+        typingLabel.who = TypingWords.who(typing, group: chat.kind.isGroup)
+        typingLabel.words = TypingWords.doing(typing) ?? "typing"
         typingLabel.rest = chat.muted ? " · muted" : ""
         setAccessibilityLabel("\(chat.name), \(detail.stringValue)")
         if let roles { avatar.show(chat.name, id: chat.id, image: avatar.image, roles: roles) }
@@ -1274,7 +1277,7 @@ final class HeaderView: NSView {
         tint.layer?.backgroundColor = roles.ground.opacity(0.72).cgColor
         rule.layer?.backgroundColor = roles.separator.opacity(0.7).cgColor
         name.textColor = roles.text.nsColor
-        detail.textColor = typing || online ? roles.online.nsColor : roles.secondary.nsColor
+        detail.textColor = !typing.isEmpty || online ? roles.online.nsColor : roles.secondary.nsColor
         typingLabel.colour = roles.online
     }
 }
