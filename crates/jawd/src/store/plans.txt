@@ -2178,6 +2178,11 @@ SELECT person FROM chats WHERE id = ?1
     SEARCH chats USING INDEX sqlite_autoindex_chats_1 (id=?)
 
 -- src/store/read.rs
+SELECT p.n, p.presence, p.last_seen, p.followed FROM chats c JOIN people p ON p.n = c.person WHERE c.id = ?1 AND c.kind = 'direct'
+    SEARCH c USING INDEX sqlite_autoindex_chats_1 (id=?)
+    SEARCH p USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/read.rs
 SELECT n FROM chats WHERE id = ?1
     SEARCH chats USING COVERING INDEX sqlite_autoindex_chats_1 (id=?)
 

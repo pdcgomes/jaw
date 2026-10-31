@@ -605,13 +605,12 @@ async fn start(home: &Path, lock: std::fs::File, engine: Chosen, options: &Optio
     pools.extend(media.lanes());
     let finder = find::Finder::start(store.clone()).await?;
     let connection = live.clone();
-    let online = Box::new(move || {
-        matches!(
-            connection.lock().expect("live state").connection.state,
-            jaw_proto::ConnectionState::Online | jaw_proto::ConnectionState::CatchingUp
-        )
+    let reach = Arc::new(move || {
+        let live = connection.lock().expect("live state");
+        (presence::reachable(live.connection.state), live.ended())
     });
-    let looking = presence::Looking { focused: attention.focus(), pushes: pushes.subscribe(), online };
+    let connections = live.lock().expect("live state").connections();
+    let looking = presence::Looking { focused: attention.focus(), pushes: pushes.subscribe(), reach, connections };
     following.start(store.clone(), engine.clone(), feed.clone(), looking, Default::default());
     let checks = Arc::new(organise::Checks::default());
     tokio::spawn(organise::check(store.clone(), checks.clone()));

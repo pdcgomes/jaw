@@ -18,10 +18,13 @@
 //! go, after which a window asks for a read again; a connection watches at most `MOST_WINDOWS`.
 //!
 //! Who's typing goes with the windows: a watch's or move's answer says it for every chat of the
-//! window, and a `typing` push follows for a chat its windows show when its typing changes, and
-//! just after the window's push that brings a chat in with someone typing. A connection keeps what
-//! its interface holds of it, forgetting a chat as it leaves every window, and at most one push
-//! owed for each chat, which waits with the windows' updates while the queue is full.
+//! window (a roster's are its people's one-to-one chats), and a `typing` push follows for a chat
+//! its windows show when its typing changes, and just after the window's push that brings a chat
+//! in with someone typing. A connection keeps what its interface holds of it, forgetting a chat as
+//! it leaves every window, and at most one push owed for each chat, which waits with the windows'
+//! updates while the queue is full. A one-to-one chat's person's presence is read with its
+//! conversation's window, whose answer says it, and a `presence` push follows when a read finds it
+//! changed, owed and held as typing is, for the chats its conversations show.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -34,8 +37,8 @@ use std::time::Instant;
 use jaw_proto::library::{Counts, Kind as LibraryKind, LibraryPush, LibraryRow, LibraryWatch, LibraryWatched};
 use jaw_proto::windows::{
     Around, ChatRow, ChatsPush, ChatsWatch, ChatsWatched, Favourite, FolderRow, FoldersPush, FoldersWatch,
-    FoldersWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, RosterRow, RosterWatch, TypingPush,
-    Typist, Typists, Watch, WatchMove,
+    FoldersWatched, MessageRow, MessagesPush, MessagesWatch, MessagesWatched, PersonPresence, PresencePush, RosterRow,
+    RosterWatch, TypingPush, Typist, Typists, Watch, WatchMove,
 };
 use jaw_proto::{Error, Windows, code};
 use rusqlite::Connection;
@@ -103,6 +106,11 @@ pub struct Client {
     /// The chats shown whose typing may differ from what its interface holds, to tell it once the
     /// queue has room.
     typing_owed: BTreeSet<String>,
+    /// The presence its interface holds for each one-to-one chat its conversations show: what the
+    /// last answer or push said.
+    presences: HashMap<String, PersonPresence>,
+    /// The conversations' chats whose presence may differ from what its interface holds.
+    presence_owed: BTreeSet<String>,
 }
 
 /// What every connection shares: each distinct window's reads, the bytes of those kept, and how
@@ -246,6 +254,10 @@ struct Found {
     counts: Option<Counts>,
     chats: HashSet<i64>,
     note: Option<String>,
+    /// A conversation's person's presence, for a one-to-one chat.
+    presence: Option<PersonPresence>,
+    /// A roster's people's one-to-one chats, which it shows who's typing in.
+    roster_chats: HashSet<String>,
     /// The window as it was read, its anchor where the read found it.
     spec: Spec,
     /// The bytes it holds, about.
@@ -436,10 +448,15 @@ fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
         }
         _ => None,
     };
+    let roster_chats: HashSet<String> = match &snapshot.rows {
+        Rows::People(rows) => rows.iter().filter_map(|(_, row)| row.chat.clone()).collect(),
+        _ => HashSet::new(),
+    };
     let bytes = size_of::<Found>()
         + rows.iter().map(Line::bytes).sum::<usize>()
         + (snapshot.senders.capacity() + snapshot.chats.capacity()) * size_of::<i64>()
-        + snapshot.named.capacity() * size_of::<u64>();
+        + snapshot.named.capacity() * size_of::<u64>()
+        + roster_chats.iter().map(|chat| size_of::<String>() + chat.capacity()).sum::<usize>();
     Found {
         fresh: from.max(snapshot.seq),
         seq: snapshot.seq,
@@ -455,6 +472,8 @@ fn found(snapshot: Snapshot, spec: Spec, from: i64) -> Found {
         counts: snapshot.counts,
         chats: snapshot.chats,
         note: snapshot.note,
+        presence: snapshot.presence,
+        roster_chats,
         spec,
         bytes: bytes as u64,
     }
@@ -524,6 +543,10 @@ struct State {
     /// A library window's counts, and the chats its rows are in.
     counts: Option<Counts>,
     chats: HashSet<i64>,
+    /// A conversation's person's presence, as the read it was settled from has it.
+    presence: Option<PersonPresence>,
+    /// A roster's people's one-to-one chats, as its interface holds them.
+    roster_chats: HashSet<String>,
 }
 
 /// A row as its interface holds it.
@@ -546,6 +569,8 @@ struct Update<'a> {
     favourites: Option<&'a RawValue>,
     counts: Option<Counts>,
     note: Option<String>,
+    /// A conversation's person's presence, which its answer says.
+    presence: Option<&'a PersonPresence>,
 }
 
 /// What kind of window an update is for.
@@ -636,6 +661,17 @@ impl Row for LibraryRow {
     }
 }
 
+/// The chats a window of `spec` shows, holding `state`: a chat list's rows, a conversation's chat
+/// and a roster's people's own; the folder tree and a library window show none.
+fn shown(spec: &Spec, state: &State) -> Vec<String> {
+    match spec {
+        Spec::Chats(_) => state.held.keys().cloned().collect(),
+        Spec::Messages(messages) => vec![messages.chat.clone()],
+        Spec::Roster(_) => state.roster_chats.iter().cloned().collect(),
+        Spec::Folders | Spec::Library(_) => Vec::new(),
+    }
+}
+
 /// Whether two sets have anything in common, looking up the smaller's in the larger.
 fn meet<T: Eq + Hash>(a: &HashSet<T>, b: &HashSet<T>) -> bool {
     let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
@@ -688,6 +724,7 @@ fn settle<'a>(
         favourites: found.favourites.as_ref().filter(|(hash, _)| favourites != Some(*hash)).map(|(_, json)| &**json),
         counts: found.counts,
         note: found.note.clone(),
+        presence: found.presence.as_ref(),
     };
     let state = State {
         held,
@@ -701,14 +738,17 @@ fn settle<'a>(
         favourites: found.favourites.as_ref().map(|(hash, _)| *hash),
         people: found.people.clone(),
         counts: found.counts,
+        presence: found.presence.clone(),
         chats: found.chats.clone(),
+        roster_chats: found.roster_chats.clone(),
     };
     (update, state)
 }
 
-/// `update` as a watch's or a move's result, with who's typing in the window's chats.
+/// `update` as a watch's or a move's result, with who's typing in the window's chats and, for a
+/// one-to-one chat's conversation, its person's presence.
 fn result(watch: String, update: Update, typing: Typists) -> Value {
-    let Update { kind, seq, total, older, newer, upsert: rows, remove, favourites, counts, note } = update;
+    let Update { kind, seq, total, older, newer, upsert: rows, remove, favourites, counts, note, presence } = update;
     let value = match kind {
         Kind::Chats | Kind::Roster => serde_json::to_value(ChatsWatched { watch, seq, total, rows, remove, typing }),
         Kind::Messages => serde_json::to_value(MessagesWatched {
@@ -720,7 +760,7 @@ fn result(watch: String, update: Update, typing: Typists) -> Value {
             rows,
             remove,
             typing,
-            presence: None,
+            presence: presence.cloned(),
         }),
         Kind::Folders => {
             let favourites: Vec<Favourite> =
@@ -933,6 +973,7 @@ impl Window {
                     || changes.chats.contains(&chat)
                     || meet(&self.state.senders, &changes.people)
                     || meet(&self.state.named, &changes.jids)
+                    || (self.state.presence.is_some() && self.state.people.iter().any(|n| changes.presence.contains(n)))
             }
             (Spec::Messages(_), None) => !changes.chats.is_empty(),
             // Its rows name their chats, which a group's members or a person can name, as the chat
@@ -965,21 +1006,27 @@ impl Window {
         Some(self.read.map_or(at, |read| at.max(read + timing.burst)))
     }
 
-    /// Whether it shows `chat`: a chat list among its rows, a chat's messages as theirs.
+    /// Whether it shows `chat`: a chat list among its rows, a chat's messages as theirs, a roster
+    /// as one of its people's own.
     fn shows(&self, chat: &str) -> bool {
         match &self.spec {
             Spec::Chats(_) => self.state.held.contains_key(chat),
             Spec::Messages(messages) => messages.chat == chat,
-            Spec::Folders | Spec::Roster(_) | Spec::Library(_) => false,
+            Spec::Roster(_) => self.state.roster_chats.contains(chat),
+            Spec::Folders | Spec::Library(_) => false,
         }
     }
 
     /// The chats it shows.
     fn chats(&self) -> Vec<String> {
+        shown(&self.spec, &self.state)
+    }
+
+    /// The one-to-one chat a conversation shows its person's presence for, once a read has found it.
+    fn presence(&self) -> Option<(&str, &PersonPresence)> {
         match &self.spec {
-            Spec::Chats(_) => self.state.held.keys().cloned().collect(),
-            Spec::Messages(messages) => vec![messages.chat.clone()],
-            Spec::Folders | Spec::Roster(_) | Spec::Library(_) => Vec::new(),
+            Spec::Messages(messages) => self.state.presence.as_ref().map(|presence| (messages.chat.as_str(), presence)),
+            _ => None,
         }
     }
 
@@ -1030,6 +1077,8 @@ impl Client {
             typing,
             typists: HashMap::new(),
             typing_owed: BTreeSet::new(),
+            presences: HashMap::new(),
+            presence_owed: BTreeSet::new(),
         }
     }
 
@@ -1057,11 +1106,47 @@ impl Client {
         typing
     }
 
-    /// Forgets the typing of the chats no window shows now, as its interface does.
+    /// Forgets the typing of the chats no window shows now, and the presence of those no
+    /// conversation shows, as its interface does.
     fn forget_unshown(&mut self) {
         let shown: HashSet<String> = self.windows.values().flat_map(Window::chats).collect();
         self.typists.retain(|chat, _| shown.contains(chat));
         self.typing_owed.retain(|chat| shown.contains(chat));
+        let open: HashSet<&str> = self.windows.values().filter_map(Window::presence).map(|(chat, _)| chat).collect();
+        self.presences.retain(|chat, _| open.contains(chat.as_str()));
+        self.presence_owed.retain(|chat| open.contains(chat.as_str()));
+    }
+
+    /// The presence a conversation of `chat` shows now, as its window's last read found it.
+    fn presence_now(&self, chat: &str) -> Option<&PersonPresence> {
+        self.windows.values().filter_map(Window::presence).find(|(of, _)| *of == chat).map(|(_, presence)| presence)
+    }
+
+    /// Notes the presence a watch's or move's answer told its interface for the chat it shows.
+    fn told_presence(&mut self, watch: &str) {
+        let Some((chat, presence)) = self.windows.get(watch).and_then(Window::presence) else { return };
+        let (chat, presence) = (chat.to_string(), presence.clone());
+        self.presence_owed.remove(&chat);
+        self.presences.insert(chat, presence);
+    }
+
+    /// Sends the `presence` pushes owed for the one-to-one chats its conversations show, each with
+    /// how their person is now, unless that's what its interface holds; false if the queue had no
+    /// room for one.
+    fn flush_presence(&mut self) -> bool {
+        while let Some(chat) = self.presence_owed.pop_first() {
+            let Some(now) = self.presence_now(&chat).cloned() else { continue };
+            if self.presences.get(&chat) == Some(&now) {
+                continue;
+            }
+            if self.out.try_send(line("presence", PresencePush { chat: chat.clone(), presence: now.clone() })).is_err()
+            {
+                self.presence_owed.insert(chat);
+                return false;
+            }
+            self.presences.insert(chat, now);
+        }
+        true
     }
 
     /// Sends the `typing` pushes owed for the chats its windows show, each with who's typing there
@@ -1440,6 +1525,7 @@ impl Client {
         let chats = window.chats();
         self.windows.insert(watch.clone(), window);
         let typing = self.typing_in(chats);
+        self.told_presence(&watch);
         Ok(result(watch, update, typing))
     }
 
@@ -1455,6 +1541,7 @@ impl Client {
         let chats = window.chats();
         self.forget_unshown();
         let typing = self.typing_in(chats);
+        self.told_presence(&watch);
         Ok(result(watch, update, typing))
     }
 
@@ -1523,7 +1610,7 @@ impl Client {
     }
 
     fn flush_at(&self) -> Option<Instant> {
-        if !self.resync.is_empty() || !self.typing_owed.is_empty() {
+        if !self.resync.is_empty() || !self.typing_owed.is_empty() || !self.presence_owed.is_empty() {
             return Some(Instant::now());
         }
         let (now, holding) = (Instant::now(), (self.catching_up)());
@@ -1549,7 +1636,7 @@ impl Client {
             }
             self.resync.remove(0);
         }
-        if !self.flush_typing() {
+        if !self.flush_typing() || !self.flush_presence() {
             self.blocked.get_or_insert_with(Instant::now);
             return;
         }
@@ -1631,11 +1718,11 @@ impl Client {
             window.slot = self.shared.slot(&window.spec);
         }
         let (update, state) = settle(&window.state.held, window.state.favourites, &found, None);
-        let list = matches!(window.spec, Spec::Chats(_));
-        let came: Vec<String> =
-            state.held.keys().filter(|id| list && !window.state.held.contains_key(*id)).cloned().collect();
-        let left = list && window.state.held.keys().any(|id| !state.held.contains_key(id));
-        match push(watch, update, &window.state) {
+        let (was, now): (HashSet<String>, HashSet<String>) =
+            (window.chats().into_iter().collect(), shown(&window.spec, &state).into_iter().collect());
+        let came: Vec<String> = now.difference(&was).cloned().collect();
+        let left = was.iter().any(|chat| !now.contains(chat));
+        match push(watch.clone(), update, &window.state) {
             None => window.keep(state, reordered),
             Some(line) => match self.out.try_send(line) {
                 Ok(()) => window.keep(state, reordered),
@@ -1652,6 +1739,12 @@ impl Client {
                 self.typing_owed.insert(chat);
             }
         }
+        // A conversation's person's presence, once its read finds it other than its interface holds.
+        if let Some((chat, presence)) = self.windows.get(&watch).and_then(Window::presence)
+            && self.presences.get(chat) != Some(presence)
+        {
+            self.presence_owed.insert(chat.to_string());
+        }
         true
     }
 
@@ -1660,6 +1753,7 @@ impl Client {
     pub fn pending(&self) -> bool {
         !self.resync.is_empty()
             || !self.typing_owed.is_empty()
+            || !self.presence_owed.is_empty()
             || self.windows.values().any(|window| window.first.is_some() || window.reorder)
     }
 }

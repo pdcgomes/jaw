@@ -665,7 +665,12 @@ async fn typing_and_recording_heard_from_whatsapp_write_nothing_to_jaw_db() {
     let following = crate::presence::Following::default();
     let (pushes, _) = broadcast::channel(16);
     let (_focus, focused) = watch::channel(true);
-    let looking = crate::presence::Looking { focused, pushes: pushes.subscribe(), online: Box::new(|| true) };
+    let looking = crate::presence::Looking {
+        focused,
+        pushes: pushes.subscribe(),
+        reach: Arc::new(|| (true, 0)),
+        connections: watch::channel(0).1,
+    };
     following.start(store.clone(), None, feed, looking, crate::presence::Limits::default());
     // Typing's task runs as jawd's does, WhatsApp heard, so it names whoever types as it would.
     let typing = crate::feed::Typing::new(crate::feed::typing::Timing {

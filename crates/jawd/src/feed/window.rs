@@ -106,6 +106,8 @@ pub(super) struct Snapshot {
     pub counts: Option<Counts>,
     pub chats: HashSet<i64>,
     pub note: Option<String>,
+    /// A one-to-one chat's person's presence, which its conversation shows.
+    pub presence: Option<proto::PersonPresence>,
 }
 
 pub(super) enum Rows {
@@ -140,6 +142,7 @@ pub(super) fn query(db: &Connection, mut spec: Spec, only: Option<Vec<i64>>) -> 
         counts: None,
         chats: HashSet::new(),
         note: None,
+        presence: None,
     };
     match &mut spec {
         Spec::Chats(spec) => {
@@ -173,6 +176,10 @@ pub(super) fn query(db: &Connection, mut spec: Spec, only: Option<Vec<i64>>) -> 
             if let Some(person) = read::chat_person(&db, &spec.chat)? {
                 snapshot.people.push(person);
             }
+            snapshot.presence = read::chat_presence(&db, &spec.chat)?.map(|said| proto::PersonPresence {
+                person: format!("person:{}", said.n),
+                presence: presence(said.presence.as_deref(), said.last_seen, said.followed),
+            });
             let rows = match &mut spec.anchor {
                 None => {
                     let rows = read::messages(&db, &spec.chat, Around::Newest, spec.before)?;
@@ -349,15 +356,21 @@ pub(crate) fn folder_row(row: lists::FolderRow) -> proto::FolderRow {
     }
 }
 
-/// Someone's sort on the wire: the store's, then a byte lower than any a name has, then their n, so
-/// bytewise it orders as the store's (sort, n) does.
-fn roster_row(row: lists::PersonRow) -> proto::RosterRow {
-    let state = match (row.presence.as_deref(), row.last_seen) {
+/// Someone's presence on the wire, from what their row keeps: online, seen with when, or hidden
+/// when they hide it or WhatsApp hasn't said, and whether jawd follows them now.
+fn presence(online: Option<&str>, last_seen: Option<i64>, followed: bool) -> proto::Presence {
+    let state = match (online, last_seen) {
         (Some(state), _) => state.to_string(),
         (None, Some(at)) if at > 0 => "seen".into(),
         _ => "hidden".into(),
     };
-    let at = (state == "seen").then_some(row.last_seen).flatten();
+    let at = (state == "seen").then_some(last_seen).flatten();
+    proto::Presence { state, at, known: followed }
+}
+
+/// Someone's sort on the wire: the store's, then a byte lower than any a name has, then their n, so
+/// bytewise it orders as the store's (sort, n) does.
+fn roster_row(row: lists::PersonRow) -> proto::RosterRow {
     proto::RosterRow {
         id: format!("person:{}", row.n),
         v: row.v.max(0) as u64,
@@ -366,7 +379,7 @@ fn roster_row(row: lists::PersonRow) -> proto::RosterRow {
         phone: row.phone,
         about: row.about,
         avatar: row.avatar,
-        presence: proto::Presence { state, at, known: row.followed },
+        presence: presence(row.presence.as_deref(), row.last_seen, row.followed),
         chat: row.chat,
         folders: row.folders.into_iter().map(|n| format!("folder:{n}")).collect(),
     }

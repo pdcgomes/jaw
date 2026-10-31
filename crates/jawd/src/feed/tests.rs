@@ -62,6 +62,8 @@ impl Bed {
             batches: HashMap::new(),
             typing: BTreeMap::new(),
             told: Vec::new(),
+            presences: BTreeMap::new(),
+            presence_told: Vec::new(),
             pushes: Vec::new(),
         }
     }
@@ -158,11 +160,19 @@ impl Model {
         self.ordered().iter().map(|row| row["id"].as_str().unwrap().to_string()).collect()
     }
 
-    /// The chats it shows: a chat list's rows, or a messages window's chat.
+    /// The chats it shows: a chat list's rows, a messages window's chat, or a roster's people's
+    /// one-to-one chats.
     fn shown(&self) -> Vec<String> {
         match &self.of {
             Some(chat) => vec![chat.clone()],
-            None => self.rows.keys().cloned().collect(),
+            None => self
+                .rows
+                .iter()
+                .filter_map(|(id, row)| match id.starts_with("person:") {
+                    true => row["chat"].as_str().map(str::to_string),
+                    false => Some(id.clone()),
+                })
+                .collect(),
         }
     }
 
@@ -188,6 +198,10 @@ pub(super) struct Watcher {
     /// in order, each after the window pushes that came before it.
     typing: BTreeMap<String, Value>,
     told: Vec<(String, Value)>,
+    /// The presence it holds for each one-to-one chat its conversations show, and the `presence`
+    /// pushes it took, in order.
+    presences: BTreeMap<String, Value>,
+    presence_told: Vec<(String, Value)>,
     /// Every push it took, by method and the chat or watch it's for, in order.
     pushes: Vec<(String, Value)>,
 }
@@ -208,11 +222,18 @@ impl Watcher {
                 model.of = of;
             }
             model.take(&result, "rows");
-            // The answer says who's typing in every chat of its window.
+            // The answer says who's typing in every chat of its window, and a conversation's its
+            // person's presence.
             for chat in model.shown() {
                 match result["typing"].get(&chat) {
                     Some(who) => self.typing.insert(chat, who.clone()),
                     None => self.typing.remove(&chat),
+                };
+            }
+            if let Some(chat) = model.of.clone() {
+                match result.get("presence") {
+                    Some(presence) => self.presences.insert(chat, presence.clone()),
+                    None => self.presences.remove(&chat),
                 };
             }
             self.forget_unshown();
@@ -224,10 +245,13 @@ impl Watcher {
         Ok(result)
     }
 
-    /// Forgets the typing of chats none of its windows shows, as an interface does.
+    /// Forgets the typing of chats none of its windows shows, and the presence of those none of its
+    /// conversations shows, as an interface does.
     fn forget_unshown(&mut self) {
         let shown: HashSet<String> = self.windows.values().flat_map(Model::shown).collect();
         self.typing.retain(|chat, _| shown.contains(chat));
+        let open: HashSet<String> = self.windows.values().filter_map(|model| model.of.clone()).collect();
+        self.presences.retain(|chat, _| open.contains(chat));
     }
 
     pub(super) async fn watch(&mut self, method: &str, params: Value) -> String {
@@ -254,6 +278,17 @@ impl Watcher {
                 true => self.typing.remove(&chat),
                 false => self.typing.insert(chat, who),
             };
+            return;
+        }
+        if push.method == "presence" {
+            let chat = push.params["chat"].as_str().unwrap().to_string();
+            let open = self.windows.values().any(|model| model.of.as_deref() == Some(chat.as_str()));
+            assert!(open, "presence pushed for {chat}, which no conversation shows: {}", push.params);
+            let mut presence = push.params.clone();
+            presence.as_object_mut().unwrap().remove("chat");
+            self.presence_told.push((chat.clone(), presence.clone()));
+            self.pushes.push(("presence".into(), json!(chat)));
+            self.presences.insert(chat, presence);
             return;
         }
         let watch = push.params["watch"].as_str().unwrap().to_string();
@@ -4632,10 +4667,10 @@ mod folders {
         check(&bed, &watcher, &watched, "her renamed").await;
     }
 
-    /// Presence, following and nobody's presence known read again only the rosters, whatever else is
-    /// watched.
+    /// Presence, following and nobody's presence known read again only the rosters and the
+    /// conversation of the person's own chat, which says their presence, whatever else is watched.
     #[tokio::test(flavor = "multi_thread")]
-    async fn presence_reads_again_only_the_rosters() {
+    async fn presence_reads_again_only_the_rosters_and_the_persons_own_conversation() {
         let bed = Bed::new(brisk());
         let mut watcher = bed.watcher(64);
         bed.apply(vec![
@@ -4673,7 +4708,7 @@ mod folders {
             let before = bed.feed.reads();
             let seq = bed.apply(vec![change]).await;
             watcher.settle(seq).await;
-            assert_eq!(bed.feed.reads() - before, 2, "{what}: only the two rosters are read again");
+            assert_eq!(bed.feed.reads() - before, 3, "{what}: only the two rosters and her chat are read again");
         }
     }
 }
@@ -5096,11 +5131,13 @@ async fn tree_and_roster_answers(bed: &Bed) -> (Value, Value) {
     (tree, roster)
 }
 
-/// The folder tree and a roster show folders and people, not chats, so typing reaches neither:
-/// they answer and push as they do with nobody typing, while a folder's chat list beside them is
-/// told who's typing in its chats, and nothing is written.
+/// The folder tree shows folders, so typing reaches it nowhere; a roster shows its people's own
+/// one-to-one chats, so it's told who's typing in those and in no other chat, by its answer and
+/// then by pushes, while its rows and pushes say what they say with nobody typing; a folder's chat
+/// list beside them is told who's typing in its chats; and nothing is written (the typing rebase
+/// audit's T4, and its O11).
 #[tokio::test(flavor = "multi_thread")]
-async fn the_tree_and_a_roster_are_told_no_typing_while_a_folders_chat_list_beside_them_is() {
+async fn the_tree_is_told_no_typing_and_a_roster_only_its_peoples_own_chats_while_a_folders_chat_list_is_told_its() {
     let (bed, typing, _hearing) = typing_bed(NEVER).await;
     let quiet = tree_and_roster_answers(&bed).await;
     let committed = *bed.store.committed().borrow();
@@ -5109,40 +5146,46 @@ async fn the_tree_and_a_roster_are_told_no_typing_while_a_folders_chat_list_besi
     typed(&typing, OPEN, &["Ana"]).await;
     typed(&typing, GROUP, &["Rui"]).await;
 
-    // Ana types in her chat, whose person the roster shows, and Rui records in the group: the
-    // tree and the roster answer as they did with nobody typing, with no typing of their own.
+    // Ana types in her chat, whose person the roster shows, and Rui records in the group: the tree
+    // answers as it did with nobody typing, and so does the roster but for Ana's typing in her chat.
     let typed_in = tree_and_roster_answers(&bed).await;
-    assert_eq!(typed_in, quiet, "the tree's and the roster's answers with someone typing");
+    assert_eq!(typed_in.0, quiet.0, "the tree's answer with someone typing");
+    let mut rows = typed_in.1.clone();
+    rows.as_object_mut().unwrap().remove("typing");
+    assert_eq!(rows, quiet.1, "the roster's rows with someone typing");
+    assert_eq!(answered_typing(&typed_in.1), want(&[(OPEN, &["Ana"])]), "the roster's typing: {}", typed_in.1);
     let keys = |answer: &Value| {
         let mut keys: Vec<String> = answer.as_object().unwrap().keys().cloned().collect();
         keys.sort();
         keys
     };
     assert_eq!(keys(&typed_in.0), ["favourites", "rows", "seq"], "{}", typed_in.0);
-    assert_eq!(keys(&typed_in.1), ["rows", "seq", "total"], "{}", typed_in.1);
+    assert_eq!(keys(&typed_in.1), ["rows", "seq", "total", "typing"], "{}", typed_in.1);
     let ana = typed_in.1["rows"].as_array().unwrap().iter().find(|row| row["chat"] == OPEN);
     assert!(ana.is_some(), "the roster shows Ana, whose chat she types in: {}", typed_in.1);
 
-    // A connection watching only them is told none of the typing that follows, and their pushes
-    // say what they say with nobody typing.
+    // A connection watching only them is told the typing in Ana's chat as it changes, none of the
+    // group's, and their pushes say what they say with nobody typing.
     let mut watcher = bed.watcher(64);
     watcher.watch("folders.watch", json!({})).await;
     watcher.watch("roster.watch", json!({"folder": "all", "around": "top", "after": 20})).await;
+    assert_eq!(watcher.typing_names(), want(&[(OPEN, &["Ana"])]));
     typing.heard(GROUP, &person(10), "", Composing);
     typing.heard(OPEN, OPEN, "", Paused);
     typed(&typing, GROUP, &["Rui", "Zé"]).await;
-    typed(&typing, OPEN, &[]).await;
+    watcher.until_typing(&[]).await;
     typing.heard(OPEN, OPEN, "", Recording);
-    typed(&typing, OPEN, &["Ana"]).await;
+    watcher.until_typing(&[(OPEN, &["Ana"])]).await;
     let renamed = Change::Person(named(OPEN, "Ana Ribeiro"));
     let written = Change::Message(Message { live: true, ..text(OPEN, "t-roster", 20_000, Some(OPEN), "olá") });
     let seq = bed.apply(vec![renamed, written]).await;
     watcher.settle(seq).await;
     watcher.run_for(ms(300)).await;
-    assert!(watcher.told.is_empty(), "typing told to the tree and a roster: {:?}", watcher.told);
+    let told: Vec<&str> = watcher.told.iter().map(|(chat, _)| chat.as_str()).collect();
+    assert_eq!(told, [OPEN, OPEN], "the roster is told Ana's pause and recording in her chat alone");
     let methods: Vec<&str> = watcher.pushes.iter().map(|(method, _)| method.as_str()).collect();
     assert!(methods.contains(&"folders") && methods.contains(&"roster"), "{:?}", watcher.pushes);
-    for (method, params) in &watcher.pushes {
+    for (method, params) in watcher.pushes.iter().filter(|(method, _)| method != "typing") {
         let keys = keys(params);
         let theirs: &[&str] = match method.as_str() {
             "folders" => &["favourites", "remove", "seq", "upsert", "watch"],
@@ -5158,9 +5201,9 @@ async fn the_tree_and_a_roster_are_told_no_typing_while_a_folders_chat_list_besi
     let groups = watcher.call("chats.watch", groups).await.unwrap();
     assert_eq!(answered_typing(&groups), want(&[(GROUP, &["Rui", "Zé"])]), "{groups}");
     typing.heard(GROUP, &person(9), "", Paused);
-    watcher.until_typing(&[(GROUP, &["Zé"])]).await;
+    watcher.until_typing(&[(OPEN, &["Ana"]), (GROUP, &["Zé"])]).await;
     let told: Vec<&str> = watcher.told.iter().map(|(chat, _)| chat.as_str()).collect();
-    assert_eq!(told, [GROUP], "only the group's chat list is told, once");
+    assert_eq!(told, [OPEN, OPEN, GROUP], "the group's chat list is told the group's, once");
     assert_eq!(*bed.store.committed().borrow(), seq, "typing wrote nothing past the two changes");
     assert!(committed < seq);
 }
@@ -5359,4 +5402,114 @@ async fn a_connection_told_to_watch_again_forgets_whos_typing_and_tells_a_chat_o
     let seq = bed.apply(vec![Change::Chat(Chat { id: person(5), pinned: Some(1), ..Chat::default() })]).await;
     watcher.settle(seq).await;
     watcher.until_typing(&[(&person(5), &["+351910000005"])]).await;
+}
+
+/// A one-to-one chat's person's presence as the protocol says it.
+fn presence_of(person: i64, state: &str, at: Option<i64>, known: bool) -> Value {
+    let mut presence = json!({"person": format!("person:{person}"), "state": state, "known": known});
+    if let Some(at) = at {
+        presence["at"] = json!(at);
+    }
+    presence
+}
+
+impl Watcher {
+    /// Runs the client, its interface reading, until that holds `presence` for `chat`.
+    async fn until_presence(&mut self, chat: &str, presence: &Value) {
+        let end = Instant::now() + TYPED;
+        loop {
+            self.drain();
+            if self.presences.get(chat) == Some(presence) {
+                return;
+            }
+            let held = self.presences.get(chat);
+            assert!(Instant::now() < end, "its interface was never told {presence} for {chat}, only {held:?}");
+            if let Ok(ready) = tokio::time::timeout_at(end.into(), self.client.ready()).await {
+                if let Ready::Changes(Ok(changes)) = &ready {
+                    self.seen = self.seen.max(changes.seq);
+                }
+                self.client.handle(ready).await;
+            }
+        }
+    }
+}
+
+/// A conversation of a one-to-one chat is told its person's presence: by its answer, then by a
+/// `presence` push for each change M6 writes of them (whether jawd follows them, online, when they
+/// were last seen), for that chat alone; a group's conversation has none; watching again says how
+/// they are now; a closed conversation is told nothing more; and telling it writes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conversation_is_told_its_persons_presence_by_its_answer_and_by_a_push_as_it_changes_writing_nothing() {
+    use crate::store::folders::{Presence, Step};
+    let (bed, _typing, _hearing) = typing_bed(NEVER).await;
+    let ana: i64 = bed
+        .store
+        .reads()
+        .query(Priority::Interactive, |db| {
+            Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [OPEN], |r| r.get(0))?)
+        })
+        .await
+        .unwrap();
+    let mut watcher = bed.watcher(64);
+    watcher.watch("chats.watch", json!({"around": "top", "after": 3})).await;
+    let conversation = watcher.watch("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 5})).await;
+    let group = watcher.call("messages.watch", json!({"chat": GROUP, "around": "newest", "before": 5})).await.unwrap();
+    assert_eq!(group.get("presence"), None, "a group's conversation has no presence: {group}");
+    let nothing_said = presence_of(ana, "hidden", None, false);
+    assert_eq!(watcher.presences, BTreeMap::from([(OPEN.to_string(), nothing_said)]));
+    // What the writer does after a write, indexing words and merging the index, done before her
+    // interface is told anything: it runs only as the test drives it.
+    let writes =
+        |bed: &Bed| (bed.store.report().done, bed.store.storage().synced_commits, *bed.store.committed().borrow());
+    let settled = async |bed: &Bed| {
+        let mut before = writes(bed);
+        loop {
+            tokio::time::sleep(ms(300)).await;
+            let now = writes(bed);
+            if now == before {
+                return now;
+            }
+            before = now;
+        }
+    };
+
+    // jawd follows her, she comes online, goes, seen a moment before, and jawd stops following her.
+    let seen = 1_792_000_000_000;
+    let changes = [
+        (Step::Following { people: vec![ana] }, presence_of(ana, "hidden", None, true)),
+        (Step::Presence { jid: OPEN.into(), state: Presence::Online }, presence_of(ana, "online", None, true)),
+        (
+            Step::Presence { jid: OPEN.into(), state: Presence::Away(Some(seen)) },
+            presence_of(ana, "seen", Some(seen), true),
+        ),
+        (Step::Following { people: Vec::new() }, presence_of(ana, "seen", Some(seen), false)),
+    ];
+    let wants: Vec<(String, Value)> = changes.iter().map(|(_, want)| (OPEN.to_string(), want.clone())).collect();
+    for (step, want) in changes {
+        let seq = bed.apply(vec![Change::Folders(step)]).await;
+        let written = settled(&bed).await;
+        watcher.settle(seq).await;
+        watcher.until_presence(OPEN, &want).await;
+        watcher.run_for(ms(150)).await;
+        assert_eq!(writes(&bed), written, "telling its interface {want} wrote nothing");
+    }
+    assert_eq!(watcher.presence_told, wants, "a push for each change, for her chat alone");
+
+    // Watching her chat again says how she is now, as a fresh watch does, and answering it writes
+    // nothing.
+    let written = settled(&bed).await;
+    let mut fresh = bed.watcher(64);
+    let again = fresh.call("messages.watch", json!({"chat": OPEN, "around": "newest", "before": 5})).await.unwrap();
+    assert_eq!(again["presence"], presence_of(ana, "seen", Some(seen), false), "{again}");
+    fresh.run_for(ms(300)).await;
+    assert_eq!(writes(&bed), written, "answering with her presence wrote nothing");
+
+    // Closed, her conversation is told nothing more of her.
+    watcher.call("unwatch", json!({"watch": conversation})).await.unwrap();
+    let online = Step::Presence { jid: OPEN.into(), state: Presence::Online };
+    let seq = bed.apply(vec![Change::Folders(online)]).await;
+    watcher.settle(seq).await;
+    watcher.run_for(ms(300)).await;
+    assert_eq!(watcher.presence_told, wants, "nothing told once it's closed");
+    assert!(watcher.presences.is_empty(), "{:?}", watcher.presences);
 }

@@ -1114,6 +1114,29 @@ pub fn chat_person(db: &Connection, id: &str) -> Result<Option<i64>> {
     Ok(db.prepare_cached("SELECT person FROM chats WHERE id = ?1")?.query_row([id], |r| r.get(0)).optional()?.flatten())
 }
 
+/// Someone's presence as M6 keeps it on their row: online or not, when they were last seen, and
+/// whether jawd follows them now.
+pub struct Presence {
+    pub n: i64,
+    /// online; None when not around.
+    pub presence: Option<String>,
+    pub last_seen: Option<i64>,
+    pub followed: bool,
+}
+
+/// The presence of the person of the one-to-one chat `id`; None for any other chat.
+pub fn chat_presence(db: &Connection, id: &str) -> Result<Option<Presence>> {
+    Ok(db
+        .prepare_cached(
+            "SELECT p.n, p.presence, p.last_seen, p.followed FROM chats c JOIN people p ON p.n = c.person
+            WHERE c.id = ?1 AND c.kind = 'direct'",
+        )?
+        .query_row([id], |r| {
+            Ok(Presence { n: r.get(0)?, presence: r.get(1)?, last_seen: r.get(2)?, followed: r.get(3)? })
+        })
+        .optional()?)
+}
+
 /// A chat's n by its JID.
 pub fn chat_n(db: &Connection, id: &str) -> Result<Option<i64>> {
     Ok(db.prepare_cached("SELECT n FROM chats WHERE id = ?1")?.query_row([id], |r| r.get(0)).optional()?)

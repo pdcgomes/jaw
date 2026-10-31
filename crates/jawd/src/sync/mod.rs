@@ -41,6 +41,9 @@ pub struct Live {
     /// connection, and only once the IQs after its handshake are answered, so after the
     /// connection's own keepalive timeout at times.
     said_connected: bool,
+    /// How many connections to WhatsApp have ended in this run, or never began, as `cut_short`
+    /// ends them: whom presence follows is counted for each, and a keepalive timeout ends none.
+    ended: watch::Sender<u64>,
     pub history: Option<HistoryProgress>,
     /// The account's own JIDs, for mentions of it and its own reactions, once jaw.db keeps them;
     /// nothing is converted until then (`stored_me`).
@@ -70,6 +73,7 @@ impl Default for Live {
             catch_up: None,
             catching_up: None,
             said_connected: false,
+            ended: watch::Sender::new(0),
             history: None,
             me: watch::Sender::new(convert::Me::default()),
             caught_chats: HashSet::new(),
@@ -151,6 +155,7 @@ impl Live {
     /// bring comes in the next connection's; and the next Connected is the next connection's.
     fn cut_short(&mut self) {
         self.said_connected = false;
+        self.ended.send_modify(|ended| *ended += 1);
         if let Some(started) = self.catching_up.take() {
             self.caught_chats.clear();
             if let Some(catch_up) = self.catch_up.as_mut() {
@@ -163,6 +168,17 @@ impl Live {
     /// linked.
     pub fn me(&self) -> watch::Receiver<convert::Me> {
         self.me.subscribe()
+    }
+
+    /// How many connections to WhatsApp have ended in this run, which changes before a new one is
+    /// said to be online, and never for a keepalive timeout and its restore.
+    pub fn connections(&self) -> watch::Receiver<u64> {
+        self.ended.subscribe()
+    }
+
+    /// How many connections have ended now, which changes with `connection` under the same lock.
+    pub fn ended(&self) -> u64 {
+        *self.ended.borrow()
     }
 }
 

@@ -2,8 +2,9 @@
 //! open one-to-one chats' first, then favourites, then rosters' in their order, and only while an
 //! interface has focus, which is also the only time WhatsApp sends presence: at most 20 new people
 //! a minute and 200 on each connection to WhatsApp, since subscribing to everyone is what presence
-//! trackers do and WhatsApp polices it. Whether they're online, and when they were last seen, is
-//! written to people's rows, which rosters sort by; who's typing never is. About texts are asked of
+//! trackers do and WhatsApp polices it; a keepalive timeout keeps the connection, and whom it
+//! follows. Whether they're online, and when they were last seen, is written to people's rows,
+//! which rosters sort by and conversations read; who's typing never is. About texts are asked of
 //! WhatsApp 50 people at a time, each at most once a day, while it can be reached.
 
 use std::collections::{HashSet, VecDeque};
@@ -26,12 +27,18 @@ pub const MOST: usize = 200;
 pub const PER_MINUTE: usize = 20;
 
 /// Whether someone's looking: an interface's focus, and the connection to WhatsApp as the
-/// `connection` pushes tell. `online` says how it is now, read once the pushes are subscribed to
-/// and again whenever some were missed, so no change of it goes unseen.
+/// `connection` pushes tell. `reach` says how it is now: whether WhatsApp can be reached, and how
+/// many connections to it have ended, read together, since sync changes both at once and counts a
+/// connection's end before a push says it; it's read once the pushes are subscribed to, again
+/// whenever some were missed, and each time whom to follow is worked out, so no change of it goes
+/// unseen. `connections` changes as connections end, as sync counts them: whom presence follows is
+/// counted for each, and a keepalive timeout, which leaves WhatsApp unreachable on the same
+/// connection, ends none.
 pub struct Looking {
     pub focused: watch::Receiver<bool>,
     pub pushes: broadcast::Receiver<Push>,
-    pub online: Box<dyn Fn() -> bool + Send + Sync>,
+    pub reach: Arc<dyn Fn() -> (bool, u64) + Send + Sync>,
+    pub connections: watch::Receiver<u64>,
 }
 
 /// Whom presence is followed within: at most `most` on a connection, `per_minute` newly in each
@@ -92,15 +99,15 @@ impl Following {
     /// `focused` says an interface is in front, through `engine` once WhatsApp can be reached, as
     /// `pushes` tell.
     pub fn start(&self, store: Store, engine: Option<Supervisor>, feed: Feed, looking: Looking, limits: Limits) {
-        let Looking { focused, pushes, online } = looking;
+        let Looking { focused, pushes, reach, connections } = looking;
         let Some(hearing) = self.hearing.lock().expect("presence heard").take() else { return };
-        let (connected, connection) = watch::channel(online());
+        let (connected, connection) = watch::channel(reach().0);
         tokio::spawn(write_heard(store.clone(), hearing));
-        tokio::spawn(connection_of(pushes, connected, online));
+        tokio::spawn(connection_of(pushes, connected, reach.clone()));
         if let Some(engine) = engine {
             let stats = self.stats.clone();
-            let following =
-                follow(store.clone(), engine.clone(), feed, focused, connection.clone(), stats.clone(), limits);
+            let reach = Reach { connected: connection.clone(), connections, now: reach };
+            let following = follow(store.clone(), engine.clone(), feed, focused, reach, stats.clone(), limits);
             tokio::spawn(following);
             tokio::spawn(about(store, engine, connection, stats, limits.about_idle));
         }
@@ -136,19 +143,27 @@ fn now_ms() -> i64 {
     crate::feed::now_ms()
 }
 
+/// Whether WhatsApp can be reached while the connection is `state`. With the phone offline it can:
+/// WhatsApp's servers send presence whether or not the phone answers.
+pub fn reachable(state: ConnectionState) -> bool {
+    use ConnectionState::{CatchingUp, Online, PhoneOffline};
+    matches!(state, Online | CatchingUp | PhoneOffline)
+}
+
 /// Says when WhatsApp can be reached, from the `connection` pushes, and from how it is now when
 /// some of them were missed.
 async fn connection_of(
     mut pushes: broadcast::Receiver<Push>,
     connected: watch::Sender<bool>,
-    online: Box<dyn Fn() -> bool + Send + Sync>,
+    reach: Arc<dyn Fn() -> (bool, u64) + Send + Sync>,
 ) {
     loop {
         let now = match pushes.recv().await {
-            Ok(push) if push.method == "connection" => serde_json::from_value::<Connection>(push.params)
-                .is_ok_and(|c| matches!(c.state, ConnectionState::Online | ConnectionState::CatchingUp)),
+            Ok(push) if push.method == "connection" => {
+                serde_json::from_value::<Connection>(push.params).is_ok_and(|c| reachable(c.state))
+            }
             Ok(_) => continue,
-            Err(broadcast::error::RecvError::Lagged(_)) => online(),
+            Err(broadcast::error::RecvError::Lagged(_)) => reach().0,
             Err(broadcast::error::RecvError::Closed) => return,
         };
         connected.send_if_modified(|was| std::mem::replace(was, now) != now);
@@ -203,28 +218,45 @@ fn favoured(db: &rusqlite::Connection) -> anyhow::Result<HashSet<i64>> {
     Ok(people)
 }
 
+/// What changes as WhatsApp comes and goes, as the pushes say it and as connections end, and how it
+/// is `now`: whether it can be reached, and how many connections to it have ended.
+struct Reach {
+    connected: watch::Receiver<bool>,
+    connections: watch::Receiver<u64>,
+    now: Arc<dyn Fn() -> (bool, u64) + Send + Sync>,
+}
+
 /// Follows the people the windows show while someone's looking and WhatsApp can be reached,
 /// within MOST on each connection and PER_MINUTE newly: open one-to-one chats' people first, then
-/// favourites, then rosters' people in their order.
+/// favourites, then rosters' people in their order. Whom a connection follows it follows until it
+/// ends: while a keepalive timeout leaves WhatsApp unreachable on it, nobody's known, and once its
+/// pings get through they're known again at once, never asked for again or counted twice.
 async fn follow(
     store: Store,
     engine: Supervisor,
     feed: Feed,
     mut focused: watch::Receiver<bool>,
-    mut connected: watch::Receiver<bool>,
+    reach: Reach,
     stats: Arc<Mutex<Stats>>,
     limits: Limits,
 ) {
+    let Reach { mut connected, mut connections, now: reach } = reach;
     let mut shown = feed.shown();
     let mut subscribed: HashSet<i64> = HashSet::new();
     let mut minute: VecDeque<Instant> = VecDeque::new();
     let mut written: Option<Vec<i64>> = None;
     let mut refused: HashSet<i64> = HashSet::new();
-    let mut was_connected = *connected.borrow();
+    // The connection whom `subscribed` holds were followed on, by how many had ended before it.
+    let (mut on, mut counting): (Option<u64>, bool) = (None, true);
     loop {
-        let (looking, online) = (*focused.borrow_and_update(), *connected.borrow_and_update());
+        let looking = *focused.borrow_and_update();
+        connected.borrow_and_update();
+        connections.borrow_and_update();
         shown.borrow_and_update();
-        if online != was_connected {
+        // Not the pushes' word: a connection's end is counted before its push says so, and the
+        // pushes alone would show it reachable, its end taken for the next connection.
+        let (online, ended) = reach();
+        if online && on != Some(ended) {
             // A connection is new to WhatsApp: whom it follows starts again, and nothing's known.
             subscribed.clear();
             refused.clear();
@@ -232,7 +264,7 @@ async fn follow(
             if let Err(e) = store.apply(Lane::Live, vec![Change::Folders(Step::Unknown)]).await {
                 eprintln!("jawd: can't forget who was around: {e:#}");
             }
-            was_connected = online;
+            on = Some(ended);
         }
         let (open, listed) = if looking && online { feed.showing() } else { Default::default() };
         let favoured: HashSet<i64> = store.reads().query(Priority::Background, favoured).await.unwrap_or_default();
@@ -297,6 +329,8 @@ async fn follow(
             changed = shown.changed() => if changed.is_err() { return },
             changed = focused.changed() => if changed.is_err() { return },
             changed = connected.changed() => if changed.is_err() { return },
+            // With nothing left to count connections, the one that's running is the last.
+            changed = connections.changed(), if counting => counting = changed.is_ok(),
             _ = async { tokio::time::sleep_until(until.unwrap_or_else(Instant::now).into()).await }, if until.is_some() => {}
         }
     }
@@ -424,7 +458,7 @@ mod tests {
         let (connected, mut connection) = watch::channel(false);
         let online = Arc::new(AtomicBool::new(false));
         let now = online.clone();
-        tokio::spawn(connection_of(heard, connected, Box::new(move || now.load(Ordering::Relaxed))));
+        tokio::spawn(connection_of(heard, connected, Arc::new(move || (now.load(Ordering::Relaxed), 0))));
         // Two pushes into room for one, before it reads: the connection push is missed.
         online.store(true, Ordering::Relaxed);
         pushes.send(Push { method: "connection".into(), params: serde_json::json!({"state": "online"}) }).unwrap();
@@ -447,7 +481,12 @@ mod tests {
         let (_focus, focused) = watch::channel(false);
         let (pushes, _) = broadcast::channel(16);
         let limits = Limits { about_idle: Duration::from_millis(200), ..Limits::default() };
-        let looking = Looking { focused, pushes: pushes.subscribe(), online: Box::new(|| true) };
+        let looking = Looking {
+            focused,
+            pushes: pushes.subscribe(),
+            reach: Arc::new(|| (true, 0)),
+            connections: watch::channel(0).1,
+        };
         Following::default().start(store.clone(), Some(supervisor), feed, looking, limits);
         tokio::time::sleep(Duration::from_millis(300)).await;
         let ana = Person { jids: vec![jid(1)], name: Some("Ana".into()), ..Person::default() };
@@ -524,7 +563,12 @@ mod tests {
         let (pushes, _) = broadcast::channel(16);
         let limits = Limits { most: 200, per_minute: 20, minute: Duration::from_millis(400), about_idle: ABOUT_IDLE };
         let following = Following::default();
-        let looking = Looking { focused, pushes: pushes.subscribe(), online: Box::new(|| true) };
+        let looking = Looking {
+            focused,
+            pushes: pushes.subscribe(),
+            reach: Arc::new(|| (true, 0)),
+            connections: watch::channel(0).1,
+        };
         following.start(store.clone(), Some(supervisor), feed.clone(), looking, limits);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(asked(&world).is_empty(), "nobody's followed while nobody looks");
@@ -622,12 +666,228 @@ mod tests {
         let (focus, focused) = watch::channel(false);
         let (pushes, _) = broadcast::channel(16);
         let limits = Limits { minute: Duration::from_millis(400), ..Limits::default() };
-        let looking = Looking { focused, pushes: pushes.subscribe(), online: Box::new(|| true) };
+        let looking = Looking {
+            focused,
+            pushes: pushes.subscribe(),
+            reach: Arc::new(|| (true, 0)),
+            connections: watch::channel(0).1,
+        };
         Following::default().start(store.clone(), Some(supervisor), feed.clone(), looking, limits);
         focus.send_replace(true);
         until("the first minute's", || asked(&world).len() >= PER_MINUTE).await;
         let asked = asked(&world);
         assert_eq!(asked[0], rui, "the open chat's person first: {:?}", &asked[..3]);
         drop(client);
+    }
+
+    /// jawd following presence for a roster of `people`, on a connection to WhatsApp that the test
+    /// says is reachable or not, through `connection` pushes, and ends by counting it in `ended`,
+    /// as sync does; with someone looking all along. `reach` is whether it can be reached and how
+    /// many connections have ended, changed together, as sync changes them under its lock.
+    struct Followed {
+        _home: tempfile::TempDir,
+        store: Store,
+        world: Arc<crate::engine::demo::World>,
+        following: Following,
+        pushes: broadcast::Sender<Push>,
+        reach: Arc<Mutex<(bool, u64)>>,
+        ended: watch::Sender<u64>,
+        client: crate::feed::Client,
+        _focus: watch::Sender<bool>,
+    }
+
+    impl Followed {
+        async fn new(people: usize, roster: usize, limits: Limits) -> Followed {
+            let home = tempfile::tempdir().unwrap();
+            let store = Store::open(home.path()).unwrap();
+            let named = (0..people).map(|n| {
+                Change::Person(Person { jids: vec![jid(n)], name: Some(format!("Person {n:03}")), ..Person::default() })
+            });
+            store.apply(Lane::Live, named.collect()).await.unwrap();
+            let engine = DemoEngine::with(vec![crate::engine::demo::connected()]);
+            let world = engine.world();
+            let (events, _incoming) = mpsc::channel(1024);
+            let supervisor = Supervisor::spawn(Arc::new(engine), events, Backoff::default());
+            let feed = Feed::start(store.clone(), Arc::new(|| false), crate::feed::Timing::default());
+            let (out, _lines) = mpsc::channel(64);
+            let mut client = feed.client(out);
+            let watched = serde_json::json!({"folder": "all", "around": "top", "after": roster});
+            client.call("roster.watch", watched).await.unwrap();
+            let (focus, focused) = watch::channel(true);
+            let (pushes, _) = broadcast::channel(16);
+            let (ended, connections) = watch::channel(0);
+            let reach = Arc::new(Mutex::new((true, 0)));
+            let now = reach.clone();
+            let looking = Looking {
+                focused,
+                pushes: pushes.subscribe(),
+                reach: Arc::new(move || *now.lock().unwrap()),
+                connections,
+            };
+            let following = Following::default();
+            following.start(store.clone(), Some(supervisor), feed, looking, limits);
+            Followed { _home: home, store, world, following, pushes, reach, ended, client, _focus: focus }
+        }
+
+        /// WhatsApp can be reached now or can't, as the `connection` push says.
+        fn say(&self, state: &str) {
+            let state = serde_json::from_value(serde_json::json!(state)).expect("a connection's state");
+            self.reach.lock().unwrap().0 = reachable(state);
+            let _ = self.pushes.send(Push { method: "connection".into(), params: serde_json::json!({"state": state}) });
+        }
+
+        /// The connection ends, as sync's `cut_short` ends it: counted, and unreachable, at once,
+        /// before any push says so.
+        fn ends(&self) {
+            let mut reach = self.reach.lock().unwrap();
+            *reach = (false, reach.1 + 1);
+            self.ended.send_replace(reach.1);
+        }
+
+        async fn followed(&self) -> i64 {
+            let count = |db: &rusqlite::Connection| {
+                Ok(db.query_row("SELECT count(*) FROM people WHERE followed", [], |r| r.get::<_, i64>(0))?)
+            };
+            self.store.reads().query(crate::work::Priority::Interactive, count).await.unwrap()
+        }
+
+        async fn until_followed(&self, n: i64, what: &str) {
+            let began = Instant::now();
+            while self.followed().await != n {
+                assert!(began.elapsed() < Duration::from_secs(20), "{what} didn't happen");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        async fn around(&self) -> i64 {
+            let count = |db: &rusqlite::Connection| {
+                Ok(db.query_row("SELECT count(*) FROM people WHERE presence = 'online'", [], |r| r.get::<_, i64>(0))?)
+            };
+            self.store.reads().query(crate::work::Priority::Interactive, count).await.unwrap()
+        }
+    }
+
+    /// A keepalive timeout leaves WhatsApp unreachable on the same connection: nobody's known while
+    /// it lasts, each keeping the state last heard, and once its pings get through again those the
+    /// connection followed are known again at once, none asked for again or counted twice; only a
+    /// new connection starts again (the keepalive audit's O10).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_keepalive_timeout_and_its_restore_bring_back_whom_the_connection_followed_at_once_and_once() {
+        // A minute longer than the test, so the first twenty are all its minute takes.
+        let limits = Limits { minute: Duration::from_secs(600), ..Limits::default() };
+        let followed = Followed::new(25, 1000, limits).await;
+        until("the minute's twenty", || asked(&followed.world).len() >= 20).await;
+        followed.until_followed(20, "the twenty followed").await;
+        followed.following.heard(pb::PresenceUpdate { jid: jid(0), unavailable: false, last_seen_ms: 0 });
+        let began = Instant::now();
+        while followed.around().await != 1 {
+            assert!(began.elapsed() < Duration::from_secs(20), "Person 000 never came online");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // The pings fail: nobody's known, and who was around shows as last heard.
+        followed.say("connecting");
+        followed.until_followed(0, "nobody known during the timeout").await;
+        assert_eq!(followed.around().await, 1, "the last state heard stays, faint");
+        until("the connection's twenty still followed on it, nobody wanted", || {
+            let status = followed.following.status();
+            (status.followed, status.wanted) == (20, 0)
+        })
+        .await;
+
+        // They get through again: the same twenty are known at once, none asked for again.
+        followed.say("online");
+        followed.until_followed(20, "the twenty known again within the minute").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(asked(&followed.world).len(), 20, "none asked for again on the same connection");
+        let status = followed.following.status();
+        assert_eq!((status.followed, status.wanted, status.waiting), (20, 25, 5));
+        assert_eq!(followed.around().await, 1);
+
+        // The phone going offline leaves WhatsApp reachable, and everyone known.
+        followed.say("phone_offline");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(followed.followed().await, 20, "the phone offline is no timeout");
+
+        // A new connection starts again: who was around isn't any more, and the minute's twenty are
+        // spent, so nobody's followed on it until the minute passes.
+        followed.say("connecting");
+        followed.ends();
+        followed.say("online");
+        let began = Instant::now();
+        while followed.around().await != 0 {
+            assert!(began.elapsed() < Duration::from_secs(20), "who was around was never forgotten");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        followed.until_followed(0, "nobody followed on the new connection").await;
+        until("nobody counted followed on the new connection", || followed.following.status().followed == 0).await;
+        assert_eq!(asked(&followed.world).len(), 20, "the minute's limit holds across connections");
+        drop(followed.client);
+    }
+
+    /// However many keepalive timeouts a connection lives through, and wherever its windows have
+    /// moved meanwhile, it follows at most `most` people; a new connection may follow as many again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_follows_at_most_its_most_across_keepalive_restores_however_its_windows_move() {
+        let limits = Limits { most: 5, per_minute: 100, minute: Duration::from_millis(50), about_idle: ABOUT_IDLE };
+        let mut followed = Followed::new(12, 6, limits).await;
+        until("the connection's five", || asked(&followed.world).len() >= 5).await;
+        followed.until_followed(5, "five followed").await;
+        // The roster moves on to the rest, and the pings fail and get through three times.
+        let rest: i64 = followed
+            .store
+            .reads()
+            .query(crate::work::Priority::Interactive, |db| {
+                Ok(db.query_row("SELECT person FROM person_jids WHERE jid = ?1", [jid(6)], |r| r.get(0))?)
+            })
+            .await
+            .unwrap();
+        let moved = serde_json::json!({"watch": "w1", "around": format!("person:{rest}"), "before": 0, "after": 5});
+        followed.client.call("watch.move", moved).await.unwrap();
+        for _ in 0..3 {
+            followed.say("connecting");
+            followed.until_followed(0, "nobody known during the timeout").await;
+            followed.say("online");
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        let asked_now: HashSet<String> = asked(&followed.world).into_iter().collect();
+        assert_eq!(asked_now.len(), 5, "one connection follows at most five: {asked_now:?}");
+        assert_eq!(followed.following.status().followed, 5);
+        // A new connection follows the roster's five as it is now.
+        followed.say("connecting");
+        followed.ends();
+        followed.say("online");
+        until("the new connection's five", || asked(&followed.world).len() >= 10).await;
+        followed.until_followed(5, "five followed on the new connection").await;
+        let shown: HashSet<String> = (6..11).map(jid).collect();
+        let latest: HashSet<String> = asked(&followed.world)[5..].iter().cloned().collect();
+        assert_eq!(latest, shown, "the people the roster shows now");
+    }
+
+    /// sync counts a connection's end before its push says WhatsApp can't be reached, and
+    /// whatsmeow reconnects by saying Connected with no Connecting before it, so that end is all
+    /// that says the next connection is new: nobody's asked for on the connection that ended while
+    /// the pushes still say it's reachable, and the next follows them again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_counted_ended_before_its_push_asks_for_nobody_and_the_next_follows_them_again() {
+        let limits = Limits { per_minute: 100, ..Limits::default() };
+        let followed = Followed::new(5, 1000, limits).await;
+        until("the five", || asked(&followed.world).len() >= 5).await;
+        followed.until_followed(5, "the five followed").await;
+
+        // The connection ends, counted at once, its push still to come.
+        followed.ends();
+        followed.until_followed(0, "nobody known once the connection ended").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(asked(&followed.world).len(), 5, "nobody asked for on the connection that ended");
+        assert_eq!(followed.followed().await, 0);
+
+        // Its push, then the next connection's, with nothing counted between.
+        followed.say("offline");
+        followed.say("online");
+        until("the five asked for on the next connection", || asked(&followed.world).len() >= 10).await;
+        followed.until_followed(5, "the five followed on the next connection").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(asked(&followed.world).len(), 10, "each asked for once on the next connection");
     }
 }
