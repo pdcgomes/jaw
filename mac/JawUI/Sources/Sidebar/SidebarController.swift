@@ -67,6 +67,11 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
     /// While the field is drawn again, its editing ending isn't the field given up.
     var keepingField = false
     static let namingRow = "naming"
+    /// Says words to VoiceOver as they come, as jawd's refusal of a name; the tests listen in.
+    var announce: @MainActor (String) -> Void = { words in
+        NSAccessibility.post(element: NSApplication.shared, notification: .announcementRequested,
+                             userInfo: [.announcement: words, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
 
     final class Item: NSObject {
         let id: String

@@ -173,6 +173,7 @@ final class NamingCell: NSTableCellView {
         if field.stringValue != naming.text { field.stringValue = naming.text }
         field.delegate = delegate
         field.setAccessibilityLabel(naming.renaming == nil ? "The new folder's name" : "The folder's new name")
+        field.setAccessibilityHelp(naming.refused)
         refused.stringValue = naming.refused ?? ""
         refused.isHidden = naming.refused == nil
         guard let roles else { return }

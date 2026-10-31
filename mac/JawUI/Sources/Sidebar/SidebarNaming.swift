@@ -78,13 +78,15 @@ extension SidebarController: NSTextFieldDelegate {
     }
 
     /// jawd turned the name down: its words go under the field, which keeps what's typed, and the keys
-    /// if it has them; keys gone elsewhere aren't taken back.
+    /// if it has them; keys gone elsewhere aren't taken back. VoiceOver says them as they come, and
+    /// they're the field's help after.
     public func notNamed(_ why: String) {
         guard var n = naming else { return }
         n.refused = why
         n.asked = false
         n.away = !typingName
         naming = n
+        announce(why)
         let row = outline.row(forItem: items[n.renaming ?? Self.namingRow])
         guard row >= 0, let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? NamingCell else { return }
         cell.show(n, delegate: self, roles: roles)

@@ -108,6 +108,23 @@ func plainKey(_ window: NSWindow, _ characters: String, _ code: UInt16) throws -
 }
 
 @MainActor
+@Test func `VoiceOver hears jawd's refusal of a name as it comes, and it's the name field's help after`() throws {
+    let host = SideHost()
+    let (s, window) = namingSidebar(host)
+    defer { window.close() }
+    var heard: [String] = []
+    s.announce = { heard.append($0) }
+    s.beginNaming(parent: "folder:1")
+    try fieldEditor(window).insertText("Cousins", replacementRange: NSRange(location: NSNotFound, length: 0))
+    let field = { (s.outline.view(atColumn: 0, row: 8, makeIfNecessary: false) as? NamingCell)?.field }
+    #expect(try #require(field()).accessibilityHelp() == nil)
+    try fieldEditor(window).doCommand(by: #selector(NSResponder.insertNewline(_:)))
+    s.notNamed("a folder there is called Cousins already")
+    #expect(heard == ["a folder there is called Cousins already"])
+    #expect(try #require(field()).accessibilityHelp() == "a folder there is called Cousins already")
+}
+
+@MainActor
 @Test func `Esc drops the field, and a click elsewhere keeps the name typed, as Finder does, unless it's empty or unchanged`() throws {
     let host = SideHost()
     let (s, window) = namingSidebar(host)
