@@ -166,12 +166,41 @@ func pixel(_ picture: CardPicture, _ x: Int, _ y: Int) -> [UInt8] {
     #expect(picture("PHOTO:data:image/jpeg,%FF%D8") == .some(nil), "a data URI that isn't base64")
 }
 
-@Test func `only the first eight cards' photos are read, so a message of many costs no more`() throws {
+/// `jpeg` made `size` bytes long by comments after its start, as a camera's notes make a photo
+/// long without anything more to decode.
+func commented(_ jpeg: Data, to size: Int) -> Data {
+    var out = Data(jpeg.prefix(2))
+    var room = size - jpeg.count
+    while room > 4 {
+        let n = min(room - 4, 0xFFFD)
+        out.append(contentsOf: [0xFF, 0xFE, UInt8((n + 2) >> 8), UInt8((n + 2) & 0xFF)])
+        out.append(Data(repeating: 0x20, count: n))
+        room -= n + 4
+    }
+    return out + jpeg.dropFirst(2)
+}
+
+@Test func `only the first eight cards' photos are kept, so a message of many costs no more`() throws {
     let jpeg = try photo(32, 32)
     let card = "BEGIN:VCARD\r\nFN:Climber\r\nPHOTO;ENCODING=b;TYPE=JPEG:\(folded(jpeg))\r\nEND:VCARD\r\n"
-    let cards = ContactCard.read(String(repeating: card, count: CardPicture.most + 2))
+    let ten = String(repeating: card, count: CardPicture.most + 2)
+    let cards = ContactCard.read(ten)
     #expect(cards.count == CardPicture.most + 2)
     #expect(cards.map { $0.picture != nil } == Array(repeating: true, count: CardPicture.most) + [false, false])
+    #expect(VCard.read(ten, photos: CardPicture.most).map { $0.photo != nil } == Array(repeating: true, count: CardPicture.most) + [false, false],
+            "the rest's photos skipped as they're read")
+
+    // What photos add to reading a message, each half as long as a photo kept can be: as much for
+    // 30 cards as for the 8 whose photos are kept. A photo in a note costs only its length.
+    let long = commented(jpeg, to: VCard.photoMost * 3 / 8)
+    let photographed = "BEGIN:VCARD\r\nFN:Climber\r\nPHOTO;ENCODING=b;TYPE=JPEG:\(folded(long))\r\nEND:VCARD\r\n"
+    #expect(ContactCard.read(photographed).first?.picture != nil, "a photo of \(long.count) bytes, read")
+    func photos(_ n: Int) -> Duration {
+        let message = String(repeating: photographed, count: n)
+        return fastest(message) - fastest(message.replacingOccurrences(of: "PHOTO;", with: "NOTE;"))
+    }
+    let (eight, thirty) = (photos(CardPicture.most), photos(30))
+    #expect(thirty < eight * 2, "photos add \(eight) to 8 cards and \(thirty) to 30")
 }
 
 // MARK: - Hostile cards
@@ -231,6 +260,22 @@ func fastest(_ card: String) -> Duration {
         #expect(four < once * 8 + .milliseconds(5), "\(shape): 256 KiB in \(once), 1 MiB in \(four)")
         #expect(four < .milliseconds(400), "\(shape) of 1 MiB read in \(four)")
     }
+}
+
+@Test func `eight photos of 2,048 pixels a side cost a row about what one does, the pixels a row decodes shared in order`() throws {
+    // A PNG is decoded whole, so pixels are what a photo costs. A row decodes those of one photo at
+    // its widest; the bubble's pictures come first, in the cards' order.
+    let png = try photo(CardPicture.widest, CardPicture.widest, .png)
+    let card = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Climber\r\nPHOTO;ENCODING=b;TYPE=PNG:\(folded(png))\r\nEND:VCARD\r\n"
+    let eight = String(repeating: card, count: 8)
+    #expect(ContactCard.read(eight).map { $0.picture != nil } == [true] + Array(repeating: false, count: 7), "the first takes them all")
+    let (one, all) = (fastest(card), fastest(eight))
+    #expect(all < one * 2, "one card read in \(one), eight in \(all)")
+
+    let quarter = try photo(CardPicture.widest / 2, CardPicture.widest / 2, .png)
+    let card4 = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Climber\r\nPHOTO;ENCODING=b;TYPE=PNG:\(folded(quarter))\r\nEND:VCARD\r\n"
+    #expect(ContactCard.read(String(repeating: card4, count: 5)).map { $0.picture != nil } == [true, true, true, true, false],
+            "four of half as wide share them")
 }
 
 @Test func `a card as long as a line jawd sends is read in time that grows with its length`() {

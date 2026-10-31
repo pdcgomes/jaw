@@ -34,11 +34,12 @@ public struct ContactCard: Sendable, Hashable {
     }
 
     /// The cards a vCard holds, as `VCard.read` reads them, the photos of the first
-    /// `CardPicture.most` made into their pictures.
+    /// `CardPicture.most` made into their pictures in order, as long as their pixels come to no more
+    /// than `CardPicture.pixelsMost`; the rest's photos aren't even kept as they're read.
     public static func read(_ vcard: String) -> [ContactCard] {
-        VCard.read(vcard).enumerated().map { i, card in
-            ContactCard(name: card.name, phones: card.phones,
-                        picture: i < CardPicture.most ? card.photo.flatMap(CardPicture.init(photo:)) : nil)
+        var pixels = CardPicture.pixelsMost
+        return VCard.read(vcard, photos: CardPicture.most).map { card in
+            ContactCard(name: card.name, phones: card.phones, picture: card.photo.flatMap { CardPicture(photo: $0, pixels: &pixels) })
         }
     }
 }
@@ -51,20 +52,26 @@ public struct CardPicture: Sendable, Hashable {
     /// The most pixels a side of a photo read, and the most cards of one message whose photos are.
     public static let widest = 2048
     public static let most = 8
+    /// The most pixels a message's photos come to together: one photo at its widest. A PNG is
+    /// decoded whole, and the row is read on the client's only reading thread each time jawd sends
+    /// it, so eight photos cost it no more than one does.
+    public static let pixelsMost = widest * widest
 
     public let side: Int
     public let pixels: Data
 
     /// The photo's picture: a JPEG or a PNG of at most `widest` pixels a side, filling the circle from
-    /// its centre; none for anything else.
-    public init?(photo: Data) {
+    /// its centre, when it has no more pixels than are left of `pixels`, which it takes from them;
+    /// none for anything else.
+    public init?(photo: Data, pixels left: inout Int) {
         let quiet = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(photo as CFData, quiet),
               let type = CGImageSourceGetType(source) as String?, ["public.jpeg", "public.png"].contains(type),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, quiet) as? [String: Any],
               let w = properties[kCGImagePropertyPixelWidth as String] as? Int, let h = properties[kCGImagePropertyPixelHeight as String] as? Int,
-              w > 0, h > 0, w <= Self.widest, h <= Self.widest
+              w > 0, h > 0, w <= Self.widest, h <= Self.widest, w * h <= left
         else { return nil }
+        left -= w * h
         let options = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -134,13 +141,14 @@ enum VCard {
         var photo: Data?
     }
 
-    /// The cards `text` holds, each from BEGIN:VCARD to END:VCARD, in order, `cardsMost` at most.
-    /// What's outside them is left out, and a card the text ends inside still counts.
-    static func read(_ text: String) -> [Card] {
+    /// The cards `text` holds, each from BEGIN:VCARD to END:VCARD, in order, `cardsMost` at most,
+    /// with the photos of the first `photos`; the rest's are skipped as any property that isn't
+    /// drawn is. What's outside them is left out, and a card the text ends inside still counts.
+    static func read(_ text: String, photos: Int = 0) -> [Card] {
         var text = text
         return text.withUTF8 { bytes in
             var reader = Reader(bytes)
-            return reader.cards(most: cardsMost)
+            return reader.cards(most: cardsMost, photos: photos)
         }
     }
 
@@ -157,6 +165,8 @@ enum VCard {
         var next: Int?
         /// The logical line being read: what's kept of it, its head once read, its kind.
         var line = Line()
+        /// Whether the next line's photo is kept: the open card's first, when its photo is wanted.
+        var keepsPhoto = false
 
         init(_ bytes: UnsafeBufferPointer<UInt8>) {
             self.bytes = bytes
@@ -167,8 +177,9 @@ enum VCard {
             next = at
         }
 
-        /// The first `most` cards, read no further than the last one's end.
-        mutating func cards(most: Int) -> [Card] {
+        /// The first `most` cards, read no further than the last one's end, with the photos of the
+        /// first `photos`.
+        mutating func cards(most: Int, photos: Int) -> [Card] {
             var cards: [Card] = []
             var open: Reading?
             while skipBlank(), logical() {
@@ -182,6 +193,7 @@ enum VCard {
                 } else {
                     open?.take(line)
                 }
+                keepsPhoto = open.map { !$0.photographed } == true && cards.count < photos
             }
             if let card = open { cards.append(card.card()) }
             return cards
@@ -221,6 +233,7 @@ enum VCard {
         mutating func logical() -> Bool {
             guard var piece = physical() else { return false }
             line.reset()
+            line.keepsPhoto = keepsPhoto
             while true {
                 take(piece)
                 let soft = line.quotedPrintable && !piece.isEmpty && bytes[piece.upperBound - 1] == UInt8(ascii: "=")
@@ -274,6 +287,8 @@ enum VCard {
         var full = false
         /// Its value went on past what's kept.
         var cut = false
+        /// A photo on it is the card's, kept; otherwise it's skipped, as a property that isn't drawn.
+        var keepsPhoto = false
 
         mutating func reset() {
             kept.removeAll(keepingCapacity: true)
@@ -286,6 +301,7 @@ enum VCard {
             quotedPrintable = false
             full = false
             cut = false
+            keepsPhoto = false
         }
 
         /// How many more bytes it keeps: up to `headMost` while its head is read, then as many of its
@@ -338,7 +354,7 @@ enum VCard {
             case 3 where VCard.same(named, VCard.tel): .phone
             case 3 where VCard.same(named, VCard.endWord): .end
             case 5 where VCard.same(named, VCard.beginWord): .begin
-            case 5 where VCard.same(named, VCard.photoWord): .photo
+            case 5 where VCard.same(named, VCard.photoWord): keepsPhoto ? .photo : .other
             default: .other
             }
             quotedPrintable = params < colon && has("ENCODING", "QUOTED-PRINTABLE")
