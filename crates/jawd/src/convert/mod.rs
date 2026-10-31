@@ -335,8 +335,13 @@ fn flagged_once(m: &e2e::Message) -> bool {
 /// message wrapped or flagged so. Anything else a view-once wrapper carries has no file to open, so
 /// it shows as it is.
 fn opens_once(wrapped: &Wrapped, m: &e2e::Message, kind: &str) -> bool {
+    once_kind(kind) && (wrapped.view_once || flagged_once(m))
+}
+
+/// Whether a message of `kind` can be one to open once, as only a photo, a video or a voice message
+/// can be sent.
+pub fn once_kind(kind: &str) -> bool {
     matches!(kind, "image" | "video" | "gif" | "video_note" | "voice" | "audio")
-        && (wrapped.view_once || flagged_once(m))
 }
 
 /// What a reply quotes of a view-once message: what it is, wrapped as one, with none of its
@@ -887,6 +892,13 @@ fn protocol_message(envelope: &Envelope, protocol: &e2e::ProtocolMessage, me: &M
             };
             let edited_at = protocol.timestamp_ms.unwrap_or(envelope.at);
             amended.at = edited_at;
+            // Standing in for its message, it says no more of one to open once than the message would.
+            let view_once = opens_once(&wrapped, inner, body.kind);
+            let (text, spans, summary) = if view_once {
+                (None, None, kinds::view_once(body.kind).to_string())
+            } else {
+                (body.text, spans, body.summary)
+            };
             let shown = Message {
                 chat: envelope.chat.clone(),
                 id: amended.target.clone(),
@@ -895,12 +907,12 @@ fn protocol_message(envelope: &Envelope, protocol: &e2e::ProtocolMessage, me: &M
                 mine: envelope.from.mine,
                 kind: body.kind,
                 status: envelope.from.mine.then(|| status(envelope.info.status)),
-                text: body.text,
+                text,
                 spans,
-                summary: body.summary,
+                summary,
                 detail: body.detail,
                 edited_at: Some(edited_at),
-                view_once: wrapped.view_once,
+                view_once,
                 live: envelope.live,
                 raw: Some(Packed::new(&envelope.info.encode_to_vec())),
                 ..Message::default()

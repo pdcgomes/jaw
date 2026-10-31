@@ -696,6 +696,39 @@ fn only_a_photo_a_video_or_a_voice_message_is_one_to_open_once_and_anything_else
 }
 
 #[test]
+fn an_edit_standing_in_for_its_message_is_one_to_open_once_only_as_that_message_would_be() {
+    let shown = |edited: e2e::Message| {
+        let edit = e2e::Message {
+            protocol_message: Some(Box::new(e2e::ProtocolMessage {
+                key: Some(key("3EB0OLD")),
+                r#type: Some(e2e::protocol_message::Type::MessageEdit as i32),
+                edited_message: Some(Box::new(edited)),
+                timestamp_ms: Some(AT + 5),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        message(&info(ANA, edit), &me(), true)
+            .into_iter()
+            .find_map(|change| match change {
+                Change::Edited { shown, .. } => Some(*shown),
+                _ => None,
+            })
+            .expect("what the edit shows")
+    };
+    let photo = shown(once("a caption after all"));
+    assert_eq!((photo.kind, photo.view_once, photo.summary.as_str()), ("image", true, "View once photo"));
+    assert_eq!((&photo.text, &photo.spans), (&None, &None), "nothing for search or a window to show");
+    let text = e2e::Message { conversation: Some("nothing to open".into()), ..Default::default() };
+    let wrapped = e2e::Message {
+        view_once_message_v2: Some(Box::new(e2e::FutureProofMessage { message: Some(Box::new(text)) })),
+        ..Default::default()
+    };
+    let text = shown(wrapped);
+    assert_eq!((text.kind, text.view_once, text.text.as_deref()), ("text", false, Some("nothing to open")));
+}
+
+#[test]
 fn a_reply_quotes_a_view_once_message_as_what_it_is_wrapped_or_flagged() {
     let flagged = e2e::Message {
         image_message: Some(Box::new(e2e::ImageMessage {

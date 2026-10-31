@@ -1,11 +1,16 @@
 use std::path::Path;
 use std::time::Duration;
 
+use prost::Message as _;
 use rusqlite::{Connection, OptionalExtension};
+use wa_proto::wa_common::MessageKey;
+use wa_proto::wa_web_protobufs_e2e as e2e;
+use wa_proto::wa_web_protobufs_web::WebMessageInfo;
 
 use super::*;
+use crate::store::kinds::KINDS;
 use crate::store::write::{Packed, now_ms};
-use crate::store::{Amend, Amendment, Applied, Change, Chat, Lane, Message, Store, index_against_text, read};
+use crate::store::{Amend, Amendment, Applied, Change, Chat, Lane, Message, Store, index_against_text, read, schema};
 use crate::work::Priority;
 
 const ANA: &str = "351910000002@s.whatsapp.net";
@@ -29,8 +34,38 @@ fn message(chat: &str, id: &str, at: i64, words: &str, expires_at: Option<i64>) 
     }
 }
 
+/// Ana's photo `id`, sent to be opened once, as the converter keeps it: what it is, no caption.
+fn once_photo(id: &str) -> Message {
+    Message {
+        kind: "image",
+        text: None,
+        summary: "View once photo".into(),
+        view_once: true,
+        ..message(ANA, id, AT, "", None)
+    }
+}
+
+/// Ana's photo `id` with `caption`, as an ordinary photo's row keeps it.
+fn captioned(id: &str, caption: &str) -> Message {
+    Message {
+        kind: "image",
+        spans: Some(serde_json::json!([{ "t": "text", "s": caption }]).to_string()),
+        ..message(ANA, id, AT, caption, None)
+    }
+}
+
 async fn query<T: Send + 'static>(store: &Store, query: impl FnOnce(&Connection) -> Result<T> + Send + 'static) -> T {
     store.reads().query(Priority::Interactive, query).await.unwrap()
+}
+
+/// What message `id`'s row says: its text, spans and summary.
+async fn said(store: &Store, id: &'static str) -> (Option<String>, Option<String>, Option<String>) {
+    query(store, move |db| {
+        Ok(db.query_row("SELECT text, spans, summary FROM messages WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?)
+    })
+    .await
 }
 
 async fn apply(store: &Store, changes: Vec<Change>) -> Applied {
@@ -142,7 +177,7 @@ async fn a_message_goes_at_its_time_once_however_often_its_erasure_comes_and_no_
 async fn a_copy_only_ever_brings_a_messages_time_sooner_and_never_makes_a_view_once_one_ordinary() {
     let home = tempfile::tempdir().unwrap();
     let store = Store::open(home.path()).unwrap();
-    let once = Message { view_once: true, ..message(ANA, "once", AT, "", Some(LATER + 1_000)) };
+    let once = Message { expires_at: Some(LATER + 1_000), ..once_photo("once") };
     apply(&store, vec![Change::Message(once.clone())]).await;
     let kept = |id: &'static str| {
         query(&store, move |db| {
@@ -151,15 +186,264 @@ async fn a_copy_only_ever_brings_a_messages_time_sooner_and_never_makes_a_view_o
             })?)
         })
     };
-    // History's copy, without the wrapper the live one came in and with no timer of its own.
-    let plain = Message { view_once: false, expires_at: None, live: false, ..once.clone() };
+    // History's copy, without the wrapper the live one came in, so with its caption, and with no
+    // timer of its own.
+    let plain = Message { view_once: false, expires_at: None, live: false, ..captioned("once", "guess where") };
     apply(&store, vec![Change::Message(plain)]).await;
     assert_eq!(kept("once").await, (Some(LATER + 1_000), true));
+    assert_eq!(said(&store, "once").await, (None, None, Some("View once photo".into())), "and says only what it is");
     apply(&store, vec![Change::Message(Message { expires_at: Some(LATER + 5_000), ..once.clone() })]).await;
     assert_eq!(kept("once").await, (Some(LATER + 1_000), true), "a later time doesn't put it off");
     apply(&store, vec![Change::Message(Message { expires_at: Some(LATER + 500), ..once.clone() })]).await;
     assert_eq!(kept("once").await, (Some(LATER + 500), true), "a sooner one brings it forward");
     assert_eq!(store.soonest().take(), Some(LATER + 500), "and wakes the timer");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_edit_gives_a_view_once_photo_its_caption_whether_it_comes_before_the_photo_or_after() {
+    let home = tempfile::tempdir().unwrap();
+    let store = Store::open(home.path()).unwrap();
+    let edit = |target: &str| Amend {
+        chat: ANA.into(),
+        target: target.into(),
+        sender: Some(ANA.into()),
+        mine: false,
+        at: AT + 5,
+        what: Amendment::Edit {
+            text: Some("a caption after all".into()),
+            spans: None,
+            summary: "a caption after all".into(),
+        },
+        raw: None,
+    };
+    apply(&store, vec![Change::Message(once_photo("once"))]).await;
+    let seq = store.committed().borrow().to_owned();
+    assert_eq!(apply(&store, vec![Change::Amend(edit("once"))]).await.changed, 0, "the phones can't edit one");
+    assert_eq!(said(&store, "once").await, (None, None, Some("View once photo".into())));
+    assert_eq!(events(&store, seq).await, [], "nor are windows told of anything");
+    // An edit that comes before its photo stands in for it, without the wrapper, as edits are sent;
+    // the photo, to be opened once, then says only what it is, though the edit is newer.
+    let shown = Message { edited_at: Some(AT + 5), ..captioned("later", "a caption after all") };
+    apply(&store, vec![Change::Edited { amend: edit("later"), shown: Box::new(shown) }]).await;
+    apply(&store, vec![Change::Message(once_photo("later"))]).await;
+    assert_eq!(said(&store, "later").await, (None, None, Some("View once photo".into())));
+    let marked: bool =
+        query(&store, |db| Ok(db.query_row("SELECT view_once FROM messages WHERE id = 'later'", [], |r| r.get(0))?))
+            .await;
+    assert!(marked, "and is one to open once");
+}
+
+/// `message`, from Ana, as WhatsApp sends it: its raw protobuf, packed as jaw.db keeps it.
+fn raw_of(id: &str, message: e2e::Message) -> Vec<u8> {
+    let info = WebMessageInfo {
+        key: MessageKey { remote_jid: Some(ANA.into()), from_me: Some(false), id: Some(id.into()), participant: None },
+        message: Some(message),
+        message_timestamp: Some((AT / 1000) as u64),
+        ..Default::default()
+    };
+    Packed::new(&info.encode_to_vec()).0
+}
+
+/// `inner` in a view-once wrapper.
+fn wrapped(inner: e2e::Message) -> e2e::Message {
+    e2e::Message {
+        view_once_message_v2: Some(Box::new(e2e::FutureProofMessage { message: Some(Box::new(inner)) })),
+        ..Default::default()
+    }
+}
+
+/// A message as an earlier jawd kept it: its ID, kind, text, spans and summary, whether it's marked
+/// view-once, and its raw protobuf.
+type Earlier<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>, &'a str, bool, Option<Vec<u8>>);
+
+/// How many blocks of index `table`'s segments hold `word`.
+fn blocks_holding(db: &Connection, table: &str, word: &str) -> i64 {
+    db.query_row(&format!("SELECT count(*) FROM {table}_data WHERE instr(block, CAST(?1 AS BLOB)) > 0"), [word], |r| {
+        r.get(0)
+    })
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_earlier_jawds_view_once_messages_are_kept_as_this_ones_and_their_captions_leave_the_index() {
+    let home = tempfile::tempdir().unwrap();
+    let caption = "quokkacaption at https://wallabysecret.example/zz";
+    let caption_spans = serde_json::json!([{ "t": "text", "s": "quokkacaption at " },
+        { "t": "link", "s": "https://wallabysecret.example/zz", "url": "https://wallabysecret.example/zz" }])
+    .to_string();
+    let photo = |caption: &str| e2e::Message {
+        image_message: Some(Box::new(e2e::ImageMessage {
+            caption: Some(caption.into()),
+            mimetype: Some("image/jpeg".into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let text = |said: &str| e2e::Message { conversation: Some(said.into()), ..Default::default() };
+    {
+        // jaw.db as main's jawd left it, at migration 30: it marked whatever came in a view-once
+        // wrapper and kept a view-once photo's caption as its text, and couldn't read the last.
+        let db = Connection::open(home.path().join("jaw.db")).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        for migration in &schema::MIGRATIONS[..30] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", 30).unwrap();
+        db.execute_batch(&format!(
+            "INSERT INTO people (n, name, v) VALUES (1, 'Ana', 0);
+            INSERT INTO person_jids (n, jid, person) VALUES (1, '{ANA}', 1);
+            INSERT INTO chats (n, id, kind, person, v) VALUES (1, '{ANA}', 'direct', 1, 0);
+            INSERT INTO sync_state (key, value) VALUES ('me', '351910000001@s.whatsapp.net');"
+        ))
+        .unwrap();
+        let rows: [Earlier; 6] = [
+            (
+                "ai",
+                "text",
+                Some("Lisbon is a city."),
+                None,
+                "",
+                true,
+                Some(raw_of("ai", wrapped(text("Lisbon is a city.")))),
+            ),
+            (
+                "photo",
+                "image",
+                Some(caption),
+                Some(caption_spans.as_str()),
+                "",
+                true,
+                Some(raw_of("photo", wrapped(photo(caption)))),
+            ),
+            (
+                "plain",
+                "image",
+                Some("an ordinary photo"),
+                None,
+                "",
+                false,
+                Some(raw_of("plain", photo("an ordinary photo"))),
+            ),
+            ("copied", "text", Some("a copy comes for me"), None, "", true, Some(raw_of("copied", wrapped(text("x"))))),
+            (
+                "unread",
+                "unknown",
+                None,
+                None,
+                crate::convert::kinds::UNKNOWN,
+                true,
+                Some(raw_of("unread", wrapped(text("now read")))),
+            ),
+            // With no raw protobuf to open it from, its caption is all there is of it.
+            ("rawless", "image", Some("kept"), None, "", true, None),
+        ];
+        for (n, (id, kind, said, spans, summary, once, raw)) in rows.into_iter().enumerate() {
+            let summary = Some(summary).filter(|s| !s.is_empty());
+            db.execute(
+                "INSERT INTO messages (n, chat, id, at, t, sender, kind, text, spans, summary, view_once, raw, v)
+                VALUES (?1, 1, ?2, ?3, ?1, 1, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
+                rusqlite::params![n as i64 + 1, id, AT + n as i64, kind, said, spans, summary, once, raw],
+            )
+            .unwrap();
+        }
+        // And a disappearing message with a link, for an erasure to merge links_fts after.
+        let goes = linked("goes", "numbatgoes", 1);
+        db.execute(
+            "INSERT INTO messages (n, chat, id, at, t, sender, kind, text, spans, expires_at, raw, v)
+            VALUES (7, 1, 'goes', ?1, 7, 1, 'text', ?2, ?3, ?4, ?5, 0)",
+            rusqlite::params![AT + 6, goes.text, goes.spans, goes.expires_at, raw_of("goes", text("see"))],
+        )
+        .unwrap();
+        db.execute_batch(
+            "UPDATE chats SET last_message = 2, last_at = 1792000000001 WHERE n = 1;
+            INSERT INTO backfills (name, after, upto) VALUES ('kinds', 0, 5);",
+        )
+        .unwrap();
+        assert!(blocks_holding(&db, "messages_fts", "quokkacaption") > 0, "the caption's words are there to look for");
+        assert!(blocks_holding(&db, "links_fts", "wallabysecret") > 0, "and its link's");
+    }
+    let store = Store::open(home.path()).unwrap();
+    assert_eq!(store.backfill_left(VIEW_ONCE).unwrap(), 7, "status counts what's to be looked at");
+    let seq = store.committed().borrow().to_owned();
+    // An erasure with links has the writer merge links_fts whole, and the next whole merge waits
+    // ten minutes after that one began, so the one the backfill leaves to do stays to be done.
+    store.apply_durable(vec![Change::Expire { n: 7, at: LATER + 1 }]).await.unwrap();
+    assert!(merged(&store).await, "the erasure's merge is done");
+    let kept = |id: &'static str| {
+        query(&store, move |db| {
+            Ok(db.query_row("SELECT kind, view_once, text FROM messages WHERE id = ?1", [id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?, r.get::<_, Option<String>>(2)?))
+            })?)
+        })
+    };
+    let shown = |kind: &str, text: &str| (kind.to_string(), false, Some(text.to_string()));
+    let backfilled = |name: &'static str| {
+        let store = store.clone();
+        async move {
+            let mut steps = 0;
+            while store.backfill_left(name).unwrap() > 0 {
+                steps += 1;
+                assert!(steps < 100, "{name} never ended");
+                store.apply(Lane::Background, vec![Change::Backfill(name)]).await.unwrap();
+            }
+        }
+    };
+    // Before this backfill reaches them, one jaw can read now converts, and a copy of another
+    // comes: neither is a photo, a video or a voice message, so neither has anything to open.
+    backfilled(KINDS).await;
+    assert_eq!(kept("unread").await, shown("text", "now read"), "one jaw can read now shows as it is");
+    apply(
+        &store,
+        vec![Change::Message(Message { live: false, ..message(ANA, "copied", AT + 3, "a copy comes for me", None) })],
+    )
+    .await;
+    assert_eq!(kept("copied").await, shown("text", "a copy comes for me"), "as one a copy came for does");
+    backfilled(VIEW_ONCE).await;
+    assert!(merge_noted(&store).await.is_some(), "the backfill notes the merge its caption's link leaves to do");
+    assert_eq!(kept("ai").await, shown("text", "Lisbon is a city."), "an answer in the wrapper shows as it is");
+    assert_eq!(kept("plain").await, shown("image", "an ordinary photo"), "an ordinary photo is as it was");
+    assert_eq!(kept("rawless").await, ("image".to_string(), true, Some("kept".to_string())), "nothing is lost");
+    assert_eq!(kept("photo").await, ("image".to_string(), true, None));
+    assert_eq!(said(&store, "photo").await, (None, None, Some("View once photo".into())), "it says only what it is");
+    let told: Vec<i64> =
+        events(&store, seq).await.into_iter().filter(|(kind, _)| kind == "message").map(|(_, n)| n).collect();
+    for n in [1, 2] {
+        assert!(told.contains(&n), "windows are told of message {n}: {told:?}");
+    }
+    assert!(!told.contains(&3), "and of nothing for the ordinary photo");
+    let raw: Vec<u8> =
+        query(&store, |db| Ok(db.query_row("SELECT raw FROM messages WHERE id = 'photo'", [], |r| r.get(0))?)).await;
+    let info = WebMessageInfo::decode(crate::store::unpack(&raw).unwrap().as_slice()).unwrap();
+    let opened = crate::convert::once_caption(&info.message.unwrap());
+    assert_eq!(opened[0]["s"], "quokkacaption at ", "its raw protobuf keeps its caption for the opening");
+    // Killed now, jawd started again still merges links_fts whole, as the backfill noted it.
+    let killed_now = killed(home.path());
+    let again = Store::open(killed_now.path()).unwrap();
+    assert!(merge_noted(&again).await.is_some(), "a kill keeps the merge noted");
+    assert!(merged(&again).await, "and started again, jawd does it");
+    again.truncate().await.unwrap();
+    let db = Connection::open(killed_now.path().join("jaw.db")).unwrap();
+    assert_eq!(blocks_holding(&db, "messages_fts", "quokkacaption"), 0, "the caption's words left the index");
+    assert_eq!(blocks_holding(&db, "links_fts", "wallabysecret"), 0, "and its link's words theirs");
+    assert_eq!(index_against_text(&db), (0, 0), "the index holds what the messages say, and no more");
+    let links: i64 = db.query_row("SELECT count(*) FROM links WHERE message = 2", [], |r| r.get(0)).unwrap();
+    assert_eq!(links, 0, "its link went with its caption");
+    drop(db);
+    // Taken again, as a backfill's step can be, it changes nothing.
+    let twice = killed(killed_now.path());
+    let db = Connection::open(twice.path().join("jaw.db")).unwrap();
+    db.execute("INSERT INTO backfills (name, after, upto) VALUES ('once', 0, 7)", []).unwrap();
+    drop(db);
+    let store = Store::open(twice.path()).unwrap();
+    let seq = store.committed().borrow().to_owned();
+    let (mut changed, mut steps) = (0, 0);
+    while store.backfill_left(VIEW_ONCE).unwrap() > 0 {
+        steps += 1;
+        assert!(steps < 100, "the backfill never ended");
+        changed += store.apply(Lane::Background, vec![Change::Backfill(VIEW_ONCE)]).await.unwrap().changed;
+    }
+    assert_eq!(changed, 0, "done once, it's done");
+    assert!(events(&store, seq).await.iter().all(|(kind, _)| kind != "message"), "and tells windows nothing");
 }
 
 #[tokio::test(flavor = "multi_thread")]

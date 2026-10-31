@@ -34,7 +34,7 @@ pub(super) const CONVERTING: Duration = Duration::from_millis(1);
 pub(super) const NEXT_UNSHOWN: &str = "SELECT n,
         NOT deleted AND (kind = 'unknown' OR text IS NULL AND summary = 'jaw can''t show this yet')
     FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
-const UNSHOWN: &str = "SELECT chat, id, raw FROM messages WHERE n = ?1";
+const UNSHOWN: &str = "SELECT chat, id, raw, view_once FROM messages WHERE n = ?1";
 const NAMED: &str = "SELECT c.id, m.id, m.raw FROM messages m JOIN chats c ON c.n = m.chat WHERE m.n = ?1";
 const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 /// A message as it converts now. Text a later edit gave it stays, an edit's time being past any
@@ -42,16 +42,19 @@ const ME: &str = "SELECT value FROM sync_state WHERE key = 'me'";
 /// sentence saying so, as no words of an edit do, though they may sum up to it: an edit after the
 /// one a row stands in for left no raw protobuf of its own. A row whose raw protobuf is an edit
 /// standing in for its message (?15) keeps what the message itself brought, as its copy may have
-/// since: its quote, forwarding, expiry, view-once and mention of you, which an edit doesn't carry.
+/// since: its quote, forwarding, expiry and mention of you, which an edit doesn't carry. One to open
+/// once (?10, as `show` works it out) says only what it is (?16), whatever an edit said.
 const SHOWN: &str = "UPDATE messages SET kind = ?2,
-        text = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), text, ?3),
-        spans = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), spans, ?4),
-        summary = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), summary,
-            iif(?5 IS ?3, NULL, ?5)),
+        text = iif(?10, NULL,
+            iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), text, ?3)),
+        spans = iif(?10, NULL,
+            iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), spans, ?4)),
+        summary = iif(?10, ?16,
+            iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), summary,
+                iif(?5 IS ?3, NULL, ?5))),
         reply = iif(?15, reply, ?6), detail = ?7, forwarded = iif(?15, forwarded, ?8),
         expires_at = iif(?15 OR ?9 IS NULL OR ?9 >= coalesce(expires_at, ?9 + 1), expires_at, ?9),
-        view_once = iif(?15, view_once, max(view_once, ?10)),
-        mentions_me = iif(?15, mentions_me, ?11), v = ?14
+        view_once = ?10, mentions_me = iif(?15, mentions_me, ?11), v = ?14
     WHERE n = ?1 AND NOT deleted";
 const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2";
 /// The raw protobufs of what's kept for `target` from the same moment, among them a copy's.
@@ -111,9 +114,9 @@ pub(super) fn converted(info: &WebMessageInfo, me: &Me) -> Result<Vec<Change>> {
 }
 
 fn converted_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
-    let row: Option<(i64, String, Option<Vec<u8>>)> =
-        db.prepare_cached(UNSHOWN)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-    let Some((chat, id, Some(raw))) = row else { return Ok(false) };
+    let row: Option<(i64, String, Option<Vec<u8>>, bool)> =
+        db.prepare_cached(UNSHOWN)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+    let Some((chat, id, Some(raw), once)) = row else { return Ok(false) };
     let Some(info) = unpack(&raw).ok().and_then(|plain| WebMessageInfo::decode(plain.as_slice()).ok()) else {
         return Ok(false);
     };
@@ -126,7 +129,7 @@ fn converted_again(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool>
     });
     let changed = match shown {
         Some((message, _)) if unshown(message) => false,
-        Some((message, standing_in)) => show(db, stamps, (chat, n), message, standing_in)?,
+        Some((message, standing_in)) => show(db, stamps, (chat, n, once), message, standing_in)?,
         None => wait(db, stamps, (chat, n, &id), &raw, changes)?,
     };
     #[cfg(test)]
@@ -152,14 +155,18 @@ pub(super) fn account(db: &Connection) -> Result<Me> {
 /// Message `n` in `chat` shows as `message`, with a new version, and so does its chat if it's the
 /// chat's newest; its poll's options and its file's copy are written as a message arriving writes
 /// them; the chat's unread messages and mentions are counted again, as what the message is may count
-/// where it didn't. `standing_in`: `message` is an edit standing in for it.
+/// where it didn't. `once`: the row is marked view-once now. `standing_in`: `message` is an edit
+/// standing in for it.
 fn show(
     db: &Connection,
     stamps: &mut Stamps,
-    (chat, n): (i64, i64),
+    (chat, n, once): (i64, i64, bool),
     message: &Message,
     standing_in: bool,
 ) -> Result<bool> {
+    // A copy never makes a view-once message an ordinary one, and an edit brings no mark of its
+    // own, but only what can be opened once is one.
+    let view_once = (once || message.view_once && !standing_in) && convert::once_kind(message.kind);
     let seq = stamps.seq(MESSAGE, Some(n));
     let changed = db.prepare_cached(SHOWN)?.execute(params![
         n,
@@ -171,12 +178,13 @@ fn show(
         message.detail,
         message.forwarded,
         message.expires_at,
-        message.view_once,
+        view_once,
         message.mentions_me,
         message.edited_at,
         UNKNOWN,
         seq,
         standing_in,
+        convert::kinds::view_once(message.kind),
     ])?;
     if changed == 0 {
         return Ok(false);

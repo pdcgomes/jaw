@@ -27,6 +27,8 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use crate::convert;
+
 /// A change for the writer to make.
 #[derive(Clone, Debug)]
 pub enum Change {
@@ -2455,6 +2457,7 @@ struct Kept {
     summary: Option<String>,
     status: Option<String>,
     detail: Option<String>,
+    view_once: bool,
 }
 
 /// status_rank as JSON, for SQL to rank statuses by with `->>`; a missing one ranks lowest.
@@ -2490,7 +2493,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     let sender = message.sender.as_deref().map(|jid| ensure_jid(db, stamps, jid)).transpose()?;
     let existing: Option<Kept> = db
         .prepare_cached(
-            "SELECT n, t, deleted, edited_at, starred, text, spans, summary, status, detail FROM messages
+            "SELECT n, t, deleted, edited_at, starred, text, spans, summary, status, detail, view_once FROM messages
             WHERE chat = ?1 AND id = ?2",
         )?
         .query_row(params![chat, message.id], |r| {
@@ -2505,6 +2508,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
                 summary: r.get(7)?,
                 status: r.get(8)?,
                 detail: r.get(9)?,
+                view_once: r.get(10)?,
             })
         })
         .optional()?;
@@ -2540,6 +2544,14 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         }
         // Stars come and go through app state, which a copy of the message doesn't know about.
         starred = kept.starred;
+    }
+    // A copy never makes a view-once message an ordinary one, though one an earlier jawd marked
+    // that can't be opened once shows as it is; and one to open once says only what it is, whatever
+    // a copy without its wrapper, or an edit kept before it came, says.
+    let view_once =
+        message.view_once || existing.as_ref().is_some_and(|kept| kept.view_once) && convert::once_kind(message.kind);
+    if view_once {
+        (text, spans, summary) = (None, None, Some(convert::kinds::view_once(message.kind).to_string()));
     }
     let (n, t) = match &existing {
         Some(kept) => (Some(kept.n), kept.t),
@@ -2582,7 +2594,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
         message.deleted,
         message.expires_at,
         starred,
-        message.view_once,
+        view_once,
         raw,
         seq,
         n,
@@ -2599,14 +2611,14 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
             "UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, text = ?6, spans = ?7,
                 summary = ?8, reply = ?9, detail = ?10, forwarded = ?11, edited_at = ?12, deleted = ?13,
                 expires_at = iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at), starred = ?15,
-                view_once = max(view_once, ?16),
+                view_once = ?16,
                 raw = iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17), v = ?18,
                 mentions_me = ?20, envelope = coalesce(envelope, ?21)
             WHERE n = ?19 AND (at IS NOT ?1 OR sender IS NOT ?2 OR mine IS NOT ?3 OR kind IS NOT ?4
                 OR status IS NOT ?5 OR text IS NOT ?6 OR spans IS NOT ?7 OR summary IS NOT ?8 OR reply IS NOT ?9
                 OR detail IS NOT ?10 OR forwarded IS NOT ?11 OR edited_at IS NOT ?12 OR deleted IS NOT ?13
                 OR iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at) IS NOT expires_at OR starred IS NOT ?15
-                OR max(view_once, ?16) IS NOT view_once
+                OR view_once IS NOT ?16
                 OR iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17) IS NOT raw
                 OR mentions_me IS NOT ?20 OR coalesce(envelope, ?21) IS NOT envelope)
             RETURNING n",
@@ -2627,7 +2639,7 @@ fn upsert_message(db: &Connection, stamps: &mut Stamps, message: &Message) -> Re
     };
     // A copy that arrives live is given to jawd at once, for its thumbnail and perhaps its download;
     // one from history waits until it's shown or asked for, and a view-once one is never kept.
-    let wanted = (message.live && !message.view_once).then(now_ms);
+    let wanted = (message.live && !view_once).then(now_ms);
     let Some(n) = changed else {
         return match (&message.media, &existing) {
             (Some(copy), Some(kept)) => media::upsert(db, stamps, kept.n, chat, "sd", copy, wanted),
@@ -2877,6 +2889,9 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
             }
             changed
         }
+        // The phones can't edit a view-once message, and its row keeps no caption, so an edit of
+        // one changes nothing.
+        Amendment::Edit { .. } if once_now(db, n)? => 0,
         Amendment::Edit { text, spans, summary } => db
             .prepare_cached(
                 "UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), edited_at = ?5, v = ?6
@@ -2990,6 +3005,16 @@ fn apply_amendment(db: &Connection, stamps: &mut Stamps, chat: i64, n: i64, doin
         stamps.record(db, CHAT, chat, Some(chat), seq)?;
     }
     Ok(true)
+}
+
+/// Whether message `n` is one to open once: marked so, and of a kind that can be, which a row an
+/// earlier jawd marked for its view-once wrapper alone may not be.
+fn once_now(db: &Connection, n: i64) -> Result<bool> {
+    let row: Option<(bool, String)> = db
+        .prepare_cached("SELECT view_once, kind FROM messages WHERE n = ?1")?
+        .query_row([n], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    Ok(row.is_some_and(|(view_once, kind)| view_once && convert::once_kind(&kind)))
 }
 
 fn set_members(db: &Connection, stamps: &mut Stamps, members: &Members) -> Result<bool> {

@@ -1537,8 +1537,8 @@ pub(super) const MIGRATIONS: &[&str] = &[
     // 31, a schema step: disappearing and view-once messages. Each chat keeps when its timer was
     // set, so a setting older than it, as history arriving late brings, never replaces it: a
     // nullable column with no CHECK on chats, which isn't STRICT, so SQLite reads none of its rows;
-    // and a new table, empty, of the view-once messages opened here. It costs the same however big
-    // jaw.db is.
+    // a new table, empty, of the view-once messages opened here; and a backfill's row, for the
+    // view-once messages an earlier jawd kept otherwise. It costs the same however big jaw.db is.
     "
     -- Class: fetched from WhatsApp, as `ephemeral` is. When the chat's disappearing timer was set,
     -- in milliseconds since the epoch: the setting's own time, a group change's, history's
@@ -1553,6 +1553,11 @@ pub(super) const MIGRATIONS: &[&str] = &[
         message INTEGER PRIMARY KEY REFERENCES messages (n) ON DELETE CASCADE,
         until INTEGER NOT NULL
     ) STRICT;
+
+    -- The view-once messages jaw.db already holds, an earlier jawd having marked whatever came in
+    -- a view-once wrapper and kept a photo's caption as its text (`expiry::VIEW_ONCE`).
+    INSERT INTO backfills (name, after, upto) SELECT 'once', 0, seq FROM sqlite_sequence
+        WHERE name = 'messages' AND seq > 0;
     ",
 ];
 

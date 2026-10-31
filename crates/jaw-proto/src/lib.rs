@@ -568,6 +568,10 @@ pub struct Stored {
     /// be looked at for voice messages to read again.
     #[serde(default)]
     pub voices_backfill: u64,
+    /// Messages jaw.db held from before view-once messages were kept unseen, still to be looked at
+    /// for those an earlier jawd marked view-once, to keep each as this one does.
+    #[serde(default)]
+    pub once_backfill: u64,
     /// Edits and answers to events encrypted with their message's secret, which jawd can't read
     /// yet, kept for a later jawd with what they change.
     #[serde(default)]

@@ -1228,6 +1228,7 @@ mod tests {
         assert_eq!(stored["copies_backfill"], 0);
         assert_eq!(stored["contacts_backfill"], 0);
         assert_eq!(stored["voices_backfill"], 0);
+        assert_eq!(stored["once_backfill"], 0);
         stop(started, &socket).await;
     }
 

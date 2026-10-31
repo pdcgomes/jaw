@@ -2798,6 +2798,26 @@ DELETE FROM pending WHERE n IN (SELECT n FROM pending WHERE kind = 'opened' ORDE
 DELETE FROM quarantine WHERE source = 'opened' AND ref = ?1
     SEARCH quarantine USING INDEX quarantine_by_ref (source=? AND ref=?)
 
+-- src/store/write/expiry.rs
+SELECT n, view_once AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
+
+-- src/store/write/expiry.rs
+SELECT chat, kind, text IS NOT NULL OR spans IS NOT NULL, summary FROM messages WHERE n = ?1 AND view_once AND NOT deleted
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+UPDATE messages SET view_once = 0, v = ?2 WHERE n = ?1 AND view_once
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+UPDATE messages SET text = NULL, spans = NULL, summary = ?2, v = ?3 WHERE n = ?1 AND view_once AND raw IS NOT NULL AND (text IS NOT NULL OR spans IS NOT NULL OR summary IS NOT ?2)
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write/expiry.rs
+UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
+    SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
 -- src/store/write/folders.rs
 DELETE FROM folder_chats
     SCAN folder_chats USING INDEX folder_chats_by_chat
@@ -3040,7 +3060,7 @@ SELECT n, NOT deleted AND (kind = 'unknown' OR text IS NULL AND summary = 'jaw c
     SEARCH messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
 
 -- src/store/write/kinds.rs
-SELECT chat, id, raw FROM messages WHERE n = ?1
+SELECT chat, id, raw, view_once FROM messages WHERE n = ?1
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/kinds.rs
@@ -3053,7 +3073,7 @@ SELECT value FROM sync_state WHERE key = 'me'
     SEARCH sync_state USING PRIMARY KEY (key=?)
 
 -- src/store/write/kinds.rs
-UPDATE messages SET kind = ?2, text = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), text, ?3), spans = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), spans, ?4), summary = iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), summary, iif(?5 IS ?3, NULL, ?5)), reply = iif(?15, reply, ?6), detail = ?7, forwarded = iif(?15, forwarded, ?8), expires_at = iif(?15 OR ?9 IS NULL OR ?9 >= coalesce(expires_at, ?9 + 1), expires_at, ?9), view_once = iif(?15, view_once, max(view_once, ?10)), mentions_me = iif(?15, mentions_me, ?11), v = ?14 WHERE n = ?1 AND NOT deleted
+UPDATE messages SET kind = ?2, text = iif(?10, NULL, iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), text, ?3)), spans = iif(?10, NULL, iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), spans, ?4)), summary = iif(?10, ?16, iif(edited_at > coalesce(?12, -1) AND (text IS NOT NULL OR summary IS NOT ?13), summary, iif(?5 IS ?3, NULL, ?5))), reply = iif(?15, reply, ?6), detail = ?7, forwarded = iif(?15, forwarded, ?8), expires_at = iif(?15 OR ?9 IS NULL OR ?9 >= coalesce(expires_at, ?9 + 1), expires_at, ?9), view_once = ?10, mentions_me = iif(?15, mentions_me, ?11), v = ?14 WHERE n = ?1 AND NOT deleted
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write/kinds.rs
@@ -4461,7 +4481,7 @@ SELECT t FROM messages WHERE t BETWEEN ?1 AND ?2 ORDER BY t DESC LIMIT 1
     SEARCH messages USING COVERING INDEX sqlite_autoindex_messages_1 (t>? AND t<?)
 
 -- src/store/write.rs
-SELECT n, t, deleted, edited_at, starred, text, spans, summary, status, detail FROM messages WHERE chat = ?1 AND id = ?2
+SELECT n, t, deleted, edited_at, starred, text, spans, summary, status, detail, view_once FROM messages WHERE chat = ?1 AND id = ?2
     SEARCH messages USING INDEX messages_by_id (chat=? AND id=?)
 
 -- src/store/write.rs
@@ -4474,7 +4494,7 @@ SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'messages'), 0) + 
 INSERT INTO fts_backlog (n) VALUES (?1)
 
 -- src/store/write.rs
-UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, text = ?6, spans = ?7, summary = ?8, reply = ?9, detail = ?10, forwarded = ?11, edited_at = ?12, deleted = ?13, expires_at = iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at), starred = ?15, view_once = max(view_once, ?16), raw = iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17), v = ?18, mentions_me = ?20, envelope = coalesce(envelope, ?21) WHERE n = ?19 AND (at IS NOT ?1 OR sender IS NOT ?2 OR mine IS NOT ?3 OR kind IS NOT ?4 OR status IS NOT ?5 OR text IS NOT ?6 OR spans IS NOT ?7 OR summary IS NOT ?8 OR reply IS NOT ?9 OR detail IS NOT ?10 OR forwarded IS NOT ?11 OR edited_at IS NOT ?12 OR deleted IS NOT ?13 OR iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at) IS NOT expires_at OR starred IS NOT ?15 OR max(view_once, ?16) IS NOT view_once OR iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17) IS NOT raw OR mentions_me IS NOT ?20 OR coalesce(envelope, ?21) IS NOT envelope) RETURNING n
+UPDATE messages SET at = ?1, sender = ?2, mine = ?3, kind = ?4, status = ?5, text = ?6, spans = ?7, summary = ?8, reply = ?9, detail = ?10, forwarded = ?11, edited_at = ?12, deleted = ?13, expires_at = iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at), starred = ?15, view_once = ?16, raw = iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17), v = ?18, mentions_me = ?20, envelope = coalesce(envelope, ?21) WHERE n = ?19 AND (at IS NOT ?1 OR sender IS NOT ?2 OR mine IS NOT ?3 OR kind IS NOT ?4 OR status IS NOT ?5 OR text IS NOT ?6 OR spans IS NOT ?7 OR summary IS NOT ?8 OR reply IS NOT ?9 OR detail IS NOT ?10 OR forwarded IS NOT ?11 OR edited_at IS NOT ?12 OR deleted IS NOT ?13 OR iif(?14 < coalesce(expires_at, ?14 + 1), ?14, expires_at) IS NOT expires_at OR starred IS NOT ?15 OR view_once IS NOT ?16 OR iif(?17 IS NULL OR ?21 IS NOT NULL AND raw IS NOT NULL, raw, ?17) IS NOT raw OR mentions_me IS NOT ?20 OR coalesce(envelope, ?21) IS NOT envelope) RETURNING n
     SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
@@ -4576,6 +4596,10 @@ UPDATE messages SET text = ?2, spans = ?3, summary = iif(?4 IS ?2, NULL, ?4), de
 -- src/store/write.rs
 UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
+
+-- src/store/write.rs
+SELECT view_once, kind FROM messages WHERE n = ?1
+    SEARCH messages USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/store/write.rs
 SELECT member, role FROM group_members WHERE chat = ?1

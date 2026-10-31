@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::contacts::{self, CONTACTS};
 use super::copies::{self, COPIES};
+use super::expiry::{self, VIEW_ONCE};
 use super::kinds::{self, KINDS};
 use super::{CHAT, MESSAGE, Stamps, chat_jid, located, now_ms};
 
@@ -24,7 +25,7 @@ pub const EVENTS: &str = "events";
 /// The backfill that reads the voice messages jaw.db held again, for their length and waveform.
 pub const VOICES: &str = "voices";
 /// The backfills this jawd knows, which a migration may leave rows for.
-pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS, COPIES, PLACES, EVENTS, CONTACTS, VOICES];
+pub const BACKFILLS: &[&str] = &[LINKS, POLLS, KINDS, COPIES, PLACES, EVENTS, CONTACTS, VOICES, VIEW_ONCE];
 /// How many messages one step of a backfill looks at: most are none of its business, and a look at
 /// one that isn't is a read of its row.
 const STEP: i64 = 64;
@@ -88,6 +89,7 @@ pub(super) fn backfill(db: &Connection, stamps: &mut Stamps, name: &str) -> Resu
         EVENTS => (NEXT_EVENTS, super::again::events, Some(kinds::CONVERTING), STEP),
         CONTACTS => (contacts::NEXT_CARDS, contacts::backfilled, Some(kinds::CONVERTING), STEP),
         VOICES => (NEXT_VOICES, super::again::voices, Some(kinds::CONVERTING), super::again::VOICES_STEP),
+        VIEW_ONCE => (expiry::NEXT_MARKED, expiry::marked, Some(expiry::UNMARKING), STEP),
         other => bail!("jawd doesn't know the backfill {other}"),
     };
     let rows: Vec<(i64, Option<bool>)> = db

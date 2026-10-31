@@ -8,10 +8,13 @@
 //! indexes take its words out of the segments that hold them (FTS5's `secure-delete`) rather than
 //! leave them there until a merge; both go back to how they were as it ends.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{MESSAGE, Stamps, delete_row, now_ms};
+use super::{CHAT, MESSAGE, Stamps, delete_row, now_ms};
+use crate::convert;
 
 /// How many due messages one synced commit erases at most: with each erasure's words taken out of
 /// the indexes' segments as it goes, a batch keeps to a short transaction.
@@ -167,6 +170,64 @@ pub(super) fn opened_bounded(db: &Connection) -> Result<()> {
 /// was opened on another of your devices; the receipt goes either way.
 pub(super) fn opened_aside(db: &Connection, chat: &str, id: &str) -> Result<bool> {
     Ok(db.prepare_cached(OPENED_ASIDE)?.execute([format!("{chat} {id}")])? > 0)
+}
+
+/// The backfill that keeps the view-once messages an earlier jawd kept as this one keeps them. It
+/// marked whatever came in a view-once wrapper, so one of a kind that can't be opened once shows
+/// as it is, and it kept a photo's, a video's or a voice message's caption as its text, so one to
+/// open once says only what it is, its caption kept in its raw protobuf alone, for its opening.
+pub const VIEW_ONCE: &str = "once";
+/// How long a step makes messages as this jawd keeps them for, past the first: taking a caption's
+/// words out of search's segments costs far more than a look at a message.
+pub(super) const UNMARKING: Duration = Duration::from_millis(1);
+/// The next messages, each with whether it's marked view-once and not deleted. It reads no raw
+/// protobuf.
+pub(super) const NEXT_MARKED: &str =
+    "SELECT n, view_once AND NOT deleted FROM messages WHERE n > ?1 AND n <= ?2 ORDER BY n LIMIT ?3";
+const MARKED: &str = "SELECT chat, kind, text IS NOT NULL OR spans IS NOT NULL, summary FROM messages
+    WHERE n = ?1 AND view_once AND NOT deleted";
+const UNMARKED: &str = "UPDATE messages SET view_once = 0, v = ?2 WHERE n = ?1 AND view_once";
+/// Message ?1's caption gone from its row, which says ?2, unless its raw protobuf, which opening
+/// it reads its caption from, is gone too.
+const UNCAPTIONED: &str = "UPDATE messages SET text = NULL, spans = NULL, summary = ?2, v = ?3
+    WHERE n = ?1 AND view_once AND raw IS NOT NULL AND (text IS NOT NULL OR spans IS NOT NULL OR summary IS NOT ?2)";
+const CHAT_SHOWS: &str = "UPDATE chats SET v = ?3 WHERE n = ?1 AND last_message = ?2";
+
+/// Keeps message `n` as this jawd keeps a view-once message, if an earlier one marked it, saying
+/// whether it changed: one of a kind that can't be opened once is marked no more, and one that can
+/// loses its caption from its row, its words taken out of search's segments as an erasure takes
+/// them, one with links noted for the whole merge of links_fts that takes theirs out.
+pub(super) fn marked(db: &Connection, stamps: &mut Stamps, n: i64) -> Result<bool> {
+    let row: Option<(i64, String, bool, Option<String>)> =
+        db.prepare_cached(MARKED)?.query_row([n], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+    let Some((chat, kind, captioned, summary)) = row else { return Ok(false) };
+    let said = convert::kinds::view_once(&kind);
+    let once = convert::once_kind(&kind);
+    if once && !captioned && summary.as_deref() == Some(said) {
+        return Ok(false);
+    }
+    let seq = stamps.seq(MESSAGE, Some(n));
+    let changed = if once {
+        let linked = db.prepare_cached(LINKED)?.exists([n])?;
+        let hidden = erasing(db, || Ok(db.prepare_cached(UNCAPTIONED)?.execute(params![n, said, seq])? > 0))?;
+        if linked && hidden {
+            let now = now_ms();
+            db.prepare_cached(NOTE_LINKS_ERASED)?.execute([now.to_string()])?;
+            stamps.links_erased(now);
+        }
+        hidden
+    } else {
+        db.prepare_cached(UNMARKED)?.execute(params![n, seq])? > 0
+    };
+    if !changed {
+        return Ok(false);
+    }
+    stamps.record(db, MESSAGE, n, Some(chat), seq)?;
+    let seq = stamps.seq(CHAT, Some(chat));
+    if db.prepare_cached(CHAT_SHOWS)?.execute(params![chat, n, seq])? > 0 {
+        stamps.record(db, CHAT, chat, Some(chat), seq)?;
+    }
+    Ok(true)
 }
 
 /// Runs `erase` with every page it frees zeroed and search's indexes taking out what it deletes,

@@ -2,9 +2,9 @@
 //! transaction at a time, from where the last left off as `backfills` keeps it, until its row goes;
 //! so far the links of the messages jaw.db held before links were kept, the options of its polls,
 //! the messages jawd couldn't show when they came, converted again, the copies of the files of the
-//! messages it held before media was kept, and its contact cards, read again. Code works with the
-//! data either way meanwhile. A step that fails is kept in quarantine and tried again later and
-//! later.
+//! messages it held before media was kept, its contact cards, read again, and the view-once
+//! messages an earlier jawd kept, kept as this one keeps them. Code works with the data either way
+//! meanwhile. A step that fails is kept in quarantine and tried again later and later.
 //! The answers and edits waiting for an event beyond the few its own transaction takes are taken
 //! here too, a step at a time as `openings` keeps them, once the writer says a commit has left some.
 

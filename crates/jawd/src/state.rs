@@ -19,7 +19,7 @@ use crate::media::Media;
 use crate::send::Sending;
 use crate::settings::Settings;
 use crate::sock::{APART_MOST, LANE_MOST, Lanes};
-use crate::store::{Store, contacts, copies, kinds, links};
+use crate::store::{Store, contacts, copies, expiry, kinds, links};
 use crate::sync::Shared;
 use crate::voice::Voice;
 use crate::work::Report;
@@ -306,6 +306,7 @@ impl State {
                     copies_backfill: store.backfill_left(copies::COPIES).ok()?,
                     contacts_backfill: store.backfill_left(contacts::CONTACTS).ok()?,
                     voices_backfill: store.backfill_left(links::VOICES).ok()?,
+                    once_backfill: store.backfill_left(expiry::VIEW_ONCE).ok()?,
                     encrypted_kept: store.count("pending WHERE kind IN ('secret', 'rsvp')").ok()?,
                     places_backfill: store.backfill_left(links::PLACES).ok()?,
                     events_backfill: store.backfill_left(links::EVENTS).ok()?,
