@@ -124,14 +124,20 @@ func images(_ l: Laid) -> [CGRect] {
     #expect(try ContactWords.lines(#require(sampleCard(5).contact)) == "Escola de Escalada")
 }
 
-@Test func `a card read from a hostile vCard is laid out from what was read, in no time`() throws {
+/// The fastest of three runs of `run`.
+func fastest(_ run: () -> Void) -> Duration {
+    let clock = ContinuousClock()
+    return (0 ..< 3).map { _ in clock.measure(run) }.min()!
+}
+
+@Test func `a card read from a hostile vCard is laid out from what was read, in a fraction of the time reading it takes`() throws {
     let vcard = "BEGIN:VCARD\r\nVERSION:2.1\r\nFN:Ana Ribeiro\r\nTEL;waid=351912345678:+351 912 345 678\r\nNOTE;ENCODING=QUOTED-PRINTABLE:"
         + String(repeating: "x=\r\n", count: 1 << 20) + "x\r\nEND:VCARD\r\n"
     let row = try #require(Samples.contactRow(9, at: Samples.now, from: Samples.ana, name: "Ana Ribeiro", vcard: vcard))
     #expect(row.contact?.cards.first?.phones.first?.dialled == "+351912345678", "the card read as its row was")
-    let clock = ContinuousClock()
-    let took = (0 ..< 3).map { _ in clock.measure { _ = cardLaid(row) } }.min()!
-    #expect(took < .milliseconds(20), "laid out in \(took)")
+    // A layout that read the vCard would take as long as reading it, on any Mac and in any build.
+    let (took, reading) = (fastest { _ = cardLaid(row) }, fastest { _ = ContactCard.read(vcard) })
+    #expect(took < reading / 4, "laid out in \(took); reading the card takes \(reading)")
 }
 
 // MARK: - Message, and the sheet of several

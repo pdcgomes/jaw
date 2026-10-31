@@ -222,6 +222,8 @@ func sized(_ bytes: Int, name: String = "Ana", filler: String = "x") -> SendCont
         #expect(read.contact?.name == "Ana Ribeiro" && read.contact?.cards.map(\.name) == ["Ana Ribeiro"], "its card read as it arrived")
         let longest = drains.max() ?? .zero
         let reading = fastest(card)
-        #expect(longest < .milliseconds(50), "the main thread's longest drain took \(longest); reading the card takes \(reading)")
+        // A drain that read the card would take as long as reading it, on any Mac and in any build;
+        // a quarter of that leaves the drain room for its own work on a loaded one.
+        #expect(longest < reading / 4, "the main thread's longest drain took \(longest); reading the card takes \(reading)")
     }
 }
