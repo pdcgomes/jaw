@@ -48,7 +48,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         let value = try incoming(name, want)
         switch value {
         case .skip, .bad: Issue.record("\(name) doesn't decode: \(value)")
-        case let .push(method, _) where ["chats", "messages", "resync", "connection", "notice", "link"].contains(method):
+        case let .push(method, _) where ["chats", "messages", "typing", "resync", "connection", "notice", "link"].contains(method):
             Issue.record("\(name) decodes only as an untyped push")
         default: break
         }
@@ -70,13 +70,18 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
     #expect(voice.kind == .voice && voice.mine && voice.status == .read)
     #expect(voice.reply == Quote(id: "3EB0A1B2C3D4E5F6", from: "Ana", summary: "did you get the photos from Sunday?"))
     #expect(voice.voice?.waveform.count == 8)
+    #expect(watched.typing.isEmpty, "an answer that leaves typing out has nobody typing")
 
     guard case let .chats(_, chats) = try incoming("chats.watch.result.json", .chats) else {
         Issue.record("not a chat list")
         return
     }
     #expect(chats.total == 312 && chats.rows.map(\.kind) == [.direct, .group])
-    #expect(chats.rows[1].typing.isEmpty && chats.rows[1].draft == "see you" && chats.rows[1].mentions == 1)
+    #expect(chats.rows[1].draft == "see you" && chats.rows[1].mentions == 1)
+    #expect(chats.typing == [
+        "120363012345678901@g.us": [Typist(id: "person:7", name: "Rui", state: .recording)],
+        "351912345678@s.whatsapp.net": [Typist(id: "person:12", name: "Ana", state: .typing)],
+    ], "who's typing comes in the answer, by chat, as protocol 2 has it, and not on the rows")
 
     guard case let .found(_, found) = try incoming("find.result.json", .find) else {
         Issue.record("not find's answer")
@@ -97,6 +102,57 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         return
     }
     #expect(error.code == ErrorCode.cancelled)
+}
+
+/// A push line, read as a client reads one.
+func pushed(_ line: String) -> Incoming {
+    IncomingLine.decode(Data(line.utf8), with: JSONDecoder())
+}
+
+@Test func `the typing push says who's typing in its chat, oldest first, and a state jawd may add reads as typing`() throws {
+    guard case let .typing(push) = try incoming("typing.push.json", .nothing) else {
+        Issue.record("not a typing push")
+        return
+    }
+    #expect(push.chat == "120363012345678901@g.us")
+    #expect(push.who == [Typist(id: "person:12", name: "Ana", state: .typing), Typist(id: "person:4", name: "Rui", state: .recording)])
+
+    let who = #"[{"id":"person:2","name":"Zé","state":"waving"},{"name":"nobody"},{"id":"person:3","name":"Inês","state":"recording"}]"#
+    guard case let .typing(later) = pushed(#"{"method":"typing","params":{"chat":"c","who":\#(who)}}"#) else {
+        Issue.record("a typing push with a typist that isn't the protocol sank whole")
+        return
+    }
+    #expect(later.who == [Typist(id: "person:2", name: "Zé", state: .typing), Typist(id: "person:3", name: "Inês", state: .recording)],
+            "a state jawd may add reads as typing, and a typist with no id leaves out only itself")
+    guard case let .typing(ended) = pushed(#"{"method":"typing","params":{"chat":"c","who":[]}}"#) else {
+        Issue.record("an empty who isn't a typing push")
+        return
+    }
+    #expect(ended.chat == "c" && ended.who.isEmpty, "nobody's typing there any more")
+    guard case .badPush("typing", _) = pushed(#"{"method":"typing","params":{"who":[]}}"#) else {
+        Issue.record("a typing push naming no chat was taken")
+        return
+    }
+}
+
+@Test func `an answer's typing leaves out only what isn't the protocol, and the window still reads`() throws {
+    func answer(typing: String) throws -> ChatsWatched {
+        let line = try fixture("chats.watch.result.json")
+        let text = String(decoding: line, as: UTF8.self)
+        guard let at = text.range(of: #""typing":"#) else { throw CocoaError(.coderInvalidValue) }
+        let changed = String(text[..<at.lowerBound]) + #""typing":"# + typing + "}}"
+        let decoder = JSONDecoder()
+        decoder.userInfo[.want] = WantLookup { _ in .chats }
+        guard case let .chats(_, watched) = IncomingLine.decode(Data(changed.utf8), with: decoder) else {
+            throw CocoaError(.coderReadCorrupt)
+        }
+        return watched
+    }
+    let some = try answer(typing: #"{"a@s.whatsapp.net":[{"id":"person:2","name":"Zé","state":"typing"},{"state":"typing"}],"b@g.us":[{"oops":1}]}"#)
+    #expect(some.rows.count == 2)
+    #expect(some.typing == ["a@s.whatsapp.net": [Typist(id: "person:2", name: "Zé")]], "Zé typing; a chat left with nobody has nobody typing")
+    let broken = try answer(typing: #""everyone""#)
+    #expect(broken.rows.count == 2 && broken.typing.isEmpty, "a typing that isn't a map is nobody typing, and the rows still read")
 }
 
 @Test func `the panes jawd keeps decode as a tree, with the chats of the panes it left out`() throws {

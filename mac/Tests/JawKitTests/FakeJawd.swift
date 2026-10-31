@@ -58,7 +58,7 @@ final class FakeJawd: Sendable {
         """
         {"id":"\(id)","v":\(v),"sort":"\(sort)","kind":"direct","name":"\(name)","avatar":null,"last":null,\
         "unread":0,"mentions":0,"pinned":false,"muted_until":null,"archived":false,"marked_unread":false,\
-        "draft":null,"typing":[],"community":null}
+        "draft":null,"community":null}
         """
     }
 

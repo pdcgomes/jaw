@@ -80,6 +80,68 @@ extension KeyedDecodingContainer {
         why = why ?? lossy.why
         return lossy.rows
     }
+
+    /// An answer's `typing`, each typist read on its own: one that isn't jaw's protocol is left out,
+    /// a chat left with nobody has nobody typing, and a `typing` that isn't a map at all is none, so
+    /// the window still reads.
+    func typists(_ key: Key) -> Typists {
+        guard let map = try? decodeIfPresent([String: Lossy<Typist>].self, forKey: key) else { return [:] }
+        return map.compactMapValues { $0.rows.isEmpty ? nil : $0.rows }
+    }
+}
+
+/// Someone typing or recording in a chat, as jawd says it.
+public struct Typist: Decodable, Sendable, Hashable {
+    /// `person:` and a number.
+    public var id: String
+    /// Their name, as a message from them shows it.
+    public var name: String
+    public var state: State
+
+    public enum State: String, Decodable, Sendable, Hashable {
+        case typing, recording
+
+        /// A state jawd may add later reads as typing, since they're doing something in the chat.
+        public init(from decoder: any Decoder) throws {
+            self = try State(rawValue: decoder.singleValueContainer().decode(String.self)) ?? .typing
+        }
+    }
+
+    public init(id: String, name: String, state: State = .typing) {
+        self.id = id
+        self.name = name
+        self.state = state
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        state = try c.decodeIfPresent(State.self, forKey: .state) ?? .typing
+    }
+
+    enum Keys: String, CodingKey {
+        case id, name, state
+    }
+}
+
+/// Who's typing in each chat where someone is, by the chat's `id`, each chat's oldest first.
+public typealias Typists = [String: [Typist]]
+
+/// The `typing` push: who's typing in a chat now, oldest first; empty once nobody is.
+public struct TypingPush: Decodable, Sendable {
+    public var chat: String
+    public var who: [Typist]
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        chat = try c.decode(String.self, forKey: .chat)
+        who = try c.decode(Lossy<Typist>.self, forKey: .who).rows
+    }
+
+    enum Keys: String, CodingKey {
+        case chat, who
+    }
 }
 
 struct ChatsWatch: Encodable, Sendable {
@@ -147,6 +209,9 @@ public struct ChatsWatched: Decodable, Sendable {
     public var total: UInt64
     public var rows: [ChatRow]
     public var remove: [String]
+    /// Who's typing in the window's chats now, where someone is. It replaces what was held for every
+    /// chat of the window, so a chat left out has nobody typing.
+    public var typing: Typists
     /// Rows that weren't jaw's protocol, left out, and why the first wasn't.
     public var unread = 0
     public var why: String?
@@ -158,10 +223,11 @@ public struct ChatsWatched: Decodable, Sendable {
         total = try c.decodeIfPresent(UInt64.self, forKey: .total) ?? 0
         rows = try c.rows(.rows, into: &unread, why: &why)
         remove = try c.decodeIfPresent([String].self, forKey: .remove) ?? []
+        typing = c.typists(.typing)
     }
 
     enum Keys: String, CodingKey {
-        case watch, seq, total, rows, remove
+        case watch, seq, total, rows, remove, typing
     }
 }
 
@@ -174,6 +240,8 @@ public struct MessagesWatched: Decodable, Sendable {
     public var newer: UInt64
     public var rows: [MessageRow]
     public var remove: [String]
+    /// Who's typing in the window's chat now, if anyone is, as a chat list's answer has it.
+    public var typing: Typists
     public var unread = 0
     public var why: String?
 
@@ -186,10 +254,11 @@ public struct MessagesWatched: Decodable, Sendable {
         newer = try c.decodeIfPresent(UInt64.self, forKey: .newer) ?? 0
         rows = try c.rows(.rows, into: &unread, why: &why)
         remove = try c.decodeIfPresent([String].self, forKey: .remove) ?? []
+        typing = c.typists(.typing)
     }
 
     enum Keys: String, CodingKey {
-        case watch, seq, total, older, newer, rows, remove
+        case watch, seq, total, older, newer, rows, remove, typing
     }
 }
 

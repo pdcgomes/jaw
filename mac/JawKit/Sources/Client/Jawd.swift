@@ -271,6 +271,8 @@ public final class Jawd {
         for (window, update) in frame.messages.sorted(by: { $0.key < $1.key }) {
             out.append(.messages(window, update))
         }
+        // After the windows, which may bring in the chats it's for.
+        if let typing = frame.typing { out.append(.typing(typing)) }
         return out
     }
 
@@ -574,6 +576,9 @@ public enum JawUpdate: Sendable {
     case link(LinkStep)
     case chats(WindowID, Update<ChatRow>)
     case messages(WindowID, Update<MessageRow>)
+    /// Who's typing in each chat the windows show, all of it as it is now: a chat left out has
+    /// nobody typing.
+    case typing(Typists)
     case windowFailed(WindowID, String)
     /// A message jawd has, as the box's key named it.
     case sent(key: String, message: String, row: MessageRow?)

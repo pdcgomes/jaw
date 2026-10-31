@@ -13,6 +13,10 @@ import Synchronization
 /// 2 s, says hello again and watches every window again with the rows its model holds, so the
 /// models end as a fresh watch would leave them. A `resync` is handled the same way. A request in
 /// flight when the connection drops is answered with a failure that says so.
+///
+/// Who's typing is kept as the protocol says: a watch's or move's answer replaces it for every chat
+/// of its window, a `typing` push for its chat, and it's forgotten as a chat leaves every window and
+/// when the connection drops. A frame carries all of it when it changed.
 public final class Client: Sendable {
     public struct Config: Sendable {
         public var socket: String
@@ -98,20 +102,22 @@ public final class Client: Sendable {
 
     /// Stops watching a window; nothing more comes for it.
     public func unwatch(_ window: WindowID) {
-        let line = state.withLock { s -> Line? in
+        let (line, typing) = state.withLock { s -> (Line?, Bool) in
             s.chats[window] = nil
             s.messages[window] = nil
-            guard let w = s.windows[window] else { return nil }
+            guard let w = s.windows[window] else { return (nil, false) }
             if w.asking != nil {
                 s.windows[window]!.closing = true
-                return nil
+                return (nil, s.unshown())
             }
             s.windows[window] = nil
-            guard let watch = w.watch else { return nil }
+            let typing = s.unshown()
+            guard let watch = w.watch else { return (nil, typing) }
             s.watches[watch] = nil
-            return unwatchLine(&s, watch)
+            return (unwatchLine(&s, watch), typing)
         }
         if let line { write(line) }
+        if typing { notify(urgent: false) }
     }
 
     /// Sends a request; its reply comes as `Event.reply` with the id this returns.
@@ -142,10 +148,12 @@ public final class Client: Sendable {
                 events: s.events,
                 chats: s.chats.mapValues { $0.update() },
                 messages: s.messages.mapValues { $0.update() },
+                typing: s.typingChanged ? s.typing : nil,
             )
             s.events.removeAll(keepingCapacity: true)
             s.chats.removeAll(keepingCapacity: true)
             s.messages.removeAll(keepingCapacity: true)
+            s.typingChanged = false
             if !frame.isEmpty { s.stats.frames += 1 }
             return frame
         }
@@ -452,6 +460,7 @@ public final class Client: Sendable {
             s.asked.removeAll()
             s.find = nil
             s.watches.removeAll()
+            s.forgetTyping()
             s.windows = s.windows.filter { !$0.value.closing }
             for window in s.windows.keys {
                 s.windows[window]!.watch = nil
@@ -485,21 +494,31 @@ public final class Client: Sendable {
             let update = Update<MessageRow>(seq: push.seq, remove: push.remove, upsert: push.upsert,
                                             total: push.total, older: push.older, newer: push.newer)
             return windowPush(push.watch, generation) { s, window in s.mergeMessages(window, update) }
-        case let .resync(watch):
-            let (current, line) = state.withLock { s -> (Bool, Line?) in
-                guard s.current(generation) else { return (false, nil) }
+        case let .typing(push):
+            let (current, changed) = state.withLock { s -> (Bool, Bool) in
+                guard s.current(generation) else { return (false, false) }
                 s.stats.lines += 1
-                guard let window = s.watches.removeValue(forKey: watch) else { return (true, nil) }
+                guard s.shows(push.chat) else { return (true, false) }
+                return (true, s.setTyping(push.chat, push.who))
+            }
+            if changed { notify(urgent: false) }
+            return current
+        case let .resync(watch):
+            let (current, line, typing) = state.withLock { s -> (Bool, Line?, Bool) in
+                guard s.current(generation) else { return (false, nil, false) }
+                s.stats.lines += 1
+                guard let window = s.watches.removeValue(forKey: watch) else { return (true, nil, false) }
                 s.stats.resyncs += 1
-                guard s.windows[window] != nil else { return (true, nil) }
+                guard s.windows[window] != nil else { return (true, nil, false) }
                 s.windows[window]!.watch = nil
                 if s.windows[window]!.closing {
                     s.windows[window] = nil
-                    return (true, nil)
+                    return (true, nil, s.unshown())
                 }
-                return (true, asking(&s, window, again: true))
+                return (true, asking(&s, window, again: true), false)
             }
             if let line { write(line) }
+            if typing { notify(urgent: false) }
             return current
         case let .connection(connection):
             return event(.connection(connection), generation, urgent: false)
@@ -548,6 +567,7 @@ public final class Client: Sendable {
             s.stats.lines += 1
             guard let window = s.watches[watch] else { return (true, false) }
             merge(&s, window)
+            s.unshown()
             return (true, true)
         }
         if merged { notify(urgent: false) }
@@ -653,6 +673,7 @@ public final class Client: Sendable {
                 }
                 if w.closing {
                     s.windows[window] = nil
+                    s.unshown()
                     lines.append(contentsOf: [unwatchLine(&s, watch)].compactMap(\.self))
                     return true
                 }
@@ -667,14 +688,17 @@ public final class Client: Sendable {
                                                  total: watched.total)
                     if moved { update.moved = Moved(place: place, newer: 0) }
                     s.mergeChats(window, update)
+                    s.answered(window, watched.typing)
                 case let .messages(watched):
                     var update = Update<MessageRow>(seq: watched.seq, remove: watched.remove, upsert: watched.rows,
                                                     total: watched.total, older: watched.older, newer: watched.newer)
                     if moved { update.moved = Moved(place: place, newer: watched.newer) }
                     s.mergeMessages(window, update)
+                    s.answered(window, watched.typing)
                 default:
                     break
                 }
+                s.unshown()
                 if follow {
                     lines.append(contentsOf: [asking(&s, window, again: false)].compactMap(\.self))
                 }
@@ -682,6 +706,7 @@ public final class Client: Sendable {
             case let .failure(failure):
                 if w.closing {
                     s.windows[window] = nil
+                    s.unshown()
                     return true
                 }
                 let gone = if case let .jawd(error) = failure { error.code == ErrorCode.notFound } else { false }
@@ -777,15 +802,17 @@ public enum Event: Sendable {
     case unreadable(String)
 }
 
-/// Everything that came since the last drain: events in order, and one merged update for each
-/// window that changed.
+/// Everything that came since the last drain: events in order, one merged update for each window
+/// that changed, and who's typing, when that changed.
 public struct Frame: Sendable {
     public var events: [Event]
     public var chats: [WindowID: Update<ChatRow>]
     public var messages: [WindowID: Update<MessageRow>]
+    /// Who's typing in the chats the windows show, all of it as it is now, when it changed.
+    public var typing: Typists?
 
     public var isEmpty: Bool {
-        events.isEmpty && chats.isEmpty && messages.isEmpty
+        events.isEmpty && chats.isEmpty && messages.isEmpty && typing == nil
     }
 }
 
@@ -852,6 +879,15 @@ struct Win: Sendable {
         self.of = of
         self.place = place
     }
+
+    /// Whether it shows `chat`, for who's typing there: a chat list among its rows, a conversation
+    /// as its chat.
+    func shows(_ chat: String) -> Bool {
+        switch kind {
+        case .chats: ids.contains(chat)
+        case .messages: of == chat
+        }
+    }
 }
 
 struct State: Sendable {
@@ -878,6 +914,10 @@ struct State: Sendable {
     var events: [Event] = []
     var chats: [WindowID: Merged<ChatRow>] = [:]
     var messages: [WindowID: Merged<MessageRow>] = [:]
+    /// Who's typing in the chats the windows show, as jawd last said, and whether that changed since
+    /// the caller last drained.
+    var typing: Typists = [:]
+    var typingChanged = false
     /// Whether the caller has been woken for what's in the inbox, and whether at once.
     var signalled = false
     var urgent = false
@@ -885,6 +925,49 @@ struct State: Sendable {
 
     init(focus: Bool) {
         self.focus = focus
+    }
+
+    /// Whether a window that isn't being let go shows `chat`.
+    func shows(_ chat: String) -> Bool {
+        windows.values.contains { !$0.closing && $0.shows(chat) }
+    }
+
+    /// Says who's typing in `chat`, nobody when `who` is empty; says whether that changed anything.
+    @discardableResult
+    mutating func setTyping(_ chat: String, _ who: [Typist]) -> Bool {
+        let changed = (typing[chat] ?? []) != who
+        if changed {
+            typing[chat] = who.isEmpty ? nil : who
+            typingChanged = true
+        }
+        return changed
+    }
+
+    /// What a watch's or move's answer says of who's typing, for every chat of its window: a chat it
+    /// leaves out has nobody typing.
+    mutating func answered(_ window: WindowID, _ answered: Typists) {
+        guard let w = windows[window], !w.closing else { return }
+        for chat in Set(typing.keys).union(answered.keys) where w.shows(chat) {
+            setTyping(chat, answered[chat] ?? [])
+        }
+    }
+
+    /// Forgets who's typing in the chats no window shows; says whether it forgot any.
+    @discardableResult
+    mutating func unshown() -> Bool {
+        guard !typing.isEmpty else { return false }
+        let gone = typing.keys.filter { !shows($0) }
+        for chat in gone {
+            typing[chat] = nil
+        }
+        if !gone.isEmpty { typingChanged = true }
+        return !gone.isEmpty
+    }
+
+    /// Forgets everyone typing, as the connection drops.
+    mutating func forgetTyping() {
+        if !typing.isEmpty { typingChanged = true }
+        typing.removeAll()
     }
 
     mutating func id() -> UInt64 {

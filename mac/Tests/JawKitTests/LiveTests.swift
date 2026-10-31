@@ -208,4 +208,28 @@ struct LiveTests {
         if case let .row(row)? = found.first?.1 { #expect(row.id == climbing) } else { Issue.record("the group wasn't found: \(found)") }
         #expect(found.last?.0 == unknown && found.last?.1 == .gone, "jawd has no chat by that JID")
     }
+
+    @Test func `the made-up account's people type, and a real jawd says who in its answers and pushes`() async throws {
+        let demo = try DemoJawd()
+        defer { demo.stop() }
+        // In front, so jawd tells the made-up WhatsApp you're online, which is when typing is heard.
+        let jawd = Jawd(socket: demo.socket, client: "jaw-mac-live", version: "0", focus: true) { _ in }
+        jawd.start()
+        defer { jawd.close() }
+        _ = jawd.watchChats("all", .top(60))
+        let ana = "351912345678@s.whatsapp.net", climbing = "120363012345678901@g.us"
+        var said: [Typists] = []
+        let end = Date().addingTimeInterval(30)
+        func heard(_ chat: String, _ state: Typist.State) -> Bool {
+            said.contains { $0[chat]?.contains { $0.state == state && $0.id.hasPrefix("person:") && !$0.name.isEmpty } == true }
+        }
+        while Date() < end, !(heard(ana, .typing) && heard(climbing, .recording)) {
+            for case let .typing(t) in jawd.drain() {
+                said.append(t)
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(heard(ana, .typing), "Ana typing in her chat: \(said.suffix(3))")
+        #expect(heard(climbing, .recording), "someone recording in Lisbon Climbing: \(said.suffix(3))")
+    }
 }

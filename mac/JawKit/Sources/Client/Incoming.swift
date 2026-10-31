@@ -42,6 +42,7 @@ enum Incoming: Sendable {
     case bad(UInt64, String)
     case chatsPush(ChatsPush)
     case messagesPush(MessagesPush)
+    case typing(TypingPush)
     case resync(String)
     case connection(Connection)
     case link(LinkStep)
@@ -96,6 +97,7 @@ struct IncomingLine: Decodable {
             switch method {
             case "chats": value = try .chatsPush(c.decode(ChatsPush.self, forKey: .params))
             case "messages": value = try .messagesPush(c.decode(MessagesPush.self, forKey: .params))
+            case "typing": value = try .typing(c.decode(TypingPush.self, forKey: .params))
             case "resync": value = try .resync(c.decode(WatchRef.self, forKey: .params).watch)
             case "connection": value = try .connection(c.decode(Connection.self, forKey: .params))
             case "link": value = try .link(c.decode(LinkStep.self, forKey: .params))

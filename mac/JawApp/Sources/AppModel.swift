@@ -216,7 +216,7 @@ final class AppModel {
             terminalPanes(kept)
         case let .looked(chat, found):
             lookedUp(chat, found)
-        case .push, .chats, .layout:
+        case .push, .chats, .layout, .typing:
             break
         }
     }
