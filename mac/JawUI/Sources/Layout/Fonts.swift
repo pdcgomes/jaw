@@ -23,6 +23,8 @@ public final class FontSet: @unchecked Sendable {
     let reaction: CTFont
     /// A message of one to three emoji alone.
     let emoji: CTFont
+    /// A contact card's initials in its circle, where it has no picture.
+    let initials: CTFont
 
     public init(size: CGFloat, mono useMono: Bool) {
         self.size = size
@@ -42,6 +44,7 @@ public final class FontSet: @unchecked Sendable {
         time = NSFont.monospacedDigitSystemFont(ofSize: size - 2, weight: .regular) as CTFont
         reaction = CTFontCreateUIFontForLanguage(.system, size - 1, nil)!
         emoji = CTFontCreateUIFontForLanguage(.system, size * 3, nil)!
+        initials = Self.weighted(size + 2, 0.3)
     }
 
     static func sfMono(_ size: CGFloat) -> CTFont? {

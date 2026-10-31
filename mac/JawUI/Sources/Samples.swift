@@ -1,7 +1,9 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import JawKit
 import JawThemes
+import UniformTypeIdentifiers
 
 /// Made-up rows for the harness and the snapshot tests: every span, every tick, replies, reactions,
 /// edits, deletes, forwards, a failed message, system and call lines, a long message that folds,
@@ -198,7 +200,7 @@ public enum Samples {
           {"id":"K4","v":1,"sort":"\(at + 3000)~000104","chat":"g","at":\(at + 3000),"from":{"id":"person:9","name":"Inês","colour":0},"kind":"poll",
            "poll":{"question":"Which day?","max":1,"voters":4,"options":[{"name":"Saturday","votes":3,"mine":true},{"name":"Sunday","votes":1}]}},
           {"id":"K5","v":1,"sort":"\(at + 4000)~000105","chat":"g","at":\(at + 4000),"from":{"id":"person:7","name":"Rui","colour":2},"kind":"contact",
-           "contact":{"name":"Climbing shop"}},
+           "contact":{"name":"Climbing shop","vcard":"BEGIN:VCARD\\r\\nVERSION:3.0\\r\\nFN:Climbing shop\\r\\nTEL;type=WORK:+351 21 987 6543\\r\\nEND:VCARD\\r\\n"}},
           {"id":"K6","v":1,"sort":"\(at + 5000)~000106","chat":"g","at":\(at + 5000),"from":{"id":"person:4","name":"Ana","colour":4},"kind":"text",
            "spans":[{"t":"link","s":"climb.pt/sintra","url":"https://climb.pt/sintra"}],
            "link":{"url":"https://climb.pt/sintra","title":"Sintra: the routes","description":"Granite slabs above the sea, from 4 to 7b",
@@ -359,5 +361,88 @@ public enum Samples {
     /// The window update a watch of `rows`, opened at the newest, returns.
     public static func update(of rows: [MessageRow]) -> Update<MessageRow> {
         Update(seq: 200, upsert: rows, total: UInt64(rows.count), older: false, newer: 0, moved: Moved(place: .newest(100), newer: 0))
+    }
+
+    // MARK: - Contact cards
+
+    /// Contact cards in the group, as jawd sends them, each read from its vCard as JawKit reads a
+    /// row: one with its photo, one on WhatsApp, two, five with some photos, one without a number, a
+    /// long name with three numbers, yours on its way, and one deleted.
+    public static var contacts: [MessageRow] {
+        let at = now - 600_000
+        let martaCard = vcard("Marta Lopes", [("+351 21 345 6789", "351213456789"), ("21 000 00 00", nil)], photo: photo(0x7DCFFF))
+        let inesCard = vcard("Inês Gomes", [("+351 913 002 210", "351913002210")])
+        let several = [vcard("Tiago Martins", [("+351 916 666 666", "351916666666")]), vcard("Sofia Costa", [("+351 917 777 777", nil)])]
+        let five = [
+            vcard("Tiago Martins", [("+351 916 666 666", "351916666666")], photo: photo(0x9ECE6A)),
+            vcard("Sofia Costa", [("+351 917 777 777", nil)]),
+            vcard("Mãe", [("+351 913 000 000", "351913000000")], photo: photo(0xBB9AF7)),
+            vcard("Ricardo Pinto", [("+351 918 888 888", "351918888888")]),
+            vcard("Joana Reis", [("+351 919 999 999", "351919999999")]),
+        ]
+        return [
+            contactRow(1, at: at, from: rui, name: "Marta Lopes", vcard: martaCard),
+            contactRow(2, at: at + 60000, from: ana, name: "Inês Gomes", vcard: inesCard),
+            contactRow(3, at: at + 120_000, from: ines, name: "2 contacts", vcard: several.joined()),
+            contactRow(4, at: at + 180_000, from: rui, name: "5 contacts", vcard: five.joined()),
+            contactRow(5, at: at + 240_000, from: ana, name: "Escola de Escalada", vcard: vcard("Escola de Escalada", [])),
+            contactRow(6, at: at + 300_000, from: ines, name: "Maria da Conceição Albuquerque de Vasconcelos e Sá",
+                       vcard: vcard("Maria da Conceição Albuquerque de Vasconcelos e Sá",
+                                    [("+351 912 345 678", "351912345678"), ("+351 21 111 1111", nil), ("+44 20 7946 0000", nil)])),
+            contactRow(7, at: at + 360_000, mine: true, status: "pending", name: "Dr.ª Marta Lopes", vcard: martaCard),
+            contactRow(8, at: at + 420_000, from: rui, name: "Inês Gomes", vcard: inesCard, deleted: true),
+        ].compactMap(\.self)
+    }
+
+    /// The window update a watch of the contact cards returns.
+    public static var contactsUpdate: Update<MessageRow> {
+        let rows = contacts
+        return Update(seq: 300, upsert: rows, total: UInt64(rows.count), older: false, newer: 0, moved: Moved(place: .newest(100), newer: 0))
+    }
+
+    /// A card as Contacts exports one, of `name` and its numbers, each with the WhatsApp account the
+    /// phones mark it with, if any, and a photo.
+    static func vcard(_ name: String, _ numbers: [(String, String?)], photo: Data? = nil) -> String {
+        var card = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:;\(name);;;\r\nFN:\(name)\r\n"
+        for (number, account) in numbers {
+            card += "TEL;type=CELL" + (account.map { ";waid=\($0)" } ?? "") + ":\(number)\r\n"
+        }
+        if let photo { card += "PHOTO;ENCODING=b;TYPE=PNG:\(photo.base64EncodedString())\r\n" }
+        return card + "END:VCARD\r\n"
+    }
+
+    /// A contact row in the group, as jawd sends one, read as JawKit reads it.
+    static func contactRow(_ n: Int, at: Int64, from: Sender? = nil, mine: Bool = false, status: String? = nil, name: String,
+                           vcard: String, deleted: Bool = false) -> MessageRow?
+    {
+        var row: [String: JSONValue] = [
+            "id": .string(String(format: "3EB0C0%010d", n)), "v": .number(1), "sort": .string("\(at)~\(String(format: "%06d", 300 + n))"),
+            "chat": .string(group.id), "at": .number(Double(at)), "mine": .bool(mine), "kind": .string("contact"), "deleted": .bool(deleted),
+            "spans": .array([.object(["t": .string("text"), "s": .string(name)])]),
+            "contact": .object(["name": .string(name), "vcard": .string(vcard)]),
+        ]
+        if let from, !mine { row["from"] = .object(["id": .string(from.id), "name": .string(from.name), "colour": .number(Double(from.colour))]) }
+        if let status { row["status"] = .string(status) }
+        guard let data = try? JSONEncoder().encode(JSONValue.object(row)) else { return nil }
+        return try? JSONDecoder().decode(MessageRow.self, from: data)
+    }
+
+    /// A made-up photo for a card: a head and shoulders, lighter, on `hex`, 120 pixels square, as a PNG.
+    static func photo(_ hex: UInt32) -> Data? {
+        let side = 120
+        guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        let ground = RGBA(hex)
+        ctx.setFillColor(ground.cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+        ctx.setFillColor(RGBA(0xFFFFFF).mixed(with: ground, 0.35).cgColor)
+        ctx.fillEllipse(in: CGRect(x: 38, y: 54, width: 44, height: 44))
+        ctx.fillEllipse(in: CGRect(x: 18, y: -30, width: 84, height: 76))
+        guard let image = ctx.makeImage() else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 }

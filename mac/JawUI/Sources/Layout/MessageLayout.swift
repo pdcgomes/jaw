@@ -65,6 +65,8 @@ public enum Region: Sendable, Hashable {
     case media(item: Int?)
     /// The ring over a picture or a file coming: a click stops it.
     case stop(item: Int?)
+    /// A contact card: Message, or for several cards, the sheet of them.
+    case card
 }
 
 /// A message laid out at a width: its height, and what to draw, already measured.

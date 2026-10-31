@@ -664,6 +664,7 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
                 select(m.id)
                 media(.look, m, item: item)
             case let .stop(item): media(.stop, m, item: item)
+            case .card: select(m.id)
             }
             return
         }

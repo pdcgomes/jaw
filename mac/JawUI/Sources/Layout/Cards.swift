@@ -92,10 +92,12 @@ extension MessageLayout.Builder {
 
     /// What VoiceOver says a message is, before its card: that it was deleted, or its kind's line and
     /// its words. A poll's kind's line has its question and its card the options, so its words, which
-    /// jawd's rows give as the question and the options, a line each, aren't said again.
+    /// jawd's rows give as the question and the options, a line each, aren't said again; a contact
+    /// card is said as its name and numbers, and several as how many and their names.
     static func said(_ m: MessageRow) -> String {
         if m.deleted { return "This message was deleted" }
         if m.kind == .poll, m.poll != nil { return kindLine(m) ?? "" }
+        if m.kind == .contact, let contact = m.contact { return ContactWords.spoken(contact) }
         return (kindLine(m).map { "\($0). " } ?? "") + m.plain
     }
 
@@ -106,7 +108,8 @@ extension MessageLayout.Builder {
         switch m.kind {
         case .image, .video, .gif, .sticker, .videoNote: return pictureSize(most: most)
         case .voice, .audio: return CGSize(width: min(most, 260), height: 40)
-        case .document, .contact: return CGSize(width: w, height: 44)
+        case .document: return CGSize(width: w, height: 44)
+        case .contact: return contactSize(most: most)
         case .location, .liveLocation: return CGSize(width: w, height: 52)
         case .poll: return pollSize(most: most)
         case .album: return albumSize(most: most)
@@ -549,13 +552,6 @@ extension MessageLayout.Builder {
         } else if let url = l?.url {
             regions.append((r, .open(url)))
         }
-    }
-
-    mutating func contact(_ r: CGRect) {
-        symbol("person.crop.circle.fill", 28, roles.secondary, centredIn: CGRect(x: r.minX, y: r.minY, width: 36, height: r.height))
-        let x = r.minX + 44
-        text(m.contact?.name ?? "Contact", fonts.name, roles.text, x: x, top: r.minY + 4, most: r.maxX - x)
-        text("Contact card · open it on your phone", fonts.small, roles.secondary, x: x, top: r.minY + 6 + lineHeight(fonts.name), most: r.maxX - x)
     }
 
     mutating func poll(_ r: CGRect) {
