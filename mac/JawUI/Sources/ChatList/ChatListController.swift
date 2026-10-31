@@ -280,7 +280,6 @@ public final class ChatListController: NSViewController, NSTableViewDataSource, 
         avatars.image(chat.avatar, root: root)
     }
 
-    /// A chat dragged out of the list, onto a pane.
     /// A chat dragged out of the list, onto a pane or a folder; a community's row, onto a folder only.
     public func tableView(_: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
         guard row < shown.count else { return nil }
