@@ -68,6 +68,7 @@ The terminal's sidebar has the tree with its counts, smart folders, folders made
 The terminal draws photos, albums two across, stickers, and the posters of GIFs, videos and video messages from jawd's previews, with kitty, iTerm2, sixel or half-blocks, on the made-up account until media in lands.
 
 - **The Mac's** are Mac-M2's steps 1 and 2: the image queue (four at a time, cancelled when scrolled past), the 64 MB cache of decoded pictures, the preview chosen by the pixels drawn, the blurred thumbnail fading into it; photos, albums, stickers (still, animated with P4 in Phase 4), GIFs looping while on screen, videos and video messages, their posters first and playing in place. The frames on main already keep each picture's shape, so the pictures drop into them and nothing moves.
+- **Built, and left** (`mac-media`, [the pictures and files plan](2026-10-30-jaw-mac-pictures-and-files-plan.md)): everything above but motion. GIFs, videos and video messages are drawn as their posters, as the terminal draws them, with ▶ looking at them with Quick Look; GIFs looping while on screen, videos and video messages playing in place, and a document's first page on its card (2.3's card has its icon) are left for Phase 4, with the rest of Mac-M2.
 - **Needs from jawd:** media in, on `m3-media-in`, in its third audit: the `media` rows' `previews`, `thumbnail`, `state` and `progress`.
 - **The check:** nothing new; media rows come with `messages.watch`.
 
@@ -170,7 +171,7 @@ Once `send-contact` lands, jawd serves `send.contact` (one card or several, each
 
 ## Phase 4 · The Mac's own, after the gaps
 
-The rest of Mac-M2 (the viewer, MapKit's maps, contact cards' Message and Add to Contacts, animated stickers with P4) and Mac-M5 (Redlamp's themes, the animations, the Mimic's chomp everywhere, notifications with Reply and Mark as Read with P2, the Dock badge with P3, Settings whole with P5, accessibility, a signed and notarized build with updates). Each starts once the gaps of its area are closed, so the viewer can follow 2.3 while voice is still waiting on jawd.
+The rest of Mac-M2 (the viewer, GIFs looping while on screen, videos and video messages playing in place, a document's first page, MapKit's maps, contact cards' Message and Add to Contacts, animated stickers with P4) and Mac-M5 (Redlamp's themes, the animations, the Mimic's chomp everywhere, notifications with Reply and Mark as Read with P2, the Dock badge with P3, Settings whole with P5, accessibility, a signed and notarized build with updates). Each starts once the gaps of its area are closed, so the viewer can follow 2.3 while voice is still waiting on jawd.
 
 ## P10, a layout book
 
