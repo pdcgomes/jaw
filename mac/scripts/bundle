@@ -17,6 +17,9 @@ cd "$repo"
 team="${JAW_TEAM_ID:-3JP75Z3F98}"
 out="mac/build/release"
 app="$out/Jaw.app"
+built="$(mac/scripts/built-from)"
+# The helpers are copied from this checkout's target, whatever target-dir a setting of Cargo's names.
+export CARGO_TARGET_DIR="$repo/target"
 
 echo "==> jawd, jaw and jaw-engine for release"
 cargo build --release -p jawd --bin jawd --quiet
@@ -43,7 +46,11 @@ cp mac/JawApp/Helpers/dev.badcoffee.jaw.jawd.plist "$app/Contents/Library/Launch
 jawd_version="$("$app/Contents/Helpers/jawd" --version | awk '{print $2}')"
 /usr/libexec/PlistBuddy -c "Add :JawdVersion string $jawd_version" "$app/Contents/Info.plist" 2>/dev/null ||
     /usr/libexec/PlistBuddy -c "Set :JawdVersion $jawd_version" "$app/Contents/Info.plist"
-built="$(mac/scripts/built-from)"
+again="$(mac/scripts/built-from)"
+if [ "$again" != "$built" ]; then
+    echo "==> the checkout changed while make mac built it: run it again" >&2
+    exit 1
+fi
 from="$(echo "$built" | sed -n 1p)"
 at="$(echo "$built" | sed -n 2p)"
 plutil -replace JawBuiltFrom -string "$from" "$app/Contents/Info.plist"

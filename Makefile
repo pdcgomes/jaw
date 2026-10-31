@@ -96,6 +96,7 @@ mac:
 	mac/scripts/bundle
 
 mac-test:
+	mac/scripts/test-built-from
 	$(CARGO) build -p jawd --bin jawd
 	mac/scripts/build-mac test JawKit
 	mac/scripts/build-mac test JawThemes

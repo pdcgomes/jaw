@@ -1,0 +1,249 @@
+#!/bin/sh
+# Tries mac/scripts/built-from on throwaway repositories, one for each case it tells apart, printing
+# ok: or FAIL: for each and exiting 1 if any failed. They're made in one folder of their own, removed
+# on every way out, with GIT_CEILING_DIRECTORIES there and git's own locations unset, so no git command
+# here reaches this checkout's repository or changes a ref or tag outside them; git's global and
+# system settings are left out, so yours don't change the answers. Their origin is the repository
+# Cargo.toml names, so built-from has to know it by the same name.
+#
+#   mac/scripts/test-built-from
+set -eu
+scripts="$(cd "$(dirname "$0")" && pwd)"
+repository="$(sed -n 's/^repository = "\(.*\)"$/\1/p' "$scripts/../../Cargo.toml")"
+case "$repository" in
+https://*/*) project="${repository#https://}" ;;
+*) echo "FAIL: Cargo.toml names no repository at an https address, which built-from checks origin against"; exit 1 ;;
+esac
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/jaw-built-from.XXXXXX")"
+trap 'cd /; rm -rf "$scratch"' EXIT
+trap 'exit 1' HUP INT TERM
+scratch="$(cd "$scratch" && pwd -P)"
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_NAMESPACE GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_OPTIONAL_LOCKS
+export GIT_CEILING_DIRECTORIES="$scratch" GIT_CONFIG_NOSYSTEM=1 HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/home"
+export GIT_AUTHOR_NAME=check GIT_AUTHOR_EMAIL=check@localhost GIT_COMMITTER_NAME=check GIT_COMMITTER_EMAIL=check@localhost
+mkdir -p "$HOME" "$scratch/tools/mac/scripts"
+built_from="$scratch/tools/mac/scripts/built-from"
+cp "$scripts/built-from" "$built_from"
+failed=0
+
+fail() {
+    echo "FAIL: $1"
+    printf '%s\n' "$2" | sed 's/^/    /'
+    failed=1
+}
+
+# says <case> <from> <at> [<folder>]: built-from prints those two lines for the folder, this one by default
+says() {
+    want="$(printf '%s\n%s' "$2" "$3")"
+    if got="$("$built_from" "${4:-$PWD}" 2>&1)" && [ "$got" = "$want" ]; then
+        echo "ok: $1"
+    else
+        fail "$1" "$(printf 'wanted:\n%s\ngot:\n%s' "$want" "$got")"
+    fi
+}
+
+# refuses <case> [<folder>]: built-from fails, printing nothing for make mac to record
+refuses() {
+    if got="$("$built_from" "${2:-$PWD}" 2> /dev/null)"; then
+        fail "$1" "$(printf 'it succeeded:\n%s' "$got")"
+    elif [ -n "$got" ]; then
+        fail "$1" "$(printf 'it failed, after printing:\n%s' "$got")"
+    else
+        echo "ok: $1"
+    fi
+}
+
+# inside <folder>: the commands after it run in that repository, once git says it's one of its own
+inside() {
+    cd "$1"
+    [ "$(git rev-parse --absolute-git-dir)" = "$1/.git" ] || { echo "FAIL: $1 isn't a repository of its own"; exit 1; }
+}
+
+# The project's checkout at origin/main, as a worktree on main is: its origin is the project's
+# repository, origin/main is its one commit, and nothing is changed. Most cases change a copy of it.
+base="$scratch/base"
+git init -q -b main "$base"
+inside "$base"
+mkdir -p crates engine proto protocol mac/scripts docs
+printf '.DS_Store\ntarget/\n' > .gitignore
+echo '[workspace]' > Cargo.toml
+echo '# the lock' > Cargo.lock
+echo 'pub fn jawd() {}' > crates/lib.rs
+echo 'package main' > engine/main.go
+echo 'syntax = "proto3";' > proto/engine.proto
+echo '# the protocol' > protocol/README.md
+echo 'engine:' > Makefile
+echo '// the app' > mac/App.swift
+echo '# the design' > docs/design.md
+echo '# jaw' > README.md
+cp "$scripts/built-from" mac/scripts/built-from
+git add -A
+git commit -q -m 'on origin/main'
+git remote add origin "$repository.git"
+git update-ref refs/remotes/origin/main HEAD
+at="$(git rev-parse --short HEAD)"
+
+# copy <name>: a copy of that checkout, which the commands after it change
+copy() {
+    cp -R "$base" "$scratch/$1"
+    inside "$scratch/$1"
+}
+
+# ahead [<branch>]: a commit off origin/main, on a new branch or where HEAD is, its hash in $b
+ahead() {
+    if [ $# -gt 0 ]; then git checkout -q -b "$1"; fi
+    echo more >> crates/lib.rs
+    git commit -q -a -m 'off origin/main'
+    b="$(git rev-parse --short HEAD)"
+}
+
+changed="with uncommitted changes to what jawd is built from"
+elsewhere="in a checkout whose origin isn't $project"
+
+says "a checkout at origin/main" main "$at on main"
+says "a checkout at origin/main, given a folder inside it" main "$at on main" "$base/mac"
+if got="$("$base/mac/scripts/built-from" 2>&1)" && [ "$got" = "$(printf 'main\n%s on main' "$at")" ]; then
+    echo "ok: a checkout at origin/main, read by its own built-from given nothing"
+else
+    fail "a checkout at origin/main, read by its own built-from given nothing" "$got"
+fi
+copy detached
+git checkout -q --detach
+says "HEAD detached at origin/main" main "$at on main"
+copy worktrees
+git worktree add -q -b other "$scratch/linked"
+says "a linked worktree at origin/main" main "$at on main" "$scratch/linked"
+git clone -q --depth 1 "file://$base" "$scratch/shallow"
+inside "$scratch/shallow"
+git remote set-url origin "$repository.git"
+says "a shallow clone of the project at origin/main" main "$at on main"
+copy release
+git tag v0.1.0
+says "at a release's tag on origin/main" release v0.1.0
+copy other-tag
+git tag vfoo
+says "at a tag on origin/main that isn't a release's" main "$at on main"
+copy origins
+for origin in "$repository" "git@${project%%/*}:${project#*/}.git" "git@${project%%/*}:${project#*/}" "ssh://git@$project.git"; do
+    git remote set-url origin "$origin"
+    says "at origin/main, with origin $origin" main "$at on main"
+done
+
+copy branch
+ahead feature
+says "a branch off origin/main" branch "feature at $b, not on origin/main"
+git checkout -q --detach
+says "HEAD detached off origin/main" branch "$b, not on origin/main"
+copy ahead
+ahead
+says "a local main with a commit of its own, as the owner's checkout has" branch "main at $b, not on origin/main"
+git tag v0.1.0
+says "at a release's tag off origin/main" branch "main at $b, not on origin/main"
+copy branch-called-origin-main
+ahead feature
+git branch origin/main
+says "a branch off origin/main, with a branch called origin/main at it" branch "feature at $b, not on origin/main"
+copy tag-called-origin-main
+ahead feature
+git tag origin/main
+says "a branch off origin/main, with a tag called origin/main at it" branch "feature at $b, not on origin/main"
+copy no-origin-main
+git update-ref -d refs/remotes/origin/main
+says "no origin/main" branch "main at $at, not on origin/main"
+git tag refs/remotes/origin/main
+says "no origin/main, with a tag called refs/remotes/origin/main at HEAD" branch "main at $at, not on origin/main"
+git clone -q "$base" "$scratch/clone"
+inside "$scratch/clone"
+says "a clone of a local checkout, at its main" branch "main at $at, $elsewhere"
+copy instead-of
+git config "url.$base.insteadOf" "$repository"
+says "an origin that url.insteadOf sends to a local checkout" branch "main at $at, $elsewhere"
+copy no-origin
+git remote remove origin
+git update-ref refs/remotes/origin/main HEAD
+says "no origin, with an origin/main at HEAD" branch "main at $at, $elsewhere"
+mkdir "$scratch/outside"
+says "a folder outside git" branch "a tree outside git, which says nothing of where it came from" "$scratch/outside"
+
+copy modified
+echo more >> crates/lib.rs
+says "a file under crates changed" changed "main at $at, $changed"
+git add crates/lib.rs
+says "a file under crates changed and staged" changed "main at $at, $changed"
+copy deleted
+rm crates/lib.rs
+says "a file under crates deleted" changed "main at $at, $changed"
+copy untracked
+echo new > crates/new.rs
+says "a new file under crates" changed "main at $at, $changed"
+says "a new file under crates, given a folder outside crates" changed "main at $at, $changed" "$scratch/untracked/mac"
+git config status.showUntrackedFiles no
+says "a new file under crates, with status.showUntrackedFiles=no" changed "main at $at, $changed"
+copy excluded
+echo crates/new.rs >> .git/info/exclude
+echo new > crates/new.rs
+says "a new file under crates that .git/info/exclude leaves out" changed "main at $at, $changed"
+copy excludes-file
+echo go.work > "$scratch/excludes"
+git config core.excludesFile "$scratch/excludes"
+echo 'go 1.24' > go.work
+says "a new go.work that an ignore file of your own leaves out" changed "main at $at, $changed"
+n=0
+for new in .cargo/config.toml rust-toolchain rust-toolchain.toml go.work; do
+    n=$((n + 1))
+    copy "new-$n"
+    mkdir -p "$(dirname "$new")"
+    echo '# new' > "$new"
+    says "a new $new" changed "main at $at, $changed"
+done
+copy makefile
+echo 'more:' >> Makefile
+says "the Makefile changed" changed "main at $at, $changed"
+copy assumed
+echo more >> crates/lib.rs
+git update-index --assume-unchanged crates/lib.rs
+says "a file under crates changed, which git is told to assume unchanged" changed \
+    "main at $at, with files jawd is built from whose changes git is told to ignore"
+copy skipped
+echo more >> crates/lib.rs
+git update-index --skip-worktree crates/lib.rs
+says "a file under crates changed, which git is told to skip" changed \
+    "main at $at, with files jawd is built from whose changes git is told to ignore"
+copy changed-release
+git tag v0.1.0
+echo more >> engine/main.go
+says "a file under engine changed, at a release's tag" changed "main at $at, $changed"
+copy changed-branch
+ahead feature
+echo more >> proto/engine.proto
+says "a file under proto changed, on a branch" changed "feature at $b, $changed"
+copy not-built-from
+echo more >> mac/App.swift
+echo more >> README.md
+echo new > docs/new.md
+touch crates/.DS_Store
+mkdir crates/target
+echo built > crates/target/lib
+says "the app, the docs and a README changed, and files the repository's .gitignore leaves out" main "$at on main"
+
+copy locks
+touch -t 200001010000 crates/lib.rs
+before="$(cksum < .git/index)"
+says "a file under crates touched, its content the same" main "$at on main"
+after="$(cksum < .git/index)"
+git status --porcelain > /dev/null
+rewritten="$(cksum < .git/index)"
+if [ "$after" = "$before" ] && [ ! -e .git/index.lock ] && [ "$rewritten" != "$before" ]; then
+    echo "ok: it leaves an index it reads as it was, where git status rewrites it"
+else
+    fail "it leaves an index it reads as it was, where git status rewrites it" \
+        "before: $before, after built-from: $after, after git status: $rewritten"
+fi
+git init -q -b main "$scratch/empty"
+refuses "a repository with no commits" "$scratch/empty"
+copy unreadable
+chmod 000 .git/index
+refuses "an index git can't read"
+chmod 644 .git/index
+exit "$failed"

@@ -3,26 +3,53 @@
 # (JawBuiltFrom and JawBuiltAt): on two lines, main, release, branch or changed, then the commit, tag
 # or branch, for what the app says. Only a Jaw from origin/main or a release's tag on it starts a jawd
 # on an account's folder, since a branch's jawd could move jaw.db to a version main's can't open. A
-# tag counts only on origin/main, since every worktree shares the tags; "changed" is a tree with
-# uncommitted changes to what jawd and jaw-engine are built from, which the app's own sources, the
-# docs and the READMEs aren't; and a tree outside git says branch. It only reads: git takes none of
+# tag counts only on origin/main, since every worktree shares the tags, and origin/main only where
+# origin is the project's own repository, as Cargo.toml names it, since a clone of a local checkout
+# has that checkout's main for it; "changed" is a tree with uncommitted changes to what jawd and
+# jaw-engine are built from, Cargo's, rustup's and go's settings beside them and the Makefile
+# included, which the app's own sources, the docs and the READMEs aren't; and a tree outside git says
+# branch. So that neither git's settings nor a name in the repository steers it to main, it reads
+# origin/main by its whole ref, which a branch or tag called origin/main can't stand in for; counts
+# as a change every untracked file but those the repository's own .gitignore files leave out,
+# whatever status.showUntrackedFiles or an ignore file of your own says, and every file git is told
+# to assume unchanged or skip; reads the checkout from its top, whatever folder of it it's given; and
+# stops when git can't read the tree, so make mac records nothing. It only reads: git takes none of
 # its optional locks.
 #
 #   mac/scripts/built-from [<checkout>]        # this script's own checkout by default
 set -eu
 export GIT_OPTIONAL_LOCKS=0
+host=github.com
+name=pdcgomes/jaw
+inputs="Cargo.toml Cargo.lock crates engine proto protocol .cargo rust-toolchain rust-toolchain.toml go.work Makefile"
 cd "${1:-$(dirname "$0")/../..}"
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
     printf 'branch\na tree outside git, which says nothing of where it came from\n'
     exit 0
 fi
+top=$(git rev-parse --show-toplevel)
+cd "$top"
 commit=$(git rev-parse --short HEAD)
 branch=$(git rev-parse --abbrev-ref HEAD)
 place="$branch at $commit"
 [ "$branch" = HEAD ] && place=$commit
-if [ -n "$(git status --porcelain -- Cargo.toml Cargo.lock crates engine proto protocol)" ]; then
+changes=$(git status --porcelain --untracked-files=no -- $inputs)
+untracked=$(git ls-files --others --exclude-per-directory=.gitignore -- $inputs)
+tracked=$(git ls-files -v -- $inputs)
+unwatched=$(printf '%s\n' "$tracked" | sed -n '/^[^H]/p')
+origin=$(git remote get-url origin 2> /dev/null) || origin=
+case ${origin%.git} in
+"https://$host/$name" | "git@$host:$name" | "ssh://git@$host/$name") ours=true ;;
+*) ours=false ;;
+esac
+main=$(git show-ref --verify --hash refs/remotes/origin/main 2> /dev/null) || main=
+if [ -n "$changes$untracked" ]; then
     printf 'changed\n%s, with uncommitted changes to what jawd is built from\n' "$place"
-elif ! git merge-base --is-ancestor HEAD origin/main 2> /dev/null; then
+elif [ -n "$unwatched" ]; then
+    printf 'changed\n%s, with files jawd is built from whose changes git is told to ignore\n' "$place"
+elif ! $ours; then
+    printf "branch\n%s, in a checkout whose origin isn't %s\n" "$place" "$host/$name"
+elif [ -z "$main" ] || ! git merge-base --is-ancestor HEAD "$main" 2> /dev/null; then
     printf 'branch\n%s, not on origin/main\n' "$place"
 elif tag=$(git describe --tags --exact-match --match 'v[0-9]*' HEAD 2> /dev/null); then
     printf 'release\n%s\n' "$tag"

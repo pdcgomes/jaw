@@ -6,7 +6,7 @@ import Testing
     let main = Build(info: ["JawBuiltFrom": "main", "JawBuiltAt": "c50a2ba3 on main", "CFBundleName": "Jaw"])
     #expect(main == Build(from: "main", at: "c50a2ba3 on main") && main.startsOnAccounts)
     #expect(Build(from: "release", at: "v0.2.0").startsOnAccounts)
-    for from in ["branch", "changed", nil] as [String?] {
+    for from in ["branch", "changed", "Main", "", nil] as [String?] {
         #expect(!Build(from: from, at: "mac-start-jawd at 1a2b3c4").startsOnAccounts, "from \(from ?? "nothing")")
     }
     #expect(Build(from: "branch", at: "main at cc471e2, not on origin/main").refusal
@@ -14,5 +14,6 @@ import Testing
         + "where a jawd from anything but origin/main or a release's tag could move jaw.db to a version origin/main's can't open: "
         + "start one with jaw in a terminal, or open a Jaw built from origin/main")
     #expect(Build(info: [:]) == Build(from: nil, at: nil))
+    #expect(Build(info: ["JawBuiltFrom": true]).from == nil)
     #expect(Build(info: [:]).refusal.hasPrefix("this Jaw doesn't say what it was built from, as make mac's builds do, so it doesn't start jawd"))
 }
