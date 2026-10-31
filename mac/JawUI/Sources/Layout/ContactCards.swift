@@ -14,6 +14,23 @@ public enum ContactWords {
         return names.isEmpty ? count(c) : names.joined(separator: ", ")
     }
 
+    /// The most names the card of several shows on its line, and the most of each, in Unicode
+    /// scalars: more than its line has room for, so a message of many, however long their names,
+    /// costs its layout about what one of five does.
+    static let namesShown = 5, nameShown = 64
+
+    /// What the card in its message is called: as `title`, but of several only the first names, each
+    /// cut short, with an ellipsis where any is left out.
+    public static func titleShown(_ c: Contact) -> String {
+        guard c.cards.count > 1 else { return title(c) }
+        let names = Array(c.cards.lazy.compactMap { said($0.name) }.prefix(namesShown + 1))
+        guard !names.isEmpty else { return count(c) }
+        let shown = names.prefix(namesShown).map { name in
+            name.unicodeScalars.count > nameShown ? String(String.UnicodeScalarView(name.unicodeScalars.prefix(nameShown))) + "…" : name
+        }
+        return (shown + (names.count > namesShown ? ["…"] : [])).joined(separator: ", ")
+    }
+
     /// The line under it: one card's numbers as the card writes them; for several, what the message
     /// calls them, or how many they are.
     public static func detail(_ c: Contact) -> String {
@@ -104,7 +121,7 @@ extension MessageLayout.Builder {
         let most = r.maxX - Space.m - x
         let words = lineHeight(fonts.name) + 2 + lineHeight(fonts.small)
         let top = r.minY + ((cardTop - words) / 2).rounded()
-        text(ContactWords.title(contact), fonts.name, roles.text, x: x, top: top, most: most)
+        text(ContactWords.titleShown(contact), fonts.name, roles.text, x: x, top: top, most: most)
         text(ContactWords.detail(contact), fonts.small, roles.secondary, x: x, top: top + lineHeight(fonts.name) + 2, most: most)
         if let action = ContactWords.action(contact) {
             let rule = r.minY + cardTop

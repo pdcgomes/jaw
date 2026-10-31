@@ -131,13 +131,32 @@ func fastest(_ run: () -> Void) -> Duration {
 }
 
 @Test func `a card read from a hostile vCard is laid out from what was read, in a fraction of the time reading it takes`() throws {
-    let vcard = "BEGIN:VCARD\r\nVERSION:2.1\r\nFN:Ana Ribeiro\r\nTEL;waid=351912345678:+351 912 345 678\r\nNOTE;ENCODING=QUOTED-PRINTABLE:"
+    // One card with a note of 4 MiB broken softly after each character; and as many cards as are
+    // read, each named in 128 skin-toned thumbs, 256 scalars, the longest name read, with as many
+    // numbers as are read.
+    let soft = "BEGIN:VCARD\r\nVERSION:2.1\r\nFN:Ana Ribeiro\r\nTEL;waid=351912345678:+351 912 345 678\r\nNOTE;ENCODING=QUOTED-PRINTABLE:"
         + String(repeating: "x=\r\n", count: 1 << 20) + "x\r\nEND:VCARD\r\n"
-    let row = try #require(Samples.contactRow(9, at: Samples.now, from: Samples.ana, name: "Ana Ribeiro", vcard: vcard))
-    #expect(row.contact?.cards.first?.phones.first?.dialled == "+351912345678", "the card read as its row was")
-    // A layout that read the vCard would take as long as reading it, on any Mac and in any build.
-    let (took, reading) = (fastest { _ = cardLaid(row) }, fastest { _ = ContactCard.read(vcard) })
-    #expect(took < reading / 4, "laid out in \(took); reading the card takes \(reading)")
+    let thumbs = String(repeating: "👍🏽", count: 128)
+    let named = (0 ..< 256).map { i in
+        "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:\(thumbs)\r\n"
+            + (0 ..< 16).map { String(format: "TEL;type=CELL;waid=3519%04d%04d:+351 9%04d %04d\r\n", i, $0, i, $0) }.joined() + "END:VCARD\r\n"
+    }.joined()
+    let one = try #require(Samples.contactRow(9, at: Samples.now, from: Samples.ana, name: "Ana Ribeiro", vcard: soft))
+    #expect(one.contact?.cards.first?.phones.first?.dialled == "+351912345678", "the card read as its row was")
+    let many = try #require(Samples.contactRow(10, at: Samples.now, from: Samples.ana, name: "256 contacts", vcard: named))
+    let contact = try #require(many.contact)
+    #expect(contact.cards.count == 256 && contact.cards.allSatisfy { $0.name == thumbs && $0.phones.count == 16 }, "every card read, whole")
+    let cut = String(repeating: "👍🏽", count: 32) + "…"
+    #expect(ContactWords.titleShown(contact) == Array(repeating: cut, count: 5).joined(separator: ", ") + ", …",
+            "five names on its line, each cut to 64 scalars")
+    #expect(ContactWords.spoken(contact).components(separatedBy: thumbs).count == 257, "VoiceOver still reads every name")
+    #expect(ContactWords.lines(contact).split(separator: "\n").count == 257, "and copying gives every card")
+    for (shape, row, vcard) in [("a note broken softly", one, soft), ("256 cards named in thumbs", many, named)] {
+        // A layout that read the vCard would take as long as reading it, and one that typeset every
+        // name longer, on any Mac and in any build.
+        let (took, reading) = (fastest { _ = cardLaid(row) }, fastest { _ = ContactCard.read(vcard) })
+        #expect(took < reading / 4, "\(shape): laid out in \(took); reading the card takes \(reading)")
+    }
 }
 
 // MARK: - Message, and the sheet of several
