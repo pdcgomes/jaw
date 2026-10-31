@@ -51,20 +51,22 @@ private struct SidebarScene: View {
             }
             SpecimenGroup(
                 title: "Naming in place",
-                note: "A new folder's field open under Family, after Cousins, holding \"Cousins\", with jawd's refusal under it in the secondary colour: \"a folder there is called Cousins already\". The row is taller to hold it, and nothing under it is covered. The roster, drawn in a scene of its own, is hidden here, so the tree has the whole height.",
+                note: "A new folder's field open under Family, after Cousins, holding \"Cousins\", with jawd's refusal under it in the secondary colour: \"a folder there is called Cousins already\". The row is taller to hold it, and nothing under it is covered. The whole tree shows, from All, nothing scrolled away. The roster, drawn in a scene of its own, is hidden here, so the tree has the whole height.",
                 roles: roles,
             ) {
                 ControllerSpecimen {
                     let s = SidebarController()
                     s.roles = roles
-                    _ = s.view
+                    // Its size before the field takes the keys, which scrolls the field into sight.
+                    s.view.frame = NSRect(x: 0, y: 0, width: 220, height: 520)
                     s.apply(Samples.folderUpdate)
                     s.roster.view.isHidden = true
+                    s.view.layoutSubtreeIfNeeded()
                     s.beginNaming(parent: "folder:1", text: "Cousins")
                     s.notNamed("a folder there is called Cousins already")
                     return s
                 }
-                .frame(width: 220, height: 300)
+                .frame(width: 220, height: 520)
             }
             SpecimenGroup(
                 title: "From jawd's fixture",
