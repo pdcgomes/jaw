@@ -2802,7 +2802,13 @@ mod tests {
 
     #[test]
     fn migration_29_keeps_one_wait_an_index_for_one_outbox_row_each() {
-        let mut db = at(None, 28);
+        let before =
+            MIGRATIONS.iter().position(|m| m.contains("CREATE TABLE app_state_awaiting")).expect("its migration");
+        let mut db = at(None, before);
+        let made: bool = db
+            .query_row("SELECT count(*) > 0 FROM sqlite_schema WHERE name = 'app_state_awaiting'", [], |r| r.get(0))
+            .unwrap();
+        assert!(!made, "from the version before the migration");
         migrate(&mut db).unwrap();
         let wait = |key: &str, outbox: i64| {
             db.execute(
