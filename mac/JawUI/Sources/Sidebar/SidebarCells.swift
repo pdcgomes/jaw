@@ -4,7 +4,7 @@ import JawThemes
 
 /// A folder's row: its symbol and its name, then, on the right, its ⌘ digit, an @ when it has
 /// mentions and its unread total. VoiceOver reads it as one element.
-final class FolderCell: NSTableCellView {
+final class FolderCell: NSTableCellView, RowSelectable {
     static let id = NSUserInterfaceItemIdentifier("folder")
     static let builtInSymbols = ["all": "bubble.left.and.bubble.right", "unread": "message.badge", "groups": "person.3",
                                  "communities": "person.2.circle", "archived": "archivebox"]
@@ -181,9 +181,17 @@ final class NamingCell: NSTableCellView {
     }
 }
 
-/// A folder's row, which tells its cell whether it's selected.
-final class FolderRowView: NSTableRowView {
-    static let id = NSUserInterfaceItemIdentifier("folder.row")
+/// A cell whose row tells it whether it's selected, since AppKit tells a cell only of a selection
+/// with the keys.
+@MainActor
+protocol RowSelectable: NSView {
+    var selected: Bool { get set }
+}
+
+/// A row of the sidebar's, a folder's or someone's in the roster, which tells its cell whether it's
+/// selected.
+final class SidebarRowView: NSTableRowView {
+    static let id = NSUserInterfaceItemIdentifier("sidebar.row")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -197,7 +205,7 @@ final class FolderRowView: NSTableRowView {
 
     override var isSelected: Bool {
         didSet {
-            for case let cell as FolderCell in subviews {
+            for case let cell as RowSelectable in subviews {
                 cell.selected = isSelected
             }
         }
@@ -205,7 +213,7 @@ final class FolderRowView: NSTableRowView {
 
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)
-        (subview as? FolderCell)?.selected = isSelected
+        (subview as? RowSelectable)?.selected = isSelected
     }
 }
 

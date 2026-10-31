@@ -258,6 +258,53 @@ func `the picked folder's row reads on the selection under it, with the keys and
 }
 
 @MainActor
+@Test(arguments: [true, false])
+func `someone's row in the roster reads on the selection under it, with the keys and without, in either look`(dark: Bool) throws {
+    let s = sidebar()
+    s.roles = Catalog.jaw.roles(dark: dark)
+    s.roster.now = { Samples.now }
+    let window = NSWindow(contentViewController: s)
+    defer { withExtendedLifetime(window) {} }
+    s.apply(Samples.folderUpdate)
+    s.roster.apply(Update(seq: 1, upsert: Samples.people, total: UInt64(Samples.people.count)))
+    s.roster.typing = ["person:1"]
+    s.roster.toggle("folder:1")
+    s.view.layoutSubtreeIfNeeded()
+    let table = s.roster.table
+    // How they are in the online colour, faint, and in the secondary tone.
+    for (row, who) in [(2, "Ana Ribeiro typing…"), (4, "Mãe 12 min ago (faint)"), (5, "Inês Gomes 2 h ago")] {
+        #expect(s.roster.said[row] == who)
+        table.selectRowIndexes([row], byExtendingSelection: false)
+        let line = try #require(table.rowView(atRow: row, makeIfNecessary: true))
+        let cell = try #require(table.view(atColumn: 0, row: row, makeIfNecessary: true) as? PersonCell)
+        #expect(line.isSelected && cell.selected, "\(who): its row says it's selected")
+        func reads(_ ink: NSColor?, on fill: NSColor, _ least: Double, _ what: String) {
+            let ratio = drawn(ink, dark: dark).contrast(with: drawn(fill, dark: dark))
+            #expect(ratio >= least, "\(who): \(what) reads at \(ratio):1 on \(fill)")
+        }
+        let dot = { cell.dot.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) } }
+        // Without the keys, as while you type: the theme's colours on AppKit's quiet grey.
+        line.isEmphasized = false
+        cell.backgroundStyle = .normal
+        reads(cell.name.textColor, on: .unemphasizedSelectedContentBackgroundColor, 4.5, "the name")
+        reads(cell.state.textColor, on: .unemphasizedSelectedContentBackgroundColor, 4.5, "how they are")
+        if cell.around { reads(dot(), on: .unemphasizedSelectedContentBackgroundColor, 3, "the dot") }
+        // With the keys: the selected text's colour on the accent.
+        line.isEmphasized = true
+        cell.backgroundStyle = .emphasized
+        reads(cell.name.textColor, on: .selectedContentBackgroundColor, 4.5, "the name")
+        reads(cell.state.textColor, on: .selectedContentBackgroundColor, 4.5, "how they are")
+        if cell.around { reads(dot(), on: .selectedContentBackgroundColor, 3, "the dot") }
+    }
+    #expect(try #require(table.view(atColumn: 0, row: 2, makeIfNecessary: true) as? PersonCell).around, "Ana's dot is checked")
+    let roles = Catalog.jaw.roles(dark: dark)
+    let mae = try #require(table.view(atColumn: 0, row: 4, makeIfNecessary: true) as? PersonCell)
+    mae.backgroundStyle = .normal
+    #expect(!mae.selected && mae.name.textColor == roles.tertiary.nsColor && mae.state.textColor == roles.tertiary.nsColor,
+            "off the selection, Mãe is faint again")
+}
+
+@MainActor
 @Test func `VoiceOver reads a folder's row once, from the row itself, with its unread total, mentions and favourite`() throws {
     let s = sidebar()
     let window = NSWindow(contentViewController: s)

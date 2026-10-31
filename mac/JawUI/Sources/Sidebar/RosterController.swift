@@ -252,13 +252,18 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
             return cell
         }
     }
+
+    public func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        if case .title = lines[row] { return nil }
+        return (tableView.makeView(withIdentifier: SidebarRowView.id, owner: self) as? SidebarRowView) ?? SidebarRowView()
+    }
 }
 
 /// Someone's row: a dot in the online colour while they're around, their avatar, their name and how
 /// they are, all faint where jawd isn't following them now, unless they're typing, which shows only
 /// while jawd hears it; their about text, when they have one, as its tooltip. VoiceOver reads it as
 /// one element, saying "last known" after how they are where it's faint.
-final class PersonCell: NSTableCellView {
+final class PersonCell: NSTableCellView, RowSelectable {
     static let id = NSUserInterfaceItemIdentifier("person")
     let dot = NSView()
     let avatar = AvatarView()
@@ -267,6 +272,21 @@ final class PersonCell: NSTableCellView {
     /// Their menu, from the roster.
     var menuFor: ((PersonCell) -> NSMenu?)?
     var popUp = MenuPopUp()
+    var roles: Roles?
+    /// How the row is drawn: faint, the dot shown, and how they are in the online colour, for typing.
+    var faint = false, around = false, typing = false
+
+    /// A selected row in a roster with the keys is drawn on the system's accent, in the selected text's
+    /// colour; any other row in the theme's.
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { colour() }
+    }
+
+    /// Whether its row is selected, which its row says, since AppKit tells a cell only of a selection
+    /// with the keys.
+    var selected = false {
+        didSet { if selected != oldValue { colour() } }
+    }
 
     init() {
         super.init(frame: .zero)
@@ -311,14 +331,31 @@ final class PersonCell: NSTableCellView {
         state.stringValue = said.text
         toolTip = p.about
         // `said.online` is typing, from their chat.
-        let faint = !p.presence.known && !said.online
+        faint = !p.presence.known && !said.online
+        around = (p.presence.around || said.online) && !faint
+        typing = said.online
         setAccessibilityLabel([p.name, said.text, faint && !said.text.isEmpty ? "last known" : ""].filter { !$0.isEmpty }
             .joined(separator: ", "))
+        self.roles = roles
         guard let roles else { return }
         avatar.show(p.name, id: p.id, image: image, roles: roles)
-        dot.layer?.backgroundColor = ((p.presence.around || said.online) && !faint ? roles.online : roles.online.opacity(0)).cgColor
-        Labels.style(name, faint ? .tertiary : .primary, roles: roles)
-        state.textColor = (faint ? roles.tertiary : said.online ? roles.online : roles.secondary).nsColor
+        colour()
+    }
+
+    func colour() {
+        guard let roles else { return }
+        if backgroundStyle == .emphasized {
+            for label in [name, state] {
+                label.textColor = .alternateSelectedControlTextColor
+            }
+            dot.layer?.backgroundColor = (around ? NSColor.alternateSelectedControlTextColor : .clear).cgColor
+            return
+        }
+        // The selection's grey without the keys takes the faint and quieter tones under 3:1, and the
+        // online colour under 4.5:1 in the light look, so there the words take the name's tone.
+        Labels.style(name, faint && !selected ? .tertiary : .primary, roles: roles)
+        state.textColor = (selected ? roles.text : faint ? roles.tertiary : typing ? roles.online : roles.secondary).nsColor
+        dot.layer?.backgroundColor = (around ? roles.online : roles.online.opacity(0)).cgColor
     }
 }
 

@@ -326,7 +326,7 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
 
     public func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
         guard !Self.isHeading((item as? Item)?.id) else { return nil }
-        return (outlineView.makeView(withIdentifier: FolderRowView.id, owner: self) as? FolderRowView) ?? FolderRowView()
+        return (outlineView.makeView(withIdentifier: SidebarRowView.id, owner: self) as? SidebarRowView) ?? SidebarRowView()
     }
 
     public func outlineViewSelectionDidChange(_: Notification) {
