@@ -578,6 +578,55 @@ async fn while_catching_up_a_community_held_only_for_its_groups_stays_in_its_win
     bed.catching_up.store(false, Ordering::Relaxed);
 }
 
+/// Where chat `id` sits on its own, as a chat list's row for it, a community's too, gives it.
+async fn own_place(bed: &Bed, id: &'static str) -> Value {
+    let place = bed.store.reads().query(crate::work::Priority::Interactive, move |db| read::chat_place(db, id)).await;
+    let (_, cursor, _) = place.unwrap().unwrap_or_else(|| panic!("no chat {id}"));
+    json!(format!("{}~~", cursor.wire()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_community_a_list_holds_for_itself_alone_sits_at_its_own_place_held_while_catching_up_or_not() {
+    // A hold longer than the test, so a window held while catching up reads only the rows it has.
+    let bed = Bed::new(Timing { hold: Duration::from_secs(600), ..brisk() });
+    bairro(&bed).await;
+    // Bairro marked unread with every group of it read: Unread holds it for itself alone.
+    bed.apply(vec![
+        read_up_to(AVISOS, "a1"),
+        read_up_to(FESTA, "f2"),
+        Change::Chat(Chat { id: BAIRRO.into(), marked_unread: Some(true), ..Chat::default() }),
+    ])
+    .await;
+    let mut watcher = bed.watcher(64);
+    let unread = Held::top(&mut watcher, "unread").await;
+    assert_eq!(shape(&unread.model), ["Ana", "Regata", "Bairro 0/0"], "Bairro alone, below what has messages");
+    assert_eq!(unread.row(BAIRRO)["sort"], own_place(&bed, BAIRRO).await, "at its own place");
+    assert_eq!(unread.model.total, 3);
+    // Held while catching up and read again for a change, it stays there.
+    bed.catching_up.store(true, Ordering::Relaxed);
+    let held = watcher.watch("chats.watch", json!({"folder": "unread", "around": "top", "after": 10})).await;
+    bed.apply(vec![Change::Message(Message { live: true, ..text(ANA, "n2", AT + 60, Some(ANA), "ainda?") })]).await;
+    while watcher.windows[&held].rows[ANA]["last"]["summary"] != "ainda?" {
+        watcher.turn().await;
+        watcher.drain();
+    }
+    let sort = watcher.windows[&held].rows.get(BAIRRO).map(|row| row["sort"].clone());
+    assert_eq!(sort, Some(own_place(&bed, BAIRRO).await), "held while catching up, it stays at its own place");
+    bed.catching_up.store(false, Ordering::Relaxed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pinned_community_sits_among_the_pinned_at_its_own_place_above_its_groups() {
+    let bed = Bed::new(brisk());
+    bairro(&bed).await;
+    bed.apply(vec![Change::Chat(Chat { id: BAIRRO.into(), pinned: Some(AT + 70), ..Chat::default() })]).await;
+    let mut watcher = bed.watcher(64);
+    let all = Held::top(&mut watcher, "all").await;
+    assert_eq!(shape(&all.model), ["Bairro 3/1", "  Avisos", "  Festa", "  Xadrez", "Ana", "Regata", "Rui"]);
+    assert_eq!(all.row(BAIRRO)["sort"], own_place(&bed, BAIRRO).await, "among the pinned, at its own place");
+    assert!(all.row(BAIRRO)["sort"].as_str().unwrap().starts_with("1~"), "{}", all.row(BAIRRO)["sort"]);
+}
+
 /// A copy of jaw.db as a kill now would leave it, every commit so far and nothing more.
 fn killed(home: &Path) -> tempfile::TempDir {
     let copy = tempfile::tempdir().unwrap();
