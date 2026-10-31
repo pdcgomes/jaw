@@ -79,6 +79,13 @@ func images(_ l: Laid) -> [CGRect] {
     #expect(circles.map(\.minX).sorted() == [r.minX + Space.m, r.minX + Space.m + 40], "Tiago's photo and Mãe's, the first and third of three")
     let rings = l.parts.filter { if case let .fill(c, _, _) = $0 { c.width == 44 } else { false } }
     #expect(rings.count == 3, "each picture of several ringed, three of five")
+
+    let both = cardLaid(two)
+    let t = try #require(cardRect(both))
+    let front = CGRect(x: t.minX + Space.m, y: t.minY + Space.s, width: 40, height: 40), behind = front.offsetBy(dx: 20, dy: 0)
+    let initials = both.parts.filter { if case let .line(_, p) = $0 { front.union(behind).contains(p) } else { false } }
+    #expect(initials.count == 1, "Tiago's initials on the front picture, and none behind it")
+    #expect(images(both).contains { abs($0.midX - behind.midX) < 1 && $0.width < 40 }, "Sofia's the person symbol")
 }
 
 @Test func `a card without a number says it's a contact card and has no foot, and a deleted one has no card`() throws {

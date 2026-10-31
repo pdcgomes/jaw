@@ -115,7 +115,7 @@ extension MessageLayout.Builder {
             let circle = CGRect(x: r.minX + Space.m + CGFloat(i) * Self.cardStep, y: r.minY + Space.s,
                                 width: Self.cardPicture, height: Self.cardPicture)
             if shown.count > 1 { parts.append(.fill(circle.insetBy(dx: -2, dy: -2), behind.cgColor, Self.cardPicture / 2 + 2)) }
-            picture(of: card, title: shown.count > 1 ? nil : ContactWords.title(contact), in: circle)
+            picture(of: card, title: shown.count > 1 ? nil : ContactWords.title(contact), behind: i > 0, in: circle)
         }
         let x = r.minX + Space.m + Self.cardPicture + CGFloat(shown.count - 1) * Self.cardStep + Space.m + 2
         let most = r.maxX - Space.m - x
@@ -134,14 +134,15 @@ extension MessageLayout.Builder {
     }
 
     /// A card's picture in `circle`: its photo, or its initials on its colour, as a chat's avatar
-    /// without a picture shows them, or the person symbol when it has no name.
-    mutating func picture(of card: ContactCard?, title: String?, in circle: CGRect) {
+    /// without a picture shows them, or the person symbol when it has no name, or when it's `behind`
+    /// another, which hides half of it, so half its initials would read as stray letters.
+    mutating func picture(of card: ContactCard?, title: String?, behind: Bool = false, in circle: CGRect) {
         if let image = card?.picture?.image {
             parts.append(.image(image, circle))
             return
         }
         let name = title ?? card?.name ?? ""
-        let initials = Avatar.initials(name)
+        let initials = behind ? "" : Avatar.initials(name)
         let colour = roles.sender(Avatar.colour(ContactWords.colourKey(card, name: name)))
         parts.append(.fill(circle, colour.opacity(0.85).cgColor, circle.width / 2))
         guard !initials.isEmpty, initials.first?.isLetter == true else {

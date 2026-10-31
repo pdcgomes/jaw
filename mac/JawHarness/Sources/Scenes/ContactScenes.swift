@@ -84,7 +84,7 @@ private struct ContactCardsScene: View {
     var body: some View {
         SpecimenGroup(
             title: "Cards, one and several",
-            note: "Rui's card of Marta Lopes with her photo, round, her two numbers and Message across its foot; Ana's of Inês Gomes, her initials on her colour; two cards and five as their names and how many, three pictures overlapping, with View All; a card without a number, saying it's a contact card, with no foot; a long name and three numbers, cut with an ellipsis; yours on its way; and a deleted one. Every card is the same height for the same kind whether it has a photo or not, and in lines it sits at the message's indent.",
+            note: "Rui's card of Marta Lopes with her photo, round, her two numbers and Message across its foot; Ana's of Inês Gomes, her initials on her colour; two cards and five as their names and how many, three pictures overlapping, initials only on the front one and the person symbol behind it where a card has no photo, with View All; a card without a number, saying it's a contact card, with no foot; a long name and three numbers, cut with an ellipsis; yours on its way; and a deleted one. Every card is the same height for the same kind whether it has a photo or not, and in lines it sits at the message's indent.",
             roles: conditions.roles,
         ) {
             ControllerSpecimen {
