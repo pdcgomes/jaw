@@ -13,8 +13,10 @@ struct Launch {
     /// `--snapshot <path>`: draws the window into a picture once a chat is open, and quits.
     let snapshot: String?
     /// Where Save puts a file: Downloads, or `--downloads <folder>`, so a run trying it on a made-up
-    /// account leaves nothing in yours.
+    /// account leaves nothing in yours; a whole path, as jawd takes one.
     var downloads = "~/Downloads"
+    /// Why the app won't start as it was asked to, said before it quits.
+    var refused: String?
 
     static let platformHome = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/jaw")
     static let demoHome = (NSTemporaryDirectory() as NSString).appendingPathComponent("jaw-mac-demo")
@@ -55,8 +57,22 @@ struct Launch {
         #endif
         if demo, home == nil { home = demoHome }
         var launch = Launch(home: home ?? platformHome, demo: demo, bench: bench, snapshot: snapshot)
-        if let downloads { launch.downloads = downloads }
+        if let downloads {
+            launch.downloads = folder(downloads)
+            var isFolder: ObjCBool = false
+            if !FileManager.default.fileExists(atPath: launch.downloads, isDirectory: &isFolder) || !isFolder.boolValue {
+                launch.refused = "--downloads \(downloads): there's no folder \(launch.downloads)"
+            }
+        }
         return launch
+    }
+
+    /// `path` as a whole path: from the home folder for `~`, from the folder the app was started in
+    /// when it's relative.
+    static func folder(_ path: String) -> String {
+        let expanded = (path as NSString).expandingTildeInPath
+        let whole = expanded.hasPrefix("/") ? expanded : (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent(expanded)
+        return (whole as NSString).standardizingPath
     }
 
     var socket: String {
