@@ -102,6 +102,14 @@ public final class Jawd {
         return key
     }
 
+    /// Sends contact cards, one or several in one message, with the key their form made for them, as
+    /// a message is sent: asked again with that key if the answer was lost, and handed back whole if
+    /// jawd turns them down.
+    public func sendContact(chat: String, cards: [SendContact.Card], key: String) {
+        let carding = Carding(params: SendContact(chat: chat, cards: cards, key: key), first: now())
+        ask("send.contact", carding.params, .sendContact(carding), expect: .sent)
+    }
+
     @discardableResult
     public func react(chat: String, message: String, emoji: String) -> String {
         let key = Self.key()
@@ -426,6 +434,8 @@ public final class Jawd {
             out.append(.sent(key: sending.params.key ?? "", message: sent.message, row: sent.row))
         case let (.sendPoll(polling), .sent(sent)):
             out.append(.sent(key: polling.params.key ?? "", message: sent.message, row: sent.row))
+        case let (.sendContact(carding), .sent(sent)):
+            out.append(.sent(key: carding.params.key ?? "", message: sent.message, row: sent.row))
         case let (.act(acting), _):
             out.append(.acted(key: acting.key, said: acting.done))
         case let (.owed(key, owed), _):
@@ -472,6 +482,12 @@ public final class Jawd {
     /// A poll being sent, as `Sending` is a message.
     struct Polling {
         let params: SendPoll
+        let first: Date
+    }
+
+    /// Contact cards being sent, as `Sending` is a message.
+    struct Carding {
+        let params: SendContact
         let first: Date
     }
 
@@ -522,6 +538,7 @@ public final class Jawd {
     enum Again {
         case send(Sending)
         case sendPoll(Polling)
+        case sendContact(Carding)
         case act(Acting)
         case move(Moving)
     }
@@ -546,6 +563,7 @@ public final class Jawd {
     enum Asked {
         case send(Sending)
         case sendPoll(Polling)
+        case sendContact(Carding)
         case act(Acting)
         case retry
         case owed(OwedKey, Owed)
@@ -627,6 +645,11 @@ public final class Jawd {
                                        why: Self.awayTooLong))
             case let .sendPoll(polling):
                 ask("send.poll", polling.params, .sendPoll(polling), expect: .sent)
+            case let .sendContact(carding) where away(carding.first):
+                out.append(.contactUnsent(chat: carding.params.chat, key: carding.params.key ?? "", cards: carding.params.cards,
+                                          why: Self.awayTooLong))
+            case let .sendContact(carding):
+                ask("send.contact", carding.params, .sendContact(carding), expect: .sent)
             case let .act(acting) where away(acting.first):
                 out.append(.acted(key: acting.key,
                                   said: "jawd was away too long to tell whether it was done, so look in the chat before \(acting.what) again"))
@@ -661,6 +684,14 @@ public final class Jawd {
                 return [.unsure(chat: chat, key: key)]
             }
             return [.pollUnsent(chat: chat, key: key, poll: polling.params, why: Self.whyUnsent(failure))]
+        case let .sendContact(carding):
+            let chat = carding.params.chat, key = carding.params.key ?? ""
+            if failure == .lost {
+                again.append(.sendContact(carding))
+                return [.unsure(chat: chat, key: key)]
+            }
+            let why = failure.code == ErrorCode.unknownMethod ? Self.whyNot(failure, "sending contacts") : Self.whyUnsent(failure)
+            return [.contactUnsent(chat: chat, key: key, cards: carding.params.cards, why: why)]
         case let .act(acting):
             if failure == .lost {
                 again.append(.act(acting))
@@ -772,6 +803,8 @@ public enum JawUpdate: Sendable {
     case unsent(chat: String, key: String, text: String, why: String)
     /// A poll jawd didn't take: it goes back to its form whole, with why.
     case pollUnsent(chat: String, key: String, poll: SendPoll, why: String)
+    /// Contact cards jawd didn't take: they go back to their form whole, with why.
+    case contactUnsent(chat: String, key: String, cards: [SendContact.Card], why: String)
     /// A message or an action whose answer was lost, to be asked for again once jawd is back.
     case unsure(chat: String, key: String)
     /// An action jawd answered for, and what to say of it, if anything.

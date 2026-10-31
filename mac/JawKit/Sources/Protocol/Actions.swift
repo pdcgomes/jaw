@@ -151,6 +151,30 @@ public struct Forward: Encodable, Sendable, Hashable {
     public var key: String?
 }
 
+/// `send.contact`'s params: one contact card or several, in one message, each the name it goes by
+/// and one vCard 3.0; it's answered as `send.text` is.
+public struct SendContact: Encodable, Sendable, Hashable {
+    public var chat: String
+    public var cards: [Card]
+    public var key: String?
+
+    public struct Card: Encodable, Sendable, Hashable {
+        public var name: String
+        public var vcard: String
+
+        public init(name: String, vcard: String) {
+            self.name = name
+            self.vcard = vcard
+        }
+    }
+
+    public init(chat: String, cards: [Card], key: String?) {
+        self.chat = chat
+        self.cards = cards
+        self.key = key
+    }
+}
+
 /// `message.info`'s answer.
 public struct MessageInfo: Decodable, Sendable, Hashable {
     public var message: String

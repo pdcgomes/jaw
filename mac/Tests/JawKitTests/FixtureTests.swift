@@ -52,7 +52,7 @@ func written(id: UInt64, _ method: String, _ params: (some Encodable & Sendable)
         case "chats.watch": .chats
         case "messages.watch", "watch.move": .messages
         case "library.watch": .library
-        case "send.text", "send.poll": .reply(.sent)
+        case "send.text", "send.poll", "send.contact": .reply(.sent)
         case "chat.start": .reply(.chat)
         case "message.info": .reply(.info)
         case "chat.info": .reply(.chatInfo)
@@ -260,6 +260,43 @@ func pushed(_ line: String) -> Incoming {
     #expect(voted.poll?.voters == 4 && voted.poll?.max == 2 && voted.poll?.mine == ["Saturday", "Sunday"])
     let older = try row(#""kind":"poll","spans":[],"poll":{"question":"Jantar?","options":[{"name":"Ramen","votes":1},{"name":"Pizza"}]}"#)
     #expect(older.poll?.voters == 0 && older.poll?.max == 1 && older.poll?.options.map(\.votes) == [1, 0], "what an older jawd leaves out")
+}
+
+@Test func `send.contact's request is its fixture, and its answer's row reads as two cards`() throws {
+    let marta = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Lopes;Marta;;Dr.ª;\r\nFN:Dr.ª Marta Lopes\r\nTEL;type=CELL;type=VOICE;type=pref:+351 213 456 789\r\nEND:VCARD\r\n"
+    let ines = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Gomes;Inês;;;\r\nFN:Inês Gomes\r\nTEL;TYPE=CELL;waid=351913002210:+351913002210\r\nEND:VCARD\r\n"
+    let request = try written(id: 15, "send.contact", SendContact(chat: "120363012345678901@g.us", cards: [
+        SendContact.Card(name: "Dr.ª Marta Lopes", vcard: marta), SendContact.Card(name: "Inês Gomes", vcard: ines),
+    ], key: "jaw-6a7b8c9d"))
+    #expect(try request == JSONValue.parse(fixture("send.contact.request.json")))
+
+    let decoder = JSONDecoder()
+    decoder.userInfo[.want] = WantLookup { _ in .reply(.sent) }
+    guard case let .reply(_, .sent(sent)) = IncomingLine.decode(try fixture("send.contact.result.json"), with: decoder) else {
+        Issue.record("send.contact.result.json isn't send.contact's answer")
+        return
+    }
+    let row = try #require(sent.row)
+    #expect(sent.message == "3EB0C9D8E7F6A5B4C3D2E1" && row.kind == .contact && row.mine && row.status == .pending)
+    #expect(row.contact?.name == "2 contacts")
+    #expect(row.contact?.cards == [
+        ContactCard(name: "Dr.ª Marta Lopes", phones: [.init(number: "+351 213 456 789")]),
+        ContactCard(name: "Inês Gomes", phones: [.init(number: "+351913002210", whatsapp: "+351913002210")]),
+    ], "each card's name and numbers, the second on WhatsApp")
+    #expect(row.plain == "Dr.ª Marta Lopes, Inês Gomes", "its words are the cards' names")
+}
+
+@Test func `a contact row without a vCard, or with a name past 256 characters, reads as far as it can`() throws {
+    func row(_ contact: String) throws -> MessageRow {
+        try JSONDecoder().decode(MessageRow.self, from: Data("""
+        {"id":"3EB0A1","v":1,"sort":"1","chat":"351912345678@s.whatsapp.net","at":1,"kind":"contact","spans":[],"contact":\(contact)}
+        """.utf8))
+    }
+    #expect(try row(#"{"name":"Dr.ª Marta Lopes","vcard":null}"#).contact == Contact(name: "Dr.ª Marta Lopes", cards: []))
+    #expect(try row(#"{"name":null,"vcard":null}"#).contact == Contact(name: nil, cards: []))
+    #expect(try row(#"{"name":7,"vcard":["no"]}"#).contact == Contact(name: nil, cards: []), "what isn't text is none, and the row stays")
+    let long = String(repeating: "ã", count: 300)
+    #expect(try row(#"{"name":"\#(long)"}"#).contact?.name == String(repeating: "ã", count: 256))
 }
 
 @Test func `each request JawKit writes equals its fixture`() throws {

@@ -13,6 +13,15 @@ let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingL
 let builtJawd = ["debug", "release"].map { repo.appending(path: "target/\($0)/jawd").path }
     .first { FileManager.default.isExecutableFile(atPath: $0) }
 
+/// Whether the jawd built here serves `method`, as its binary names it: what a branch of jawd's brings
+/// is tried on a jawd built from it, and waits for one that is.
+func jawdServes(_ method: String) -> Bool {
+    guard let path = builtJawd, let binary = try? Data(contentsOf: URL(fileURLWithPath: path), options: .alwaysMapped) else {
+        return false
+    }
+    return binary.range(of: Data(method.utf8)) != nil
+}
+
 /// A jawd for a test, on a folder of its own, killed when the test ends.
 final class DemoJawd {
     let home: String
@@ -489,5 +498,41 @@ struct LiveTests {
             return inFolder.get(someone.id) == nil
         }, "and leaves them once taken out")
         #expect(everyone.get(someone.id) != nil, "still among everyone")
+    }
+}
+
+@MainActor
+@Suite(.serialized, .enabled(if: builtJawd != nil, "cargo build -p jawd builds the jawd this runs"))
+struct ContactLiveTests {
+    @Test func `a real jawd's demo cards come read as their names and numbers, and a card sent comes back as yours`() async throws {
+        let demo = try DemoJawd()
+        defer { demo.stop() }
+        let held = Held(demo.socket)
+        defer { held.jawd.close() }
+        let ana = "351912345678@s.whatsapp.net", climbing = "120363012345678901@g.us"
+        #expect(await held.until { h in [ana, climbing].allSatisfy { id in h.chats.list.contains { $0.id == id } } }, "the demo's chats come")
+
+        held.watch(climbing)
+        let climbers = { (h: Held) in h.messages?.list.first { $0.kind == .contact && !$0.mine }?.contact }
+        #expect(await held.until { climbers($0) != nil }, "Rui's two cards come")
+        let two = try #require(climbers(held))
+        #expect(two.name == "2 contacts" && two.cards.map(\.name) == ["Inês Gomes", "Tiago Martins"])
+        #expect(two.cards.map { $0.phones.map(\.dialled) } == [["+351913002210"], ["+351916666666"]])
+
+        held.watch(ana)
+        let dentist = { (h: Held) in h.messages?.list.first { $0.kind == .contact && !$0.mine }?.contact }
+        #expect(await held.until { dentist($0) != nil }, "and Ana's dentist's")
+        let card = try #require(dentist(held))
+        #expect(card.name == "Dr.ª Marta Lopes" && card.cards.map(\.name) == ["Dr.ª Marta Lopes"])
+        #expect(card.cards.first?.phones == [ContactCard.Phone(number: "+351 21 345 6789", whatsapp: "+351213456789"),
+                                             ContactCard.Phone(number: "21 000 00 00")], "her numbers, the first on WhatsApp")
+
+        let vcard = "BEGIN:VCARD\r\nVERSION:3.0\r\nN:;Marta Lopes;;;\r\nFN:Marta Lopes\r\nTEL;TYPE=CELL;waid=351213456789:+351213456789\r\nEND:VCARD\r\n"
+        held.jawd.sendContact(chat: ana, cards: [SendContact.Card(name: "Marta Lopes", vcard: vcard)], key: "jaw-live-card")
+        #expect(await held.until { h in h.updates.contains { if case let .sent(key, _, _) = $0 { key == "jaw-live-card" } else { false } } },
+                "sent, under its key")
+        #expect(await held.until { h in
+            h.messages?.list.contains { $0.mine && $0.kind == .contact && $0.contact?.cards.first?.phones.first?.dialled == "+351213456789" } == true
+        }, "and its row in the window, yours, read as its card")
     }
 }

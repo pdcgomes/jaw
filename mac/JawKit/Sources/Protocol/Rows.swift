@@ -477,9 +477,29 @@ public struct Location: Decodable, Sendable, Hashable {
     public var url: String?
 }
 
-/// A contact card.
+/// A contact card, or several in one message: the name they go by, and each card as it's drawn, read
+/// once from the row's vCard as the row is decoded, on the client's reading thread. The vCard isn't
+/// kept, since a card can be as long as a line jawd sends and a window holds a few hundred rows.
 public struct Contact: Decodable, Sendable, Hashable {
+    /// What the message calls it: a card's name, or for several what they're called ("2 contacts").
     public var name: String?
+    public var cards: [ContactCard]
+
+    public init(name: String?, cards: [ContactCard]) {
+        self.name = name
+        self.cards = cards
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)).flatMap { $0 }.map { VCard.prefix($0, VCard.nameMost) }
+        let vcard = (try? c.decodeIfPresent(String.self, forKey: .vcard)).flatMap { $0 }
+        cards = vcard.map(ContactCard.read) ?? []
+    }
+
+    enum Keys: String, CodingKey {
+        case name, vcard
+    }
 }
 
 /// An invitation to join a group, or to follow a channel or be one of its admins, as it says.

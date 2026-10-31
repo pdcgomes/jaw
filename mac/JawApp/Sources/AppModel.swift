@@ -232,6 +232,8 @@ final class AppModel {
             } else {
                 say("the poll \"\(poll.question)\" wasn't sent: \(why)", warn: true)
             }
+        case let .contactUnsent(_, _, cards, why):
+            say("\(cards.count == 1 ? "the card wasn't" : "the cards weren't") sent: \(why)", warn: true)
         case .unsure:
             say("asking jawd again once it's back")
         case let .acted(key, said):

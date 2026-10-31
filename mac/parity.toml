@@ -7,7 +7,6 @@
 [requests]
 "layout.set" = "1.1"
 "send.media" = "2.5"
-"send.contact" = "3.9"
 "voice.play" = "2.6"
 "voice.pause" = "2.6"
 "voice.seek" = "2.6"
