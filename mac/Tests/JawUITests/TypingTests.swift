@@ -352,21 +352,63 @@ func stillMotion(_ body: () async throws -> Void) async rethrows {
     }
 }
 
-@MainActor @Test(.timeLimit(.minutes(1))) func `their message lands where the bubble was, and someone else's leaves it`() async {
+/// Rui's message, after the samples' cards, the newest, whose sorts start with their times,
+/// 1792159300000 to 1792159307000.
+func ruisMessage() -> MessageRow {
+    var rui = Samples.m(99, [Span(.text, "Saturday at 9, then")], at: Samples.now + 60000, from: Samples.rui)
+    rui.sort = "9~2"
+    return rui
+}
+
+@MainActor @Test(.timeLimit(.minutes(1))) func `his message lands above his bubble while jawd still says he's typing, and the bubble goes once jawd says he's stopped`() async {
     await stillMotion {
-        let (c, _) = await pane(typing: [ruiTyping])
+        let (c, _) = await pane(typing: [])
+        var typing: Typists = [Samples.group.id: [ruiTyping]]
+        ConversationController.give(typing, to: [c])
         let count = c.rows.count
-        // After the samples' cards, the newest, whose sorts start with their times, 1792159300000 to 1792159307000.
         var ana = Samples.m(98, [Span(.text, "I'm in")], at: Samples.now + 30000, from: Samples.ana)
         ana.sort = "9~1"
         await applied(c, Update(seq: 300, upsert: [ana], total: UInt64(count + 1), newer: 0))
         #expect(c.rows.last?.id == ana.id && c.typing == [ruiTyping] && c.showsTyping, "Ana's message leaves Rui typing")
-        var rui = Samples.m(99, [Span(.text, "Saturday at 9, then")], at: Samples.now + 60000, from: Samples.rui)
-        rui.sort = "9~2"
+        // jawd's map still says Rui's typing, so the app hands nothing over.
+        let rui = ruisMessage()
         await applied(c, Update(seq: 301, upsert: [rui], total: UInt64(count + 2), newer: 0))
-        #expect(c.rows.last?.id == rui.id && c.typing.isEmpty, "Rui's message ends his typing")
-        #expect(!c.showsTyping && c.table.numberOfRows == c.rows.count && c.isAtBottom)
+        #expect(c.rows.last?.id == rui.id && c.typing == [ruiTyping], "the pane says what the chat list and the status line say")
+        #expect(c.showsTyping && c.table.numberOfRows == c.rows.count + 1 && c.isAtBottom, "his bubble after his message, in view")
+        #expect(c.header.typingLabel.phrase == "Rui typing")
+        typing[Samples.group.id] = nil
+        ConversationController.give(typing, to: [c])
+        #expect(!c.showsTyping && c.table.numberOfRows == c.rows.count && c.isAtBottom && c.header.typingLabel.isHidden,
+                "gone once jawd says he's stopped")
     }
+}
+
+@MainActor @Test(.timeLimit(.minutes(1))) func `his message lands where his bubble was when jawd's word that he's stopped comes with it`() async {
+    await stillMotion {
+        let (c, _) = await pane(typing: [])
+        ConversationController.give([Samples.group.id: [ruiTyping]], to: [c])
+        #expect(c.showsTyping)
+        let count = c.rows.count, rui = ruisMessage()
+        await withCheckedContinuation { (k: CheckedContinuation<Void, Never>) in
+            c.drawn = { k.resume() }
+            c.apply(Update(seq: 301, upsert: [rui], total: UInt64(count + 1), newer: 0))
+            ConversationController.give([:], to: [c])
+        }
+        c.view.layoutSubtreeIfNeeded()
+        #expect(c.rows.last?.id == rui.id && !c.showsTyping && c.table.numberOfRows == c.rows.count && c.isAtBottom)
+    }
+}
+
+@MainActor @Test func `the app gives each pane its own chat's typing from what jawd says of every chat`() {
+    let group = ConversationController(chat: Samples.group, spec: spec(.bubbles, dark: true), layouts: Layouts(), place: .newest(100))
+    let direct = ConversationController(chat: Samples.direct, spec: spec(.bubbles, dark: true), layouts: Layouts(), place: .newest(100))
+    let ana = Typist(id: "person:12", name: "Ana")
+    ConversationController.give([Samples.group.id: [ruiTyping], Samples.direct.id: [ana], "elsewhere": [anaTyping]], to: [group, direct])
+    #expect(group.typing == [ruiTyping] && direct.typing == [ana], "each its own chat's, and none of a chat no pane shows")
+    ConversationController.give([Samples.group.id: [anaTyping, ruiTyping]], to: [group, direct])
+    #expect(group.typing == [anaTyping, ruiTyping] && direct.typing.isEmpty, "Ana started in the group, and stopped in her chat")
+    ConversationController.give([:], to: [group, direct])
+    #expect(group.typing.isEmpty && direct.typing.isEmpty, "nobody, once jawd says nobody")
 }
 
 @MainActor @Test(.timeLimit(.minutes(1))) func `no bubble away from the newest messages, nor in an empty chat`() async throws {

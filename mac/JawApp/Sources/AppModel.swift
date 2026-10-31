@@ -181,11 +181,8 @@ final class AppModel {
         case let .messages(w, u):
             if let chat = paneWindows[w] { panes[chat]?.apply(u) } else { glance.apply(w, u) }
         case let .typing(now):
-            let was = typing
             typing = now
-            for (chat, c) in panes where was[chat] != now[chat] {
-                c.typing = now[chat] ?? []
-            }
+            ConversationController.give(now, to: panes.values)
             window?.chatList.typing = now
         case let .sent(key, _, _):
             sending[key] = nil
@@ -313,7 +310,7 @@ final class AppModel {
 
     func makePane(_ chat: ChatRow, place: Place) -> ConversationController {
         let c = ConversationController(chat: chat, spec: spec, layouts: layouts, place: place)
-        c.typing = typing[chat.id] ?? []
+        ConversationController.give(typing, to: [c])
         c.host = self
         c.notice = { [weak self] in self?.say($0) }
         c.avatar = window?.chatList.avatar(for: chat)

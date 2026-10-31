@@ -97,7 +97,8 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
     var hoveredRow: Int?
 
     /// Who's typing in the chat now, oldest first, as jawd says it. While anyone is, the header says
-    /// who and the typing bubble waits below the newest message.
+    /// who and the typing bubble waits below the newest message. Only jawd ends it, as it does when
+    /// their message comes, so a pane never says otherwise than the chat list and the status line.
     public var typing: [Typist] = [] {
         didSet {
             guard typing != oldValue else { return }
@@ -105,6 +106,15 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
             header.show(chat)
             typingRow.words = TypingWords.line(typing, group: chat.kind.isGroup) ?? ""
             showTyping()
+        }
+    }
+
+    /// Gives each of `panes` its chat's typists from `typing`, who's typing in every chat jawd's
+    /// windows show, as the app does when it makes a pane and each time jawd says who's typing; a pane
+    /// whose chat's typists are as they were is left as it is.
+    public static func give(_ typing: Typists, to panes: some Sequence<ConversationController>) {
+        for c in panes {
+            c.typing = typing[c.chat.id] ?? []
         }
     }
 
@@ -256,12 +266,10 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         let wasEmpty = window.isEmpty
         let atBottom = isAtBottom || !anchoredFirst
         let anchor = currentAnchor()
-        let newest = window.newest
         window.apply(update)
         shown(votes: update.upsert.map(\.id))
         rebuild()
         reloading = true
-        if let newest { answered(update.upsert.filter { !$0.mine && Self.precedes(newest, $0) }) }
         let items = Array(zip(rows, contexts))
         // The newest first, so what's on screen when following is laid out before the rest.
         layouts.prepare(Array(items.reversed()), width: layoutWidth, spec: spec) { [weak self] in
@@ -500,13 +508,6 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         let anchor = currentAnchor()
         change()
         if atBottom { scrollToBottom() } else { restore(anchor) }
-    }
-
-    /// A new message from someone typing ends their typing here at once, as jawd ends it, so the
-    /// message lands where the typing bubble was.
-    func answered(_ theirs: [MessageRow]) {
-        guard !theirs.isEmpty, !typing.isEmpty else { return }
-        typing = chat.kind.isGroup ? typing.filter { t in !theirs.contains { $0.from?.id == t.id } } : []
     }
 
     /// Lets the header's typing and the typing bubble play while this is the pane you're reading,
