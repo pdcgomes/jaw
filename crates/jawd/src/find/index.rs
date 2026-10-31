@@ -52,6 +52,8 @@ struct ChatEntry {
     frecency: f64,
     opened_at: Option<i64>,
     last_at: i64,
+    /// For a group in a community, the community's JID.
+    community: Option<String>,
     /// Its own name, or for a one-to-one chat its person's names and numbers.
     names: Vec<Name>,
 }
@@ -124,6 +126,7 @@ struct ChatRecord {
     frecency: f64,
     opened_at: Option<i64>,
     last_at: i64,
+    community: Option<String>,
     folders: Vec<i64>,
 }
 
@@ -135,7 +138,7 @@ struct PersonRecord {
     folders: Vec<i64>,
 }
 
-const CHAT: &str = "SELECT n, id, name, person, frecency, opened_at, last_at FROM chats";
+const CHAT: &str = "SELECT n, id, name, person, frecency, opened_at, last_at, community FROM chats";
 const PERSON: &str = "SELECT n, name, push_name, verified_name FROM people";
 
 fn chat_record(r: &rusqlite::Row) -> rusqlite::Result<(i64, ChatRecord)> {
@@ -148,6 +151,7 @@ fn chat_record(r: &rusqlite::Row) -> rusqlite::Result<(i64, ChatRecord)> {
             frecency: r.get(4)?,
             opened_at: r.get(5)?,
             last_at: r.get(6)?,
+            community: r.get(7)?,
             folders: Vec::new(),
         },
     ))
@@ -379,6 +383,12 @@ fn blend(score: u32, frecency: f64) -> u32 {
 /// How often matching checks whether its find was cancelled, in chats or people.
 const CHECK_EVERY: usize = 512;
 
+/// When `chat` last had a message, as it ranks: a community at the newest of itself and every group
+/// of it, as `newest` has them.
+fn ranked_at(chat: &ChatEntry, newest: &HashMap<&str, i64>) -> i64 {
+    chat.last_at.max(newest.get(chat.id.as_str()).copied().unwrap_or_default())
+}
+
 /// The best of `names` for `query`, and its score; the earlier name wins a tie.
 fn best(query: &Query, names: &[Name], matcher: &mut Matcher) -> Option<(usize, u32)> {
     names
@@ -457,6 +467,7 @@ impl Index {
                         frecency: chat.frecency,
                         opened_at: chat.opened_at,
                         last_at: chat.last_at,
+                        community: chat.community,
                         names: Vec::new(),
                     },
                 );
@@ -498,12 +509,25 @@ impl Index {
         folders.iter().filter_map(|n| self.folder_names.get(n).cloned()).collect()
     }
 
+    /// The newest `last_at` of every group of each community, by the community's JID.
+    fn communities_newest(&self) -> HashMap<&str, i64> {
+        let mut newest: HashMap<&str, i64> = HashMap::new();
+        for chat in self.chats.values() {
+            if let Some(community) = chat.community.as_deref() {
+                let at = newest.entry(community).or_default();
+                *at = (*at).max(chat.last_at);
+            }
+        }
+        newest
+    }
+
     /// The `limit` chats you open most, decayed to `now`, then the newest.
     pub fn recent(&self, limit: usize, now: i64) -> Vec<NameHit> {
+        let newest = self.communities_newest();
         let mut chats: Vec<(i64, f64, i64)> = self
             .chats
             .iter()
-            .map(|(&n, chat)| (n, frecency(chat.frecency, chat.opened_at, now), chat.last_at))
+            .map(|(&n, chat)| (n, frecency(chat.frecency, chat.opened_at, now), ranked_at(chat, &newest)))
             .collect();
         chats.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
         chats
@@ -539,6 +563,7 @@ impl Index {
             let matcher = &mut matcher.borrow_mut();
             let mut found: BTreeMap<Kind, Vec<Candidate>> = BTreeMap::new();
             if kinds.contains(&Kind::Chat) {
+                let newest = self.communities_newest();
                 for (seen, (&n, chat)) in self.chats.iter().enumerate() {
                     if seen % CHECK_EVERY == 0 && cancel.is_cancelled() {
                         return None;
@@ -550,7 +575,7 @@ impl Index {
                             name,
                             score: blend(score, frecency),
                             frecency,
-                            last_at: chat.last_at,
+                            last_at: ranked_at(chat, &newest),
                             length: chat.names[name].text.len(),
                         });
                     }
@@ -649,6 +674,7 @@ impl Index {
                 std::mem::size_of::<(i64, ChatEntry)>()
                     + chat.id.capacity() * 2
                     + chat.name.as_ref().map_or(0, String::capacity)
+                    + chat.community.as_ref().map_or(0, String::capacity)
                     + chat.folders.capacity() * 8
                     + names(&chat.names)
             })
@@ -699,6 +725,7 @@ mod tests {
             frecency: 0.0,
             opened_at: None,
             last_at: 0,
+            community: None,
             folders: Vec::new(),
         }
     }
@@ -846,6 +873,21 @@ mod tests {
         let names: Vec<&str> = recent.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["Often last week", "Once today", "Busy", "Quiet"]);
         assert_eq!(recent[0].1, 250, "five opens a week ago count as two and a half");
+    }
+
+    #[test]
+    fn a_community_ranks_by_the_newest_of_itself_and_every_group_of_it() {
+        let bairro = group(2, "Bairro").id;
+        let of = |chat: ChatRecord| ChatRecord { community: Some(bairro.clone()), ..chat };
+        let index = groups(vec![
+            ChatRecord { last_at: 5, ..group(1, "Vela") },
+            group(2, "Bairro"),
+            of(ChatRecord { last_at: 9, ..group(3, "Festa") }),
+            of(ChatRecord { last_at: 7, ..group(4, "Biblioteca") }),
+        ]);
+        let recent: Vec<String> = index.recent(10, NOW).into_iter().map(|hit| hit.text).collect();
+        assert_eq!(recent, ["Bairro", "Festa", "Biblioteca", "Vela"], "Bairro at Festa's time, ahead of Vela's");
+        assert_eq!(found(&index, "b")[..2], ["Bairro", "Biblioteca"], "as good a match, and newer by Festa");
     }
 
     #[test]

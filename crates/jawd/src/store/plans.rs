@@ -49,7 +49,7 @@ const ALLOWED: &[(&str, &str)] = &[
         "the events with something kept sealed that didn't open, a handful, as a person is known by another JID",
     ),
     (
-        "SELECT n, id, name, person, frecency, opened_at, last_at FROM chats",
+        "SELECT n, id, name, person, frecency, opened_at, last_at, community FROM chats",
         "the palette's index is built from every chat once, at start",
     ),
     (

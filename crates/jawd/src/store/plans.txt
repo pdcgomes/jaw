@@ -3,7 +3,7 @@ SELECT n, builtin, rule IS NOT NULL, parent, name FROM folders
     SCAN folders
 
 -- src/find/index.rs
-SELECT n, id, name, person, frecency, opened_at, last_at FROM chats
+SELECT n, id, name, person, frecency, opened_at, last_at, community FROM chats
     SCAN chats
 
 -- src/find/index.rs
@@ -27,7 +27,7 @@ SELECT type, key FROM events WHERE seq > ?1 AND seq <= ?2 AND type IN ('chat', '
     SEARCH events USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)
 
 -- src/find/index.rs
-SELECT n, id, name, person, frecency, opened_at, last_at FROM chats WHERE n = ?1
+SELECT n, id, name, person, frecency, opened_at, last_at, community FROM chats WHERE n = ?1
     SEARCH chats USING INTEGER PRIMARY KEY (rowid=?)
 
 -- src/find/index.rs
