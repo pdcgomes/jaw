@@ -219,6 +219,17 @@ func fastest(_ run: () -> Void) -> Duration {
     #expect(popped.count == 1 && popped.first?.1 === c.table && popped.first?.0.items.count == 2)
 }
 
+@MainActor @Test func `a number on WhatsApp as an account whose digits aren't its own says which account Message opens`() {
+    #expect(CardAction.label(ContactCard.Phone(number: "+351 21 345 6789", whatsapp: "+351213456789")) == "+351 21 345 6789 · WhatsApp")
+    let other = ContactCard.Phone(number: "+351 912 345 678", whatsapp: "+447700900123")
+    #expect(CardAction.label(other) == "+351 912 345 678 · WhatsApp +447700900123")
+    #expect(CardAction.label(ContactCard.Phone(number: "912 345 678", whatsapp: "+351912345678")) == "912 345 678 · WhatsApp +351912345678",
+            "written without its country, the account says it")
+    #expect(CardAction.label(ContactCard.Phone(number: "21 000 00 00")) == "21 000 00 00")
+    let menu = pane(PaneHost()).numbersMenu([other, ContactCard.Phone(number: "21 000 00 00")], name: "Ana")
+    #expect(menu.items.map(\.title) == ["+351 912 345 678 · WhatsApp +447700900123", "21 000 00 00"])
+}
+
 @MainActor @Test func `a card's menu starts with Message, its numbers when it has several, and several cards' with View Contacts`() throws {
     let c = pane(PaneHost())
     func titles(_ m: MessageRow) throws -> [String] {

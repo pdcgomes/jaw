@@ -34,9 +34,12 @@ public enum CardAction: Equatable, Sendable {
         return out
     }
 
-    /// A number as a menu or the sheet says it: as the card writes it, the WhatsApp account's marked.
+    /// A number as a menu or the sheet says it: as the card writes it, the WhatsApp account's marked,
+    /// and named when its digits aren't the number's, since Message opens the account.
     public static func label(_ phone: ContactCard.Phone) -> String {
-        phone.whatsapp == nil ? phone.number : phone.number + " · WhatsApp"
+        guard let account = phone.whatsapp else { return phone.number }
+        let digits = phone.number.unicodeScalars.filter { ("0" ... "9").contains($0) }
+        return digits.elementsEqual(account.unicodeScalars.dropFirst()) ? phone.number + " · WhatsApp" : phone.number + " · WhatsApp " + account
     }
 
     /// What's said for a card without a number, in the terminal's words.
