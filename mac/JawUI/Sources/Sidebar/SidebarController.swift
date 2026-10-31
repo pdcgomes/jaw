@@ -70,6 +70,8 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
     /// While the field is drawn again, its editing ending isn't the field given up.
     var keepingField = false
     static let namingRow = "naming"
+    /// Makes the tree's rows; the picture tests give one that draws the selection a picture can hold.
+    var makeRow: @MainActor () -> SidebarRowView = { SidebarRowView() }
     /// Says words to VoiceOver as they come, as jawd's refusal of a name; the tests listen in.
     var announce: @MainActor (String) -> Void = { words in
         NSAccessibility.post(element: NSApplication.shared, notification: .announcementRequested,
@@ -336,7 +338,7 @@ public final class SidebarController: NSViewController, NSOutlineViewDataSource,
 
     public func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
         guard !Self.isHeading((item as? Item)?.id) else { return nil }
-        return (outlineView.makeView(withIdentifier: SidebarRowView.id, owner: self) as? SidebarRowView) ?? SidebarRowView()
+        return (outlineView.makeView(withIdentifier: SidebarRowView.id, owner: self) as? SidebarRowView) ?? makeRow()
     }
 
     public func outlineViewSelectionDidChange(_: Notification) {

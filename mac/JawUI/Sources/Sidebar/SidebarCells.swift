@@ -191,7 +191,7 @@ protocol RowSelectable: NSView {
 
 /// A row of the sidebar's, a folder's or someone's in the roster, which tells its cell whether it's
 /// selected.
-final class SidebarRowView: NSTableRowView {
+class SidebarRowView: NSTableRowView {
     static let id = NSUserInterfaceItemIdentifier("sidebar.row")
 
     override init(frame: NSRect) {

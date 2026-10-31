@@ -48,6 +48,8 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
     var minute: Timer?
     /// Whether a window can be seen, as the minute needs; the tests set their own.
     var visible: @MainActor (NSWindow) -> Bool = { $0.occlusionState.contains(.visible) }
+    /// Makes the roster's rows; the picture tests give one that draws the selection a picture can hold.
+    var makeRow: @MainActor () -> SidebarRowView = { SidebarRowView() }
 
     /// How many people the window keeps from the top, grown as the roster scrolls.
     public static let rows: UInt32 = 200
@@ -364,7 +366,7 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
 
     public func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         if case .title = lines[row] { return nil }
-        return (tableView.makeView(withIdentifier: SidebarRowView.id, owner: self) as? SidebarRowView) ?? SidebarRowView()
+        return (tableView.makeView(withIdentifier: SidebarRowView.id, owner: self) as? SidebarRowView) ?? makeRow()
     }
 }
 
