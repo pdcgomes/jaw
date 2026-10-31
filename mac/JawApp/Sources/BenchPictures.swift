@@ -36,7 +36,8 @@ enum BenchPictures {
             if tries > 300 { return Bench.finish(["error": 5]) }
             return DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { waitForLake(model, tries: tries + 1) }
         }
-        let folder = FileManager.default.temporaryDirectory.appending(path: "jaw-bench-pictures-\(getpid())", directoryHint: .isDirectory)
+        // In the run's own folder, which is emptied as it quits, even when its deadline ends it.
+        let folder = Opened.folder.appending(path: "bench-pictures", directoryHint: .isDirectory)
         do {
             let chat = try made(in: folder, from: (small, large, tiny))
             fling(chat, model: model, folder: folder)

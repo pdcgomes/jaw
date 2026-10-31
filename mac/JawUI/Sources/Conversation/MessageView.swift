@@ -87,14 +87,14 @@ final class MessageView: NSView {
     }
 
     override func draw(_ rect: NSRect) {
-        guard let timing = CellTiming.now else { return drawn(rect) }
+        guard let timing = CellTiming.now else { return paint(rect) }
         let start = CACurrentMediaTime()
-        drawn(rect)
+        paint(rect)
         timing.draws += 1
         timing.drawMs.append((CACurrentMediaTime() - start) * 1000)
     }
 
-    func drawn(_: NSRect) {
+    func paint(_: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext, let laid else { return }
         if selected, let roles {
             ctx.setFillColor(roles.selection.opacity(0.55).cgColor)

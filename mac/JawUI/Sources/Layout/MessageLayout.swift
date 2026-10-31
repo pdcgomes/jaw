@@ -477,7 +477,8 @@ public enum MessageLayout {
             return out
         }
 
-        /// A media message's one line, until Mac-M2 draws it inline.
+        /// A message's kind in one line: what a message with no card of its own shows, an album of counts
+        /// among them, and what VoiceOver, a reply's quote and Delete's question say for one with no text.
         static func kindLine(_ m: MessageRow) -> String? {
             let seconds = m.media?.seconds ?? m.voice?.seconds
             let length = seconds.map { " · " + Format.length($0) } ?? ""
