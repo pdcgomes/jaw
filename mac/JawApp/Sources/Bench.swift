@@ -114,8 +114,8 @@ enum Bench {
                 let form = pollForm(key, chat: c.chat.name)
                 if key.hasPrefix("poll-form") {
                     model.window?.showPollForm(form, chat: c.chat.id)
-                } else if let poll = form.poll {
-                    model.sendPoll(chat: c.chat.id, poll)
+                } else if let poll = form.send() {
+                    model.sendPoll(chat: c.chat.id, poll, key: form.key)
                 } else {
                     FileHandle.standardError.write(Data("\(key): not sent: \(form.problem ?? "")\n".utf8))
                 }

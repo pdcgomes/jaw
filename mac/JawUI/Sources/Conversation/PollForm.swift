@@ -45,6 +45,11 @@ public final class PollForm {
     /// keeps its option.
     public private(set) var ids: [Int]
     @ObservationIgnored var next: Int
+    /// The key the poll goes with, made with the form, so jawd takes a second Send of it for the same
+    /// poll rather than another.
+    public let key = Jawd.key()
+    /// Whether Send has taken the poll, which it does once.
+    public private(set) var sent = false
 
     public init(chat: String, question: String = "", options: [String] = ["", ""], several: Bool = false, said: String? = nil) {
         let options = options.count < 2 ? options + Array(repeating: "", count: 2 - options.count) : options
@@ -92,6 +97,14 @@ public final class PollForm {
         guard problem == nil else { return nil }
         let named = named
         return (Self.trimmed(question), named, several ? named.count : 1)
+    }
+
+    /// The poll for Send to send with `key`, the first time it asks once the form is ready, and nil
+    /// after: a second click, Return or ⌘↩ that reaches the sheet as it closes sends nothing more.
+    public func send() -> (question: String, options: [String], max: Int)? {
+        guard !sent, let poll else { return nil }
+        sent = true
+        return poll
     }
 
     /// Return in a field: from the question to the first option; from an option with words to the
@@ -212,7 +225,7 @@ public struct PollFormView: View {
                 Button("Send", action: send)
                     .keyboardShortcut(.return, modifiers: .command)
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.poll == nil)
+                    .disabled(model.poll == nil || model.sent)
                     .help("Send (⌘↩)")
             }
         }

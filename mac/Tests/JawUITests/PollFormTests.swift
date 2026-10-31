@@ -88,6 +88,21 @@ import Testing
     #expect(turned.said == "no", "a field writing what it already had changes nothing")
 }
 
+@MainActor @Test func `Send takes the poll once, with the key its form was made with`() {
+    let form = PollForm(chat: "Lisbon Climbing", question: "Jantar?", options: ["Ramen", "Pizza"])
+    let key = form.key
+    #expect(key.hasPrefix("jaw-"))
+    #expect(form.send()?.options == ["Ramen", "Pizza"] && form.sent)
+    #expect(form.send() == nil, "a second Send, as the sheet closes, sends nothing")
+    #expect(form.key == key, "and the poll keeps the key it went with")
+    let blank = PollForm(chat: "Lisbon Climbing")
+    #expect(blank.send() == nil && !blank.sent, "one not ready isn't taken, so Send works once it is")
+    #expect(blank.key != key, "each form has a key of its own")
+    let turned = PollForm(chat: "Lisbon Climbing", returned: SendPoll(chat: "g", question: "Jantar?", options: ["Ramen", "Pizza"], key: key),
+                          said: "the outbox is full")
+    #expect(turned.key != key && !turned.sent, "a poll jawd turned down opens in a form of its own, to go with a new key")
+}
+
 @MainActor @Test func `a poll jawd turned down opens again as it was, with jawd's words, until it's changed`() {
     let turned = SendPoll(chat: "g", question: "What do we bring?", options: ["Rope", "Quickdraws"], max: 2, key: "jaw-k")
     let form = PollForm(chat: "Lisbon Climbing", returned: turned, said: "the outbox is full")

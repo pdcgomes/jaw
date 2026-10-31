@@ -723,9 +723,9 @@ final class AppModel {
         window?.showPollForm(PollForm(chat: c.chat.name), chat: c.chat.id)
     }
 
-    /// Sends a poll as its form has it, with a key made for it; jawd's row brings it into the chat.
-    func sendPoll(chat: String, _ poll: (question: String, options: [String], max: Int)) {
-        jawd.sendPoll(chat: chat, question: poll.question, options: poll.options, max: poll.max, key: Jawd.key())
+    /// Sends a poll as its form has it, with the key its form made; jawd's row brings it into the chat.
+    func sendPoll(chat: String, _ poll: (question: String, options: [String], max: Int), key: String) {
+        jawd.sendPoll(chat: chat, question: poll.question, options: poll.options, max: poll.max, key: key)
     }
 }
 

@@ -285,10 +285,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             pollSheet = nil
             pollForm = nil
         }
-        let view = PollFormView(model: form, roles: model.roles, send: { [weak model] in
-            guard let poll = form.poll else { return }
+        let view = PollFormView(model: form, roles: model.roles, send: { [weak self, weak model] in
+            guard self?.pollSheet != nil, let poll = form.send() else { return }
             end()
-            model?.sendPoll(chat: chat, poll)
+            model?.sendPoll(chat: chat, poll, key: form.key)
         }, cancel: end)
         let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
         pollSheet = sheet
