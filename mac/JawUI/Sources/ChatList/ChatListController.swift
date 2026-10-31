@@ -335,12 +335,15 @@ final class ChatCell: NSView {
     /// The menu of the chat on this row, from its list.
     var menuFor: ((ChatCell) -> NSMenu?)?
     var popUp = MenuPopUp()
+    /// How many times it's been shown a chat, each one a redraw.
+    private(set) var shows = 0
 
     override var isFlipped: Bool {
         true
     }
 
     func show(_ chat: ChatRow, typists: [Typist], roles: Roles, open: Bool, inCommunity: Bool, avatar: NSImage?) {
+        shows += 1
         self.chat = chat
         self.typists = typists
         self.roles = roles

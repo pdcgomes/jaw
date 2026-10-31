@@ -58,20 +58,45 @@ import Testing
     #expect(recording.string.hasSuffix("… recording…") && recording.size().width <= room.width, "\(recording.string)")
 }
 
-@MainActor @Test func `a change of who's typing redraws only the rows whose typing it changes`() {
+@MainActor @Test func `a change of who's typing redraws only the rows whose typing it changes`() throws {
     let list = ChatListController(folder: "all", roles: Catalog.jaw.dark)
-    list.view.frame = NSRect(x: 0, y: 0, width: 300, height: 260)
+    let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 260), styleMask: [.borderless], backing: .buffered, defer: true)
+    w.contentView = list.view
     list.apply(Update(seq: 1, upsert: Samples.chats, total: UInt64(Samples.chats.count)))
-    let rows = list.all.map(\.id)
     let rui = [Typist(id: "person:7", name: "Rui")], ana = [Typist(id: "person:12", name: "Ana")]
     list.typing = [Samples.group.id: rui]
-    let was = list.typing
+    list.view.layoutSubtreeIfNeeded()
+    let rows = list.all.map(\.id)
+    let group = try #require(rows.firstIndex(of: Samples.group.id)), direct = try #require(rows.firstIndex(of: Samples.direct.id))
+    /// Each row's cell as the table holds it once laid out, none made for the asking, and how many
+    /// times each was shown a chat.
+    func drawn() throws -> [(cell: ChatCell, shows: Int)] {
+        list.view.layoutSubtreeIfNeeded()
+        return try rows.indices.map { i in
+            let cell = try #require(list.table.view(atColumn: 0, row: i, makeIfNecessary: false) as? ChatCell, "row \(i) has its cell")
+            return (cell, cell.shows)
+        }
+    }
+    let before = try drawn()
+    #expect(before[group].cell.typists == rui && before[direct].cell.typists.isEmpty)
+
     list.typing = [Samples.group.id: rui, Samples.direct.id: ana]
-    #expect(list.rows(changedFrom: was) == IndexSet(integer: rows.firstIndex(of: Samples.direct.id)!), "Ana's row alone")
-    #expect(list.rows(changedFrom: list.typing).isEmpty, "none when nothing changed")
-    #expect(list.rows(changedFrom: [:]) == IndexSet([Samples.direct.id, Samples.group.id].map { rows.firstIndex(of: $0)! }))
-    let cell = list.table.view(atColumn: 0, row: rows.firstIndex(of: Samples.direct.id)!, makeIfNecessary: true) as? ChatCell
-    #expect(cell?.typists == ana, "and that row shows it")
+    let after = try drawn()
+    #expect(after[direct].cell.typists == ana, "Ana's row shows her typing")
+    for i in rows.indices where i != direct {
+        #expect(after[i].cell === before[i].cell && after[i].shows == before[i].shows, "\(rows[i])'s row isn't shown again")
+    }
+
+    list.typing = [Samples.group.id: rui, Samples.direct.id: ana]
+    let same = try drawn()
+    #expect(zip(same, after).allSatisfy { $0.cell === $1.cell && $0.shows == $1.shows }, "no row is shown again when nothing changed")
+
+    list.typing = [:]
+    let none = try drawn()
+    #expect(none[group].cell.typists.isEmpty && none[direct].cell.typists.isEmpty, "both rows say nobody's typing")
+    for i in rows.indices where i != direct && i != group {
+        #expect(none[i].cell === same[i].cell && none[i].shows == same[i].shows, "\(rows[i])'s row isn't shown again")
+    }
 }
 
 /// Where a row's badge and the ink of its text fall, in points from the row's top-left, the badge
