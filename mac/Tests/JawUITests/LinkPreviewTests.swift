@@ -136,6 +136,23 @@ func writeJPEG(_ path: String, _ w: Int, _ h: Int) throws {
     }
 }
 
+@Test func `jawd's folder decodes only a JPEG, as the protocol says a link's thumbnail is`() throws {
+    let (root, done) = try pictureFolder()
+    defer { done() }
+    try writeJPEG("\(root)/media/links/a.jpg", 140, 140)
+    let drawn = try #require(Samples.pictures.picture("media/links/ipma.jpg", pixels: 140))
+    for (name, type) in [("b", UTType.png), ("c", UTType.tiff)] {
+        let destination = try #require(CGImageDestinationCreateWithURL(URL(fileURLWithPath: "\(root)/media/links/\(name).jpg") as CFURL,
+                                                                       type.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, drawn, nil)
+        #expect(CGImageDestinationFinalize(destination))
+    }
+    let folder = FolderPictures(root: root)
+    #expect(folder.picture("media/links/a.jpg", pixels: 140) != nil)
+    #expect(folder.picture("media/links/b.jpg", pixels: 140) == nil, "a PNG under a JPEG's name")
+    #expect(folder.picture("media/links/c.jpg", pixels: 140) == nil, "nor a TIFF, though ImageIO reads both")
+}
+
 @Test func `jawd's folder keeps the pictures drawn last within its bytes, and reads again one it let go`() throws {
     let (root, done) = try pictureFolder()
     defer { done() }

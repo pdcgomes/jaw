@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import Synchronization
+import UniformTypeIdentifiers
 
 /// Where a message's pictures come from, by the paths jawd sends: jawd's folder in the app, and
 /// pictures drawn for the purpose in the harness and the tests.
@@ -38,7 +39,11 @@ public final class FolderPictures: PictureSource {
         let key = "\(pixels) \(path)"
         if let image = kept.withLock({ $0.use(key) }) { return image }
         let url = URL(fileURLWithPath: root).appending(path: path)
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+        // jawd keeps a thumbnail someone sent as it came, so only bytes that read as the JPEG the
+        // protocol says these are get decoded.
+        let reading: [CFString: Any] = [kCGImageSourceShouldCache: false, kCGImageSourceTypeIdentifierHint: UTType.jpeg.identifier]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, reading as CFDictionary),
+              CGImageSourceGetType(source) as String? == UTType.jpeg.identifier,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let w = properties[kCGImagePropertyPixelWidth] as? Int, let h = properties[kCGImagePropertyPixelHeight] as? Int
         else { return nil }
