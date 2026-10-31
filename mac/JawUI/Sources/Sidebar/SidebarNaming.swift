@@ -48,9 +48,11 @@ extension SidebarController: NSTextFieldDelegate {
     }
 
     /// Esc, or a name given up empty, unchanged or as jawd last turned it down: the folder isn't made,
-    /// or keeps its name.
+    /// or keeps its name. Nothing while jawd is answering for the name, as a click away does nothing
+    /// then, since the folder may be made by then, and a chat's New Folder… files the chat in it once
+    /// it is.
     public func cancelNaming() {
-        guard naming != nil else { return }
+        guard let n = naming, !n.asked else { return }
         naming = nil
         outline.reloadData()
         restoreOpen()

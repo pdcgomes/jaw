@@ -130,6 +130,23 @@ func plainKey(_ window: NSWindow, _ characters: String, _ code: UInt16) throws -
 }
 
 @MainActor
+@Test func `Esc while jawd answers for the name leaves the field waiting, so a chat's New Folder… still files the chat in the folder made`() throws {
+    let host = SideHost()
+    let (s, window) = namingSidebar(host)
+    defer { window.close() }
+    s.beginNaming(parent: nil, filing: Filed(Samples.direct))
+    try fieldEditor(window).insertText("Parents", replacementRange: NSRange(location: NSNotFound, length: 0))
+    try fieldEditor(window).doCommand(by: #selector(NSResponder.insertNewline(_:)))
+    try fieldEditor(window).doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+    #expect(s.naming?.asked == true && s.naming?.filing == Filed(Samples.direct) && s.said.contains("[Parents]"),
+            "what to file is kept for jawd's answer, which the app files the chat on")
+    #expect(host.named.map(\.0) == ["Parents"])
+    s.notNamed("a folder there is called Parents already")
+    try fieldEditor(window).doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+    #expect(s.naming == nil, "once jawd has turned it down, Esc drops it")
+}
+
+@MainActor
 @Test func `a name a click elsewhere kept that jawd turns down is said without taking the keys back, and Esc or another click away drops it`() throws {
     let host = SideHost()
     let (s, window) = namingSidebar(host)
