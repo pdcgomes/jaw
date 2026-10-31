@@ -463,12 +463,7 @@ public struct PaletteView: View {
                     .onKeyPress(characters: .decimalDigits) { press in
                         model.digit(Int(press.characters) ?? 0) ? .handled : .ignored
                     }
-                    .onKeyPress(characters: CharacterSet(charactersIn: "gG")) { press in
-                        guard press.modifiers.contains(.command) || press.modifiers.contains(.control) else { return .ignored }
-                        guard let m = model.selectedMessage else { return model.goToLink() ? .handled : .ignored }
-                        goTo(m)
-                        return .handled
-                    }
+                    .onKeyPress(characters: CharacterSet(charactersIn: "gG")) { press in goToFound(press.modifiers) }
                     .onSubmit { model.pick() }
                 if model.finding { ProgressView().controlSize(.small) }
             }
@@ -485,6 +480,15 @@ public struct PaletteView: View {
         .overlay(RoundedRectangle(cornerRadius: Radius.panel).stroke(roles.separator.color))
         .onAppear { focused = true }
         .focusEffectDisabled()
+    }
+
+    /// G with ⌘ or ⌃ held: goes to the message found that's selected, or to the message a link found
+    /// is in; anything else, and G alone, is the field's.
+    func goToFound(_ modifiers: EventModifiers) -> KeyPress.Result {
+        guard modifiers.contains(.command) || modifiers.contains(.control) else { return .ignored }
+        guard let m = model.selectedMessage else { return model.goToLink() ? .handled : .ignored }
+        goTo(m)
+        return .handled
     }
 
     var icon: String {

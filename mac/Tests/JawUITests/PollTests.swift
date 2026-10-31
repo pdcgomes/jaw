@@ -163,7 +163,7 @@ func pollOptions(_ names: String...) -> [Poll.Option] {
     #expect(host.votes.last?.options == ["Sunday"], "jawd said it wasn't done, so the row again")
 }
 
-@MainActor @Test func `a poll's menu has Vote with its options, yours ticked, on their digits, and Take Back My Vote`() async throws {
+@MainActor @Test func `a poll's menu has Vote with its options, yours ticked, and Take Back My Vote, with no digits`() async throws {
     let host = PaneHost()
     let (c, window) = await shown(Samples.polls, host)
     defer { window.close() }
@@ -171,7 +171,7 @@ func pollOptions(_ names: String...) -> [Poll.Option] {
     let vote = try #require(c.menu(forRow: i)?.items.first { $0.title == "Vote" }?.submenu)
     #expect(vote.items.map(\.title) == ["Saturday", "Sunday", "", "Take Back My Vote"])
     #expect(vote.items[0].state == .on && vote.items[1].state == .off)
-    #expect(vote.items[0].keyEquivalent == "1" && vote.items[1].keyEquivalent == "2" && vote.items[0].keyEquivalentModifierMask.isEmpty)
+    #expect(vote.items.allSatisfy { $0.keyEquivalent.isEmpty }, "a selected poll's digits react, as a message's do")
     (vote.items[1] as? ClosureItem)?.run()
     #expect(host.votes.last?.options == ["Sunday"])
     (vote.items[3] as? ClosureItem)?.run()
@@ -180,6 +180,31 @@ func pollOptions(_ names: String...) -> [Poll.Option] {
     #expect(c.menu(forRow: none)?.items.first { $0.title == "Vote" }?.submenu?.items.map(\.title) == ["Ramen", "Tasca do Chico", "Pizza"],
             "no Take Back without a vote")
     #expect(c.voteMenu(for: sampleLink("L1")) == nil && c.newestPoll?.id == "P5")
+}
+
+@MainActor @Test func `Enter on a selected poll opens its Vote menu under it, and an option chosen there votes`() async throws {
+    let host = PaneHost()
+    let (c, window) = await shown(Samples.polls, host)
+    defer { window.close() }
+    let i = try #require(c.rows.firstIndex { $0.id == "P5" })
+    c.select("P5")
+    let cell = try #require(c.table.view(atColumn: 0, row: i, makeIfNecessary: false) as? MessageView, "the newest poll, on screen")
+    var popped: [(NSMenu, NSPoint)] = []
+    cell.popUp.run = { menu, point, _ in popped.append((menu, point)) }
+    let enter = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                              context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+    #expect(c.selectionKey(enter), "Enter is taken")
+    let (menu, point) = try #require(popped.first)
+    #expect(popped.count == 1 && menu.items.map(\.title) == ["Cabo da Roca, on the slabs above the lighthouse", "Peninha, if the wind has dropped",
+                                                             "The boulders below the palace", "Anywhere with shade all day, please", "",
+                                                             "Take Back My Vote"])
+    #expect(menu.items[0].state == .on && menu.items[1].state == .off && menu.items[2].state == .on)
+    #expect(menu.items.allSatisfy { $0.keyEquivalent.isEmpty }, "an open menu takes a digit as the start of a name, so none is shown")
+    let body = try #require(cell.laid).body
+    #expect(point == NSPoint(x: body.minX, y: body.maxY), "under the poll's bubble")
+    (menu.items[2] as? ClosureItem)?.run()
+    #expect(host.votes.last?.message == "P5" && host.votes.last?.options == ["Cabo da Roca, on the slabs above the lighthouse"],
+            "the third, yours, taken out")
 }
 
 @Test func `every poll draws as its reference, in both looks, dark and light`() throws {

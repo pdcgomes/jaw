@@ -93,7 +93,9 @@ enum Bench {
             if NSApp.keyWindow == nil { model.window?.window?.makeKeyAndOrderFront(nil) }
             let step = key.hasPrefix("save:") || key == "revert" || key == "settings" || key.hasPrefix("size:") || key.hasPrefix("drop:")
                 || key.hasPrefix("menu:") || key == "terminal-panes" || key.hasPrefix("vote:") || key.hasPrefix("poll") || key.hasPrefix("click:")
+                || key.hasPrefix("menu-key:")
             if key.hasPrefix("click:") { click(String(key.dropFirst(6)), in: model.window?.pollSheet ?? model.window?.window) }
+            if key.hasPrefix("menu-key:") { MenuKey.arm(String(key.dropFirst(9)), model: model) }
             if key.hasPrefix("drop:") {
                 let parts = key.split(separator: ":")
                 let zones: [String: GridView.DropZone] = ["middle": .middle, "left": .left, "right": .right, "top": .top, "bottom": .bottom]
@@ -155,12 +157,19 @@ enum Bench {
                 } else if key.hasPrefix("vote:") || key.hasPrefix("poll:") {
                     FileHandle.standardError.write(Data("\(key): \(pollSaid(model.conversation?.newestPoll))\(model.notice.map { " · said \"\($0.0)\"" } ?? "")\n".utf8))
                 } else {
-                    let palette = (model.window?.palette.isVisible ?? false) ? " · palette at \(model.window?.palette.model.index ?? -1) of \(model.window?.palette.model.items.count ?? 0)" : ""
+                    let open = model.window.flatMap { w in w.palette.isVisible ? w.palette.model : nil }
+                    let palette = open.map { p in
+                        " · palette at \(p.index) of \(p.items.count)"
+                            + (p.items.indices.contains(p.index) ? " (\(p.items[p.index].group): \(p.items[p.index].title.map(\.s).joined()))" : "")
+                    } ?? ""
                     let glance = model.glance.isOpen ? model.window?.window.map { w in
                         " · glance centre \(Int(model.glance.panel.frame.midX - w.frame.midX)),\(Int(model.glance.panel.frame.midY - w.frame.midY)) from the window's"
                     } ?? "" : ""
                     let form = model.window?.pollForm.map { " · poll form " + formSaid($0, sheet: model.window?.pollSheet) } ?? ""
-                    let said = palette + glance + form + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
+                    let selected = model.conversation?.selectedRow.map {
+                        " · selected \($0.kind.rawValue) \"\($0.plain.prefix(24).replacingOccurrences(of: "\n", with: " "))\""
+                    } ?? ""
+                    let said = palette + glance + form + selected + (model.notice.map { " · said \"\($0.0)\"" } ?? "") + " · panes " + model.panes.values.map { "\(Int($0.view.frame.width))×\(Int($0.view.frame.height))" }.joined(separator: " ")
                     let grid = model.grid.map { g in g.reading.map { "\($0.id):\($0.chat?.prefix(6) ?? "empty")@\($0.c0)-\($0.c1)x\($0.r0)-\($0.r1)" }.joined(separator: " ") } ?? "no panes"
                     FileHandle.standardError.write(Data("\(key): \(grid) · focus \(model.focusedSlot ?? 0) · layout \(model.book.current ?? "unsaved")\(model.book.isEdited ? " •" : "")\(said)\n".utf8))
                 }
@@ -204,6 +213,84 @@ enum Bench {
         let several = parts.count > 1 && parts.last == "several"
         if several { parts.removeLast() }
         return PollForm(chat: chat, question: parts.first ?? "", options: Array(parts.dropFirst()), several: several)
+    }
+
+    /// A key for the next menu that pops up, as `menu-key:2` arms it before the step that opens one.
+    /// A menu that's open holds the main queue until it closes, so the key is posted to the app's
+    /// event queue from a timer once the menu tracks, as a key pressed on the keyboard reaches an open
+    /// menu, and Esc a second after it if the menu is still open; the log says the menu's items, how
+    /// it closed, and the focused pane's newest poll after. `menu-key:t.return` presses each in turn.
+    @MainActor
+    final class MenuKey: NSObject {
+        let key: String
+        let model: AppModel
+        var escaped = false
+        var open = false
+        /// Those armed, kept until their menu closes, since the notifications don't keep them.
+        static var armed: [MenuKey] = []
+
+        init(key: String, model: AppModel) {
+            self.key = key
+            self.model = model
+        }
+
+        static func arm(_ key: String, model: AppModel) {
+            let armed = MenuKey(key: key, model: model)
+            Self.armed.append(armed)
+            let center = NotificationCenter.default
+            center.addObserver(armed, selector: #selector(began(_:)), name: NSMenu.didBeginTrackingNotification, object: nil)
+            center.addObserver(armed, selector: #selector(ended(_:)), name: NSMenu.didEndTrackingNotification, object: nil)
+        }
+
+        @objc func began(_ note: Notification) {
+            guard !open else { return }
+            open = true
+            say("a menu opened: \(Bench.words((note.object as? NSMenu)?.items ?? []))")
+            for (i, pressed) in key.split(separator: ".").enumerated() {
+                later(0.4 + 0.3 * Double(i)) { Self.post(String(pressed)) }
+            }
+            later(1.4 + 0.3 * Double(key.split(separator: ".").count)) { [self] in
+                guard open else { return }
+                escaped = true
+                Self.post("escape")
+            }
+        }
+
+        @objc func ended(_: Notification) {
+            guard open else { return }
+            open = false
+            NotificationCenter.default.removeObserver(self)
+            Self.armed.removeAll { $0 === self }
+            say(escaped ? "the menu was still open, and Esc closed it" : "the menu closed")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [self] in say("then \(Bench.pollSaid(model.conversation?.newestPoll))") }
+        }
+
+        func say(_ what: String) {
+            FileHandle.standardError.write(Data("menu-key:\(key): \(what)\n".utf8))
+        }
+
+        /// Runs `then` after `seconds` from the run loop in every mode, a menu's tracking included.
+        func later(_ seconds: TimeInterval, _ then: @escaping @MainActor () -> Void) {
+            RunLoop.main.add(Timer(timeInterval: seconds, repeats: false) { _ in MainActor.assumeIsolated(then) }, forMode: .common)
+        }
+
+        /// A key down and up, as `2`, `t`, `down`, `return` or `escape`, posted to the app's event queue.
+        static func post(_ key: String) {
+            let codes: [String: UInt16] = ["1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22, "7": 26, "8": 28, "9": 25, "escape": 53,
+                                           "return": 36, "down": 125, "up": 126, "t": 17, "p": 35, "r": 15]
+            let named = ["escape": "\u{1b}", "return": "\r", "down": String(UnicodeScalar(NSDownArrowFunctionKey)!),
+                         "up": String(UnicodeScalar(NSUpArrowFunctionKey)!)]
+            let typed = named[key] ?? key
+            let flags: NSEvent.ModifierFlags = key == "down" || key == "up" ? [.numericPad, .function] : []
+            for type in [NSEvent.EventType.keyDown, .keyUp] {
+                if let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                                                windowNumber: 0, context: nil, characters: typed, charactersIgnoringModifiers: typed,
+                                                isARepeat: false, keyCode: codes[key] ?? 0)
+                {
+                    NSApp.postEvent(event, atStart: false)
+                }
+            }
+        }
     }
 
     /// A click, as `click:120:240` has it: the left button down and up at that point in the key

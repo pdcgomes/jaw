@@ -23,6 +23,34 @@ let linksFound = """
 ],"counts":{"chat":1,"link":2}}
 """
 
+@MainActor @Test func `⌘G or ⌃G in the palette goes to a message found or to a link's message, and G alone is typed`() throws {
+    let message = """
+    {"kind":"message","score":0,"text":[{"t":"text","s":"vamos a "},{"t":"mark","s":"Sintra"}],"chat_name":"Lisbon Climbing",
+     "row":{"id":"3EB0C431F2A9B8E7D6","v":81200,"sort":"1792050000000~000000000412","chat":"120363000000000001@g.us","at":1792050000000,
+            "from":{"id":"person:12","name":"Rui","colour":4},"mine":false,"kind":"text","spans":[{"t":"text","s":"vamos a Sintra"}],
+            "reply":null,"forwarded":0,"reactions":[],"status":null,"edited":false,"deleted":false,"expires_at":null,"view_once":false,
+            "starred":false}},
+    """
+    let found = try JSONDecoder().decode(Found.self, from: Data(linksFound.replacingOccurrences(of: #"{"results":["#, with: #"{"results":["# + message).utf8))
+    let model = PaletteModel()
+    var chosen: [String] = []
+    model.chose = { pick in
+        if case let .linkMessage(l) = pick { chosen.append("link's message \(l.message)") } else { chosen.append("something else") }
+    }
+    model.reset()
+    model.answered(id: 1, found)
+    var went: [String] = []
+    let view = PaletteView(model: model, roles: spec(.bubbles, dark: true).style.roles, close: {}, goTo: { went.append($0.id) })
+    model.index = try #require(model.items.firstIndex { $0.group == .kind(.link) })
+    #expect(view.goToFound([]) == .ignored, "G alone goes into the field")
+    #expect(view.goToFound(.command) == .handled && chosen == ["link's message 3EB0A1B2C3D4E5F6"])
+    #expect(view.goToFound(.control) == .handled && chosen.count == 2, "⌃G as ⌘G")
+    model.index = try #require(model.items.firstIndex { $0.group == .kind(.message) })
+    #expect(view.goToFound(.command) == .handled && went == ["3EB0C431F2A9B8E7D6"] && chosen.count == 2, "a message found, as before")
+    model.index = try #require(model.items.firstIndex { [.recent, .kind(.chat)].contains($0.group) })
+    #expect(view.goToFound(.command) == .ignored && went.count == 1 && chosen.count == 2, "a chat has no message to go to")
+}
+
 @Test func `a link find found decodes with its message, its chat and its host`() throws {
     let found = try JSONDecoder().decode(Found.self, from: Data(linksFound.utf8))
     #expect(found.results.map(\.kind) == [.chat, .link, .link] && found.counts[.link] == 2)

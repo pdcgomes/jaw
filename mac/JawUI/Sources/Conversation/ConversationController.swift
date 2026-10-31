@@ -778,18 +778,16 @@ public final class ConversationController: NSViewController, NSTableViewDataSour
         rows.last { $0.kind == .poll && $0.poll != nil && !$0.deleted }
     }
 
-    /// A poll's options to vote with, yours ticked, the first nine on their digits, and Take Back My
-    /// Vote once you have one; nil for anything that isn't a poll that can be voted in.
+    /// A poll's options to vote with, yours ticked, and Take Back My Vote once you have one; nil for
+    /// anything that isn't a poll that can be voted in. The options have no keys: an open menu takes a
+    /// bare digit as the start of an item's name, so the arrows or an option's first letters and
+    /// Return choose, and a selected message's digits stay its quick reactions.
     func voteMenu(for m: MessageRow) -> NSMenu? {
         guard m.kind == .poll, let poll = m.poll, !m.deleted else { return nil }
         let menu = NSMenu()
-        for (i, option) in poll.options.enumerated() {
+        for option in poll.options {
             let item = ClosureItem(title: option.name) { [weak self] in self?.vote(option.name, in: m.id) }
             item.state = option.mine ? .on : .off
-            if i < 9 {
-                item.keyEquivalent = "\(i + 1)"
-                item.keyEquivalentModifierMask = []
-            }
             menu.addItem(item)
         }
         if !poll.mine.isEmpty {
