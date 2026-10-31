@@ -32,6 +32,7 @@ pub struct Expected {
     came: Mutex<Vec<(Duration, i64, Instant)>>,
     pushes: AtomicU64,
     lists: AtomicU64,
+    presences: AtomicU64,
 }
 
 impl Expected {
@@ -49,6 +50,11 @@ impl Expected {
     /// Pushes of any kind so far, and the chat list's.
     pub fn pushes(&self) -> (u64, u64) {
         (self.pushes.load(Ordering::Relaxed), self.lists.load(Ordering::Relaxed))
+    }
+
+    /// `presence` pushes so far, for the open chat's person.
+    pub fn presences(&self) -> u64 {
+        self.presences.load(Ordering::Relaxed)
     }
 }
 
@@ -131,6 +137,9 @@ fn seen(push: &Value, read: Instant, expected: &Expected) {
     match push["method"].as_str() {
         Some("chats") => {
             expected.lists.fetch_add(1, Ordering::Relaxed);
+        }
+        Some("presence") => {
+            expected.presences.fetch_add(1, Ordering::Relaxed);
         }
         Some("messages") => {
             let Some(rows) = push["params"]["upsert"].as_array() else { return };

@@ -159,6 +159,8 @@ pub struct World {
     /// What a test does as the phone is asked, before it answers.
     #[cfg(test)]
     when_asked: Mutex<Option<WhenAsked>>,
+    /// How often one of the people followed comes or goes, when not every `COMINGS`.
+    comings: Mutex<Option<Duration>>,
 }
 
 /// What a test does as the made-up phone is asked to send a file again.
@@ -188,6 +190,11 @@ impl World {
         if let Some(events) = events {
             let _ = events.send(Incoming { event: typing(chat, sender, state), ack: None }).await;
         }
+    }
+
+    /// Has one of the people jawd follows come or go every `every`, rather than every `COMINGS`.
+    pub fn come_and_go_every(&self, every: Duration) {
+        *self.comings.lock().expect("the demo world") = Some(every);
     }
 
     /// Hands `event` to jawd through the engine running now, as WhatsApp would send it, and says how
@@ -964,7 +971,8 @@ const COMINGS: Duration = Duration::from_secs(5);
 async fn comings_and_goings(sender: Sender) {
     let mut around: HashMap<String, bool> = HashMap::new();
     for turn in 0u64.. {
-        tokio::time::sleep(COMINGS).await;
+        let every = sender.world.comings.lock().expect("the demo world").unwrap_or(COMINGS);
+        tokio::time::sleep(every).await;
         let subscribed = sender.world.subscribed.lock().expect("the demo world").clone();
         let Some(jid) = subscribed.get(turn as usize % subscribed.len().max(1)).cloned() else { continue };
         let now = !around.get(&jid).copied().unwrap_or(seed(&jid).is_multiple_of(3));

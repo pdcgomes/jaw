@@ -10,6 +10,7 @@ fn plan(folder: &Path, report: &Path) -> Plan {
         paging: None,
         flood: None,
         typing: 0,
+        presence: 0,
         seconds: None,
         catch_up: None,
         in_flight: 256,
@@ -71,10 +72,12 @@ fn a_demo_accounts_history_catch_up_and_flood_each_arrive_whole_through_the_engi
     assert_eq!(count(folder.path(), "messages"), before + arrived);
 
     let before = count(folder.path(), "messages");
-    let flood = Plan { flood: Some(400), seconds: Some(1.0), typing: 5, ..plan(folder.path(), &report_to) };
+    let flood =
+        Plan { flood: Some(400), seconds: Some(1.0), typing: 5, presence: 20, ..plan(folder.path(), &report_to) };
     run(flood).unwrap();
     let flood = &report(&report_to)["flood"];
     assert!(flood["typing"]["heard"].as_u64().unwrap() > 0, "people typed through the flood: {flood}");
+    assert!(flood["presence"]["heard"].as_u64().unwrap() > 0, "the open chat's person came and went: {flood}");
     assert_eq!(flood["messages"], 400);
     assert_eq!(flood["ack"]["n"], 400, "each message was acked");
     assert_eq!(flood["missing"], 0);

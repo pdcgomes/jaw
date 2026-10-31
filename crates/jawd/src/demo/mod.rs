@@ -44,6 +44,8 @@ pub struct Plan {
     pub flood: Option<u32>,
     /// Chats whose people type, record and stop, each a few times a second.
     pub typing: u32,
+    /// How many times a second the people jawd follows come or go; once every 5 s when 0.
+    pub presence: u32,
     pub seconds: Option<f64>,
     pub catch_up: Option<u32>,
     pub in_flight: u32,
@@ -460,6 +462,10 @@ impl Demo {
             (false, _) => {}
         }
         let typing = self.keep_typing(plan.typing);
+        if plan.presence > 0 {
+            println!("jawd demo: someone jawd follows comes or goes {} times a second", plan.presence);
+            self.world.come_and_go_every(Duration::from_secs_f64(1.0 / f64::from(plan.presence)));
+        }
         if plan.after > 0.0 {
             tokio::time::sleep(Duration::from_secs_f64(plan.after)).await;
         }
@@ -1011,6 +1017,7 @@ impl Demo {
         let opening = self.keep_opening();
         self.sampler.most();
         let (pushes, lists) = self.expected.pushes();
+        let presences = self.expected.presences();
         let total = (f64::from(rate) * seconds) as u64;
         let acks: Arc<Mutex<Vec<Duration>>> = Arc::default();
         let (began, cpu) = (Instant::now(), usage::now().cpu);
@@ -1039,6 +1046,7 @@ impl Demo {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let opens = opening.stop().await?;
         let (pushed, listed) = self.expected.pushes();
+        let presences = self.expected.presences() - presences;
         let watcher_cpu = stop(watcher).await;
         let (came, missing) = self.expected.take();
         let arrivals: Vec<Duration> = came.iter().map(|c| c.0).collect();
@@ -1090,6 +1098,8 @@ impl Demo {
                 "list_pushes_per_second": (listed - lists) as f64 / seconds_taken,
                 "missing": missing,
                 "typing": self.state.feed().map(|feed| feed.typing().stats()),
+                "presence": self.state.status().presence,
+                "presence_pushes_per_second": presences as f64 / seconds_taken,
             }),
         )
     }

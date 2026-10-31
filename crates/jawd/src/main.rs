@@ -122,6 +122,10 @@ enum Command {
         /// second, from once the history is in until the demo ends; busy groups first
         #[arg(long, default_value_t = 0)]
         typing: u32,
+        /// How many times a second the people jawd follows come or go, as the made-up WhatsApp
+        /// tells it; once every 5 s without
+        #[arg(long, default_value_t = 0)]
+        presence: u32,
         /// How long the flood lasts, timed; it goes on untimed until Ctrl-C without
         #[arg(long)]
         seconds: Option<f64>,
@@ -301,6 +305,7 @@ fn jawd(cli: Cli) -> Result<()> {
             shown,
             flood,
             typing,
+            presence,
             seconds,
             catch_up,
             in_flight,
@@ -323,6 +328,7 @@ fn jawd(cli: Cli) -> Result<()> {
             paging: paging.map(|ms| demo::Paging { apart: std::time::Duration::from_millis(ms), shown }),
             flood,
             typing,
+            presence,
             seconds,
             catch_up,
             in_flight,
