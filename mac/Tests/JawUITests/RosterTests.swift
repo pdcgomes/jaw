@@ -161,6 +161,28 @@ func roster(_ host: RosterStub, folder: String = "all", people: [RosterRow] = Sa
 }
 
 @MainActor
+@Test func `VoiceOver reads someone's row once, from the row itself, saying a faint row's state is what was last known`() throws {
+    let host = RosterStub()
+    let r = roster(host)
+    let window = NSWindow(contentViewController: r)
+    defer { withExtendedLifetime(window) {} }
+    var lurdes = try #require(Samples.people.first { $0.id == "person:7" })
+    lurdes.v = 2
+    lurdes.presence.known = false
+    r.apply(Update(seq: 2, upsert: [lurdes]))
+    r.toggle("folder:1")
+    r.view.layoutSubtreeIfNeeded()
+    #expect(r.said[2] == "Ana Ribeiro online" && r.said[4] == "Mãe 12 min ago (faint)" && r.said[6] == "Avó Lurdes (faint)")
+    let cell = { (row: Int) in r.table.view(atColumn: 0, row: row, makeIfNecessary: true) as? PersonCell }
+    let ana = try #require(cell(2))
+    #expect(ana.isAccessibilityElement() && ana.accessibilityRole() == .button && ana.accessibilityLabel() == "Ana Ribeiro, online")
+    let parts = NSAccessibility.unignoredChildren(from: ana.accessibilityChildren() ?? [])
+    #expect(parts.isEmpty, "nothing in it read again: \(parts)")
+    #expect(try #require(cell(4)).accessibilityLabel() == "Mãe, 12 min ago, last known", "jawd isn't following her now")
+    #expect(try #require(cell(6)).accessibilityLabel() == "Avó Lurdes", "she hides when she was last seen, so nothing is said of it")
+}
+
+@MainActor
 @Test func `VoiceOver's Show Menu on someone's row opens their menu under the row`() throws {
     let host = RosterStub()
     let r = roster(host)

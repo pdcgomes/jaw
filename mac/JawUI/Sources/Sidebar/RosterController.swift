@@ -256,7 +256,8 @@ public final class RosterController: NSViewController, NSTableViewDataSource, NS
 
 /// Someone's row: a dot in the online colour while they're around, their avatar, their name and how
 /// they are, all faint where jawd isn't following them now, unless they're typing, which shows only
-/// while jawd hears it; their about text, when they have one, as its tooltip.
+/// while jawd hears it; their about text, when they have one, as its tooltip. VoiceOver reads it as
+/// one element, saying "last known" after how they are where it's faint.
 final class PersonCell: NSTableCellView {
     static let id = NSUserInterfaceItemIdentifier("person")
     let dot = NSView()
@@ -286,11 +287,18 @@ final class PersonCell: NSTableCellView {
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
     }
 
     @available(*, unavailable)
     required init?(coder _: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Its label says all of it, so nothing in it is read again.
+    override func accessibilityChildren() -> [Any]? {
+        []
     }
 
     /// VoiceOver's Show Menu: their menu under their row.
@@ -302,10 +310,11 @@ final class PersonCell: NSTableCellView {
         name.stringValue = p.name
         state.stringValue = said.text
         toolTip = p.about
-        setAccessibilityLabel([p.name, said.text].filter { !$0.isEmpty }.joined(separator: ", "))
-        guard let roles else { return }
         // `said.online` is typing, from their chat.
         let faint = !p.presence.known && !said.online
+        setAccessibilityLabel([p.name, said.text, faint && !said.text.isEmpty ? "last known" : ""].filter { !$0.isEmpty }
+            .joined(separator: ", "))
+        guard let roles else { return }
         avatar.show(p.name, id: p.id, image: image, roles: roles)
         dot.layer?.backgroundColor = ((p.presence.around || said.online) && !faint ? roles.online : roles.online.opacity(0)).cgColor
         Labels.style(name, faint ? .tertiary : .primary, roles: roles)
